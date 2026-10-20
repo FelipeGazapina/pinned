@@ -13,6 +13,7 @@
       <span id="status-text" data-tauri-drag-region></span>
       <button class="update" title="Install the new version and restart"></button>
       <button id="folder" title="Open another folder in this tab">📁</button>
+      <button id="settings-toggle" title="Settings (⌘,)">⋯</button>
       <button id="minimize" title="Shrink to pill">–</button>
     </header>
     <div id="workspace">
@@ -20,8 +21,16 @@
         <span class="handle" title="Drag to move the tabs to another side">⠿</span>
         <div id="tab-list"></div>
         <button id="new-tab" title="New tab in this folder (⌘T)">＋</button>
+        <span id="bar-resize" title="Drag to resize the tabs"></span>
       </nav>
       <div id="terms"></div>
+    </div>
+    <div id="settings">
+      <nav id="settings-nav">
+        <button data-page="integrations">Integrations</button>
+        <button data-page="connectors">Connectors</button>
+      </nav>
+      <section id="settings-page"></section>
     </div>
     <div id="grip" title="Resize"></div>
   </main>
@@ -33,5 +42,6 @@
 <script src="vendor/xterm.js"></script>
 <script src="vendor/addon-fit.js"></script>
 <script src="main.js"></script>
+<script src="settings.js"></script>
 </body>
 </html>

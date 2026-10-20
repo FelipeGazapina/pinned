@@ -23,7 +23,11 @@ const tabName = (tab) => tab.cwd.split("/").filter(Boolean).pop() || (tab.cwd ? 
 const isVertical = () => ["left", "right"].includes(document.body.dataset.tabs);
 
 async function openTab(from) {
-  const id = await invoke("open_tab", { from: from?.id ?? null });
+  return addTab(await invoke("open_tab", { from: from?.id ?? null }));
+}
+
+/** Shows the tab `id` that the backend created. `focus: false` leaves the active tab in front. */
+async function addTab(id, { focus = true } = {}) {
   const el = document.createElement("div");
   el.className = "term";
   terms.append(el);
@@ -40,7 +44,7 @@ async function openTab(from) {
 
   const button = document.createElement("div");
   button.className = "tab";
-  button.innerHTML = `<span class="dot"></span><span class="name"></span><button class="close" title="Close tab (⌘W)">✕</button>`;
+  button.innerHTML = `<span class="dot"></span><span class="name"></span><button class="close" title="Close tab (⌘W)">✕</button><span class="resize" title="Drag to resize the tabs"></span>`;
   tabList.append(button);
 
   const tab = { id, term, fit, el, button, cwd: "", status: "idle", message: null, running: false };
@@ -52,11 +56,17 @@ async function openTab(from) {
   button.querySelector(".close").onclick = () => closeTab(tab);
   button.onmousedown = (e) => {
     if (e.target.closest(".close")) return;
+    if (e.target.closest(".resize")) {
+      e.preventDefault();
+      const left = button.getBoundingClientRect().left;
+      return drag(e, { move: (e) => setSize("tab-width", e.clientX - left) });
+    }
     activate(tab);
     drag(e, { move: (e) => reorder(tab, e) });
   };
 
-  activate(tab);
+  if (focus || !active) activate(tab);
+  else el.hidden = true;
   await startClaude(tab);
   return tab;
 }
@@ -82,6 +92,7 @@ function closeTab(tab) {
 }
 
 function activate(tab) {
+  delete document.body.dataset.page;
   active = tab;
   for (const t of tabs) {
     t.el.hidden = t !== tab;
@@ -163,18 +174,46 @@ function nearestEdge(e) {
   return EDGES.reduce((a, b) => (distance[b] < distance[a] ? b : a));
 }
 
-function placeTabBar(edge) {
-  document.body.dataset.tabs = edge;
+function load(key) {
   try {
-    localStorage.setItem("tab-bar", edge);
+    return localStorage.getItem(key);
+  } catch {}
+}
+function save(key, value) {
+  try {
+    localStorage.setItem(key, value);
   } catch {}
 }
 
-let savedEdge = null;
-try {
-  savedEdge = localStorage.getItem("tab-bar");
-} catch {}
+function placeTabBar(edge) {
+  document.body.dataset.tabs = edge;
+  save("tab-bar", edge);
+}
+
+const savedEdge = load("tab-bar");
 placeTabBar(EDGES.includes(savedEdge) ? savedEdge : "top");
+
+// Horizontal tabs share one width; the vertical bar has its own.
+const SIZE_LIMITS = { "tab-width": [60, 400], "tab-bar-width": [90, 400] };
+function setSize(key, px) {
+  const [min, max] = SIZE_LIMITS[key];
+  const clamped = Math.round(Math.min(max, Math.max(min, px)));
+  document.documentElement.style.setProperty(`--${key}`, `${clamped}px`);
+  save(key, clamped);
+}
+for (const key in SIZE_LIMITS) {
+  const saved = Number(load(key));
+  if (saved) setSize(key, saved);
+}
+
+document.getElementById("bar-resize").addEventListener("mousedown", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  const r = tabBar.getBoundingClientRect();
+  drag(e, {
+    move: (e) => setSize("tab-bar-width", document.body.dataset.tabs === "left" ? e.clientX - r.left : r.right - e.clientX),
+  });
+});
 
 // Dragging the bar itself (not a tab) moves it to whichever side of the panel the mouse ends nearest.
 tabBar.addEventListener("mousedown", (e) => {
@@ -190,13 +229,32 @@ tabBar.addEventListener("mousedown", (e) => {
 });
 
 // The panel is nonactivating, so a click alone doesn't give it keyboard focus.
-window.addEventListener("mousedown", () => invoke("focus_panel").then(() => active?.term.focus()), true);
+window.addEventListener("mousedown", () => invoke("focus_panel").then(() => settingsOpen() || active?.term.focus()), true);
 invoke("focus_panel");
+
+const IS_MAC = /Mac/.test(navigator.platform);
+const TAB_STEP = { ArrowLeft: -1, ArrowRight: 1 };
+
+/** Moves to the neighbouring tab, wrapping around at either end. */
+function stepTab(step) {
+  const i = tabs.indexOf(active);
+  if (tabs.length > 1) activate(tabs[(i + step + tabs.length) % tabs.length]);
+}
 
 // Caught before xterm, which would otherwise swallow them.
 window.addEventListener("keydown", (e) => {
-  if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
-  if (e.key === "t") openTab(active);
+  if (e.shiftKey || e.altKey) return;
+  const tabKey = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  // In settings the arrows keep their text-editing meaning.
+  if (tabKey && e.key in TAB_STEP && active && !settingsOpen()) {
+    stepTab(TAB_STEP[e.key]);
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+  if (!e.metaKey || e.ctrlKey) return;
+  if (e.key === ",") toggleSettings();
+  else if (e.key === "t") openTab(active);
   else if (e.key === "w" && active) closeTab(active);
   else if (/^[1-9]$/.test(e.key) && tabs[e.key - 1]) activate(tabs[e.key - 1]);
   else return;
@@ -226,6 +284,12 @@ win.listen("claude-exit", ({ payload }) => {
   if (!tab) return;
   tab.running = false;
   tab.term.write("\r\n\x1b[2m[claude exited, press Enter to restart]\x1b[0m\r\n");
+});
+
+// A connector started a session. It opens in the background so typing in the current tab isn't hijacked.
+win.listen("tab-opened", async ({ payload }) => {
+  const tab = await addTab(payload, { focus: false });
+  setStatus(tab, "working");
 });
 
 win.listen("agent-event", ({ payload }) => {

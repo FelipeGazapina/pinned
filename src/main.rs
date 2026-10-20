@@ -1,5 +1,7 @@
 mod agent;
+mod connectors;
 mod hooks;
+mod linear;
 mod pty;
 
 use portable_pty::CommandBuilder;
@@ -30,6 +32,10 @@ struct Launch {
 struct Tab {
     cwd: PathBuf,
     session: Option<pty::Session>,
+    /// Extra `claude` arguments for the first start only, so a restart doesn't redo the task.
+    launch: Vec<String>,
+    /// Environment for every start, such as the issue a connector's session reports on.
+    env: Vec<(&'static str, String)>,
 }
 
 struct Harness {
@@ -47,6 +53,12 @@ impl Harness {
     fn tab<R>(&self, id: &str, f: impl FnOnce(&mut Tab) -> R) -> Result<R, String> {
         self.tabs.lock().unwrap().get_mut(id).map(f).ok_or_else(|| format!("no tab {id}"))
     }
+
+    fn add_tab(&self, cwd: PathBuf, launch: Vec<String>, env: Vec<(&'static str, String)>) -> String {
+        let id = format!("tab-{}", self.next_tab.fetch_add(1, Ordering::Relaxed));
+        self.tabs.lock().unwrap().insert(id.clone(), Tab { cwd, session: None, launch, env });
+        id
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -62,9 +74,7 @@ fn open_tab(harness: State<Harness>, from: Option<String>) -> String {
     let cwd = from
         .and_then(|from| harness.tab(&from, |t| t.cwd.clone()).ok())
         .unwrap_or_else(|| harness.default_cwd.clone());
-    let id = format!("tab-{}", harness.next_tab.fetch_add(1, Ordering::Relaxed));
-    harness.tabs.lock().unwrap().insert(id.clone(), Tab { cwd, session: None });
-    id
+    harness.add_tab(cwd, vec![], vec![])
 }
 
 #[tauri::command]
@@ -77,15 +87,19 @@ fn start_claude(
     output: Channel<InvokeResponseBody>,
 ) -> Result<String, String> {
     let l = &harness.launch;
-    let cwd = harness.tab(&tab, |t| t.cwd.clone())?;
+    let (cwd, launch, env) = harness.tab(&tab, |t| (t.cwd.clone(), std::mem::take(&mut t.launch), t.env.clone()))?;
     let mut cmd = CommandBuilder::new(&l.claude);
     cmd.arg("--settings");
     cmd.arg(&l.settings);
+    cmd.args(launch);
     cmd.cwd(&cwd);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env(agent::SOCK_ENV, &l.sock);
     cmd.env(agent::TAB_ENV, &tab);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     if let Some(path) = &l.path_env {
         cmd.env("PATH", path);
     }
@@ -323,10 +337,20 @@ fn add_tray(app: &tauri::App) -> tauri::Result<()> {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some(hooks::SUBCOMMAND) {
-        return hooks::forward(args.next().as_deref());
+    match args.next().as_deref() {
+        Some(hooks::SUBCOMMAND) => return hooks::forward(args.next().as_deref()),
+        Some(hooks::STAGE_SUBCOMMAND) => match hooks::stage(args.next().as_deref()) {
+            Ok(done) => return println!("{done}"),
+            Err(e) => {
+                eprintln!("pinned: {e}");
+                std::process::exit(1);
+            }
+        },
+        _ => {}
     }
 
+    // The updater and the Linear client share reqwest's rustls, which ships without a crypto provider.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let launch = launch().expect("could not prepare claude launch");
     let sock = launch.sock.clone();
     let builder = tauri::Builder::default()
@@ -346,7 +370,15 @@ fn main() {
             choose_folder,
             check_update,
             install_update,
-            get_opacity
+            get_opacity,
+            connectors::get_settings,
+            connectors::open_linear_keys,
+            connectors::connect_linear,
+            connectors::disconnect_linear,
+            connectors::linear_suggestions,
+            connectors::save_connector,
+            connectors::delete_connector,
+            connectors::pick_folder
         ])
         .setup(move |app| {
             app.manage(Harness {
@@ -358,12 +390,25 @@ fn main() {
                 update: Mutex::new(None),
                 opacity: AtomicU8::new(saved_opacity(app.path().app_config_dir().ok())),
             });
+            app.manage(connectors::Connectors::load(app.path().app_config_dir()?, std::env::current_exe()?));
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(connectors::watch(handle.clone(), move |run| {
+                let env = vec![(agent::CONNECTOR_ENV, run.connector), (agent::ISSUE_ENV, run.issue)];
+                let id = handle.state::<Harness>().add_tab(run.cwd, run.args, env);
+                let _ = handle.emit("tab-opened", id);
+            }));
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             add_tray(app)?;
             let handle = app.handle().clone();
-            hooks::listen(sock, move |event| {
-                let _ = handle.emit("agent-event", event);
+            hooks::listen(sock, move |message| match message {
+                agent::Message::Agent(event) => {
+                    let _ = handle.emit("agent-event", event);
+                    Ok(String::new())
+                }
+                agent::Message::Stage { connector, issue, stage } => tauri::async_runtime::block_on(
+                    handle.state::<connectors::Connectors>().advance(&connector, &issue, stage),
+                ),
             })?;
             #[cfg(target_os = "macos")]
             pin_above_fullscreen(&app.get_webview_window("main").unwrap())?;

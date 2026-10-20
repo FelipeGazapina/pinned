@@ -41,7 +41,7 @@ From a terminal you can open a specific folder:
 The **＋** button in the tab bar (or ⌘T) opens another tab on the same folder, with its own
 Claude session and status. Each tab's dot shows its status, and the pill reports the tab that
 most needs you. ✕ on a tab (or ⌘W) closes it; the app quits with the last tab. ⌘1–⌘9 switch
-tabs. 📁 changes the folder of the current tab.
+tabs, and ⌘← / ⌘→ move to the previous or next tab (Ctrl on other systems). 📁 changes the folder of the current tab.
 
 Drag a tab to reorder it. Drag the tab bar by its ⠿ handle or empty space to the top, bottom,
 left or right side of the panel; left and right stack the tabs vertically. pinned remembers
@@ -49,6 +49,42 @@ the side you picked.
 
 Drop files onto the panel to attach them to the current tab (images included), or paste an
 image from the clipboard.
+
+## Integrations and connectors
+
+Click **⋯** in the header (or press ⌘,) to swap the terminal for settings. Click ⋯ again, or
+pick a tab, to go back.
+
+**Integrations** connects services. For Linear, click **Open Linear ↗**, create a personal API
+key on the page that opens in your browser, and paste it. pinned checks the key with Linear
+and keeps it in `~/Library/Application Support/dev.personal-harness.pinned/linear-key`,
+readable only by you.
+
+**Connectors** make the agent proactive. A connector watches Linear for issues created with a
+label. For each new issue, it opens a tab in the background on the folder you chose and starts:
+
+```sh
+claude --model <model> --effort <effort> --permission-mode <mode> [--worktree=<issue>] \
+  --name "<issue> <title>" "<instructions>\n\n<issue title, link and description>"
+```
+
+The default instructions ask Claude to implement the issue, record a Playwright video that
+proves the fix, and open a pull request that links the video. Edit them per connector.
+Each connector has its own column flow. **Move the Linear issue to the column** names
+the column for each stage, and an empty field leaves the issue where it is:
+
+- **When pinned picks it up.** pinned moves the issue before the session starts.
+- **When Claude starts changing code** and **when the pull request is open.** pinned adds a
+  step to the prompt that tells Claude to run `pinned stage coding` and `pinned stage review`.
+  The command asks the running app to move the issue, so the Linear key never enters the
+  session.
+
+Columns are matched by name, ignoring case, within the issue's team. Several connectors can
+watch the same repository with different labels and flows.
+
+pinned checks Linear every minute and only for issues created after the connector was
+saved, and it starts each issue once. Pick **Separate git worktree per issue** when several
+issues may run at the same time in one repository.
 
 ## Updates
 
