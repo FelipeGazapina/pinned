@@ -1,10 +1,13 @@
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
+    killed: Arc<AtomicBool>,
 }
 
 pub fn size(cols: u16, rows: u16) -> PtySize {
@@ -24,15 +27,20 @@ impl Session {
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
+        let killed = Arc::new(AtomicBool::new(false));
+        let reader_killed = killed.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 16 * 1024];
             while let Ok(n @ 1..) = reader.read(&mut buf) {
                 on_output(buf[..n].to_vec());
             }
-            on_exit();
+            // A session we dropped ourselves must not report an exit that the UI would pin on its replacement.
+            if !reader_killed.load(Ordering::SeqCst) {
+                on_exit();
+            }
         });
 
-        Ok(Self { master: pair.master, writer, child })
+        Ok(Self { master: pair.master, writer, child, killed })
     }
 
     pub fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
@@ -47,6 +55,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        self.killed.store(true, Ordering::SeqCst);
         let _ = self.child.kill();
     }
 }

@@ -1,5 +1,6 @@
 :root {
-  --bg: #0f1115f0;
+  --opacity: 0.94;
+  --bg: rgb(15 17 21 / var(--opacity));
   --fg: #d7dae0;
   --muted: #7d8590;
   --border: #2b3038;
@@ -52,3 +53,6 @@ body[data-status="working"] .dot { animation: breathe 1.2s ease-in-out infinite;
 body.alert #pill { animation: alert 0.6s ease-in-out 6; }
 @keyframes breathe { 50% { opacity: 0.3; } }
 @keyframes alert { 50% { background: var(--status-color); color: #0f1115; } }
+
+.xterm-viewport { scrollbar-width: none; }
+.xterm-viewport::-webkit-scrollbar { display: none; }

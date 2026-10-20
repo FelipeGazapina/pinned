@@ -5,14 +5,17 @@ mod pty;
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
+
+const OPACITIES: [u8; 6] = [100, 90, 80, 60, 40, 20];
+const DEFAULT_OPACITY: u8 = 94;
 
 const PILL: LogicalSize<f64> = LogicalSize { width: 210.0, height: 40.0 };
 
@@ -36,6 +39,7 @@ struct Harness {
     tabs: Mutex<HashMap<String, Tab>>,
     next_tab: AtomicU32,
     update: Mutex<Option<Update>>,
+    opacity: AtomicU8,
 }
 
 impl Harness {
@@ -82,7 +86,7 @@ fn start_claude(
         cmd.env("PATH", path);
     }
 
-    // Drop the old session first so its exit event fires before the new one starts.
+    // Dropping the old session kills it silently, so its exit can't be mistaken for the new one's.
     harness.tab(&label, |t| t.session.take());
     let session = pty::Session::spawn(
         cmd,
@@ -166,8 +170,18 @@ fn focus_panel(app: AppHandle, window: WebviewWindow) {
 
 /// Closes this panel and ends its session; the app exits with the last panel.
 #[tauri::command]
-fn close_tab(window: WebviewWindow, harness: State<Harness>) -> Result<(), String> {
+fn close_tab(app: AppHandle, window: WebviewWindow, harness: State<Harness>) -> Result<(), String> {
     harness.tabs.lock().unwrap().remove(window.label());
+    // A window still wearing the panel class is released twice on destroy, which takes the app down.
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_nspanel::ManagerExt;
+        if let Ok(panel) = app.get_webview_panel(window.label()) {
+            panel.to_window();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
     window.destroy().map_err(|e| e.to_string())
 }
 
@@ -224,6 +238,23 @@ async fn choose_folder(app: AppHandle, window: WebviewWindow, harness: State<'_,
     }
     harness.tab(window.label(), |t| t.cwd = dir);
     Ok(true)
+}
+
+#[tauri::command]
+fn get_opacity(harness: State<Harness>) -> u8 {
+    harness.opacity.load(Ordering::Relaxed)
+}
+
+fn opacity_file(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|c| c.join("opacity"))
+}
+
+fn saved_opacity(config_dir: Option<PathBuf>) -> u8 {
+    config_dir
+        .and_then(|c| std::fs::read_to_string(c.join("opacity")).ok())
+        .and_then(|t| t.trim().parse::<u8>().ok())
+        .filter(|p| (1..=100).contains(p))
+        .unwrap_or(DEFAULT_OPACITY)
 }
 
 /// Returns the newer version when one is published, keeping it ready for `install_update`.
@@ -293,14 +324,36 @@ fn launch() -> std::io::Result<Launch> {
 }
 
 fn add_tray(app: &tauri::App) -> tauri::Result<()> {
+    let current = app.state::<Harness>().opacity.load(Ordering::Relaxed);
+    let levels = OPACITIES
+        .iter()
+        .map(|&p| CheckMenuItem::with_id(app, format!("opacity-{p}"), format!("{p}%"), true, p == current, None::<&str>))
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let level_refs: Vec<&dyn tauri::menu::IsMenuItem<_>> = levels.iter().map(|i| i as _).collect();
+    let opacity = Submenu::with_items(app, "Opacity", true, &level_refs)?;
     let quit = MenuItem::with_id(app, "quit", "Quit pinned", true, None::<&str>)?;
     TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
-        .menu(&Menu::with_items(app, &[&quit])?)
-        .on_menu_event(|app, e| {
+        .menu(&Menu::with_items(app, &[&opacity, &quit])?)
+        .on_menu_event(move |app, e| {
             if e.id() == "quit" {
                 app.exit(0);
+                return;
             }
+            let Some(percent) = e.id().as_ref().strip_prefix("opacity-").and_then(|p| p.parse::<u8>().ok()) else {
+                return;
+            };
+            for item in &levels {
+                let _ = item.set_checked(item.id() == e.id());
+            }
+            app.state::<Harness>().opacity.store(percent, Ordering::Relaxed);
+            if let Some(file) = opacity_file(app) {
+                if let Some(dir) = file.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(file, percent.to_string());
+            }
+            let _ = app.emit("opacity", percent);
         })
         .build(app)?;
     Ok(())
@@ -330,7 +383,8 @@ fn main() {
             new_tab,
             choose_folder,
             check_update,
-            install_update
+            install_update,
+            get_opacity
         ])
         .setup(move |app| {
             app.manage(Harness {
@@ -339,6 +393,7 @@ fn main() {
                 tabs: Mutex::new(HashMap::new()),
                 next_tab: AtomicU32::new(2),
                 update: Mutex::new(None),
+                opacity: AtomicU8::new(saved_opacity(app.path().app_config_dir().ok())),
             });
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

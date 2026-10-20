@@ -1,6 +1,10 @@
 const { invoke, Channel } = window.__TAURI__.core;
 const win = window.__TAURI__.window.getCurrentWindow();
 
+const applyOpacity = (percent) => document.documentElement.style.setProperty("--opacity", percent / 100);
+invoke("get_opacity").then(applyOpacity);
+win.listen("opacity", ({ payload }) => applyOpacity(payload));
+
 const STATUS_TEXT = { idle: "", working: "working…", done: "done", "needs-input": "needs you" };
 
 const term = new Terminal({
