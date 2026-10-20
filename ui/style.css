@@ -23,8 +23,9 @@ header { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px
 #status-text { color: var(--status-color); }
 #minimize { width: 22px; height: 22px; border-radius: 6px; font-size: 16px; line-height: 1; }
 #quit { width: 22px; height: 22px; border-radius: 6px; font-size: 12px; line-height: 1; }
-#minimize:hover, #folder:hover { background: #ffffff14; }
+#minimize:hover, #folder:hover, #new-tab:hover { background: #ffffff14; }
 #quit:hover { background: #e5484d; color: #fff; }
+#new-tab { width: 22px; height: 22px; border-radius: 6px; font-size: 13px; line-height: 1; }
 #folder { width: 22px; height: 22px; border-radius: 6px; font-size: 12px; line-height: 1; }
 .update { display: none; padding: 2px 8px; border-radius: 10px; background: var(--working);
   color: #0f1115; font-weight: 600; white-space: nowrap; }

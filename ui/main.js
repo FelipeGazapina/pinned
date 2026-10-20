@@ -1,5 +1,4 @@
 const { invoke, Channel } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
 const win = window.__TAURI__.window.getCurrentWindow();
 
 const STATUS_TEXT = { idle: "", working: "working…", done: "done", "needs-input": "needs you" };
@@ -36,7 +35,24 @@ term.onData((data) => {
   if (data === "\r") startClaude();
 });
 
-listen("claude-exit", () => {
+// Claude Code attaches an image when a file path is pasted, so a drop becomes a paste of the escaped paths.
+window.__TAURI__.webview.getCurrentWebview().onDragDropEvent(({ payload }) => {
+  if (payload.type !== "drop" || !running) return;
+  const escaped = payload.paths.map((p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&"));
+  term.paste(escaped.join(" ") + " ");
+  term.focus();
+});
+
+// A clipboard image has no text for xterm to paste; Ctrl+V makes Claude Code read the image itself.
+document.addEventListener("paste", (e) => {
+  const types = [...(e.clipboardData?.types ?? [])];
+  if (!running || types.includes("text/plain") || !types.includes("Files")) return;
+  e.preventDefault();
+  e.stopPropagation();
+  invoke("write_input", { data: "\x16" });
+}, true);
+
+win.listen("claude-exit", () => {
   running = false;
   term.write("\r\n\x1b[2m[claude exited, press Enter to restart]\x1b[0m\r\n");
 });
@@ -48,7 +64,7 @@ function setStatus(status, message) {
   document.getElementById("pill-text").textContent = text || "claude";
 }
 
-listen("agent-event", ({ payload }) => {
+win.listen("agent-event", ({ payload }) => {
   setStatus(payload.status, payload.status === "needs-input" ? payload.message : null);
   if (payload.status !== "working" && document.body.dataset.view === "pill") {
     document.body.classList.remove("alert");
@@ -63,7 +79,8 @@ async function setView(view) {
   document.body.dataset.view = view;
   if (view === "expanded") term.focus();
 }
-document.getElementById("quit").onclick = () => invoke("quit_app");
+document.getElementById("quit").onclick = () => invoke("close_tab");
+document.getElementById("new-tab").onclick = () => invoke("new_tab");
 document.getElementById("minimize").onclick = () => setView("pill");
 document.getElementById("expand").onclick = () => setView("expanded");
 document.getElementById("grip").onmousedown = (e) => {
@@ -85,27 +102,29 @@ async function checkUpdate() {
     if (version) document.body.dataset.update = version;
     else delete document.body.dataset.update;
     for (const b of document.querySelectorAll(".update")) {
+      b.disabled = false;
       b.textContent = b.closest("#pill") ? "↑" : `Update to v${version}`;
     }
+    return version;
   } catch (e) {
     console.warn("update check failed", e);
   }
 }
-for (const button of document.querySelectorAll(".update")) {
-  button.onclick = async () => {
-    for (const b of document.querySelectorAll(".update")) {
-      b.disabled = true;
-      b.textContent = "updating…";
-    }
-    try {
-      await invoke("install_update");
-    } catch (e) {
-      term.write(`\r\n\x1b[31m[update failed: ${e}]\x1b[0m\r\n`);
-      checkUpdate();
-    }
-  };
+async function installUpdate() {
+  for (const b of document.querySelectorAll(".update")) {
+    b.disabled = true;
+    b.textContent = "updating…";
+  }
+  try {
+    await invoke("install_update");
+  } catch (e) {
+    term.write(`\r\n\x1b[31m[update failed: ${e}]\x1b[0m\r\n`);
+    checkUpdate();
+  }
 }
-checkUpdate();
+for (const button of document.querySelectorAll(".update")) button.onclick = installUpdate;
+// Launch installs straight away, before a session has anything to lose; later checks only offer the button.
+checkUpdate().then((version) => version && win.label === "main" && installUpdate());
 setInterval(checkUpdate, 6 * 60 * 60 * 1000);
 
 new ResizeObserver(() => {

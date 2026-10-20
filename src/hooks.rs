@@ -1,4 +1,4 @@
-use crate::agent::{AgentEvent, AgentStatus, SOCK_ENV};
+use crate::agent::{AgentEvent, AgentStatus, SOCK_ENV, WINDOW_ENV};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -35,7 +35,7 @@ pub fn forward(arg: Option<&str>) {
     let _ = std::io::stdin().read_to_string(&mut input);
     let hook: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
     let field = |k: &str| hook[k].as_str().map(str::to_owned);
-    let event = AgentEvent { status, cwd: field("cwd"), message: field("message") };
+    let event = AgentEvent { status, cwd: field("cwd"), message: field("message"), window: std::env::var(WINDOW_ENV).ok() };
 
     if let Ok(mut stream) = UnixStream::connect(sock) {
         let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));

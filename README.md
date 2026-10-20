@@ -36,9 +36,17 @@ From a terminal you can open a specific folder:
 /Applications/pinned.app/Contents/MacOS/pinned ~/path/to/project
 ```
 
+## Several pinned panels
+
+The **＋** button in the header opens another pinned panel next to this one, on the same
+folder, with its own Claude session and status. **✕** closes only that panel; the app quits
+with the last one. Drop files onto a panel to attach them (images included), or paste an
+image from the clipboard.
+
 ## Updates
 
-pinned checks GitHub Releases at launch and every 6 hours. When a newer version exists, an
+pinned checks GitHub Releases at launch and installs a newer version right away, then
+restarts. It checks again every 6 hours; if a newer version exists by then, an
 **Update to vX** button appears in the header (and `↑` on the pill). Click it to download,
 install, and restart.
 
