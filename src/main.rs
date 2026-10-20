@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
 
@@ -26,11 +26,10 @@ struct Launch {
     sock: PathBuf,
 }
 
-/// One pinned panel: its own folder, claude session and expanded size.
+/// One tab in the panel: its own folder and claude session.
 struct Tab {
     cwd: PathBuf,
     session: Option<pty::Session>,
-    expanded: LogicalSize<f64>,
 }
 
 struct Harness {
@@ -38,20 +37,15 @@ struct Harness {
     default_cwd: PathBuf,
     tabs: Mutex<HashMap<String, Tab>>,
     next_tab: AtomicU32,
+    expanded: Mutex<LogicalSize<f64>>,
     update: Mutex<Option<Update>>,
     opacity: AtomicU8,
 }
 
 impl Harness {
-    /// Runs `f` on the tab owned by the window `label`, creating it on first use.
-    fn tab<R>(&self, label: &str, f: impl FnOnce(&mut Tab) -> R) -> R {
-        let mut tabs = self.tabs.lock().unwrap();
-        let tab = tabs.entry(label.to_owned()).or_insert_with(|| Tab {
-            cwd: self.default_cwd.clone(),
-            session: None,
-            expanded: LogicalSize::new(760.0, 460.0),
-        });
-        f(tab)
+    /// Runs `f` on the tab `id`, failing once the tab is closed.
+    fn tab<R>(&self, id: &str, f: impl FnOnce(&mut Tab) -> R) -> Result<R, String> {
+        self.tabs.lock().unwrap().get_mut(id).map(f).ok_or_else(|| format!("no tab {id}"))
     }
 }
 
@@ -62,18 +56,28 @@ enum View {
     Pill,
 }
 
+/// Adds a tab on `from`'s folder, or the launch folder, and returns its id.
+#[tauri::command]
+fn open_tab(harness: State<Harness>, from: Option<String>) -> String {
+    let cwd = from
+        .and_then(|from| harness.tab(&from, |t| t.cwd.clone()).ok())
+        .unwrap_or_else(|| harness.default_cwd.clone());
+    let id = format!("tab-{}", harness.next_tab.fetch_add(1, Ordering::Relaxed));
+    harness.tabs.lock().unwrap().insert(id.clone(), Tab { cwd, session: None });
+    id
+}
+
 #[tauri::command]
 fn start_claude(
     app: AppHandle,
-    window: WebviewWindow,
     harness: State<Harness>,
+    tab: String,
     cols: u16,
     rows: u16,
     output: Channel<InvokeResponseBody>,
 ) -> Result<String, String> {
     let l = &harness.launch;
-    let label = window.label().to_owned();
-    let cwd = harness.tab(&label, |t| t.cwd.clone());
+    let cwd = harness.tab(&tab, |t| t.cwd.clone())?;
     let mut cmd = CommandBuilder::new(&l.claude);
     cmd.arg("--settings");
     cmd.arg(&l.settings);
@@ -81,13 +85,14 @@ fn start_claude(
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env(agent::SOCK_ENV, &l.sock);
-    cmd.env(agent::WINDOW_ENV, &label);
+    cmd.env(agent::TAB_ENV, &tab);
     if let Some(path) = &l.path_env {
         cmd.env("PATH", path);
     }
 
     // Dropping the old session kills it silently, so its exit can't be mistaken for the new one's.
-    harness.tab(&label, |t| t.session.take());
+    harness.tab(&tab, |t| t.session.take())?;
+    let exited = tab.clone();
     let session = pty::Session::spawn(
         cmd,
         pty::size(cols, rows),
@@ -95,27 +100,27 @@ fn start_claude(
             let _ = output.send(InvokeResponseBody::Raw(bytes));
         },
         move || {
-            let _ = app.emit_to(label.as_str(), "claude-exit", ());
+            let _ = app.emit("claude-exit", exited);
         },
     )?;
-    harness.tab(window.label(), |t| t.session = Some(session));
+    harness.tab(&tab, |t| t.session = Some(session))?;
     Ok(cwd.display().to_string())
 }
 
 #[tauri::command]
-fn write_input(window: WebviewWindow, harness: State<Harness>, data: String) -> Result<(), String> {
-    harness.tab(window.label(), |t| match t.session.as_mut() {
+fn write_input(harness: State<Harness>, tab: String, data: String) -> Result<(), String> {
+    harness.tab(&tab, |t| match t.session.as_mut() {
         Some(s) => s.write(data.as_bytes()).map_err(|e| e.to_string()),
         None => Ok(()),
-    })
+    })?
 }
 
 #[tauri::command]
-fn resize_pty(window: WebviewWindow, harness: State<Harness>, cols: u16, rows: u16) -> Result<(), String> {
-    harness.tab(window.label(), |t| match t.session.as_ref() {
+fn resize_pty(harness: State<Harness>, tab: String, cols: u16, rows: u16) -> Result<(), String> {
+    harness.tab(&tab, |t| match t.session.as_ref() {
         Some(s) => s.resize(pty::size(cols, rows)),
         None => Ok(()),
-    })
+    })?
 }
 
 #[tauri::command]
@@ -124,10 +129,10 @@ fn set_view(window: WebviewWindow, harness: State<Harness>, view: View) -> Resul
     let size = match view {
         View::Pill => {
             let current = window.inner_size().map_err(|e| e.to_string())?.to_logical(scale);
-            harness.tab(window.label(), |t| t.expanded = current);
+            *harness.expanded.lock().unwrap() = current;
             PILL
         }
-        View::Expanded => harness.tab(window.label(), |t| t.expanded),
+        View::Expanded => *harness.expanded.lock().unwrap(),
     };
     window.set_size(size).map_err(|e| e.to_string())?;
     if matches!(view, View::Expanded) {
@@ -168,66 +173,23 @@ fn focus_panel(app: AppHandle, window: WebviewWindow) {
     let _ = (app, window);
 }
 
-/// Closes this panel and ends its session; the app exits with the last panel.
+/// Ends the tab's session; the app exits with the last tab.
 #[tauri::command]
-fn close_tab(app: AppHandle, window: WebviewWindow, harness: State<Harness>) -> Result<(), String> {
-    harness.tabs.lock().unwrap().remove(window.label());
-    // A window still wearing the panel class is released twice on destroy, which takes the app down.
-    #[cfg(target_os = "macos")]
-    {
-        use tauri_nspanel::ManagerExt;
-        if let Ok(panel) = app.get_webview_panel(window.label()) {
-            panel.to_window();
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = app;
-    window.destroy().map_err(|e| e.to_string())
-}
-
-/// Opens another panel next to this one, on the same folder, with its own claude session.
-#[tauri::command]
-async fn new_tab(app: AppHandle, window: WebviewWindow, harness: State<'_, Harness>) -> Result<(), String> {
-    let scale = window.scale_factor().map_err(|e| e.to_string())?;
-    let size: LogicalSize<f64> = window.inner_size().map_err(|e| e.to_string())?.to_logical(scale);
-    let origin = window.outer_position().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
-    let label = format!("pinned-{}", harness.next_tab.fetch_add(1, Ordering::Relaxed));
-    let cwd = harness.tab(window.label(), |t| t.cwd.clone());
-    harness.tabs.lock().unwrap().insert(
-        label.clone(),
-        Tab { cwd, session: None, expanded: size },
-    );
-
-    let mut config = app.config().app.windows[0].clone();
-    config.label = label.clone();
-    config.x = Some(origin.x + 32.0);
-    config.y = Some(origin.y + 32.0);
-    config.width = size.width;
-    config.height = size.height;
-    let built = WebviewWindowBuilder::from_config(&app, &config)
-        .and_then(|b| b.build())
-        .map_err(|e| e.to_string());
-    let new_window = match built {
-        Ok(w) => w,
-        Err(e) => {
-            harness.tabs.lock().unwrap().remove(&label);
-            return Err(e);
-        }
+fn close_tab(app: AppHandle, harness: State<Harness>, tab: String) {
+    let last = {
+        let mut tabs = harness.tabs.lock().unwrap();
+        tabs.remove(&tab);
+        tabs.is_empty()
     };
-    keep_on_screen(&new_window, size, scale).map_err(|e| e.to_string())?;
-    #[cfg(target_os = "macos")]
-    app.run_on_main_thread(move || {
-        if let Err(e) = pin_above_fullscreen(&new_window) {
-            eprintln!("pinned: could not pin {}: {e}", new_window.label());
-        }
-    })
-    .map_err(|e| e.to_string())
+    if last {
+        app.exit(0);
+    }
 }
 
 /// Returns true when the user picked a folder; the caller then restarts claude there.
 #[tauri::command]
-async fn choose_folder(app: AppHandle, window: WebviewWindow, harness: State<'_, Harness>) -> Result<bool, String> {
-    let current = harness.tab(window.label(), |t| t.cwd.clone());
+async fn choose_folder(app: AppHandle, harness: State<'_, Harness>, tab: String) -> Result<bool, String> {
+    let current = harness.tab(&tab, |t| t.cwd.clone())?;
     let Some(picked) = app.dialog().file().set_directory(current).blocking_pick_folder() else {
         return Ok(false);
     };
@@ -236,7 +198,7 @@ async fn choose_folder(app: AppHandle, window: WebviewWindow, harness: State<'_,
         let _ = std::fs::create_dir_all(&config);
         let _ = std::fs::write(config.join("last-folder"), dir.as_os_str().as_encoded_bytes());
     }
-    harness.tab(window.label(), |t| t.cwd = dir);
+    harness.tab(&tab, |t| t.cwd = dir)?;
     Ok(true)
 }
 
@@ -374,13 +336,13 @@ fn main() {
     let builder = builder.plugin(tauri_nspanel::init());
     builder
         .invoke_handler(tauri::generate_handler![
+            open_tab,
             start_claude,
             write_input,
             resize_pty,
             set_view,
             focus_panel,
             close_tab,
-            new_tab,
             choose_folder,
             check_update,
             install_update,
@@ -391,7 +353,8 @@ fn main() {
                 launch,
                 default_cwd: initial_cwd(app.path().app_config_dir().ok()),
                 tabs: Mutex::new(HashMap::new()),
-                next_tab: AtomicU32::new(2),
+                next_tab: AtomicU32::new(1),
+                expanded: Mutex::new(LogicalSize::new(760.0, 460.0)),
                 update: Mutex::new(None),
                 opacity: AtomicU8::new(saved_opacity(app.path().app_config_dir().ok())),
             });
@@ -400,8 +363,7 @@ fn main() {
             add_tray(app)?;
             let handle = app.handle().clone();
             hooks::listen(sock, move |event| {
-                let label = event.window.clone().unwrap_or_else(|| "main".into());
-                let _ = handle.emit_to(label.as_str(), "agent-event", event);
+                let _ = handle.emit("agent-event", event);
             })?;
             #[cfg(target_os = "macos")]
             pin_above_fullscreen(&app.get_webview_window("main").unwrap())?;

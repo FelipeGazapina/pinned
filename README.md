@@ -36,11 +36,18 @@ From a terminal you can open a specific folder:
 /Applications/pinned.app/Contents/MacOS/pinned ~/path/to/project
 ```
 
-## Several pinned panels
+## Tabs
 
-The **＋** button in the header opens another pinned panel next to this one, on the same
-folder, with its own Claude session and status. **✕** closes only that panel; the app quits
-with the last one. Drop files onto a panel to attach them (images included), or paste an
+The **＋** button in the tab bar (or ⌘T) opens another tab on the same folder, with its own
+Claude session and status. Each tab's dot shows its status, and the pill reports the tab that
+most needs you. ✕ on a tab (or ⌘W) closes it; the app quits with the last tab. ⌘1–⌘9 switch
+tabs. 📁 changes the folder of the current tab.
+
+Drag a tab to reorder it. Drag the tab bar by its ⠿ handle or empty space to the top, bottom,
+left or right side of the panel; left and right stack the tabs vertically. pinned remembers
+the side you picked.
+
+Drop files onto the panel to attach them to the current tab (images included), or paste an
 image from the clipboard.
 
 ## Updates

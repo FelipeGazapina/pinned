@@ -1,4 +1,4 @@
-use crate::agent::{AgentEvent, AgentStatus, SOCK_ENV, WINDOW_ENV};
+use crate::agent::{AgentEvent, AgentStatus, SOCK_ENV, TAB_ENV};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
 }
 
 /// Runs inside the hook process Claude Code spawns: read the hook payload from stdin and
-/// forward it to the window that owns this session. Never fails loudly, so it can't
+/// forward it to the tab that owns this session. Never fails loudly, so it can't
 /// disturb the agent.
 pub fn forward(arg: Option<&str>) {
     let Some(status) = AgentStatus::ALL.iter().find(|(_, a, _)| Some(*a) == arg).map(|(s, _, _)| *s)
@@ -35,7 +35,7 @@ pub fn forward(arg: Option<&str>) {
     let _ = std::io::stdin().read_to_string(&mut input);
     let hook: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
     let field = |k: &str| hook[k].as_str().map(str::to_owned);
-    let event = AgentEvent { status, cwd: field("cwd"), message: field("message"), window: std::env::var(WINDOW_ENV).ok() };
+    let event = AgentEvent { status, cwd: field("cwd"), message: field("message"), tab: std::env::var(TAB_ENV).ok() };
 
     if let Ok(mut stream) = UnixStream::connect(sock) {
         let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));

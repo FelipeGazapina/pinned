@@ -5,22 +5,27 @@
 <link rel="stylesheet" href="vendor/xterm.css">
 <link rel="stylesheet" href="style.css">
 </head>
-<body data-view="expanded" data-status="idle">
+<body data-view="expanded" data-tabs="top">
   <main id="expanded">
-    <header data-tauri-drag-region>
+    <header data-tauri-drag-region data-status="idle">
       <span class="dot"></span>
       <span id="title" data-tauri-drag-region>claude</span>
       <span id="status-text" data-tauri-drag-region></span>
       <button class="update" title="Install the new version and restart"></button>
-      <button id="new-tab" title="New pinned in this folder">＋</button>
-      <button id="folder" title="Open another folder">📁</button>
+      <button id="folder" title="Open another folder in this tab">📁</button>
       <button id="minimize" title="Shrink to pill">–</button>
-      <button id="quit" title="Close this pinned">✕</button>
     </header>
-    <div id="term"></div>
+    <div id="workspace">
+      <nav id="tab-bar">
+        <span class="handle" title="Drag to move the tabs to another side">⠿</span>
+        <div id="tab-list"></div>
+        <button id="new-tab" title="New tab in this folder (⌘T)">＋</button>
+      </nav>
+      <div id="terms"></div>
+    </div>
     <div id="grip" title="Resize"></div>
   </main>
-  <div id="pill">
+  <div id="pill" data-status="idle">
     <span class="handle" data-tauri-drag-region title="Drag">⠿</span>
     <button id="expand" title="Open"><span class="dot"></span><span id="pill-text">claude</span></button>
     <button class="update" title="Install the new version and restart"></button>
