@@ -103,6 +103,26 @@ fn set_view(window: WebviewWindow, harness: State<Harness>, view: View) -> Resul
     window.set_size(size).map_err(|e| e.to_string())
 }
 
+/// A nonactivating panel never becomes key on its own, so keystrokes would go to the app
+/// underneath. Called on every click and on start so the terminal receives typing.
+#[tauri::command]
+fn focus_panel(app: AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_nspanel::ManagerExt;
+        if let Ok(panel) = app.get_webview_panel("main") {
+            panel.make_key_window();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 /// Returns true when the user picked a folder; the caller then restarts claude there.
 #[tauri::command]
 async fn choose_folder(app: AppHandle, harness: State<'_, Harness>) -> Result<bool, String> {
@@ -218,6 +238,8 @@ fn main() {
             write_input,
             resize_pty,
             set_view,
+            focus_panel,
+            quit_app,
             choose_folder,
             check_update,
             install_update

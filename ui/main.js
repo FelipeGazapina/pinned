@@ -18,6 +18,10 @@ fit.fit();
 
 let running = false;
 
+// The panel is nonactivating, so a click alone doesn't give it keyboard focus.
+window.addEventListener("mousedown", () => invoke("focus_panel").then(() => term.focus()), true);
+invoke("focus_panel");
+
 async function startClaude() {
   const output = new Channel();
   output.onmessage = (bytes) => term.write(new Uint8Array(bytes));
@@ -59,6 +63,7 @@ async function setView(view) {
   document.body.dataset.view = view;
   if (view === "expanded") term.focus();
 }
+document.getElementById("quit").onclick = () => invoke("quit_app");
 document.getElementById("minimize").onclick = () => setView("pill");
 document.getElementById("expand").onclick = () => setView("expanded");
 document.getElementById("grip").onmousedown = (e) => {
