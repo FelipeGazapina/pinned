@@ -23,28 +23,41 @@ const tabName = (tab) => tab.cwd.split("/").filter(Boolean).pop() || (tab.cwd ? 
 const isVertical = () => ["left", "right"].includes(document.body.dataset.tabs);
 
 /** Opens a tab on the project at `path`, or on the launch folder when `path` is null. */
-async function openTab(path) {
-  return addTab(await invoke("open_tab", { path }));
+async function openTab(path, bypass = false) {
+  return addTab(await invoke("open_tab", { path, bypass }));
 }
 
 /** The picker's entries in display order, and which one Enter opens. */
 let choices = [];
 let chosen = 0;
+/** Whether the next tab opened from the picker skips every permission check. Off each time the picker opens. */
+let bypassNext = false;
 const pickerOpen = () => !picker.hidden;
+
+function setBypassNext(on) {
+  bypassNext = on;
+  picker.dataset.bypass = on;
+  picker.querySelector(".bypass").textContent = on ? "⚡ Skip all permissions: on" : "⚡ Skip all permissions: off";
+}
 
 async function showProjects() {
   const projects = await invoke("list_projects");
   choices = [
-    ...projects.map((p) => ({ name: p.name, path: tilde(p.path), open: () => openTab(p.path) })),
+    ...projects.map((p) => ({ name: p.name, path: tilde(p.path), open: () => openTab(p.path, bypassNext) })),
     {
       name: "Open folder…",
       open: async () => {
         const path = await invoke("pick_project");
-        if (path) openTab(path);
+        if (path) openTab(path, bypassNext);
       },
     },
   ];
+  const toggle = document.createElement("button");
+  toggle.className = "bypass";
+  toggle.title = "Opens the next tab with --dangerously-skip-permissions (⇧Enter)";
+  toggle.onclick = () => setBypassNext(!bypassNext);
   picker.replaceChildren(
+    toggle,
     ...choices.map((choice, i) => {
       const button = document.createElement("button");
       for (const [cls, text] of [["name", choice.name], ["path", choice.path]]) {
@@ -55,22 +68,25 @@ async function showProjects() {
         button.append(span);
       }
       button.onmouseenter = () => choose(i);
-      button.onclick = () => openChoice(i);
+      button.onclick = (e) => openChoice(i, e.shiftKey);
       return button;
     }),
   );
   delete document.body.dataset.page;
   picker.hidden = false;
+  setBypassNext(false);
   choose(0);
 }
 
 function choose(i) {
   chosen = (i + choices.length) % choices.length;
-  picker.querySelectorAll("button").forEach((b, j) => b.classList.toggle("chosen", j === chosen));
-  picker.children[chosen].scrollIntoView({ block: "nearest" });
+  const entries = picker.querySelectorAll("button:not(.bypass)");
+  entries.forEach((b, j) => b.classList.toggle("chosen", j === chosen));
+  entries[chosen].scrollIntoView({ block: "nearest" });
 }
 
-function openChoice(i) {
+function openChoice(i, bypass = false) {
+  if (bypass) bypassNext = true;
   closeProjects();
   choices[i].open();
 }
@@ -103,7 +119,8 @@ async function addTab(id, { focus = true } = {}) {
   button.innerHTML = `<span class="dot"></span><span class="name"></span><button class="close" title="Close tab (⌘W)">✕</button><span class="resize" title="Drag to resize the tabs"></span>`;
   tabList.append(button);
 
-  const tab = { id, term, fit, el, button, cwd: "", status: "idle", message: null, title: null, running: false };
+  const bypass = await invoke("tab_bypass", { tab: id });
+  const tab = { id, term, fit, el, button, bypass, cwd: "", status: "idle", message: null, title: null, running: false };
   tabs.push(tab);
   term.onData((data) => {
     if (tab.running) return invoke("write_input", { tab: id, data });
@@ -177,8 +194,8 @@ function setStatus(tab, status, message) {
 function render() {
   for (const tab of tabs) {
     tab.button.dataset.status = tab.status;
-    tab.button.querySelector(".name").textContent = tabName(tab);
-    tab.button.title = tab.cwd;
+    tab.button.querySelector(".name").textContent = (tab.bypass ? "⚡ " : "") + tabName(tab);
+    tab.button.title = tab.bypass ? `${tab.cwd}\nPermissions skipped` : tab.cwd;
   }
   renderCarousel();
   if (!active) return;
@@ -357,7 +374,8 @@ window.addEventListener("keydown", (e) => {
   // Keys other than ⌘ shortcuts belong to the open picker, not the terminal behind it.
   if (pickerOpen() && !e.metaKey) {
     if (e.key in PICKER_STEP) choose(chosen + PICKER_STEP[e.key]);
-    else if (e.key === "Enter") openChoice(chosen);
+    else if (e.key === "Enter") openChoice(chosen, e.shiftKey);
+    else if (e.key === "b" && !e.ctrlKey && !e.altKey) setBypassNext(!bypassNext);
     else if (e.key === "Escape") closeProjects();
     e.preventDefault();
     e.stopPropagation();

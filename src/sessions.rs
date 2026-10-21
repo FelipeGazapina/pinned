@@ -9,6 +9,9 @@ pub struct Saved {
     /// Claude Code's session id, passed back as `claude --resume`.
     pub session: String,
     pub env: Vec<(String, String)>,
+    /// The tab skips every permission check, and a resume must keep skipping them.
+    #[serde(default)]
+    pub bypass: bool,
     /// A turn was running (or stopped by an error) when pinned quit, so it has work left.
     #[serde(default)]
     pub interrupted: bool,
@@ -65,7 +68,7 @@ mod tests {
 
     #[test]
     fn interrupted_sessions_continue_once_no_limit_blocks_them() {
-        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], interrupted, resume_at };
+        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at };
         let resumed = vec!["--resume".to_owned(), "s1".to_owned()];
         let continued = [resumed.clone(), vec![CONTINUE_PROMPT.to_owned()]].concat();
         assert_eq!(saved(false, None).launch_args(100), resumed);
@@ -81,6 +84,7 @@ mod tests {
             cwd: "/repo".into(),
             session: "23ec76b4-2867-49e2-b564-22c6c9e7b090".into(),
             env: vec![("PINNED_ISSUE".into(), "uuid".into())],
+            bypass: true,
             interrupted: true,
             resume_at: Some(1792382400),
         }];

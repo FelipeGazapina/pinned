@@ -56,10 +56,21 @@ pub enum Stage {
     Review,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "kebab-case")]
+pub enum When {
+    InMinutes(f64),
+    /// 24-hour `HH:MM` on the local clock.
+    At(String),
+}
+
 /// One line on the harness socket.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Message {
     Agent(AgentEvent),
     Stage { connector: String, issue: String, stage: Stage },
+    Remind { message: String, when: When },
+    ListReminders,
+    CancelReminder { id: u64 },
 }

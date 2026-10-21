@@ -6,6 +6,7 @@ mod hooks;
 mod linear;
 mod projects;
 mod pty;
+mod reminders;
 mod sessions;
 
 use portable_pty::CommandBuilder;
@@ -32,6 +33,7 @@ struct Launch {
     claude: PathBuf,
     path_env: Option<String>,
     settings: PathBuf,
+    mcp_config: PathBuf,
     sock: PathBuf,
 }
 
@@ -43,6 +45,8 @@ struct Tab {
     launch: Vec<String>,
     /// Environment for every start, such as the issue a connector's session reports on.
     env: Vec<(String, String)>,
+    /// Every start runs claude with `--dangerously-skip-permissions`, so nothing asks or is blocked.
+    bypass: bool,
     /// Claude Code's id for the conversation in progress, known once a hook reports it.
     claude_session: Option<String>,
     /// A turn is running, or died on an error: the session has work left if pinned quits now.
@@ -79,9 +83,9 @@ impl Harness {
         self.tabs.lock().unwrap().get_mut(id).map(f).ok_or_else(|| format!("no tab {id}"))
     }
 
-    fn add_tab(&self, cwd: PathBuf, launch: Vec<String>, env: Vec<(String, String)>, claude_session: Option<String>) -> String {
+    fn add_tab(&self, cwd: PathBuf, launch: Vec<String>, env: Vec<(String, String)>, bypass: bool, claude_session: Option<String>) -> String {
         let id = format!("tab-{}", self.next_tab.fetch_add(1, Ordering::Relaxed));
-        self.tabs.lock().unwrap().insert(id.clone(), Tab { cwd, session: None, launch, env, claude_session, interrupted: false, resume_at: None, turn: None });
+        self.tabs.lock().unwrap().insert(id.clone(), Tab { cwd, session: None, launch, env, bypass, claude_session, interrupted: false, resume_at: None, turn: None });
         id
     }
 
@@ -101,6 +105,7 @@ impl Harness {
                     cwd: t.cwd.clone(),
                     session: t.claude_session.clone().unwrap(),
                     env: t.env.clone(),
+                    bypass: t.bypass,
                     interrupted: t.interrupted,
                     resume_at: t.resume_at,
                 })
@@ -200,13 +205,14 @@ enum View {
 }
 
 /// Adds a tab on the project at `path`, or the launch folder, and returns its id.
+/// With `bypass` the tab's claude never asks for permission.
 #[tauri::command]
-fn open_tab(harness: State<Harness>, path: Option<String>) -> String {
+fn open_tab(harness: State<Harness>, path: Option<String>, bypass: bool) -> String {
     let cwd = match path {
         Some(path) => harness.open_project(path.into()),
         None => harness.default_cwd.clone(),
     };
-    harness.add_tab(cwd, vec![], vec![], None)
+    harness.add_tab(cwd, vec![], vec![], bypass, None)
 }
 
 /// The turns saved for the project at `path`, newest first.
@@ -282,7 +288,7 @@ fn restore_tabs(harness: State<Harness>) -> Vec<String> {
         .map(|s| {
             let launch = s.launch_args(now);
             let waiting = s.interrupted && launch.len() == 2;
-            let id = harness.add_tab(s.cwd, launch, s.env, Some(s.session));
+            let id = harness.add_tab(s.cwd, launch, s.env, s.bypass, Some(s.session));
             // A limit that already lifted continues through the launch prompt; one still in force waits.
             let _ = harness.tab(&id, |t| {
                 t.interrupted = s.interrupted;
@@ -291,6 +297,11 @@ fn restore_tabs(harness: State<Harness>) -> Vec<String> {
             id
         })
         .collect()
+}
+
+#[tauri::command]
+fn tab_bypass(harness: State<Harness>, tab: String) -> Result<bool, String> {
+    harness.tab(&tab, |t| t.bypass)
 }
 
 #[tauri::command]
@@ -303,17 +314,23 @@ fn start_claude(
     output: Channel<InvokeResponseBody>,
 ) -> Result<String, String> {
     let l = &harness.launch;
-    let (cwd, launch, env) = harness.tab(&tab, |t| {
+    let (cwd, launch, env, bypass) = harness.tab(&tab, |t| {
         // Without launch arguments this is a fresh conversation, not the one recorded before.
         if t.launch.is_empty() {
             t.claude_session = None;
         }
-        (t.cwd.clone(), std::mem::take(&mut t.launch), t.env.clone())
+        (t.cwd.clone(), std::mem::take(&mut t.launch), t.env.clone(), t.bypass)
     })?;
     harness.save_sessions();
     let mut cmd = CommandBuilder::new(&l.claude);
+    // --mcp-config takes any number of values, so --settings right after it keeps it from swallowing the rest.
+    cmd.arg("--mcp-config");
+    cmd.arg(&l.mcp_config);
     cmd.arg("--settings");
     cmd.arg(&l.settings);
+    if bypass {
+        cmd.arg("--dangerously-skip-permissions");
+    }
     cmd.args(launch);
     cmd.cwd(&cwd);
     cmd.env("TERM", "xterm-256color");
@@ -523,11 +540,14 @@ fn launch() -> std::io::Result<Launch> {
     let tmp = std::env::temp_dir();
     let settings = tmp.join("pinned-claude-settings.json");
     hooks::write_settings(&settings, &std::env::current_exe()?)?;
+    let mcp_config = tmp.join("pinned-claude-mcp.json");
+    reminders::write_mcp_config(&mcp_config, &std::env::current_exe()?)?;
     let path_env = login_shell_path().or_else(|| std::env::var("PATH").ok());
     Ok(Launch {
         claude: find_claude(path_env.as_deref()),
         path_env,
         settings,
+        mcp_config,
         sock: tmp.join(format!("pinned-{}.sock", std::process::id())),
     })
 }
@@ -573,6 +593,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some(hooks::SUBCOMMAND) => return hooks::forward(args.next().as_deref()),
+        Some(reminders::SUBCOMMAND) => return reminders::serve(),
         Some(hooks::STAGE_SUBCOMMAND) => match hooks::stage(args.next().as_deref()) {
             Ok(done) => return println!("{done}"),
             Err(e) => {
@@ -599,6 +620,7 @@ fn main() {
             pick_project,
             restore_tabs,
             start_claude,
+            tab_bypass,
             write_input,
             resize_pty,
             set_view,
@@ -652,11 +674,13 @@ fn main() {
                 quitting: AtomicBool::new(false),
             });
             app.manage(awake::Awake::load(app.path().app_config_dir().ok()));
+            app.manage(reminders::Reminders::load(app.path().app_config_dir().ok()));
+            reminders::watch(app.handle().clone());
             app.manage(connectors::Connectors::load(app.path().app_config_dir()?, std::env::current_exe()?));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(connectors::watch(handle.clone(), move |run| {
                 let env = vec![(agent::CONNECTOR_ENV.to_owned(), run.connector), (agent::ISSUE_ENV.to_owned(), run.issue)];
-                let id = handle.state::<Harness>().add_tab(run.cwd, run.args, env, None);
+                let id = handle.state::<Harness>().add_tab(run.cwd, run.args, env, false, None);
                 let _ = handle.emit("tab-opened", id);
             }));
             #[cfg(target_os = "macos")]
@@ -677,6 +701,9 @@ fn main() {
                     let _ = handle.emit("agent-event", event);
                     Ok(String::new())
                 }
+                agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),
+                agent::Message::ListReminders => Ok(handle.state::<reminders::Reminders>().list()),
+                agent::Message::CancelReminder { id } => handle.state::<reminders::Reminders>().cancel(id),
                 agent::Message::Stage { connector, issue, stage } => tauri::async_runtime::block_on(
                     handle.state::<connectors::Connectors>().advance(&connector, &issue, stage),
                 ),

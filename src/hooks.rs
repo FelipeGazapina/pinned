@@ -1,4 +1,5 @@
 use crate::history;
+use crate::reminders;
 use crate::agent::{AgentEvent, AgentStatus, Message, Stage, CONNECTOR_ENV, ISSUE_ENV, SOCK_ENV, TAB_ENV};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -23,7 +24,10 @@ pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
             serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]),
         );
     }
-    std::fs::write(path, serde_json::to_vec_pretty(&serde_json::json!({ "hooks": hooks }))?)
+    std::fs::write(path, serde_json::to_vec_pretty(&serde_json::json!({
+        "hooks": hooks,
+        "permissions": { "allow": reminders::permissions() },
+    }))?)
 }
 
 /// Runs inside the hook process Claude Code spawns: read the hook payload from stdin and

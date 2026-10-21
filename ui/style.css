@@ -84,6 +84,8 @@ body[data-tabs="left"] .tab .resize, body[data-tabs="right"] .tab .resize { disp
 #projects button { display: flex; flex-direction: column; width: 100%; padding: 5px 8px; border-radius: 6px;
   text-align: left; }
 #projects button.chosen { background: #ffffff14; }
+#projects button.bypass { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+#projects[data-bypass="true"] button.bypass { color: #f5a524; }
 #projects span { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #projects .path { color: var(--muted); font-size: 11px; }
 
