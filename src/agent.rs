@@ -12,13 +12,16 @@ pub enum AgentStatus {
     Working,
     Done,
     NeedsInput,
+    /// The turn died on an API error, such as a usage limit.
+    Failed,
 }
 
 impl AgentStatus {
-    pub const ALL: [(AgentStatus, &'static str, &'static str); 3] = [
+    pub const ALL: [(AgentStatus, &'static str, &'static str); 4] = [
         (AgentStatus::Working, "working", "UserPromptSubmit"),
         (AgentStatus::Done, "done", "Stop"),
         (AgentStatus::NeedsInput, "needs-input", "Notification"),
+        (AgentStatus::Failed, "failed", "StopFailure"),
     ];
 }
 
@@ -29,6 +32,12 @@ pub struct AgentEvent {
     pub message: Option<String>,
     /// Id of the tab whose session fired the hook.
     pub tab: Option<String>,
+    /// Claude Code's session id, which `claude --resume` takes.
+    pub session: Option<String>,
+    /// A few words on what the session is about, once Claude Code named it or the user prompted.
+    pub title: Option<String>,
+    /// Unix time the usage limit that stopped the turn lifts, when the failure was one.
+    pub resume_at: Option<u64>,
 }
 
 /// Where a connector's session is in its work on an issue. Each stage maps to a Linear column.

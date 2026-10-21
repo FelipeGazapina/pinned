@@ -23,7 +23,7 @@ xattr -dr com.apple.quarantine /Applications/pinned.app
 
 ## Use
 
-- pinned starts in the last folder you opened. Click 📁 to start `claude` in another folder.
+- pinned starts in the project you opened most recently. Click 📁 to start `claude` in another folder.
 - Drag the header to move the panel. Drag the bottom-right corner to resize it.
 - Click `–` to shrink it to a pill. The pill shows what the agent is doing: working, done, or
   needs you. It flashes when the agent finishes or asks for permission. Click the pill to open
@@ -38,10 +38,24 @@ From a terminal you can open a specific folder:
 
 ## Tabs
 
-The **＋** button in the tab bar (or ⌘T) opens another tab on the same folder, with its own
-Claude session and status. Each tab's dot shows its status, and the pill reports the tab that
+The **＋** button in the tab bar (or ⌘T) lists your projects, most recent first: every folder
+you opened with 📁, ＋, or from a terminal. Pick one (arrow keys and Enter work) to open a tab on
+it, or choose **Open folder…** to add another. Esc or a click outside closes the list. Each tab
+has its own Claude session and status. Each tab's dot shows its status, and the pill reports the tab that
 most needs you. ✕ on a tab (or ⌘W) closes it; the app quits with the last tab. ⌘1–⌘9 switch
 tabs, and ⌘← / ⌘→ move to the previous or next tab (Ctrl on other systems). 📁 changes the folder of the current tab.
+
+Quitting pinned keeps the Claude sessions that were still going. The next launch reopens
+each one in its own tab with `claude --resume`, in the same folder or worktree, so you carry
+on where you stopped. A session counts as finished when you close its tab or Claude exits
+(`/exit`), and pinned forgets it then. A tab where you never sent a prompt has nothing to
+resume, so it isn't kept.
+
+Continue where it stopped: if Claude was mid-turn when pinned quit, the reopened tab sends
+"Continue from where you left off." by itself. The same happens when a usage limit stops a
+turn: pinned reads the reset time from the session's transcript, shows `limit, continues
+HH:MM` on the tab, and types the prompt once the limit lifts. If pinned was closed across
+the reset, the session continues as soon as it reopens.
 
 Drag a tab to reorder it. Drag the tab bar by its ⠿ handle or empty space to the top, bottom,
 left or right side of the panel; left and right stack the tabs vertically. pinned remembers

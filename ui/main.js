@@ -5,26 +5,82 @@ const applyOpacity = (percent) => document.documentElement.style.setProperty("--
 invoke("get_opacity").then(applyOpacity);
 win.listen("opacity", ({ payload }) => applyOpacity(payload));
 
-const STATUS_TEXT = { idle: "", working: "working…", done: "done", "needs-input": "needs you" };
-// The pill reports the first tab found in this order.
-const URGENCY = ["needs-input", "done", "working", "idle"];
+const STATUS_TEXT = { idle: "", working: "working…", done: "done", "needs-input": "needs you", failed: "stopped" };
 const EDGES = ["top", "bottom", "left", "right"];
 
 const workspace = document.getElementById("workspace");
 const tabBar = document.getElementById("tab-bar");
 const tabList = document.getElementById("tab-list");
 const terms = document.getElementById("terms");
+const picker = document.getElementById("projects");
 
-/** Tabs in display order. Each: { id, term, fit, el, button, cwd, status, message, running }. */
+/** Tabs in display order. Each: { id, term, fit, el, button, cwd, status, message, title, running }. */
 const tabs = [];
 let active = null;
 
+const tilde = (path) => path.replace(/^\/Users\/[^/]+/, "~");
 const tabName = (tab) => tab.cwd.split("/").filter(Boolean).pop() || (tab.cwd ? "/" : "claude");
 const isVertical = () => ["left", "right"].includes(document.body.dataset.tabs);
 
-async function openTab(from) {
-  return addTab(await invoke("open_tab", { from: from?.id ?? null }));
+/** Opens a tab on the project at `path`, or on the launch folder when `path` is null. */
+async function openTab(path) {
+  return addTab(await invoke("open_tab", { path }));
 }
+
+/** The picker's entries in display order, and which one Enter opens. */
+let choices = [];
+let chosen = 0;
+const pickerOpen = () => !picker.hidden;
+
+async function showProjects() {
+  const projects = await invoke("list_projects");
+  choices = [
+    ...projects.map((p) => ({ name: p.name, path: tilde(p.path), open: () => openTab(p.path) })),
+    {
+      name: "Open folder…",
+      open: async () => {
+        const path = await invoke("pick_project");
+        if (path) openTab(path);
+      },
+    },
+  ];
+  picker.replaceChildren(
+    ...choices.map((choice, i) => {
+      const button = document.createElement("button");
+      for (const [cls, text] of [["name", choice.name], ["path", choice.path]]) {
+        if (!text) continue;
+        const span = document.createElement("span");
+        span.className = cls;
+        span.textContent = text;
+        button.append(span);
+      }
+      button.onmouseenter = () => choose(i);
+      button.onclick = () => openChoice(i);
+      return button;
+    }),
+  );
+  delete document.body.dataset.page;
+  picker.hidden = false;
+  choose(0);
+}
+
+function choose(i) {
+  chosen = (i + choices.length) % choices.length;
+  picker.querySelectorAll("button").forEach((b, j) => b.classList.toggle("chosen", j === chosen));
+  picker.children[chosen].scrollIntoView({ block: "nearest" });
+}
+
+function openChoice(i) {
+  closeProjects();
+  choices[i].open();
+}
+
+function closeProjects() {
+  picker.hidden = true;
+  active?.term.focus();
+}
+
+const toggleProjects = () => (pickerOpen() ? closeProjects() : showProjects());
 
 /** Shows the tab `id` that the backend created. `focus: false` leaves the active tab in front. */
 async function addTab(id, { focus = true } = {}) {
@@ -47,7 +103,7 @@ async function addTab(id, { focus = true } = {}) {
   button.innerHTML = `<span class="dot"></span><span class="name"></span><button class="close" title="Close tab (⌘W)">✕</button><span class="resize" title="Drag to resize the tabs"></span>`;
   tabList.append(button);
 
-  const tab = { id, term, fit, el, button, cwd: "", status: "idle", message: null, running: false };
+  const tab = { id, term, fit, el, button, cwd: "", status: "idle", message: null, title: null, running: false };
   tabs.push(tab);
   term.onData((data) => {
     if (tab.running) return invoke("write_input", { tab: id, data });
@@ -75,6 +131,7 @@ async function startClaude(tab) {
   const output = new Channel();
   output.onmessage = (bytes) => tab.term.write(new Uint8Array(bytes));
   tab.cwd = await invoke("start_claude", { tab: tab.id, cols: tab.term.cols, rows: tab.term.rows, output });
+  tab.title = null;
   tab.running = true;
   setStatus(tab, "idle");
 }
@@ -93,6 +150,7 @@ function closeTab(tab) {
 
 function activate(tab) {
   delete document.body.dataset.page;
+  picker.hidden = true;
   active = tab;
   for (const t of tabs) {
     t.el.hidden = t !== tab;
@@ -122,20 +180,67 @@ function render() {
     tab.button.querySelector(".name").textContent = tabName(tab);
     tab.button.title = tab.cwd;
   }
+  renderCarousel();
   if (!active) return;
   const header = document.querySelector("header");
   header.dataset.status = active.status;
-  document.getElementById("title").textContent = active.cwd.replace(/^\/Users\/[^/]+/, "~") || "claude";
-  document.getElementById("status-text").textContent = STATUS_TEXT[active.status];
-
-  const urgent = pillTab();
-  const text = urgent.message || STATUS_TEXT[urgent.status];
-  document.getElementById("pill").dataset.status = urgent.status;
-  document.getElementById("pill-text").textContent =
-    tabs.length > 1 && text ? `${tabName(urgent)} · ${text}` : text || tabName(urgent);
+  document.getElementById("title").textContent = tilde(active.cwd) || "claude";
+  document.getElementById("status-text").textContent =
+    active.status === "failed" && active.resumeAt
+      ? `limit, continues ${new Date(active.resumeAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+      : STATUS_TEXT[active.status];
 }
 
-const pillTab = () => URGENCY.map((s) => tabs.find((t) => t.status === s)).find(Boolean);
+const pill = document.getElementById("pill");
+const carousel = document.getElementById("carousel");
+const track = document.getElementById("track");
+// A card's three lines need this much height; below it the pill shows one compact row.
+const CARDS_FROM_HEIGHT = 64;
+const CAROUSEL_SPEED = 40;
+const stillMotion = matchMedia("(prefers-reduced-motion: reduce)");
+/** What the track was last built for; items are rebuilt only when this changes. */
+let builtFor = "";
+
+/** Loops every tab through the pill. Status and title changes update the items in place so the scroll doesn't jump. */
+function renderCarousel() {
+  const { width, height } = carousel.getBoundingClientRect();
+  if (!width) return;
+  const mode = pill.getBoundingClientRect().height >= CARDS_FROM_HEIGHT ? "cards" : "compact";
+  const key = JSON.stringify([mode, Math.round(width), stillMotion.matches, tabs.map((t) => [t.id, tabName(t)])]);
+  if (key !== builtFor) {
+    builtFor = key;
+    pill.dataset.mode = mode;
+    buildTrack(width);
+  }
+  for (const item of track.querySelectorAll(".item")) {
+    const tab = tabs.find((t) => t.id === item.dataset.tab);
+    item.dataset.status = tab.status;
+    item.querySelector(".status").textContent = tab.message || STATUS_TEXT[tab.status] || "idle";
+    item.querySelector(".title").textContent = tab.title || tilde(tab.cwd);
+    item.title = tab.title ? `${tab.cwd}\n${tab.title}` : tab.cwd;
+  }
+}
+
+function buildTrack(width) {
+  if (!tabs.length) return track.replaceChildren();
+  const set = document.createElement("div");
+  set.className = "set";
+  for (const tab of tabs) {
+    const item = document.createElement("button");
+    item.className = "item";
+    item.dataset.tab = tab.id;
+    item.innerHTML = `<span class="dot"></span><span class="name"></span><span class="status"></span><span class="title"></span>`;
+    item.querySelector(".name").textContent = tabName(tab);
+    set.append(item);
+  }
+  track.replaceChildren(set);
+  const setWidth = set.getBoundingClientRect().width;
+  // Enough copies that the track still covers the pill when shifted by one whole set.
+  const copies = stillMotion.matches ? 1 : Math.ceil(width / setWidth) + 1;
+  for (let i = 1; i < copies; i++) track.append(set.cloneNode(true));
+  track.style.setProperty("--set-width", `${setWidth}px`);
+  track.style.setProperty("--period", `${setWidth / CAROUSEL_SPEED}s`);
+}
 
 /** Calls `move` while the mouse is dragged past a few pixels from `down`, then `drop` on release. */
 function drag(down, { move, drop }) {
@@ -228,12 +333,18 @@ tabBar.addEventListener("mousedown", (e) => {
   });
 });
 
+// ＋ toggles the picker itself, so a click on it doesn't count as outside.
+window.addEventListener("mousedown", (e) => {
+  if (pickerOpen() && !e.target.closest("#projects, #new-tab")) closeProjects();
+}, true);
+
 // The panel is nonactivating, so a click alone doesn't give it keyboard focus.
 window.addEventListener("mousedown", () => invoke("focus_panel").then(() => settingsOpen() || active?.term.focus()), true);
 invoke("focus_panel");
 
 const IS_MAC = /Mac/.test(navigator.platform);
 const TAB_STEP = { ArrowLeft: -1, ArrowRight: 1 };
+const PICKER_STEP = { ArrowUp: -1, ArrowDown: 1 };
 
 /** Moves to the neighbouring tab, wrapping around at either end. */
 function stepTab(step) {
@@ -243,6 +354,15 @@ function stepTab(step) {
 
 // Caught before xterm, which would otherwise swallow them.
 window.addEventListener("keydown", (e) => {
+  // Keys other than ⌘ shortcuts belong to the open picker, not the terminal behind it.
+  if (pickerOpen() && !e.metaKey) {
+    if (e.key in PICKER_STEP) choose(chosen + PICKER_STEP[e.key]);
+    else if (e.key === "Enter") openChoice(chosen);
+    else if (e.key === "Escape") closeProjects();
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   if (e.shiftKey || e.altKey) return;
   const tabKey = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
   // In settings the arrows keep their text-editing meaning.
@@ -254,7 +374,7 @@ window.addEventListener("keydown", (e) => {
   }
   if (!e.metaKey || e.ctrlKey) return;
   if (e.key === ",") toggleSettings();
-  else if (e.key === "t") openTab(active);
+  else if (e.key === "t") toggleProjects();
   else if (e.key === "w" && active) closeTab(active);
   else if (/^[1-9]$/.test(e.key) && tabs[e.key - 1]) activate(tabs[e.key - 1]);
   else return;
@@ -295,8 +415,11 @@ win.listen("tab-opened", async ({ payload }) => {
 win.listen("agent-event", ({ payload }) => {
   const tab = tabs.find((t) => t.id === payload.tab);
   if (!tab) return;
+  tab.title = payload.title ?? tab.title;
   setStatus(tab, payload.status, payload.status === "needs-input" ? payload.message : null);
+  tab.resumeAt = payload.status === "failed" ? payload.resume_at : null;
   if (payload.status !== "working" && document.body.dataset.view === "pill") {
+    pill.dataset.status = payload.status;
     document.body.classList.remove("alert");
     void document.body.offsetWidth;
     document.body.classList.add("alert");
@@ -308,18 +431,23 @@ async function setView(view) {
   await invoke("set_view", { view });
   document.body.dataset.view = view;
 }
-document.getElementById("new-tab").onclick = () => openTab(active);
+document.getElementById("new-tab").onclick = toggleProjects;
 document.getElementById("minimize").onclick = () => setView("pill");
-// Opening from the pill lands on the tab it was reporting.
-document.getElementById("expand").onclick = async () => {
-  const tab = pillTab();
+track.onclick = async (e) => {
+  const tab = tabs.find((t) => t.id === e.target.closest(".item")?.dataset.tab);
+  if (!tab) return;
   await setView("expanded");
   activate(tab);
 };
-document.getElementById("grip").onmousedown = (e) => {
+new ResizeObserver(renderCarousel).observe(pill);
+stillMotion.addEventListener("change", renderCarousel);
+const resizeFrom = (direction) => (e) => {
   e.preventDefault();
-  win.startResizeDragging("SouthEast");
+  win.startResizeDragging(direction);
 };
+document.getElementById("pill-edge").onmousedown = resizeFrom("East");
+document.getElementById("pill-corner").onmousedown = resizeFrom("SouthEast");
+document.getElementById("grip").onmousedown = resizeFrom("SouthEast");
 
 document.getElementById("folder").onclick = async () => {
   const tab = active;
@@ -363,4 +491,8 @@ setInterval(checkUpdate, 6 * 60 * 60 * 1000);
 
 new ResizeObserver(() => refit(active)).observe(terms);
 
-openTab(null);
+// Sessions still going when pinned quit come back resumed; with none, start fresh.
+invoke("restore_tabs").then(async (ids) => {
+  if (!ids.length) return openTab(null);
+  for (const id of ids) await addTab(id, { focus: id === ids[0] });
+});

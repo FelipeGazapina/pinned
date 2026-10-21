@@ -18,8 +18,6 @@
         "height": 460,
         "x": 40,
         "y": 60,
-        "minWidth": 150,
-        "minHeight": 40,
         "decorations": false,
         "transparent": true,
         "shadow": true,

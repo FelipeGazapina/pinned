@@ -36,6 +36,7 @@ const settingsOpen = () => document.body.dataset.page === "settings";
 async function toggleSettings() {
   if (settingsOpen()) return active && activate(active);
   document.body.dataset.page = "settings";
+  picker.hidden = true;
   settings = await invoke("get_settings");
   showPage(page);
 }
