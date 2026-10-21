@@ -22,14 +22,26 @@ const DEFAULT_INSTRUCTIONS = `Resolve the Linear issue below in this repository,
 4. Commit the code, and commit the video under .github/evidence/<issue identifier>/.
 5. Push and open a pull request with gh pr create. Put the issue identifier in the title, summarize the change, and link the committed video in the body as proof that it works.
 6. If a Linear tool is available, comment the pull request link on the issue.`;
+const SLACK_INSTRUCTIONS = `Someone mentioned you in the Slack thread below. Triage it in this repository, without waiting for me.
+
+- If it reports a bug, reproduce it or trace it through the code, and reply with your analysis: the cause, where it lives, and how to fix it.
+- If existing behavior or a known fix already solves it, reply with that solution and stop.
+- If it is a question, answer it from the code.
+
+Never edit, commit or push code. Only read, run and reply.`;
+/** What can start a connector, matching the backend's `Trigger`. */
+const TRIGGERS = {
+  "linear-label": "a Linear issue is created with label",
+  "slack-mention": "the bot is @mentioned in Slack channel",
+};
 
 const settingsPage = document.getElementById("settings-page");
 
 /** Mirrors the backend's `get_settings`. Unsaved connectors carry an empty id. */
-let settings = { linear: null, connectors: [], checked: null };
+let settings = { linear: null, slack: null, connectors: [], checked: null };
 let page = ["general", "connectors", "projects"].includes(load("settings-page")) ? load("settings-page") : "integrations";
-/** Names from the connected Linear workspace, for the connector form's suggestions. */
-let suggestions = { labels: [], columns: [] };
+/** Names from the connected Linear workspace and Slack channels, for the connector form's suggestions. */
+let suggestions = { labels: [], columns: [], channels: [] };
 
 const settingsOpen = () => document.body.dataset.page === "settings";
 
@@ -47,16 +59,25 @@ function showPage(name) {
   for (const b of document.querySelectorAll("#settings-nav button")) b.classList.toggle("active", b.dataset.page === name);
   if (name === "connectors" && settings.linear && !suggestions.labels.length) {
     invoke("linear_suggestions").then((found) => {
-      suggestions = found;
-      for (const [id, names] of [["linear-labels", found.labels], ["linear-columns", found.columns]]) {
-        const list = document.getElementById(id);
-        if (list) list.innerHTML = options(names);
-      }
+      Object.assign(suggestions, found);
+      fillList("linear-labels", found.labels);
+      fillList("linear-columns", found.columns);
+    }, console.warn);
+  }
+  if (name === "connectors" && settings.slack && !suggestions.channels.length) {
+    invoke("slack_suggestions").then((channels) => {
+      suggestions.channels = channels;
+      fillList("slack-channels", channels);
     }, console.warn);
   }
   if (name === "projects") return showProjectsPage();
   if (name === "general") return showGeneral();
   settingsPage.innerHTML = name === "integrations" ? integrationsHtml() : connectorsHtml();
+}
+
+function fillList(id, names) {
+  const list = document.getElementById(id);
+  if (list) list.innerHTML = options(names);
 }
 
 const esc = (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -82,19 +103,43 @@ function integrationsHtml() {
       <div class="card-head"><span class="logo">◐</span><div><b>Linear</b><div class="hint">Issues, labels and comments</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
+    </div>
+    ${slackCardHtml()}`;
+}
+
+function slackCardHtml() {
+  const account = settings.slack;
+  const body = account
+    ? `<p class="connected">Connected as <b>@${esc(account.name)}</b> in ${esc(account.team)}.</p>
+       <div class="actions"><button class="secondary" data-action="disconnect-slack">Disconnect</button></div>`
+    : `<ol class="steps">
+         <li>Create a Slack app at <code>api.slack.com/apps</code>. Under OAuth &amp; Permissions, give its bot the scopes
+           <code>channels:history</code>, <code>groups:history</code>, <code>channels:read</code>, <code>groups:read</code>,
+           <code>users:read</code> and <code>chat:write</code>, then install it to your workspace.</li>
+         <li>Invite the bot to the channel it should watch, with <code>/invite @your-bot</code>.</li>
+         <li>Paste the Bot User OAuth Token here.
+           <div class="row"><input id="slack-token" type="password" placeholder="xoxb-…" autocomplete="off">
+           <button class="primary" data-action="connect-slack">Connect</button></div></li>
+       </ol>
+       <p class="error" id="slack-error"></p>`;
+  return `<div class="card">
+      <div class="card-head"><span class="logo slack">#</span><div><b>Slack</b><div class="hint">Mentions of the bot, answered in their thread</div></div>
+        <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
+      ${body}
     </div>`;
 }
 
 function connectorsHtml() {
   const intro = `<h2>Connectors</h2>
     <p class="hint">A connector watches an integration and opens a Claude Code tab on its own when something happens, so the agent starts before you ask.</p>`;
-  if (!settings.linear) {
-    return `${intro}<div class="card"><p>Connect Linear first.</p>
+  if (!settings.linear && !settings.slack) {
+    return `${intro}<div class="card"><p>Connect Linear or Slack first.</p>
       <div class="actions"><button class="primary" data-action="go-integrations">Go to Integrations</button></div></div>`;
   }
   return `${intro}
     <datalist id="linear-labels">${options(suggestions.labels)}</datalist>
     <datalist id="linear-columns">${options(suggestions.columns)}</datalist>
+    <datalist id="slack-channels">${options(suggestions.channels)}</datalist>
     <datalist id="models">${options(MODELS)}</datalist>
     ${settings.connectors.map(connectorHtml).join("")}
     <div class="actions start"><button class="secondary" data-action="new-connector">＋ New connector</button></div>
@@ -102,28 +147,33 @@ function connectorsHtml() {
 }
 
 function connectorHtml(c, i) {
+  const slack = c.trigger.kind === "slack-mention";
+  const what = slack
+    ? `<input name="channel" list="slack-channels" value="${esc(c.trigger.channel)}" placeholder="support" required>`
+    : `<input name="label" list="linear-labels" value="${esc(c.trigger.label)}" placeholder="claude" required>`;
   return `<form class="card connector" data-index="${i}">
     <div class="card-head">
       <input name="name" class="title" value="${esc(c.name)}" placeholder="Connector name" required>
       <label class="toggle"><input type="checkbox" name="enabled"${c.enabled ? " checked" : ""}> On</label>
     </div>
     <div class="grid">
-      <label>When a Linear issue is created with label
-        <input name="label" list="linear-labels" value="${esc(c.trigger.label)}" placeholder="claude" required></label>
+      <label>When
+        <span class="row"><select name="kind">${options(Object.keys(TRIGGERS), (t) => TRIGGERS[t], c.trigger.kind)}</select>
+        ${what}</span></label>
       <label>Open a session in
         <span class="row"><input name="folder" value="${esc(c.folder)}" placeholder="/path/to/repo" required>
         <button type="button" class="secondary" data-action="pick-folder">Choose…</button></span></label>
       <label>Model <input name="model" list="models" value="${esc(c.model)}" placeholder="claude's default"></label>
       <label>Effort <select name="effort">${options(EFFORTS, undefined, c.effort)}</select></label>
       <label>Permissions <select name="permissionMode">${options(Object.keys(PERMISSIONS), (p) => PERMISSIONS[p], c.permissionMode)}</select></label>
-      <label class="toggle"><input type="checkbox" name="worktree"${c.worktree ? " checked" : ""}> Separate git worktree per issue</label>
+      <label class="toggle"><input type="checkbox" name="worktree"${c.worktree ? " checked" : ""}> Separate git worktree per ${slack ? "thread" : "issue"}</label>
     </div>
-    <fieldset class="columns">
+    ${slack ? "" : `<fieldset class="columns">
       <legend>Move the Linear issue to the column</legend>
       ${STAGES.map(([stage, when]) => `<label>${when}
         <input name="column-${stage}" list="linear-columns" value="${esc(c.columns?.[stage])}" placeholder="leave where it is"></label>`).join("")}
-    </fieldset>
-    <label>Instructions sent before the issue
+    </fieldset>`}
+    <label>Instructions sent before the ${slack ? "thread" : "issue"}
       <textarea name="instructions" rows="8">${esc(c.instructions)}</textarea></label>
     <p class="hint">Runs <code>${esc(commandPreview(c))}</code></p>
     <div class="actions">
@@ -138,32 +188,52 @@ function commandPreview(c) {
   const parts = ["claude"];
   if (c.model) parts.push(`--model ${c.model}`);
   parts.push(`--effort ${c.effort}`, `--permission-mode ${c.permissionMode}`);
-  if (c.worktree) parts.push("--worktree=<issue>");
-  return [...parts, '"<instructions + issue>"'].join(" ");
+  const subject = c.trigger.kind === "slack-mention" ? "thread" : "issue";
+  if (c.worktree) parts.push(`--worktree=<${subject}>`);
+  return [...parts, `"<instructions + ${subject}>"`].join(" ");
 }
 
 function checkedText() {
   const checked = settings.checked;
-  if (!checked) return "Not checked yet. Linear is checked every minute.";
+  if (!checked) return "Not checked yet. Integrations are checked every minute.";
   const at = new Date(checked.at).toLocaleTimeString();
-  return checked.error ? `Last check at ${at} failed: ${checked.error}` : `Last checked at ${at}. Linear is checked every minute.`;
+  return checked.error ? `Last check at ${at} failed: ${checked.error}` : `Last checked at ${at}. Integrations are checked every minute.`;
 }
 
 function readConnector(form) {
   const f = form.elements;
+  const stored = settings.connectors[form.dataset.index];
   return {
-    ...settings.connectors[form.dataset.index],
+    ...stored,
     name: f.name.value.trim(),
     enabled: f.enabled.checked,
-    trigger: { kind: "linear-label", label: f.label.value.trim() },
+    trigger: f.label
+      ? { kind: "linear-label", label: f.label.value.trim() }
+      : { kind: "slack-mention", channel: f.channel.value.trim() },
     folder: f.folder.value.trim(),
     model: f.model.value.trim(),
     effort: f.effort.value,
     permissionMode: f.permissionMode.value,
     worktree: f.worktree.checked,
     instructions: f.instructions.value,
-    columns: Object.fromEntries(STAGES.map(([stage]) => [stage, f[`column-${stage}`].value.trim()])),
+    columns: f.label
+      ? Object.fromEntries(STAGES.map(([stage]) => [stage, f[`column-${stage}`].value.trim()]))
+      : stored.columns ?? { picked: "", coding: "", review: "" },
   };
+}
+
+const DEFAULT_NAMES = { "linear-label": "Resolve labeled Linear issues", "slack-mention": "Triage Slack mentions" };
+const DEFAULT_TEXTS = { "linear-label": DEFAULT_INSTRUCTIONS, "slack-mention": SLACK_INSTRUCTIONS };
+
+/** Swaps the form to another trigger, keeping what was typed, and the defaults for it where untouched. */
+function switchTrigger(form) {
+  const c = readConnector(form);
+  const kind = form.elements.kind.value;
+  if (c.name === DEFAULT_NAMES[c.trigger.kind]) c.name = DEFAULT_NAMES[kind];
+  if (c.instructions.trim() === DEFAULT_TEXTS[c.trigger.kind].trim()) c.instructions = DEFAULT_TEXTS[kind];
+  c.trigger = kind === "slack-mention" ? { kind, channel: "" } : { kind, label: "" };
+  settings.connectors[form.dataset.index] = c;
+  showPage("connectors");
 }
 
 const actions = {
@@ -182,23 +252,46 @@ const actions = {
   async "disconnect-linear"() {
     await invoke("disconnect_linear");
     settings.linear = null;
-    suggestions = { labels: [], columns: [] };
+    suggestions = { ...suggestions, labels: [], columns: [] };
+    showPage("integrations");
+  },
+  async "connect-slack"() {
+    const token = document.getElementById("slack-token").value;
+    if (!token.trim()) return;
+    try {
+      settings.slack = await invoke("connect_slack", { token });
+      showPage("integrations");
+    } catch (e) {
+      document.getElementById("slack-error").textContent = e;
+    }
+  },
+  async "disconnect-slack"() {
+    await invoke("disconnect_slack");
+    settings.slack = null;
+    suggestions.channels = [];
     showPage("integrations");
   },
   "new-connector"() {
-    settings.connectors.push({
-      id: "",
-      name: "Resolve labeled Linear issues",
-      enabled: true,
-      trigger: { kind: "linear-label", label: "claude" },
-      folder: active?.cwd ?? "",
-      model: "opus",
-      effort: "high",
-      permissionMode: "auto",
-      worktree: true,
-      instructions: DEFAULT_INSTRUCTIONS,
-      columns: { picked: "Analyzing", coding: "In Dev", review: "Ready to Review" },
-    });
+    const common = { id: "", enabled: true, folder: active?.cwd ?? "", model: "opus", effort: "high", permissionMode: "auto" };
+    settings.connectors.push(
+      settings.linear
+        ? {
+            ...common,
+            name: DEFAULT_NAMES["linear-label"],
+            trigger: { kind: "linear-label", label: "claude" },
+            worktree: true,
+            instructions: DEFAULT_INSTRUCTIONS,
+            columns: { picked: "Analyzing", coding: "In Dev", review: "Ready to Review" },
+          }
+        : {
+            ...common,
+            name: DEFAULT_NAMES["slack-mention"],
+            trigger: { kind: "slack-mention", channel: "" },
+            worktree: false,
+            instructions: SLACK_INSTRUCTIONS,
+            columns: { picked: "", coding: "", review: "" },
+          },
+    );
     showPage("connectors");
     settingsPage.querySelector("form.connector:last-of-type [name=name]").focus();
   },
@@ -225,6 +318,11 @@ settingsPage.addEventListener("click", (e) => {
 
 settingsPage.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "linear-key") actions["connect-linear"]();
+  if (e.key === "Enter" && e.target.id === "slack-token") actions["connect-slack"]();
+});
+
+settingsPage.addEventListener("change", (e) => {
+  if (e.target.name === "kind") switchTrigger(e.target.closest("form"));
 });
 
 settingsPage.addEventListener("submit", async (e) => {
