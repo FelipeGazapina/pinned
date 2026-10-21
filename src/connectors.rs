@@ -859,8 +859,8 @@ mod tests {
         );
     }
 
-    /// Through the harness's entry points, on a store as connectors.json holds it. Neither call
-    /// reaches Linear: the first answers from the store, the second fails before it.
+    /// Through the harness's entry points, on a store as connectors.json holds it. No call here
+    /// reaches Linear or Slack: each answers from the store or fails before the network.
     #[test]
     fn the_harness_answers_a_second_create_and_a_stage_from_the_stored_issue() {
         use tauri::async_runtime::block_on;

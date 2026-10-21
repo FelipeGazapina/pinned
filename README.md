@@ -107,7 +107,7 @@ thread that mentions it, pinned opens a tab whose prompt holds the whole thread,
 session answers in that thread by running `pinned slack reply "<text>"`. The bot token stays
 in the app, as the Linear key does. The default instructions ask Claude to triage the thread:
 analyse a bug and reply with the cause, or reply with an existing solution, without editing
-code.
+code. Each Slack connector can also file a Linear issue and fix the bug, as below.
 
 To connect Slack, create an app at api.slack.com/apps and give its bot these scopes:
 `channels:history`, `groups:history`, `channels:read`, `groups:read`, `users:read` and
@@ -119,6 +119,24 @@ pinned checks the channel every minute. Each thread starts one session, and a la
 the same thread is ignored. Mentions that arrive while pinned is closed start their session at
 the next launch, and the session opens its first reply by saying it was offline. Slack rate
 limits reading history, so a rate-limited check reports the error and waits for the next minute.
+
+Turn on **Create the Linear issue and fix obvious bugs on its own** to let the session fix
+bugs. This needs Linear connected and a **Team**, by name or key. A **Label** is optional. pinned
+adds a decision rule to the prompt:
+
+- If the thread is not a bug, or it already has an answer, the session replies and stops.
+- If the bug is obvious and the fix is small and low-risk, the session replies that it is
+  fixing it. Then it runs `pinned linear create "<title>" "<description>"`, replies with the
+  issue link, fixes the bug, opens a pull request and replies with its link.
+- If the bug is not obvious, or the fix is big or risky, the session replies with its analysis
+  and stops.
+
+`pinned linear create` files the issue in the connector's team with its label, and adds a link
+to the Slack thread to the description. Each thread files one issue. A second call returns the
+issue already filed. With the option off, pinned rejects the command. After filing, `pinned
+stage coding` and `pinned stage review` move that issue through the columns you set. A thread
+has no issue when pinned picks it up, so a Slack connector has no first column. The session
+fixes code under the connector's **Permissions**, so pick a mode that lets it run `git` and `gh`.
 
 ## Updates
 
