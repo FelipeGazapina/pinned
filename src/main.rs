@@ -1,4 +1,5 @@
 mod agent;
+mod awake;
 mod connectors;
 mod history;
 mod hooks;
@@ -605,6 +606,8 @@ fn main() {
             close_tab,
             choose_folder,
             project_history,
+            awake::get_keep_awake,
+            awake::set_keep_awake,
             check_update,
             install_update,
             get_opacity,
@@ -648,6 +651,7 @@ fn main() {
                 history_dir: app.path().app_config_dir().ok().map(|c| c.join("history")),
                 quitting: AtomicBool::new(false),
             });
+            app.manage(awake::Awake::load(app.path().app_config_dir().ok()));
             app.manage(connectors::Connectors::load(app.path().app_config_dir()?, std::env::current_exe()?));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(connectors::watch(handle.clone(), move |run| {

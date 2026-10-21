@@ -1,3 +1,21 @@
+/** The General page: app-wide switches. */
+async function showGeneral() {
+  const awake = await invoke("get_keep_awake");
+  settingsPage.innerHTML = `<h2>General</h2>
+    <p><label class="toggle"><input type="checkbox" id="keep-awake"${awake ? " checked" : ""}> Keep this Mac awake</label></p>
+    <p class="meta">While this is on, the Mac and its display don't go to sleep, so sessions keep working when you step away. It turns off when you switch it off or quit pinned.</p>
+    <p class="error" id="awake-error"></p>`;
+  document.getElementById("keep-awake").onchange = async (e) => {
+    try {
+      await invoke("set_keep_awake", { on: e.target.checked });
+      document.getElementById("awake-error").textContent = "";
+    } catch (err) {
+      e.target.checked = !e.target.checked;
+      document.getElementById("awake-error").textContent = err;
+    }
+  };
+}
+
 /** The Projects page: every project pinned knows, and the turns its sessions finished in one. */
 async function showProjects() {
   const projects = await invoke("list_projects");

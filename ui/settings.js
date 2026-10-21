@@ -27,7 +27,7 @@ const settingsPage = document.getElementById("settings-page");
 
 /** Mirrors the backend's `get_settings`. Unsaved connectors carry an empty id. */
 let settings = { linear: null, connectors: [], checked: null };
-let page = ["connectors", "projects"].includes(load("settings-page")) ? load("settings-page") : "integrations";
+let page = ["general", "connectors", "projects"].includes(load("settings-page")) ? load("settings-page") : "integrations";
 /** Names from the connected Linear workspace, for the connector form's suggestions. */
 let suggestions = { labels: [], columns: [] };
 
@@ -55,6 +55,7 @@ function showPage(name) {
     }, console.warn);
   }
   if (name === "projects") return showProjects();
+  if (name === "general") return showGeneral();
   settingsPage.innerHTML = name === "integrations" ? integrationsHtml() : connectorsHtml();
 }
 
