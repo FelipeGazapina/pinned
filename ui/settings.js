@@ -54,7 +54,7 @@ function showPage(name) {
       }
     }, console.warn);
   }
-  if (name === "projects") return showProjects();
+  if (name === "projects") return showProjectsPage();
   if (name === "general") return showGeneral();
   settingsPage.innerHTML = name === "integrations" ? integrationsHtml() : connectorsHtml();
 }

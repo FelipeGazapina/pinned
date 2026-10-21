@@ -17,7 +17,7 @@ async function showGeneral() {
 }
 
 /** The Projects page: every project pinned knows, and the turns its sessions finished in one. */
-async function showProjects() {
+async function showProjectsPage() {
   const projects = await invoke("list_projects");
   settingsPage.innerHTML = `<h2>Projects</h2>
     <p>Pick a project to see what its sessions changed, turn by turn.</p>
@@ -36,7 +36,7 @@ async function showProjectHistory(path) {
 }
 
 actions["open-project"] = (button) => showProjectHistory(button.dataset.path);
-actions["projects-back"] = showProjects;
+actions["projects-back"] = showProjectsPage;
 
 const when = (unix) => new Date(unix * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
 const lineClass = (line) =>
