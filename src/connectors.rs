@@ -1,11 +1,11 @@
 //! Connectors make the harness proactive: each one watches an integration and opens a tab
 //! with a claude session already working on what it found.
 
-use crate::agent::{Stage, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV};
+use crate::agent::{Stage, Subject};
 use crate::{linear, slack};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -88,6 +88,71 @@ pub struct Connector {
     /// Issues, or Slack threads as `<channel id>:<thread ts>`, that already started a session.
     #[serde(default)]
     pub handled: Vec<String>,
+    /// The Linear team a Slack connector's sessions file issues in, by name or key.
+    #[serde(default)]
+    pub team: String,
+    /// The Linear label put on the issues a Slack connector's sessions file; empty puts none.
+    #[serde(default)]
+    pub label: String,
+    /// Lets a Slack connector's sessions file a Linear issue and fix a bug they judge obvious.
+    #[serde(default)]
+    pub auto_fix: bool,
+    /// The issue each Slack thread's session filed, by `<channel id>:<thread ts>`.
+    #[serde(default)]
+    pub created: BTreeMap<String, Filed>,
+}
+
+/// A Linear issue a Slack thread's session filed.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Filed {
+    pub id: String,
+    pub identifier: String,
+    pub url: String,
+}
+
+impl Filed {
+    /// What `pinned linear create` prints.
+    fn answer(&self) -> String {
+        format!("{} {}", self.identifier, self.url)
+    }
+}
+
+/// What `pinned linear create` does for a thread.
+#[derive(Debug, PartialEq)]
+enum Filing {
+    /// The thread already filed this issue, so the call returns it instead of filing another.
+    Filed(Filed),
+    New { team: String, label: String },
+}
+
+impl Connector {
+    fn filing(&self, channel: &str, thread: &str) -> Result<Filing, String> {
+        if !self.auto_fix {
+            return Err(format!(
+                "connector {:?} does not file Linear issues: only a Slack connector with \"Create the Linear issue and fix obvious bugs on its own\" turned on does",
+                self.name
+            ));
+        }
+        if let Some(filed) = self.created.get(&thread_key(channel, thread)) {
+            return Ok(Filing::Filed(filed.clone()));
+        }
+        if self.team.trim().is_empty() {
+            return Err(format!("connector {:?} has no Linear team to file issues in: set one in its settings", self.name));
+        }
+        Ok(Filing::New { team: self.team.trim().to_owned(), label: self.label.trim().to_owned() })
+    }
+
+    /// The Linear issue `pinned stage` moves for a session on `subject`.
+    fn issue(&self, subject: &Subject) -> Result<String, String> {
+        match subject {
+            Subject::LinearIssue { issue } => Ok(issue.clone()),
+            Subject::SlackThread { channel, thread } => self
+                .created
+                .get(&thread_key(channel, thread))
+                .map(|f| f.id.clone())
+                .ok_or_else(|| "this Slack thread has no Linear issue yet: file one with `pinned linear create` first".into()),
+        }
+    }
 }
 
 /// The Linear column each stage moves the issue to. Empty leaves the issue where it is.
@@ -117,6 +182,12 @@ struct Store {
     connectors: Vec<Connector>,
 }
 
+impl Store {
+    fn connector(&self, id: &str) -> Result<&Connector, String> {
+        self.connectors.iter().find(|c| c.id == id).ok_or_else(|| "the connector was deleted".into())
+    }
+}
+
 #[derive(Serialize, Clone)]
 pub struct Check {
     at: String,
@@ -137,27 +208,6 @@ pub struct Run {
     pub args: Vec<String>,
     pub connector: String,
     pub subject: Subject,
-}
-
-/// What a connector's session works on, which its callbacks into pinned report against.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Subject {
-    /// Linear's id for the issue, which `pinned stage` moves.
-    LinearIssue(String),
-    /// The Slack thread `pinned slack reply` answers in.
-    SlackThread { channel: String, thread: String },
-}
-
-impl Subject {
-    /// The session's environment that names this subject.
-    pub fn env(&self) -> Vec<(String, String)> {
-        match self {
-            Subject::LinearIssue(id) => vec![(ISSUE_ENV.to_owned(), id.clone())],
-            Subject::SlackThread { channel, thread } => {
-                vec![(SLACK_CHANNEL_ENV.to_owned(), channel.clone()), (SLACK_THREAD_ENV.to_owned(), thread.clone())]
-            }
-        }
-    }
 }
 
 /// Something a connector's check turned up that starts a session unless it already did.
@@ -196,6 +246,8 @@ pub struct Connectors {
     wake: Notify,
     /// Slack channel ids by the name a connector gives, so a check doesn't list every channel.
     channels: Mutex<HashMap<String, String>>,
+    /// Held while a session files a Linear issue, so two calls from one thread can't both file one.
+    filing: tokio::sync::Mutex<()>,
 }
 
 impl Connectors {
@@ -211,6 +263,7 @@ impl Connectors {
             checked: Mutex::new(None),
             wake: Notify::new(),
             channels: Mutex::new(HashMap::new()),
+            filing: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -339,19 +392,43 @@ impl Connectors {
         Ok(id)
     }
 
-    /// Moves the issue to the column the connector maps `stage` to.
-    pub async fn advance(&self, connector: &str, issue: &str, stage: Stage) -> Result<String, String> {
-        let column = {
+    /// Moves the session's issue to the column the connector maps `stage` to.
+    pub async fn advance(&self, connector: &str, subject: &Subject, stage: Stage) -> Result<String, String> {
+        let (issue, column) = {
             let store = self.store.lock().unwrap();
-            let c = store.connectors.iter().find(|c| c.id == connector).ok_or("the connector was deleted")?;
-            c.columns.get(stage).to_owned()
+            let c = store.connector(connector)?;
+            (c.issue(subject)?, c.columns.get(stage).to_owned())
         };
         if column.is_empty() {
             return Ok("this connector has no column for that stage, so the issue stays where it is".into());
         }
         let key = self.key(LINEAR_KEY).ok_or("Linear is not connected")?;
-        linear::move_issue(&key, issue, &column).await?;
+        linear::move_issue(&key, &issue, &column).await?;
         Ok(format!("moved the issue to {column}"))
+    }
+
+    /// Files a Linear issue for the Slack thread, linking back to it, unless the thread already
+    /// filed one. Answers `<identifier> <url>` either way.
+    pub async fn create(&self, connector: &str, channel: &str, thread: &str, title: &str, description: &str) -> Result<String, String> {
+        let _filing = self.filing.lock().await;
+        let filing = self.store.lock().unwrap().connector(connector)?.filing(channel, thread)?;
+        let (team, label) = match filing {
+            Filing::Filed(filed) => return Ok(filed.answer()),
+            Filing::New { team, label } => (team, label),
+        };
+        let key = self.key(LINEAR_KEY).ok_or("Linear is not connected: connect it in pinned's Integrations settings")?;
+        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Integrations settings")?;
+        let link = slack::permalink(&token, channel, thread).await?;
+        let description = format!("{}\n\nSlack thread: {link}", description.trim());
+        let issue = linear::create_issue(&key, &team, title.trim(), &description, &label).await?;
+        let filed = Filed { id: issue.id, identifier: issue.identifier, url: issue.url };
+        let mut store = self.store.lock().unwrap();
+        // The connector may have been deleted while Linear answered; the issue exists all the same.
+        if let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) {
+            c.created.insert(thread_key(channel, thread), filed.clone());
+            self.save(&store)?;
+        }
+        Ok(filed.answer())
     }
 
     /// Posts `text` in the Slack thread the connector's session answers.
@@ -407,10 +484,37 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &Path) -> Run {
         issue.description.as_deref().unwrap_or("(no description)"),
     );
     args.push(prompt);
-    Run { cwd: c.folder.clone(), args, connector: c.id.clone(), subject: Subject::LinearIssue(issue.id.clone()) }
+    Run { cwd: c.folder.clone(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() } }
 }
 
 const TAB_NAME_CHARS: usize = 50;
+const TRIAGE_ONLY: &str = "\n\nThis connector only triages: never change code, and never file a Linear issue. `pinned linear create` is turned off for it.";
+
+/// The rule a Slack connector that fixes bugs gives its session, with the commands to run.
+fn fix_steps(c: &Connector, exe: &Path) -> String {
+    let exe = exe.display();
+    let mut steps = vec![
+        "Reply with what you found, and that you are opening a Linear issue and fixing it.".to_owned(),
+        format!("Run `'{exe}' linear create \"<title>\" \"<description>\"` to file the issue. It prints the issue identifier and link; reply with them."),
+    ];
+    if !c.columns.get(Stage::Coding).is_empty() {
+        steps.push(format!("Run `'{exe}' stage coding` right before you start changing code."));
+    }
+    steps.push("Implement the fix, run the project's tests and checks, and open the pull request.".into());
+    if !c.columns.get(Stage::Review).is_empty() {
+        steps.push(format!("Run `'{exe}' stage review` right after the pull request is open."));
+    }
+    steps.push("Reply with the pull request link.".into());
+    let steps: Vec<String> = steps.iter().enumerate().map(|(i, s)| format!("   {}. {s}", i + 1)).collect();
+    format!(
+        "\n\nDecide what the thread needs, then act:\n\
+         - Not a bug, or existing behavior or a known fix already answers it: reply with the answer and stop.\n\
+         - A bug that is obvious, because you reproduced it or found it in the code, and whose fix is small and low-risk: fix it, in this order:\n{}\n\
+         - A bug that is not obvious, or whose fix is big or risky: reply with your analysis and what you would change, then stop without filing an issue or changing code.\n\
+         If a pinned command fails, reply in the thread with its error and stop.",
+        steps.join("\n")
+    )
+}
 
 fn slack_run(
     c: &Connector,
@@ -429,6 +533,7 @@ fn slack_run(
         "\n\nAnswer in the Slack thread below by running `'{}' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn.",
         exe.display()
     );
+    prompt += &if c.auto_fix { fix_steps(c, exe) } else { TRIAGE_ONLY.to_owned() };
     prompt += &format!("\n\nSlack thread in #{channel_name}, oldest first:\n");
     let transcript: Vec<String> = posts.iter().map(|p| format!("{}: {}", p.author, p.text)).collect();
     prompt += &transcript.join("\n");
@@ -449,8 +554,9 @@ pub async fn watch(app: AppHandle, open: impl Fn(Run)) {
             let (connector, subject) = (run.connector.clone(), run.subject.clone());
             open(run);
             // The session starts even when Linear won't move the issue; the check reports why.
-            if let Subject::LinearIssue(issue) = subject {
-                if let Err(e) = connectors.advance(&connector, &issue, Stage::Picked).await {
+            // A Slack thread has no issue to pick until its session files one.
+            if let Subject::LinearIssue { .. } = subject {
+                if let Err(e) = connectors.advance(&connector, &subject, Stage::Picked).await {
                     error.get_or_insert(e);
                 }
             }
@@ -539,7 +645,7 @@ pub async fn slack_suggestions(connectors: State<'_, Connectors>) -> Result<Vec<
     slack::member_channels(&token).await
 }
 
-/// Adds or replaces a connector. Its watermark and handled issues stay with the stored copy.
+/// Adds or replaces a connector. Its watermark, handled issues and filed issues stay with the stored copy.
 #[tauri::command]
 pub fn save_connector(connectors: State<Connectors>, mut connector: Connector) -> Result<Connector, String> {
     let mut store = connectors.store.lock().unwrap();
@@ -547,12 +653,14 @@ pub fn save_connector(connectors: State<Connectors>, mut connector: Connector) -
         Some(existing) => {
             connector.since = existing.since.clone();
             connector.handled = std::mem::take(&mut existing.handled);
+            connector.created = std::mem::take(&mut existing.created);
             *existing = connector.clone();
         }
         None => {
             connector.id = format!("c{}", chrono::Utc::now().timestamp_millis());
             connector.since = chrono::Utc::now().to_rfc3339();
             connector.handled.clear();
+            connector.created.clear();
             store.connectors.push(connector.clone());
         }
     }
@@ -597,6 +705,10 @@ mod tests {
             columns: Columns { picked: "Analyzing".into(), coding: "In Dev".into(), review: String::new() },
             since: String::new(),
             handled: vec![],
+            team: String::new(),
+            label: String::new(),
+            auto_fix: false,
+            created: BTreeMap::new(),
         };
         let issue = linear::Issue {
             id: "uuid".into(),
@@ -607,7 +719,7 @@ mod tests {
         };
         let run = run(&connector, &issue, Path::new("/Applications/pinned.app/Contents/MacOS/pinned"));
         assert_eq!(run.cwd, PathBuf::from("/repo"));
-        assert_eq!((run.connector.as_str(), &run.subject), ("c1", &Subject::LinearIssue("uuid".into())));
+        assert_eq!((run.connector.as_str(), &run.subject), ("c1", &Subject::LinearIssue { issue: "uuid".into() }));
         assert_eq!(
             run.args,
             [
@@ -640,17 +752,25 @@ mod tests {
             columns: Columns::default(),
             since: String::new(),
             handled: vec![],
+            team: String::new(),
+            label: String::new(),
+            auto_fix: false,
+            created: BTreeMap::new(),
         }
     }
 
     fn thread_run(mentioned: &str, picked_up: &str) -> Run {
+        connector_thread_run(&slack_connector(), mentioned, picked_up)
+    }
+
+    fn connector_thread_run(c: &Connector, mentioned: &str, picked_up: &str) -> Run {
         let at = |t: &str| DateTime::parse_from_rfc3339(t).unwrap().with_timezone(&Utc);
         let mention = slack::Mention { thread: "1792400050.000200".into(), at: at(mentioned) };
         let posts = [
             slack::Post { author: "ana".into(), text: "@pinned export 500s since today\nsee the log".into() },
             slack::Post { author: "bruno".into(), text: "same here".into() },
         ];
-        slack_run(&slack_connector(), "C0123ABCD", "support", &mention, &posts, at(picked_up), Path::new("/bin/pinned"))
+        slack_run(c, "C0123ABCD", "support", &mention, &posts, at(picked_up), Path::new("/bin/pinned"))
     }
 
     #[test]
@@ -670,9 +790,126 @@ mod tests {
                 "plan",
                 "--name",
                 "#support @pinned export 500s since today",
-                "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here",
+                "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn.\n\nThis connector only triages: never change code, and never file a Linear issue. `pinned linear create` is turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here",
             ]
         );
+    }
+
+    fn fixing_connector() -> Connector {
+        Connector {
+            auto_fix: true,
+            team: "ENG".into(),
+            label: "from-slack".into(),
+            permission_mode: PermissionMode::Auto,
+            columns: Columns { picked: "Analyzing".into(), coding: "In Dev".into(), review: "Ready to Review".into() },
+            instructions: "Fix what you can.".into(),
+            ..slack_connector()
+        }
+    }
+
+    #[test]
+    fn a_slack_run_that_fixes_bugs_gets_the_decision_rule_and_its_commands() {
+        let prompt = connector_thread_run(&fixing_connector(), "2026-10-19T10:00:00Z", "2026-10-19T10:01:00Z").args.pop().unwrap();
+        assert_eq!(
+            prompt,
+            "Fix what you can.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn.\n\n\
+             Decide what the thread needs, then act:\n\
+             - Not a bug, or existing behavior or a known fix already answers it: reply with the answer and stop.\n\
+             - A bug that is obvious, because you reproduced it or found it in the code, and whose fix is small and low-risk: fix it, in this order:\n\
+             \x20  1. Reply with what you found, and that you are opening a Linear issue and fixing it.\n\
+             \x20  2. Run `'/bin/pinned' linear create \"<title>\" \"<description>\"` to file the issue. It prints the issue identifier and link; reply with them.\n\
+             \x20  3. Run `'/bin/pinned' stage coding` right before you start changing code.\n\
+             \x20  4. Implement the fix, run the project's tests and checks, and open the pull request.\n\
+             \x20  5. Run `'/bin/pinned' stage review` right after the pull request is open.\n\
+             \x20  6. Reply with the pull request link.\n\
+             - A bug that is not obvious, or whose fix is big or risky: reply with your analysis and what you would change, then stop without filing an issue or changing code.\n\
+             If a pinned command fails, reply in the thread with its error and stop.\n\n\
+             Slack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here"
+        );
+        let no_columns = Connector { columns: Columns::default(), ..fixing_connector() };
+        let prompt = connector_thread_run(&no_columns, "2026-10-19T10:00:00Z", "2026-10-19T10:01:00Z").args.pop().unwrap();
+        assert!(!prompt.contains("stage"));
+        assert!(prompt.contains("   3. Implement the fix"));
+    }
+
+    #[test]
+    fn a_thread_files_one_issue_and_stages_move_it() {
+        let thread = Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() };
+        let mut c = fixing_connector();
+        assert_eq!(c.issue(&thread), Err("this Slack thread has no Linear issue yet: file one with `pinned linear create` first".into()));
+        assert_eq!(c.filing("C0123ABCD", "1792400050.000200"), Ok(Filing::New { team: "ENG".into(), label: "from-slack".into() }));
+        let filed = Filed { id: "uuid".into(), identifier: "ENG-12".into(), url: "https://linear.app/x/issue/ENG-12".into() };
+        c.created.insert("C0123ABCD:1792400050.000200".into(), filed.clone());
+        assert_eq!(c.filing("C0123ABCD", "1792400050.000200"), Ok(Filing::Filed(filed)));
+        assert_eq!(c.issue(&thread), Ok("uuid".into()));
+        assert_eq!(c.filing("C0123ABCD", "1792499999.000100"), Ok(Filing::New { team: "ENG".into(), label: "from-slack".into() }));
+        assert_eq!(c.issue(&Subject::LinearIssue { issue: "other".into() }), Ok("other".into()));
+    }
+
+    #[test]
+    fn only_a_connector_that_fixes_bugs_files_issues() {
+        assert_eq!(
+            slack_connector().filing("C0123ABCD", "1792400050.000200"),
+            Err("connector \"Triage\" does not file Linear issues: only a Slack connector with \"Create the Linear issue and fix obvious bugs on its own\" turned on does".into())
+        );
+        let teamless = Connector { team: " ".into(), ..fixing_connector() };
+        assert_eq!(
+            teamless.filing("C0123ABCD", "1792400050.000200"),
+            Err("connector \"Triage\" has no Linear team to file issues in: set one in its settings".into())
+        );
+    }
+
+    /// Through the harness's entry points, on a store as connectors.json holds it. Neither call
+    /// reaches Linear: the first answers from the store, the second fails before it.
+    #[test]
+    fn the_harness_answers_a_second_create_and_a_stage_from_the_stored_issue() {
+        use tauri::async_runtime::block_on;
+        let dir = std::env::temp_dir().join(format!("pinned-connectors-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut c = fixing_connector();
+        c.created.insert(
+            "C0123ABCD:1792400050.000200".into(),
+            Filed { id: "uuid".into(), identifier: "ENG-12".into(), url: "https://linear.app/x/issue/ENG-12".into() },
+        );
+        let store = Store { connectors: vec![c, Connector { id: "c3".into(), ..slack_connector() }], ..Store::default() };
+        std::fs::write(dir.join("connectors.json"), serde_json::to_vec(&store).unwrap()).unwrap();
+        let connectors = Connectors::load(dir.clone(), "/bin/pinned".into());
+
+        assert_eq!(
+            block_on(connectors.create("c2", "C0123ABCD", "1792400050.000200", "Export 500s again", "dup")),
+            Ok("ENG-12 https://linear.app/x/issue/ENG-12".into())
+        );
+        let thread = |t: &str| Subject::SlackThread { channel: "C0123ABCD".into(), thread: t.into() };
+        assert_eq!(block_on(connectors.advance("c2", &thread("1792400050.000200"), Stage::Coding)), Err("Linear is not connected".into()));
+        assert_eq!(
+            block_on(connectors.advance("c2", &thread("1792499999.000100"), Stage::Coding)),
+            Err("this Slack thread has no Linear issue yet: file one with `pinned linear create` first".into())
+        );
+        assert_eq!(
+            block_on(connectors.create("c3", "C0123ABCD", "1792400050.000200", "Export 500s", "desc")),
+            Err("connector \"Triage\" does not file Linear issues: only a Slack connector with \"Create the Linear issue and fix obvious bugs on its own\" turned on does".into())
+        );
+        assert_eq!(block_on(connectors.create("gone", "C0123ABCD", "1", "t", "d")), Err("the connector was deleted".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_store_saved_before_issue_filing_still_loads() {
+        let saved = r##"{
+          "linear": null,
+          "slack": { "team": "Acme", "userId": "UBOT", "name": "pinned" },
+          "connectors": [{
+            "id": "c2", "name": "Triage", "enabled": true,
+            "trigger": { "kind": "slack-mention", "channel": "#support" },
+            "folder": "/repo", "model": "", "effort": "high", "permissionMode": "plan", "worktree": false,
+            "instructions": "Triage it.", "columns": { "picked": "", "coding": "", "review": "" },
+            "since": "2026-10-19T10:00:00+00:00", "handled": ["C0123ABCD:1792400050.000200"]
+          }]
+        }"##;
+        let store: Store = serde_json::from_str(saved).unwrap();
+        let c = &store.connectors[0];
+        assert_eq!((c.team.as_str(), c.label.as_str(), c.auto_fix, c.created.len()), ("", "", false, 0));
+        assert_eq!(c.handled, ["C0123ABCD:1792400050.000200"]);
     }
 
     #[test]

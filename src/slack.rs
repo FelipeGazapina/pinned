@@ -234,6 +234,12 @@ pub async fn thread(token: &str, channel: &str, thread: &str) -> Result<Vec<Post
     Ok(posts(&replies["messages"], &names))
 }
 
+/// A link to the thread, for the Linear issue a session files from it.
+pub async fn permalink(token: &str, channel: &str, thread: &str) -> Result<String, String> {
+    let body = call(token, "chat.getPermalink", &[("channel", channel), ("message_ts", thread)]).await?;
+    body["permalink"].as_str().map(str::to_owned).ok_or_else(|| "Slack sent no permalink".into())
+}
+
 pub async fn post(token: &str, channel: &str, thread: &str, text: &str) -> Result<(), String> {
     write(token, "chat.postMessage", json!({ "channel": channel, "thread_ts": thread, "text": text })).await.map(drop)
 }

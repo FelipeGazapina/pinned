@@ -592,24 +592,21 @@ fn add_tray(app: &tauri::App) -> tauri::Result<()> {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
+    let command = match args.next().as_deref() {
         Some(hooks::SUBCOMMAND) => return hooks::forward(args.next().as_deref()),
         Some(reminders::SUBCOMMAND) => return reminders::serve(),
-        Some(hooks::STAGE_SUBCOMMAND) => match hooks::stage(args.next().as_deref()) {
-            Ok(done) => return println!("{done}"),
-            Err(e) => {
-                eprintln!("pinned: {e}");
-                std::process::exit(1);
-            }
-        },
-        Some(hooks::SLACK_SUBCOMMAND) => match hooks::slack(&args.collect::<Vec<_>>()) {
-            Ok(done) => return println!("{done}"),
-            Err(e) => {
-                eprintln!("pinned: {e}");
-                std::process::exit(1);
-            }
-        },
-        _ => {}
+        Some(hooks::STAGE_SUBCOMMAND) => Some(hooks::stage(args.next().as_deref())),
+        Some(hooks::SLACK_SUBCOMMAND) => Some(hooks::slack(&args.collect::<Vec<_>>())),
+        Some(hooks::LINEAR_SUBCOMMAND) => Some(hooks::linear(&args.collect::<Vec<_>>())),
+        _ => None,
+    };
+    match command {
+        Some(Ok(done)) => return println!("{done}"),
+        Some(Err(e)) => {
+            eprintln!("pinned: {e}");
+            std::process::exit(1);
+        }
+        None => {}
     }
 
     // The updater and the Linear client share reqwest's rustls, which ships without a crypto provider.
@@ -716,11 +713,14 @@ fn main() {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),
                 agent::Message::ListReminders => Ok(handle.state::<reminders::Reminders>().list()),
                 agent::Message::CancelReminder { id } => handle.state::<reminders::Reminders>().cancel(id),
-                agent::Message::Stage { connector, issue, stage } => tauri::async_runtime::block_on(
-                    handle.state::<connectors::Connectors>().advance(&connector, &issue, stage),
+                agent::Message::Stage { connector, subject, stage } => tauri::async_runtime::block_on(
+                    handle.state::<connectors::Connectors>().advance(&connector, &subject, stage),
                 ),
                 agent::Message::SlackReply { connector, channel, thread, text } => tauri::async_runtime::block_on(
                     handle.state::<connectors::Connectors>().reply(&connector, &channel, &thread, &text),
+                ),
+                agent::Message::LinearCreate { connector, channel, thread, title, description } => tauri::async_runtime::block_on(
+                    handle.state::<connectors::Connectors>().create(&connector, &channel, &thread, &title, &description),
                 ),
             })?;
             let window = app.get_webview_window("main").unwrap();

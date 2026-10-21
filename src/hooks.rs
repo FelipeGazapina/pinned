@@ -1,7 +1,7 @@
 use crate::history;
 use crate::reminders;
 use crate::agent::{
-    AgentEvent, AgentStatus, Message, Stage, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, SOCK_ENV, TAB_ENV,
+    AgentEvent, AgentStatus, Message, Stage, Subject, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, SOCK_ENV, TAB_ENV,
 };
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -12,6 +12,7 @@ use std::time::Duration;
 pub const SUBCOMMAND: &str = "hook";
 pub const STAGE_SUBCOMMAND: &str = "stage";
 pub const SLACK_SUBCOMMAND: &str = "slack";
+pub const LINEAR_SUBCOMMAND: &str = "linear";
 
 /// What the harness answers to each socket line.
 type Reply = Result<String, String>;
@@ -113,12 +114,22 @@ fn title_from_prompt(prompt: &str) -> Option<String> {
 }
 
 /// Runs when a connector's session calls `pinned stage <stage>`: asks the harness to move the
-/// session's issue to that stage's column and returns what the harness answered.
+/// session's issue to that stage's column and returns what the harness answered. A Slack session
+/// names its thread, and the harness moves the issue the thread filed.
 pub fn stage(arg: Option<&str>) -> Reply {
     let stage: Stage = arg
         .and_then(|a| serde_json::from_value(serde_json::json!(a)).ok())
         .ok_or(format!("usage: pinned {STAGE_SUBCOMMAND} <picked|coding|review>"))?;
-    ask(Message::Stage { connector: env(CONNECTOR_ENV)?, issue: env(ISSUE_ENV)?, stage })
+    ask(Message::Stage { connector: env(CONNECTOR_ENV)?, subject: subject()?, stage })
+}
+
+/// What the session works on, from the environment its connector started it with.
+fn subject() -> Result<Subject, String> {
+    match (env(ISSUE_ENV), env(SLACK_CHANNEL_ENV), env(SLACK_THREAD_ENV)) {
+        (Ok(issue), ..) => Ok(Subject::LinearIssue { issue }),
+        (_, Ok(channel), Ok(thread)) => Ok(Subject::SlackThread { channel, thread }),
+        (Err(e), ..) => Err(e),
+    }
 }
 
 /// Runs when a Slack connector's session calls `pinned slack reply <text>`: asks the harness to
@@ -129,6 +140,24 @@ pub fn slack(args: &[String]) -> Reply {
         _ => return Err(format!("usage: pinned {SLACK_SUBCOMMAND} reply <text>")),
     };
     ask(Message::SlackReply { connector: env(CONNECTOR_ENV)?, channel: env(SLACK_CHANNEL_ENV)?, thread: env(SLACK_THREAD_ENV)?, text })
+}
+
+/// Runs when a Slack connector's session calls `pinned linear create <title> <description>`: asks
+/// the harness to file a Linear issue for the session's thread and returns its identifier and link.
+pub fn linear(args: &[String]) -> Reply {
+    let (title, description) = match args {
+        [verb, title, description @ ..] if verb == "create" && !title.trim().is_empty() && !description.is_empty() => {
+            (title.clone(), description.join(" "))
+        }
+        _ => return Err(format!("usage: pinned {LINEAR_SUBCOMMAND} create <title> <description>")),
+    };
+    ask(Message::LinearCreate {
+        connector: env(CONNECTOR_ENV)?,
+        channel: env(SLACK_CHANNEL_ENV)?,
+        thread: env(SLACK_THREAD_ENV)?,
+        title,
+        description,
+    })
 }
 
 fn env(k: &str) -> Result<String, String> {
@@ -217,22 +246,32 @@ mod tests {
         assert_eq!(title_from_prompt("  \n"), None);
     }
 
-    /// One test, because both commands read the session's environment, which is process-wide.
+    /// One test, because the commands read the session's environment, which is process-wide.
     #[test]
     fn connector_commands_reach_the_harness_and_return_its_answer() {
         let sock = std::env::temp_dir().join(format!("pinned-test-{}.sock", std::process::id()));
         listen(sock.clone(), |message| match message {
-            Message::Stage { connector, issue, stage: Stage::Coding } => Ok(format!("{connector} moved {issue}")),
+            Message::Stage { connector, subject: Subject::LinearIssue { issue }, stage: Stage::Coding } => Ok(format!("{connector} moved {issue}")),
+            Message::Stage { connector, subject: Subject::SlackThread { channel, thread }, stage } => {
+                Ok(format!("{connector} moved the issue of {channel}:{thread} to {stage:?}"))
+            }
             Message::SlackReply { connector, channel, thread, text } => Ok(format!("{connector} posted {text:?} in {channel}:{thread}")),
+            Message::LinearCreate { connector, channel, thread, title, description } => {
+                Ok(format!("{connector} filed {title:?} / {description:?} for {channel}:{thread}"))
+            }
             other => Err(format!("unexpected {other:?}")),
         })
         .unwrap();
         std::env::set_var(SOCK_ENV, &sock);
         std::env::set_var(CONNECTOR_ENV, "c1");
+        assert_eq!(stage(Some("coding")), Err("PINNED_ISSUE is not set: run this inside a session a pinned connector started".to_owned()));
         std::env::set_var(ISSUE_ENV, "issue-uuid");
 
         assert_eq!(stage(Some("coding")), Ok("c1 moved issue-uuid".to_owned()));
-        assert_eq!(stage(Some("review")), Err("unexpected Stage { connector: \"c1\", issue: \"issue-uuid\", stage: Review }".to_owned()));
+        assert_eq!(
+            stage(Some("review")),
+            Err("unexpected Stage { connector: \"c1\", subject: LinearIssue { issue: \"issue-uuid\" }, stage: Review }".to_owned())
+        );
         assert_eq!(stage(Some("shipping")), Err("usage: pinned stage <picked|coding|review>".to_owned()));
 
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -240,6 +279,7 @@ mod tests {
             slack(&args(&["reply", "hi"])),
             Err("PINNED_SLACK_CHANNEL is not set: run this inside a session a pinned connector started".to_owned())
         );
+        std::env::remove_var(ISSUE_ENV);
         std::env::set_var(SLACK_CHANNEL_ENV, "C0123ABCD");
         std::env::set_var(SLACK_THREAD_ENV, "1792400050.000200");
         assert_eq!(
@@ -248,6 +288,25 @@ mod tests {
         );
         assert_eq!(slack(&args(&["reply"])), Err("usage: pinned slack reply <text>".to_owned()));
         assert_eq!(slack(&args(&["post", "hi"])), Err("usage: pinned slack reply <text>".to_owned()));
+
+        assert_eq!(stage(Some("review")), Ok("c1 moved the issue of C0123ABCD:1792400050.000200 to Review".to_owned()));
+        assert_eq!(
+            linear(&args(&["create", "Export 500s", "The export button", "fails"])),
+            Ok("c1 filed \"Export 500s\" / \"The export button fails\" for C0123ABCD:1792400050.000200".to_owned())
+        );
+        assert_eq!(linear(&args(&["create", "Export 500s"])), Err("usage: pinned linear create <title> <description>".to_owned()));
+        assert_eq!(linear(&args(&["file", "a", "b"])), Err("usage: pinned linear create <title> <description>".to_owned()));
         let _ = std::fs::remove_file(sock);
+    }
+
+    #[test]
+    fn a_linear_stage_message_keeps_its_wire_shape() {
+        let linear = r#"{"kind":"stage","connector":"c1","issue":"uuid","stage":"coding"}"#;
+        let message: Message = serde_json::from_str(linear).unwrap();
+        assert_eq!(serde_json::to_string(&message).unwrap(), linear);
+        let slack = r#"{"kind":"stage","connector":"c2","channel":"C0123ABCD","thread":"1792400050.000200","stage":"review"}"#;
+        let message: Message = serde_json::from_str(slack).unwrap();
+        assert!(matches!(&message, Message::Stage { subject: Subject::SlackThread { channel, .. }, .. } if channel == "C0123ABCD"));
+        assert_eq!(serde_json::to_string(&message).unwrap(), slack);
     }
 }

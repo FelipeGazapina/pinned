@@ -59,6 +59,29 @@ pub enum Stage {
     Review,
 }
 
+/// What a connector's session works on, which its callbacks into pinned report against.
+/// Untagged, so a stage message from a Linear session reads `"issue": "<id>"` as it always has.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum Subject {
+    /// Linear's id for the issue, which `pinned stage` moves.
+    LinearIssue { issue: String },
+    /// The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.
+    SlackThread { channel: String, thread: String },
+}
+
+impl Subject {
+    /// The session's environment that names this subject.
+    pub fn env(&self) -> Vec<(String, String)> {
+        match self {
+            Subject::LinearIssue { issue } => vec![(ISSUE_ENV.to_owned(), issue.clone())],
+            Subject::SlackThread { channel, thread } => {
+                vec![(SLACK_CHANNEL_ENV.to_owned(), channel.clone()), (SLACK_THREAD_ENV.to_owned(), thread.clone())]
+            }
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub enum When {
@@ -72,8 +95,14 @@ pub enum When {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Message {
     Agent(AgentEvent),
-    Stage { connector: String, issue: String, stage: Stage },
+    Stage {
+        connector: String,
+        #[serde(flatten)]
+        subject: Subject,
+        stage: Stage,
+    },
     SlackReply { connector: String, channel: String, thread: String, text: String },
+    LinearCreate { connector: String, channel: String, thread: String, title: String, description: String },
     Remind { message: String, when: When },
     ListReminders,
     CancelReminder { id: u64 },
