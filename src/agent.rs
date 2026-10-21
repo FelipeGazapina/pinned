@@ -38,6 +38,10 @@ pub struct AgentEvent {
     pub title: Option<String>,
     /// Unix time the usage limit that stopped the turn lifts, when the failure was one.
     pub resume_at: Option<u64>,
+    /// What the user asked, on the event that starts a turn.
+    pub prompt: Option<String>,
+    /// Git tree of the working tree, on the events that start and end a turn.
+    pub snapshot: Option<String>,
 }
 
 /// Where a connector's session is in its work on an issue. Each stage maps to a Linear column.

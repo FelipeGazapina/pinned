@@ -1,3 +1,4 @@
+use crate::history;
 use crate::agent::{AgentEvent, AgentStatus, Message, Stage, CONNECTOR_ENV, ISSUE_ENV, SOCK_ENV, TAB_ENV};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -55,6 +56,11 @@ pub fn forward(arg: Option<&str>) {
             .flatten()
             .and_then(|path| std::fs::File::open(path).ok())
             .and_then(|file| limit_reset_from_transcript(BufReader::new(file))),
+        prompt: (status == AgentStatus::Working).then(|| hook["prompt"].as_str().map(history::clip_prompt)).flatten(),
+        // Taken here, in the hook Claude Code waits on, so the agent can't edit before the baseline exists.
+        snapshot: matches!(status, AgentStatus::Working | AgentStatus::Done | AgentStatus::Failed)
+            .then(|| field("cwd").and_then(|cwd| history::snapshot(Path::new(&cwd))))
+            .flatten(),
     };
 
     if let Ok(mut stream) = UnixStream::connect(sock) {

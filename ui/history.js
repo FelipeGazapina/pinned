@@ -1,0 +1,48 @@
+/** The Projects page: every project pinned knows, and the turns its sessions finished in one. */
+async function showProjects() {
+  const projects = await invoke("list_projects");
+  settingsPage.innerHTML = `<h2>Projects</h2>
+    <p>Pick a project to see what its sessions changed, turn by turn.</p>
+    <div class="projects">${
+      projects.map((p) => `<button class="project" data-action="open-project" data-path="${esc(p.path)}">
+        <b>${esc(p.name)}</b><span class="path">${esc(tilde(p.path))}</span></button>`).join("") || `<p class="empty">No projects yet.</p>`
+    }</div>`;
+}
+
+async function showProjectHistory(path) {
+  const turns = await invoke("project_history", { path });
+  const name = path.split("/").filter(Boolean).pop() ?? "/";
+  settingsPage.innerHTML = `<button class="secondary" data-action="projects-back">← Projects</button>
+    <h2>${esc(name)}</h2><p class="meta">${esc(tilde(path))}</p>
+    <div class="history">${historyHtml(turns)}</div>`;
+}
+
+actions["open-project"] = (button) => showProjectHistory(button.dataset.path);
+actions["projects-back"] = showProjects;
+
+const when = (unix) => new Date(unix * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+const lineClass = (line) =>
+  line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") || line.startsWith("index ")
+    ? "f"
+    : line.startsWith("@@") ? "h" : line[0] === "+" ? "a" : line[0] === "-" ? "d" : "";
+
+function historyHtml(turns) {
+  if (!turns.length) {
+    return `<p class="empty">Nothing recorded yet. Each turn a session finishes in a git project is saved here with the files it changed.</p>`;
+  }
+  return turns.map((t) => {
+    const added = t.files.reduce((n, f) => n + f.added, 0);
+    const removed = t.files.reduce((n, f) => n + f.removed, 0);
+    const files = t.files.map((f) => `<li><span>${esc(f.path)}</span><span class="add">+${f.added}</span><span class="del">−${f.removed}</span></li>`).join("");
+    const patch = t.patch.split("\n").map((l) => `<span class="l ${lineClass(l)}">${esc(l)}</span>`).join("");
+    return `<details class="turn">
+      <summary>
+        <span class="what">${esc(t.prompt || t.title || "(no prompt)")}</span>
+        <span class="meta">${esc(t.title && t.prompt ? t.title + " · " : "")}${when(t.ended)} · ${t.files.length} file${t.files.length === 1 ? "" : "s"}
+          <span class="add">+${added}</span> <span class="del">−${removed}</span></span>
+      </summary>
+      <ul>${files}</ul>
+      <pre>${patch}</pre>${t.truncated ? `<p class="meta">The diff was cut at its size limit.</p>` : ""}
+    </details>`;
+  }).join("");
+}

@@ -1,5 +1,6 @@
 mod agent;
 mod connectors;
+mod history;
 mod hooks;
 mod linear;
 mod projects;
@@ -47,6 +48,8 @@ struct Tab {
     interrupted: bool,
     /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
     resume_at: Option<u64>,
+    /// Working tree and prompt as the running turn began, to diff against when it ends.
+    turn: Option<(String, Option<String>)>,
 }
 
 struct Harness {
@@ -56,11 +59,15 @@ struct Harness {
     next_tab: AtomicU32,
     expanded: Mutex<LogicalSize<f64>>,
     pill: Mutex<LogicalSize<f64>>,
+    /// Where the pill sat when it was last expanded, so shrinking again puts it back there.
+    pill_pos: Mutex<Option<tauri::PhysicalPosition<i32>>>,
     update: Mutex<Option<Update>>,
     opacity: AtomicU8,
     sessions_file: Option<PathBuf>,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
+    /// One file of finished turns per project.
+    history_dir: Option<PathBuf>,
     /// Set while the app shuts down, when sessions die without having finished.
     quitting: AtomicBool,
 }
@@ -73,7 +80,7 @@ impl Harness {
 
     fn add_tab(&self, cwd: PathBuf, launch: Vec<String>, env: Vec<(String, String)>, claude_session: Option<String>) -> String {
         let id = format!("tab-{}", self.next_tab.fetch_add(1, Ordering::Relaxed));
-        self.tabs.lock().unwrap().insert(id.clone(), Tab { cwd, session: None, launch, env, claude_session, interrupted: false, resume_at: None });
+        self.tabs.lock().unwrap().insert(id.clone(), Tab { cwd, session: None, launch, env, claude_session, interrupted: false, resume_at: None, turn: None });
         id
     }
 
@@ -150,6 +157,28 @@ impl Harness {
         }
     }
 
+    /// Starts a turn on a prompt, or on its end saves what the session changed since.
+    fn record_turn(&self, tab: &str, event: &agent::AgentEvent) {
+        use agent::AgentStatus::*;
+        let Some(tree) = event.snapshot.clone() else { return };
+        match event.status {
+            Working => {
+                let _ = self.tab(tab, |t| t.turn = Some((tree, event.prompt.clone())));
+            }
+            Done | Failed => {
+                let Ok(Some(((before, prompt), cwd, session))) =
+                    self.tab(tab, |t| Some((t.turn.take()?, t.cwd.clone(), t.claude_session.clone()?)))
+                else {
+                    return;
+                };
+                let (Some(dir), Some((files, patch, truncated))) = (&self.history_dir, history::diff(&cwd, &before, &tree)) else { return };
+                let turn = history::Turn { session, title: event.title.clone(), prompt, ended: unix_now(), files, patch, truncated };
+                history::append(&history::file_for(dir, &history::project_of(&cwd)), &turn);
+            }
+            NeedsInput => {}
+        }
+    }
+
     /// Forgets the tab's session once it finished, unless it only died because the app is quitting.
     fn end_session(&self, tab: &str) {
         if self.quitting.load(Ordering::SeqCst) {
@@ -177,6 +206,12 @@ fn open_tab(harness: State<Harness>, path: Option<String>) -> String {
         None => harness.default_cwd.clone(),
     };
     harness.add_tab(cwd, vec![], vec![], None)
+}
+
+/// The turns saved for the project at `path`, newest first.
+#[tauri::command]
+fn project_history(harness: State<Harness>, path: String) -> Vec<history::Turn> {
+    harness.history_dir.as_ref().map(|dir| history::load(&history::file_for(dir, Path::new(&path)))).unwrap_or_default()
 }
 
 #[derive(serde::Serialize)]
@@ -336,9 +371,20 @@ fn set_view(window: WebviewWindow, harness: State<Harness>, view: View) -> Resul
         View::Expanded => (&harness.pill, &harness.expanded, EXPANDED_MIN),
     };
     *leaving.lock().unwrap() = current;
+    if matches!(view, View::Expanded) {
+        *harness.pill_pos.lock().unwrap() = window.outer_position().ok();
+    }
     let size = *entering.lock().unwrap();
     window.set_min_size(Some(min)).map_err(|e| e.to_string())?;
     window.set_size(size).map_err(|e| e.to_string())?;
+    match view {
+        View::Expanded => {}
+        View::Pill => {
+            if let Some(pos) = *harness.pill_pos.lock().unwrap() {
+                window.set_position(pos).map_err(|e| e.to_string())?;
+            }
+        }
+    }
     keep_on_screen(&window, size, scale).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -558,6 +604,7 @@ fn main() {
             focus_panel,
             close_tab,
             choose_folder,
+            project_history,
             check_update,
             install_update,
             get_opacity,
@@ -592,11 +639,13 @@ fn main() {
                 next_tab: AtomicU32::new(1),
                 expanded: Mutex::new(LogicalSize::new(760.0, 460.0)),
                 pill: Mutex::new(PILL),
+                pill_pos: Mutex::new(None),
                 update: Mutex::new(None),
                 opacity: AtomicU8::new(saved_opacity(app.path().app_config_dir().ok())),
                 sessions_file: app.path().app_config_dir().ok().map(|c| c.join("sessions.json")),
                 projects: Mutex::new(projects),
                 projects_file,
+                history_dir: app.path().app_config_dir().ok().map(|c| c.join("history")),
                 quitting: AtomicBool::new(false),
             });
             app.manage(connectors::Connectors::load(app.path().app_config_dir()?, std::env::current_exe()?));
@@ -618,6 +667,7 @@ fn main() {
                             harness.record_session(tab, session.clone(), event.cwd.as_deref());
                         }
                         harness.record_status(tab, &event);
+                        harness.record_turn(tab, &event);
                         continue_when_limit_lifts(&handle, tab);
                     }
                     let _ = handle.emit("agent-event", event);
