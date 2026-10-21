@@ -100,6 +100,26 @@ pinned checks Linear every minute and only for issues created after the connecto
 saved, and it starts each issue once. Pick **Separate git worktree per issue** when several
 issues may run at the same time in one repository.
 
+### Slack
+
+A Slack connector watches one channel for messages that @mention your bot. For each new
+thread that mentions it, pinned opens a tab whose prompt holds the whole thread, and the
+session answers in that thread by running `pinned slack reply "<text>"`. The bot token stays
+in the app, as the Linear key does. The default instructions ask Claude to triage the thread:
+analyse a bug and reply with the cause, or reply with an existing solution, without editing
+code.
+
+To connect Slack, create an app at api.slack.com/apps and give its bot these scopes:
+`channels:history`, `groups:history`, `channels:read`, `groups:read`, `users:read` and
+`chat:write`. Install the app, invite the bot to the channel with `/invite @your-bot`, and
+paste the Bot User OAuth Token (`xoxb-…`) under **Integrations**. pinned keeps it in
+`slack-key` next to `linear-key`.
+
+pinned checks the channel every minute. Each thread starts one session, and a later mention in
+the same thread is ignored. Mentions that arrive while pinned is closed start their session at
+the next launch, and the session opens its first reply by saying it was offline. Slack rate
+limits reading history, so a rate-limited check reports the error and waits for the next minute.
+
 ## Updates
 
 pinned checks GitHub Releases at launch and installs a newer version right away, then
