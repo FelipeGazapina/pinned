@@ -8,6 +8,7 @@ mod projects;
 mod pty;
 mod reminders;
 mod sessions;
+mod slack;
 
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
@@ -601,6 +602,13 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Some(hooks::SLACK_SUBCOMMAND) => match hooks::slack(&args.collect::<Vec<_>>()) {
+            Ok(done) => return println!("{done}"),
+            Err(e) => {
+                eprintln!("pinned: {e}");
+                std::process::exit(1);
+            }
+        },
         _ => {}
     }
 
@@ -638,6 +646,9 @@ fn main() {
             connectors::connect_linear,
             connectors::disconnect_linear,
             connectors::linear_suggestions,
+            connectors::connect_slack,
+            connectors::disconnect_slack,
+            connectors::slack_suggestions,
             connectors::save_connector,
             connectors::delete_connector,
             connectors::pick_folder
@@ -679,7 +690,8 @@ fn main() {
             app.manage(connectors::Connectors::load(app.path().app_config_dir()?, std::env::current_exe()?));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(connectors::watch(handle.clone(), move |run| {
-                let env = vec![(agent::CONNECTOR_ENV.to_owned(), run.connector), (agent::ISSUE_ENV.to_owned(), run.issue)];
+                let mut env = vec![(agent::CONNECTOR_ENV.to_owned(), run.connector)];
+                env.extend(run.subject.env());
                 let id = handle.state::<Harness>().add_tab(run.cwd, run.args, env, false, None);
                 let _ = handle.emit("tab-opened", id);
             }));
@@ -706,6 +718,9 @@ fn main() {
                 agent::Message::CancelReminder { id } => handle.state::<reminders::Reminders>().cancel(id),
                 agent::Message::Stage { connector, issue, stage } => tauri::async_runtime::block_on(
                     handle.state::<connectors::Connectors>().advance(&connector, &issue, stage),
+                ),
+                agent::Message::SlackReply { connector, channel, thread, text } => tauri::async_runtime::block_on(
+                    handle.state::<connectors::Connectors>().reply(&connector, &channel, &thread, &text),
                 ),
             })?;
             let window = app.get_webview_window("main").unwrap();

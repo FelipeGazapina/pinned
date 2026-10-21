@@ -5,6 +5,9 @@ pub const TAB_ENV: &str = "PINNED_TAB";
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";
 pub const ISSUE_ENV: &str = "PINNED_ISSUE";
+/// Set on sessions a Slack connector started, so `pinned slack reply` knows the thread it answers.
+pub const SLACK_CHANNEL_ENV: &str = "PINNED_SLACK_CHANNEL";
+pub const SLACK_THREAD_ENV: &str = "PINNED_SLACK_THREAD";
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -70,6 +73,7 @@ pub enum When {
 pub enum Message {
     Agent(AgentEvent),
     Stage { connector: String, issue: String, stage: Stage },
+    SlackReply { connector: String, channel: String, thread: String, text: String },
     Remind { message: String, when: When },
     ListReminders,
     CancelReminder { id: u64 },

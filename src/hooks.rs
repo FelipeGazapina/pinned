@@ -1,6 +1,8 @@
 use crate::history;
 use crate::reminders;
-use crate::agent::{AgentEvent, AgentStatus, Message, Stage, CONNECTOR_ENV, ISSUE_ENV, SOCK_ENV, TAB_ENV};
+use crate::agent::{
+    AgentEvent, AgentStatus, Message, Stage, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, SOCK_ENV, TAB_ENV,
+};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -9,6 +11,7 @@ use std::time::Duration;
 
 pub const SUBCOMMAND: &str = "hook";
 pub const STAGE_SUBCOMMAND: &str = "stage";
+pub const SLACK_SUBCOMMAND: &str = "slack";
 
 /// What the harness answers to each socket line.
 type Reply = Result<String, String>;
@@ -115,9 +118,25 @@ pub fn stage(arg: Option<&str>) -> Reply {
     let stage: Stage = arg
         .and_then(|a| serde_json::from_value(serde_json::json!(a)).ok())
         .ok_or(format!("usage: pinned {STAGE_SUBCOMMAND} <picked|coding|review>"))?;
-    let env = |k: &str| std::env::var(k).map_err(|_| format!("{k} is not set: run this inside a session a pinned connector started"));
-    let message = Message::Stage { connector: env(CONNECTOR_ENV)?, issue: env(ISSUE_ENV)?, stage };
+    ask(Message::Stage { connector: env(CONNECTOR_ENV)?, issue: env(ISSUE_ENV)?, stage })
+}
 
+/// Runs when a Slack connector's session calls `pinned slack reply <text>`: asks the harness to
+/// post `text` in the session's thread and returns what the harness answered.
+pub fn slack(args: &[String]) -> Reply {
+    let text = match args {
+        [verb, text @ ..] if verb == "reply" && !text.is_empty() => text.join(" "),
+        _ => return Err(format!("usage: pinned {SLACK_SUBCOMMAND} reply <text>")),
+    };
+    ask(Message::SlackReply { connector: env(CONNECTOR_ENV)?, channel: env(SLACK_CHANNEL_ENV)?, thread: env(SLACK_THREAD_ENV)?, text })
+}
+
+fn env(k: &str) -> Result<String, String> {
+    std::env::var(k).map_err(|_| format!("{k} is not set: run this inside a session a pinned connector started"))
+}
+
+/// Sends one message to the running harness and waits for its answer.
+fn ask(message: Message) -> Reply {
     let mut stream = UnixStream::connect(env(SOCK_ENV)?).map_err(|e| format!("pinned is not running: {e}"))?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     writeln!(stream, "{}", serde_json::to_string(&message).unwrap()).map_err(|e| e.to_string())?;
@@ -198,11 +217,13 @@ mod tests {
         assert_eq!(title_from_prompt("  \n"), None);
     }
 
+    /// One test, because both commands read the session's environment, which is process-wide.
     #[test]
-    fn stage_reaches_the_harness_and_returns_its_answer() {
+    fn connector_commands_reach_the_harness_and_return_its_answer() {
         let sock = std::env::temp_dir().join(format!("pinned-test-{}.sock", std::process::id()));
         listen(sock.clone(), |message| match message {
             Message::Stage { connector, issue, stage: Stage::Coding } => Ok(format!("{connector} moved {issue}")),
+            Message::SlackReply { connector, channel, thread, text } => Ok(format!("{connector} posted {text:?} in {channel}:{thread}")),
             other => Err(format!("unexpected {other:?}")),
         })
         .unwrap();
@@ -213,6 +234,20 @@ mod tests {
         assert_eq!(stage(Some("coding")), Ok("c1 moved issue-uuid".to_owned()));
         assert_eq!(stage(Some("review")), Err("unexpected Stage { connector: \"c1\", issue: \"issue-uuid\", stage: Review }".to_owned()));
         assert_eq!(stage(Some("shipping")), Err("usage: pinned stage <picked|coding|review>".to_owned()));
+
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            slack(&args(&["reply", "hi"])),
+            Err("PINNED_SLACK_CHANNEL is not set: run this inside a session a pinned connector started".to_owned())
+        );
+        std::env::set_var(SLACK_CHANNEL_ENV, "C0123ABCD");
+        std::env::set_var(SLACK_THREAD_ENV, "1792400050.000200");
+        assert_eq!(
+            slack(&args(&["reply", "It's *fixed* in v2"])),
+            Ok("c1 posted \"It's *fixed* in v2\" in C0123ABCD:1792400050.000200".to_owned())
+        );
+        assert_eq!(slack(&args(&["reply"])), Err("usage: pinned slack reply <text>".to_owned()));
+        assert_eq!(slack(&args(&["post", "hi"])), Err("usage: pinned slack reply <text>".to_owned()));
         let _ = std::fs::remove_file(sock);
     }
 }
