@@ -184,6 +184,7 @@ fn thread_key(channel: &str, thread: &str) -> String {
 pub struct Suggestions {
     labels: Vec<String>,
     columns: Vec<String>,
+    teams: Vec<String>,
 }
 
 pub struct Connectors {
@@ -501,7 +502,11 @@ pub fn disconnect_linear(connectors: State<Connectors>) -> Result<(), String> {
 #[tauri::command]
 pub async fn linear_suggestions(connectors: State<'_, Connectors>) -> Result<Suggestions, String> {
     let key = connectors.key(LINEAR_KEY).ok_or("Linear is not connected")?;
-    Ok(Suggestions { labels: linear::label_names(&key).await?, columns: linear::state_names(&key).await? })
+    Ok(Suggestions {
+        labels: linear::label_names(&key).await?,
+        columns: linear::state_names(&key).await?,
+        teams: linear::team_names(&key).await?,
+    })
 }
 
 /// Checks the bot token against Slack before keeping it.
