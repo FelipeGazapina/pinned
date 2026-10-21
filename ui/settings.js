@@ -29,6 +29,12 @@ const SLACK_INSTRUCTIONS = `Someone mentioned you in the Slack thread below. Tri
 - If it is a question, answer it from the code.
 
 Never edit, commit or push code. Only read, run and reply.`;
+const SLACK_FIX_INSTRUCTIONS = `Someone mentioned you in the Slack thread below. Handle it in this repository, without waiting for me.
+
+- If it is a question, answer it from the code.
+- If existing behavior or a known fix already solves it, reply with that solution.
+- If it reports a bug, reproduce it or trace it through the code before you decide whether to fix it.
+- When you fix a bug, create a branch named after the Linear issue identifier, run the project's existing tests and checks, then push and open a pull request with gh pr create. Put the issue identifier in the title and link the Slack thread in the body.`;
 /** What can start a connector, matching the backend's `Trigger`. */
 const TRIGGERS = {
   "linear-label": "a Linear issue is created with label",
@@ -41,7 +47,7 @@ const settingsPage = document.getElementById("settings-page");
 let settings = { linear: null, slack: null, connectors: [], checked: null };
 let page = ["general", "connectors", "projects"].includes(load("settings-page")) ? load("settings-page") : "integrations";
 /** Names from the connected Linear workspace and Slack channels, for the connector form's suggestions. */
-let suggestions = { labels: [], columns: [], channels: [] };
+let suggestions = { labels: [], columns: [], teams: [], channels: [] };
 
 const settingsOpen = () => document.body.dataset.page === "settings";
 
@@ -62,6 +68,7 @@ function showPage(name) {
       Object.assign(suggestions, found);
       fillList("linear-labels", found.labels);
       fillList("linear-columns", found.columns);
+      fillList("linear-teams", found.teams);
     }, console.warn);
   }
   if (name === "connectors" && settings.slack && !suggestions.channels.length) {
@@ -139,6 +146,7 @@ function connectorsHtml() {
   return `${intro}
     <datalist id="linear-labels">${options(suggestions.labels)}</datalist>
     <datalist id="linear-columns">${options(suggestions.columns)}</datalist>
+    <datalist id="linear-teams">${options(suggestions.teams)}</datalist>
     <datalist id="slack-channels">${options(suggestions.channels)}</datalist>
     <datalist id="models">${options(MODELS)}</datalist>
     ${settings.connectors.map(connectorHtml).join("")}
@@ -168,11 +176,13 @@ function connectorHtml(c, i) {
       <label>Permissions <select name="permissionMode">${options(Object.keys(PERMISSIONS), (p) => PERMISSIONS[p], c.permissionMode)}</select></label>
       <label class="toggle"><input type="checkbox" name="worktree"${c.worktree ? " checked" : ""}> Separate git worktree per ${slack ? "thread" : "issue"}</label>
     </div>
-    ${slack ? "" : `<fieldset class="columns">
+    ${slack ? issuesHtml(c) : ""}
+    <fieldset class="columns">
       <legend>Move the Linear issue to the column</legend>
-      ${STAGES.map(([stage, when]) => `<label>${when}
+      ${(slack ? STAGES.filter(([stage]) => stage !== "picked") : STAGES).map(([stage, when]) => `<label>${when}
         <input name="column-${stage}" list="linear-columns" value="${esc(c.columns?.[stage])}" placeholder="leave where it is"></label>`).join("")}
-    </fieldset>`}
+      ${slack ? `<p class="hint">A thread has no Linear issue when pinned picks it up, so there is no first column. These two apply once the session files the issue.</p>` : ""}
+    </fieldset>
     <label>Instructions sent before the ${slack ? "thread" : "issue"}
       <textarea name="instructions" rows="8">${esc(c.instructions)}</textarea></label>
     <p class="hint">Runs <code>${esc(commandPreview(c))}</code></p>
@@ -182,6 +192,17 @@ function connectorHtml(c, i) {
       <button class="primary">${c.id ? "Save" : "Create"}</button>
     </div>
   </form>`;
+}
+
+/** The Slack connector's Linear issue settings, which the backend's `create` files issues with. */
+function issuesHtml(c) {
+  return `<fieldset class="columns">
+      <legend>Linear issues</legend>
+      <label class="toggle"><input type="checkbox" name="autoFix"${c.autoFix ? " checked" : ""}> Create the Linear issue and fix obvious bugs on its own</label>
+      <label>Team <input name="team" list="linear-teams" value="${esc(c.team)}" placeholder="Engineering"${c.autoFix ? " required" : ""}></label>
+      <label>Label <input name="issueLabel" list="linear-labels" value="${esc(c.label)}" placeholder="none"></label>
+      ${settings.linear ? "" : `<p class="hint">Connect Linear under Integrations to file issues from Slack threads.</p>`}
+    </fieldset>`;
 }
 
 function commandPreview(c) {
@@ -203,7 +224,7 @@ function checkedText() {
 function readConnector(form) {
   const f = form.elements;
   const stored = settings.connectors[form.dataset.index];
-  return {
+  const c = {
     ...stored,
     name: f.name.value.trim(),
     enabled: f.enabled.checked,
@@ -216,23 +237,23 @@ function readConnector(form) {
     permissionMode: f.permissionMode.value,
     worktree: f.worktree.checked,
     instructions: f.instructions.value,
-    columns: f.label
-      ? Object.fromEntries(STAGES.map(([stage]) => [stage, f[`column-${stage}`].value.trim()]))
-      : stored.columns ?? { picked: "", coding: "", review: "" },
+    // A Slack form has no picked column, so it keeps the stored one.
+    columns: Object.fromEntries(STAGES.map(([stage]) => [stage, f[`column-${stage}`]?.value.trim() ?? stored.columns?.[stage] ?? ""])),
   };
+  return f.label ? c : { ...c, team: f.team.value.trim(), label: f.issueLabel.value.trim(), autoFix: f.autoFix.checked };
 }
 
 const DEFAULT_NAMES = { "linear-label": "Resolve labeled Linear issues", "slack-mention": "Triage Slack mentions" };
-const DEFAULT_TEXTS = { "linear-label": DEFAULT_INSTRUCTIONS, "slack-mention": SLACK_INSTRUCTIONS };
+const defaultText = (c) =>
+  c.trigger.kind === "linear-label" ? DEFAULT_INSTRUCTIONS : c.autoFix ? SLACK_FIX_INSTRUCTIONS : SLACK_INSTRUCTIONS;
 
-/** Swaps the form to another trigger, keeping what was typed, and the defaults for it where untouched. */
-function switchTrigger(form) {
-  const c = readConnector(form);
-  const kind = form.elements.kind.value;
-  if (c.name === DEFAULT_NAMES[c.trigger.kind]) c.name = DEFAULT_NAMES[kind];
-  if (c.instructions.trim() === DEFAULT_TEXTS[c.trigger.kind].trim()) c.instructions = DEFAULT_TEXTS[kind];
-  c.trigger = kind === "slack-mention" ? { kind, channel: "" } : { kind, label: "" };
-  settings.connectors[form.dataset.index] = c;
+/** Redraws the form after `change` edits what it is, swapping in the new defaults where the old ones were untouched. */
+function reshape(form, change) {
+  const before = readConnector(form);
+  const after = change({ ...before });
+  if (before.name === DEFAULT_NAMES[before.trigger.kind]) after.name = DEFAULT_NAMES[after.trigger.kind];
+  if (before.instructions.trim() === defaultText(before).trim()) after.instructions = defaultText(after);
+  settings.connectors[form.dataset.index] = after;
   showPage("connectors");
 }
 
@@ -290,6 +311,9 @@ const actions = {
             worktree: false,
             instructions: SLACK_INSTRUCTIONS,
             columns: { picked: "", coding: "", review: "" },
+            team: "",
+            label: "",
+            autoFix: false,
           },
     );
     showPage("connectors");
@@ -322,7 +346,15 @@ settingsPage.addEventListener("keydown", (e) => {
 });
 
 settingsPage.addEventListener("change", (e) => {
-  if (e.target.name === "kind") switchTrigger(e.target.closest("form"));
+  if (e.target.name === "kind") {
+    const kind = e.target.value;
+    reshape(e.target.closest("form"), (c) => ({ ...c, trigger: kind === "slack-mention" ? { kind, channel: "" } : { kind, label: "" } }));
+  }
+  if (e.target.name === "autoFix") {
+    // Read the form as it was before the click, so its untouched default text is recognised.
+    e.target.checked = !e.target.checked;
+    reshape(e.target.closest("form"), (c) => ({ ...c, autoFix: !c.autoFix }));
+  }
 });
 
 settingsPage.addEventListener("submit", async (e) => {
