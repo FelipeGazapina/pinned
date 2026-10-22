@@ -742,14 +742,15 @@ impl Machine {
             return Err(format!("{folder} does not exist on this machine"));
         };
         let known: Vec<PathBuf> = projects::recent(&self.projects.lock().unwrap()).into_iter().map(|p| p.path.clone()).collect();
-        if let Some(found) = known.into_iter().find(|p| git_remote(p).as_deref() == Some(repo)) {
+        let same = |dir: &Path| git_remote(dir).is_some_and(|remote| same_repo(&remote, repo));
+        if let Some(found) = known.into_iter().find(|p| same(p)) {
             return Ok(found);
         }
         let name = repo_name(repo).ok_or_else(|| format!("{repo} names no repository to clone"))?;
         let target = self.clones.join(name);
         if !target.exists() {
             clone(repo, &target)?;
-        } else if git_remote(&target).as_deref() != Some(repo) {
+        } else if !same(&target) {
             return Err(format!("{} exists and is not a clone of {repo}", target.display()));
         }
         Ok(self.open_project(target))
@@ -791,8 +792,38 @@ fn repo_name(repo: &str) -> Option<&str> {
     (!name.is_empty() && name != "." && name != "..").then_some(name)
 }
 
-/// Clones without a terminal: a repository that needs a password fails instead of waiting for one.
+/// `host/owner/name` of a git URL, the same for its ssh and https forms.
+fn repo_key(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/').trim_end_matches(".git");
+    let rest = match url.split_once("://") {
+        Some((_, rest)) => rest.to_owned(),
+        // scp-like `git@host:owner/name`
+        None => url.replacen(':', "/", 1),
+    };
+    let rest = rest.rsplit_once('@').map_or(rest.as_str(), |(_, host_path)| host_path);
+    let mut parts = rest.split('/').filter(|p| !p.is_empty());
+    let host = parts.next()?.split(':').next()?.to_lowercase();
+    let path: Vec<&str> = parts.collect();
+    (path.len() >= 2).then(|| format!("{host}/{}", path.join("/").to_lowercase()))
+}
+
+fn same_repo(a: &str, b: &str) -> bool {
+    a == b || repo_key(a).is_some_and(|key| Some(key) == repo_key(b))
+}
+
+/// Clones `repo`, and if that fails, its https form: a machine without ssh access to the
+/// host, such as a VPS holding only another repository's deploy key, can still clone a public one.
 fn clone(repo: &str, into: &Path) -> Result<(), String> {
+    let first = clone_once(repo, into);
+    let https = repo_key(repo).map(|key| format!("https://{key}.git")).filter(|https| https != repo);
+    match (first, https) {
+        (Err(e), Some(https)) => clone_once(&https, into).map_err(|again| format!("{e}; {again}")),
+        (first, _) => first,
+    }
+}
+
+/// Clones without a terminal: a repository that needs a password fails instead of waiting for one.
+fn clone_once(repo: &str, into: &Path) -> Result<(), String> {
     if let Some(parent) = into.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -801,6 +832,7 @@ fn clone(repo: &str, into: &Path) -> Result<(), String> {
         .arg(repo)
         .arg(into)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_SSH_COMMAND", std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh -o BatchMode=yes".into()))
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("git clone {repo}: {e}"))?;
@@ -1101,6 +1133,18 @@ mod tests {
         let elsewhere = RunSpec { folder: "/nonexistent/acme".into(), repo: None, ..run };
         assert_eq!(m.open_run(&elsewhere), Err("/nonexistent/acme does not exist on this machine".into()));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ssh_and_https_urls_of_one_repository_match() {
+        let ssh = "git@github.com:FelipeGazapina/pinned.git";
+        assert_eq!(repo_key(ssh).as_deref(), Some("github.com/felipegazapina/pinned"));
+        for same in ["https://github.com/FelipeGazapina/pinned", "https://github.com/FelipeGazapina/pinned.git/", "ssh://git@github.com:22/FelipeGazapina/pinned.git", "https://token@github.com/felipegazapina/pinned.git"] {
+            assert!(same_repo(ssh, same), "{same}");
+        }
+        assert!(!same_repo(ssh, "git@github.com:FelipeGazapina/other.git"));
+        assert!(!same_repo(ssh, "git@gitlab.com:FelipeGazapina/pinned.git"));
+        assert_eq!(repo_key("pinned"), None);
     }
 
     #[test]
