@@ -1,7 +1,7 @@
 use crate::history;
 use crate::reminders;
 use crate::agent::{
-    AgentEvent, AgentStatus, Message, Stage, Subject, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, SOCK_ENV, TAB_ENV,
+    AgentEvent, AgentStatus, Message, Stage, Subject, Usage, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, SOCK_ENV, TAB_ENV,
 };
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -13,6 +13,7 @@ pub const SUBCOMMAND: &str = "hook";
 pub const STAGE_SUBCOMMAND: &str = "stage";
 pub const SLACK_SUBCOMMAND: &str = "slack";
 pub const LINEAR_SUBCOMMAND: &str = "linear";
+pub const STATUSLINE_SUBCOMMAND: &str = "statusline";
 
 /// What the harness answers to each socket line.
 type Reply = Result<String, String>;
@@ -30,6 +31,7 @@ pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
     }
     std::fs::write(path, serde_json::to_vec_pretty(&serde_json::json!({
         "hooks": hooks,
+        "statusLine": { "type": "command", "command": format!("'{}' {STATUSLINE_SUBCOMMAND}", exe.display()) },
         "permissions": { "allow": reminders::permissions() },
     }))?)
 }
@@ -71,10 +73,62 @@ pub fn forward(arg: Option<&str>) {
             .flatten(),
     };
 
+    tell(&sock, &Message::Agent(event));
+}
+
+/// Sends one message to the running harness without waiting for its answer.
+fn tell(sock: &str, message: &Message) {
     if let Ok(mut stream) = UnixStream::connect(sock) {
         let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-        let _ = writeln!(stream, "{}", serde_json::to_string(&Message::Agent(event)).unwrap());
+        let _ = writeln!(stream, "{}", serde_json::to_string(message).unwrap());
     }
+}
+
+/// Runs as the session's statusline: forwards the subscription usage Claude Code reports, then
+/// prints the user's own statusline, which the `--settings` entry would otherwise replace.
+pub fn statusline() {
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    if let (Some(usage), Ok(sock)) = (usage_from_status(&input), std::env::var(SOCK_ENV)) {
+        tell(&sock, &Message::Usage(usage));
+    }
+    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")));
+    if let Some(command) = config_dir.and_then(|dir| user_statusline(&dir)) {
+        let _ = std::io::stdout().write_all(&run_statusline(&command, &input));
+    }
+}
+
+/// The usage in the JSON Claude Code pipes to its statusline. It has none until the session's
+/// first API response, and none at all without a Pro or Max subscription.
+fn usage_from_status(input: &str) -> Option<Usage> {
+    #[derive(serde::Deserialize)]
+    struct Status {
+        rate_limits: Option<Usage>,
+    }
+    serde_json::from_str::<Status>(input).ok()?.rate_limits.filter(|u| u.five_hour.is_some() || u.seven_day.is_some())
+}
+
+/// The statusline command set in the user's own Claude Code settings.
+fn user_statusline(config_dir: &Path) -> Option<String> {
+    let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(config_dir.join("settings.json")).ok()?).ok()?;
+    settings["statusLine"]["command"].as_str().map(str::to_owned)
+}
+
+/// What `command` prints when given the statusline JSON, run the way Claude Code runs it.
+fn run_statusline(command: &str, input: &str) -> Vec<u8> {
+    let Ok(mut child) = std::process::Command::new("/bin/sh")
+        .args(["-c", command])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+    else {
+        return vec![];
+    };
+    // A command that never reads its input closes the pipe early, and still gets to print.
+    let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+    child.wait_with_output().map(|out| out.stdout).unwrap_or_default()
 }
 
 const LIMIT_ERROR: &[u8] = br#""apiError":"usage_limit_reached""#;
@@ -202,6 +256,7 @@ pub fn listen(sock: PathBuf, on_message: impl Fn(Message) -> Reply + Send + Sync
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::LimitWindow;
 
     #[test]
     fn transcript_title_is_the_last_ai_title() {
@@ -297,6 +352,43 @@ mod tests {
         assert_eq!(linear(&args(&["create", "Export 500s"])), Err("usage: pinned linear create <title> <description>".to_owned()));
         assert_eq!(linear(&args(&["file", "a", "b"])), Err("usage: pinned linear create <title> <description>".to_owned()));
         let _ = std::fs::remove_file(sock);
+    }
+
+    #[test]
+    fn statusline_usage_is_read_from_rate_limits() {
+        let both = r#"{"session_id":"s1","model":{"display_name":"Opus"},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1792400000},"seven_day":{"used_percentage":41.2,"resets_at":1792900000}}}"#;
+        assert_eq!(
+            usage_from_status(both),
+            Some(Usage {
+                five_hour: Some(LimitWindow { used_percentage: 23.5, resets_at: 1792400000 }),
+                seven_day: Some(LimitWindow { used_percentage: 41.2, resets_at: 1792900000 }),
+            })
+        );
+        let weekly_only = r#"{"rate_limits":{"seven_day":{"used_percentage":90,"resets_at":1792900000}}}"#;
+        assert_eq!(
+            usage_from_status(weekly_only),
+            Some(Usage { five_hour: None, seven_day: Some(LimitWindow { used_percentage: 90.0, resets_at: 1792900000 }) })
+        );
+        assert_eq!(usage_from_status(r#"{"session_id":"s1","cwd":"/repo"}"#), None);
+        assert_eq!(usage_from_status(r#"{"rate_limits":{}}"#), None);
+        assert_eq!(usage_from_status(r#"{"rate_limits":{"five_hour":{"used_percentage":"lots"}}}"#), None);
+        assert_eq!(usage_from_status("{broken"), None);
+        assert_eq!(usage_from_status(""), None);
+    }
+
+    #[test]
+    fn the_users_own_statusline_runs_on_the_same_input() {
+        let dir = std::env::temp_dir().join(format!("pinned-statusline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(user_statusline(&dir), None);
+        std::fs::write(dir.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+        assert_eq!(user_statusline(&dir), None);
+        std::fs::write(dir.join("settings.json"), r#"{"statusLine":{"type":"command","command":"tr a-z A-Z"}}"#).unwrap();
+        let command = user_statusline(&dir).unwrap();
+        assert_eq!(command, "tr a-z A-Z");
+        assert_eq!(run_statusline(&command, r#"{"cwd":"/repo"}"#), br#"{"CWD":"/REPO"}"#);
+        assert_eq!(run_statusline("echo done", &"x".repeat(1 << 20)), b"done\n");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

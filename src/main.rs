@@ -513,6 +513,11 @@ fn get_opacity(harness: State<Harness>) -> u8 {
     harness.opacity.load(Ordering::Relaxed)
 }
 
+#[tauri::command]
+fn get_usage(usage: State<Mutex<agent::Usage>>) -> agent::Usage {
+    *usage.lock().unwrap()
+}
+
 fn opacity_file(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|c| c.join("opacity"))
 }
@@ -635,6 +640,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let command = match args.next().as_deref() {
         Some(hooks::SUBCOMMAND) => return hooks::forward(args.next().as_deref()),
+        Some(hooks::STATUSLINE_SUBCOMMAND) => return hooks::statusline(),
         Some(reminders::SUBCOMMAND) => return reminders::serve(),
         Some(hooks::STAGE_SUBCOMMAND) => Some(hooks::stage(args.next().as_deref())),
         Some(hooks::SLACK_SUBCOMMAND) => Some(hooks::slack(&args.collect::<Vec<_>>())),
@@ -680,6 +686,7 @@ fn main() {
             check_update,
             install_update,
             get_opacity,
+            get_usage,
             connectors::get_settings,
             connectors::open_linear_keys,
             connectors::connect_linear,
@@ -723,6 +730,7 @@ fn main() {
                 history_dir: app.path().app_config_dir().ok().map(|c| c.join("history")),
                 quitting: AtomicBool::new(false),
             });
+            app.manage(Mutex::new(agent::Usage::default()));
             app.manage(awake::Awake::load(app.path().app_config_dir().ok()));
             app.manage(reminders::Reminders::load(app.path().app_config_dir().ok()));
             reminders::watch(app.handle().clone());
@@ -761,6 +769,13 @@ fn main() {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),
                 agent::Message::ListReminders => Ok(handle.state::<reminders::Reminders>().list()),
                 agent::Message::CancelReminder { id } => handle.state::<reminders::Reminders>().cancel(id),
+                agent::Message::Usage(report) => {
+                    let state = handle.state::<Mutex<agent::Usage>>();
+                    let mut usage = state.lock().unwrap();
+                    *usage = report.over(*usage, unix_now());
+                    let _ = handle.emit("usage", *usage);
+                    Ok(String::new())
+                }
                 agent::Message::Stage { connector, subject, stage } => tauri::async_runtime::block_on(
                     handle.state::<connectors::Connectors>().advance(&connector, &subject, stage),
                 ),
