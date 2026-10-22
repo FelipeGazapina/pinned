@@ -290,7 +290,7 @@ function addTab(machine, view) {
     activate(tab);
     drag(e, { move: (e) => reorder(tab, e) });
   };
-  if (!active) activate(tab);
+  if (!active) show(tab);
   return tab;
 }
 
@@ -340,6 +340,11 @@ function removeTab(tab, forget) {
 function activate(tab) {
   delete document.body.dataset.page;
   picker.hidden = true;
+  show(tab);
+}
+
+/** Brings the tab to the front, leaving the picker or settings open over it. */
+function show(tab) {
   active = tab;
   for (const t of tabs) {
     t.el.hidden = t !== tab;
@@ -347,7 +352,7 @@ function activate(tab) {
   }
   refit(tab);
   render();
-  tab.term.focus();
+  if (!pickerOpen() && !settingsOpen()) tab.term.focus();
 }
 
 // A hidden terminal can't measure itself, so each tab fits when it is shown.
