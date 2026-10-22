@@ -115,28 +115,42 @@ To connect Slack, create an app at api.slack.com/apps and give its bot these sco
 paste the Bot User OAuth Token (`xoxb-…`) under **Integrations**. pinned keeps it in
 `slack-key` next to `linear-key`.
 
-pinned checks the channel every minute. Each thread starts one session, and a later mention in
-the same thread is ignored. Mentions that arrive while pinned is closed start their session at
-the next launch, and the session opens its first reply by saying it was offline. Slack rate
-limits reading history, so a rate-limited check reports the error and waits for the next minute.
+pinned checks the channel every minute. A new mention in a thread that already has a session
+does not start another one. Mentions that arrive
+while pinned is closed start their session at the next launch, and the session opens its first
+reply by saying it was offline. Slack rate limits reading history, so a rate-limited check
+reports the error and waits for the next minute.
 
-Turn on **Create the Linear issue and fix obvious bugs on its own** to let the session fix
-bugs. This needs Linear connected and a **Team**, by name or key. A **Label** is optional. pinned
-adds a decision rule to the prompt:
+Later messages in a thread go to the session that answers it, with no need to mention the bot
+again. pinned types each one into the session's tab as a prompt that starts with
+`[Slack reply from <name> in the thread]`, and the session answers in the thread. Messages
+from the bot and from other bots are skipped. If the thread's tab is closed, or pinned
+restarted without resuming it, pinned opens a new session with the whole thread instead.
+pinned follows threads that started in the last 7 days.
 
-- If the thread is not a bug, or it already has an answer, the session replies and stops.
-- If the bug is obvious and the fix is small and low-risk, the session replies that it is
-  fixing it. Then it runs `pinned linear create "<title>" "<description>"`, replies with the
-  issue link, fixes the bug, opens a pull request and replies with its link.
-- If the bug is not obvious, or the fix is big or risky, the session replies with its analysis
-  and stops.
+**When the thread reports a bug** sets how far the session goes:
+
+- **Only analyze and reply.** The session replies with its analysis and never changes code.
+  pinned rejects `pinned linear create`.
+- **Analyze, then ask me in the thread before filing.** The session replies with its analysis
+  and asks whether to file a Linear issue and fix the bug, then waits. When someone answers
+  yes in the thread, the session files the issue and fixes the bug, as below. pinned rejects
+  `pinned linear create` until someone has written in the thread after the session started.
+- **Fix obvious bugs on its own, ask for the rest.** If the bug is obvious and the fix is small
+  and low-risk, the session fixes it right away. Otherwise it asks, as above.
+
+The second and third options need Linear connected and a **Team**, by name or key. A
+**Label** is optional. To fix a bug, the session replies that it is fixing it and runs
+`pinned linear create "<title>" "<description>"`. Then it replies with the issue link, fixes
+the bug, opens a pull request and replies with its link. If the thread is not a bug, or it
+already has an answer, the session replies and stops.
 
 `pinned linear create` files the issue in the connector's team with its label, and adds a link
 to the Slack thread to the description. Each thread files one issue. A second call returns the
-issue already filed. With the option off, pinned rejects the command. After filing, `pinned
-stage coding` and `pinned stage review` move that issue through the columns you set. A thread
-has no issue when pinned picks it up, so a Slack connector has no first column. The session
-fixes code under the connector's **Permissions**, so pick a mode that lets it run `git` and `gh`.
+issue already filed. After filing, `pinned stage coding` and `pinned stage review` move that
+issue through the columns you set. A thread has no issue when pinned picks it up, so a Slack
+connector has no first column. The session fixes code under the connector's **Permissions**,
+so pick a mode that lets it run `git` and `gh`.
 
 ## Updates
 
