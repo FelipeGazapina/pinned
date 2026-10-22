@@ -292,7 +292,7 @@ async function pickFolder(path) {
   }
 }
 
-/** True while the native folder dialog is up: it takes focus from the panel, which shouldn't shrink for it. */
+/** True while a native folder or file dialog is up: it takes focus from the panel, which shouldn't shrink for it. */
 let choosingFolder = false;
 async function chooseFolder(start) {
   choosingFolder = true;
@@ -655,21 +655,107 @@ window.addEventListener("keydown", (e) => {
   e.stopPropagation();
 }, true);
 
-// Claude Code attaches an image when a file path is pasted, so a drop becomes a paste of the escaped paths.
-TAURI?.webview.getCurrentWebview().onDragDropEvent(({ payload }) => {
-  if (payload.type !== "drop" || active?.machine !== LOCAL || !active.view.running) return;
-  const escaped = payload.paths.map((p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&"));
-  active.term.paste(escaped.join(" ") + " ");
-  active.term.focus();
+const UPLOAD_LIMIT = 25 << 20;
+
+// Claude Code attaches an image when a file path is pasted, so an attached file becomes a paste of its escaped path.
+function pastePaths(tab, paths) {
+  tab.term.paste(paths.map((p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&")).join(" ") + " ");
+  tab.term.focus();
+}
+
+const attachNote = document.createElement("p");
+attachNote.id = "attach-note";
+attachNote.hidden = true;
+terms.append(attachNote);
+let attachNoteTimer;
+function showAttachNote(text, error = false) {
+  clearTimeout(attachNoteTimer);
+  attachNote.textContent = text;
+  attachNote.toggleAttribute("data-error", error);
+  attachNote.hidden = !text;
+  if (error) attachNoteTimer = setTimeout(() => (attachNote.hidden = true), 6000);
+}
+
+const base64Of = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.slice(reader.result.indexOf(",") + 1));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+
+// The session reads a path on its own machine, so each file is saved there first.
+async function attachFiles(tab, files) {
+  if (!tab || !files.length) return;
+  if (!tab.view.running) return showAttachNote("Start claude in this tab first.", true);
+  const paths = [];
+  try {
+    for (const file of files) {
+      if (file.size > UPLOAD_LIMIT) throw `${file.name} is over 25 MB, the largest file pinned attaches`;
+      showAttachNote(`Sending ${file.name} to ${machineName(tab.machine)}…`);
+      paths.push(await callOn(tab.machine, { cmd: "upload", name: file.name, data: await base64Of(file) }));
+    }
+    showAttachNote("");
+  } catch (e) {
+    showAttachNote(String(e), true);
+  }
+  if (paths.length && tabs.includes(tab)) pastePaths(tab, paths);
+}
+
+const attachInput = document.getElementById("attach-input");
+let attachTo = null;
+document.getElementById("attach").onclick = () => {
+  if (!active) return;
+  attachTo = active;
+  choosingFolder = true;
+  attachInput.click();
+};
+attachInput.oncancel = () => (choosingFolder = false);
+attachInput.onchange = () => {
+  choosingFolder = false;
+  attachFiles(attachTo, [...attachInput.files]);
+  attachInput.value = "";
+};
+
+TAURI?.webview.getCurrentWebview().onDragDropEvent(async ({ payload }) => {
+  if (payload.type !== "drop" || !active) return;
+  const tab = active;
+  if (tab.machine === LOCAL) return tab.view.running && pastePaths(tab, payload.paths);
+  try {
+    const files = await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split("/").pop())));
+    await attachFiles(tab, files);
+  } catch (e) {
+    showAttachNote(String(e), true);
+  }
 });
 
-// A clipboard image has no text for xterm to paste; Ctrl+V makes Claude Code read the image itself.
+// The app gets drops from Tauri above; a browser gets them here.
+if (!TAURI) {
+  const dragsFiles = (e) => e.dataTransfer?.types.includes("Files");
+  addEventListener("dragover", (e) => {
+    if (!dragsFiles(e)) return;
+    e.preventDefault();
+    terms.dataset.dropping = "";
+  });
+  addEventListener("dragleave", (e) => {
+    if (!e.relatedTarget) delete terms.dataset.dropping;
+  });
+  addEventListener("drop", (e) => {
+    if (!dragsFiles(e)) return;
+    e.preventDefault();
+    delete terms.dataset.dropping;
+    attachFiles(active, [...e.dataTransfer.files]);
+  });
+}
+
 document.addEventListener("paste", (e) => {
   const types = [...(e.clipboardData?.types ?? [])];
-  if (active?.machine !== LOCAL || !active.view.running || types.includes("text/plain") || !types.includes("Files")) return;
+  if (!active || settingsOpen() || pickerOpen() || types.includes("text/plain") || !types.includes("Files")) return;
   e.preventDefault();
   e.stopPropagation();
-  callOn(LOCAL, { cmd: "write_input", tab: active.view.id, data: "\x16" });
+  // A clipboard image has no text for xterm to paste; on this Mac, Ctrl+V makes Claude Code read the image itself.
+  if (active.machine === LOCAL) callOn(LOCAL, { cmd: "write_input", tab: active.view.id, data: "\x16" });
+  else attachFiles(active, [...e.clipboardData.files]);
 }, true);
 
 function onMachineEvent(machine, event) {

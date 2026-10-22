@@ -20,7 +20,7 @@ const _: () = assert!(LIMIT.div_ceil(3) * 4 + (1 << 20) <= sync::MESSAGE_LIMIT);
 /// Saves `data` in `dir` under a safe form of `name`, never over an earlier upload, and returns its path.
 pub fn save(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf, String> {
     if data.len() > LIMIT {
-        return Err(format!("{name} is over {} MB, the largest file pinned attaches", LIMIT >> 20));
+        return Err(too_big(name));
     }
     private_dir(dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
     sweep(dir);
@@ -39,6 +39,10 @@ pub fn save(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf, String> {
             Err(e) => return Err(format!("could not save {name}: {e}")),
         }
     }
+}
+
+pub fn too_big(name: &str) -> String {
+    format!("{name} is over {} MB, the largest file pinned attaches", LIMIT >> 20)
 }
 
 /// Deletes the uploads older than `KEEP`.

@@ -322,6 +322,17 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
   text-align: center; color: var(--muted); }
 body[data-empty="true"] #empty { display: block; }
 
+#attach { width: 22px; height: 22px; border-radius: 6px; font-size: 12px; line-height: 1; }
+#attach:hover { background: #ffffff14; }
+body[data-empty="true"] #attach { display: none; }
+#attach-note { position: absolute; z-index: 3; top: 8px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 16px);
+  margin: 0; padding: 6px 12px; background: rgb(15 17 21); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px #00000080; pointer-events: none; }
+#attach-note[hidden] { display: none; }
+#attach-note[data-error] { border-color: #e5484d; color: #e5484d; }
+#terms[data-dropping]::after { content: ""; position: absolute; inset: 4px; border: 2px dashed var(--working);
+  border-radius: 8px; pointer-events: none; }
+
 .logo.account { background: #3d434d; }
 .logo.server { background: #2ead33; }
 .sign-in { display: flex; flex-direction: column; gap: 10px; }

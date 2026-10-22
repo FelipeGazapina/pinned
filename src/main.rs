@@ -4,7 +4,7 @@ mod commands;
 
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::wire::{Call, MachineEvent, TabId};
-use pinned_core::{agent, connectors, reminders};
+use pinned_core::{agent, connectors, reminders, uploads};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,6 +42,16 @@ enum View {
 #[tauri::command]
 fn machine_call(machine: State<Arc<Machine>>, call: Call) -> Result<serde_json::Value, String> {
     machine.call(call)
+}
+
+/// A dropped file's bytes, for a tab on another machine, which can't read this Mac's paths.
+#[tauri::command]
+async fn read_dropped(path: String) -> Result<tauri::ipc::Response, String> {
+    let read = |e: std::io::Error| format!("could not read {path}: {e}");
+    if std::fs::metadata(&path).map_err(read)?.len() > uploads::LIMIT as u64 {
+        return Err(uploads::too_big(&path));
+    }
+    std::fs::read(&path).map(tauri::ipc::Response::new).map_err(read)
 }
 
 #[tauri::command]
@@ -240,6 +250,7 @@ fn main() {
     builder
         .invoke_handler(tauri::generate_handler![
             machine_call,
+            read_dropped,
             attach_tab,
             detach_tab,
             restore_tabs,
