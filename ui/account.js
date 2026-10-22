@@ -34,6 +34,7 @@ function showAccount() {
       ${state === "refused" ? `<p class="error">The hub no longer accepts this sign-in. Sign out, then sign in again.</p>` : ""}
       <div class="actions"><button class="secondary" data-action="sign-out">Sign out</button></div>
     </div>
+    ${TAURI ? "" : notificationsHtml()}
     <form class="card new-password">
       <div class="card-head"><div><b>Password</b></div></div>
       <input name="username" type="email" value="${esc(account.email)}" autocomplete="username" hidden>
@@ -47,6 +48,29 @@ function showAccount() {
     changePassword(e.target);
   };
 }
+
+const NOTIFICATIONS = {
+  default: ["Off", "Hear when a session finishes or needs you while pinned is in the background or on another tab."],
+  granted: ["Enabled", "A session that finishes or needs you while pinned is in the background or on another tab shows a notification."],
+  denied: ["Blocked", "This browser blocks notifications from pinned. Allow them in the site's settings, then reload."],
+  unsupported: ["Not available", "This browser can't show notifications. On an iPhone, add pinned to the Home Screen first."],
+};
+
+// The browser remembers the answer, so the card reads it from there each time.
+function notificationsHtml() {
+  const permission = window.Notification && navigator.serviceWorker ? Notification.permission : "unsupported";
+  const [badge, hint] = NOTIFICATIONS[permission];
+  return `<div class="card">
+      <div class="card-head"><div><b>Notifications on this device</b><div class="hint">${hint}</div></div>
+        <span class="badge" data-on="${permission === "granted"}">${badge}</span></div>
+      ${permission === "default" ? `<div class="actions"><button class="primary" data-action="enable-notifications">Enable</button></div>` : ""}
+    </div>`;
+}
+
+actions["enable-notifications"] = async () => {
+  await Notification.requestPermission();
+  showAccount();
+};
 
 async function changePassword(form) {
   const error = document.getElementById("password-error");

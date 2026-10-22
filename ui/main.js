@@ -67,13 +67,56 @@ function updateView(tab, view) {
   const before = statusOf(tab);
   tab.view = view;
   const after = statusOf(tab);
-  if (after !== before && ALERTS.includes(after) && document.body.dataset.view === "pill") {
+  if (after === before) return;
+  if (!TAURI) return attend(tab, ALERTS.includes(after));
+  if (ALERTS.includes(after) && document.body.dataset.view === "pill") {
     pill.dataset.status = after;
     document.body.classList.remove("alert");
     void document.body.offsetWidth;
     document.body.classList.add("alert");
   }
 }
+
+/** In the browser, which has no pill to flash: the tabs that finished or need input since they were last in view. */
+const unseen = new Set();
+const PAGE_TITLE = document.title;
+const inView = (tab) => !document.hidden && tab === active && !settingsOpen() && !pickerOpen();
+
+function attend(tab, alert) {
+  if (alert && !inView(tab)) {
+    unseen.add(tab.key);
+    notify(tab);
+  } else unseen.delete(tab.key);
+  renderUnseen();
+}
+
+function markSeen(tab) {
+  if (tab && inView(tab) && unseen.delete(tab.key)) renderUnseen();
+}
+
+function renderUnseen() {
+  document.title = unseen.size ? `(${unseen.size}) ${PAGE_TITLE}` : PAGE_TITLE;
+  const badge = unseen.size ? navigator.setAppBadge?.(unseen.size) : navigator.clearAppBadge?.();
+  badge?.catch(() => {});
+}
+
+// Android Chrome only shows a notification through the service worker, which also takes the click.
+async function notify(tab) {
+  if (window.Notification?.permission !== "granted") return;
+  const registration = await navigator.serviceWorker?.getRegistration();
+  registration?.showNotification(`${tabName(tab)} on ${machineName(tab.machine)}: ${STATUS_TEXT[statusOf(tab)]}`, {
+    body: tab.view.message || tab.view.title || tilde(tab.view.cwd),
+    tag: tab.key,
+    renotify: true,
+    data: { tab: tab.key },
+  });
+}
+
+navigator.serviceWorker?.addEventListener("message", ({ data }) => {
+  const tab = data?.type === "activate-tab" && tabByKey(data.tab);
+  if (tab) activate(tab);
+});
+document.addEventListener("visibilitychange", () => markSeen(active));
 
 async function openTab(machine, path, bypass = false) {
   const id = await callOn(machine, { cmd: "open_tab", path, bypass });
@@ -274,6 +317,7 @@ function openChoice(i, bypass = false) {
 function closeProjects() {
   picker.hidden = true;
   active?.term.focus();
+  markSeen(active);
 }
 
 const toggleProjects = () => (pickerOpen() ? closeProjects() : showProjects());
@@ -405,6 +449,7 @@ function removeTab(tab, forget) {
   tab.el.remove();
   tab.button.remove();
   if (forget) order = order.filter((k) => k !== tab.key);
+  if (unseen.delete(tab.key)) renderUnseen();
   if (active === tab) {
     active = null;
     if (tabs.length) activate(tabs[Math.min(i, tabs.length - 1)]);
@@ -426,6 +471,7 @@ function show(tab) {
   refit(tab);
   render();
   if (!pickerOpen() && !settingsOpen()) tab.term.focus();
+  markSeen(tab);
 }
 
 // A hidden terminal can't measure itself, so each tab fits when it is shown.
