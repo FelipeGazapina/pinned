@@ -10,6 +10,8 @@ const THREAD_LOOKBACK: chrono::Duration = chrono::Duration::days(7);
 const PAGE: &str = "200";
 /// The error a call fails with once Slack rate limits pinned.
 pub const RATE_LIMITED: &str = "Slack: ratelimited";
+/// The reaction that tells people a session is working on their message.
+pub const WORKING: &str = "robot_face";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +27,8 @@ pub struct Account {
 pub struct Mention {
     /// Timestamp of the thread's first message, which Slack uses as the thread's id.
     pub thread: String,
+    /// Timestamp of the message that mentions the bot.
+    pub ts: String,
     pub at: DateTime<Utc>,
 }
 
@@ -37,6 +41,8 @@ pub struct Replies {
     /// The messages people wrote since the session's last one, oldest first. Empty unless one of
     /// them mentions the bot.
     pub posts: Vec<Post>,
+    /// The timestamps of the messages in `posts` that mention the bot, oldest first.
+    pub mentioned: Vec<String>,
 }
 
 /// How far a followed thread was read, as Slack timestamps.
@@ -179,7 +185,7 @@ fn mentions_in(messages: &Value, bot: &str, since: DateTime<Utc>) -> Vec<Mention
             let ts = m["ts"].as_str()?;
             let at = DateTime::from_timestamp_micros(micros(ts)?)?;
             let thread = m["thread_ts"].as_str().unwrap_or(ts).to_owned();
-            (at > since).then_some(Mention { thread, at })
+            (at > since).then(|| Mention { thread, ts: ts.to_owned(), at })
         })
         .collect()
 }
@@ -233,6 +239,11 @@ fn after_cursor(messages: &Value, bot: &str, cursor: &str) -> Option<(String, Ve
     Some((newest, people))
 }
 
+/// The timestamps of the messages that mention `bot`.
+fn mentioning(messages: &[Value], bot: &str) -> Vec<String> {
+    messages.iter().filter(|m| mentions(m, bot)).filter_map(|m| m["ts"].as_str().map(str::to_owned)).collect()
+}
+
 /// Mentions of `bot` in `channel` after `since`, oldest first, and new messages in the threads
 /// `cursors` follows, keyed by thread ts. Takes one history call, plus one replies call per
 /// thread that got a reply since, because Slack rate limits both.
@@ -257,9 +268,10 @@ pub async fn activity(
     let mut replies = vec![];
     for (thread, given) in followed_with_replies(messages, cursors) {
         let Some((newest, people)) = after_cursor(&replies_after(token, channel, &thread, given).await?, bot, given) else { continue };
+        let mentioned = mentioning(&people, bot);
         let people = Value::Array(people);
         let names = names(token, &people).await?;
-        replies.push(Replies { thread, newest, posts: posts(&people, &names) });
+        replies.push(Replies { thread, newest, posts: posts(&people, &names), mentioned });
     }
     Ok(Activity { mentions, replies })
 }
@@ -348,6 +360,18 @@ pub async fn post(token: &str, channel: &str, thread: &str, text: &str) -> Resul
     write(token, "chat.postMessage", json!({ "channel": channel, "thread_ts": thread, "text": text })).await.map(drop)
 }
 
+/// Reacts to the message `ts` with the emoji `name`. A reaction the bot already left counts as
+/// done, so a retry after a crash converges.
+pub async fn react(token: &str, channel: &str, ts: &str, name: &str) -> Result<(), String> {
+    match write(token, "reactions.add", json!({ "channel": channel, "timestamp": ts, "name": name })).await {
+        Ok(_) => Ok(()),
+        Err(e) if e == "Slack: already_reacted" => Ok(()),
+        // Apps installed before pinned reacted lack the scope.
+        Err(e) if e == "Slack: missing_scope" => Err("Slack won't let the bot react: add the reactions:write scope to the Slack app and reinstall it".into()),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,12 +404,20 @@ mod tests {
         let since = DateTime::from_timestamp(1792395000, 0).unwrap();
         assert_eq!(
             mentions_in(&history, "UBOT", since),
-            [Mention { thread: "1792400050.000200".into(), at: DateTime::from_timestamp(1792400050, 200_000).unwrap() }]
+            [Mention {
+                thread: "1792400050.000200".into(),
+                ts: "1792400050.000200".into(),
+                at: DateTime::from_timestamp(1792400050, 200_000).unwrap()
+            }]
         );
         assert_eq!(threads_replied_after(&history, since), ["1792400050.000200", "1792390000.000100"]);
         assert_eq!(
             mentions_in(&replies, "UBOT", since),
-            [Mention { thread: "1792390000.000100".into(), at: DateTime::from_timestamp(1792400090, 0).unwrap() }]
+            [Mention {
+                thread: "1792390000.000100".into(),
+                ts: "1792400090.000000".into(),
+                at: DateTime::from_timestamp(1792400090, 0).unwrap()
+            }]
         );
     }
 
@@ -423,6 +455,9 @@ mod tests {
                 json!({ "ts": "1792400105.000000", "user": "U2", "text": "thanks!" }),
             ]
         );
+        assert_eq!(mentioning(&people, "UBOT"), ["1792400090.000000"], "only the message to the bot gets the reaction");
+        let two = [json!({ "ts": "1.1", "user": "U2", "text": "<@UBOT> first" }), json!({ "ts": "1.2", "user": "U3", "text": "<@U2> and <@UBOT> again" })];
+        assert_eq!(mentioning(&two, "UBOT"), ["1.1", "1.2"]);
         let (newest, people) = after_cursor(&replies, "UBOT", "1792400090.000000").unwrap();
         assert_eq!((newest.as_str(), people.len()), ("1792400105.000000", 0));
         let (newest, people) = after_cursor(&replies, "UBOT", "1792400099.000000").unwrap();

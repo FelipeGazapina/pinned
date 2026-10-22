@@ -1357,7 +1357,7 @@ mod tests {
 
     fn connector_thread_run(c: &Connector, mentioned: &str, picked_up: &str) -> Run {
         let at = |t: &str| DateTime::parse_from_rfc3339(t).unwrap().with_timezone(&Utc);
-        let mention = slack::Mention { thread: "1792400050.000200".into(), at: at(mentioned) };
+        let mention = slack::Mention { thread: "1792400050.000200".into(), ts: "1792400050.000200".into(), at: at(mentioned) };
         slack_run(c, "C0123ABCD", "support", &mention.thread, &posts(), mention_note(&mention, at(picked_up)), "/bin/pinned")
     }
 
