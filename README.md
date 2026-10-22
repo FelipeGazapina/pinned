@@ -82,8 +82,8 @@ claude --model <model> --effort <effort> --permission-mode <mode> [--worktree=<i
   --name "<issue> <title>" "<instructions>\n\n<issue title, link and description>"
 ```
 
-The default instructions ask Claude to implement the issue, record a Playwright video that
-proves the fix, and open a pull request that links the video. Edit them per connector.
+The default instructions ask Claude to implement the issue and open a pull request. Edit them
+per connector.
 Each connector has its own column flow. **Move the Linear issue to the column** names
 the column for each stage, and an empty field leaves the issue where it is:
 
@@ -151,6 +151,42 @@ issue already filed. After filing, `pinned stage coding` and `pinned stage revie
 issue through the columns you set. A thread has no issue when pinned picks it up, so a Slack
 connector has no first column. The session fixes code under the connector's **Permissions**,
 so pick a mode that lets it run `git` and `gh`.
+
+### Proof of work
+
+Every connector session that can open a pull request must prove that the change works. These
+are Linear connector sessions, and Slack connector sessions whose bug setting is not **Only
+analyze and reply**. pinned appends a **Proof of work** block to the prompt, after your
+instructions, so editing the instructions does not remove it. The block tells the session to:
+
+1. Write a Playwright script in a temporary directory outside the repository.
+2. Start the app the way the project documents, drive the flow that the change affects, and
+   record a video with `recordVideo` and a small `slowMo`.
+3. After the pull request is open, run
+   `pinned evidence <video> --caption "<what the video shows>"`. A Slack session also puts
+   the comment link in its last reply in the thread.
+
+The proof is posted as a comment on the pull request. Nothing is committed to the repository:
+the session never adds the video or the script to git.
+
+`pinned evidence <video-file> --caption "<text>" [--pr <number>]` runs in the session's
+folder with your own `gh` sign-in. It converts a `.webm` to `.mp4` when `ffmpeg` is
+installed, and uploads the video as an asset of a release tagged `pinned-evidence`. If the
+release does not exist yet, the command creates it as a prerelease on the default branch, and
+it appears in the repository's Releases list under that name. Then the command posts a
+`## Proof` comment with the caption and the asset link, on the pull request given by `--pr`
+or on the current branch's pull request, and prints the comment link. Running the command
+again with the same video file does not post a second comment. GitHub has no API that puts a
+video inline in a comment, so the link opens or downloads the video. It does not play in the
+pull request.
+
+If a browser cannot show the change, because it is a library, a CLI or backend code, or if the
+app cannot start in the session, the session records no video. Its `## Proof` comment then
+says `No video: <reason>` and holds the test or command output that proves the change.
+
+**Require a Playwright video, posted as a comment on the pull request** is on by default.
+Clear it to leave the block out of a connector's sessions. A Slack connector that only
+replies never opens a pull request, so the form hides the setting.
 
 ## Updates
 

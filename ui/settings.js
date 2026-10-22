@@ -18,10 +18,8 @@ const DEFAULT_INSTRUCTIONS = `Resolve the Linear issue below in this repository,
 
 1. Read the issue and the code it touches. Create a branch named after the issue identifier.
 2. Implement the change and run the project's existing tests and checks.
-3. Prove it works in the running app: write a Playwright test that exercises the fix with video recording on (video: 'on'), run it, and keep the recorded video.
-4. Commit the code, and commit the video under .github/evidence/<issue identifier>/.
-5. Push and open a pull request with gh pr create. Put the issue identifier in the title, summarize the change, and link the committed video in the body as proof that it works.
-6. If a Linear tool is available, comment the pull request link on the issue.`;
+3. Commit, push and open a pull request with gh pr create. Put the issue identifier in the title and summarize the change.
+4. If a Linear tool is available, comment the pull request link on the issue.`;
 const SLACK_INSTRUCTIONS = `Someone mentioned you in the Slack thread below. Triage it in this repository, without waiting for me.
 
 - If it reports a bug, reproduce it or trace it through the code, and reply with your analysis: the cause, where it lives, and how to fix it.
@@ -162,6 +160,7 @@ function connectorsHtml() {
 
 function connectorHtml(c, i) {
   const slack = c.trigger.kind === "slack-mention";
+  const proofs = !slack || c.fix !== "off";
   const what = slack
     ? `<input name="channel" list="slack-channels" value="${esc(c.trigger.channel)}" placeholder="support" required>`
     : `<input name="label" list="linear-labels" value="${esc(c.trigger.label)}" placeholder="claude" required>`;
@@ -181,7 +180,9 @@ function connectorHtml(c, i) {
       <label>Effort <select name="effort">${options(EFFORTS, undefined, c.effort)}</select></label>
       <label>Permissions <select name="permissionMode">${options(Object.keys(PERMISSIONS), (p) => PERMISSIONS[p], c.permissionMode)}</select></label>
       <label class="toggle"><input type="checkbox" name="worktree"${c.worktree ? " checked" : ""}> Separate git worktree per ${slack ? "thread" : "issue"}</label>
+      ${proofs ? `<label class="toggle"><input type="checkbox" name="proof"${c.proof === false ? "" : " checked"}> Require a Playwright video, posted as a comment on the pull request</label>` : ""}
     </div>
+    ${proofs ? `<p class="hint">The video is uploaded to the repository's <code>pinned-evidence</code> prerelease and the comment links it, so it opens or downloads instead of playing inline: GitHub has no API for inline video. Nothing is committed to the repository.</p>` : ""}
     ${slack ? issuesHtml(c) : ""}
     <fieldset class="columns">
       <legend>Move the Linear issue to the column</legend>
@@ -243,6 +244,8 @@ function readConnector(form) {
     permissionMode: f.permissionMode.value,
     worktree: f.worktree.checked,
     instructions: f.instructions.value,
+    // Hidden while a Slack connector only replies, where it keeps the stored choice.
+    proof: f.proof?.checked ?? stored.proof ?? true,
     // A Slack form has no picked column, so it keeps the stored one.
     columns: Object.fromEntries(STAGES.map(([stage]) => [stage, f[`column-${stage}`]?.value.trim() ?? stored.columns?.[stage] ?? ""])),
   };
@@ -299,7 +302,7 @@ const actions = {
     showPage("integrations");
   },
   "new-connector"() {
-    const common = { id: "", enabled: true, folder: active?.cwd ?? "", model: "opus", effort: "high", permissionMode: "auto" };
+    const common = { id: "", enabled: true, folder: active?.cwd ?? "", model: "opus", effort: "high", permissionMode: "auto", proof: true };
     settings.connectors.push(
       settings.linear
         ? {

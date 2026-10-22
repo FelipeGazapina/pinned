@@ -1,6 +1,7 @@
 mod agent;
 mod awake;
 mod connectors;
+mod evidence;
 mod history;
 mod hooks;
 mod linear;
@@ -638,6 +639,7 @@ fn main() {
         Some(hooks::STAGE_SUBCOMMAND) => Some(hooks::stage(args.next().as_deref())),
         Some(hooks::SLACK_SUBCOMMAND) => Some(hooks::slack(&args.collect::<Vec<_>>())),
         Some(hooks::LINEAR_SUBCOMMAND) => Some(hooks::linear(&args.collect::<Vec<_>>())),
+        Some(evidence::SUBCOMMAND) => Some(evidence::run(&args.collect::<Vec<_>>())),
         _ => None,
     };
     match command {

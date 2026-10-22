@@ -131,6 +131,13 @@ pub struct Connector {
     /// How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.
     #[serde(default)]
     pub followed: BTreeMap<String, Followed>,
+    /// Whether a session that opens a pull request must prove it works, with a Playwright video.
+    #[serde(default = "on")]
+    pub proof: bool,
+}
+
+fn on() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -639,6 +646,9 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &Path) -> Run {
         prompt += "\n\nReport your progress to pinned, the app that started this session. Each command moves the Linear issue to its next column. Run each one once:\n";
         prompt += &steps.join("\n");
     }
+    if c.proof {
+        prompt += &proof_of_work(exe);
+    }
     prompt += &format!(
         "\n\nLinear issue {}: {}\n{}\n\n{}",
         issue.identifier,
@@ -649,6 +659,27 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &Path) -> Run {
     args.push(prompt);
     Run { cwd: c.folder.clone(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() } }
 }
+
+/// What every connector session that may open a pull request must do to prove the change works.
+/// The proof goes on the pull request as a comment, never into the repository.
+fn proof_of_work(exe: &Path) -> String {
+    format!(
+        "\n\nProof of work. Prove on the pull request that the change works. Never `git add` the video or the script: nothing from the recording is committed.\n\
+         - If the change has behavior a user can see in a running web UI, record it with Playwright. Write the script in a new temporary directory outside the repository. \
+         If the project has Playwright installed, load it from there (`createRequire('<repo>/')`); otherwise run `npm init -y && npm i -D playwright && npx playwright install chromium` in the temporary directory.\n\
+         - The script starts the app the way the project documents, then drives exactly the flow the change affects. Launch chromium with `slowMo: 300` so a person can follow it, record with `browser.newContext({{ recordVideo: {{ dir }} }})`, \
+         and hold the final state for a second. Run `await context.close()` before you read `page.video().path()`: the .webm stays empty until then.\n\
+         - Run the script for real and check that the video shows the fixed behavior, for example with `ffprobe` or a frame pulled with ffmpeg. If the run fails because of the change, fix the change. Never hide the failure.\n\
+         - Once the pull request is open, run `'{}' evidence <video> --caption \"<two lines on what the video shows>\"`. It uploads the video to the repository's `pinned-evidence` prerelease, posts a `## Proof` comment that links it on the pull request, and prints the comment link. \
+         Running it again with the same file posts nothing new. Explain the bug path, before and after, in the pull request body.\n\
+         - If a browser cannot show the change (a library, a CLI, backend only, no runnable UI), or the app cannot start here, do not fake a video. \
+         Post the proof with `gh pr comment <number> --body-file <file>`: a `## Proof` heading, \"No video: <one-line reason>\", then the exact test or command output that proves the change.\n\
+         - Never show secrets or real user data in the recording.",
+        exe.display()
+    )
+}
+
+const SLACK_PROOF: &str = "\nPut the link to the Proof comment in your last reply in the thread too.";
 
 const TAB_NAME_CHARS: usize = 50;
 const TRIAGE_ONLY: &str = "\n\nThis connector only triages: never change code, and never file a Linear issue. `pinned linear create` is turned off for it.";
@@ -721,6 +752,10 @@ fn slack_run(
         reply_header("<name>")
     );
     prompt += &fix_rule(c, exe);
+    if c.proof && c.fix != Fix::Off {
+        prompt += &proof_of_work(exe);
+        prompt += SLACK_PROOF;
+    }
     prompt += &format!("\n\nSlack thread in #{channel_name}, oldest first:\n");
     let transcript: Vec<String> = posts.iter().map(|p| format!("{}: {}", p.author, p.text)).collect();
     prompt += &transcript.join("\n");
@@ -888,9 +923,8 @@ pub async fn pick_folder(app: AppHandle, start: Option<String>) -> Option<String
 mod tests {
     use super::*;
 
-    #[test]
-    fn run_passes_connector_settings_to_claude() {
-        let connector = Connector {
+    fn linear_connector() -> Connector {
+        Connector {
             id: "c1".into(),
             name: "Resolve".into(),
             enabled: true,
@@ -909,15 +943,23 @@ mod tests {
             fix: Fix::Off,
             created: BTreeMap::new(),
             followed: BTreeMap::new(),
-        };
-        let issue = linear::Issue {
+            proof: false,
+        }
+    }
+
+    fn issue() -> linear::Issue {
+        linear::Issue {
             id: "uuid".into(),
             identifier: "ENG-7".into(),
             title: "Broken button".into(),
             description: None,
             url: "https://linear.app/x/issue/ENG-7".into(),
-        };
-        let run = run(&connector, &issue, Path::new("/Applications/pinned.app/Contents/MacOS/pinned"));
+        }
+    }
+
+    #[test]
+    fn run_passes_connector_settings_to_claude() {
+        let run = run(&linear_connector(), &issue(), Path::new("/Applications/pinned.app/Contents/MacOS/pinned"));
         assert_eq!(run.cwd, PathBuf::from("/repo"));
         assert_eq!((run.connector.as_str(), &run.subject), ("c1", &Subject::LinearIssue { issue: "uuid".into() }));
         assert_eq!(
@@ -957,6 +999,7 @@ mod tests {
             fix: Fix::Off,
             created: BTreeMap::new(),
             followed: BTreeMap::new(),
+            proof: false,
         }
     }
 
@@ -1221,5 +1264,53 @@ mod tests {
         let json = serde_json::to_value(&store.connectors).unwrap();
         assert_eq!(json[0]["trigger"], serde_json::json!({ "kind": "linear-label", "label": "claude" }));
         assert_eq!(json[0]["handled"], serde_json::json!(["uuid"]));
+        assert!(store.connectors[0].proof, "a connector saved before the proof setting requires proof");
+        assert_eq!(json[0]["proof"], serde_json::json!(true));
+        let mut off = json[0].clone();
+        off["proof"] = serde_json::json!(false);
+        assert!(!serde_json::from_value::<Connector>(off).unwrap().proof);
+    }
+
+    const PROOF: &str = "\n\nProof of work. Prove on the pull request that the change works. Never `git add` the video or the script: nothing from the recording is committed.\n\
+        - If the change has behavior a user can see in a running web UI, record it with Playwright. Write the script in a new temporary directory outside the repository. \
+        If the project has Playwright installed, load it from there (`createRequire('<repo>/')`); otherwise run `npm init -y && npm i -D playwright && npx playwright install chromium` in the temporary directory.\n\
+        - The script starts the app the way the project documents, then drives exactly the flow the change affects. Launch chromium with `slowMo: 300` so a person can follow it, record with `browser.newContext({ recordVideo: { dir } })`, \
+        and hold the final state for a second. Run `await context.close()` before you read `page.video().path()`: the .webm stays empty until then.\n\
+        - Run the script for real and check that the video shows the fixed behavior, for example with `ffprobe` or a frame pulled with ffmpeg. If the run fails because of the change, fix the change. Never hide the failure.\n\
+        - Once the pull request is open, run `'/bin/pinned' evidence <video> --caption \"<two lines on what the video shows>\"`. It uploads the video to the repository's `pinned-evidence` prerelease, posts a `## Proof` comment that links it on the pull request, and prints the comment link. \
+        Running it again with the same file posts nothing new. Explain the bug path, before and after, in the pull request body.\n\
+        - If a browser cannot show the change (a library, a CLI, backend only, no runnable UI), or the app cannot start here, do not fake a video. \
+        Post the proof with `gh pr comment <number> --body-file <file>`: a `## Proof` heading, \"No video: <one-line reason>\", then the exact test or command output that proves the change.\n\
+        - Never show secrets or real user data in the recording.";
+
+    #[test]
+    fn a_linear_run_must_prove_its_pull_request_unless_proof_is_off() {
+        let prompt = |proof| run(&Connector { proof, ..linear_connector() }, &issue(), Path::new("/bin/pinned")).args.pop().unwrap();
+        assert_eq!(
+            prompt(true),
+            format!(
+                "Fix it.\n\nReport your progress to pinned, the app that started this session. Each command moves the Linear issue to its next column. Run each one once:\n- Run `'/bin/pinned' stage coding` right before you start changing code.\
+                 {PROOF}\n\nLinear issue ENG-7: Broken button\nhttps://linear.app/x/issue/ENG-7\n\n(no description)"
+            )
+        );
+        assert!(!prompt(false).contains("Proof"));
+    }
+
+    #[test]
+    fn a_slack_run_proves_its_pull_request_only_when_it_may_open_one() {
+        let prompt = |fix, proof| {
+            let c = Connector { fix, proof, ..fixing_connector() };
+            connector_thread_run(&c, "2026-10-19T10:00:00Z", "2026-10-19T10:01:00Z").args.pop().unwrap()
+        };
+        let block = format!(
+            "{PROOF}\nPut the link to the Proof comment in your last reply in the thread too.\n\nSlack thread in #support, oldest first:\n"
+        );
+        for fix in [Fix::Ask, Fix::Auto] {
+            let with = prompt(fix, true);
+            assert!(with.contains(&format!("If a pinned command fails, reply in the thread with its error and stop.{block}")), "{fix:?}");
+            assert_eq!(with.replace(&block, "\n\nSlack thread in #support, oldest first:\n"), prompt(fix, false), "{fix:?}");
+        }
+        assert!(!prompt(Fix::Off, true).contains("Proof"));
+        assert_eq!(prompt(Fix::Off, true), prompt(Fix::Off, false));
     }
 }
