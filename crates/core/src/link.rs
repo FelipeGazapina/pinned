@@ -8,7 +8,7 @@
 use crate::account::Credentials;
 use crate::agent::Message;
 use crate::machine::{Machine, ViewerId};
-use crate::wire::{Bytes, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
+use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -71,8 +71,6 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     let thread = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("could not start the hub link's runtime");
         runtime.block_on(run(link, creds, machine, version, stopped));
-        // A call still running, such as a clone for a connector's run, finishes on its own.
-        runtime.shutdown_background();
     });
     Link { shared, stop, thread }
 }
@@ -179,6 +177,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
 
     let (out, mut outgoing) = channel::unbounded_channel();
     *shared.out.lock().unwrap() = Some(out.clone());
+    let calls = in_order(machine.clone(), out.clone());
     eprintln!("pinned: connected to {}", creds.hub);
     shared.send(&MachineFrame::Event { event: MachineEvent::Tabs { tabs: machine.tabs() } });
 
@@ -190,7 +189,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
             frame = stream.next() => {
                 heard = Instant::now();
                 match frame {
-                    Some(Ok(Frame::Text(t))) => answer(shared, machine, &out, &t, version),
+                    Some(Ok(Frame::Text(t))) => answer(shared, machine, &out, &calls, &t, version),
                     Some(Ok(Frame::Close(_))) | None => return Ok(()),
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.to_string()),
@@ -206,16 +205,32 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     }
 }
 
+/// A thread that answers the connection's calls one after another, so input typed fast reaches
+/// the session in order. It ends with the connection.
+fn in_order(machine: Arc<Machine>, out: channel::UnboundedSender<String>) -> mpsc::Sender<(u64, Call)> {
+    let (calls, queue) = mpsc::channel::<(u64, Call)>();
+    std::thread::spawn(move || {
+        for (id, call) in queue {
+            let reply = MachineFrame::Reply(Reply::new(id, machine.call(call)));
+            let _ = out.send(serde_json::to_string(&reply).unwrap());
+        }
+    });
+    calls
+}
+
 /// Handles one frame from the hub.
-fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSender<String>, frame: &str, version: &str) {
+fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSender<String>, calls: &mpsc::Sender<(u64, Call)>, frame: &str, version: &str) {
     match serde_json::from_str::<ToMachine>(frame) {
-        Ok(ToMachine::Call { id, call }) => {
+        // A run may clone a repository for minutes, so it doesn't hold up the calls behind it.
+        Ok(ToMachine::Call { id, call: call @ Call::Run { .. } }) => {
             let (machine, out) = (machine.clone(), out.clone());
-            // A run may clone a repository, so calls run off the link's thread.
-            tokio::task::spawn_blocking(move || {
+            std::thread::spawn(move || {
                 let reply = MachineFrame::Reply(Reply::new(id, machine.call(call)));
                 let _ = out.send(serde_json::to_string(&reply).unwrap());
             });
+        }
+        Ok(ToMachine::Call { id, call }) => {
+            let _ = calls.send((id, call));
         }
         Ok(ToMachine::Reply(reply)) => {
             if let Some(waiting) = shared.pending.lock().unwrap().remove(&reply.id) {

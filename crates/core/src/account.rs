@@ -132,6 +132,18 @@ pub fn pair(hub: &str, code: &str, name: &str, os: &str) -> Result<Credentials, 
     })
 }
 
+/// Ends the login, so its token no longer opens the hub. The machine's own token stays valid.
+pub fn logout(hub: &str, user_token: &str) -> Result<(), String> {
+    let hub = hub.trim().trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
+    let response = client.post(format!("{hub}/api/logout")).bearer_auth(user_token).send().map_err(|e| format!("could not reach {hub}: {e}"))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("{hub} answered {}", response.status()))
+    }
+}
+
 /// This machine's host name, which names it in the account until someone renames it.
 pub fn hostname() -> String {
     let out = std::process::Command::new("hostname").stderr(std::process::Stdio::null()).output();
