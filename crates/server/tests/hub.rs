@@ -418,3 +418,30 @@ fn sign_in_rejects_wrong_passwords_duplicates_and_logged_out_tokens() {
     }
     assert_eq!(account::login(&url, "ana@acme.dev", "correct horse"), Err("too many failed sign ins; try again in 15 minutes".into()));
 }
+
+#[test]
+fn a_burst_of_parallel_sign_ins_counts_against_the_limit() {
+    let hub = TestHub::start("burst");
+    let url = hub.url.clone();
+    account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let answers: Vec<_> = (0..30)
+        .map(|_| {
+            let url = url.clone();
+            std::thread::spawn(move || account::login(&url, "ana@acme.dev", "wrong horse"))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|t| t.join().unwrap())
+        .collect();
+    let refused = answers.iter().filter(|a| **a == Err("too many failed sign ins; try again in 15 minutes".to_owned())).count();
+    assert_eq!(refused, 20);
+}
+
+#[test]
+fn the_hub_reconnects_when_postgres_drops_it() {
+    let hub = TestHub::start("reconnect");
+    account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+    admin(&format!("select pg_terminate_backend(pid) from pg_stat_activity where datname = '{}'", hub.database));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(account::login(&hub.url, "ana@acme.dev", "correct horse").is_ok());
+}

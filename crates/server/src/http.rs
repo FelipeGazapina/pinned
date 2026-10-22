@@ -1,5 +1,5 @@
 use crate::db;
-use crate::hub::{Account, Hub};
+use crate::hub::{Account, Hub, Outbox};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -16,12 +16,19 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 const MIN_PASSWORD: usize = 8;
-const MAX_ATTEMPTS: usize = 10;
+/// Sign-in attempts allowed within `ATTEMPT_WINDOW` from one address, the only limit a stranger can't
+/// spend on someone else's behalf.
+const ADDRESS_ATTEMPTS: usize = 10;
+/// A higher limit per email slows guessing spread over many addresses without letting one
+/// address lock the owner out.
+const EMAIL_ATTEMPTS: usize = 100;
+const ADDRESS_SIGNUPS: usize = 5;
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(15 * 60);
+/// Each argon2 hash holds about 19 MiB, so only this many run at once whatever arrives.
+const CONCURRENT_HASHES: usize = 4;
 const AUTH_WAIT: Duration = Duration::from_secs(15);
 /// Keeps sockets alive through proxies that close idle ones, such as nginx after 60s.
 const PING: Duration = Duration::from_secs(25);
@@ -33,10 +40,11 @@ pub struct Server {
     hub: Arc<Hub>,
     downloads: PathBuf,
     attempts: Mutex<HashMap<String, Vec<Instant>>>,
+    hashing: tokio::sync::Semaphore,
 }
 
 pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf) -> Router {
-    let server = Arc::new(Server { hub, downloads, attempts: Mutex::default() });
+    let server = Arc::new(Server { hub, downloads, attempts: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES) });
     Router::new()
         .route("/api/signup", post(signup))
         .route("/api/login", post(login))
@@ -94,7 +102,8 @@ fn email(raw: &str) -> Result<String, Error> {
     Ok(email)
 }
 
-async fn hash_password(password: String) -> Result<String, Error> {
+async fn hash_password(server: &Server, password: String) -> Result<String, Error> {
+    let _permit = server.hashing.acquire().await.map_err(|e| internal(e.to_string()))?;
     tokio::task::spawn_blocking(move || {
         use argon2::password_hash::{PasswordHasher, SaltString};
         use rand_core::OsRng;
@@ -105,7 +114,8 @@ async fn hash_password(password: String) -> Result<String, Error> {
     .map_err(|e| internal(e.to_string()))
 }
 
-async fn password_matches(password: String, hash: String) -> bool {
+async fn password_matches(server: &Server, password: String, hash: String) -> bool {
+    let Ok(_permit) = server.hashing.acquire().await else { return false };
     tokio::task::spawn_blocking(move || {
         use argon2::password_hash::{PasswordHash, PasswordVerifier};
         PasswordHash::new(&hash).is_ok_and(|h| argon2::Argon2::default().verify_password(password.as_bytes(), &h).is_ok())
@@ -114,12 +124,15 @@ async fn password_matches(password: String, hash: String) -> bool {
     .unwrap_or(false)
 }
 
-async fn signup(State(server): State<Arc<Server>>, Json(body): Json<SignIn>) -> Answer<Session> {
+async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<SignIn>) -> Answer<Session> {
     let email = email(&body.email)?;
     if body.password.chars().count() < MIN_PASSWORD {
         return Err(Error(StatusCode::BAD_REQUEST, format!("the password needs at least {MIN_PASSWORD} characters")));
     }
-    let hash = hash_password(body.password).await?;
+    if !server.attempt(&[(format!("signup:{}", client_address(peer, &headers)), ADDRESS_SIGNUPS)]) {
+        return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many sign ups; try again in 15 minutes".into()));
+    }
+    let hash = hash_password(&server, body.password).await?;
     let account = server.hub.db.create_account(&email, &hash).await.map_err(internal)?;
     let account = account.ok_or_else(|| Error(StatusCode::CONFLICT, "an account with that email already exists".into()))?;
     let token = server.hub.db.create_login(Uuid::parse_str(&account.id).unwrap()).await.map_err(internal)?;
@@ -128,39 +141,47 @@ async fn signup(State(server): State<Arc<Server>>, Json(body): Json<SignIn>) -> 
 }
 
 impl Server {
-    fn throttled(&self, keys: &[String]) -> bool {
+    /// Counts an attempt against each key and its limit, unless one is spent. The attempt counts
+    /// before the password is checked, so a burst of parallel requests can't all slip under the limit.
+    fn attempt(&self, keys: &[(String, usize)]) -> bool {
         let mut attempts = self.attempts.lock().unwrap();
-        keys.iter().any(|key| {
-            let failed = attempts.entry(key.clone()).or_default();
-            failed.retain(|at| at.elapsed() < ATTEMPT_WINDOW);
-            failed.len() >= MAX_ATTEMPTS
-        })
+        attempts.retain(|_, at| {
+            at.retain(|at| at.elapsed() < ATTEMPT_WINDOW);
+            !at.is_empty()
+        });
+        if keys.iter().any(|(key, limit)| attempts.get(key).is_some_and(|at| at.len() >= *limit)) {
+            return false;
+        }
+        for (key, _) in keys {
+            attempts.entry(key.clone()).or_default().push(Instant::now());
+        }
+        true
     }
 
-    fn failed(&self, keys: &[String]) {
+    /// Takes back the attempts of a sign in that succeeded.
+    fn succeeded(&self, keys: &[(String, usize)]) {
         let mut attempts = self.attempts.lock().unwrap();
-        attempts.retain(|_, failed| failed.last().is_some_and(|at| at.elapsed() < ATTEMPT_WINDOW));
-        for key in keys {
-            attempts.entry(key.clone()).or_default().push(Instant::now());
+        for (key, _) in keys {
+            if let Some(at) = attempts.get_mut(key) {
+                at.pop();
+            }
         }
     }
 }
 
 async fn login(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<SignIn>) -> Answer<Session> {
     let email = email(&body.email)?;
-    let keys = [format!("email:{email}"), format!("address:{}", client_address(peer, &headers))];
-    if server.throttled(&keys) {
+    let keys = [(format!("email:{email}"), EMAIL_ATTEMPTS), (format!("address:{}", client_address(peer, &headers)), ADDRESS_ATTEMPTS)];
+    if !server.attempt(&keys) {
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many failed sign ins; try again in 15 minutes".into()));
     }
     let found = server.hub.db.account_by_email(&email).await.map_err(internal)?;
     let account = match found {
-        Some((account, hash)) => password_matches(body.password, hash).await.then_some(account),
+        Some((account, hash)) => password_matches(&server, body.password, hash).await.then_some(account),
         None => None,
     };
-    let Some(account) = account else {
-        server.failed(&keys);
-        return Err(Error(StatusCode::UNAUTHORIZED, "wrong email or password".into()));
-    };
+    let Some(account) = account else { return Err(Error(StatusCode::UNAUTHORIZED, "wrong email or password".into())) };
+    server.succeeded(&keys);
     let token = server.hub.db.create_login(Uuid::parse_str(&account.id).unwrap()).await.map_err(internal)?;
     Ok(Json(Session { token, account }))
 }
@@ -218,6 +239,11 @@ fn close_unauthorized() -> Message {
     Message::Close(Some(CloseFrame { code: UNAUTHORIZED, reason: "unauthorized".into() }))
 }
 
+/// 1013, try again later: the peer reconnects, which a refusal would stop.
+fn close_behind() -> Message {
+    Message::Close(Some(CloseFrame { code: 1013, reason: "fell behind".into() }))
+}
+
 async fn first_text(socket: &mut WebSocket) -> Option<String> {
     match tokio::time::timeout(AUTH_WAIT, socket.recv()).await {
         Ok(Some(Ok(Message::Text(text)))) => Some(text.to_string()),
@@ -257,7 +283,7 @@ async fn serve_client(hub: Arc<Hub>, mut socket: WebSocket) {
         Err(e) => return eprintln!("pinned-server: client sign in failed: {e}"),
     };
     let id = hub.next_socket();
-    let (out, mut outbox) = mpsc::unbounded_channel();
+    let (out, mut outbox, overflowed) = Outbox::new();
     account.client_connected(id, db::hash(&token), out, machines);
     eprintln!("pinned-server: client {id} of account {} connected", account.id);
 
@@ -278,6 +304,10 @@ async fn serve_client(hub: Arc<Hub>, mut socket: WebSocket) {
                 Some(Ok(_)) => {}
             },
             _ = ping.tick() => if sink.send(Message::Ping(Default::default())).await.is_err() { break },
+            _ = overflowed.notified() => {
+                let _ = sink.send(close_behind()).await;
+                break;
+            }
         }
     }
     // Answers a client's close frame, so the client sees a clean close instead of 1006.
@@ -340,7 +370,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
         Err(e) => return eprintln!("pinned-server: machine sign in failed: {e}"),
     };
     let (machine, socket_id) = (row.id.to_string(), hub.next_socket());
-    let (out, mut outbox) = mpsc::unbounded_channel();
+    let (out, mut outbox, overflowed) = Outbox::new();
     let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0 };
     let _ = out.send(serde_json::to_string(&ToMachine::Hello { machine: view }).unwrap());
     // A machine that reconnects before its old socket timed out goes offline and back, so clients attach again.
@@ -365,6 +395,10 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
                 Ok(Some(Ok(_))) => {}
             },
             _ = ping.tick() => if sink.send(Message::Ping(Default::default())).await.is_err() { break },
+            _ = overflowed.notified() => {
+                let _ = sink.send(close_behind()).await;
+                break;
+            }
         }
     }
     let _ = sink.close().await;

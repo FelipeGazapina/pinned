@@ -28,7 +28,9 @@ const CODE_LEN: usize = 8;
 
 #[derive(Clone)]
 pub struct Db {
-    client: Arc<Client>,
+    url: Arc<str>,
+    /// Replaced when Postgres drops the connection, as on its restart, so the hub doesn't stay down.
+    client: Arc<tokio::sync::Mutex<Arc<Client>>>,
 }
 
 pub struct Token {
@@ -64,27 +66,41 @@ pub struct Connectors {
     pub secrets: BTreeMap<String, String>,
 }
 
+async fn open(url: &str) -> Result<Client, String> {
+    let (client, connection) = tokio_postgres::connect(url, NoTls).await.map_err(|e| format!("could not connect to Postgres: {e}"))?;
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("pinned-server: Postgres connection ended: {e}");
+        }
+    });
+    Ok(client)
+}
+
 fn err(e: tokio_postgres::Error) -> String {
     e.to_string()
 }
 
 impl Db {
     pub async fn connect(url: &str) -> Result<Db, String> {
-        let (client, connection) = tokio_postgres::connect(url, NoTls).await.map_err(|e| format!("could not connect to Postgres: {e}"))?;
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("pinned-server: Postgres connection ended: {e}");
-            }
-        });
+        let client = open(url).await?;
         client.batch_execute(SCHEMA).await.map_err(|e| format!("could not create the tables: {e}"))?;
-        Ok(Db { client: Arc::new(client) })
+        Ok(Db { url: url.into(), client: Arc::new(tokio::sync::Mutex::new(Arc::new(client))) })
+    }
+
+    async fn client(&self) -> Result<Arc<Client>, String> {
+        let mut client = self.client.lock().await;
+        if client.is_closed() {
+            *client = Arc::new(open(&self.url).await?);
+            eprintln!("pinned-server: reconnected to Postgres");
+        }
+        Ok(client.clone())
     }
 
     /// The new account, or None when the email is taken.
     pub async fn create_account(&self, email: &str, password_hash: &str) -> Result<Option<AccountView>, String> {
         let id = Uuid::new_v4();
         let inserted = self
-            .client
+            .client().await?
             .execute("insert into accounts (id, email, password_hash) values ($1, $2, $3) on conflict (email) do nothing", &[&id, &email, &password_hash])
             .await
             .map_err(err)?;
@@ -92,25 +108,25 @@ impl Db {
     }
 
     pub async fn account_by_email(&self, email: &str) -> Result<Option<(AccountView, String)>, String> {
-        let row = self.client.query_opt("select id, password_hash from accounts where email = $1", &[&email]).await.map_err(err)?;
+        let row = self.client().await?.query_opt("select id, password_hash from accounts where email = $1", &[&email]).await.map_err(err)?;
         Ok(row.map(|r| (AccountView { id: r.get::<_, Uuid>(0).to_string(), email: email.to_owned() }, r.get(1))))
     }
 
     pub async fn email(&self, account: Uuid) -> Result<Option<String>, String> {
-        let row = self.client.query_opt("select email from accounts where id = $1", &[&account]).await.map_err(err)?;
+        let row = self.client().await?.query_opt("select email from accounts where id = $1", &[&account]).await.map_err(err)?;
         Ok(row.map(|r| r.get(0)))
     }
 
     pub async fn create_login(&self, account: Uuid) -> Result<String, String> {
         let token = Token::new();
-        self.client.execute("insert into logins (token_hash, account) values ($1, $2)", &[&token.hash, &account]).await.map_err(err)?;
+        self.client().await?.execute("insert into logins (token_hash, account) values ($1, $2)", &[&token.hash, &account]).await.map_err(err)?;
         Ok(token.text)
     }
 
     /// The account a login token belongs to, marking the login used.
     pub async fn login(&self, token: &str) -> Result<Option<Uuid>, String> {
         let row = self
-            .client
+            .client().await?
             .query_opt("update logins set last_used = now() where token_hash = $1 returning account", &[&hash(token)])
             .await
             .map_err(err)?;
@@ -118,13 +134,13 @@ impl Db {
     }
 
     pub async fn logout(&self, token: &str) -> Result<(), String> {
-        self.client.execute("delete from logins where token_hash = $1", &[&hash(token)]).await.map_err(err).map(drop)
+        self.client().await?.execute("delete from logins where token_hash = $1", &[&hash(token)]).await.map_err(err).map(drop)
     }
 
     pub async fn create_machine(&self, account: Uuid, name: &str, os: &str) -> Result<(MachineView, String), String> {
         let (id, token) = (Uuid::new_v4(), Token::new());
         let row = self
-            .client
+            .client().await?
             .query_one(
                 "insert into machines (id, account, name, os, token_hash) values ($1, $2, $3, $4, $5)
                  returning extract(epoch from created_at)::bigint",
@@ -139,7 +155,7 @@ impl Db {
     /// The machine a token belongs to, recording that it just connected from `os`.
     pub async fn machine_connected(&self, token: &str, os: &str) -> Result<Option<MachineRow>, String> {
         let row = self
-            .client
+            .client().await?
             .query_opt("update machines set os = $2, last_seen = now() where token_hash = $1 returning id, account, name", &[&hash(token), &os])
             .await
             .map_err(err)?;
@@ -147,13 +163,13 @@ impl Db {
     }
 
     pub async fn machine_seen(&self, machine: Uuid) -> Result<(), String> {
-        self.client.execute("update machines set last_seen = now() where id = $1", &[&machine]).await.map_err(err).map(drop)
+        self.client().await?.execute("update machines set last_seen = now() where id = $1", &[&machine]).await.map_err(err).map(drop)
     }
 
     /// The account's machines in the order they joined, all offline: the hub knows which are online.
     pub async fn machines(&self, account: Uuid) -> Result<Vec<MachineView>, String> {
         let rows = self
-            .client
+            .client().await?
             .query(
                 "select id, name, os, extract(epoch from coalesce(last_seen, created_at))::bigint from machines
                  where account = $1 order by created_at, id",
@@ -168,27 +184,27 @@ impl Db {
     }
 
     pub async fn machine_name(&self, account: Uuid, machine: Uuid) -> Result<Option<String>, String> {
-        let row = self.client.query_opt("select name from machines where id = $1 and account = $2", &[&machine, &account]).await.map_err(err)?;
+        let row = self.client().await?.query_opt("select name from machines where id = $1 and account = $2", &[&machine, &account]).await.map_err(err)?;
         Ok(row.map(|r| r.get(0)))
     }
 
     pub async fn rename_machine(&self, account: Uuid, machine: Uuid, name: &str) -> Result<bool, String> {
-        let n = self.client.execute("update machines set name = $3 where id = $1 and account = $2", &[&machine, &account, &name]).await.map_err(err)?;
+        let n = self.client().await?.execute("update machines set name = $3 where id = $1 and account = $2", &[&machine, &account, &name]).await.map_err(err)?;
         Ok(n == 1)
     }
 
     pub async fn remove_machine(&self, account: Uuid, machine: Uuid) -> Result<bool, String> {
-        let n = self.client.execute("delete from machines where id = $1 and account = $2", &[&machine, &account]).await.map_err(err)?;
+        let n = self.client().await?.execute("delete from machines where id = $1 and account = $2", &[&machine, &account]).await.map_err(err)?;
         Ok(n == 1)
     }
 
     /// A fresh pairing code for the account and when it expires, in Unix seconds.
     pub async fn create_pair_code(&self, account: Uuid) -> Result<(String, i64), String> {
-        self.client.execute("delete from pair_codes where expires_at < now()", &[]).await.map_err(err)?;
+        self.client().await?.execute("delete from pair_codes where expires_at < now()", &[]).await.map_err(err)?;
         loop {
             let code = pair_code();
             let row = self
-                .client
+                .client().await?
                 .query_opt(
                     "insert into pair_codes (code, account, expires_at) values ($1, $2, now() + interval '15 minutes')
                      on conflict do nothing returning extract(epoch from expires_at)::bigint",
@@ -205,7 +221,7 @@ impl Db {
     /// Spends a pairing code: the account it was made for, or None when it is unknown, used or expired.
     pub async fn take_pair_code(&self, code: &str) -> Result<Option<(Uuid, String)>, String> {
         let row = self
-            .client
+            .client().await?
             .query_opt(
                 "with taken as (delete from pair_codes where code = $1 returning account, expires_at)
                  select a.id, a.email from taken join accounts a on a.id = taken.account where taken.expires_at > now()",
@@ -217,23 +233,23 @@ impl Db {
     }
 
     pub async fn connectors(&self, account: Uuid) -> Result<Connectors, String> {
-        let row = self.client.query_one("select store, secrets from accounts where id = $1", &[&account]).await.map_err(err)?;
+        let row = self.client().await?.query_one("select store, secrets from accounts where id = $1", &[&account]).await.map_err(err)?;
         let secrets: Value = row.get(1);
         let secrets = serde_json::from_value(secrets).unwrap_or_default();
         Ok(Connectors { store: row.get(0), secrets })
     }
 
     pub async fn accounts_with_connectors(&self) -> Result<Vec<Uuid>, String> {
-        let rows = self.client.query("select id from accounts where store <> '{}' or secrets <> '{}'", &[]).await.map_err(err)?;
+        let rows = self.client().await?.query("select id from accounts where store <> '{}' or secrets <> '{}'", &[]).await.map_err(err)?;
         Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
     pub async fn save_store(&self, account: Uuid, store: &Value) -> Result<(), String> {
-        self.client.execute("update accounts set store = $2 where id = $1", &[&account, store]).await.map_err(err).map(drop)
+        self.client().await?.execute("update accounts set store = $2 where id = $1", &[&account, store]).await.map_err(err).map(drop)
     }
 
     pub async fn save_secrets(&self, account: Uuid, secrets: &Value) -> Result<(), String> {
-        self.client.execute("update accounts set secrets = $2 where id = $1", &[&account, secrets]).await.map_err(err).map(drop)
+        self.client().await?.execute("update accounts set secrets = $2 where id = $1", &[&account, secrets]).await.map_err(err).map(drop)
     }
 }
 

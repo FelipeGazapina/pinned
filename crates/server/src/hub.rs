@@ -14,7 +14,36 @@ use uuid::Uuid;
 
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
 
-pub type Outbox = mpsc::UnboundedSender<String>;
+/// Frames a socket holds for a peer that reads slower than they arrive, such as a phone on a busy tab.
+const OUTBOX_FRAMES: usize = 1024;
+
+/// A socket's outgoing frames. A peer that lets `OUTBOX_FRAMES` pile up is dropped rather than
+/// letting the hub's memory grow; it reconnects and its terminals replay their screens.
+#[derive(Clone)]
+pub struct Outbox {
+    frames: mpsc::Sender<String>,
+    overflowed: Arc<tokio::sync::Notify>,
+}
+
+impl Outbox {
+    /// The outbox, the socket's end of it, and what fires once the peer fell behind.
+    pub fn new() -> (Outbox, mpsc::Receiver<String>, Arc<tokio::sync::Notify>) {
+        let (frames, queue) = mpsc::channel(OUTBOX_FRAMES);
+        let overflowed = Arc::new(tokio::sync::Notify::new());
+        (Outbox { frames, overflowed: overflowed.clone() }, queue, overflowed)
+    }
+
+    pub fn send(&self, frame: String) -> Result<(), ()> {
+        match self.frames.try_send(frame) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.overflowed.notify_one();
+                Err(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(()),
+        }
+    }
+}
 pub type Sent = (String, oneshot::Receiver<Result<Value, String>>);
 
 pub struct Hub {
@@ -323,6 +352,8 @@ impl Account {
         let m = live.machines.get_mut(machine)?;
         let id = m.next_call;
         m.next_call += 1;
+        // Calls whose callers stopped waiting, as after a timeout, would otherwise stay until the machine disconnects.
+        m.pending.retain(|_, waiting| !waiting.is_closed());
         let (answer, answered) = oneshot::channel();
         m.pending.insert(id, answer);
         let _ = m.out.send(frame(&ToMachine::Call { id, call }));
