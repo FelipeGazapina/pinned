@@ -836,6 +836,11 @@ fn repo_name(repo: &str) -> Option<&str> {
 }
 
 fn repo_key(url: &str) -> Option<String> {
+    https_url(url).map(|https| https.trim_start_matches("https://").trim_end_matches(".git").to_lowercase())
+}
+
+/// The https address of a repository as written, whichever of its URLs is given.
+fn https_url(url: &str) -> Option<String> {
     let url = url.trim().trim_end_matches('/').trim_end_matches(".git");
     let rest = match url.split_once("://") {
         Some((_, rest)) => rest.to_owned(),
@@ -845,7 +850,7 @@ fn repo_key(url: &str) -> Option<String> {
     let mut parts = rest.split('/').filter(|p| !p.is_empty());
     let host = parts.next()?.split(':').next()?.to_lowercase();
     let path: Vec<&str> = parts.collect();
-    (path.len() >= 2).then(|| format!("{host}/{}", path.join("/").to_lowercase()))
+    (path.len() >= 2).then(|| format!("https://{host}/{}.git", path.join("/")))
 }
 
 fn same_repo(a: &str, b: &str) -> bool {
@@ -855,12 +860,12 @@ fn same_repo(a: &str, b: &str) -> bool {
 /// Clones `repo`, and if that fails, its https form: a machine without ssh access to the
 /// host, such as a VPS holding only another repository's deploy key, can still clone a public one.
 fn clone(repo: &str, into: &Path, token: Option<&str>) -> Result<(), String> {
-    let https = repo_key(repo).map(|key| format!("https://{key}.git"));
+    let https = https_url(repo);
     // With the account's token a GitHub repository clones over https, private or not, and keeps the
     // token in the clone's own config, as actions/checkout does, so the session can fetch and push.
     if let (Some(token), Some(https)) = (token, https.as_ref().filter(|url| url.starts_with("https://github.com/"))) {
         let auth = github::auth_config(token);
-        clone_once(if repo.starts_with("https://github.com/") { repo } else { https }, into, Some(&auth))?;
+        clone_once(https, into, Some(&auth))?;
         return git_config(into, &auth);
     }
     let first = clone_once(repo, into, None);
@@ -1222,6 +1227,7 @@ mod tests {
         assert!(!same_repo(ssh, "git@github.com:FelipeGazapina/other.git"));
         assert!(!same_repo(ssh, "git@gitlab.com:FelipeGazapina/pinned.git"));
         assert_eq!(repo_key("pinned"), None);
+        assert_eq!(https_url(ssh).as_deref(), Some("https://github.com/FelipeGazapina/pinned.git"));
     }
 
     #[test]
