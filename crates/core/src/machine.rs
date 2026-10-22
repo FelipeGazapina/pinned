@@ -330,7 +330,11 @@ impl Machine {
     /// Opens a connector's run and starts it at once, so it works with no one watching.
     pub fn run(&self, run: &RunSpec) -> Result<TabId, String> {
         let id = self.open_run(run)?;
-        self.start_claude(&id, UNWATCHED.0, UNWATCHED.1)?;
+        // A run that can't start is refused whole, so the hub's next machine takes it and no idle tab stays behind here.
+        if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
+            self.close_tab(&id);
+            return Err(e);
+        }
         Ok(id)
     }
 
@@ -1132,6 +1136,16 @@ mod tests {
         assert_eq!(m.tab(&id, |t| t.launch.clone()).unwrap(), ["--name", "ENG-7", "Run `'/opt/pinned/bin/pinned' stage coding` first"]);
         let elsewhere = RunSpec { folder: "/nonexistent/acme".into(), repo: None, ..run };
         assert_eq!(m.open_run(&elsewhere), Err("/nonexistent/acme does not exist on this machine".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_that_cannot_start_leaves_no_tab() {
+        let dir = temp("run-unstartable");
+        let m = Machine::new(Launch { claude: "/nonexistent/claude".into(), ..launch() }, None, Some("/repo".into()), |_| {});
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec![], env: vec![] };
+        assert!(m.run(&run).is_err());
+        assert_eq!(m.tabs(), vec![]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
