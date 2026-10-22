@@ -1,3 +1,4 @@
+mod account;
 mod awake;
 mod commands;
 
@@ -123,10 +124,11 @@ fn focus_panel(app: AppHandle, window: WebviewWindow) {
     let _ = (app, window);
 }
 
-/// Ends the tab's session; the app exits with the last tab.
+/// Ends the tab's session. Signed out, the app exits with the last tab; signed in, it stays up
+/// so other devices can still open sessions on this Mac.
 #[tauri::command]
-fn close_tab(app: AppHandle, machine: State<Arc<Machine>>, tab: String) {
-    if machine.close_tab(&tab) {
+fn close_tab(app: AppHandle, machine: State<Arc<Machine>>, account: State<account::Account>, tab: String) {
+    if machine.close_tab(&tab) && !account.is_signed_in() {
         machine.quit();
         app.exit(0);
     }
@@ -266,7 +268,10 @@ fn main() {
             commands::slack_suggestions,
             commands::save_connector,
             commands::delete_connector,
-            commands::pick_folder
+            commands::pick_folder,
+            account::account,
+            account::sign_in,
+            account::sign_out
         ])
         .setup(move |app| {
             let config = app.path().app_config_dir().ok();
@@ -286,19 +291,7 @@ fn main() {
             watch_reminders(app.handle().clone());
             let storage = connectors::FileStorage::new(app.path().app_config_dir()?);
             app.manage(connectors::Connectors::new(storage, exe.display().to_string()));
-            let handle = app.handle().clone();
-            let opener = machine.clone();
-            tauri::async_runtime::spawn(async move {
-                let open = |work| {
-                    let taken = match work {
-                        connectors::Work::Run(run) => opener.run(&run.spec()).is_ok(),
-                        connectors::Work::Delivery(d) => opener.deliver(&d.env(), &d.text()),
-                    };
-                    async move { taken }
-                };
-                let checked = |check: &connectors::Check| drop(handle.emit("connectors-checked", check));
-                handle.state::<connectors::Connectors>().watch(open, checked).await
-            });
+            app.manage(account::Account::start(app.handle(), app.path().app_config_dir()?, machine.clone()));
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             add_tray(app)?;
@@ -307,16 +300,20 @@ fn main() {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),
                 agent::Message::ListReminders => Ok(handle.state::<reminders::Reminders>().list()),
                 agent::Message::CancelReminder { id } => handle.state::<reminders::Reminders>().cancel(id),
-                agent::Message::Stage { connector, subject, stage } => tauri::async_runtime::block_on(
-                    handle.state::<connectors::Connectors>().stage(&connector, &subject, stage),
-                ),
-                agent::Message::SlackReply { connector, channel, thread, text } => tauri::async_runtime::block_on(
-                    handle.state::<connectors::Connectors>().slack_reply(&connector, &channel, &thread, &text),
-                ),
-                agent::Message::LinearCreate { connector, channel, thread, title, description } => tauri::async_runtime::block_on(
-                    handle.state::<connectors::Connectors>().linear_create(&connector, &channel, &thread, &title, &description),
-                ),
                 agent::Message::Agent(_) | agent::Message::Usage(_) => Err("the machine answers this itself".into()),
+                callback => match handle.state::<account::Account>().forward(callback) {
+                    Ok(answer) => answer,
+                    Err(agent::Message::Stage { connector, subject, stage }) => tauri::async_runtime::block_on(
+                        handle.state::<connectors::Connectors>().stage(&connector, &subject, stage),
+                    ),
+                    Err(agent::Message::SlackReply { connector, channel, thread, text }) => tauri::async_runtime::block_on(
+                        handle.state::<connectors::Connectors>().slack_reply(&connector, &channel, &thread, &text),
+                    ),
+                    Err(agent::Message::LinearCreate { connector, channel, thread, title, description }) => tauri::async_runtime::block_on(
+                        handle.state::<connectors::Connectors>().linear_create(&connector, &channel, &thread, &title, &description),
+                    ),
+                    Err(_) => unreachable!("forward hands back only the callback it was given"),
+                },
             })?;
             let window = app.get_webview_window("main").unwrap();
             window.set_min_size(Some(EXPANDED_MIN))?;

@@ -800,7 +800,6 @@ async function bootApp() {
   await refreshTabs(LOCAL);
   for (const id of restored) await startTab(tabByKey(keyOf(LOCAL, id)));
   if (!machines.get(LOCAL).tabs.length) await openTab(LOCAL, null);
-  // Before the app can sign in, it has no account command.
-  const signedIn = await invoke("account").catch(() => null);
-  if (signedIn?.signed_in) connectHub(signedIn);
+  const signedIn = await invoke("account");
+  if (signedIn.signed_in) connectHub(signedIn);
 }
