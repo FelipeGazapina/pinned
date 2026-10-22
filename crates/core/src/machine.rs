@@ -1010,6 +1010,7 @@ mod tests {
             thread: thread.into(),
             messages: messages.iter().map(|m| m.to_string()).collect(),
             cursor: "1792400090.000000".into(),
+            mentioned: vec![],
         }
     }
 

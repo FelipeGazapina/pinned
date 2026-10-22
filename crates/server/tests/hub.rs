@@ -370,7 +370,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     let id = connector["id"].as_str().unwrap().to_owned();
     client.wait("the saved connector", |f| f["type"] == "settings" && f["settings"]["connectors"][0]["id"] == id);
     let account_id = uuid::Uuid::parse_str(&account.id).unwrap();
-    let run = |subject: Subject| Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject });
+    let run = |subject: Subject| Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![] });
     let open = |work| hub.runtime.block_on(hub.hub().open(account_id, work));
     let connector_tabs = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.connector.as_deref() == Some(&id) && t.running).count();
 
@@ -405,7 +405,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     );
 
     let delivery = |thread: &str| {
-        Work::Delivery(Delivery { connector: id.clone(), channel: "C0123ABCD".into(), thread: thread.into(), messages: vec!["yes, file it".into()], cursor: "1792400090.000000".into() })
+        Work::Delivery(Delivery { connector: id.clone(), channel: "C0123ABCD".into(), thread: thread.into(), messages: vec!["yes, file it".into()], cursor: "1792400090.000000".into(), mentioned: vec![] })
     };
     let seen = Arc::new(Mutex::new(vec![]));
     let sink = seen.clone();

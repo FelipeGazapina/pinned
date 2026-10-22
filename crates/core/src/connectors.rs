@@ -356,6 +356,8 @@ pub struct Run {
     pub args: Vec<String>,
     pub connector: String,
     pub subject: Subject,
+    /// The Slack messages the bot reacts to once a tab takes the run, by ts.
+    pub mentioned: Vec<String>,
 }
 
 impl Run {
@@ -387,6 +389,8 @@ pub struct Delivery {
     pub messages: Vec<String>,
     /// The newest message's ts, which the thread's cursor moves to once a session has the messages.
     pub cursor: String,
+    /// The messages that mention the bot, which it reacts to once a session has them, by ts.
+    pub mentioned: Vec<String>,
 }
 
 impl Delivery {
@@ -587,7 +591,8 @@ impl Connectors {
                     let cursor = posts.last().map_or_else(|| mention.thread.clone(), |p| p.ts.clone());
                     connector.followed.insert(key, Followed { cursor, seen: None, replied: false });
                     let note = mention_note(&mention, now);
-                    work.push(Work::Run(slack_run(connector, &channel, &channel_name, &mention.thread, &posts, note, &self.exe)));
+                    let run = slack_run(connector, &channel, &channel_name, &mention.thread, &posts, note, &self.exe);
+                    work.push(Work::Run(Run { mentioned: vec![mention.ts], ..run }));
                     changed = true;
                 }
                 Found::Replies { replies, .. } if replies.posts.is_empty() => {
@@ -604,6 +609,7 @@ impl Connectors {
                     thread: replies.thread,
                     messages: replies.posts.iter().map(reply_block).collect(),
                     cursor: replies.newest,
+                    mentioned: replies.mentioned,
                 })),
             }
         }
@@ -625,15 +631,16 @@ impl Connectors {
     {
         match work {
             Work::Run(run) => {
-                let (connector, subject, folder) = (run.connector.clone(), run.subject.clone(), run.cwd.clone());
+                let (connector, subject, folder, mentioned) = (run.connector.clone(), run.subject.clone(), run.cwd.clone(), run.mentioned.clone());
                 if !open(Work::Run(run)).await {
                     return Err(self.unclaim(&connector, &subject, &folder));
                 }
-                // The session starts even when Linear won't move the issue; the check reports why.
-                // A Slack thread has no issue to pick until its session files one.
+                // The session starts even when Linear won't move the issue or Slack won't take the
+                // reaction; the check reports why. A Slack thread has no issue to pick until its
+                // session files one.
                 match &subject {
                     Subject::LinearIssue { .. } => self.stage(&connector, &subject, Stage::Picked).await.map(drop),
-                    Subject::SlackThread { .. } => Ok(()),
+                    Subject::SlackThread { channel, .. } => self.acknowledge(channel, &mentioned).await,
                 }
             }
             Work::Delivery(d) => {
@@ -647,9 +654,25 @@ impl Connectors {
                     }
                     newest
                 };
-                self.follow(&d.connector, &d.channel, &d.thread, cursor)
+                self.follow(&d.connector, &d.channel, &d.thread, cursor)?;
+                self.acknowledge(&d.channel, &d.mentioned).await
             }
         }
+    }
+
+    /// Reacts to the messages a session took, so people can tell the bot didn't ignore them.
+    /// Tries every message even when one fails, and answers the first failure.
+    async fn acknowledge(&self, channel: &str, mentioned: &[String]) -> Result<(), String> {
+        if mentioned.is_empty() {
+            return Ok(());
+        }
+        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
+        let mut result = Ok(());
+        for ts in mentioned {
+            let reacted = slack::react(&token, channel, ts, slack::WORKING).await;
+            result = result.and(reacted);
+        }
+        result
     }
 
     fn unclaim(&self, connector: &str, subject: &Subject, folder: &Path) -> String {
@@ -672,7 +695,8 @@ impl Connectors {
         let posts = slack::thread(&token, &d.channel, &d.thread).await?;
         let newest = posts.last().map_or_else(|| d.cursor.clone(), |p| p.ts.clone());
         let note = c.created.get(&thread_key(&d.channel, &d.thread)).map(filed_note);
-        Ok((slack_run(&c, &d.channel, channel_name(name), &d.thread, &posts, note.as_deref(), &self.exe), newest))
+        let run = slack_run(&c, &d.channel, channel_name(name), &d.thread, &posts, note.as_deref(), &self.exe);
+        Ok((Run { mentioned: d.mentioned.clone(), ..run }, newest))
     }
 
     /// Records that the thread's session has every message up to `cursor`, someone else's among them.
@@ -848,7 +872,7 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
         issue.description.as_deref().unwrap_or("(no description)"),
     );
     args.push(prompt);
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() } }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() }, mentioned: vec![] }
 }
 
 /// What every connector session that may open a pull request must do to prove the change works.
@@ -959,7 +983,7 @@ fn slack_run(
     prompt += note.unwrap_or_default();
     args.push(prompt);
     let subject = Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() };
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![] }
 }
 
 fn reply_header(author: &str) -> String {
@@ -1212,7 +1236,12 @@ mod tests {
             Err("could not open a session in /repo; the next check tries again".into())
         );
         let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
-        assert!(block_on(connectors.hand_over(Work::Run(thread_run), &refuse)).is_err());
+        let thread_run = Run { mentioned: vec!["1792400050.000200".into()], ..thread_run };
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(thread_run), &refuse)),
+            Err("could not open a session in /repo; the next check tries again".into()),
+            "nothing reacts to a mention no session took"
+        );
 
         let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
         assert_eq!(reloaded[0].handled, ["older"]);
@@ -1241,6 +1270,31 @@ mod tests {
         let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
         assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { true })), Ok(()));
         assert_eq!(connectors.get_settings().connectors[0].handled, ["C0123ABCD:1792400050.000200"]);
+        assert_eq!(block_on(connectors.acknowledge("C0123ABCD", &[])), Ok(()), "nothing to react to needs no Slack");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_reaction_that_fails_leaves_the_session_and_cursor_in_place() {
+        let slack = Connector { id: "c2".into(), handled: vec!["C0123ABCD:1792400050.000200".into()], ..slack_connector() };
+        let (connectors, dir) = stored("unreacted", vec![slack]);
+        let not_connected = Err("Slack is not connected: connect it in pinned's Connectors settings".to_owned());
+        let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        let thread_run = Run { mentioned: vec!["1792400050.000200".into()], ..thread_run };
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { true })), not_connected);
+        assert_eq!(connectors.get_settings().connectors[0].handled, ["C0123ABCD:1792400050.000200"], "the run stays claimed");
+
+        let delivery = Delivery {
+            connector: "c2".into(),
+            channel: "C0123ABCD".into(),
+            thread: "1792400050.000200".into(),
+            messages: vec!["yes, file it".into()],
+            cursor: "1792400090.000000".into(),
+            mentioned: vec!["1792400090.000000".into()],
+        };
+        assert_eq!(block_on(connectors.hand_over(Work::Delivery(delivery), &|_| async { true })), not_connected);
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
+        assert_eq!(reloaded[0].followed["C0123ABCD:1792400050.000200"].cursor, "1792400090.000000", "the cursor moved all the same");
         let _ = std::fs::remove_dir_all(dir);
     }
 
