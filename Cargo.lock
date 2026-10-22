@@ -2428,10 +2428,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 name = "pinned"
 version = "0.5.1"
 dependencies = [
- "chrono",
  "pinned-core",
- "portable-pty",
- "reqwest",
  "rustls",
  "serde",
  "serde_json",
@@ -2440,7 +2437,6 @@ dependencies = [
  "tauri-nspanel",
  "tauri-plugin-dialog",
  "tauri-plugin-updater",
- "tokio",
 ]
 
 [[package]]

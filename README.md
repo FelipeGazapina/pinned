@@ -212,8 +212,12 @@ install, and restart.
 
 ## How it works
 
-- `src/pty.rs` runs `claude` in a pseudo-terminal. `ui/` renders it with xterm.js.
-- `src/hooks.rs` passes Claude Code a `--settings` file with `UserPromptSubmit`, `Stop` and
+- The code is a cargo workspace. `crates/core` (`pinned-core`) holds everything that doesn't
+  need a window, and `src/` is the Tauri app built on it.
+- `crates/core/src/machine.rs` runs each tab's `claude` in a pseudo-terminal
+  (`crates/core/src/pty.rs`) and keeps the last 256 KiB of its output for whoever attaches.
+  `ui/` renders it with xterm.js.
+- `crates/core/src/hooks.rs` passes Claude Code a `--settings` file with `UserPromptSubmit`, `Stop` and
   `Notification` hooks. Each hook runs `pinned hook <status>`, which forwards the event to the
   window over a Unix socket. Your own `~/.claude/settings.json` is not modified.
 - The usage meter comes from the data Claude Code gives its statusline. The `--settings` file

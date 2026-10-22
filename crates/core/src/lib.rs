@@ -8,6 +8,7 @@ pub mod evidence;
 pub mod history;
 pub mod hooks;
 pub mod linear;
+pub mod machine;
 pub mod plugin;
 pub mod projects;
 pub mod pty;
