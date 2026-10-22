@@ -28,6 +28,9 @@ xattr -dr com.apple.quarantine /Applications/pinned.app
 - Click `–` to shrink it to a pill. The pill shows what the agent is doing: working, done, or
   needs you. It flashes when the agent finishes or asks for permission. Click the pill to open
   the panel again.
+- The header shows how much of your Claude subscription you have used, for example
+  `5h 23%  7d 41%`. Each window has a thin bar: blue below 70%, amber from 70%, red from 90%.
+  Hover over it to see the exact figures and when each window resets.
 - Quit from the menu-bar icon.
 
 From a terminal you can open a specific folder:
@@ -201,6 +204,12 @@ install, and restart.
 - `src/hooks.rs` passes Claude Code a `--settings` file with `UserPromptSubmit`, `Stop` and
   `Notification` hooks. Each hook runs `pinned hook <status>`, which forwards the event to the
   window over a Unix socket. Your own `~/.claude/settings.json` is not modified.
+- The usage meter comes from the data Claude Code gives its statusline. The `--settings` file
+  sets `pinned statusline` as the statusline, which forwards the 5-hour and 7-day figures to
+  the window. Claude Code reports them only for Pro and Max subscriptions, and only after a
+  session's first response, so the meter stays hidden until then. A window leaves the meter
+  when it resets. If you set a `statusLine` in `~/.claude/settings.json`, `pinned statusline`
+  runs it with the same input and prints its output, so your statusline still shows.
 - `src/main.rs` turns the window into a non-activating `NSPanel`. macOS only lets that kind
   of window appear inside another app's fullscreen Space.
 
