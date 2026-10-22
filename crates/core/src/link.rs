@@ -7,7 +7,7 @@
 
 use crate::account::Credentials;
 use crate::agent::Message;
-use crate::machine::Machine;
+use crate::machine::{Machine, ViewerId};
 use crate::wire::{Bytes, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -18,8 +18,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc as channel, watch};
 use tokio_tungstenite::tungstenite::Message as Frame;
 
-/// The viewer id a subscribed tab's output goes out under.
-const VIEWER: &str = "hub";
 const PING: Duration = Duration::from_secs(20);
 /// A hub silent this long, pongs included, is gone even if the socket hasn't said so.
 const SILENT: Duration = Duration::from_secs(60);
@@ -44,8 +42,8 @@ struct Shared {
     /// `call_hub`s waiting for their reply, by frame id.
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>,
     next_call: AtomicU64,
-    /// Tabs the live connection streams to the hub.
-    subscribed: Mutex<HashSet<TabId>>,
+    /// The tabs and viewers the live connection streams to the hub.
+    subscribed: Mutex<HashSet<(TabId, ViewerId)>>,
 }
 
 impl Shared {
@@ -58,8 +56,8 @@ impl Shared {
     fn disconnected(&self, machine: &Machine) {
         *self.out.lock().unwrap() = None;
         self.pending.lock().unwrap().clear();
-        for tab in self.subscribed.lock().unwrap().drain() {
-            machine.detach(&tab, VIEWER);
+        for (tab, viewer) in self.subscribed.lock().unwrap().drain() {
+            machine.detach(&tab, &viewer);
         }
     }
 }
@@ -131,10 +129,7 @@ impl Link {
 async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, version: String, mut stopped: watch::Receiver<bool>) {
     let events = shared.clone();
     let listener = machine.subscribe(Box::new(move |event| {
-        // A subscribed tab's output already goes out through its viewer.
-        if !matches!(event, MachineEvent::Output { .. }) {
-            events.send(&MachineFrame::Event { event: event.clone() });
-        }
+        events.send(&MachineFrame::Event { event: event.clone() });
     }));
     let mut backoff = BACKOFF_MIN;
     loop {
@@ -227,19 +222,19 @@ fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSende
                 let _ = waiting.send(reply.result());
             }
         }
-        Ok(ToMachine::Subscribe { tab }) => {
-            let (out, id) = (out.clone(), tab.clone());
+        Ok(ToMachine::Subscribe { tab, viewer }) => {
+            let (out, id, to) = (out.clone(), tab.clone(), viewer.clone());
             let sink = move |bytes: &[u8]| {
-                let frame = MachineFrame::Event { event: MachineEvent::Output { tab: id.clone(), data: Bytes(bytes.to_vec()) } };
+                let frame = MachineFrame::Output { viewer: to.clone(), tab: id.clone(), data: Bytes(bytes.to_vec()) };
                 let _ = out.send(serde_json::to_string(&frame).unwrap());
             };
-            if machine.attach(&tab, VIEWER.into(), Box::new(sink)).is_ok() {
-                shared.subscribed.lock().unwrap().insert(tab);
+            if machine.attach(&tab, viewer.clone(), Box::new(sink)).is_ok() {
+                shared.subscribed.lock().unwrap().insert((tab, viewer));
             }
         }
-        Ok(ToMachine::Unsubscribe { tab }) => {
-            machine.detach(&tab, VIEWER);
-            shared.subscribed.lock().unwrap().remove(&tab);
+        Ok(ToMachine::Unsubscribe { tab, viewer }) => {
+            machine.detach(&tab, &viewer);
+            shared.subscribed.lock().unwrap().remove(&(tab, viewer));
         }
         Ok(ToMachine::Hello { .. }) => {}
         Err(e) => {
