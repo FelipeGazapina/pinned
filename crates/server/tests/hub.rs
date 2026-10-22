@@ -1,6 +1,6 @@
 use base64::Engine;
 use pinned_core::account::{self, Credentials};
-use pinned_core::agent::Subject;
+use pinned_core::agent::{self, Stage, Subject};
 use pinned_core::connectors::{Delivery, Run, Work};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
@@ -373,6 +373,24 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     client.wait_machines(&[("mac-mini", true), ("vps", true)]);
     assert!(open(run(Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() })));
     assert_eq!((connector_tabs(&node_a), connector_tabs(&node_b)), (1, 1), "the preferred machine runs it once online");
+
+    let issue = Subject::LinearIssue { issue: "uuid-1".into() };
+    assert!(open(run(issue.clone())), "a run a session already works on counts as taken");
+    let Work::Run(again) = run(Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() }) else { unreachable!() };
+    assert_eq!(node_a.machine.run(&again.spec()), Ok("tab-1".into()), "a machine answers a run sent again with the session it started");
+    assert_eq!((connector_tabs(&node_a), connector_tabs(&node_b)), (1, 1));
+
+    let forward = |node: &Node, subject: Subject| node.link.as_ref().unwrap().forward(agent::Message::Stage { connector: id.clone(), subject, stage: Stage::Coding });
+    assert_eq!(
+        forward(&node_b, issue.clone()),
+        Ok("this connector has no column for that stage, so the issue stays where it is".into()),
+        "vps reports on the issue its session works on"
+    );
+    assert_eq!(
+        forward(&node_a, issue),
+        Err("this machine runs no session of that connector on that subject".into()),
+        "mac-mini can't report on vps's issue"
+    );
 
     let delivery = |thread: &str| {
         Work::Delivery(Delivery { connector: id.clone(), channel: "C0123ABCD".into(), thread: thread.into(), messages: vec!["yes, file it".into()], cursor: "1792400090.000000".into() })

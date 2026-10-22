@@ -1,4 +1,4 @@
-use crate::agent::{AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
+use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, EXE_PLACEHOLDER};
 use crate::{history, hooks, plugin, projects, pty, reminders, sessions};
 use portable_pty::{CommandBuilder, PtySize};
@@ -196,6 +196,7 @@ impl Tab {
             message: self.message.clone(),
             resume_at: self.resume_at,
             connector: self.env.iter().find(|(k, _)| k == CONNECTOR_ENV).map(|(_, v)| v.clone()),
+            subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
         }
     }
@@ -334,6 +335,13 @@ impl Machine {
 
     /// Opens a connector's run and starts it at once, so it works with no one watching.
     pub fn run(&self, run: &RunSpec) -> Result<TabId, String> {
+        // The hub sends a run again when it lost the answer, as on a dropped link: the session it started answers.
+        if let Some(work) = session_of(&run.env) {
+            let tabs = self.tabs.lock().unwrap();
+            if let Some((id, _)) = tabs.iter().find(|(_, t)| t.session.is_some() && session_of(&t.env).as_ref() == Some(&work)) {
+                return Ok(id.clone());
+            }
+        }
         let id = self.open_run(run)?;
         // A run that can't start is refused whole, so the hub's next machine takes it and no idle tab stays behind here.
         if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {

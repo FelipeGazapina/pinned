@@ -1,4 +1,5 @@
 use crate::db::{self, Db};
+use pinned_core::agent::Subject;
 use pinned_core::connectors::{Connectors, Storage, Work};
 use pinned_core::wire::{
     Call, HubCall, MachineEvent, MachineId, MachineView, PairCode, Reply, TabId, TabView, Target, ToClient, ToMachine, EXE_PLACEHOLDER,
@@ -13,6 +14,24 @@ use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
+/// A run may clone a large repository before its session starts.
+const RUN_WAIT: Duration = Duration::from_secs(30 * 60);
+
+/// Why a call to a machine has no answer.
+pub enum Unanswered {
+    /// The machine answered with an error, or is offline: nothing happened there.
+    Refused(String),
+    /// The machine went offline or stopped answering after the call reached it, so it may have acted on it.
+    Lost(String),
+}
+
+impl From<Unanswered> for String {
+    fn from(failure: Unanswered) -> String {
+        match failure {
+            Unanswered::Refused(e) | Unanswered::Lost(e) => e,
+        }
+    }
+}
 
 /// Frames a socket holds for a peer that reads slower than they arrive, such as a phone on a busy tab.
 const OUTBOX_FRAMES: usize = 1024;
@@ -166,14 +185,23 @@ impl Hub {
         let Ok(account) = self.account(account).await else { return false };
         match work {
             Work::Run(run) => {
+                if account.working_on(&run.connector, &run.subject, |_| true) {
+                    return true;
+                }
                 let preferred = match self.connectors(&account).await {
                     Ok(c) => c.get_settings().connectors.into_iter().find(|c| c.id == run.connector).map(|c| c.machine).unwrap_or_default(),
                     Err(_) => String::new(),
                 };
                 for machine in account.dispatch_order(&preferred, |_| true) {
-                    match self.call_machine(&account, &machine, Call::Run { run: run.spec() }).await {
+                    match self.call_machine(&account, &machine, Call::Run { run: run.spec() }, RUN_WAIT).await {
                         Ok(_) => return true,
-                        Err(e) => eprintln!("pinned-server: {} refused a run of connector {}: {e}", machine, run.connector),
+                        Err(Unanswered::Refused(e)) => eprintln!("pinned-server: {machine} refused a run of connector {}: {e}", run.connector),
+                        // The run may have started there, so it doesn't go to a second machine. The next
+                        // check finds its tab, or sends it again, and a machine answers a run it has with that session.
+                        Err(Unanswered::Lost(e)) => {
+                            eprintln!("pinned-server: lost {machine}'s answer to a run of connector {}: {e}", run.connector);
+                            return false;
+                        }
                     }
                 }
                 false
@@ -182,8 +210,11 @@ impl Hub {
                 let runs_connector = |tabs: &[TabView]| tabs.iter().any(|t| t.running && t.connector.as_deref() == Some(&d.connector));
                 for machine in account.dispatch_order("", runs_connector) {
                     let call = Call::Deliver { env: d.env(), text: d.text() };
-                    if self.call_machine(&account, &machine, call).await == Ok(Value::Bool(true)) {
-                        return true;
+                    match self.call_machine(&account, &machine, call, MACHINE_CALL_WAIT).await {
+                        Ok(Value::Bool(true)) => return true,
+                        // The messages were likely typed; opening another session for the thread would answer it twice.
+                        Err(Unanswered::Lost(_)) => return true,
+                        _ => {}
                     }
                 }
                 false
@@ -191,23 +222,28 @@ impl Hub {
         }
     }
 
-    pub async fn call_machine(&self, account: &Account, machine: &str, call: Call) -> Result<Value, String> {
+    pub async fn call_machine(&self, account: &Account, machine: &str, call: Call, wait: Duration) -> Result<Value, Unanswered> {
         let sent = account.send_call(machine, call);
-        self.answer(account, machine, sent).await
+        self.answer(account, machine, sent, wait).await
     }
 
-    pub async fn answer(&self, account: &Account, machine: &str, sent: Option<Sent>) -> Result<Value, String> {
+    pub async fn client_call(&self, account: &Account, machine: &str, sent: Option<Sent>) -> Result<Value, String> {
+        Ok(self.answer(account, machine, sent, MACHINE_CALL_WAIT).await?)
+    }
+
+    async fn answer(&self, account: &Account, machine: &str, sent: Option<Sent>, wait: Duration) -> Result<Value, Unanswered> {
         let Some((name, answered)) = sent else {
             let known = match Uuid::parse_str(machine) {
-                Ok(id) => self.db.machine_name(account.id, id).await?,
+                Ok(id) => self.db.machine_name(account.id, id).await.map_err(Unanswered::Refused)?,
                 Err(_) => None,
             };
-            return Err(known.map_or_else(|| format!("this account has no machine {machine}"), |name| format!("{name} is offline")));
+            let error = known.map_or_else(|| format!("this account has no machine {machine}"), |name| format!("{name} is offline"));
+            return Err(Unanswered::Refused(error));
         };
-        match tokio::time::timeout(MACHINE_CALL_WAIT, answered).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(format!("{name} went offline")),
-            Err(_) => Err(format!("{name} did not answer")),
+        match tokio::time::timeout(wait, answered).await {
+            Ok(Ok(result)) => result.map_err(Unanswered::Refused),
+            Ok(Err(_)) => Err(Unanswered::Lost(format!("{name} went offline"))),
+            Err(_) => Err(Unanswered::Lost(format!("{name} did not answer"))),
         }
     }
 
@@ -336,6 +372,16 @@ impl Account {
         for m in machines {
             m.online = live.machines.contains_key(&m.id);
         }
+    }
+
+    /// Whether a session on an online machine that `on` picks works on the connector's `subject`.
+    pub fn working_on(&self, connector: &str, subject: &Subject, on: impl Fn(&MachineId) -> bool) -> bool {
+        let live = self.live.lock().unwrap();
+        live.machines
+            .iter()
+            .filter(|(id, _)| on(id))
+            .flat_map(|(_, m)| &m.tabs)
+            .any(|t| t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject))
     }
 
     fn dispatch_order(&self, preferred: &str, wanted: impl Fn(&[TabView]) -> bool) -> Vec<MachineId> {

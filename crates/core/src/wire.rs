@@ -47,6 +47,9 @@ pub struct TabView {
     /// Unix time a usage limit lifts, while one stopped the turn.
     pub resume_at: Option<u64>,
     pub connector: Option<String>,
+    /// What the connector's session works on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<Subject>,
     /// The tab's number, which orders tabs by when they opened.
     pub opened: u64,
 }
@@ -321,6 +324,7 @@ mod tests {
             message: Some("Claude needs your permission to use Bash".into()),
             resume_at: None,
             connector: Some("c1".into()),
+            subject: Some(Subject::LinearIssue { issue: "uuid".into() }),
             opened: 3,
         }
     }
@@ -376,7 +380,7 @@ mod tests {
             json!({ "kind": "tabs", "tabs": [{
                 "id": "tab-3", "cwd": "/repo", "bypass": false, "running": true, "status": "needs-input",
                 "title": "Fix the build", "message": "Claude needs your permission to use Bash",
-                "resume_at": null, "connector": "c1", "opened": 3,
+                "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3,
             }] }),
         );
         round_trip(

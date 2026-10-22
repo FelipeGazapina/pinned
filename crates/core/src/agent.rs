@@ -82,6 +82,17 @@ impl Subject {
     }
 }
 
+/// The connector and subject a session's environment names, for a connector's session.
+pub fn session_of(env: &[(String, String)]) -> Option<(String, Subject)> {
+    let var = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+    let subject = match (var(ISSUE_ENV), var(SLACK_CHANNEL_ENV), var(SLACK_THREAD_ENV)) {
+        (_, Some(channel), Some(thread)) => Subject::SlackThread { channel, thread },
+        (Some(issue), _, _) => Subject::LinearIssue { issue },
+        _ => return None,
+    };
+    Some((var(CONNECTOR_ENV)?, subject))
+}
+
 pub fn session_env(connector: &str, subject: &Subject) -> Vec<(String, String)> {
     let mut env = vec![(CONNECTOR_ENV.to_owned(), connector.to_owned())];
     env.extend(subject.env());

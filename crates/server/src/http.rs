@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
+use pinned_core::agent::Subject;
 use pinned_core::account::{Failure, NewMachine, Paired, Pairing, Registered, Session, SignIn};
 use pinned_core::link::UNAUTHORIZED;
 use pinned_core::wire::{ClientFrame, HubCall, MachineFrame, MachineView, Reply, ToClient, ToMachine};
@@ -323,7 +324,7 @@ fn client_frame(hub: &Arc<Hub>, account: &Arc<Account>, client: u64, text: &str)
             let sent = account.send_call(&machine, call);
             let (hub, account) = (hub.clone(), account.clone());
             tokio::spawn(async move {
-                let result = hub.answer(&account, &machine, sent).await;
+                let result = hub.client_call(&account, &machine, sent).await;
                 if let Err(e) = &result {
                     eprintln!("pinned-server: client {client}'s call to {machine} failed: {e}");
                 }
@@ -419,12 +420,21 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
         Ok(MachineFrame::Call { id, call }) => {
             let (hub, account, machine) = (hub.clone(), account.clone(), machine.to_owned());
             tokio::spawn(async move {
-                // A machine holds a lesser credential than a login: it may only pass on its sessions' callbacks.
-                let result = match call {
-                    HubCall::Stage { .. } | HubCall::SlackReply { .. } | HubCall::LinearCreate { .. } | HubCall::LinearTake { .. } => {
-                        hub.hub_call(&account, call).await
+                // A machine holds a lesser credential than a login: it may only pass on the callbacks
+                // of sessions it runs, so a prompt-injected session can't act for another connector or thread.
+                let work = match &call {
+                    HubCall::Stage { connector, subject, .. } => Some((connector.clone(), subject.clone())),
+                    HubCall::SlackReply { connector, channel, thread, .. }
+                    | HubCall::LinearCreate { connector, channel, thread, .. }
+                    | HubCall::LinearTake { connector, channel, thread, .. } => {
+                        Some((connector.clone(), Subject::SlackThread { channel: channel.clone(), thread: thread.clone() }))
                     }
-                    _ => Err("a machine may only forward a connector session's callbacks".into()),
+                    _ => None,
+                };
+                let result = match work {
+                    Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
+                    Some(_) => Err("this machine runs no session of that connector on that subject".into()),
+                    None => Err("a machine may only forward a connector session's callbacks".into()),
                 };
                 if let Err(e) = &result {
                     eprintln!("pinned-server: machine {machine}'s hub call failed: {e}");
