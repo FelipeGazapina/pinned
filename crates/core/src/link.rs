@@ -34,15 +34,12 @@ pub struct Link {
     thread: std::thread::JoinHandle<()>,
 }
 
-/// What the link's thread and its callers share.
 #[derive(Default)]
 struct Shared {
     /// The live connection's outgoing frames, from the hub's hello until the connection ends.
     out: Mutex<Option<channel::UnboundedSender<String>>>,
-    /// `call_hub`s waiting for their reply, by frame id.
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>,
     next_call: AtomicU64,
-    /// The tabs and viewers the live connection streams to the hub.
     subscribed: Mutex<HashSet<(TabId, ViewerId)>>,
 }
 
@@ -112,12 +109,10 @@ impl Link {
         }
     }
 
-    /// Whether the hub accepted this machine on the current connection.
     pub fn online(&self) -> bool {
         self.shared.out.lock().unwrap().is_some()
     }
 
-    /// Disconnects for good and waits for the link's thread to end.
     pub fn stop(self) {
         let _ = self.stop.send(true);
         let _ = self.thread.join();
@@ -218,7 +213,6 @@ fn in_order(machine: Arc<Machine>, out: channel::UnboundedSender<String>) -> mps
     calls
 }
 
-/// Handles one frame from the hub.
 fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSender<String>, calls: &mpsc::Sender<(u64, Call)>, frame: &str, version: &str) {
     match serde_json::from_str::<ToMachine>(frame) {
         // A run may clone a repository for minutes, so it doesn't hold up the calls behind it.
@@ -267,7 +261,6 @@ fn text(frame: &MachineFrame) -> Frame {
     Frame::Text(serde_json::to_string(frame).unwrap().into())
 }
 
-/// The machine socket of the hub at `hub`, such as `wss://pinned.example.com/ws/machine`.
 fn ws_url(hub: &str) -> Result<String, String> {
     let hub = hub.trim().trim_end_matches('/');
     if let Some(rest) = hub.strip_prefix("https://") {

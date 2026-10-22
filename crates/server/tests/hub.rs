@@ -91,7 +91,6 @@ fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
-/// A client socket and every frame it has received.
 struct Client {
     ws: WebSocket<MaybeTlsStream<TcpStream>>,
     frames: Vec<Value>,
@@ -161,7 +160,6 @@ impl Client {
         self.request(json!({ "type": "call", "machine": machine, "call": call }))
     }
 
-    /// Everything the tab printed to this client so far.
     fn output(&mut self, machine: &str, tab: &str) -> String {
         self.pump();
         let bytes: Vec<u8> = self

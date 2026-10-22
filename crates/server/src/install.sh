@@ -36,7 +36,6 @@ fi
 chmod 755 "$PART"
 mv "$PART" "$BIN/pinned-server"
 
-# Named explicitly, since sudo may or may not keep the invoking user's HOME.
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/pinned"
 NAME="$("$BIN/pinned-server" pair "$HUB" "$CODE" --config-dir "$CONFIG")"
 echo "pinned: paired this machine as $NAME"

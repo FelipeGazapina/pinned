@@ -11,11 +11,9 @@ use std::time::Duration;
 
 const FILE: &str = "account.json";
 
-/// What `account.json` holds. A machine paired with a code has no user token or email of its own
-/// to sign in with: those fields are empty.
+/// What `account.json` holds. A machine paired with a code has no login: its `user_token` is empty.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Credentials {
-    /// The hub's base URL, such as `https://pinned.example.com`.
     pub hub: String,
     pub email: String,
     pub user_token: String,
@@ -28,7 +26,6 @@ impl Credentials {
         serde_json::from_slice(&std::fs::read(dir.join(FILE)).ok()?).ok()
     }
 
-    /// Writes the file readable only by the user, replacing it whole.
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
@@ -57,7 +54,6 @@ pub struct SignIn {
     pub password: String,
 }
 
-/// What signing up or in answers: a login token for the account.
 #[derive(Serialize, Deserialize)]
 pub struct Session {
     pub token: String,
@@ -71,7 +67,6 @@ pub struct NewMachine {
     pub os: String,
 }
 
-/// What registering a machine answers: the token it authenticates its link with.
 #[derive(Serialize, Deserialize)]
 pub struct Registered {
     pub machine: MachineView,
@@ -86,7 +81,6 @@ pub struct Pairing {
     pub os: String,
 }
 
-/// What pairing answers.
 #[derive(Serialize, Deserialize)]
 pub struct Paired {
     pub machine: MachineView,
@@ -112,7 +106,6 @@ pub fn login(hub: &str, email: &str, password: &str) -> Result<(String, AccountV
     Ok((session.token, session.account))
 }
 
-/// Adds this machine to the signed-in account, and answers it with the machine's token.
 pub fn register_machine(hub: &str, user_token: &str, name: &str, os: &str) -> Result<(MachineView, String), String> {
     let registered: Registered = post(hub, "/api/machines", Some(user_token), &NewMachine { name: name.into(), os: os.into() })?;
     Ok((registered.machine, registered.token))

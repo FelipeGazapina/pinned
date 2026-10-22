@@ -9,10 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct Config {
-    /// Postgres URL.
     pub db: String,
     pub listen: String,
-    /// The web app's files.
     pub ui: PathBuf,
     /// Where `pinned-server-<target>` binaries for the install script live.
     pub downloads: PathBuf,

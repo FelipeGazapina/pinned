@@ -18,7 +18,6 @@ use uuid::Uuid;
 /// How long a client's call waits for its machine, which may be cloning a repository.
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
 
-/// Frames waiting to be written to one socket, serialized.
 pub type Outbox = mpsc::UnboundedSender<String>;
 /// A call on its way to a machine: the machine's name, and where its answer arrives.
 pub type Sent = (String, oneshot::Receiver<Result<Value, String>>);
@@ -47,19 +46,16 @@ struct Live {
     clients: HashMap<u64, Client>,
 }
 
-/// A connected machine.
 struct Online {
     socket: u64,
     name: String,
     out: Outbox,
-    /// Calls sent to it, by the id the hub gave them.
     pending: HashMap<u64, oneshot::Sender<Result<Value, String>>>,
     next_call: u64,
     /// Its last `Tabs` event.
     tabs: Vec<TabView>,
 }
 
-/// A connected client.
 struct Client {
     out: Outbox,
     /// The login token it signed in with, so logging out disconnects it.
@@ -67,7 +63,6 @@ struct Client {
     attached: HashSet<Target>,
 }
 
-/// The viewer a client's output goes to on a machine.
 fn viewer(client: u64) -> String {
     format!("client-{client}")
 }
@@ -93,7 +88,6 @@ impl Hub {
         self.sockets.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Starts the watch loop of every account that has connectors or integrations.
     pub async fn watch_all(self: &Arc<Self>) -> Result<(), String> {
         for id in self.db.accounts_with_connectors().await? {
             let account = self.account(id).await?;
@@ -123,7 +117,6 @@ impl Hub {
         Ok(connectors.clone())
     }
 
-    /// Starts the account's watch loop unless it runs already.
     async fn watch(self: &Arc<Self>, account: &Arc<Account>) -> Result<(), String> {
         let connectors = self.connectors(account).await?;
         if account.watching.swap(true, Ordering::SeqCst) {
@@ -178,7 +171,6 @@ impl Hub {
         }
     }
 
-    /// Sends `call` to the machine and waits for its answer.
     pub async fn call_machine(&self, account: &Account, machine: &str, call: Call) -> Result<Value, String> {
         let sent = account.send_call(machine, call);
         self.answer(account, machine, sent).await
@@ -258,7 +250,6 @@ impl Hub {
         answer
     }
 
-    /// Every machine of the account, with which are online.
     pub async fn machines(&self, account: &Account) -> Result<Vec<MachineView>, String> {
         let mut machines = self.db.machines(account.id).await?;
         account.mark_online(&mut machines);
@@ -278,7 +269,6 @@ impl Hub {
         }
     }
 
-    /// Ends every client connection signed in with the login token `hash`.
     pub fn logged_out(&self, hash: &[u8]) {
         let accounts: Vec<Arc<Account>> = self.accounts.lock().unwrap().values().cloned().collect();
         for account in accounts {
@@ -400,7 +390,6 @@ impl Account {
         live.clients.insert(id, Client { out, login, attached: HashSet::new() });
     }
 
-    /// Forgets the client and stops its output on every machine.
     pub fn client_gone(&self, id: u64) {
         let mut live = self.live.lock().unwrap();
         let Some(client) = live.clients.remove(&id) else { return };

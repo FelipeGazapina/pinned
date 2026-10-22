@@ -74,7 +74,6 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers.get(header::AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ").map(str::trim)
 }
 
-/// The account a bearer login token belongs to.
 async fn signed_in(server: &Server, headers: &HeaderMap) -> Result<Uuid, Error> {
     let unauthorized = || Error(StatusCode::UNAUTHORIZED, "sign in first".into());
     let token = bearer(headers).ok_or_else(unauthorized)?;
@@ -133,7 +132,6 @@ async fn signup(State(server): State<Arc<Server>>, Json(body): Json<SignIn>) -> 
 }
 
 impl Server {
-    /// Whether any of `keys` failed too often lately.
     fn throttled(&self, keys: &[String]) -> bool {
         let mut attempts = self.attempts.lock().unwrap();
         keys.iter().any(|key| {
@@ -224,7 +222,6 @@ fn close_unauthorized() -> Message {
     Message::Close(Some(CloseFrame { code: UNAUTHORIZED, reason: "unauthorized".into() }))
 }
 
-/// The first frame, which must be text, within `AUTH_WAIT`.
 async fn first_text(socket: &mut WebSocket) -> Option<String> {
     match tokio::time::timeout(AUTH_WAIT, socket.recv()).await {
         Ok(Some(Ok(Message::Text(text)))) => Some(text.to_string()),

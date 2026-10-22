@@ -15,7 +15,6 @@ pinned-core = { path = "../core" }
 argon2 = "0.5"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
-# OsRng, for tokens, pairing codes and password salts.
 rand_core = { version = "0.6", features = ["getrandom"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

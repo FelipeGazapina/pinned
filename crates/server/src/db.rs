@@ -55,14 +55,12 @@ pub fn pair_code() -> String {
     (0..CODE_LEN).map(|_| CODE_ALPHABET[OsRng.next_u32() as usize % CODE_ALPHABET.len()] as char).collect()
 }
 
-/// A machine as its row stands.
 pub struct MachineRow {
     pub id: Uuid,
     pub account: Uuid,
     pub name: String,
 }
 
-/// An account's connector store and integration keys.
 pub struct Connectors {
     pub store: Value,
     pub secrets: BTreeMap<String, String>,
@@ -73,7 +71,6 @@ fn err(e: tokio_postgres::Error) -> String {
 }
 
 impl Db {
-    /// Connects and creates the tables that are missing.
     pub async fn connect(url: &str) -> Result<Db, String> {
         let (client, connection) = tokio_postgres::connect(url, NoTls).await.map_err(|e| format!("could not connect to Postgres: {e}"))?;
         tokio::spawn(async move {
@@ -96,7 +93,6 @@ impl Db {
         Ok((inserted == 1).then(|| AccountView { id: id.to_string(), email: email.to_owned() }))
     }
 
-    /// The account and its password hash.
     pub async fn account_by_email(&self, email: &str) -> Result<Option<(AccountView, String)>, String> {
         let row = self.client.query_opt("select id, password_hash from accounts where email = $1", &[&email]).await.map_err(err)?;
         Ok(row.map(|r| (AccountView { id: r.get::<_, Uuid>(0).to_string(), email: email.to_owned() }, r.get(1))))
@@ -123,12 +119,10 @@ impl Db {
         Ok(row.map(|r| r.get(0)))
     }
 
-    /// Ends a login. Answers whether it existed.
-    pub async fn logout(&self, token: &str) -> Result<bool, String> {
-        Ok(self.client.execute("delete from logins where token_hash = $1", &[&hash(token)]).await.map_err(err)? == 1)
+    pub async fn logout(&self, token: &str) -> Result<(), String> {
+        self.client.execute("delete from logins where token_hash = $1", &[&hash(token)]).await.map_err(err).map(drop)
     }
 
-    /// Adds a machine to the account, and answers it with its token.
     pub async fn create_machine(&self, account: Uuid, name: &str, os: &str) -> Result<(MachineView, String), String> {
         let (id, token) = (Uuid::new_v4(), Token::new());
         let row = self
@@ -180,13 +174,11 @@ impl Db {
         Ok(row.map(|r| r.get(0)))
     }
 
-    /// Answers whether the account has that machine.
     pub async fn rename_machine(&self, account: Uuid, machine: Uuid, name: &str) -> Result<bool, String> {
         let n = self.client.execute("update machines set name = $3 where id = $1 and account = $2", &[&machine, &account, &name]).await.map_err(err)?;
         Ok(n == 1)
     }
 
-    /// Answers whether the account had that machine.
     pub async fn remove_machine(&self, account: Uuid, machine: Uuid) -> Result<bool, String> {
         let n = self.client.execute("delete from machines where id = $1 and account = $2", &[&machine, &account]).await.map_err(err)?;
         Ok(n == 1)
