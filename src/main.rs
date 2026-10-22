@@ -1,7 +1,7 @@
 mod awake;
-mod connectors;
+mod commands;
 
-use pinned_core::{agent, evidence, history, hooks, plugin, projects, pty, reminders, sessions};
+use pinned_core::{agent, connectors, evidence, history, hooks, plugin, projects, pty, reminders, sessions};
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -88,7 +88,7 @@ impl Harness {
     /// The newest tab whose running session answers the delivery's Slack thread.
     fn slack_tab(&self, d: &connectors::Delivery) -> Option<String> {
         let subject = agent::Subject::SlackThread { channel: d.channel.clone(), thread: d.thread.clone() };
-        let env = connector_env(&d.connector, &subject);
+        let env = agent::session_env(&d.connector, &subject);
         let tabs = self.tabs.lock().unwrap();
         let live = tabs.iter().filter(|(_, t)| t.session.is_some() && env.iter().all(|e| t.env.contains(e)));
         live.max_by_key(|(id, _)| tab_number(id)).map(|(id, _)| id.clone())
@@ -219,13 +219,6 @@ fn tab_number(id: &str) -> u32 {
     id.trim_start_matches("tab-").parse().unwrap_or(0)
 }
 
-/// The environment that names a connector's session and its subject, which `slack_tab` finds it by.
-fn connector_env(connector: &str, subject: &agent::Subject) -> Vec<(String, String)> {
-    let mut env = vec![(agent::CONNECTOR_ENV.to_owned(), connector.to_owned())];
-    env.extend(subject.env());
-    env
-}
-
 /// `text` as a bracketed paste and Enter, so its lines reach claude as one prompt that it submits.
 /// Control characters other than newlines and tabs are dropped, so the text can't end the paste early.
 fn paste(text: &str) -> Vec<u8> {
@@ -278,7 +271,7 @@ fn list_projects(harness: State<Harness>) -> Vec<ProjectView> {
 /// Asks for a folder and records it as a project, returning its path.
 #[tauri::command]
 async fn pick_project(app: AppHandle, harness: State<'_, Harness>) -> Result<Option<String>, ()> {
-    let picked = connectors::pick_folder(app, None).await;
+    let picked = commands::pick_folder(app, None).await;
     Ok(picked.map(|dir| harness.open_project(dir.into()).display().to_string()))
 }
 
@@ -497,7 +490,7 @@ fn close_tab(app: AppHandle, harness: State<Harness>, tab: String) {
 #[tauri::command]
 async fn choose_folder(app: AppHandle, harness: State<'_, Harness>, tab: String) -> Result<bool, String> {
     let current = harness.tab(&tab, |t| t.cwd.display().to_string())?;
-    let Some(picked) = connectors::pick_folder(app, Some(current)).await else {
+    let Some(picked) = commands::pick_folder(app, Some(current)).await else {
         return Ok(false);
     };
     let dir = harness.open_project(picked.into());
@@ -704,17 +697,17 @@ fn main() {
             install_update,
             get_opacity,
             get_usage,
-            connectors::get_settings,
-            connectors::open_linear_keys,
-            connectors::connect_linear,
-            connectors::disconnect_linear,
-            connectors::linear_suggestions,
-            connectors::connect_slack,
-            connectors::disconnect_slack,
-            connectors::slack_suggestions,
-            connectors::save_connector,
-            connectors::delete_connector,
-            connectors::pick_folder
+            commands::get_settings,
+            commands::open_linear_keys,
+            commands::connect_linear,
+            commands::disconnect_linear,
+            commands::linear_suggestions,
+            commands::connect_slack,
+            commands::disconnect_slack,
+            commands::slack_suggestions,
+            commands::save_connector,
+            commands::delete_connector,
+            commands::pick_folder
         ])
         .setup(move |app| {
             let config = app.path().app_config_dir().ok();
@@ -751,20 +744,26 @@ fn main() {
             app.manage(awake::Awake::load(app.path().app_config_dir().ok()));
             app.manage(reminders::Reminders::load(app.path().app_config_dir().ok()));
             watch_reminders(app.handle().clone());
-            app.manage(connectors::Connectors::load(app.path().app_config_dir()?, std::env::current_exe()?));
+            let storage = connectors::FileStorage::new(app.path().app_config_dir()?);
+            app.manage(connectors::Connectors::new(storage, std::env::current_exe()?.display().to_string()));
             let handle = app.handle().clone();
-            tauri::async_runtime::spawn(connectors::watch(handle.clone(), move |work| {
-                let harness = handle.state::<Harness>();
-                match work {
-                    connectors::Work::Run(run) => {
-                        let env = connector_env(&run.connector, &run.subject);
-                        let id = harness.add_tab(run.cwd.clone(), run.args.clone(), env, false, None);
-                        let _ = handle.emit("tab-opened", id);
-                        true
-                    }
-                    connectors::Work::Delivery(d) => harness.deliver(d),
-                }
-            }));
+            tauri::async_runtime::spawn(async move {
+                let open = |work| {
+                    let harness = handle.state::<Harness>();
+                    let taken = match work {
+                        connectors::Work::Run(run) => {
+                            let env = agent::session_env(&run.connector, &run.subject);
+                            let id = harness.add_tab(run.cwd, run.args, env, false, None);
+                            let _ = handle.emit("tab-opened", id);
+                            true
+                        }
+                        connectors::Work::Delivery(d) => harness.deliver(&d),
+                    };
+                    async move { taken }
+                };
+                let checked = |check: &connectors::Check| drop(handle.emit("connectors-checked", check));
+                handle.state::<connectors::Connectors>().watch(open, checked).await
+            });
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             add_tray(app)?;
@@ -794,13 +793,13 @@ fn main() {
                     Ok(String::new())
                 }
                 agent::Message::Stage { connector, subject, stage } => tauri::async_runtime::block_on(
-                    handle.state::<connectors::Connectors>().advance(&connector, &subject, stage),
+                    handle.state::<connectors::Connectors>().stage(&connector, &subject, stage),
                 ),
                 agent::Message::SlackReply { connector, channel, thread, text } => tauri::async_runtime::block_on(
-                    handle.state::<connectors::Connectors>().reply(&connector, &channel, &thread, &text),
+                    handle.state::<connectors::Connectors>().slack_reply(&connector, &channel, &thread, &text),
                 ),
                 agent::Message::LinearCreate { connector, channel, thread, title, description } => tauri::async_runtime::block_on(
-                    handle.state::<connectors::Connectors>().create(&connector, &channel, &thread, &title, &description),
+                    handle.state::<connectors::Connectors>().linear_create(&connector, &channel, &thread, &title, &description),
                 ),
             })?;
             let window = app.get_webview_window("main").unwrap();
@@ -897,7 +896,7 @@ mod tests {
     }
 
     fn slack_env(connector: &str, thread: &str) -> Vec<(String, String)> {
-        connector_env(connector, &agent::Subject::SlackThread { channel: "C0123ABCD".into(), thread: thread.into() })
+        agent::session_env(connector, &agent::Subject::SlackThread { channel: "C0123ABCD".into(), thread: thread.into() })
     }
 
     fn delivery(connector: &str, thread: &str, messages: &[&str]) -> connectors::Delivery {
@@ -924,7 +923,7 @@ mod tests {
             h.tab(&id, |t| t.session = Some(spawn("sleep 30").0)).unwrap();
             id
         };
-        let issue = connector_env("c2", &agent::Subject::LinearIssue { issue: "uuid".into() });
+        let issue = agent::session_env("c2", &agent::Subject::LinearIssue { issue: "uuid".into() });
         live(&h, issue);
         live(&h, slack_env("c9", "1792400050.000200"));
         live(&h, slack_env("c2", "1792499999.000100"));

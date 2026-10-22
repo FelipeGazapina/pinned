@@ -1,20 +1,19 @@
 //! Connectors make the harness proactive: each one watches an integration and opens a tab
 //! with a claude session already working on what it found.
 
-use pinned_core::agent::{Stage, Subject};
-use pinned_core::{linear, slack};
+use crate::agent::{self, Stage, Subject};
+use crate::{linear, slack};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Notify;
 
 const INTERVAL: Duration = Duration::from_secs(60);
-/// Files in the config dir that hold each integration's secret, readable only by the user.
+/// The names each integration's secret is kept under.
 const LINEAR_KEY: &str = "linear-key";
 const SLACK_KEY: &str = "slack-key";
 /// A Slack watermark trails the check that moved it, so a message Slack shows a little late
@@ -134,6 +133,12 @@ pub struct Connector {
     /// Whether a session that opens a pull request must prove it works, with a Playwright video.
     #[serde(default = "on")]
     pub proof: bool,
+    /// The machine this connector's sessions run on when it is online; empty lets the hub pick.
+    #[serde(default)]
+    pub machine: String,
+    /// The git origin of `folder`, so a fallback machine can find or clone the repository.
+    #[serde(default)]
+    pub repo: String,
 }
 
 fn on() -> bool {
@@ -208,6 +213,20 @@ impl Connector {
         true
     }
 
+    fn repo(&self) -> Option<String> {
+        Some(self.repo.trim().to_owned()).filter(|r| !r.is_empty())
+    }
+
+    /// Undoes the claim of a session that never opened, so the next check finds its subject again.
+    fn unclaim(&mut self, subject: &Subject) {
+        let key = match subject {
+            Subject::LinearIssue { issue } => issue.clone(),
+            Subject::SlackThread { channel, thread } => thread_key(channel, thread),
+        };
+        self.handled.retain(|k| *k != key);
+        self.followed.remove(&key);
+    }
+
     /// The Linear issue `pinned stage` moves for a session on `subject`.
     fn issue(&self, subject: &Subject) -> Result<String, String> {
         match subject {
@@ -254,23 +273,28 @@ impl Store {
     }
 }
 
-#[derive(Serialize, Clone)]
+/// When the connectors last checked their integrations, and what went wrong.
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Check {
-    at: String,
-    error: Option<String>,
+    pub at: String,
+    pub error: Option<String>,
 }
 
-#[derive(Serialize)]
+/// Everything the settings page shows. Keys never leave the storage.
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
-    linear: Option<linear::Account>,
-    slack: Option<slack::Account>,
-    connectors: Vec<Connector>,
-    checked: Option<Check>,
+    pub linear: Option<linear::Account>,
+    pub slack: Option<slack::Account>,
+    pub connectors: Vec<Connector>,
+    pub checked: Option<Check>,
 }
 
 /// A session a connector wants opened.
+#[derive(Clone)]
 pub struct Run {
     pub cwd: PathBuf,
+    /// The git origin of `cwd`, when the connector knows it.
+    pub repo: Option<String>,
     pub args: Vec<String>,
     pub connector: String,
     pub subject: Subject,
@@ -284,6 +308,7 @@ pub enum Work {
     Delivery(Delivery),
 }
 
+#[derive(Clone)]
 pub struct Delivery {
     pub connector: String,
     pub channel: String,
@@ -292,6 +317,18 @@ pub struct Delivery {
     pub messages: Vec<String>,
     /// The newest message's ts, which the thread's cursor moves to once a session has the messages.
     pub cursor: String,
+}
+
+impl Delivery {
+    /// The environment of the session that answers the thread.
+    pub fn env(&self) -> Vec<(String, String)> {
+        agent::session_env(&self.connector, &Subject::SlackThread { channel: self.channel.clone(), thread: self.thread.clone() })
+    }
+
+    /// The messages as one prompt.
+    pub fn text(&self) -> String {
+        self.messages.join("\n\n")
+    }
 }
 
 /// Something a connector's check turned up.
@@ -331,10 +368,67 @@ pub struct Suggestions {
     teams: Vec<String>,
 }
 
-pub struct Connectors {
+/// Where the connectors keep their store and the integrations' keys: files for the app, the
+/// account's row for the hub.
+pub trait Storage: Send + Sync {
+    /// The store's JSON, as `save` last wrote it.
+    fn load(&self) -> Option<Vec<u8>>;
+    fn save(&self, store: &[u8]) -> Result<(), String>;
+    /// A key `write_key` kept under `name`, never empty.
+    fn key(&self, name: &str) -> Option<String>;
+    fn write_key(&self, name: &str, key: &str) -> Result<(), String>;
+    fn remove_key(&self, name: &str);
+}
+
+/// `connectors.json` and one file per key in a directory, the keys readable only by the user.
+pub struct FileStorage {
     dir: PathBuf,
-    /// This binary, which sessions call back as `pinned stage`.
-    exe: PathBuf,
+}
+
+impl FileStorage {
+    pub fn new(dir: PathBuf) -> Self {
+        Self { dir }
+    }
+}
+
+impl Storage for FileStorage {
+    fn load(&self) -> Option<Vec<u8>> {
+        std::fs::read(self.dir.join("connectors.json")).ok()
+    }
+
+    fn save(&self, store: &[u8]) -> Result<(), String> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        std::fs::write(self.dir.join("connectors.json"), store).map_err(|e| e.to_string())
+    }
+
+    fn key(&self, name: &str) -> Option<String> {
+        let key = std::fs::read_to_string(self.dir.join(name)).ok()?;
+        Some(key.trim().to_owned()).filter(|k| !k.is_empty())
+    }
+
+    fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(self.dir.join(name))
+            .and_then(|mut f| f.write_all(key.as_bytes()))
+            .map_err(|e| e.to_string())
+    }
+
+    fn remove_key(&self, name: &str) {
+        let _ = std::fs::remove_file(self.dir.join(name));
+    }
+}
+
+pub struct Connectors {
+    storage: Box<dyn Storage>,
+    /// How prompts name the pinned binary that sessions call back, as in `pinned stage`.
+    exe: String,
     store: Mutex<Store>,
     checked: Mutex<Option<Check>>,
     wake: Notify,
@@ -345,13 +439,10 @@ pub struct Connectors {
 }
 
 impl Connectors {
-    pub fn load(dir: PathBuf, exe: PathBuf) -> Self {
-        let store = std::fs::read(dir.join("connectors.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+    pub fn new(storage: impl Storage + 'static, exe: String) -> Self {
+        let store = storage.load().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         Self {
-            dir,
+            storage: Box::new(storage),
             exe,
             store: Mutex::new(store),
             checked: Mutex::new(None),
@@ -362,28 +453,11 @@ impl Connectors {
     }
 
     fn save(&self, store: &Store) -> Result<(), String> {
-        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
-        let bytes = serde_json::to_vec_pretty(store).map_err(|e| e.to_string())?;
-        std::fs::write(self.dir.join("connectors.json"), bytes).map_err(|e| e.to_string())
+        self.storage.save(&serde_json::to_vec_pretty(store).map_err(|e| e.to_string())?)
     }
 
-    fn key(&self, file: &str) -> Option<String> {
-        let key = std::fs::read_to_string(self.dir.join(file)).ok()?;
-        Some(key.trim().to_owned()).filter(|k| !k.is_empty())
-    }
-
-    fn write_key(&self, file: &str, key: &str) -> Result<(), String> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(self.dir.join(file))
-            .and_then(|mut f| f.write_all(key.as_bytes()))
-            .map_err(|e| e.to_string())
+    fn key(&self, name: &str) -> Option<String> {
+        self.storage.key(name)
     }
 
     /// Starts a session for everything new the enabled connectors match, and passes new thread
@@ -472,28 +546,51 @@ impl Connectors {
     }
 
     /// Gives `work` to the tabs. A thread's cursor moves only once its messages reached a session,
-    /// its own or a new one, so messages that didn't are passed on again at the next check.
-    async fn hand_over(&self, work: Work, open: &impl Fn(&Work) -> bool) -> Result<(), String> {
-        match &work {
+    /// its own or a new one, so messages that didn't are passed on again at the next check. A run
+    /// no tab took gives its subject back, so the next check tries it again.
+    async fn hand_over<F, Fut>(&self, work: Work, open: &F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        match work {
             Work::Run(run) => {
-                open(&work);
+                let (connector, subject, folder) = (run.connector.clone(), run.subject.clone(), run.cwd.clone());
+                if !open(Work::Run(run)).await {
+                    return Err(self.unclaim(&connector, &subject, &folder));
+                }
                 // The session starts even when Linear won't move the issue; the check reports why.
                 // A Slack thread has no issue to pick until its session files one.
-                match &run.subject {
-                    Subject::LinearIssue { .. } => self.advance(&run.connector, &run.subject, Stage::Picked).await.map(drop),
+                match &subject {
+                    Subject::LinearIssue { .. } => self.stage(&connector, &subject, Stage::Picked).await.map(drop),
                     Subject::SlackThread { .. } => Ok(()),
                 }
             }
             Work::Delivery(d) => {
-                let cursor = if open(&work) {
+                let cursor = if open(Work::Delivery(d.clone())).await {
                     d.cursor.clone()
                 } else {
-                    let (run, newest) = self.fallback(d).await?;
-                    open(&Work::Run(run));
+                    let (run, newest) = self.fallback(&d).await?;
+                    let folder = run.cwd.clone();
+                    if !open(Work::Run(run)).await {
+                        return Err(format!("could not open a session in {} for a Slack thread; the next check tries again", folder.display()));
+                    }
                     newest
                 };
                 self.follow(&d.connector, &d.channel, &d.thread, cursor)
             }
+        }
+    }
+
+    /// Forgets that the connector handled `subject`, and says why.
+    fn unclaim(&self, connector: &str, subject: &Subject, folder: &Path) -> String {
+        let error = format!("could not open a session in {}; the next check tries again", folder.display());
+        let mut store = self.store.lock().unwrap();
+        let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) else { return error };
+        c.unclaim(subject);
+        match self.save(&store) {
+            Ok(()) => error,
+            Err(e) => format!("{error}; {e}"),
         }
     }
 
@@ -563,7 +660,7 @@ impl Connectors {
     }
 
     /// Moves the session's issue to the column the connector maps `stage` to.
-    pub async fn advance(&self, connector: &str, subject: &Subject, stage: Stage) -> Result<String, String> {
+    pub async fn stage(&self, connector: &str, subject: &Subject, stage: Stage) -> Result<String, String> {
         let (issue, column) = {
             let store = self.store.lock().unwrap();
             let c = store.connector(connector)?;
@@ -579,7 +676,7 @@ impl Connectors {
 
     /// Files a Linear issue for the Slack thread, linking back to it, unless the thread already
     /// filed one. Answers `<identifier> <url>` either way.
-    pub async fn create(&self, connector: &str, channel: &str, thread: &str, title: &str, description: &str) -> Result<String, String> {
+    pub async fn linear_create(&self, connector: &str, channel: &str, thread: &str, title: &str, description: &str) -> Result<String, String> {
         let _filing = self.filing.lock().await;
         let filing = self.store.lock().unwrap().connector(connector)?.filing(channel, thread)?;
         let (team, label) = match filing {
@@ -602,7 +699,7 @@ impl Connectors {
     }
 
     /// Posts `text` in the Slack thread the connector's session answers.
-    pub async fn reply(&self, connector: &str, channel: &str, thread: &str, text: &str) -> Result<String, String> {
+    pub async fn slack_reply(&self, connector: &str, channel: &str, thread: &str, text: &str) -> Result<String, String> {
         if !self.store.lock().unwrap().connectors.iter().any(|c| c.id == connector) {
             return Err("the connector was deleted".into());
         }
@@ -630,7 +727,7 @@ fn claude_args(c: &Connector, worktree: &str, name: String) -> Vec<String> {
     args
 }
 
-fn run(c: &Connector, issue: &linear::Issue, exe: &Path) -> Run {
+fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
     let mut args = claude_args(c, &issue.identifier.to_lowercase(), format!("{} {}", issue.identifier, issue.title));
     let mut prompt = c.instructions.trim().to_owned();
     let report = [
@@ -640,7 +737,7 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &Path) -> Run {
     let steps: Vec<String> = report
         .iter()
         .filter(|(stage, ..)| !c.columns.get(*stage).is_empty())
-        .map(|(_, arg, when)| format!("- Run `'{}' stage {arg}` {when}.", exe.display()))
+        .map(|(_, arg, when)| format!("- Run `'{}' stage {arg}` {when}.", exe))
         .collect();
     if !steps.is_empty() {
         prompt += "\n\nReport your progress to pinned, the app that started this session. Each command moves the Linear issue to its next column. Run each one once:\n";
@@ -657,12 +754,12 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &Path) -> Run {
         issue.description.as_deref().unwrap_or("(no description)"),
     );
     args.push(prompt);
-    Run { cwd: c.folder.clone(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() } }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() } }
 }
 
 /// What every connector session that may open a pull request must do to prove the change works.
 /// The proof goes on the pull request as a comment, never into the repository.
-fn proof_of_work(exe: &Path) -> String {
+fn proof_of_work(exe: &str) -> String {
     format!(
         "\n\nProof of work. Prove on the pull request that the change works. Never `git add` the video or the script: nothing from the recording is committed.\n\
          - If the change has behavior a user can see in a running web UI, record it with Playwright. Write the script in a new temporary directory outside the repository. \
@@ -674,7 +771,7 @@ fn proof_of_work(exe: &Path) -> String {
          - If a browser cannot show the change (a library, a CLI, backend only, no runnable UI), or the app cannot start here, do not fake a video. \
          Post the proof with `gh pr comment <number> --body-file <file>`: a `## Proof` heading, \"No video: <one-line reason>\", then the exact test or command output that proves the change.\n\
          - Never show secrets or real user data in the recording.",
-        exe.display()
+        exe
     )
 }
 
@@ -685,8 +782,7 @@ const TRIAGE_ONLY: &str = "\n\nThis connector only triages: never change code, a
 const OFFLINE: &str = "\n\npinned was closed when this mention arrived and is only seeing it now. Open your first reply by saying so, in the language of the thread.";
 
 /// The numbered steps that file the issue and fix the bug, starting with the reply `first`.
-fn fix_steps(c: &Connector, exe: &Path, first: &str) -> String {
-    let exe = exe.display();
+fn fix_steps(c: &Connector, exe: &str, first: &str) -> String {
     let mut steps = vec![
         first.to_owned(),
         format!("Run `'{exe}' linear create \"<title>\" \"<description>\"` to file the issue. It prints the issue identifier and link; reply with them."),
@@ -704,7 +800,7 @@ fn fix_steps(c: &Connector, exe: &Path, first: &str) -> String {
 }
 
 /// What a Slack connector's session may do about a bug, with the commands to run.
-fn fix_rule(c: &Connector, exe: &Path) -> String {
+fn fix_rule(c: &Connector, exe: &str) -> String {
     let answer = "- Not a bug, or existing behavior or a known fix already answers it: reply with the answer and stop.";
     let ask = "reply with your analysis and what you would change, ask in the thread whether to file a Linear issue and fix it, and stop without filing an issue or changing code";
     let failed = "If a pinned command fails, reply in the thread with its error and stop.";
@@ -738,7 +834,7 @@ fn slack_run(
     thread: &str,
     posts: &[slack::Post],
     note: Option<&str>,
-    exe: &Path,
+    exe: &str,
 ) -> Run {
     let opening = posts.first().and_then(|p| p.text.lines().next()).unwrap_or_default();
     let opening: String = opening.chars().take(TAB_NAME_CHARS).collect();
@@ -747,7 +843,7 @@ fn slack_run(
     prompt += &format!(
         "\n\nAnswer in the Slack thread below by running `'{}' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. \
          Messages posted in the thread later reach you as `{}` blocks; answer them in the thread the same way.",
-        exe.display(),
+        exe,
         reply_header("<name>")
     );
     prompt += &fix_rule(c, exe);
@@ -761,7 +857,7 @@ fn slack_run(
     prompt += note.unwrap_or_default();
     args.push(prompt);
     let subject = Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() };
-    Run { cwd: c.folder.clone(), args, connector: c.id.clone(), subject }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject }
 }
 
 fn reply_header(author: &str) -> String {
@@ -781,146 +877,232 @@ fn filed_note(filed: &Filed) -> String {
     )
 }
 
-/// Polls forever; `open` receives what each check found and answers whether a tab took it,
-/// which a delivery no live tab answers doesn't. A settings change wakes it early.
-pub async fn watch(app: AppHandle, open: impl Fn(&Work) -> bool) {
-    let connectors = app.state::<Connectors>();
-    loop {
-        let (work, mut error) = connectors.poll().await;
-        for work in work {
-            if let Err(e) = connectors.hand_over(work, &open).await {
-                error.get_or_insert(e);
+/// Each method answers the `wire::HubCall` of the same name.
+impl Connectors {
+    /// Polls forever. `open` receives what each check found and answers whether a tab took it,
+    /// and `on_check` hears how each check went. A settings change wakes it early.
+    pub async fn watch<F, Fut>(&self, open: F, on_check: impl Fn(&Check))
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        loop {
+            let (work, mut error) = self.poll().await;
+            for work in work {
+                if let Err(e) = self.hand_over(work, &open).await {
+                    error.get_or_insert(e);
+                }
+            }
+            let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
+            *self.checked.lock().unwrap() = Some(check.clone());
+            on_check(&check);
+            let _ = tokio::time::timeout(INTERVAL, self.wake.notified()).await;
+        }
+    }
+
+    pub fn get_settings(&self) -> Settings {
+        let store = self.store.lock().unwrap();
+        Settings {
+            linear: store.linear.clone(),
+            slack: store.slack.clone(),
+            connectors: store.connectors.clone(),
+            checked: self.checked.lock().unwrap().clone(),
+        }
+    }
+
+    /// Checks the key against Linear before keeping it.
+    pub async fn connect_linear(&self, key: &str) -> Result<linear::Account, String> {
+        let key = key.trim();
+        let account = linear::account(key).await?;
+        self.storage.write_key(LINEAR_KEY, key)?;
+        let mut store = self.store.lock().unwrap();
+        store.linear = Some(account.clone());
+        self.save(&store)?;
+        self.wake.notify_one();
+        Ok(account)
+    }
+
+    pub fn disconnect_linear(&self) -> Result<(), String> {
+        self.storage.remove_key(LINEAR_KEY);
+        let mut store = self.store.lock().unwrap();
+        store.linear = None;
+        self.save(&store)
+    }
+
+    pub async fn linear_suggestions(&self) -> Result<Suggestions, String> {
+        let key = self.key(LINEAR_KEY).ok_or("Linear is not connected")?;
+        Ok(Suggestions {
+            labels: linear::label_names(&key).await?,
+            columns: linear::state_names(&key).await?,
+            teams: linear::team_names(&key).await?,
+        })
+    }
+
+    /// Checks the bot token against Slack before keeping it.
+    pub async fn connect_slack(&self, token: &str) -> Result<slack::Account, String> {
+        let token = token.trim();
+        let account = slack::account(token).await?;
+        self.storage.write_key(SLACK_KEY, token)?;
+        self.channels.lock().unwrap().clear();
+        let mut store = self.store.lock().unwrap();
+        store.slack = Some(account.clone());
+        self.save(&store)?;
+        self.wake.notify_one();
+        Ok(account)
+    }
+
+    pub fn disconnect_slack(&self) -> Result<(), String> {
+        self.storage.remove_key(SLACK_KEY);
+        self.channels.lock().unwrap().clear();
+        let mut store = self.store.lock().unwrap();
+        store.slack = None;
+        self.save(&store)
+    }
+
+    /// Channels the bot was invited to, which a Slack connector can watch.
+    pub async fn slack_suggestions(&self) -> Result<Vec<String>, String> {
+        let token = self.key(SLACK_KEY).ok_or("Slack is not connected")?;
+        slack::member_channels(&token).await
+    }
+
+    /// Adds or replaces a connector. Its watermark, handled issues, filed issues and thread cursors stay with the stored copy.
+    pub fn save_connector(&self, mut connector: Connector) -> Result<Connector, String> {
+        let mut store = self.store.lock().unwrap();
+        match store.connectors.iter_mut().find(|c| c.id == connector.id && !c.id.is_empty()) {
+            Some(existing) => {
+                connector.since = existing.since.clone();
+                connector.handled = std::mem::take(&mut existing.handled);
+                connector.created = std::mem::take(&mut existing.created);
+                connector.followed = std::mem::take(&mut existing.followed);
+                *existing = connector.clone();
+            }
+            None => {
+                connector.id = format!("c{}", chrono::Utc::now().timestamp_millis());
+                connector.since = chrono::Utc::now().to_rfc3339();
+                connector.handled.clear();
+                connector.created.clear();
+                connector.followed.clear();
+                store.connectors.push(connector.clone());
             }
         }
-        let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
-        *connectors.checked.lock().unwrap() = Some(check.clone());
-        let _ = app.emit("connectors-checked", check);
-        let _ = tokio::time::timeout(INTERVAL, connectors.wake.notified()).await;
+        self.save(&store)?;
+        self.wake.notify_one();
+        Ok(connector)
     }
-}
 
-#[tauri::command]
-pub fn get_settings(connectors: State<Connectors>) -> Settings {
-    let store = connectors.store.lock().unwrap();
-    Settings {
-        linear: store.linear.clone(),
-        slack: store.slack.clone(),
-        connectors: store.connectors.clone(),
-        checked: connectors.checked.lock().unwrap().clone(),
+    pub fn delete_connector(&self, id: &str) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        store.connectors.retain(|c| c.id != id);
+        self.save(&store)
     }
-}
 
-#[tauri::command]
-pub fn open_linear_keys() -> Result<(), String> {
-    std::process::Command::new("open").arg(linear::KEY_PAGE).spawn().map(drop).map_err(|e| e.to_string())
-}
-
-/// Checks the key against Linear before keeping it.
-#[tauri::command]
-pub async fn connect_linear(connectors: State<'_, Connectors>, key: String) -> Result<linear::Account, String> {
-    let key = key.trim();
-    let account = linear::account(key).await?;
-    connectors.write_key(LINEAR_KEY, key)?;
-    let mut store = connectors.store.lock().unwrap();
-    store.linear = Some(account.clone());
-    connectors.save(&store)?;
-    connectors.wake.notify_one();
-    Ok(account)
-}
-
-#[tauri::command]
-pub fn disconnect_linear(connectors: State<Connectors>) -> Result<(), String> {
-    let _ = std::fs::remove_file(connectors.dir.join(LINEAR_KEY));
-    let mut store = connectors.store.lock().unwrap();
-    store.linear = None;
-    connectors.save(&store)
-}
-
-#[tauri::command]
-pub async fn linear_suggestions(connectors: State<'_, Connectors>) -> Result<Suggestions, String> {
-    let key = connectors.key(LINEAR_KEY).ok_or("Linear is not connected")?;
-    Ok(Suggestions {
-        labels: linear::label_names(&key).await?,
-        columns: linear::state_names(&key).await?,
-        teams: linear::team_names(&key).await?,
-    })
-}
-
-/// Checks the bot token against Slack before keeping it.
-#[tauri::command]
-pub async fn connect_slack(connectors: State<'_, Connectors>, token: String) -> Result<slack::Account, String> {
-    let token = token.trim();
-    let account = slack::account(token).await?;
-    connectors.write_key(SLACK_KEY, token)?;
-    connectors.channels.lock().unwrap().clear();
-    let mut store = connectors.store.lock().unwrap();
-    store.slack = Some(account.clone());
-    connectors.save(&store)?;
-    connectors.wake.notify_one();
-    Ok(account)
-}
-
-#[tauri::command]
-pub fn disconnect_slack(connectors: State<Connectors>) -> Result<(), String> {
-    let _ = std::fs::remove_file(connectors.dir.join(SLACK_KEY));
-    connectors.channels.lock().unwrap().clear();
-    let mut store = connectors.store.lock().unwrap();
-    store.slack = None;
-    connectors.save(&store)
-}
-
-/// Channels the bot was invited to, which a Slack connector can watch.
-#[tauri::command]
-pub async fn slack_suggestions(connectors: State<'_, Connectors>) -> Result<Vec<String>, String> {
-    let token = connectors.key(SLACK_KEY).ok_or("Slack is not connected")?;
-    slack::member_channels(&token).await
-}
-
-/// Adds or replaces a connector. Its watermark, handled issues, filed issues and thread cursors stay with the stored copy.
-#[tauri::command]
-pub fn save_connector(connectors: State<Connectors>, mut connector: Connector) -> Result<Connector, String> {
-    let mut store = connectors.store.lock().unwrap();
-    match store.connectors.iter_mut().find(|c| c.id == connector.id && !c.id.is_empty()) {
-        Some(existing) => {
-            connector.since = existing.since.clone();
-            connector.handled = std::mem::take(&mut existing.handled);
-            connector.created = std::mem::take(&mut existing.created);
-            connector.followed = std::mem::take(&mut existing.followed);
-            *existing = connector.clone();
+    /// Replaces the store and keys with exported ones, as when a signed-out app's connectors move
+    /// to its account. An integration whose key didn't come along counts as not connected.
+    pub fn import(&self, store: serde_json::Value, linear_key: Option<String>, slack_key: Option<String>) -> Result<(), String> {
+        let mut imported: Store = serde_json::from_value(store).map_err(|e| format!("not a connectors store: {e}"))?;
+        let present = |key: Option<String>| key.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty());
+        let (linear_key, slack_key) = (present(linear_key), present(slack_key));
+        if linear_key.is_none() {
+            imported.linear = None;
         }
-        None => {
-            connector.id = format!("c{}", chrono::Utc::now().timestamp_millis());
-            connector.since = chrono::Utc::now().to_rfc3339();
-            connector.handled.clear();
-            connector.created.clear();
-            connector.followed.clear();
-            store.connectors.push(connector.clone());
+        if slack_key.is_none() {
+            imported.slack = None;
         }
+        for (name, key) in [(LINEAR_KEY, linear_key), (SLACK_KEY, slack_key)] {
+            match key {
+                Some(key) => self.storage.write_key(name, &key)?,
+                None => self.storage.remove_key(name),
+            }
+        }
+        self.channels.lock().unwrap().clear();
+        let mut current = self.store.lock().unwrap();
+        *current = imported;
+        self.save(&current)?;
+        self.wake.notify_one();
+        Ok(())
     }
-    connectors.save(&store)?;
-    connectors.wake.notify_one();
-    Ok(connector)
-}
 
-#[tauri::command]
-pub fn delete_connector(connectors: State<Connectors>, id: String) -> Result<(), String> {
-    let mut store = connectors.store.lock().unwrap();
-    store.connectors.retain(|c| c.id != id);
-    connectors.save(&store)
-}
-
-#[tauri::command]
-pub async fn pick_folder(app: AppHandle, start: Option<String>) -> Option<String> {
-    let mut dialog = app.dialog().file();
-    if let Some(start) = start.filter(|s| !s.is_empty()) {
-        dialog = dialog.set_directory(start);
+    /// The store and the Linear and Slack keys, as `import` takes them.
+    pub fn export(&self) -> (serde_json::Value, Option<String>, Option<String>) {
+        let store = serde_json::to_value(&*self.store.lock().unwrap()).unwrap();
+        (store, self.key(LINEAR_KEY), self.key(SLACK_KEY))
     }
-    dialog.blocking_pick_folder()?.into_path().ok().map(|p| p.display().to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(future)
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pinned-connectors-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Connectors over a store holding `connectors`, as connectors.json in a fresh directory.
+    fn stored(name: &str, connectors: Vec<Connector>) -> (Connectors, PathBuf) {
+        let dir = temp_dir(name);
+        let storage = FileStorage::new(dir.clone());
+        storage.save(&serde_json::to_vec(&Store { connectors, ..Store::default() }).unwrap()).unwrap();
+        (Connectors::new(storage, "/bin/pinned".into()), dir)
+    }
+
+    #[test]
+    fn a_run_no_tab_took_is_found_again_by_the_next_check() {
+        let mut linear = linear_connector();
+        linear.handled = vec!["uuid".into(), "older".into()];
+        let mut slack = Connector { id: "c2".into(), ..slack_connector() };
+        slack.handled = vec!["C0123ABCD:1792400050.000200".into()];
+        slack.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), replied: false });
+        let (connectors, dir) = stored("unclaim", vec![linear, slack]);
+        let refuse = |_: Work| async { false };
+
+        let issue_run = run(&linear_connector(), &issue(), "/bin/pinned");
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(issue_run), &refuse)),
+            Err("could not open a session in /repo; the next check tries again".into())
+        );
+        let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert!(block_on(connectors.hand_over(Work::Run(thread_run), &refuse)).is_err());
+
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
+        assert_eq!(reloaded[0].handled, ["older"]);
+        assert_eq!((reloaded[1].handled.len(), reloaded[1].followed.len()), (0, 0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_a_tab_took_stays_claimed() {
+        let slack = Connector { id: "c2".into(), handled: vec!["C0123ABCD:1792400050.000200".into()], ..slack_connector() };
+        let (connectors, dir) = stored("claimed", vec![slack]);
+        let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { true })), Ok(()));
+        assert_eq!(connectors.get_settings().connectors[0].handled, ["C0123ABCD:1792400050.000200"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_import_replaces_the_store_and_keys_and_drops_integrations_without_a_key() {
+        let (connectors, dir) = stored("import", vec![linear_connector()]);
+        let exported = serde_json::json!({
+            "linear": { "name": "Ana", "email": "ana@acme.dev", "organization": "Acme" },
+            "slack": { "team": "Acme", "userId": "UBOT", "name": "pinned" },
+            "connectors": [serde_json::to_value(Connector { id: "c9".into(), ..slack_connector() }).unwrap()],
+        });
+        connectors.import(exported, Some(" lin_api_1 ".into()), None).unwrap();
+        let (store, linear_key, slack_key) = connectors.export();
+        assert_eq!((linear_key.as_deref(), slack_key), (Some("lin_api_1"), None));
+        assert_eq!(store["linear"]["email"], "ana@acme.dev");
+        assert_eq!(store["slack"], serde_json::Value::Null);
+        assert_eq!(store["connectors"][0]["id"], "c9");
+        assert_eq!(std::fs::read_to_string(dir.join("linear-key")).unwrap(), "lin_api_1");
+        assert!(connectors.import(serde_json::json!({ "connectors": "no" }), None, None).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     fn linear_connector() -> Connector {
         Connector {
@@ -943,6 +1125,8 @@ mod tests {
             created: BTreeMap::new(),
             followed: BTreeMap::new(),
             proof: false,
+            machine: String::new(),
+            repo: String::new(),
         }
     }
 
@@ -958,7 +1142,7 @@ mod tests {
 
     #[test]
     fn run_passes_connector_settings_to_claude() {
-        let run = run(&linear_connector(), &issue(), Path::new("/Applications/pinned.app/Contents/MacOS/pinned"));
+        let run = run(&linear_connector(), &issue(), "/Applications/pinned.app/Contents/MacOS/pinned");
         assert_eq!(run.cwd, PathBuf::from("/repo"));
         assert_eq!((run.connector.as_str(), &run.subject), ("c1", &Subject::LinearIssue { issue: "uuid".into() }));
         assert_eq!(
@@ -999,6 +1183,8 @@ mod tests {
             created: BTreeMap::new(),
             followed: BTreeMap::new(),
             proof: false,
+            machine: String::new(),
+            repo: String::new(),
         }
     }
 
@@ -1009,7 +1195,7 @@ mod tests {
     fn connector_thread_run(c: &Connector, mentioned: &str, picked_up: &str) -> Run {
         let at = |t: &str| DateTime::parse_from_rfc3339(t).unwrap().with_timezone(&Utc);
         let mention = slack::Mention { thread: "1792400050.000200".into(), at: at(mentioned) };
-        slack_run(c, "C0123ABCD", "support", &mention.thread, &posts(), mention_note(&mention, at(picked_up)), Path::new("/bin/pinned"))
+        slack_run(c, "C0123ABCD", "support", &mention.thread, &posts(), mention_note(&mention, at(picked_up)), "/bin/pinned")
     }
 
     fn posts() -> [slack::Post; 2] {
@@ -1143,7 +1329,6 @@ mod tests {
     /// reaches Linear or Slack: each answers from the store or fails before the network.
     #[test]
     fn the_harness_answers_a_second_create_and_a_stage_from_the_stored_issue() {
-        use tauri::async_runtime::block_on;
         let dir = std::env::temp_dir().join(format!("pinned-connectors-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut c = fixing_connector();
@@ -1153,23 +1338,23 @@ mod tests {
         );
         let store = Store { connectors: vec![c, Connector { id: "c3".into(), ..slack_connector() }], ..Store::default() };
         std::fs::write(dir.join("connectors.json"), serde_json::to_vec(&store).unwrap()).unwrap();
-        let connectors = Connectors::load(dir.clone(), "/bin/pinned".into());
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
 
         assert_eq!(
-            block_on(connectors.create("c2", "C0123ABCD", "1792400050.000200", "Export 500s again", "dup")),
+            block_on(connectors.linear_create("c2", "C0123ABCD", "1792400050.000200", "Export 500s again", "dup")),
             Ok("ENG-12 https://linear.app/x/issue/ENG-12".into())
         );
         let thread = |t: &str| Subject::SlackThread { channel: "C0123ABCD".into(), thread: t.into() };
-        assert_eq!(block_on(connectors.advance("c2", &thread("1792400050.000200"), Stage::Coding)), Err("Linear is not connected".into()));
+        assert_eq!(block_on(connectors.stage("c2", &thread("1792400050.000200"), Stage::Coding)), Err("Linear is not connected".into()));
         assert_eq!(
-            block_on(connectors.advance("c2", &thread("1792499999.000100"), Stage::Coding)),
+            block_on(connectors.stage("c2", &thread("1792499999.000100"), Stage::Coding)),
             Err("this Slack thread has no Linear issue yet: file one with `pinned linear create` first".into())
         );
         assert_eq!(
-            block_on(connectors.create("c3", "C0123ABCD", "1792400050.000200", "Export 500s", "desc")),
+            block_on(connectors.linear_create("c3", "C0123ABCD", "1792400050.000200", "Export 500s", "desc")),
             Err("connector \"Triage\" does not file Linear issues: it is set to only analyze and reply".into())
         );
-        assert_eq!(block_on(connectors.create("gone", "C0123ABCD", "1", "t", "d")), Err("the connector was deleted".into()));
+        assert_eq!(block_on(connectors.linear_create("gone", "C0123ABCD", "1", "t", "d")), Err("the connector was deleted".into()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1226,7 +1411,7 @@ mod tests {
     #[test]
     fn a_thread_whose_session_is_gone_starts_over_knowing_its_issue() {
         let c = fixing_connector();
-        let gone = |note: Option<&str>| slack_run(&c, "C0123ABCD", "support", "1792400050.000200", &posts(), note, Path::new("/bin/pinned"));
+        let gone = |note: Option<&str>| slack_run(&c, "C0123ABCD", "support", "1792400050.000200", &posts(), note, "/bin/pinned");
         let first = connector_thread_run(&c, "2026-10-19T10:00:00Z", "2026-10-19T10:01:00Z");
         assert_eq!(gone(None).args, first.args);
         let filed = Filed { id: "uuid".into(), identifier: "ENG-12".into(), url: "https://linear.app/x/issue/ENG-12".into() };
@@ -1283,7 +1468,7 @@ mod tests {
 
     #[test]
     fn a_linear_run_must_prove_its_pull_request_unless_proof_is_off() {
-        let prompt = |proof| run(&Connector { proof, ..linear_connector() }, &issue(), Path::new("/bin/pinned")).args.pop().unwrap();
+        let prompt = |proof| run(&Connector { proof, ..linear_connector() }, &issue(), "/bin/pinned").args.pop().unwrap();
         assert_eq!(
             prompt(true),
             format!(
