@@ -2,8 +2,8 @@ mod awake;
 mod commands;
 
 use pinned_core::machine::{Launch, Machine};
-use pinned_core::wire::{MachineEvent, ProjectView, TabId};
-use pinned_core::{agent, connectors, history, reminders};
+use pinned_core::wire::{Call, MachineEvent, TabId};
+use pinned_core::{agent, connectors, reminders};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,61 +39,29 @@ enum View {
     Pill,
 }
 
-/// Adds a tab on the project at `path`, or the launch folder, and returns its id.
-/// With `bypass` the tab's claude never asks for permission.
+/// Answers a `wire::Call` from the webview, the same calls the hub forwards from other devices.
+/// Sync commands run one at a time on the main thread, which keeps keystrokes in order.
 #[tauri::command]
-fn open_tab(machine: State<Arc<Machine>>, path: Option<String>, bypass: bool) -> TabId {
-    machine.open_tab(path, bypass)
+fn machine_call(machine: State<Arc<Machine>>, call: Call) -> Result<serde_json::Value, String> {
+    machine.call(call)
 }
 
-/// The turns saved for the project at `path`, newest first.
+/// Streams the tab's output to the webview's terminal, starting with what its screen holds.
 #[tauri::command]
-fn project_history(machine: State<Arc<Machine>>, path: String) -> Vec<history::Turn> {
-    machine.project_history(&path)
+fn attach_tab(machine: State<Arc<Machine>>, tab: String, output: Channel<InvokeResponseBody>) -> Result<(), String> {
+    let sink = move |bytes: &[u8]| drop(output.send(InvokeResponseBody::Raw(bytes.to_vec())));
+    machine.attach(&tab, LOCAL.into(), Box::new(sink))
 }
 
 #[tauri::command]
-fn list_projects(machine: State<Arc<Machine>>) -> Vec<ProjectView> {
-    machine.list_projects()
+fn detach_tab(machine: State<Arc<Machine>>, tab: String) {
+    machine.detach(&tab, LOCAL);
 }
 
-/// Asks for a folder and records it as a project, returning its path.
-#[tauri::command]
-async fn pick_project(app: AppHandle, machine: State<'_, Arc<Machine>>) -> Result<Option<String>, ()> {
-    let picked = commands::pick_folder(app, None).await;
-    Ok(picked.map(|dir| machine.open_project(dir.into()).display().to_string()))
-}
-
-/// Reopens the sessions still going at the last quit, resumed, and returns their tab ids.
+/// Reopens the sessions still going at the last quit, not yet started, and returns their tab ids.
 #[tauri::command]
 fn restore_tabs(machine: State<Arc<Machine>>) -> Vec<TabId> {
     machine.restore_tabs()
-}
-
-#[tauri::command]
-fn tab_bypass(machine: State<Arc<Machine>>, tab: String) -> Result<bool, String> {
-    Ok(machine.view(&tab)?.bypass)
-}
-
-/// Starts claude in the tab with `output` as the webview's terminal. The terminal already shows
-/// what an earlier session printed, so it attaches after the start and gets only the new session.
-#[tauri::command]
-fn start_claude(machine: State<Arc<Machine>>, tab: String, cols: u16, rows: u16, output: Channel<InvokeResponseBody>) -> Result<String, String> {
-    machine.detach(&tab, LOCAL);
-    let cwd = machine.start_claude(&tab, cols, rows)?;
-    let sink = move |bytes: &[u8]| drop(output.send(InvokeResponseBody::Raw(bytes.to_vec())));
-    machine.attach(&tab, LOCAL.into(), Box::new(sink))?;
-    Ok(cwd)
-}
-
-#[tauri::command]
-fn write_input(machine: State<Arc<Machine>>, tab: String, data: String) -> Result<(), String> {
-    machine.write_input(&tab, data.as_bytes())
-}
-
-#[tauri::command]
-fn resize_pty(machine: State<Arc<Machine>>, tab: String, cols: u16, rows: u16) -> Result<(), String> {
-    machine.resize_pty(&tab, cols, rows)
 }
 
 #[tauri::command]
@@ -164,17 +132,6 @@ fn close_tab(app: AppHandle, machine: State<Arc<Machine>>, tab: String) {
     }
 }
 
-/// Returns true when the user picked a folder; the caller then restarts claude there.
-#[tauri::command]
-async fn choose_folder(app: AppHandle, machine: State<'_, Arc<Machine>>, tab: String) -> Result<bool, String> {
-    let current = machine.view(&tab)?.cwd;
-    let Some(picked) = commands::pick_folder(app, Some(current)).await else {
-        return Ok(false);
-    };
-    machine.set_folder(&tab, &picked)?;
-    Ok(true)
-}
-
 #[tauri::command]
 fn get_opacity(panel: State<Panel>) -> u8 {
     panel.opacity.load(Ordering::Relaxed)
@@ -214,17 +171,6 @@ async fn install_update(app: AppHandle, panel: State<'_, Panel>, machine: State<
     update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
     machine.quit();
     app.restart();
-}
-
-/// Passes the machine's events to the webview: as `machine`, and as the events the UI listens to today.
-fn emit(app: &AppHandle, event: MachineEvent) {
-    let _ = match &event {
-        MachineEvent::Agent { event } => app.emit("agent-event", event),
-        MachineEvent::Exit { tab } => app.emit("claude-exit", tab),
-        MachineEvent::Usage { usage } => app.emit("usage", usage),
-        MachineEvent::Tabs { .. } | MachineEvent::Output { .. } => Ok(()),
-    };
-    let _ = app.emit("machine", event);
 }
 
 /// Shows each reminder as a macOS notification once it is due.
@@ -297,19 +243,13 @@ fn main() {
     let builder = builder.plugin(tauri_nspanel::init());
     builder
         .invoke_handler(tauri::generate_handler![
-            open_tab,
-            list_projects,
-            pick_project,
+            machine_call,
+            attach_tab,
+            detach_tab,
             restore_tabs,
-            start_claude,
-            tab_bypass,
-            write_input,
-            resize_pty,
             set_view,
             focus_panel,
             close_tab,
-            choose_folder,
-            project_history,
             awake::get_keep_awake,
             awake::set_keep_awake,
             check_update,
@@ -332,7 +272,7 @@ fn main() {
             let config = app.path().app_config_dir().ok();
             let from_arg = std::env::args().nth(1).and_then(|d| std::fs::canonicalize(d).ok()).filter(|p| p.is_dir());
             let handle = app.handle().clone();
-            let machine = Machine::new(launch, config.clone(), from_arg, move |event| emit(&handle, event));
+            let machine = Machine::new(launch, config.clone(), from_arg, move |event: MachineEvent| drop(handle.emit("machine", event)));
             app.manage(machine.clone());
             app.manage(Panel {
                 expanded: Mutex::new(LogicalSize::new(760.0, 460.0)),
@@ -351,8 +291,7 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 let open = |work| {
                     let taken = match work {
-                        // The webview starts the tab when it shows it, in the background.
-                        connectors::Work::Run(run) => opener.open_run(&run.spec()).map(|id| drop(handle.emit("tab-opened", id))).is_ok(),
+                        connectors::Work::Run(run) => opener.run(&run.spec()).is_ok(),
                         connectors::Work::Delivery(d) => opener.deliver(&d.env(), &d.text()),
                     };
                     async move { taken }
