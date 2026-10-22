@@ -1,7 +1,7 @@
 mod awake;
 mod commands;
 
-use pinned_core::{agent, connectors, evidence, history, hooks, plugin, projects, pty, reminders, sessions};
+use pinned_core::{agent, connectors, history, hooks, plugin, projects, pty, reminders, sessions};
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -647,24 +647,8 @@ fn add_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let command = match args.next().as_deref() {
-        Some(hooks::SUBCOMMAND) => return hooks::forward(args.next().as_deref()),
-        Some(hooks::STATUSLINE_SUBCOMMAND) => return hooks::statusline(),
-        Some(reminders::SUBCOMMAND) => return reminders::serve(),
-        Some(hooks::STAGE_SUBCOMMAND) => Some(hooks::stage(args.next().as_deref())),
-        Some(hooks::SLACK_SUBCOMMAND) => Some(hooks::slack(&args.collect::<Vec<_>>())),
-        Some(hooks::LINEAR_SUBCOMMAND) => Some(hooks::linear(&args.collect::<Vec<_>>())),
-        Some(evidence::SUBCOMMAND) => Some(evidence::run(&args.collect::<Vec<_>>())),
-        _ => None,
-    };
-    match command {
-        Some(Ok(done)) => return println!("{done}"),
-        Some(Err(e)) => {
-            eprintln!("pinned: {e}");
-            std::process::exit(1);
-        }
-        None => {}
+    if let Some(code) = pinned_core::cli::dispatch(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        std::process::exit(code);
     }
 
     // The updater and the Linear client share reqwest's rustls, which ships without a crypto provider.
