@@ -713,9 +713,19 @@ function renderUsage() {
 }
 setInterval(renderUsage, 60 * 1000);
 
+// set_view resizes the native window. The panel is hidden before the window shrinks and shown
+// after it grows, so it is never laid out in a window too small for it: the terminals would fit
+// to a few cells and claude would redraw at that size.
 async function setView(view) {
   document.body.classList.remove("alert");
-  await invoke("set_view", { view });
+  const previous = document.body.dataset.view;
+  if (view === "pill") document.body.dataset.view = view;
+  try {
+    await invoke("set_view", { view });
+  } catch (e) {
+    document.body.dataset.view = previous;
+    throw e;
+  }
   document.body.dataset.view = view;
 }
 document.getElementById("new-tab").onclick = () => toggleProjects();
