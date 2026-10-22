@@ -202,11 +202,11 @@ impl Hub {
                 for machine in account.dispatch_order(&preferred, |_| true) {
                     match self.call_machine(&account, &machine, Call::Run { run: spec.clone() }, RUN_WAIT).await {
                         Ok(_) => return true,
-                        Err(Unanswered::Refused(e)) => eprintln!("pinned-server: {machine} refused a run of connector {}: {e}", run.connector),
+                        Err(Unanswered::Refused(e)) => eprintln!("pinned-server: {machine} refused a run of workflow {}: {e}", run.connector),
                         // The run may have started there, so it doesn't go to a second machine. The next
                         // check finds its tab, or sends it again, and a machine answers a run it has with that session.
                         Err(Unanswered::Lost(e)) => {
-                            eprintln!("pinned-server: lost {machine}'s answer to a run of connector {}: {e}", run.connector);
+                            eprintln!("pinned-server: lost {machine}'s answer to a run of workflow {}: {e}", run.connector);
                             return false;
                         }
                     }
@@ -580,12 +580,12 @@ impl PgStorage {
                 }
                 if let Some(store) = store {
                     if let Err(e) = db.save_store(account, &store).await {
-                        eprintln!("pinned-server: could not save account {account}'s connectors: {e}");
+                        eprintln!("pinned-server: could not save account {account}'s workflows: {e}");
                     }
                 }
                 if let Some(secrets) = secrets {
                     if let Err(e) = db.save_secrets(account, &secrets).await {
-                        eprintln!("pinned-server: could not save account {account}'s integration keys: {e}");
+                        eprintln!("pinned-server: could not save account {account}'s connector keys: {e}");
                     }
                 }
             }

@@ -172,7 +172,7 @@ fn import_when_empty(app: AppHandle) {
             }
         }
         if let Err(e) = link.call_hub(HubCall::Import { store, linear_key: keys.linear, slack_key: keys.slack, github_key: keys.github }) {
-            eprintln!("pinned: could not move this Mac's connectors to the account: {e}");
+            eprintln!("pinned: could not move this Mac's workflows to the account: {e}");
         }
     });
 }

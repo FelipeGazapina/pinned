@@ -84,9 +84,9 @@ While you are signed in:
   are greyed out. Pick a machine, or press ← and →, to list its projects. On another machine,
   **Type a path…** replaces **Open folder…**. If that folder doesn't exist there, the list
   says so. 📁 on another machine's tab opens the same list, to move the tab to another folder.
-- The account holds your connectors, Linear and Slack keys, and the hub runs the connectors
-  even when this Mac sleeps. The first time you sign in, pinned moves this Mac's connectors
-  and keys into the account, if the account has none yet. A connector's **Run on** field picks
+- The account holds your workflows, Linear and Slack keys, and the hub runs the workflows
+  even when this Mac sleeps. The first time you sign in, pinned moves this Mac's workflows
+  and keys into the account, if the account has none yet. A workflow's **Run on** field picks
   the machine its sessions start on; when that machine is offline, another online machine
   takes the run and finds or clones the repository there.
 - Closing the last tab leaves pinned running, so your other devices can still open sessions
@@ -96,7 +96,7 @@ While you are signed in:
 offline machine shows when it was last seen. Click **Rename** to rename a machine. Click
 **Remove** to take a machine out of the account; a second row asks you to confirm.
 **Sign out** under Account removes this Mac from the account, and pinned runs its own
-connectors again.
+workflows again.
 
 ### Add a server
 
@@ -120,17 +120,17 @@ and password. You get the same tabs and settings as in the app, without the pane
 On a phone the tabs sit in one scrolling row on top, and a row of keys above the terminal
 gives you Esc, Tab, ↑, ↓, Ctrl-C and Enter.
 
-## Integrations and connectors
+## Connectors and workflows
 
 Click **⋯** in the header (or press ⌘,) to swap the terminal for settings. Click ⋯ again, or
 pick a tab, to go back.
 
-**Integrations** connects services. For Linear, click **Open Linear ↗**, create a personal API
+**Connectors** connects services. For Linear, click **Open Linear ↗**, create a personal API
 key on the page that opens in your browser, and paste it. pinned checks the key with Linear
 and keeps it in `~/Library/Application Support/dev.personal-harness.pinned/linear-key`,
 readable only by you.
 
-**Connectors** make the agent proactive. A connector watches Linear for issues created with a
+**Workflows** make the agent proactive. A workflow watches Linear for issues created with a
 label. For each new issue, it opens a tab in the background on the folder you chose and starts:
 
 ```sh
@@ -139,17 +139,17 @@ claude --model <model> --effort <effort> --permission-mode <mode> [--worktree=<i
 ```
 
 The default instructions ask Claude to implement the issue and open a pull request. Edit them
-per connector.
+per workflow.
 
-The Connectors page lists each connector with its steps and a sentence that says what it does.
-The switch on a connector turns it on or off right away. Click a connector to open its flow:
+The Workflows page lists each workflow with its steps and a sentence that says what it does.
+The switch on a workflow turns it on or off right away. Click a workflow to open its flow:
 the trigger at the top, then each step it runs, joined by the event that leads to it, as in
 n8n. Click a step to set it up, and click it again to fold it. A dashed **＋** step is optional
 and off: click it to add it, and **Remove step** turns it off again. A **!** marks a step that
-is missing something, and saving opens that step. ⌘S saves. **＋ New connector** asks what
+is missing something, and saving opens that step. ⌘S saves. **＋ New workflow** asks what
 starts the agent, Linear or Slack, and opens a flow filled with defaults.
 
-Each connector has its own column flow. Each **Move the issue** step names the column for a
+Each workflow has its own column flow. Each **Move the issue** step names the column for a
 stage, and a stage without the step leaves the issue where it is:
 
 - **When pinned picks it up.** pinned moves the issue before the session starts.
@@ -158,26 +158,26 @@ stage, and a stage without the step leaves the issue where it is:
   The command asks the running app to move the issue, so the Linear key never enters the
   session.
 
-Columns are matched by name, ignoring case, within the issue's team. Several connectors can
+Columns are matched by name, ignoring case, within the issue's team. Several workflows can
 watch the same repository with different labels and flows.
 
-pinned checks Linear every minute and only for issues created after the connector was
+pinned checks Linear every minute and only for issues created after the workflow was
 saved, and it starts each issue once. Pick **Separate git worktree per issue** when several
 issues may run at the same time in one repository.
 
 ### Slack
 
-A Slack connector watches one channel for messages that @mention your bot. For each new
+A Slack workflow watches one channel for messages that @mention your bot. For each new
 thread that mentions it, pinned opens a tab whose prompt holds the whole thread, and the
 session answers in that thread by running `pinned slack reply "<text>"`. The bot token stays
 in the app, as the Linear key does. The default instructions ask Claude to triage the thread:
 analyse a bug and reply with the cause, or reply with an existing solution, without editing
-code. Each Slack connector can also file a Linear issue and fix the bug, as below.
+code. Each Slack workflow can also file a Linear issue and fix the bug, as below.
 
 To connect Slack, create an app at api.slack.com/apps and give its bot these scopes:
 `channels:history`, `groups:history`, `channels:read`, `groups:read`, `users:read` and
 `chat:write`. Install the app, invite the bot to the channel with `/invite @your-bot`, and
-paste the Bot User OAuth Token (`xoxb-…`) under **Integrations**. pinned keeps it in
+paste the Bot User OAuth Token (`xoxb-…`) under **Connectors**. pinned keeps it in
 `slack-key` next to `linear-key`.
 
 pinned checks the channel every minute. A new mention in a thread that already has a session
@@ -213,36 +213,36 @@ The second and third options need Linear connected and a **Team**, by name or ke
 the bug, opens a pull request and replies with its link. If the thread is not a bug, or it
 already has an answer, the session replies and stops.
 
-`pinned linear create` files the issue in the connector's team with its label, and adds a link
+`pinned linear create` files the issue in the workflow's team with its label, and adds a link
 to the Slack thread to the description. pinned files on your behalf, so the issue is assigned to
 the owner of the connected Linear account. If the thread names who should own the task, the
 session adds `--assignee "<name or email>"`, and pinned matches it against the workspace's
 users by name, display name or email, ignoring case. Each thread files one issue. A second call returns the
 issue already filed. After filing, `pinned stage coding` and `pinned stage review` move that
 issue through the columns you set. A thread has no issue when pinned picks it up, so a Slack
-connector has no first column. The session fixes code under the connector's **Permissions**,
+workflow has no first column. The session fixes code under the workflow's **Permissions**,
 so pick a mode that lets it run `git` and `gh`.
 
 ### One session per issue
 
-An issue gets one session across all connectors. A Linear connector does not start a session
+An issue gets one session across all workflows. A Linear workflow does not start a session
 for an issue that a Slack thread's session filed or took, even when the issue carries the
-connector's label, and two Linear connectors never both start the same issue.
+workflow's label, and two Linear workflows never both start the same issue.
 
 When a thread asks the session to work on an existing issue, the session runs
 `pinned linear take <identifier>`, for example `pinned linear take ENG-123`, before anything
-else. If another session already works on the issue, the command says which connector's
+else. If another session already works on the issue, the command says which workflow's
 session has it, and the session replies in the thread that the issue is already being worked
 on and stops. Otherwise the thread takes the issue: the session replies that it is taking it
-and fixes it as above, `pinned stage` moves that issue, and the Linear connector skips it.
+and fixes it as above, `pinned stage` moves that issue, and the Linear workflow skips it.
 The thread asked for the issue, so taking one does not wait for a reply under **Analyze, then
-ask me in the thread before filing**. A connector set to **Only analyze and reply** never takes
+ask me in the thread before filing**. A workflow set to **Only analyze and reply** never takes
 an issue.
 
 ### Proof of work
 
-Every connector session that can open a pull request must prove that the change works. These
-are Linear connector sessions, and Slack connector sessions whose bug setting is not **Only
+Every workflow session that can open a pull request must prove that the change works. These
+are Linear workflow sessions, and Slack workflow sessions whose bug setting is not **Only
 analyze and reply**. pinned appends a **Proof of work** block to the prompt, after your
 instructions, so editing the instructions does not remove it. The block tells the session to:
 
@@ -275,7 +275,7 @@ app cannot start in the session, the session records no video. Its `## Proof` co
 says `No video: <reason>` and holds the test or command output that proves the change.
 
 The **Prove it works** step is on by default. Remove it to leave the block out of a
-connector's sessions. A Slack connector that only replies never opens a pull request, so its
+workflow's sessions. A Slack workflow that only replies never opens a pull request, so its
 flow has no such step.
 
 ## Updates

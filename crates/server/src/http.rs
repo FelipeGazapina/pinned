@@ -467,7 +467,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 };
                 let result = match work {
                     Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
-                    Some(_) => Err("this machine runs no session of that connector on that subject".into()),
+                    Some(_) => Err("this machine runs no session of that workflow on that subject".into()),
                     // An app's first sign-in moves its own connectors in, which only an empty account takes,
                     // and every machine keeps its projects' files in step with the account's.
                     None if matches!(
@@ -477,7 +477,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                     {
                         hub.hub_call(&account, call).await
                     }
-                    None => Err("a machine may only forward a connector session's callbacks".into()),
+                    None => Err("a machine may only forward a workflow session's callbacks".into()),
                 };
                 if let Err(e) = &result {
                     eprintln!("pinned-server: machine {machine}'s hub call failed: {e}");

@@ -185,13 +185,13 @@ impl Connector {
         match self.fix {
             Fix::Off => {
                 return Err(format!(
-                    "connector {:?} does not file Linear issues: it is set to only analyze and reply",
+                    "workflow {:?} does not file Linear issues: it is set to only analyze and reply",
                     self.name
                 ))
             }
             Fix::Ask if !self.followed.get(&key).is_some_and(|f| f.replied) => {
                 return Err(format!(
-                    "connector {:?} files an issue only after someone answers you in the thread with a mention: ask there, and wait for the answer to reach you",
+                    "workflow {:?} files an issue only after someone answers you in the thread with a mention: ask there, and wait for the answer to reach you",
                     self.name
                 ))
             }
@@ -201,7 +201,7 @@ impl Connector {
             return Ok(Filing::Filed(filed.clone()));
         }
         if self.team.trim().is_empty() {
-            return Err(format!("connector {:?} has no Linear team to file issues in: set one in its settings", self.name));
+            return Err(format!("workflow {:?} has no Linear team to file issues in: set one in its settings", self.name));
         }
         Ok(Filing::New { team: self.team.trim().to_owned(), label: self.label.trim().to_owned() })
     }
@@ -272,7 +272,7 @@ struct Store {
 
 impl Store {
     fn connector(&self, id: &str) -> Result<&Connector, String> {
-        self.connectors.iter().find(|c| c.id == id).ok_or_else(|| "the connector was deleted".into())
+        self.connectors.iter().find(|c| c.id == id).ok_or_else(|| "the workflow was deleted".into())
     }
 
     /// The connector whose session works on the Linear issue `id`, with the thread it answers when a
@@ -290,7 +290,7 @@ impl Store {
         let key = thread_key(channel, thread);
         let c = self.connector(connector)?;
         if c.fix == Fix::Off {
-            return Err(format!("connector {:?} does not work on Linear issues: it is set to only analyze and reply", c.name));
+            return Err(format!("workflow {:?} does not work on Linear issues: it is set to only analyze and reply", c.name));
         }
         match c.created.get(&key) {
             Some(filed) if filed.id == issue.id => return Ok(filed.clone()),
@@ -299,8 +299,8 @@ impl Store {
         }
         if let Some((owner, thread)) = self.working_on(&issue.id) {
             let by = match thread {
-                Some(_) => format!("the session of connector {:?} that answers another Slack thread", owner.name),
-                None => format!("the session connector {:?} started for it", owner.name),
+                Some(_) => format!("the session of workflow {:?} that answers another Slack thread", owner.name),
+                None => format!("the session workflow {:?} started for it", owner.name),
             };
             return Err(format!("{} is already being worked on by {by}. No second session starts on it.", issue.identifier));
         }
@@ -657,7 +657,7 @@ impl Connectors {
     /// newest message it was given.
     async fn fallback(&self, d: &Delivery) -> Result<(Run, String), String> {
         let c = self.store.lock().unwrap().connector(&d.connector)?.clone();
-        let Trigger::SlackMention { channel: name } = &c.trigger else { return Err("the connector no longer watches Slack".into()) };
+        let Trigger::SlackMention { channel: name } = &c.trigger else { return Err("the workflow no longer watches Slack".into()) };
         let token = self.key(SLACK_KEY).ok_or("Slack is not connected")?;
         let posts = slack::thread(&token, &d.channel, &d.thread).await?;
         let newest = posts.last().map_or_else(|| d.cursor.clone(), |p| p.ts.clone());
@@ -729,7 +729,7 @@ impl Connectors {
             (c.issue(subject)?, c.columns.get(stage).to_owned())
         };
         if column.is_empty() {
-            return Ok("this connector has no column for that stage, so the issue stays where it is".into());
+            return Ok("this workflow has no column for that stage, so the issue stays where it is".into());
         }
         let key = self.key(LINEAR_KEY).ok_or("Linear is not connected")?;
         linear::move_issue(&key, &issue, &column).await?;
@@ -753,8 +753,8 @@ impl Connectors {
             Filing::Filed(filed) => return Ok(filed.answer()),
             Filing::New { team, label } => (team, label),
         };
-        let key = self.key(LINEAR_KEY).ok_or("Linear is not connected: connect it in pinned's Integrations settings")?;
-        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Integrations settings")?;
+        let key = self.key(LINEAR_KEY).ok_or("Linear is not connected: connect it in pinned's Connectors settings")?;
+        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
         let link = slack::permalink(&token, channel, thread).await?;
         let description = format!("{}\n\nSlack thread: {link}", description.trim());
         let issue = linear::create_issue(&key, &team, title.trim(), &description, &label, assignee).await?;
@@ -773,7 +773,7 @@ impl Connectors {
     /// title and description.
     pub async fn linear_take(&self, connector: &str, channel: &str, thread: &str, issue: &str) -> Result<String, String> {
         let _filing = self.filing.lock().await;
-        let key = self.key(LINEAR_KEY).ok_or("Linear is not connected: connect it in pinned's Integrations settings")?;
+        let key = self.key(LINEAR_KEY).ok_or("Linear is not connected: connect it in pinned's Connectors settings")?;
         let issue = linear::issue(&key, issue.trim()).await?;
         let mut store = self.store.lock().unwrap();
         let filed = store.take(connector, channel, thread, &issue)?;
@@ -785,9 +785,9 @@ impl Connectors {
     /// Posts `text` in the Slack thread the connector's session answers.
     pub async fn slack_reply(&self, connector: &str, channel: &str, thread: &str, text: &str) -> Result<String, String> {
         if !self.store.lock().unwrap().connectors.iter().any(|c| c.id == connector) {
-            return Err("the connector was deleted".into());
+            return Err("the workflow was deleted".into());
         }
-        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Integrations settings")?;
+        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
         slack::post(&token, channel, thread, text).await?;
         Ok("posted the reply in the Slack thread".into())
     }
@@ -862,7 +862,7 @@ fn proof_of_work(exe: &str) -> String {
 const SLACK_PROOF: &str = "\nPut the link to the Proof comment in your last reply in the thread too.";
 
 const TAB_NAME_CHARS: usize = 50;
-const TRIAGE_ONLY: &str = "\n\nThis connector only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.";
+const TRIAGE_ONLY: &str = "\n\nThis workflow only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.";
 const OFFLINE: &str = "\n\npinned was closed when this mention arrived and is only seeing it now. Open your first reply by saying so, in the language of the thread.";
 
 /// The numbered steps that file the issue and fix the bug, starting with the reply `first`.
@@ -1361,7 +1361,7 @@ mod tests {
                 "plan",
                 "--name",
                 "#support @pinned export 500s since today",
-                "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\nThis connector only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here",
+                "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\nThis workflow only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here",
             ]
         );
     }
@@ -1441,7 +1441,7 @@ mod tests {
     #[test]
     fn the_fix_setting_decides_when_a_thread_may_file_an_issue() {
         let new = Ok(Filing::New { team: "ENG".into(), label: "from-slack".into() });
-        let ask_first = Err("connector \"Triage\" files an issue only after someone answers you in the thread with a mention: ask there, and wait for the answer to reach you".to_owned());
+        let ask_first = Err("workflow \"Triage\" files an issue only after someone answers you in the thread with a mention: ask there, and wait for the answer to reach you".to_owned());
         let with = |fix, followed: Option<bool>| {
             let mut c = Connector { fix, ..fixing_connector() };
             if let Some(replied) = followed {
@@ -1449,7 +1449,7 @@ mod tests {
             }
             c.filing("C0123ABCD", "1792400050.000200")
         };
-        assert_eq!(with(Fix::Off, Some(true)), Err("connector \"Triage\" does not file Linear issues: it is set to only analyze and reply".into()));
+        assert_eq!(with(Fix::Off, Some(true)), Err("workflow \"Triage\" does not file Linear issues: it is set to only analyze and reply".into()));
         assert_eq!(with(Fix::Ask, None), ask_first);
         assert_eq!(with(Fix::Ask, Some(false)), ask_first);
         assert_eq!(with(Fix::Ask, Some(true)), new);
@@ -1457,12 +1457,12 @@ mod tests {
         assert_eq!(with(Fix::Auto, Some(false)), new);
         assert_eq!(
             slack_connector().filing("C0123ABCD", "1792400050.000200"),
-            Err("connector \"Triage\" does not file Linear issues: it is set to only analyze and reply".into())
+            Err("workflow \"Triage\" does not file Linear issues: it is set to only analyze and reply".into())
         );
         let teamless = Connector { team: " ".into(), ..fixing_connector() };
         assert_eq!(
             teamless.filing("C0123ABCD", "1792400050.000200"),
-            Err("connector \"Triage\" has no Linear team to file issues in: set one in its settings".into())
+            Err("workflow \"Triage\" has no Linear team to file issues in: set one in its settings".into())
         );
     }
 
@@ -1478,7 +1478,7 @@ mod tests {
         );
         assert_eq!(
             store.take("c2", "C0123ABCD", "1792499999.000100", &issue()),
-            Err("ENG-7 is already being worked on by the session of connector \"Triage\" that answers another Slack thread. No second session starts on it.".into())
+            Err("ENG-7 is already being worked on by the session of workflow \"Triage\" that answers another Slack thread. No second session starts on it.".into())
         );
 
         store.connectors[0].handled.push("uuid-8".into());
@@ -1486,7 +1486,7 @@ mod tests {
         assert_eq!(store.working_on("uuid-8").map(|(c, thread)| (c.id.as_str(), thread)), Some(("c1", None)));
         assert_eq!(
             store.take("c2", "C0123ABCD", "1792499999.000100", &picked),
-            Err("ENG-8 is already being worked on by the session connector \"Resolve\" started for it. No second session starts on it.".into())
+            Err("ENG-8 is already being worked on by the session workflow \"Resolve\" started for it. No second session starts on it.".into())
         );
 
         let free = linear::Issue { id: "uuid-9".into(), identifier: "ENG-9".into(), ..issue() };
@@ -1498,9 +1498,9 @@ mod tests {
         store.connectors.push(Connector { id: "c3".into(), ..slack_connector() });
         assert_eq!(
             store.take("c3", "C0123ABCD", "1792499999.000100", &free),
-            Err("connector \"Triage\" does not work on Linear issues: it is set to only analyze and reply".into())
+            Err("workflow \"Triage\" does not work on Linear issues: it is set to only analyze and reply".into())
         );
-        assert_eq!(store.take("gone", "C0123ABCD", "1792499999.000100", &free), Err("the connector was deleted".into()));
+        assert_eq!(store.take("gone", "C0123ABCD", "1792499999.000100", &free), Err("the workflow was deleted".into()));
     }
 
     /// Through the harness's entry points, on a store as connectors.json holds it. No call here
@@ -1530,9 +1530,9 @@ mod tests {
         );
         assert_eq!(
             block_on(connectors.linear_create("c3", "C0123ABCD", "1792400050.000200", "Export 500s", "desc", "")),
-            Err("connector \"Triage\" does not file Linear issues: it is set to only analyze and reply".into())
+            Err("workflow \"Triage\" does not file Linear issues: it is set to only analyze and reply".into())
         );
-        assert_eq!(block_on(connectors.linear_create("gone", "C0123ABCD", "1", "t", "d", "")), Err("the connector was deleted".into()));
+        assert_eq!(block_on(connectors.linear_create("gone", "C0123ABCD", "1", "t", "d", "")), Err("the workflow was deleted".into()));
         let _ = std::fs::remove_dir_all(dir);
     }
 

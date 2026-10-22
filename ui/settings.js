@@ -128,7 +128,7 @@ function integrationsHtml() {
            <button class="primary" data-action="connect-linear">Connect</button></div></li>
        </ol>
        <p class="error" id="linear-error"></p>`;
-  return `<h2>Integrations</h2>
+  return `<h2>Connectors</h2>
     <p class="hint">Services the harness can read from and act on.</p>
     <div class="card">
       <div class="card-head"><span class="logo">◐</span><div><b>Linear</b><div class="hint">Issues, labels and comments</div></div>
@@ -182,7 +182,7 @@ function slackCardHtml() {
 }
 
 
-/** What the Connectors page shows: the list, the trigger choice for a new connector, or the flow editor on a draft of one connector. */
+/** What the Workflows page shows: the list, the trigger choice for a new workflow, or the flow editor on a draft of one workflow. */
 let view = { name: "list" };
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -193,7 +193,7 @@ const folderName = (path) => path.split("/").filter(Boolean).pop() ?? "";
 const input = (path, value, attrs = "") => `<input data-bind="${path}" value="${esc(value)}" ${attrs}>`;
 const select = (path, values, labelOf, selected) => `<select data-bind="${path}">${options(values, labelOf, selected)}</select>`;
 const check = (path, on, text) => `<label class="toggle"><input type="checkbox" data-bind="${path}"${on ? " checked" : ""}> ${text}</label>`;
-const switchHtml = (attrs, on) => `<label class="switch" title="On: the connector watches and starts sessions"><input type="checkbox" ${attrs}${on ? " checked" : ""}><span></span></label>`;
+const switchHtml = (attrs, on) => `<label class="switch" title="On: the workflow watches and starts sessions"><input type="checkbox" ${attrs}${on ? " checked" : ""}><span></span></label>`;
 const iconHtml = (step) => `<span class="icon" data-tone="${step.tone}" title="${esc(`${step.app}: ${step.title}`)}">${step.icon}</span>`;
 const kindHtml = (c) => `<label>Starts when ${select("trigger.kind", Object.keys(TRIGGERS), (t) => TRIGGERS[t], c.trigger.kind)}</label>`;
 
@@ -221,10 +221,10 @@ const STEPS = {
     title: "Issue gets a label",
     trigger: true,
     summary: (c) => (c.trigger.label.trim() ? `Label “${c.trigger.label.trim()}”` : "Name a label"),
-    issues: (c) => [!settings.linear && "Connect Linear under Integrations.", !c.trigger.label.trim() && "Name the label that starts a session."].filter(Boolean),
+    issues: (c) => [!settings.linear && "Connect Linear under Connectors.", !c.trigger.label.trim() && "Name the label that starts a session."].filter(Boolean),
     fields: (c) => `${kindHtml(c)}
       <label>Label ${input("trigger.label", c.trigger.label, 'list="linear-labels" placeholder="claude"')}</label>
-      <p class="hint">pinned checks Linear every minute, only for issues created after the connector is saved, and starts each issue once.</p>`,
+      <p class="hint">pinned checks Linear every minute, only for issues created after the workflow is saved, and starts each issue once.</p>`,
   },
   "slack-trigger": {
     tone: "slack",
@@ -233,7 +233,7 @@ const STEPS = {
     title: "Bot is @mentioned",
     trigger: true,
     summary: (c) => (c.trigger.channel.trim() ? `in #${c.trigger.channel.trim().replace(/^#/, "")}` : "Name a channel"),
-    issues: (c) => [!settings.slack && "Connect Slack under Integrations.", !c.trigger.channel.trim() && "Name the channel to watch."].filter(Boolean),
+    issues: (c) => [!settings.slack && "Connect Slack under Connectors.", !c.trigger.channel.trim() && "Name the channel to watch."].filter(Boolean),
     fields: (c) => `${kindHtml(c)}
       <label>Channel ${input("trigger.channel", c.trigger.channel, 'list="slack-channels" placeholder="support"')}</label>
       <p class="hint">Invite the bot with <code>/invite @your-bot</code>. Each new thread that mentions it starts one session, checked every minute.</p>`,
@@ -280,7 +280,7 @@ const STEPS = {
     title: "If it reports a bug",
     summary: (c) => FIXES[c.fix],
     issues: (c) =>
-      c.fix === "off" ? [] : [!settings.linear && "Connect Linear under Integrations to file issues.", !c.team.trim() && "Name the Linear team issues are filed in."].filter(Boolean),
+      c.fix === "off" ? [] : [!settings.linear && "Connect Linear under Connectors to file issues.", !c.team.trim() && "Name the Linear team issues are filed in."].filter(Boolean),
     fields: (c) => `<label>The session ${select("fix", Object.keys(FIXES), (f) => FIXES[f], c.fix)}</label>
       ${
         c.fix === "off"
@@ -369,15 +369,15 @@ async function fillRepo() {
 function connectorsHtml() {
   if (view.name === "edit") return editorHtml();
   if (view.name === "pick") return triggerChoiceHtml();
-  const intro = `<h2>Connectors</h2>
-    <p class="hint">A connector watches an integration and opens a Claude Code tab on its own when something happens, so the agent starts before you ask.</p>`;
+  const intro = `<h2>Workflows</h2>
+    <p class="hint">A workflow watches a connector and opens a Claude Code tab on its own when something happens, so the agent starts before you ask.</p>`;
   if (!settings.linear && !settings.slack) {
     return `${intro}<div class="card"><p>Connect Linear or Slack first.</p>
-      <div class="actions"><button class="primary" data-action="go-integrations">Go to Integrations</button></div></div>`;
+      <div class="actions"><button class="primary" data-action="go-integrations">Go to Connectors</button></div></div>`;
   }
   return `${intro}
     ${settings.connectors.map(cardHtml).join("")}
-    <button class="new-card" data-action="new-connector">＋ New connector</button>
+    <button class="new-card" data-action="new-connector">＋ New workflow</button>
     <p class="hint" id="checked">${esc(checkedText())}</p>`;
 }
 
@@ -407,14 +407,14 @@ const TEMPLATES = [
 ];
 
 function triggerChoiceHtml() {
-  return `<div class="editor-bar"><button class="secondary" data-action="close-editor" title="Back to connectors">←</button><h2>New connector</h2></div>
+  return `<div class="editor-bar"><button class="secondary" data-action="close-editor" title="Back to workflows">←</button><h2>New workflow</h2></div>
     <p class="hint">Pick what starts the agent. You set up the rest of the flow next.</p>
     ${TEMPLATES.map(({ kind, integration, text }) => {
       const step = STEPS[`${integration}-trigger`];
       const connected = settings[integration];
       return `<button class="template" data-action="${connected ? "pick-trigger" : "go-integrations"}" data-kind="${kind}">
         ${iconHtml(step)}
-        <span><b>${TRIGGERS[kind]}</b><span class="hint">${connected ? text : `Connect ${step.app} under Integrations first.`}</span></span>
+        <span><b>${TRIGGERS[kind]}</b><span class="hint">${connected ? text : `Connect ${step.app} under Connectors first.`}</span></span>
       </button>`;
     }).join("")}`;
 }
@@ -429,14 +429,14 @@ function editorHtml() {
     <datalist id="folders">${options(suggestions.folders)}</datalist>
     <datalist id="github-repos">${options(suggestions.repos)}</datalist>
     <div class="editor-bar">
-      <button class="secondary" data-action="close-editor" title="Back to connectors">←</button>
-      ${input("name", c.name, 'class="title" placeholder="Connector name"')}
+      <button class="secondary" data-action="close-editor" title="Back to workflows">←</button>
+      ${input("name", c.name, 'class="title" placeholder="Workflow name"')}
       ${switchHtml('data-bind="enabled"', c.enabled)}
       <button class="primary" id="save-connector" data-action="save-connector" title="Save (⌘S)"></button>
     </div>
     <p class="error" id="editor-error"></p>
     <div class="flow">${flowOf(c).map(([id, edge]) => stepHtml(c, id, edge)).join("")}</div>
-    ${c.id ? `<div class="actions start"><button class="secondary danger" data-action="delete-connector">Delete connector</button></div>` : ""}`;
+    ${c.id ? `<div class="actions start"><button class="secondary danger" data-action="delete-connector">Delete workflow</button></div>` : ""}`;
 }
 
 function stepHtml(c, id, edge) {
@@ -519,9 +519,9 @@ function commandPreview(c) {
 
 function checkedText() {
   const checked = settings.checked;
-  if (!checked) return "Not checked yet. Integrations are checked every minute.";
+  if (!checked) return "Not checked yet. Connectors are checked every minute.";
   const at = new Date(checked.at).toLocaleTimeString();
-  return checked.error ? `Last check at ${at} failed: ${checked.error}` : `Last checked at ${at}. Integrations are checked every minute.`;
+  return checked.error ? `Last check at ${at} failed: ${checked.error}` : `Last checked at ${at}. Connectors are checked every minute.`;
 }
 
 /** The draft with its typed names trimmed, as the backend matches them. */
@@ -690,7 +690,7 @@ const actions = {
     const c = tidy(view.draft);
     const error = document.getElementById("editor-error");
     if (!c.name) {
-      error.textContent = "Name the connector.";
+      error.textContent = "Name the workflow.";
       return settingsPage.querySelector(".editor-bar .title").focus();
     }
     const incomplete = flowOf(c).find(([id]) => shown(c, id) && STEPS[id].issues?.(c).length);

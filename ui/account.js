@@ -3,7 +3,7 @@ const DEFAULT_HUB = "https://pinned.187-127-36-149.sslip.io";
 function showAccount() {
   if (!account) {
     settingsPage.innerHTML = `<h2>Account</h2>
-      <p class="hint">Sign in to see your other machines and their sessions here, open sessions on them, and run connectors on whichever machine is online.</p>
+      <p class="hint">Sign in to see your other machines and their sessions here, open sessions on them, and run workflows on whichever machine is online.</p>
       <form class="card sign-in">
         <label>Hub <input name="hub" value="${esc(load("hub-url") ?? DEFAULT_HUB)}" spellcheck="false" autocomplete="off"></label>
         <label>Email <input name="email" type="email" autocomplete="username"></label>
@@ -25,7 +25,7 @@ function showAccount() {
   const badge = state === "online" ? "Connected" : state === "refused" ? "Refused by the hub" : "Connecting…";
   const name = machines.get(LOCAL)?.hubView?.name;
   settingsPage.innerHTML = `<h2>Account</h2>
-    <p class="hint">Your machines, their sessions and your connectors belong to this account.</p>
+    <p class="hint">Your machines, their sessions and your workflows belong to this account.</p>
     <div class="card">
       <div class="card-head"><span class="logo account">@</span>
         <div><b>${esc(account.email || "…")}</b><div class="hint">${esc(account.hub)}</div></div>

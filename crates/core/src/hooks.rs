@@ -224,7 +224,7 @@ pub fn linear(args: &[String]) -> Reply {
 }
 
 fn env(k: &str) -> Result<String, String> {
-    std::env::var(k).map_err(|_| format!("{k} is not set: run this inside a session a pinned connector started"))
+    std::env::var(k).map_err(|_| format!("{k} is not set: run this inside a session a pinned workflow started"))
 }
 
 /// Sends one message to the running harness and waits for its answer.
@@ -329,7 +329,7 @@ mod tests {
         .unwrap();
         std::env::set_var(SOCK_ENV, &sock);
         std::env::set_var(CONNECTOR_ENV, "c1");
-        assert_eq!(stage(Some("coding")), Err("PINNED_ISSUE is not set: run this inside a session a pinned connector started".to_owned()));
+        assert_eq!(stage(Some("coding")), Err("PINNED_ISSUE is not set: run this inside a session a pinned workflow started".to_owned()));
         std::env::set_var(ISSUE_ENV, "issue-uuid");
 
         assert_eq!(stage(Some("coding")), Ok("c1 moved issue-uuid".to_owned()));
@@ -342,7 +342,7 @@ mod tests {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
             slack(&args(&["reply", "hi"])),
-            Err("PINNED_SLACK_CHANNEL is not set: run this inside a session a pinned connector started".to_owned())
+            Err("PINNED_SLACK_CHANNEL is not set: run this inside a session a pinned workflow started".to_owned())
         );
         std::env::remove_var(ISSUE_ENV);
         std::env::set_var(SLACK_CHANNEL_ENV, "C0123ABCD");

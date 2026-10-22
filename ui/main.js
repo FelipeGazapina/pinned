@@ -167,7 +167,7 @@ async function cloneFromGithub() {
     repos = await connectorCall("github_repos");
   } catch (e) {
     list.innerHTML = "";
-    document.getElementById("picker-error").textContent = /not connected/.test(e) ? "Connect GitHub under Settings → Integrations first." : String(e);
+    document.getElementById("picker-error").textContent = /not connected/.test(e) ? "Connect GitHub under Settings → Connectors first." : String(e);
     return;
   }
   const show = () => {

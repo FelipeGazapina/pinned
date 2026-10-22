@@ -395,12 +395,12 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     let forward = |node: &Node, subject: Subject| node.link.as_ref().unwrap().forward(agent::Message::Stage { connector: id.clone(), subject, stage: Stage::Coding });
     assert_eq!(
         forward(&node_b, issue.clone()),
-        Ok("this connector has no column for that stage, so the issue stays where it is".into()),
+        Ok("this workflow has no column for that stage, so the issue stays where it is".into()),
         "vps reports on the issue its session works on"
     );
     assert_eq!(
         forward(&node_a, issue),
-        Err("this machine runs no session of that connector on that subject".into()),
+        Err("this machine runs no session of that workflow on that subject".into()),
         "mac-mini can't report on vps's issue"
     );
 
@@ -444,7 +444,7 @@ fn an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only() {
     let other = HubCall::Import { store: json!({ "connectors": [] }), linear_key: None, slack_key: Some("xoxb-2".into()), github_key: None };
     assert_eq!(link.call_hub(other), Ok(json!(false)), "a later machine can't replace the account's connectors");
     assert_eq!(client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["name"], "Bugs");
-    assert_eq!(link.call_hub(HubCall::GetSettings), Err("a machine may only forward a connector session's callbacks".into()));
+    assert_eq!(link.call_hub(HubCall::GetSettings), Err("a machine may only forward a workflow session's callbacks".into()));
     node.kill();
 }
 
