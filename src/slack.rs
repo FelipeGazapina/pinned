@@ -30,6 +30,7 @@ pub struct Mention {
 
 #[derive(Debug, PartialEq)]
 pub struct Post {
+    pub ts: String,
     pub author: String,
     pub text: String,
 }
@@ -211,7 +212,7 @@ fn posts(messages: &Value, names: &HashMap<String, String>) -> Vec<Post> {
             for (id, n) in names {
                 text = text.replace(&format!("<@{id}>"), &format!("@{n}"));
             }
-            Post { author, text }
+            Post { ts: m["ts"].as_str().unwrap_or_default().to_owned(), author, text }
         })
         .collect()
 }
@@ -307,14 +308,14 @@ mod tests {
         assert_eq!(user_ids(&replies), ["U1", "U2", "U3", "UBOT"]);
         let names = HashMap::from([("U1".to_owned(), "ana".to_owned()), ("UBOT".to_owned(), "pinned".to_owned())]);
         let thread = json!([
-            { "user": "U1", "text": "<@UBOT> it broke for <@U9>" },
-            { "bot_profile": { "name": "deploybot" }, "text": "deploy failed" },
+            { "ts": "1792400050.000200", "user": "U1", "text": "<@UBOT> it broke for <@U9>" },
+            { "ts": "1792400060.000000", "bot_profile": { "name": "deploybot" }, "text": "deploy failed" },
         ]);
         assert_eq!(
             posts(&thread, &names),
             [
-                Post { author: "ana".into(), text: "@pinned it broke for <@U9>".into() },
-                Post { author: "deploybot".into(), text: "deploy failed".into() },
+                Post { ts: "1792400050.000200".into(), author: "ana".into(), text: "@pinned it broke for <@U9>".into() },
+                Post { ts: "1792400060.000000".into(), author: "deploybot".into(), text: "deploy failed".into() },
             ]
         );
     }

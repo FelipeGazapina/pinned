@@ -35,6 +35,12 @@ const SLACK_FIX_INSTRUCTIONS = `Someone mentioned you in the Slack thread below.
 - If existing behavior or a known fix already solves it, reply with that solution.
 - If it reports a bug, reproduce it or trace it through the code before you decide whether to fix it.
 - When you fix a bug, create a branch named after the Linear issue identifier, run the project's existing tests and checks, then push and open a pull request with gh pr create. Put the issue identifier in the title and link the Slack thread in the body.`;
+/** How far a Slack connector's session goes with a bug, matching the backend's `Fix`. */
+const FIXES = {
+  off: "Only analyze and reply",
+  ask: "Analyze, then ask me in the thread before filing",
+  auto: "Fix obvious bugs on its own, ask for the rest",
+};
 /** What can start a connector, matching the backend's `Trigger`. */
 const TRIGGERS = {
   "linear-label": "a Linear issue is created with label",
@@ -198,8 +204,8 @@ function connectorHtml(c, i) {
 function issuesHtml(c) {
   return `<fieldset class="columns">
       <legend>Linear issues</legend>
-      <label class="toggle"><input type="checkbox" name="autoFix"${c.autoFix ? " checked" : ""}> Create the Linear issue and fix obvious bugs on its own</label>
-      <label>Team <input name="team" list="linear-teams" value="${esc(c.team)}" placeholder="Engineering"${c.autoFix ? " required" : ""}></label>
+      <label class="wide">When the thread reports a bug <select name="fix">${options(Object.keys(FIXES), (f) => FIXES[f], c.fix)}</select></label>
+      <label>Team <input name="team" list="linear-teams" value="${esc(c.team)}" placeholder="Engineering"${c.fix !== "off" ? " required" : ""}></label>
       <label>Label <input name="issueLabel" list="linear-labels" value="${esc(c.label)}" placeholder="none"></label>
       ${settings.linear ? "" : `<p class="hint">Connect Linear under Integrations to file issues from Slack threads.</p>`}
     </fieldset>`;
@@ -240,12 +246,12 @@ function readConnector(form) {
     // A Slack form has no picked column, so it keeps the stored one.
     columns: Object.fromEntries(STAGES.map(([stage]) => [stage, f[`column-${stage}`]?.value.trim() ?? stored.columns?.[stage] ?? ""])),
   };
-  return f.label ? c : { ...c, team: f.team.value.trim(), label: f.issueLabel.value.trim(), autoFix: f.autoFix.checked };
+  return f.label ? c : { ...c, team: f.team.value.trim(), label: f.issueLabel.value.trim(), fix: f.fix.value };
 }
 
 const DEFAULT_NAMES = { "linear-label": "Resolve labeled Linear issues", "slack-mention": "Triage Slack mentions" };
 const defaultText = (c) =>
-  c.trigger.kind === "linear-label" ? DEFAULT_INSTRUCTIONS : c.autoFix ? SLACK_FIX_INSTRUCTIONS : SLACK_INSTRUCTIONS;
+  c.trigger.kind === "linear-label" ? DEFAULT_INSTRUCTIONS : c.fix === "off" ? SLACK_INSTRUCTIONS : SLACK_FIX_INSTRUCTIONS;
 
 /** Redraws the form after `change` edits what it is, swapping in the new defaults where the old ones were untouched. */
 function reshape(form, change) {
@@ -313,7 +319,7 @@ const actions = {
             columns: { picked: "", coding: "", review: "" },
             team: "",
             label: "",
-            autoFix: false,
+            fix: "off",
           },
     );
     showPage("connectors");
@@ -350,10 +356,12 @@ settingsPage.addEventListener("change", (e) => {
     const kind = e.target.value;
     reshape(e.target.closest("form"), (c) => ({ ...c, trigger: kind === "slack-mention" ? { kind, channel: "" } : { kind, label: "" } }));
   }
-  if (e.target.name === "autoFix") {
-    // Read the form as it was before the click, so its untouched default text is recognised.
-    e.target.checked = !e.target.checked;
-    reshape(e.target.closest("form"), (c) => ({ ...c, autoFix: !c.autoFix }));
+  if (e.target.name === "fix") {
+    // Read the form as it was before the change, so its untouched default text is recognised.
+    const form = e.target.closest("form");
+    const fix = e.target.value;
+    e.target.value = settings.connectors[form.dataset.index].fix;
+    reshape(form, (c) => ({ ...c, fix }));
   }
 });
 
