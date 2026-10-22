@@ -219,6 +219,19 @@ impl Connector {
         Some(github::clone_url(&self.repo)).filter(|r| !r.is_empty())
     }
 
+    /// Moves a Slack connector's watermark up to `watermark`, and answers whether it moved. A check
+    /// that found a mention leaves it where it is: the mention's run may find no machine, and
+    /// `unclaim` alone doesn't bring back a mention the watermark has passed. Once a session takes
+    /// the mention it is handled, and the next check moves the watermark on.
+    fn advance(&mut self, watermark: DateTime<Utc>, mentioned: bool) -> bool {
+        let behind = DateTime::parse_from_rfc3339(&self.since).map_or(true, |since| since < watermark);
+        if !matches!(self.trigger, Trigger::SlackMention { .. }) || !behind || mentioned {
+            return false;
+        }
+        self.since = watermark.to_rfc3339();
+        true
+    }
+
     fn unclaim(&mut self, subject: &Subject) {
         let key = match subject {
             Subject::LinearIssue { issue } => issue.clone(),
@@ -545,11 +558,8 @@ impl Connectors {
         let mut changed = false;
         let watermark = now - SLACK_OVERLAP;
         for connector in store.connectors.iter_mut().filter(|c| checked.contains(&c.id)) {
-            let behind = DateTime::parse_from_rfc3339(&connector.since).map_or(true, |since| since < watermark);
-            if matches!(connector.trigger, Trigger::SlackMention { .. }) && behind {
-                connector.since = watermark.to_rfc3339();
-                changed = true;
-            }
+            let mentioned = found.iter().any(|(id, f)| *id == connector.id && matches!(f, Found::Mention { .. }));
+            changed |= connector.advance(watermark, mentioned);
         }
         let mut work = vec![];
         for (id, found) in found {
@@ -1208,6 +1218,20 @@ mod tests {
         assert_eq!(reloaded[0].handled, ["older"]);
         assert_eq!((reloaded[1].handled.len(), reloaded[1].followed.len()), (0, 0));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_slack_watermark_waits_for_a_mention_until_a_session_takes_it() {
+        let at = |rfc3339: &str| DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&Utc);
+        let mut slack = Connector { since: "2026-10-22T16:18:15+00:00".into(), ..slack_connector() };
+        assert!(!slack.advance(at("2026-10-22T16:19:17Z"), true), "a check that found a mention keeps the watermark");
+        assert!(!slack.advance(at("2026-10-22T16:20:20Z"), true), "and so does the next one while no machine takes it");
+        assert_eq!(slack.since, "2026-10-22T16:18:15+00:00");
+        assert!(slack.advance(at("2026-10-22T16:21:22Z"), false), "a check that found nothing new moves it on");
+        assert_eq!(slack.since, "2026-10-22T16:21:22+00:00");
+        assert!(!slack.advance(at("2026-10-22T16:20:00Z"), false), "it never moves back");
+        let mut linear = Connector { since: "2026-10-22T16:18:15+00:00".into(), ..linear_connector() };
+        assert!(!linear.advance(at("2026-10-22T16:21:22Z"), false), "Linear asks by creation time, not this watermark");
     }
 
     #[test]
