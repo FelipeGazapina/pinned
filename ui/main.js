@@ -292,8 +292,19 @@ async function pickFolder(path) {
   }
 }
 
+/** True while the native folder dialog is up: it takes focus from the panel, which shouldn't shrink for it. */
+let choosingFolder = false;
+async function chooseFolder(start) {
+  choosingFolder = true;
+  try {
+    return await invoke("pick_folder", { start });
+  } finally {
+    choosingFolder = false;
+  }
+}
+
 async function pickLocalFolder() {
-  const path = await invoke("pick_folder", { start: picking.tab?.view.cwd ?? null });
+  const path = await chooseFolder(picking.tab?.view.cwd ?? null);
   if (path) pickFolder(path);
 }
 
@@ -720,6 +731,10 @@ async function setView(view) {
 }
 document.getElementById("new-tab").onclick = () => toggleProjects();
 document.getElementById("minimize").onclick = () => setView("pill");
+// Clicking outside the expanded panel shrinks it to the pill, as the minimize button does.
+window.addEventListener("blur", () => {
+  if (TAURI && document.body.dataset.view === "expanded" && !choosingFolder) setView("pill");
+});
 track.onclick = async (e) => {
   const tab = tabByKey(e.target.closest(".item")?.dataset.tab);
   if (!tab) return;
@@ -740,7 +755,7 @@ document.getElementById("folder").onclick = async () => {
   const tab = active;
   if (!tab) return;
   if (tab.machine !== LOCAL) return pickerOpen() ? closeProjects() : showProjects({ machine: tab.machine, tab });
-  const path = await invoke("pick_folder", { start: tab.view.cwd });
+  const path = await chooseFolder(tab.view.cwd);
   if (path) await moveTab(tab, path);
 };
 
