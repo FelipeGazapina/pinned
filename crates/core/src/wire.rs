@@ -88,6 +88,8 @@ pub enum Call {
     ProjectHistory { path: String },
     /// The folder's `origin` remote, or `null`.
     GitRemote { path: String },
+    /// `projects::Folders`: the subfolders matching a path as typed so far, such as `~/pro`.
+    Browse { path: String },
     /// The new tab's id, with claude already running. Refused when the folder can't be found or cloned.
     Run { run: RunSpec },
     /// `true` when a live tab whose environment holds every pair took `text` as a prompt.

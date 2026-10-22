@@ -238,7 +238,7 @@ impl Machine {
                 projects::save(file, &projects);
             }
         }
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        let home = home();
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
             .unwrap_or_else(|| home.clone());
@@ -294,6 +294,7 @@ impl Machine {
             Call::ListProjects => json(self.list_projects()),
             Call::ProjectHistory { path } => json(self.project_history(&path)),
             Call::GitRemote { path } => json(git_remote(Path::new(&path))),
+            Call::Browse { path } => json(projects::browse(&path, &home())?),
             Call::Run { run } => json(self.run(&run)?),
             Call::Deliver { env, text } => json(self.deliver(&env, &text)),
         }
@@ -765,6 +766,10 @@ impl Machine {
         }
         Ok(self.open_project(target))
     }
+}
+
+fn home() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
 }
 
 fn json<T: Serialize>(value: T) -> Result<Value, String> {

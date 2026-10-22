@@ -313,6 +313,9 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 #projects .type-path input { width: 100%; padding: 5px 8px; border: 1px solid var(--working); border-radius: 6px; outline: none;
   background: #0000004d; color: var(--fg); font: 11px ui-monospace, Menlo, monospace; }
 #projects .error { margin: 4px 8px; font-size: 11px; }
+#projects .folders { display: flex; flex-direction: column; max-height: 50vh; overflow-y: auto; }
+#projects .folders button { flex-direction: row; justify-content: space-between; align-items: center; gap: 8px; }
+#projects .folders .path { flex: none; padding: 0 5px; border: 1px solid var(--border); border-radius: 4px; font-size: 9px; }
 
 #empty { display: none; position: absolute; inset: 0; height: fit-content; margin: auto; padding: 0 24px;
   text-align: center; color: var(--muted); }

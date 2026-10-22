@@ -50,12 +50,92 @@ pub fn recent(projects: &[Project]) -> Vec<&Project> {
     found
 }
 
+/// Most entries `browse` lists, so a huge folder can't flood the picker.
+const BROWSE_LIMIT: usize = 500;
+
+/// The folder a typed path lists, and its subfolders that match.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+pub struct Folders {
+    pub parent: PathBuf,
+    pub entries: Vec<Folder>,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+pub struct Folder {
+    pub name: String,
+    pub path: PathBuf,
+    /// Holds a git repository, so it is likely a project.
+    pub repo: bool,
+}
+
+/// The subfolders matching `typed`, a path as typed so far: `~/pro` lists the folders of `~`
+/// starting with `pro`, and `~/projetos/` every folder in it. A path without a leading `/` or `~`
+/// starts at `home`. Hidden folders show only once the typed name starts with a dot.
+pub fn browse(typed: &str, home: &Path) -> Result<Folders, String> {
+    let typed = typed.trim();
+    let (folder, prefix) = match typed.rsplit_once('/') {
+        _ if typed == "~" => ("~", ""),
+        Some((folder, prefix)) => (if folder.is_empty() { "/" } else { folder }, prefix),
+        None => ("", typed),
+    };
+    let parent = match folder.strip_prefix('~') {
+        Some(rest) if rest.trim_start_matches('/').is_empty() => home.to_path_buf(),
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None if folder.starts_with('/') => PathBuf::from(folder),
+        None => home.join(folder),
+    };
+    let prefix = prefix.to_lowercase();
+    let read = match std::fs::read_dir(&parent) {
+        Ok(read) => read,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(Folders { parent, entries: vec![] }),
+        Err(_) => return Err(format!("{} is not a folder on this machine", parent.display())),
+    };
+    let mut entries: Vec<Folder> = read
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            let lower = name.to_lowercase();
+            let wanted = lower.starts_with(&prefix) && (prefix.starts_with('.') || !name.starts_with('.')) && path.is_dir();
+            wanted.then(|| Folder { repo: path.join(".git").exists(), name, path })
+        })
+        .collect();
+    entries.sort_by_key(|f| f.name.to_lowercase());
+    entries.truncate(BROWSE_LIMIT);
+    Ok(Folders { parent, entries })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn temp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("pinned-projects-test-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn browse_lists_the_typed_folder_or_the_subfolders_matching_its_last_name() {
+        let home = temp("browse");
+        for dir in ["projetos/pinned/.git", "projetos/Pessoal", "projetos/.cache", "Documents"] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        std::fs::write(home.join("projetos/notes.txt"), "").unwrap();
+        let names = |typed: &str| {
+            let folders = browse(typed, &home).unwrap();
+            (folders.parent, folders.entries.into_iter().map(|f| (f.name, f.repo)).collect::<Vec<_>>())
+        };
+        let projetos = home.join("projetos");
+        assert_eq!(names("~/projetos/"), (projetos.clone(), vec![("Pessoal".into(), false), ("pinned".into(), true)]));
+        assert_eq!(names("~/projetos/p"), (projetos.clone(), vec![("Pessoal".into(), false), ("pinned".into(), true)]));
+        assert_eq!(names("~/projetos/PI"), (projetos.clone(), vec![("pinned".into(), true)]));
+        assert_eq!(names("~/projetos/."), (projetos.clone(), vec![(".cache".into(), false)]));
+        assert_eq!(names("projetos/pin"), (projetos.clone(), vec![("pinned".into(), true)]));
+        assert_eq!(names("").0, home.clone());
+        assert_eq!(names("~/").0.to_str(), home.to_str(), "no trailing slash on the folder listed");
+        assert_eq!(names("~").1, vec![("Documents".into(), false), ("projetos".into(), false)]);
+        assert_eq!(names(&format!("{}/", projetos.display())).1.len(), 2);
+        assert_eq!(browse("~/nowhere/", &home), Err(format!("{} is not a folder on this machine", home.join("nowhere").display())));
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

@@ -123,25 +123,76 @@ async function showProjects({ machine, tab = null } = {}) {
     ...projects.map((p) => ({ name: p.name, path: tilde(p.path), open: () => pickFolder(p.path) })),
     local
       ? { name: "Open folder…", open: () => pickLocalFolder() }
-      : { name: "Type a path…", open: () => typePath(), keep: true },
+      : { name: "Browse folders…", open: () => browseFolders(), keep: true },
   ];
-  picker.querySelector(".choices").replaceChildren(
-    ...choices.map((choice, i) => {
-      const button = document.createElement("button");
-      for (const [cls, text] of [["name", choice.name], ["path", choice.path]]) {
-        if (!text) continue;
-        const span = document.createElement("span");
-        span.className = cls;
-        span.textContent = text;
-        button.append(span);
-      }
-      button.onmouseenter = () => choose(i);
-      button.onclick = (e) => openChoice(i, e.shiftKey);
-      return button;
-    }),
-  );
+  picker.querySelector(".choices").replaceChildren(...choiceButtons());
   picker.querySelector(".choices").insertAdjacentHTML("beforeend", `<p class="error" id="picker-error"></p>`);
   choose(0);
+}
+
+function choiceButtons() {
+  return choices.map((choice, i) => {
+    const button = document.createElement("button");
+    for (const [cls, text] of [["name", choice.name], ["path", choice.path]]) {
+      if (!text) continue;
+      const span = document.createElement("span");
+      span.className = cls;
+      span.textContent = text;
+      button.append(span);
+    }
+    button.onmousemove = () => chosen !== i && choose(i);
+    button.onclick = (e) => openChoice(i, e.shiftKey);
+    return button;
+  });
+}
+
+/** Counts browse requests, so an answer to an older keystroke can't replace a newer one. */
+let browseSeq = 0;
+
+// Like T3 Code's: the machine lists the folder typed so far, and choosing a folder steps into it.
+function browseFolders(start = "~/") {
+  picker.querySelector(".choices").innerHTML = `<form class="type-path browse"><input placeholder="~/" autocomplete="off" spellcheck="false"></form>
+    <div class="folders"></div><p class="error" id="picker-error"></p>`;
+  const field = picker.querySelector(".browse input");
+  field.value = start;
+  field.oninput = () => listFolders(field.value);
+  picker.querySelector(".browse").onsubmit = (e) => {
+    e.preventDefault();
+    openChoice(chosen, false);
+  };
+  field.focus();
+  listFolders(start);
+}
+
+async function listFolders(typed) {
+  const { machine } = picking;
+  const seq = ++browseSeq;
+  const error = document.getElementById("picker-error");
+  let found;
+  try {
+    found = await callOn(machine, { cmd: "browse", path: typed });
+  } catch (e) {
+    if (seq === browseSeq) error.textContent = String(e);
+    return;
+  }
+  if (seq !== browseSeq || picking.machine !== machine || !pickerOpen()) return;
+  error.textContent = "";
+  const field = picker.querySelector(".browse input");
+  const into = (path) => () => {
+    field.value = path.endsWith("/") ? path : `${path}/`;
+    field.focus();
+    listFolders(field.value);
+  };
+  const up = found.parent.replace(/\/[^/]*$/, "") || "/";
+  choices = [
+    { name: `Open ${found.parent}`, open: () => pickFolder(found.parent).then((ok) => ok && closeProjects()), keep: true },
+    ...(found.parent === "/" ? [] : [{ name: "..", path: up, open: into(up), keep: true }]),
+    ...found.entries.map((f) => ({ name: f.name, path: f.repo ? "git" : "", open: into(f.path), keep: true })),
+  ];
+  picker.querySelector(".folders").replaceChildren(...choiceButtons());
+  const prefix = typed.slice(typed.lastIndexOf("/") + 1);
+  const firstFolder = choices.length - found.entries.length;
+  choose(prefix && found.entries.length ? firstFolder : 0);
 }
 
 function pickerMachinesHtml(current, lockToCurrent) {
@@ -220,23 +271,6 @@ async function moveTab(tab, path) {
   tab.term.reset();
   await startTab(tab);
   tab.term.focus();
-}
-
-function typePath() {
-  const last = picker.querySelectorAll(".choices button")[choices.length - 1];
-  const form = document.createElement("form");
-  form.className = "type-path";
-  form.innerHTML = `<input placeholder="/path/on/${esc(machineName(picking.machine))}" autocomplete="off" spellcheck="false">`;
-  last.replaceWith(form);
-  const field = form.querySelector("input");
-  field.focus();
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    const path = field.value.trim();
-    if (!path) return;
-    document.getElementById("picker-error").textContent = "";
-    if (await pickFolder(path)) closeProjects();
-  };
 }
 
 function addTab(machine, view) {
@@ -528,6 +562,10 @@ function stepTab(step) {
 window.addEventListener("keydown", (e) => {
   if (pickerOpen() && e.target.closest?.(".type-path")) {
     if (e.key === "Escape") showProjects(picking);
+    else if (e.key in PICKER_STEP) choose(chosen + PICKER_STEP[e.key]);
+    else if (e.key === "Tab" && chosen > 0) openChoice(chosen);
+    else return;
+    e.preventDefault();
     return;
   }
   // Keys other than ⌘ shortcuts belong to the open picker, not the terminal behind it.
