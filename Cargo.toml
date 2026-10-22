@@ -3,11 +3,11 @@ members = [".", "crates/core", "crates/server"]
 
 # scripts/release.sh bumps every `version = ` line in this file, this one included.
 [workspace.package]
-version = "0.7.1"
+version = "0.7.2"
 
 [package]
 name = "pinned"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 default-run = "pinned"
 
