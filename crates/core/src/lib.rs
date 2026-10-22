@@ -3,6 +3,7 @@ pub mod agent;
 pub mod cli;
 pub mod connectors;
 pub mod evidence;
+pub mod github;
 pub mod history;
 pub mod hooks;
 pub mod linear;

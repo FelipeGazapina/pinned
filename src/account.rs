@@ -1,5 +1,5 @@
 use pinned_core::account::{self, Credentials};
-use pinned_core::connectors::{self, Connectors};
+use pinned_core::connectors::{self, Connectors, Keys};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::Machine;
 use pinned_core::wire::HubCall;
@@ -158,8 +158,8 @@ fn import_when_empty(app: AppHandle) {
             }
             std::thread::sleep(Duration::from_millis(250));
         }
-        let (mut store, linear_key, slack_key) = app.state::<Connectors>().export();
-        let has_local = linear_key.is_some() || slack_key.is_some() || store["connectors"].as_array().is_some_and(|c| !c.is_empty());
+        let (mut store, keys) = app.state::<Connectors>().export();
+        let has_local = keys != Keys::default() || store["connectors"].as_array().is_some_and(|c| !c.is_empty());
         if !has_local {
             return;
         }
@@ -171,7 +171,7 @@ fn import_when_empty(app: AppHandle) {
                 connector["machine"] = creds.machine_id.clone().into();
             }
         }
-        if let Err(e) = link.call_hub(HubCall::Import { store, linear_key, slack_key }) {
+        if let Err(e) = link.call_hub(HubCall::Import { store, linear_key: keys.linear, slack_key: keys.slack, github_key: keys.github }) {
             eprintln!("pinned: could not move this Mac's connectors to the account: {e}");
         }
     });

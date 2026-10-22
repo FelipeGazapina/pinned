@@ -90,6 +90,13 @@ pub enum Call {
     GitRemote { path: String },
     /// `projects::Folders`: the subfolders matching a path as typed so far, such as `~/pro`.
     Browse { path: String },
+    /// The folder of a clone of `repo`, found among the machine's projects or cloned into `~/pinned`.
+    /// The hub adds the account's GitHub token, for a private repository.
+    Clone {
+        repo: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
+    },
     /// The new tab's id, with claude already running. Refused when the folder can't be found or cloned.
     Run { run: RunSpec },
     /// `true` when a live tab whose environment holds every pair took `text` as a prompt.
@@ -110,6 +117,9 @@ pub struct RunSpec {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// The account's GitHub token, added by the hub, which clones a private repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 /// What a machine reports on its own.
@@ -148,6 +158,13 @@ pub enum HubCall {
     DisconnectSlack,
     /// Channel names.
     SlackSuggestions,
+    /// `github::Account`.
+    ConnectGithub { token: String },
+    DisconnectGithub,
+    /// `Vec<github::Repo>`, most recently pushed first.
+    GithubRepos,
+    /// The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has none.
+    Clone { machine: MachineId, repo: String },
     /// The connector as stored.
     SaveConnector { connector: Connector },
     DeleteConnector { id: String },
@@ -158,7 +175,13 @@ pub enum HubCall {
     /// `PairCode`.
     PairCode,
     /// A signed-out app's connectors, moved to the account on its first sign-in.
-    Import { store: Value, linear_key: Option<String>, slack_key: Option<String> },
+    Import {
+        store: Value,
+        linear_key: Option<String>,
+        slack_key: Option<String>,
+        #[serde(default)]
+        github_key: Option<String>,
+    },
     Stage {
         connector: String,
         #[serde(flatten)]
@@ -345,6 +368,7 @@ mod tests {
                     repo: Some("git@github.com:acme/app.git".into()),
                     args: vec!["--name".into(), "ENG-7 Broken button".into(), "Run `'{{pinned}}' stage coding`".into()],
                     env: vec![("PINNED_CONNECTOR".into(), "c1".into()), ("PINNED_ISSUE".into(), "uuid".into())],
+                    token: None,
                 },
             },
             json!({
@@ -366,7 +390,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_ignored_and_a_run_needs_only_folder_and_args() {
         let call: Call = serde_json::from_value(json!({ "cmd": "run", "run": { "folder": "/repo", "args": [], "later": 1 }, "extra": true })).unwrap();
-        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![] } });
+        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![], token: None } });
         assert!(serde_json::from_value::<Call>(json!({ "cmd": "format_disk" })).is_err());
     }
 
@@ -405,8 +429,8 @@ mod tests {
             json!({ "cmd": "linear_take", "connector": "c2", "channel": "C1", "thread": "1.2", "issue": "ENG-7" }),
         );
         round_trip(
-            HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None },
-            json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": "lin_api_1", "slack_key": null }),
+            HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None },
+            json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": "lin_api_1", "slack_key": null, "github_key": null }),
         );
     }
 
@@ -453,8 +477,8 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, connectors: vec![], checked: None } },
-            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "connectors": [], "checked": null } }),
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, connectors: vec![], checked: None } },
+            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "connectors": [], "checked": null } }),
         );
     }
 

@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, EXE_PLACEHOLDER};
-use crate::{history, hooks, plugin, projects, pty, reminders, sessions};
+use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -295,6 +295,7 @@ impl Machine {
             Call::ProjectHistory { path } => json(self.project_history(&path)),
             Call::GitRemote { path } => json(git_remote(Path::new(&path))),
             Call::Browse { path } => json(projects::browse(&path, &home())?),
+            Call::Clone { repo, token } => json(self.find_folder("", Some(&repo), token.as_deref())?),
             Call::Run { run } => json(self.run(&run)?),
             Call::Deliver { env, text } => json(self.deliver(&env, &text)),
         }
@@ -326,7 +327,7 @@ impl Machine {
     /// Adds a tab for a connector's run without starting it, and returns its id. Refused when
     /// the run's folder can't be found or cloned here.
     pub fn open_run(&self, run: &RunSpec) -> Result<TabId, String> {
-        let cwd = self.find_folder(&run.folder, run.repo.as_deref())?;
+        let cwd = self.find_folder(&run.folder, run.repo.as_deref(), run.token.as_deref())?;
         let exe = self.launch.exe.display().to_string();
         let args = run.args.iter().map(|a| a.replace(EXE_PLACEHOLDER, &exe)).collect();
         let id = self.add_tab(cwd, args, run.env.clone(), false, None);
@@ -744,9 +745,9 @@ impl Machine {
         });
     }
 
-    fn find_folder(&self, folder: &str, repo: Option<&str>) -> Result<PathBuf, String> {
+    fn find_folder(&self, folder: &str, repo: Option<&str>, token: Option<&str>) -> Result<PathBuf, String> {
         let dir = PathBuf::from(folder);
-        if dir.is_dir() {
+        if !folder.is_empty() && dir.is_dir() {
             return Ok(dir);
         }
         let Some(repo) = repo.map(str::trim).filter(|r| !r.is_empty()) else {
@@ -760,7 +761,7 @@ impl Machine {
         let name = repo_name(repo).ok_or_else(|| format!("{repo} names no repository to clone"))?;
         let target = self.clones.join(name);
         if !target.exists() {
-            clone(repo, &target)?;
+            clone(repo, &target, token)?;
         } else if !same(&target) {
             return Err(format!("{} exists and is not a clone of {repo}", target.display()));
         }
@@ -824,21 +825,38 @@ fn same_repo(a: &str, b: &str) -> bool {
 
 /// Clones `repo`, and if that fails, its https form: a machine without ssh access to the
 /// host, such as a VPS holding only another repository's deploy key, can still clone a public one.
-fn clone(repo: &str, into: &Path) -> Result<(), String> {
-    let first = clone_once(repo, into);
-    let https = repo_key(repo).map(|key| format!("https://{key}.git")).filter(|https| https != repo);
-    match (first, https) {
-        (Err(e), Some(https)) => clone_once(&https, into).map_err(|again| format!("{e}; {again}")),
+fn clone(repo: &str, into: &Path, token: Option<&str>) -> Result<(), String> {
+    let https = repo_key(repo).map(|key| format!("https://{key}.git"));
+    // With the account's token a GitHub repository clones over https, private or not, and keeps the
+    // token in the clone's own config, as actions/checkout does, so the session can fetch and push.
+    if let (Some(token), Some(https)) = (token, https.as_ref().filter(|url| url.starts_with("https://github.com/"))) {
+        let auth = github::auth_config(token);
+        clone_once(if repo.starts_with("https://github.com/") { repo } else { https }, into, Some(&auth))?;
+        return git_config(into, &auth);
+    }
+    let first = clone_once(repo, into, None);
+    match (first, https.filter(|https| https != repo)) {
+        (Err(e), Some(https)) => clone_once(&https, into, None).map_err(|again| format!("{e}; {again}")),
         (first, _) => first,
     }
 }
 
+fn git_config(repo: &Path, (key, value): &(&str, String)) -> Result<(), String> {
+    let out = Command::new("git").arg("-C").arg(repo).args(["config", "--local", key, value]).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
+    out.status.success().then_some(()).ok_or_else(|| format!("git config failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
+}
+
 /// Clones without a terminal: a repository that needs a password fails instead of waiting for one.
-fn clone_once(repo: &str, into: &Path) -> Result<(), String> {
+fn clone_once(repo: &str, into: &Path, config: Option<&(&str, String)>) -> Result<(), String> {
     if let Some(parent) = into.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let out = Command::new("git")
+    let mut git = Command::new("git");
+    // Through the environment, so the token stays out of the process list.
+    if let Some((key, value)) = config {
+        git.env("GIT_CONFIG_COUNT", "1").env("GIT_CONFIG_KEY_0", key).env("GIT_CONFIG_VALUE_0", value);
+    }
+    let out = git
         .arg("clone")
         .arg(repo)
         .arg(into)
@@ -1134,6 +1152,7 @@ mod tests {
             repo: Some("git@github.com:acme/app.git".into()),
             args: vec!["--name".into(), "ENG-7".into(), "Run `'{{pinned}}' stage coding` first".into()],
             env: vec![("PINNED_CONNECTOR".into(), "c1".into())],
+            token: None,
         };
         let id = m.open_run(&run).unwrap();
         let view = m.view(&id).unwrap();
@@ -1158,7 +1177,7 @@ mod tests {
     fn a_run_that_cannot_start_leaves_no_tab() {
         let dir = temp("run-unstartable");
         let m = Machine::new(Launch { claude: "/nonexistent/claude".into(), ..launch() }, None, Some("/repo".into()), |_| {});
-        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec![], env: vec![] };
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec![], env: vec![], token: None };
         assert!(m.run(&run).is_err());
         assert_eq!(m.tabs(), vec![]);
         let _ = std::fs::remove_dir_all(dir);
@@ -1188,9 +1207,24 @@ mod tests {
         let m = machine();
         m.open_project(other);
         m.open_project(ours.clone());
-        let run = RunSpec { folder: "/Users/someone-else/app".into(), repo: Some("git@github.com:acme/app.git".into()), args: vec![], env: vec![] };
+        let run = RunSpec { folder: "/Users/someone-else/app".into(), repo: Some("git@github.com:acme/app.git".into()), args: vec![], env: vec![], token: None };
         let id = m.open_run(&run).unwrap();
         assert_eq!(m.view(&id).unwrap().cwd, ours.display().to_string());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_repository_clones_once_and_later_clones_find_the_first() {
+        let root = temp("clone");
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        git(&source, &["init", "-q"]);
+        git(&source, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let into = root.join("clones/source");
+        assert_eq!(clone(&source.display().to_string(), &into, None), Ok(()));
+        assert!(into.join(".git").is_dir());
+        assert!(clone(&source.display().to_string(), &into, None).is_err(), "git refuses to clone over a folder");
+        assert!(clone(&root.join("missing").display().to_string(), &root.join("clones/missing"), None).unwrap_err().contains("git clone"));
         let _ = std::fs::remove_dir_all(root);
     }
 

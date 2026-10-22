@@ -1,6 +1,7 @@
 use crate::db::{self, Db};
 use pinned_core::agent::Subject;
-use pinned_core::connectors::{Connectors, Storage, Work};
+use pinned_core::connectors::{Connectors, Keys, Storage, Work};
+use pinned_core::github;
 use pinned_core::wire::{
     Call, HubCall, MachineEvent, MachineId, MachineView, PairCode, Reply, TabId, TabView, Target, ToClient, ToMachine, EXE_PLACEHOLDER,
 };
@@ -188,12 +189,17 @@ impl Hub {
                 if account.working_on(&run.connector, &run.subject, |_| true) {
                     return true;
                 }
-                let preferred = match self.connectors(&account).await {
-                    Ok(c) => c.get_settings().connectors.into_iter().find(|c| c.id == run.connector).map(|c| c.machine).unwrap_or_default(),
-                    Err(_) => String::new(),
+                let (preferred, token) = match self.connectors(&account).await {
+                    Ok(c) => (
+                        c.get_settings().connectors.into_iter().find(|c| c.id == run.connector).map(|c| c.machine).unwrap_or_default(),
+                        c.github_token(),
+                    ),
+                    Err(_) => (String::new(), None),
                 };
+                let mut spec = run.spec();
+                spec.token = token.filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
                 for machine in account.dispatch_order(&preferred, |_| true) {
-                    match self.call_machine(&account, &machine, Call::Run { run: run.spec() }, RUN_WAIT).await {
+                    match self.call_machine(&account, &machine, Call::Run { run: spec.clone() }, RUN_WAIT).await {
                         Ok(_) => return true,
                         Err(Unanswered::Refused(e)) => eprintln!("pinned-server: {machine} refused a run of connector {}: {e}", run.connector),
                         // The run may have started there, so it doesn't go to a second machine. The next
@@ -288,9 +294,17 @@ impl Hub {
             HubCall::SlackSuggestions => (json(c().await?.slack_suggestions().await?), false),
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
-            HubCall::Import { store, linear_key, slack_key } => {
-                let imported = c().await?.import(store, linear_key, slack_key)?;
+            HubCall::Import { store, linear_key, slack_key, github_key } => {
+                let imported = c().await?.import(store, Keys { linear: linear_key, slack: slack_key, github: github_key })?;
                 (json(imported), imported)
+            }
+            HubCall::ConnectGithub { token } => (json(c().await?.connect_github(&token).await?), true),
+            HubCall::DisconnectGithub => (json(c().await?.disconnect_github()?), true),
+            HubCall::GithubRepos => (json(c().await?.github_repos().await?), false),
+            HubCall::Clone { machine, repo } => {
+                let repo = github::clone_url(&repo);
+                let token = c().await?.github_token().filter(|_| github::hosts(&repo));
+                return Ok(self.call_machine(account, &machine, Call::Clone { repo, token }, RUN_WAIT).await?);
             }
             HubCall::Stage { connector, subject, stage } => (json(c().await?.stage(&connector, &subject, stage).await?), false),
             HubCall::SlackReply { connector, channel, thread, text } => {

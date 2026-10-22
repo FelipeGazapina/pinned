@@ -1,5 +1,9 @@
 use pinned_core::connectors::{Connector, Connectors, Settings, Suggestions};
-use pinned_core::{linear, slack};
+use pinned_core::machine::Machine;
+use pinned_core::wire::Call;
+use pinned_core::{github, linear, slack};
+use serde_json::Value;
+use std::sync::Arc;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -41,6 +45,35 @@ pub fn disconnect_slack(connectors: State<Connectors>) -> Result<(), String> {
 #[tauri::command]
 pub async fn slack_suggestions(connectors: State<'_, Connectors>) -> Result<Vec<String>, String> {
     connectors.slack_suggestions().await
+}
+
+#[tauri::command]
+pub fn open_github_tokens() -> Result<(), String> {
+    std::process::Command::new("open").arg(github::TOKEN_PAGE).spawn().map(drop).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn connect_github(connectors: State<'_, Connectors>, token: String) -> Result<github::Account, String> {
+    connectors.connect_github(&token).await
+}
+
+#[tauri::command]
+pub fn disconnect_github(connectors: State<Connectors>) -> Result<(), String> {
+    connectors.disconnect_github()
+}
+
+#[tauri::command]
+pub async fn github_repos(connectors: State<'_, Connectors>) -> Result<Vec<github::Repo>, String> {
+    connectors.github_repos().await
+}
+
+/// Clones on this Mac while it's signed out, with this Mac's own GitHub token.
+#[tauri::command]
+pub async fn clone_repo(connectors: State<'_, Connectors>, machine: State<'_, Arc<Machine>>, repo: String) -> Result<Value, String> {
+    let repo = github::clone_url(&repo);
+    let token = connectors.github_token().filter(|_| github::hosts(&repo));
+    let machine = machine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || machine.call(Call::Clone { repo, token })).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

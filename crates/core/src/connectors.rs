@@ -3,7 +3,7 @@
 
 use crate::agent::{self, Stage, Subject};
 use crate::wire::RunSpec;
-use crate::{linear, slack};
+use crate::{github, linear, slack};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -16,6 +16,7 @@ use tokio::sync::Notify;
 const INTERVAL: Duration = Duration::from_secs(60);
 const LINEAR_KEY: &str = "linear-key";
 const SLACK_KEY: &str = "slack-key";
+const GITHUB_KEY: &str = "github-key";
 /// A Slack watermark trails the check that moved it, so a message Slack shows a little late
 /// is still after it. Threads already handled keep the overlap from starting a session twice.
 const SLACK_OVERLAP: chrono::Duration = chrono::Duration::seconds(60);
@@ -212,7 +213,7 @@ impl Connector {
     }
 
     fn repo(&self) -> Option<String> {
-        Some(self.repo.trim().to_owned()).filter(|r| !r.is_empty())
+        Some(github::clone_url(&self.repo)).filter(|r| !r.is_empty())
     }
 
     fn unclaim(&mut self, subject: &Subject) {
@@ -261,6 +262,8 @@ struct Store {
     linear: Option<linear::Account>,
     #[serde(default)]
     slack: Option<slack::Account>,
+    #[serde(default)]
+    github: Option<github::Account>,
     connectors: Vec<Connector>,
 }
 
@@ -315,8 +318,18 @@ pub struct Check {
 pub struct Settings {
     pub linear: Option<linear::Account>,
     pub slack: Option<slack::Account>,
+    #[serde(default)]
+    pub github: Option<github::Account>,
     pub connectors: Vec<Connector>,
     pub checked: Option<Check>,
+}
+
+/// The integrations' keys, which never leave a store but by `export`.
+#[derive(Default, Debug, PartialEq)]
+pub struct Keys {
+    pub linear: Option<String>,
+    pub slack: Option<String>,
+    pub github: Option<String>,
 }
 
 /// A session a connector wants opened.
@@ -336,6 +349,7 @@ impl Run {
             repo: self.repo.clone(),
             args: self.args.clone(),
             env: agent::session_env(&self.connector, &self.subject),
+            token: None,
         }
     }
 }
@@ -975,6 +989,7 @@ impl Connectors {
         Settings {
             linear: store.linear.clone(),
             slack: store.slack.clone(),
+            github: store.github.clone(),
             connectors: store.connectors.clone(),
             checked: self.checked.lock().unwrap().clone(),
         }
@@ -1029,6 +1044,33 @@ impl Connectors {
         self.save(&store)
     }
 
+    /// Checks the token against GitHub before keeping it.
+    pub async fn connect_github(&self, token: &str) -> Result<github::Account, String> {
+        let token = token.trim();
+        let account = github::account(token).await?;
+        self.storage.write_key(GITHUB_KEY, token)?;
+        let mut store = self.store.lock().unwrap();
+        store.github = Some(account.clone());
+        self.save(&store)?;
+        Ok(account)
+    }
+
+    pub fn disconnect_github(&self) -> Result<(), String> {
+        self.storage.remove_key(GITHUB_KEY);
+        let mut store = self.store.lock().unwrap();
+        store.github = None;
+        self.save(&store)
+    }
+
+    pub async fn github_repos(&self) -> Result<Vec<github::Repo>, String> {
+        github::repos(&self.github_token().ok_or("GitHub is not connected")?).await
+    }
+
+    /// What a machine clones the account's private GitHub repositories with.
+    pub fn github_token(&self) -> Option<String> {
+        self.key(GITHUB_KEY)
+    }
+
     /// Channels the bot was invited to, which a Slack connector can watch.
     pub async fn slack_suggestions(&self) -> Result<Vec<String>, String> {
         let token = self.key(SLACK_KEY).ok_or("Slack is not connected")?;
@@ -1069,21 +1111,24 @@ impl Connectors {
     /// Takes exported connectors and keys, as when a signed-out app's connectors move to its account,
     /// and false when there are some already, so a later machine can't replace them. An integration
     /// whose key didn't come along counts as not connected.
-    pub fn import(&self, store: serde_json::Value, linear_key: Option<String>, slack_key: Option<String>) -> Result<bool, String> {
+    pub fn import(&self, store: serde_json::Value, keys: Keys) -> Result<bool, String> {
         let mut imported: Store = serde_json::from_value(store).map_err(|e| format!("not a connectors store: {e}"))?;
         let mut current = self.store.lock().unwrap();
-        if current.linear.is_some() || current.slack.is_some() || !current.connectors.is_empty() {
+        if current.linear.is_some() || current.slack.is_some() || current.github.is_some() || !current.connectors.is_empty() {
             return Ok(false);
         }
         let present = |key: Option<String>| key.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty());
-        let (linear_key, slack_key) = (present(linear_key), present(slack_key));
+        let (linear_key, slack_key, github_key) = (present(keys.linear), present(keys.slack), present(keys.github));
         if linear_key.is_none() {
             imported.linear = None;
         }
         if slack_key.is_none() {
             imported.slack = None;
         }
-        for (name, key) in [(LINEAR_KEY, linear_key), (SLACK_KEY, slack_key)] {
+        if github_key.is_none() {
+            imported.github = None;
+        }
+        for (name, key) in [(LINEAR_KEY, linear_key), (SLACK_KEY, slack_key), (GITHUB_KEY, github_key)] {
             match key {
                 Some(key) => self.storage.write_key(name, &key)?,
                 None => self.storage.remove_key(name),
@@ -1096,10 +1141,10 @@ impl Connectors {
         Ok(true)
     }
 
-    /// The store and the Linear and Slack keys, as `import` takes them.
-    pub fn export(&self) -> (serde_json::Value, Option<String>, Option<String>) {
+    /// The store and the integrations' keys, as `import` takes them.
+    pub fn export(&self) -> (serde_json::Value, Keys) {
         let store = serde_json::to_value(&*self.store.lock().unwrap()).unwrap();
-        (store, self.key(LINEAR_KEY), self.key(SLACK_KEY))
+        (store, Keys { linear: self.key(LINEAR_KEY), slack: self.key(SLACK_KEY), github: self.key(GITHUB_KEY) })
     }
 }
 
@@ -1176,16 +1221,18 @@ mod tests {
             "slack": { "team": "Acme", "userId": "UBOT", "name": "pinned" },
             "connectors": [serde_json::to_value(Connector { id: "c9".into(), ..slack_connector() }).unwrap()],
         });
-        assert_eq!(connectors.import(exported.clone(), Some(" lin_api_1 ".into()), None), Ok(true));
-        let (store, linear_key, slack_key) = connectors.export();
-        assert_eq!((linear_key.as_deref(), slack_key), (Some("lin_api_1"), None));
+        let keys = Keys { linear: Some(" lin_api_1 ".into()), github: Some("ghp_1".into()), ..Keys::default() };
+        assert_eq!(connectors.import(exported.clone(), keys), Ok(true));
+        let (store, keys) = connectors.export();
+        assert_eq!(keys, Keys { linear: Some("lin_api_1".into()), slack: None, github: Some("ghp_1".into()) });
         assert_eq!(store["linear"]["email"], "ana@acme.dev");
         assert_eq!(store["slack"], serde_json::Value::Null);
         assert_eq!(store["connectors"][0]["id"], "c9");
         assert_eq!(std::fs::read_to_string(dir.join("linear-key")).unwrap(), "lin_api_1");
-        assert_eq!(connectors.import(serde_json::json!({ "connectors": [] }), None, Some("xoxb-2".into())), Ok(false), "a store with connectors keeps them");
-        assert_eq!(connectors.export().1.as_deref(), Some("lin_api_1"));
-        assert!(connectors.import(serde_json::json!({ "connectors": "no" }), None, None).is_err());
+        let other = Keys { slack: Some("xoxb-2".into()), ..Keys::default() };
+        assert_eq!(connectors.import(serde_json::json!({ "connectors": [] }), other), Ok(false), "a store with connectors keeps them");
+        assert_eq!(connectors.export().1.linear.as_deref(), Some("lin_api_1"));
+        assert!(connectors.import(serde_json::json!({ "connectors": "no" }), Keys::default()).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 

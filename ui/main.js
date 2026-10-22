@@ -121,6 +121,7 @@ async function showProjects({ machine, tab = null } = {}) {
   const local = machine === LOCAL;
   choices = [
     ...projects.map((p) => ({ name: p.name, path: tilde(p.path), open: () => pickFolder(p.path) })),
+    { name: "Clone from GitHub…", open: () => cloneFromGithub(), keep: true },
     local
       ? { name: "Open folder…", open: () => pickLocalFolder() }
       : { name: "Browse folders…", open: () => browseFolders(), keep: true },
@@ -144,6 +145,47 @@ function choiceButtons() {
     button.onclick = (e) => openChoice(i, e.shiftKey);
     return button;
   });
+}
+
+async function cloneFromGithub() {
+  picker.querySelector(".choices").innerHTML = `<form class="type-path browse"><input placeholder="Filter your repositories" autocomplete="off" spellcheck="false"></form>
+    <div class="folders"><p class="loading">Loading your repositories…</p></div><p class="error" id="picker-error"></p>`;
+  const field = picker.querySelector(".browse input");
+  const list = picker.querySelector(".folders");
+  field.focus();
+  picker.querySelector(".browse").onsubmit = (e) => {
+    e.preventDefault();
+    if (choices[chosen]) openChoice(chosen);
+  };
+  const { machine } = picking;
+  let repos;
+  try {
+    repos = await connectorCall("github_repos");
+  } catch (e) {
+    list.innerHTML = "";
+    document.getElementById("picker-error").textContent = /not connected/.test(e) ? "Connect GitHub under Settings → Integrations first." : String(e);
+    return;
+  }
+  const show = () => {
+    const typed = field.value.trim().toLowerCase();
+    const found = repos.filter((r) => r.full_name.toLowerCase().includes(typed)).slice(0, 100);
+    choices = found.map((r) => ({ name: r.full_name, path: r.private ? "private" : "", open: () => cloneAndOpen(machine, r.full_name), keep: true }));
+    if (!found.length) return (list.innerHTML = `<p class="loading">No repository matches</p>`);
+    list.replaceChildren(...choiceButtons());
+    choose(0);
+  };
+  field.oninput = show;
+  show();
+}
+
+async function cloneAndOpen(machine, repo) {
+  picker.querySelector(".folders").innerHTML = `<p class="loading">Cloning ${esc(repo)} on ${esc(machineName(machine))}…</p>`;
+  try {
+    const path = hub ? await hub.hub({ cmd: "clone", machine: hubIdOf(machine), repo }) : await invoke("clone_repo", { repo });
+    if (await pickFolder(path)) closeProjects();
+  } catch (e) {
+    document.getElementById("picker-error").textContent = String(e);
+  }
 }
 
 /** Counts browse requests, so an answer to an older keystroke can't replace a newer one. */

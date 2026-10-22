@@ -308,7 +308,7 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
 
     assert_eq!(
         client.call(b, json!({ "cmd": "format_disk" })),
-        Err("this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`, `start_claude`, `write_input`, `resize_pty`, `close_tab`, `set_folder`, `list_projects`, `project_history`, `git_remote`, `browse`, `run`, `deliver`".replace("0.5.1", env!("CARGO_PKG_VERSION")))
+        Err("this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`, `start_claude`, `write_input`, `resize_pty`, `close_tab`, `set_folder`, `list_projects`, `project_history`, `git_remote`, `browse`, `clone`, `run`, `deliver`".replace("0.5.1", env!("CARGO_PKG_VERSION")))
     );
     assert!(client.hub(json!({ "cmd": "self_destruct" })).unwrap_err().contains("unknown variant `self_destruct`"));
     assert_eq!(client.call("not-a-machine", json!({ "cmd": "tabs" })), Err("this account has no machine not-a-machine".into()));
@@ -435,12 +435,12 @@ fn an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only() {
         "id": "c1", "name": "Bugs", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
         "folder": "/repo", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "",
     }] });
-    assert_eq!(link.call_hub(HubCall::Import { store: local, linear_key: Some("lin_api_1".into()), slack_key: None }), Ok(json!(true)));
+    assert_eq!(link.call_hub(HubCall::Import { store: local, linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None }), Ok(json!(true)));
     let mut client = Client::connect(&url, &token);
     client.wait("hello", |f| f["type"] == "hello");
     assert_eq!(client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["name"], "Bugs");
 
-    let other = HubCall::Import { store: json!({ "connectors": [] }), linear_key: None, slack_key: Some("xoxb-2".into()) };
+    let other = HubCall::Import { store: json!({ "connectors": [] }), linear_key: None, slack_key: Some("xoxb-2".into()), github_key: None };
     assert_eq!(link.call_hub(other), Ok(json!(false)), "a later machine can't replace the account's connectors");
     assert_eq!(client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["name"], "Bugs");
     assert_eq!(link.call_hub(HubCall::GetSettings), Err("a machine may only forward a connector session's callbacks".into()));

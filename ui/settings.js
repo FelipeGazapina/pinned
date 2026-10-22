@@ -41,13 +41,14 @@ const TRIGGERS = {
 
 const settingsPage = document.getElementById("settings-page");
 const LINEAR_KEYS = "https://linear.app/settings/account/security";
+const GITHUB_TOKENS = "https://github.com/settings/tokens/new?scopes=repo&description=pinned";
 
 /** Mirrors the backend's `get_settings`. Unsaved connectors carry an empty id. */
 let settings = { linear: null, slack: null, connectors: [], checked: null };
 const PAGES = ["general", "integrations", "projects", "connectors", "account", "machines"];
 let page = PAGES.includes(load("settings-page")) && (TAURI || load("settings-page") !== "general") ? load("settings-page") : "integrations";
 /** Names from the connected Linear workspace and Slack channels, for the connector form's suggestions. */
-let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [] };
+let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [] };
 
 const settingsOpen = () => document.body.dataset.page === "settings";
 
@@ -91,6 +92,12 @@ function showPage(name) {
       fillList("slack-channels", channels);
     }, console.warn);
   }
+  if (name === "connectors" && settings.github && !suggestions.repos.length) {
+    connectorCall("github_repos").then((repos) => {
+      suggestions.repos = repos.map((r) => r.full_name);
+      fillList("github-repos", suggestions.repos);
+    }, console.warn);
+  }
   if (name === "projects") return showProjectsPage();
   if (name === "general") return showGeneral();
   if (name === "account") return showAccount();
@@ -128,7 +135,28 @@ function integrationsHtml() {
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>
-    ${slackCardHtml()}`;
+    ${slackCardHtml()}
+    ${githubCardHtml()}`;
+}
+
+function githubCardHtml() {
+  const account = settings.github;
+  const body = account
+    ? `<p class="connected">Connected as <b>@${esc(account.login)}</b>${account.name ? ` (${esc(account.name)})` : ""}.</p>
+       <div class="actions"><button class="secondary" data-action="disconnect-github">Disconnect</button></div>`
+    : `<ol class="steps">
+         <li>Create a classic personal access token with the <code>repo</code> scope.
+           <button class="secondary" data-action="open-github-tokens">Open GitHub ↗</button></li>
+         <li>Paste the token here.
+           <div class="row"><input id="github-token" type="password" placeholder="ghp_…" autocomplete="off">
+           <button class="primary" data-action="connect-github">Connect</button></div></li>
+       </ol>
+       <p class="error" id="github-error"></p>`;
+  return `<div class="card">
+      <div class="card-head"><span class="logo github">⎇</span><div><b>GitHub</b><div class="hint">Clones your repositories on any machine that lacks them, private ones too</div></div>
+        <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
+      ${body}
+    </div>`;
 }
 
 function slackCardHtml() {
@@ -217,14 +245,15 @@ const STEPS = {
     app: "Claude Code",
     title: "Run a session",
     summary: (c) =>
-      [folderName(c.folder) || "no folder", account && runOnName(c), c.model.trim() || "default model", c.effort, PERMISSIONS[c.permissionMode]]
+      [folderName(c.folder) || folderName(c.repo.replace(/\.git$/, "")) || "no folder", account && runOnName(c), c.model.trim() || "default model", c.effort, PERMISSIONS[c.permissionMode]]
         .filter(Boolean)
         .join(" · "),
-    issues: (c) => (c.folder.trim() ? [] : ["Choose the folder the session opens in."]),
+    issues: (c) => (c.folder.trim() || c.repo.trim() ? [] : ["Choose the folder or the repository the session opens in."]),
     fields: (c) => `${account ? `<label>Run on ${runOnHtml(c)}</label>` : ""}
       <label>Folder${account ? ` on ${esc(machineName(folderMachine(c)))}` : ""}
         <span class="row">${input("folder", c.folder, 'list="folders" placeholder="/path/to/repo" spellcheck="false"')}
         ${folderMachine(c) === LOCAL ? `<button class="secondary" data-action="pick-folder">Choose…</button>` : ""}</span></label>
+      <label>Repository ${input("repo", c.repo, `list="github-repos" placeholder="${settings.github ? "owner/name, from your GitHub" : "git URL"}" spellcheck="false"`)}</label>
       <p class="hint" id="repo">${repoHint(c)}</p>
       <div class="grid">
         <label>Model ${input("model", c.model, `list="models" placeholder="claude's default"`)}</label>
@@ -312,7 +341,9 @@ function runOnHtml(c) {
 }
 
 const repoHint = (c) =>
-  c.repo ? `A machine without this folder finds or clones <code>${esc(c.repo)}</code>.` : "";
+  !c.repo.trim()
+    ? "A machine without the folder can't run this session."
+    : `A machine without ${c.folder.trim() ? "this folder" : "a clone"} clones <code>${esc(c.repo.trim())}</code> into <code>~/pinned</code>${settings.github ? " with your GitHub token" : ""}.`;
 
 async function loadFolders(c) {
   const machine = folderMachine(c);
@@ -331,8 +362,8 @@ async function fillRepo() {
     repo = folder ? await callOn(folderMachine(draft), { cmd: "git_remote", path: folder }) : null;
   } catch {}
   if (view.draft !== draft || draft.folder.trim() !== folder) return;
-  draft.repo = repo ?? "";
-  refresh();
+  if (repo) draft.repo = repo;
+  redraw();
 }
 
 function connectorsHtml() {
@@ -396,6 +427,7 @@ function editorHtml() {
     <datalist id="slack-channels">${options(suggestions.channels)}</datalist>
     <datalist id="models">${options(MODELS)}</datalist>
     <datalist id="folders">${options(suggestions.folders)}</datalist>
+    <datalist id="github-repos">${options(suggestions.repos)}</datalist>
     <div class="editor-bar">
       <button class="secondary" data-action="close-editor" title="Back to connectors">←</button>
       ${input("name", c.name, 'class="title" placeholder="Connector name"')}
@@ -591,6 +623,24 @@ const actions = {
     } catch (e) {
       document.getElementById("slack-error").textContent = e;
     }
+  },
+  "open-github-tokens": () => (TAURI ? invoke("open_github_tokens") : window.open(GITHUB_TOKENS, "_blank", "noopener")),
+  async "connect-github"() {
+    const token = document.getElementById("github-token").value;
+    if (!token.trim()) return;
+    try {
+      settings.github = await connectorCall("connect_github", { token });
+      suggestions.repos = [];
+      showPage("integrations");
+    } catch (e) {
+      document.getElementById("github-error").textContent = e;
+    }
+  },
+  async "disconnect-github"() {
+    await connectorCall("disconnect_github");
+    settings.github = null;
+    suggestions.repos = [];
+    showPage("integrations");
   },
   async "disconnect-slack"() {
     await connectorCall("disconnect_slack");
