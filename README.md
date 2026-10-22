@@ -169,7 +169,9 @@ issues may run at the same time in one repository.
 
 A Slack workflow watches one channel for messages that @mention your bot. For each new
 thread that mentions it, pinned opens a tab whose prompt holds the whole thread, and the
-session answers in that thread by running `pinned slack reply "<text>"`. The bot token stays
+session answers in that thread by running `pinned slack reply "<text>"`. Replies are kept
+short. Before each one, the session runs its draft through the `pinned:bro` skill, which
+pinned loads into every session it starts. The bot token stays
 in the app, as the Linear key does. The default instructions ask Claude to triage the thread:
 analyse a bug and reply with the cause, or reply with an existing solution, without editing
 code. Each Slack workflow can also file a Linear issue and fix the bug, as below.
