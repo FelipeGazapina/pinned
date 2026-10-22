@@ -680,7 +680,7 @@ const actions = {
     showStep(null);
   },
   async "pick-folder"() {
-    const picked = await chooseFolder(view.draft.folder);
+    const picked = await invoke("pick_folder", { start: view.draft.folder });
     if (!picked) return;
     view.draft.folder = picked;
     redraw();
