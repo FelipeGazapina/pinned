@@ -39,10 +39,14 @@ pub struct Launch {
 impl Launch {
     /// Writes the settings, MCP config and plugin every session loads, for sessions that call back `exe`.
     pub fn prepare(exe: &Path) -> std::io::Result<Launch> {
-        let tmp = std::env::temp_dir();
         // One folder per process: the app and a node on the same Mac each point sessions at their own binary.
-        let files = tmp.join(format!("pinned-{}", std::process::id()));
-        std::fs::create_dir_all(&files)?;
+        // A fresh 0700 folder, since Linux shares /tmp: another user who planted a folder by the
+        // same name could swap in hooks that run as this machine's user.
+        let files = tempfile::Builder::new()
+            .prefix(&format!("pinned-{}-", std::process::id()))
+            .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .tempdir()?
+            .keep();
         let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
         let mcp_config = files.join("claude-mcp.json");
@@ -58,7 +62,7 @@ impl Launch {
             mcp_config: Some(mcp_config),
             plugin_dir,
             tutorial_helper,
-            sock: tmp.join(format!("pinned-{}.sock", std::process::id())),
+            sock: files.join("pinned.sock"),
         })
     }
 
