@@ -90,6 +90,28 @@ impl Harness {
         id
     }
 
+    /// The newest tab whose running session answers the delivery's Slack thread.
+    fn slack_tab(&self, d: &connectors::Delivery) -> Option<String> {
+        let subject = agent::Subject::SlackThread { channel: d.channel.clone(), thread: d.thread.clone() };
+        let env = connector_env(&d.connector, &subject);
+        let tabs = self.tabs.lock().unwrap();
+        let live = tabs.iter().filter(|(_, t)| t.session.is_some() && env.iter().all(|e| t.env.contains(e)));
+        live.max_by_key(|(id, _)| tab_number(id)).map(|(id, _)| id.clone())
+    }
+
+    /// Types the delivery's messages into the session that answers its thread, if one is running.
+    fn deliver(&self, d: &connectors::Delivery) -> bool {
+        self.slack_tab(d).is_some_and(|tab| self.type_prompt(&tab, &d.messages.join("\n\n")).is_ok())
+    }
+
+    /// Types `text` into the tab's session as one prompt and submits it.
+    fn type_prompt(&self, tab: &str, text: &str) -> Result<(), String> {
+        self.tab(tab, |t| match t.session.as_mut() {
+            Some(s) => s.write(&paste(text)).map_err(|e| e.to_string()),
+            None => Err(format!("tab {tab} has no running session")),
+        })?
+    }
+
     /// Writes the tabs whose claude session is still going, in the order they were opened.
     fn save_sessions(&self) {
         let Some(file) = &self.sessions_file else { return };
@@ -98,7 +120,7 @@ impl Harness {
             let mut open: Vec<(u32, &Tab)> = tabs
                 .iter()
                 .filter(|(_, t)| t.claude_session.is_some())
-                .map(|(id, t)| (id.trim_start_matches("tab-").parse().unwrap_or(0), t))
+                .map(|(id, t)| (tab_number(id), t))
                 .collect();
             open.sort_by_key(|(n, _)| *n);
             open.into_iter()
@@ -196,6 +218,24 @@ impl Harness {
             self.save_sessions();
         }
     }
+}
+
+fn tab_number(id: &str) -> u32 {
+    id.trim_start_matches("tab-").parse().unwrap_or(0)
+}
+
+/// The environment that names a connector's session and its subject, which `slack_tab` finds it by.
+fn connector_env(connector: &str, subject: &agent::Subject) -> Vec<(String, String)> {
+    let mut env = vec![(agent::CONNECTOR_ENV.to_owned(), connector.to_owned())];
+    env.extend(subject.env());
+    env
+}
+
+/// `text` as a bracketed paste and Enter, so its lines reach claude as one prompt that it submits.
+/// Control characters other than newlines and tabs are dropped, so the text can't end the paste early.
+fn paste(text: &str) -> Vec<u8> {
+    let text: String = text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect();
+    [b"\x1b[200~", text.as_bytes(), b"\x1b[201~\r"].concat()
 }
 
 #[derive(serde::Deserialize)]
@@ -686,11 +726,17 @@ fn main() {
             reminders::watch(app.handle().clone());
             app.manage(connectors::Connectors::load(app.path().app_config_dir()?, std::env::current_exe()?));
             let handle = app.handle().clone();
-            tauri::async_runtime::spawn(connectors::watch(handle.clone(), move |run| {
-                let mut env = vec![(agent::CONNECTOR_ENV.to_owned(), run.connector)];
-                env.extend(run.subject.env());
-                let id = handle.state::<Harness>().add_tab(run.cwd, run.args, env, false, None);
-                let _ = handle.emit("tab-opened", id);
+            tauri::async_runtime::spawn(connectors::watch(handle.clone(), move |work| {
+                let harness = handle.state::<Harness>();
+                match work {
+                    connectors::Work::Run(run) => {
+                        let env = connector_env(&run.connector, &run.subject);
+                        let id = harness.add_tab(run.cwd.clone(), run.args.clone(), env, false, None);
+                        let _ = handle.emit("tab-opened", id);
+                        true
+                    }
+                    connectors::Work::Delivery(d) => harness.deliver(d),
+                }
             }));
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -771,4 +817,111 @@ fn pin_above_fullscreen(window: &WebviewWindow) -> tauri::Result<()> {
     panel.set_hides_on_deactivate(false);
     panel.order_front_regardless();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn harness() -> Harness {
+        Harness {
+            launch: Launch { claude: "claude".into(), path_env: None, settings: "s".into(), mcp_config: "m".into(), sock: "k".into() },
+            default_cwd: "/repo".into(),
+            tabs: Mutex::new(HashMap::new()),
+            next_tab: AtomicU32::new(1),
+            expanded: Mutex::new(PILL),
+            pill: Mutex::new(PILL),
+            pill_pos: Mutex::new(None),
+            update: Mutex::new(None),
+            opacity: AtomicU8::new(DEFAULT_OPACITY),
+            sessions_file: None,
+            projects: Mutex::new(vec![]),
+            projects_file: None,
+            history_dir: None,
+            quitting: AtomicBool::new(false),
+        }
+    }
+
+    /// A pty session running `script` under sh, and everything it prints.
+    fn spawn(script: &str) -> (pty::Session, Arc<Mutex<Vec<u8>>>) {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", script]);
+        let out = Arc::new(Mutex::new(vec![]));
+        let sink = out.clone();
+        let session = pty::Session::spawn(cmd, pty::size(80, 24), move |b| sink.lock().unwrap().extend(b), || {}).unwrap();
+        (session, out)
+    }
+
+    fn wait_for(what: &str, done: impl Fn() -> bool) {
+        let start = Instant::now();
+        while !done() {
+            assert!(start.elapsed() < Duration::from_secs(5), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn slack_env(connector: &str, thread: &str) -> Vec<(String, String)> {
+        connector_env(connector, &agent::Subject::SlackThread { channel: "C0123ABCD".into(), thread: thread.into() })
+    }
+
+    fn delivery(connector: &str, thread: &str, messages: &[&str]) -> connectors::Delivery {
+        connectors::Delivery {
+            connector: connector.into(),
+            channel: "C0123ABCD".into(),
+            thread: thread.into(),
+            messages: messages.iter().map(|m| m.to_string()).collect(),
+            cursor: "1792400090.000000".into(),
+        }
+    }
+
+    #[test]
+    fn a_paste_is_bracketed_submitted_and_cannot_close_itself() {
+        assert_eq!(paste("[Slack reply from ana in the thread]\nyes,\tdo it"), b"\x1b[200~[Slack reply from ana in the thread]\nyes,\tdo it\x1b[201~\r");
+        assert_eq!(paste("a\x1b[201~\rb\x07"), b"\x1b[200~a[201~b\x1b[201~\r");
+    }
+
+    #[test]
+    fn a_delivery_finds_the_live_tab_of_its_thread() {
+        let h = harness();
+        let live = |h: &Harness, env| {
+            let id = h.add_tab("/repo".into(), vec![], env, false, None);
+            h.tab(&id, |t| t.session = Some(spawn("sleep 30").0)).unwrap();
+            id
+        };
+        let issue = connector_env("c2", &agent::Subject::LinearIssue { issue: "uuid".into() });
+        live(&h, issue);
+        live(&h, slack_env("c9", "1792400050.000200"));
+        live(&h, slack_env("c2", "1792499999.000100"));
+        h.add_tab("/repo".into(), vec![], slack_env("c2", "1792400050.000200"), false, None);
+        let d = delivery("c2", "1792400050.000200", &["hi"]);
+        assert_eq!(h.slack_tab(&d), None, "the thread's only tab has no running session");
+        assert!(!h.deliver(&d));
+        let own = live(&h, slack_env("c2", "1792400050.000200"));
+        assert_eq!(own, "tab-5");
+        assert_eq!(h.slack_tab(&d), Some(own));
+        let newer = live(&h, slack_env("c2", "1792400050.000200"));
+        assert_eq!(h.slack_tab(&d), Some(newer));
+    }
+
+    /// The session is a real pty running cat with the terminal in raw mode, so the file holds
+    /// exactly the bytes the session received.
+    #[test]
+    fn a_delivery_reaches_the_session_through_its_pty() {
+        let file = std::env::temp_dir().join(format!("pinned-delivery-{}.bin", std::process::id()));
+        let (session, out) = spawn(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        wait_for("stty", || String::from_utf8_lossy(&out.lock().unwrap()).contains("ready"));
+        let h = harness();
+        let tab = h.add_tab("/repo".into(), vec![], slack_env("c2", "1792400050.000200"), false, None);
+        h.tab(&tab, |t| t.session = Some(session)).unwrap();
+
+        let d = delivery("c2", "1792400050.000200", &["[Slack reply from ana in the thread]\nyes, create the task", "[Slack reply from bruno in the thread]\nand ship it"]);
+        assert!(h.deliver(&d));
+        let expected: &[u8] = b"\x1b[200~[Slack reply from ana in the thread]\nyes, create the task\n\n[Slack reply from bruno in the thread]\nand ship it\x1b[201~\r";
+        wait_for("cat to write", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
+        assert_eq!(std::fs::read(&file).unwrap(), expected);
+        assert!(!h.deliver(&delivery("c2", "1792499999.000100", &["elsewhere"])));
+        let _ = std::fs::remove_file(file);
+    }
 }

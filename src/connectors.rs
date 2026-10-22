@@ -192,6 +192,15 @@ impl Connector {
         Ok(Filing::New { team: self.team.trim().to_owned(), label: self.label.trim().to_owned() })
     }
 
+    /// Marks `key` handled, or answers false when it already was.
+    fn claim(&mut self, key: String) -> bool {
+        if self.handled.contains(&key) {
+            return false;
+        }
+        self.handled.push(key);
+        true
+    }
+
     /// The Linear issue `pinned stage` moves for a session on `subject`.
     fn issue(&self, subject: &Subject) -> Result<String, String> {
         match subject {
@@ -260,24 +269,52 @@ pub struct Run {
     pub subject: Subject,
 }
 
-/// Something a connector's check turned up that starts a session unless it already did.
+/// What a check hands to the tabs.
+pub enum Work {
+    /// A session to open.
+    Run(Run),
+    /// New messages for the session that answers a Slack thread.
+    Delivery(Delivery),
+}
+
+pub struct Delivery {
+    pub connector: String,
+    pub channel: String,
+    pub thread: String,
+    /// One `[Slack reply from …]` block per new message, oldest first.
+    pub messages: Vec<String>,
+    /// The newest message's ts, which the thread's cursor moves to once a session has the messages.
+    pub cursor: String,
+}
+
+/// Something a connector's check turned up.
 enum Found {
+    /// Starts a session unless the issue already did.
     Issue(linear::Issue),
+    /// Starts a session unless the thread already did.
     Mention { channel: String, channel_name: String, mention: slack::Mention, posts: Vec<slack::Post> },
+    /// New messages in a thread that already started a session.
+    Replies { channel: String, replies: slack::Replies },
 }
 
 impl Found {
-    /// What `Connector::handled` records, so each issue or thread starts one session.
+    /// What `Connector::handled` and `Connector::followed` record it under.
     fn key(&self) -> String {
         match self {
             Found::Issue(issue) => issue.id.clone(),
             Found::Mention { channel, mention, .. } => thread_key(channel, &mention.thread),
+            Found::Replies { channel, replies } => thread_key(channel, &replies.thread),
         }
     }
 }
 
 fn thread_key(channel: &str, thread: &str) -> String {
     format!("{channel}:{thread}")
+}
+
+/// A Slack connector's channel as the user typed it, without the `#`.
+fn channel_name(name: &str) -> &str {
+    name.trim().trim_start_matches('#')
 }
 
 #[derive(Serialize)]
@@ -342,10 +379,10 @@ impl Connectors {
             .map_err(|e| e.to_string())
     }
 
-    /// Starts a session for everything new the enabled connectors match. A failing connector
-    /// doesn't hold up the others, but a rate limit skips the rest of that integration until the
-    /// next check instead of hammering it.
-    async fn poll(&self) -> (Vec<Run>, Option<String>) {
+    /// Starts a session for everything new the enabled connectors match, and passes new thread
+    /// messages on. A failing connector doesn't hold up the others, but a rate limit skips the
+    /// rest of that integration until the next check instead of hammering it.
+    async fn poll(&self) -> (Vec<Work>, Option<String>) {
         let now = Utc::now();
         let watching: Vec<Connector> =
             self.store.lock().unwrap().connectors.iter().filter(|c| c.enabled).cloned().collect();
@@ -380,29 +417,97 @@ impl Connectors {
                 changed = true;
             }
         }
-        let mut runs = vec![];
+        let mut work = vec![];
         for (id, found) in found {
             // The connector may have been edited or deleted while the integration answered.
             let Some(connector) = store.connectors.iter_mut().find(|c| c.id == id && c.enabled) else { continue };
             let key = found.key();
-            if connector.handled.contains(&key) {
-                continue;
-            }
-            connector.handled.push(key);
-            changed = true;
-            runs.push(match &found {
-                Found::Issue(issue) => run(connector, issue, &self.exe),
-                Found::Mention { channel, channel_name, mention, posts } => {
-                    slack_run(connector, channel, channel_name, &mention.thread, posts, mention_note(mention, now), &self.exe)
+            match found {
+                Found::Issue(issue) => {
+                    if connector.claim(key) {
+                        work.push(Work::Run(run(connector, &issue, &self.exe)));
+                        changed = true;
+                    }
                 }
-            });
+                Found::Mention { channel, channel_name, mention, posts } => {
+                    if !connector.claim(key.clone()) {
+                        continue;
+                    }
+                    // The session starts with these messages, so only later ones are passed on.
+                    let cursor = posts.last().map_or_else(|| mention.thread.clone(), |p| p.ts.clone());
+                    connector.followed.insert(key, Followed { cursor, replied: false });
+                    let note = mention_note(&mention, now);
+                    work.push(Work::Run(slack_run(connector, &channel, &channel_name, &mention.thread, &posts, note, &self.exe)));
+                    changed = true;
+                }
+                Found::Replies { replies, .. } if replies.posts.is_empty() => {
+                    // Only bots wrote, so there is nothing to pass on and no reason to read them again.
+                    if let Some(followed) = connector.followed.get_mut(&key) {
+                        followed.cursor = replies.newest;
+                        changed = true;
+                    }
+                }
+                Found::Replies { channel, replies } => work.push(Work::Delivery(Delivery {
+                    connector: id,
+                    channel,
+                    thread: replies.thread,
+                    messages: replies.posts.iter().map(reply_block).collect(),
+                    cursor: replies.newest,
+                })),
+            }
         }
         if changed {
             if let Err(e) = self.save(&store) {
                 errors.push(e);
             }
         }
-        (runs, (!errors.is_empty()).then(|| errors.join("; ")))
+        (work, (!errors.is_empty()).then(|| errors.join("; ")))
+    }
+
+    /// Gives `work` to the tabs. A thread's cursor moves only once its messages reached a session,
+    /// its own or a new one, so messages that didn't are passed on again at the next check.
+    async fn hand_over(&self, work: Work, open: &impl Fn(&Work) -> bool) -> Result<(), String> {
+        match &work {
+            Work::Run(run) => {
+                open(&work);
+                // The session starts even when Linear won't move the issue; the check reports why.
+                // A Slack thread has no issue to pick until its session files one.
+                match &run.subject {
+                    Subject::LinearIssue { .. } => self.advance(&run.connector, &run.subject, Stage::Picked).await.map(drop),
+                    Subject::SlackThread { .. } => Ok(()),
+                }
+            }
+            Work::Delivery(d) => {
+                let cursor = if open(&work) {
+                    d.cursor.clone()
+                } else {
+                    let (run, newest) = self.fallback(d).await?;
+                    open(&Work::Run(run));
+                    newest
+                };
+                self.follow(&d.connector, &d.channel, &d.thread, cursor)
+            }
+        }
+    }
+
+    /// A new session for a thread no live tab answers, given the whole thread so far, and the
+    /// newest message it was given.
+    async fn fallback(&self, d: &Delivery) -> Result<(Run, String), String> {
+        let c = self.store.lock().unwrap().connector(&d.connector)?.clone();
+        let Trigger::SlackMention { channel: name } = &c.trigger else { return Err("the connector no longer watches Slack".into()) };
+        let token = self.key(SLACK_KEY).ok_or("Slack is not connected")?;
+        let posts = slack::thread(&token, &d.channel, &d.thread).await?;
+        let newest = posts.last().map_or_else(|| d.cursor.clone(), |p| p.ts.clone());
+        let note = c.created.get(&thread_key(&d.channel, &d.thread)).map(filed_note);
+        Ok((slack_run(&c, &d.channel, channel_name(name), &d.thread, &posts, note.as_deref(), &self.exe), newest))
+    }
+
+    /// Records that the thread's session has every message up to `cursor`, someone else's among them.
+    fn follow(&self, connector: &str, channel: &str, thread: &str, cursor: String) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) else { return Ok(()) };
+        c.followed.insert(thread_key(channel, thread), Followed { cursor, replied: true });
+        self.save(&store)
     }
 
     /// What one connector finds that it hasn't handled yet, or None while its integration isn't connected.
@@ -417,17 +522,25 @@ impl Connectors {
                 let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
                 let channel = self.channel_id(&token, name).await?;
                 let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
+                let prefix = thread_key(&channel, "");
+                let cursors = c
+                    .followed
+                    .iter()
+                    .filter_map(|(key, f)| Some((key.strip_prefix(&prefix)?.to_owned(), f.cursor.clone())))
+                    .collect();
+                let activity = slack::activity(&token, &channel, &bot, since, &cursors).await?;
                 let mut found: Vec<Found> = vec![];
                 // Oldest first, so a thread's first new mention is the one its session answers.
-                for mention in slack::mentions(&token, &channel, &bot, since).await? {
+                for mention in activity.mentions {
                     let key = thread_key(&channel, &mention.thread);
                     if c.handled.contains(&key) || found.iter().any(|f| f.key() == key) {
                         continue;
                     }
                     let posts = slack::thread(&token, &channel, &mention.thread).await?;
-                    let channel_name = name.trim().trim_start_matches('#').to_owned();
+                    let channel_name = channel_name(name).to_owned();
                     found.push(Found::Mention { channel: channel.clone(), channel_name, mention, posts });
                 }
+                found.extend(activity.replies.into_iter().map(|replies| Found::Replies { channel: channel.clone(), replies }));
                 Ok(Some(found))
             }
         }
@@ -621,20 +734,28 @@ fn reply_header(author: &str) -> String {
     format!("[Slack reply from {author} in the thread]")
 }
 
-/// Polls forever; `open` receives each session to start. A settings change wakes it early.
-pub async fn watch(app: AppHandle, open: impl Fn(Run)) {
+/// A later message of the thread, as its session receives it.
+fn reply_block(post: &slack::Post) -> String {
+    format!("{}\n{}", reply_header(&post.author), post.text)
+}
+
+/// The note a thread's new session gets when an earlier session of it filed an issue.
+fn filed_note(filed: &Filed) -> String {
+    format!(
+        "\n\nThis thread already has Linear issue {} ({}). Do not file another one: `pinned linear create` returns that issue.",
+        filed.identifier, filed.url
+    )
+}
+
+/// Polls forever; `open` receives what each check found and answers whether a tab took it,
+/// which a delivery no live tab answers doesn't. A settings change wakes it early.
+pub async fn watch(app: AppHandle, open: impl Fn(&Work) -> bool) {
     let connectors = app.state::<Connectors>();
     loop {
-        let (runs, mut error) = connectors.poll().await;
-        for run in runs {
-            let (connector, subject) = (run.connector.clone(), run.subject.clone());
-            open(run);
-            // The session starts even when Linear won't move the issue; the check reports why.
-            // A Slack thread has no issue to pick until its session files one.
-            if let Subject::LinearIssue { .. } = subject {
-                if let Err(e) = connectors.advance(&connector, &subject, Stage::Picked).await {
-                    error.get_or_insert(e);
-                }
+        let (work, mut error) = connectors.poll().await;
+        for work in work {
+            if let Err(e) = connectors.hand_over(work, &open).await {
+                error.get_or_insert(e);
             }
         }
         let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
@@ -1052,6 +1173,26 @@ mod tests {
         assert_eq!(store.connectors[0].created["C0123ABCD:1792400050.000200"].identifier, "ENG-12");
         let json = serde_json::to_value(&store.connectors[0]).unwrap();
         assert_eq!((&json["fix"], json.get("autoFix")), (&serde_json::json!("auto"), None));
+    }
+
+    #[test]
+    fn later_messages_reach_the_session_under_their_author() {
+        let post = slack::Post { ts: "1792400090.000000".into(), author: "Ana Lima".into(), text: "yes, create the task\n@pinned thanks".into() };
+        assert_eq!(reply_block(&post), "[Slack reply from Ana Lima in the thread]\nyes, create the task\n@pinned thanks");
+    }
+
+    #[test]
+    fn a_thread_whose_session_is_gone_starts_over_knowing_its_issue() {
+        let c = fixing_connector();
+        let gone = |note: Option<&str>| slack_run(&c, "C0123ABCD", "support", "1792400050.000200", &posts(), note, Path::new("/bin/pinned"));
+        let first = connector_thread_run(&c, "2026-10-19T10:00:00Z", "2026-10-19T10:01:00Z");
+        assert_eq!(gone(None).args, first.args);
+        let filed = Filed { id: "uuid".into(), identifier: "ENG-12".into(), url: "https://linear.app/x/issue/ENG-12".into() };
+        let prompt = gone(Some(&filed_note(&filed))).args.pop().unwrap();
+        assert!(prompt.ends_with(
+            "Slack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here\n\n\
+             This thread already has Linear issue ENG-12 (https://linear.app/x/issue/ENG-12). Do not file another one: `pinned linear create` returns that issue."
+        ));
     }
 
     #[test]

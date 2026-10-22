@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const API: &str = "https://slack.com/api/";
 /// How far back a channel's history is read to find threads that got a new reply. A thread
-/// older than this that gets a new mention is missed.
+/// older than this that gets a new mention or reply is missed.
 const THREAD_LOOKBACK: chrono::Duration = chrono::Duration::days(7);
 const PAGE: &str = "200";
 /// The error a call fails with once Slack rate limits pinned.
@@ -26,6 +26,22 @@ pub struct Mention {
     /// Timestamp of the thread's first message, which Slack uses as the thread's id.
     pub thread: String,
     pub at: DateTime<Utc>,
+}
+
+/// New messages in a thread whose session is already answering it.
+#[derive(Debug, PartialEq)]
+pub struct Replies {
+    pub thread: String,
+    /// The newest message's timestamp, the bot's own included, which the thread's cursor moves to.
+    pub newest: String,
+    /// The messages people wrote, oldest first.
+    pub posts: Vec<Post>,
+}
+
+/// What one check of a channel finds.
+pub struct Activity {
+    pub mentions: Vec<Mention>,
+    pub replies: Vec<Replies>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -168,19 +184,68 @@ fn threads_replied_after(history: &Value, since: DateTime<Utc>) -> Vec<String> {
         .collect()
 }
 
-/// Mentions of `bot` in `channel` after `since`, oldest first. Takes one history call, plus one
-/// replies call per thread that got a reply since, because Slack rate limits both.
-pub async fn mentions(token: &str, channel: &str, bot: &str, since: DateTime<Utc>) -> Result<Vec<Mention>, String> {
+/// Threads of a history page in `cursors`, by thread ts, whose last reply is past their cursor.
+fn followed_with_replies<'a>(history: &Value, cursors: &'a BTreeMap<String, String>) -> Vec<(String, &'a str)> {
+    history
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let (thread, cursor) = cursors.get_key_value(m["ts"].as_str()?)?;
+            (micros(m["latest_reply"].as_str()?)? > micros(cursor)?).then(|| (thread.clone(), cursor.as_str()))
+        })
+        .collect()
+}
+
+/// The newest timestamp after `cursor` in a thread, and the messages after it that people wrote:
+/// neither the bot's own nor another bot's.
+fn after_cursor(messages: &Value, bot: &str, cursor: &str) -> Option<(String, Vec<Value>)> {
+    let cursor = micros(cursor)?;
+    let new: Vec<&Value> = messages
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["ts"].as_str().and_then(micros).is_some_and(|at| at > cursor))
+        .collect();
+    let newest = new.iter().filter_map(|m| m["ts"].as_str()).max_by_key(|ts| micros(ts))?.to_owned();
+    let people = new
+        .into_iter()
+        .filter(|m| m["user"].as_str() != Some(bot) && m["subtype"].as_str() != Some("bot_message"))
+        .cloned()
+        .collect();
+    Some((newest, people))
+}
+
+/// Mentions of `bot` in `channel` after `since`, oldest first, and new messages in the threads
+/// `cursors` follows, keyed by thread ts. Takes one history call, plus one replies call per
+/// thread that got a reply since, because Slack rate limits both.
+pub async fn activity(
+    token: &str,
+    channel: &str,
+    bot: &str,
+    since: DateTime<Utc>,
+    cursors: &BTreeMap<String, String>,
+) -> Result<Activity, String> {
     let oldest = ts(since - THREAD_LOOKBACK);
     let history = call(token, "conversations.history", &[("channel", channel), ("oldest", &oldest), ("limit", PAGE)]).await?;
-    let mut found = mentions_in(&history["messages"], bot, since);
-    for thread in threads_replied_after(&history["messages"], since) {
+    let messages = &history["messages"];
+    let mut mentions = mentions_in(messages, bot, since);
+    // A followed thread already has its session, so a mention in it is just another reply.
+    for thread in threads_replied_after(messages, since).into_iter().filter(|t| !cursors.contains_key(t)) {
         let replies = call(token, "conversations.replies", &[("channel", channel), ("ts", &thread), ("limit", PAGE)]).await?;
-        found.extend(mentions_in(&replies["messages"], bot, since));
+        mentions.extend(mentions_in(&replies["messages"], bot, since));
     }
-    found.sort_by_key(|m| m.at);
-    found.dedup();
-    Ok(found)
+    mentions.sort_by_key(|m| m.at);
+    mentions.dedup();
+    let mut replies = vec![];
+    for (thread, cursor) in followed_with_replies(messages, cursors) {
+        let body = call(token, "conversations.replies", &[("channel", channel), ("ts", &thread), ("oldest", cursor), ("limit", PAGE)]).await?;
+        let Some((newest, people)) = after_cursor(&body["messages"], bot, cursor) else { continue };
+        let people = Value::Array(people);
+        let names = names(token, &people).await?;
+        replies.push(Replies { thread, newest, posts: posts(&people, &names) });
+    }
+    Ok(Activity { mentions, replies })
 }
 
 /// Users a thread names, as authors or `<@…>` mentions.
@@ -220,8 +285,13 @@ fn posts(messages: &Value, names: &HashMap<String, String>) -> Vec<Post> {
 /// Every message of the thread, oldest first.
 pub async fn thread(token: &str, channel: &str, thread: &str) -> Result<Vec<Post>, String> {
     let replies = call(token, "conversations.replies", &[("channel", channel), ("ts", thread), ("limit", "1000")]).await?;
+    Ok(posts(&replies["messages"], &names(token, &replies["messages"]).await?))
+}
+
+/// The display name of each user `messages` names.
+async fn names(token: &str, messages: &Value) -> Result<HashMap<String, String>, String> {
     let mut names = HashMap::new();
-    for id in user_ids(&replies["messages"]) {
+    for id in user_ids(messages) {
         let user = call(token, "users.info", &[("user", &id)]).await?;
         let profile = &user["user"]["profile"];
         let name = [&profile["display_name"], &profile["real_name"], &user["user"]["name"]]
@@ -232,7 +302,7 @@ pub async fn thread(token: &str, channel: &str, thread: &str) -> Result<Vec<Post
             .to_owned();
         names.insert(id, name);
     }
-    Ok(posts(&replies["messages"], &names))
+    Ok(names)
 }
 
 /// A link to the thread, for the Linear issue a session files from it.
@@ -284,6 +354,35 @@ mod tests {
             mentions_in(&replies, "UBOT", since),
             [Mention { thread: "1792390000.000100".into(), at: DateTime::from_timestamp(1792400090, 0).unwrap() }]
         );
+    }
+
+    #[test]
+    fn followed_threads_get_a_replies_call_only_past_their_cursor() {
+        let (history, _) = fixture();
+        let cursors = BTreeMap::from([
+            ("1792400050.000200".to_owned(), "1792400060.000100".to_owned()),
+            ("1792390000.000100".to_owned(), "1792400080.000000".to_owned()),
+            ("1792370000.000000".to_owned(), "1792370000.000000".to_owned()),
+        ]);
+        assert_eq!(followed_with_replies(&history, &cursors), [("1792390000.000100".to_owned(), "1792400080.000000")]);
+        assert_eq!(followed_with_replies(&history, &BTreeMap::new()), []);
+    }
+
+    #[test]
+    fn follow_ups_are_what_people_wrote_after_the_cursor() {
+        let replies = json!([
+            { "ts": "1792390000.000100", "user": "U2", "text": "deploy notes" },
+            { "ts": "1792400080.000000", "user": "UBOT", "text": "the cause is X; file it?" },
+            { "ts": "1792400090.000000", "user": "U3", "text": "yes, create the task" },
+            { "ts": "1792400095.000000", "subtype": "bot_message", "bot_id": "B9", "text": "deploy finished" },
+            { "ts": "1792400099.000000", "user": "UBOT", "text": "on it" },
+        ]);
+        let (newest, people) = after_cursor(&replies, "UBOT", "1792400080.000000").unwrap();
+        assert_eq!(newest, "1792400099.000000");
+        assert_eq!(people, [json!({ "ts": "1792400090.000000", "user": "U3", "text": "yes, create the task" })]);
+        let (newest, people) = after_cursor(&replies, "UBOT", "1792400090.000000").unwrap();
+        assert_eq!((newest.as_str(), people.len()), ("1792400099.000000", 0));
+        assert_eq!(after_cursor(&replies, "UBOT", "1792400099.000000"), None);
     }
 
     #[test]
