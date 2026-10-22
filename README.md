@@ -120,6 +120,13 @@ and password. You get the same tabs and settings as in the app, without the pane
 On a phone the tabs sit in one scrolling row on top, and a row of keys above the terminal
 gives you Esc, Tab, ↑, ↓, Ctrl-C and Enter.
 
+On Android you can install the web app, so it opens from the home screen in its own window
+like a native app. Open the hub's address in Chrome, tap the ⋮ menu, then tap **Install app**
+(older versions say **Add to Home screen**). Chrome offers this only over https, which is why
+the hub sits behind nginx at its sslip.io address. The installed app opens on the same
+sign-in form, and no session can start until you sign in. Without a network it still opens,
+but it cannot reach your machines until the network comes back.
+
 ## Connectors and workflows
 
 Click **⋯** in the header (or press ⌘,) to swap the terminal for settings. Click ⋯ again, or
