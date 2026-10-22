@@ -286,6 +286,8 @@ async fn serve_client(hub: Arc<Hub>, mut socket: WebSocket) {
             _ = ping.tick() => if sink.send(Message::Ping(Default::default())).await.is_err() { break },
         }
     }
+    // Answers a client's close frame, so the client sees a clean close instead of 1006.
+    let _ = sink.close().await;
     account.client_gone(id);
     eprintln!("pinned-server: client {id} of account {} disconnected", account.id);
 }
@@ -372,6 +374,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
             _ = ping.tick() => if sink.send(Message::Ping(Default::default())).await.is_err() { break },
         }
     }
+    let _ = sink.close().await;
     if account.went_offline(&machine, Some(socket_id)) {
         if let Err(e) = hub.db.machine_seen(row.id).await {
             eprintln!("pinned-server: could not record when machine {machine} was last seen: {e}");
