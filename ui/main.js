@@ -417,9 +417,15 @@ function show(tab) {
   if (!pickerOpen() && !settingsOpen()) tab.term.focus();
 }
 
+// The window's minimum height leaves no room for a terminal; a fit there would reflow the
+// buffer into a few cells and claude would redraw at that size, so such a size is ignored.
+const MIN_TERM_COLS = 20;
+const MIN_TERM_ROWS = 4;
 // A hidden terminal can't measure itself, so each tab fits when it is shown.
 function refit(tab) {
   if (!tab || tab.el.hidden || document.body.dataset.view !== "expanded") return;
+  const dims = tab.fit.proposeDimensions();
+  if (!dims || dims.cols < MIN_TERM_COLS || dims.rows < MIN_TERM_ROWS) return;
   tab.fit.fit();
   if (tab.view.running) callOn(tab.machine, { cmd: "resize_pty", tab: tab.view.id, cols: tab.term.cols, rows: tab.term.rows }).catch(() => {});
 }
