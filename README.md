@@ -175,10 +175,10 @@ analyse a bug and reply with the cause, or reply with an existing solution, with
 code. Each Slack workflow can also file a Linear issue and fix the bug, as below.
 
 To connect Slack, create an app at api.slack.com/apps and give its bot these scopes:
-`channels:history`, `groups:history`, `channels:read`, `groups:read`, `users:read` and
-`chat:write`. Install the app, invite the bot to the channel with `/invite @your-bot`, and
-paste the Bot User OAuth Token (`xoxb-…`) under **Connectors**. pinned keeps it in
-`slack-key` next to `linear-key`.
+`channels:history`, `groups:history`, `channels:read`, `groups:read`, `users:read`,
+`chat:write` and `reactions:write`. Install the app, invite the bot to the channel with
+`/invite @your-bot`, and paste the Bot User OAuth Token (`xoxb-…`) under **Connectors**.
+pinned keeps it in `slack-key` next to `linear-key`.
 
 pinned checks the channel every minute. A new mention in a thread that already has a session
 does not start another one. Mentions that arrive
@@ -194,6 +194,10 @@ since the last one the session got, each as a prompt that starts with
 from the bot and from other bots are skipped. If the thread's tab is closed, or pinned
 restarted without resuming it, pinned opens a new session with the whole thread instead.
 pinned follows threads that started in the last 7 days.
+
+When a session starts on a message that mentions the bot, the bot reacts to it with
+:robot_face:, and it does the same to each later mention the session receives, so people can
+tell the mention reached a session.
 
 The **If it reports a bug** step sets how far the session goes:
 
