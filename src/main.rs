@@ -1,17 +1,7 @@
-mod agent;
 mod awake;
 mod connectors;
-mod evidence;
-mod history;
-mod hooks;
-mod linear;
-mod plugin;
-mod projects;
-mod pty;
-mod reminders;
-mod sessions;
-mod slack;
 
+use pinned_core::{agent, evidence, history, hooks, plugin, projects, pty, reminders, sessions};
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -610,6 +600,22 @@ fn launch() -> std::io::Result<Launch> {
     })
 }
 
+/// Shows each reminder as a macOS notification once it is due.
+fn watch_reminders(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        for reminder in app.state::<reminders::Reminders>().take_due(unix_now()) {
+            notify(&reminder.message);
+        }
+    });
+}
+
+fn notify(message: &str) {
+    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!("display notification \"{escaped}\" with title \"Reminder\" sound name \"Glass\"");
+    let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+}
+
 fn add_tray(app: &tauri::App) -> tauri::Result<()> {
     let current = app.state::<Harness>().opacity.load(Ordering::Relaxed);
     let levels = OPACITIES
@@ -744,7 +750,7 @@ fn main() {
             app.manage(Mutex::new(agent::Usage::default()));
             app.manage(awake::Awake::load(app.path().app_config_dir().ok()));
             app.manage(reminders::Reminders::load(app.path().app_config_dir().ok()));
-            reminders::watch(app.handle().clone());
+            watch_reminders(app.handle().clone());
             app.manage(connectors::Connectors::load(app.path().app_config_dir()?, std::env::current_exe()?));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(connectors::watch(handle.clone(), move |work| {

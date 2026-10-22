@@ -15,10 +15,10 @@ const CANCEL_TOOL: &str = "cancel_reminder";
 pub const SERVER: &str = "pinned";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-struct Reminder {
-    id: u64,
-    message: String,
-    due_unix_secs: u64,
+pub struct Reminder {
+    pub id: u64,
+    pub message: String,
+    pub due_unix_secs: u64,
 }
 
 pub struct Reminders {
@@ -74,7 +74,8 @@ impl Reminders {
         Ok(format!("Reminder #{id} cancelled."))
     }
 
-    fn take_due(&self, now: u64) -> Vec<Reminder> {
+    /// Removes and returns the reminders due by `now`, in unix seconds.
+    pub fn take_due(&self, now: u64) -> Vec<Reminder> {
         let mut pending = self.pending.lock().unwrap();
         let (due, later): (Vec<_>, Vec<_>) = pending.drain(..).partition(|r| r.due_unix_secs <= now);
         *pending = later;
@@ -91,23 +92,6 @@ impl Reminders {
         }
         let _ = std::fs::write(file, serde_json::to_vec_pretty(pending).unwrap());
     }
-}
-
-pub fn watch(app: tauri::AppHandle) {
-    use tauri::Manager;
-    std::thread::spawn(move || loop {
-        std::thread::sleep(StdDuration::from_secs(1));
-        let now = Local::now().timestamp().max(0) as u64;
-        for reminder in app.state::<Reminders>().take_due(now) {
-            notify(&reminder.message);
-        }
-    });
-}
-
-fn notify(message: &str) {
-    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("display notification \"{escaped}\" with title \"Reminder\" sound name \"Glass\"");
-    let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
 }
 
 fn due_time<Tz: TimeZone>(now: DateTime<Tz>, when: &When) -> Result<DateTime<Tz>, String> {

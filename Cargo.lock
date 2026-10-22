@@ -2429,6 +2429,7 @@ name = "pinned"
 version = "0.5.1"
 dependencies = [
  "chrono",
+ "pinned-core",
  "portable-pty",
  "reqwest",
  "rustls",
@@ -2439,6 +2440,18 @@ dependencies = [
  "tauri-nspanel",
  "tauri-plugin-dialog",
  "tauri-plugin-updater",
+ "tokio",
+]
+
+[[package]]
+name = "pinned-core"
+version = "0.5.1"
+dependencies = [
+ "chrono",
+ "portable-pty",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

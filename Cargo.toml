@@ -1,3 +1,10 @@
+[workspace]
+members = [".", "crates/core"]
+
+# scripts/release.sh bumps every `version = ` line in this file, this one included.
+[workspace.package]
+version = "0.5.1"
+
 [package]
 name = "pinned"
 version = "0.5.1"
@@ -8,6 +15,7 @@ default-run = "pinned"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+pinned-core = { path = "crates/core" }
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }

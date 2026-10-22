@@ -1,8 +1,8 @@
 //! Connectors make the harness proactive: each one watches an integration and opens a tab
 //! with a claude session already working on what it found.
 
-use crate::agent::{Stage, Subject};
-use crate::{linear, slack};
+use pinned_core::agent::{Stage, Subject};
+use pinned_core::{linear, slack};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap};

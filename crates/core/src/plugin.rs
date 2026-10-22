@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 /// Set in every session to the path of the tutorial helper, so a script can import it.
 pub const HELPER_ENV: &str = "PINNED_TUTORIAL_HELPER";
 
-const MANIFEST: &str = include_str!("../plugin/.claude-plugin/plugin.json");
-const SKILL: &str = include_str!("../plugin/skills/tutorial-video/SKILL.md");
-const HELPER: &str = include_str!("../plugin/skills/tutorial-video/tutorial.mjs");
+const MANIFEST: &str = include_str!("../../../plugin/.claude-plugin/plugin.json");
+const SKILL: &str = include_str!("../../../plugin/skills/tutorial-video/SKILL.md");
+const HELPER: &str = include_str!("../../../plugin/skills/tutorial-video/tutorial.mjs");
 
 /// Where `install` puts the helper, relative to the plugin directory.
 fn helper_path(dir: &Path) -> PathBuf {
