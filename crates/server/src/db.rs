@@ -6,6 +6,7 @@ use base64::Engine;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand_core::{OsRng, RngCore};
+use pinned_core::sync;
 use pinned_core::wire::{AccountView, MachineView};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -27,7 +28,13 @@ create table if not exists machines (id uuid primary key, account uuid not null 
   created_at timestamptz not null default now(), last_seen timestamptz);
 create table if not exists pair_codes (code text primary key, account uuid not null references accounts on delete cascade,
   expires_at timestamptz not null);
+create table if not exists project_files (account uuid not null references accounts on delete cascade, project text not null,
+  path text not null, sha text not null, modified bigint not null, data bytea not null, primary key (account, project, path));
+create table if not exists shared_projects (account uuid not null references accounts on delete cascade, key text not null,
+  name text not null, repo text not null, updated timestamptz not null default now(), primary key (account, key));
 ";
+/// Compressed bytes of synced project files one account may keep on the hub.
+const SYNC_QUOTA: i64 = 1 << 30;
 
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LEN: usize = 8;
@@ -181,6 +188,79 @@ impl Db {
 
     pub async fn set_password(&self, account: Uuid, password_hash: &str) -> Result<(), String> {
         self.client().await?.execute("update accounts set password_hash = $2 where id = $1", &[&account, &password_hash]).await.map_err(err).map(drop)
+    }
+
+    pub async fn sync_list(&self, account: Uuid, project: &str) -> Result<Vec<sync::Entry>, String> {
+        let rows = self
+            .client().await?
+            .query("select path, sha, modified, octet_length(data) from project_files where account = $1 and project = $2", &[&account, &project])
+            .await
+            .map_err(err)?;
+        Ok(rows.iter().map(|r| sync::Entry { path: r.get(0), sha: r.get(1), modified: r.get::<_, i64>(2) as u64, size: r.get::<_, i32>(3) as u64 }).collect())
+    }
+
+    /// Keeps the files, unless they would take the account past its quota. Two pushes at once may
+    /// pass it by a batch, which is fine for a guard against filling the disk.
+    pub async fn sync_push(&self, account: Uuid, project: &str, files: Vec<(sync::Entry, Vec<u8>)>) -> Result<(), String> {
+        let client = self.client().await?;
+        let paths: Vec<&str> = files.iter().map(|(e, _)| e.path.as_str()).collect();
+        let row = client
+            .query_one(
+                "select coalesce(sum(octet_length(data)), 0)::bigint, \
+                 coalesce(sum(octet_length(data)) filter (where project = $2 and path = any($3)), 0)::bigint \
+                 from project_files where account = $1",
+                &[&account, &project, &paths],
+            )
+            .await
+            .map_err(err)?;
+        let (used, replaced): (i64, i64) = (row.get(0), row.get(1));
+        let incoming: i64 = files.iter().map(|(_, data)| data.len() as i64).sum();
+        if used - replaced + incoming > SYNC_QUOTA {
+            return Err(format!("the account's synced projects would pass {} MB; delete old sessions to sync more", SYNC_QUOTA >> 20));
+        }
+        for (entry, data) in &files {
+            client
+                .execute(
+                    "insert into project_files (account, project, path, sha, modified, data) values ($1, $2, $3, $4, $5, $6) \
+                     on conflict (account, project, path) do update set sha = excluded.sha, modified = excluded.modified, data = excluded.data",
+                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data],
+                )
+                .await
+                .map_err(err)?;
+        }
+        Ok(())
+    }
+
+    pub async fn sync_pull(&self, account: Uuid, project: &str, paths: &[String]) -> Result<Vec<(sync::Entry, Vec<u8>)>, String> {
+        let rows = self
+            .client().await?
+            .query("select path, sha, modified, data from project_files where account = $1 and project = $2 and path = any($3)", &[&account, &project, &paths])
+            .await
+            .map_err(err)?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let data: Vec<u8> = r.get(3);
+                (sync::Entry { path: r.get(0), sha: r.get(1), modified: r.get::<_, i64>(2) as u64, size: data.len() as u64 }, data)
+            })
+            .collect())
+    }
+
+    pub async fn share_project(&self, account: Uuid, project: &sync::Project) -> Result<(), String> {
+        self.client().await?
+            .execute(
+                "insert into shared_projects (account, key, name, repo) values ($1, $2, $3, $4) \
+                 on conflict (account, key) do update set name = excluded.name, repo = excluded.repo, updated = now()",
+                &[&account, &project.key, &project.name, &project.repo],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    pub async fn shared_projects(&self, account: Uuid) -> Result<Vec<sync::Project>, String> {
+        let rows = self.client().await?.query("select key, name, repo from shared_projects where account = $1 order by updated desc", &[&account]).await.map_err(err)?;
+        Ok(rows.iter().map(|r| sync::Project { key: r.get(0), name: r.get(1), repo: r.get(2) }).collect())
     }
 
     pub async fn email(&self, account: Uuid) -> Result<Option<String>, String> {

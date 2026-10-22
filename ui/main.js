@@ -112,15 +112,19 @@ async function showProjects({ machine, tab = null } = {}) {
   for (const b of picker.querySelectorAll(".machine")) b.onclick = () => showProjects({ machine: b.dataset.machine, tab });
   setBypassNext(false);
   let projects = [];
+  let shared = [];
   try {
-    projects = await callOn(machine, { cmd: "list_projects" });
+    [projects, shared] = await Promise.all([callOn(machine, { cmd: "list_projects" }), hub ? hub.hub({ cmd: "shared_projects" }).catch(() => []) : []]);
   } catch (e) {
     console.warn("list_projects", e);
   }
+  const here = new Set(projects.map((p) => p.repo).filter(Boolean));
   if (picking.machine !== machine || !pickerOpen()) return;
   const local = machine === LOCAL;
   choices = [
     ...projects.map((p) => ({ name: p.name, path: tilde(p.path), open: () => pickFolder(p.path) })),
+    // Projects of the account another machine has, cloned here when chosen.
+    ...shared.filter((p) => !here.has(p.key)).map((p) => ({ name: p.name, path: `clone · ${p.key}`, open: () => cloneAndOpen(machine, p.repo), keep: true })),
     { name: "Clone from GitHub…", open: () => cloneFromGithub(), keep: true },
     local
       ? { name: "Open folder…", open: () => pickLocalFolder() }

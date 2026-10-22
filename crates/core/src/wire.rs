@@ -3,6 +3,7 @@
 
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
+use crate::sync;
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -58,6 +59,9 @@ pub struct TabView {
 pub struct ProjectView {
     pub path: String,
     pub name: String,
+    /// The origin as `host/owner/name`, which names the project on every machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
 }
 
 /// Everything a client may ask a machine to do, local or through the hub. The comment on each
@@ -165,6 +169,16 @@ pub enum HubCall {
     GithubRepos,
     /// The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has none.
     Clone { machine: MachineId, repo: String },
+    /// `Vec<sync::Project>`: the account's projects, most recently shared first.
+    SharedProjects,
+    /// From a machine: a project it syncs, which other machines then offer to clone.
+    ShareProject { project: sync::Project },
+    /// From a machine: `Vec<sync::Entry>`, every file the hub holds for the project.
+    SyncList { project: String },
+    /// From a machine: `null`, once the hub keeps the files.
+    SyncPush { project: String, files: Vec<sync::File> },
+    /// From a machine: `Vec<sync::File>`.
+    SyncPull { project: String, paths: Vec<String> },
     /// The connector as stored.
     SaveConnector { connector: Connector },
     DeleteConnector { id: String },

@@ -1,7 +1,8 @@
 use crate::db::{self, Db};
 use pinned_core::agent::Subject;
 use pinned_core::connectors::{Connectors, Keys, Storage, Work};
-use pinned_core::github;
+use base64::Engine;
+use pinned_core::{github, sync};
 use pinned_core::wire::{
     Call, HubCall, MachineEvent, MachineId, MachineView, PairCode, Reply, TabId, TabView, Target, ToClient, ToMachine, EXE_PLACEHOLDER,
 };
@@ -297,6 +298,37 @@ impl Hub {
             HubCall::Import { store, linear_key, slack_key, github_key } => {
                 let imported = c().await?.import(store, Keys { linear: linear_key, slack: slack_key, github: github_key })?;
                 (json(imported), imported)
+            }
+            HubCall::SharedProjects => return json(self.db.shared_projects(account.id).await?),
+            HubCall::ShareProject { project } => return json(self.db.share_project(account.id, &project).await?),
+            HubCall::SyncList { project } => return json(self.db.sync_list(account.id, &project).await?),
+            HubCall::SyncPush { project, files } => {
+                let mut kept = vec![];
+                for file in files {
+                    if !sync::shared_path(&file.entry.path) {
+                        return Err(format!("{} is not a file a project shares", file.entry.path));
+                    }
+                    let data = match &file.data {
+                        Some(data) => base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| e.to_string())?,
+                        None => vec![],
+                    };
+                    if data.len() as u64 > sync::FILE_LIMIT {
+                        return Err(format!("{} is bigger than a synced file may be", file.entry.path));
+                    }
+                    kept.push((file.entry, data));
+                }
+                return json(self.db.sync_push(account.id, &project, kept).await?);
+            }
+            HubCall::SyncPull { project, paths } => {
+                let files = self.db.sync_pull(account.id, &project, &paths).await?;
+                let files: Vec<sync::File> = files
+                    .into_iter()
+                    .map(|(entry, data)| {
+                        let data = (!entry.sha.is_empty()).then(|| base64::engine::general_purpose::STANDARD.encode(data));
+                        sync::File { entry, data }
+                    })
+                    .collect();
+                return json(files);
             }
             HubCall::ConnectGithub { token } => (json(c().await?.connect_github(&token).await?), true),
             HubCall::DisconnectGithub => (json(c().await?.disconnect_github()?), true),

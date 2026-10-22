@@ -2762,11 +2762,13 @@ version = "0.6.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "flate2",
  "futures-util",
  "portable-pty",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.28.0",

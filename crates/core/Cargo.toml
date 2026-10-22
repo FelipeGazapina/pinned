@@ -19,6 +19,8 @@ tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tempfile = "3"
+flate2 = "1"
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt"] }

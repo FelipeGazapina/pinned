@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, EXE_PLACEHOLDER};
-use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions};
+use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions, sync};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -208,6 +208,7 @@ pub struct Machine {
     tabs: Mutex<HashMap<TabId, Tab>>,
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
+    sync_file: Option<PathBuf>,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     /// One file of finished turns per project.
@@ -248,6 +249,7 @@ impl Machine {
             tabs: Mutex::new(HashMap::new()),
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
+            sync_file: dir.as_ref().map(|d| d.join("sync.json")),
             projects: Mutex::new(projects),
             projects_file,
             history_dir: dir.as_ref().map(|d| d.join("history")),
@@ -464,8 +466,35 @@ impl Machine {
             .map(|p| ProjectView {
                 path: p.path.display().to_string(),
                 name: p.path.file_name().map_or_else(|| "/".into(), |n| n.to_string_lossy().into_owned()),
+                repo: git_remote(&p.path).and_then(|remote| repo_key(&remote)),
             })
             .collect()
+    }
+
+    /// The projects this machine syncs: the most recently opened checkout of each git origin.
+    /// Worktrees share their main checkout's origin and are left out.
+    pub fn checkouts(&self) -> Vec<sync::Checkout> {
+        let paths: Vec<PathBuf> = projects::recent(&self.projects.lock().unwrap()).into_iter().map(|p| p.path.clone()).collect();
+        let mut seen = std::collections::HashSet::new();
+        paths
+            .into_iter()
+            .filter(|path| path.join(".git").is_dir())
+            .filter_map(|path| {
+                let repo = git_remote(&path)?;
+                let key = repo_key(&repo)?;
+                let name = repo_name(&repo).unwrap_or_default().to_owned();
+                seen.insert(key.clone()).then(|| sync::Checkout {
+                    project: sync::Project { key, name, repo },
+                    history: self.history_dir.as_ref().map(|dir| history::file_for(dir, &path)),
+                    path,
+                })
+            })
+            .collect()
+    }
+
+    /// Where this machine remembers what it synced, or None when it keeps nothing.
+    pub fn sync_file(&self) -> Option<&Path> {
+        self.sync_file.as_deref()
     }
 
     /// The turns saved for the project at `path`, newest first.
@@ -769,7 +798,7 @@ impl Machine {
     }
 }
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
 }
 

@@ -451,7 +451,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
             tokio::spawn(async move {
                 // A machine holds a lesser credential than a login: it may only pass on the callbacks
                 // of sessions it runs, so a prompt-injected session can't act for another connector or thread,
-                // and import into an account with no connectors yet.
+                // import into an account with no connectors yet, and sync its projects.
                 let work = match &call {
                     HubCall::Stage { connector, subject, .. } => Some((connector.clone(), subject.clone())),
                     HubCall::SlackReply { connector, channel, thread, .. }
@@ -464,8 +464,15 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 let result = match work {
                     Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
                     Some(_) => Err("this machine runs no session of that connector on that subject".into()),
-                    // An app's first sign-in moves its own connectors in, which only an empty account takes.
-                    None if matches!(call, HubCall::Import { .. }) => hub.hub_call(&account, call).await,
+                    // An app's first sign-in moves its own connectors in, which only an empty account takes,
+                    // and every machine keeps its projects' files in step with the account's.
+                    None if matches!(
+                        call,
+                        HubCall::Import { .. } | HubCall::ShareProject { .. } | HubCall::SyncList { .. } | HubCall::SyncPush { .. } | HubCall::SyncPull { .. }
+                    ) =>
+                    {
+                        hub.hub_call(&account, call).await
+                    }
                     None => Err("a machine may only forward a connector session's callbacks".into()),
                 };
                 if let Err(e) = &result {

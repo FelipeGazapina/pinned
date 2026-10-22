@@ -4,6 +4,7 @@ use pinned_core::agent::{self, Stage, Subject};
 use pinned_core::connectors::{Delivery, Run, Work};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
+use pinned_core::sync;
 use pinned_core::wire::HubCall;
 use serde_json::{json, Value};
 use std::net::TcpStream;
@@ -445,6 +446,68 @@ fn an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only() {
     assert_eq!(client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["name"], "Bugs");
     assert_eq!(link.call_hub(HubCall::GetSettings), Err("a machine may only forward a connector session's callbacks".into()));
     node.kill();
+}
+
+struct Through<'a>(&'a Link);
+
+impl sync::Hub for Through<'_> {
+    fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
+        Ok(serde_json::from_value(self.0.call_hub(HubCall::SyncList { project: project.into() })?).unwrap())
+    }
+    fn push(&self, project: &str, files: Vec<sync::File>) -> Result<(), String> {
+        self.0.call_hub(HubCall::SyncPush { project: project.into(), files }).map(drop)
+    }
+    fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
+        Ok(serde_json::from_value(self.0.call_hub(HubCall::SyncPull { project: project.into(), paths })?).unwrap())
+    }
+}
+
+#[test]
+fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
+    let hub = TestHub::start("sync");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("sync-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let project = sync::Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
+    let checkout = |home: &Path, folder: &str| sync::Checkout { project: project.clone(), path: home.join(folder), history: None };
+    let (on_mac, on_mini) = (checkout(&mac_home, "projetos/app"), checkout(&mini_home, "pinned/app"));
+    let memory = |home: &Path, c: &sync::Checkout| sync::claude_dir(home, &c.path).join("memory/MEMORY.md");
+    std::fs::create_dir_all(memory(&mac_home, &on_mac).parent().unwrap()).unwrap();
+    std::fs::write(memory(&mac_home, &on_mac), "- deploys go through the VPS").unwrap();
+
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    let now = std::time::SystemTime::now();
+    let pushed = sync::sync(&Through(mac_link), &mut sync::State::default(), &mac_home, &on_mac, now).unwrap().pushed;
+    assert_eq!(pushed, vec!["claude/memory/MEMORY.md"]);
+    let pulled = sync::sync(&Through(mini_link), &mut sync::State::default(), &mini_home, &on_mini, now).unwrap().pulled;
+    assert_eq!(pulled, vec!["claude/memory/MEMORY.md"]);
+    assert_eq!(std::fs::read_to_string(memory(&mini_home, &on_mini)).unwrap(), "- deploys go through the VPS");
+
+    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1 }, data: Some("eA==".into()) };
+    assert_eq!(
+        mac_link.call_hub(HubCall::SyncPush { project: project.key.clone(), files: vec![outside] }),
+        Err("../.ssh/authorized_keys is not a file a project shares".into())
+    );
+    mac_link.call_hub(HubCall::ShareProject { project: project.clone() }).unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    assert_eq!(client.hub(json!({ "cmd": "shared_projects" })), Ok(json!([{ "key": "github.com/acme/app", "name": "app", "repo": "git@github.com:acme/app.git" }])));
+    let (stranger, _) = account::signup(&url, "bruno@acme.dev", "correct horse").unwrap();
+    let mut other = Client::connect(&url, &stranger);
+    other.wait("hello", |f| f["type"] == "hello");
+    assert_eq!(other.hub(json!({ "cmd": "shared_projects" })), Ok(json!([])), "another account sees none of it");
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
 }
 
 #[test]

@@ -3,13 +3,15 @@
 use crate::account::Credentials;
 use crate::agent::Message;
 use crate::machine::{Machine, ViewerId};
+use crate::sync;
 use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{mpsc as channel, watch};
 use tokio_tungstenite::tungstenite::Message as Frame;
 
@@ -20,6 +22,8 @@ const HELLO_WAIT: Duration = Duration::from_secs(15);
 const CALL_WAIT: Duration = Duration::from_secs(60);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+const SYNC_FIRST: Duration = Duration::from_secs(5);
+const SYNC_EVERY: Duration = Duration::from_secs(20);
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
 pub const UNAUTHORIZED: u16 = 4001;
 
@@ -43,6 +47,29 @@ impl Shared {
         out.is_some_and(|out| out.send(serde_json::to_string(frame).unwrap()).is_ok())
     }
 
+    /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
+    fn call(&self, call: HubCall) -> Result<Value, String> {
+        let id = self.next_call.fetch_add(1, Ordering::Relaxed);
+        let (answer, answered) = mpsc::channel();
+        self.pending.lock().unwrap().insert(id, answer);
+        if !self.send(&MachineFrame::Call { id, call }) {
+            self.pending.lock().unwrap().remove(&id);
+            return Err("not connected to the hub".into());
+        }
+        match answered.recv_timeout(CALL_WAIT) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.pending.lock().unwrap().remove(&id);
+                Err("the hub did not answer within 60 seconds".into())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("the connection to the hub dropped".into()),
+        }
+    }
+
+    fn online(&self) -> bool {
+        self.out.lock().unwrap().is_some()
+    }
+
     fn disconnected(&self, machine: &Machine) {
         *self.out.lock().unwrap() = None;
         self.pending.lock().unwrap().clear();
@@ -57,6 +84,8 @@ impl Shared {
 pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     let shared = Arc::new(Shared::default());
     let (stop, stopped) = watch::channel(false);
+    let (syncing, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
+    std::thread::spawn(move || sync_projects(&syncing, &synced_machine, &sync_stopped));
     let (link, version) = (shared.clone(), version.to_owned());
     let thread = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("could not start the hub link's runtime");
@@ -68,21 +97,7 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
 impl Link {
     /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
     pub fn call_hub(&self, call: HubCall) -> Result<Value, String> {
-        let id = self.shared.next_call.fetch_add(1, Ordering::Relaxed);
-        let (answer, answered) = mpsc::channel();
-        self.shared.pending.lock().unwrap().insert(id, answer);
-        if !self.shared.send(&MachineFrame::Call { id, call }) {
-            self.shared.pending.lock().unwrap().remove(&id);
-            return Err("not connected to the hub".into());
-        }
-        match answered.recv_timeout(CALL_WAIT) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                self.shared.pending.lock().unwrap().remove(&id);
-                Err("the hub did not answer within 60 seconds".into())
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err("the connection to the hub dropped".into()),
-        }
+        self.shared.call(call)
     }
 
     /// Passes a connector session's callback to the hub and answers what the session prints.
@@ -104,12 +119,64 @@ impl Link {
     }
 
     pub fn online(&self) -> bool {
-        self.shared.out.lock().unwrap().is_some()
+        self.shared.online()
     }
 
     pub fn stop(self) {
         let _ = self.stop.send(true);
         let _ = self.thread.join();
+    }
+}
+
+impl sync::Hub for Shared {
+    fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
+        decode(self.call(HubCall::SyncList { project: project.into() })?)
+    }
+    fn push(&self, project: &str, files: Vec<sync::File>) -> Result<(), String> {
+        self.call(HubCall::SyncPush { project: project.into(), files }).map(drop)
+    }
+    fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
+        decode(self.call(HubCall::SyncPull { project: project.into(), paths })?)
+    }
+}
+
+fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
+    serde_json::from_value(value).map_err(|e| format!("the hub sent something pinned can't read: {e}"))
+}
+
+/// Keeps the machine's projects in step with the account's while the link runs.
+fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<bool>) {
+    let Some(file) = machine.sync_file().map(Path::to_path_buf) else { return };
+    let home = crate::machine::home();
+    let mut state = sync::State::load(&file);
+    let mut shared_projects = HashSet::new();
+    let mut wait = SYNC_FIRST;
+    loop {
+        let until = Instant::now() + wait;
+        while Instant::now() < until {
+            if *stopped.borrow() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        wait = SYNC_EVERY;
+        if !shared.online() {
+            continue;
+        }
+        for checkout in machine.checkouts() {
+            let key = checkout.project.key.clone();
+            if !shared_projects.contains(&key) && shared.call(HubCall::ShareProject { project: checkout.project.clone() }).is_ok() {
+                shared_projects.insert(key.clone());
+            }
+            match sync::sync(shared, &mut state, &home, &checkout, SystemTime::now()) {
+                Ok(done) if !done.pushed.is_empty() || !done.pulled.is_empty() => {
+                    eprintln!("pinned: synced {key}: {} up, {} down", done.pushed.len(), done.pulled.len())
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("pinned: could not sync {key}: {e}"),
+            }
+        }
+        state.save(&file);
     }
 }
 
