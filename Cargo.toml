@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/core"]
+members = [".", "crates/core", "crates/server"]
 
 # scripts/release.sh bumps every `version = ` line in this file, this one included.
 [workspace.package]
