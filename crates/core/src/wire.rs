@@ -121,7 +121,7 @@ pub enum MachineEvent {
     Tabs { tabs: Vec<TabView> },
     /// A hook fired in a tab's session.
     Agent { event: AgentEvent },
-    /// Output of a tab someone subscribed to.
+    /// Output of a tab a client attached to, as the hub passes it on.
     Output { tab: TabId, data: Bytes },
     /// The tab's claude exited by itself.
     Exit { tab: TabId },
@@ -273,13 +273,15 @@ pub enum MachineFrame {
     /// The answer to `ToMachine::Call` with this id.
     Reply(Reply),
     Event { event: MachineEvent },
+    /// A tab's output for the viewer that subscribed to it, its screen first.
+    Output { viewer: String, tab: TabId, data: Bytes },
     /// A connector session's callback; the hub answers with `ToMachine::Reply`.
     Call { id: u64, call: HubCall },
 }
 
 /// Hub to machine.
 ///
-/// `{"type":"call","id":3,"call":{"cmd":"close_tab","tab":"tab-2"}}`, `{"type":"subscribe","tab":"tab-2"}`
+/// `{"type":"call","id":3,"call":{"cmd":"close_tab","tab":"tab-2"}}`, `{"type":"subscribe","tab":"tab-2","viewer":"client-4"}`
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToMachine {
@@ -287,9 +289,11 @@ pub enum ToMachine {
     Hello { machine: MachineView },
     Call { id: u64, call: Call },
     Reply(Reply),
-    /// Start sending the tab's output, its screen first, as `MachineEvent::Output`.
-    Subscribe { tab: TabId },
-    Unsubscribe { tab: TabId },
+    /// Start sending the tab's output to `viewer`, its screen first, as `MachineFrame::Output`.
+    /// Each client is its own viewer, so one that attaches late gets the screen without the others
+    /// seeing it twice.
+    Subscribe { tab: TabId, viewer: String },
+    Unsubscribe { tab: TabId, viewer: String },
 }
 
 #[cfg(test)]
@@ -457,7 +461,14 @@ mod tests {
             json!({ "type": "call", "id": 7, "call": { "cmd": "slack_reply", "connector": "c2", "channel": "C1", "thread": "1.2", "text": "done" } }),
         );
         round_trip(MachineFrame::Reply(Reply::new(3, Ok(json!("tab-4")))), json!({ "type": "reply", "id": 3, "ok": "tab-4" }));
-        round_trip(ToMachine::Subscribe { tab: "tab-2".into() }, json!({ "type": "subscribe", "tab": "tab-2" }));
+        round_trip(
+            ToMachine::Subscribe { tab: "tab-2".into(), viewer: "client-4".into() },
+            json!({ "type": "subscribe", "tab": "tab-2", "viewer": "client-4" }),
+        );
+        round_trip(
+            MachineFrame::Output { viewer: "client-4".into(), tab: "tab-2".into(), data: Bytes(b"hi".to_vec()) },
+            json!({ "type": "output", "viewer": "client-4", "tab": "tab-2", "data": "aGk=" }),
+        );
         round_trip(
             ToMachine::Call { id: 3, call: Call::ResizePty { tab: "tab-2".into(), cols: 80, rows: 24 } },
             json!({ "type": "call", "id": 3, "call": { "cmd": "resize_pty", "tab": "tab-2", "cols": 80, "rows": 24 } }),

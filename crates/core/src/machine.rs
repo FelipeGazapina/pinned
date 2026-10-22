@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
@@ -29,6 +29,8 @@ pub type ViewerId = String;
 /// Receives a tab's output. It runs on the session's reader thread with the tab's screen locked,
 /// so it must not attach to or detach from that tab.
 pub type Sink = Box<dyn Fn(&[u8]) + Send + Sync>;
+/// Hears every event from when it subscribes, alongside the callback `Machine::new` took.
+pub type Listener = Box<dyn Fn(&Event) + Send + Sync>;
 
 /// How every session starts.
 pub struct Launch {
@@ -49,11 +51,14 @@ impl Launch {
     /// Writes the settings, MCP config and plugin every session loads, for sessions that call back `exe`.
     pub fn prepare(exe: &Path) -> std::io::Result<Launch> {
         let tmp = std::env::temp_dir();
-        let settings = tmp.join("pinned-claude-settings.json");
+        // One folder per process: the app and a node on the same Mac each point sessions at their own binary.
+        let files = tmp.join(format!("pinned-{}", std::process::id()));
+        std::fs::create_dir_all(&files)?;
+        let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
-        let mcp_config = tmp.join("pinned-claude-mcp.json");
+        let mcp_config = files.join("claude-mcp.json");
         reminders::write_mcp_config(&mcp_config, exe)?;
-        let plugin_dir = tmp.join("pinned-plugin");
+        let plugin_dir = files.join("plugin");
         let tutorial_helper = plugin::install(&plugin_dir)?;
         let path_env = login_shell_path().or_else(|| std::env::var("PATH").ok());
         Ok(Launch {
@@ -204,6 +209,9 @@ pub struct Machine {
     quitting: AtomicBool,
     usage: Mutex<Usage>,
     events: Box<dyn Fn(Event) + Send + Sync>,
+    /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
+    listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
+    next_listener: AtomicU64,
     /// The `Arc` this machine lives in, for the threads it starts.
     me: Weak<Machine>,
 }
@@ -241,12 +249,26 @@ impl Machine {
             quitting: AtomicBool::new(false),
             usage: Mutex::new(Usage::default()),
             events: Box::new(events),
+            listeners: Mutex::new(vec![]),
+            next_listener: AtomicU64::new(1),
             me: me.clone(),
         })
     }
 
     pub fn launch(&self) -> &Launch {
         &self.launch
+    }
+
+    /// Sends every later event to `listener` too, such as a hub link that starts after sign in.
+    /// Returns the id `unsubscribe` takes.
+    pub fn subscribe(&self, listener: Listener) -> u64 {
+        let id = self.next_listener.fetch_add(1, Ordering::Relaxed);
+        self.listeners.lock().unwrap().push((id, Arc::new(listener)));
+        id
+    }
+
+    pub fn unsubscribe(&self, id: u64) {
+        self.listeners.lock().unwrap().retain(|(l, _)| *l != id);
     }
 
     /// Answers every call a client may make, local or through the hub. `Run` may clone a
@@ -558,6 +580,10 @@ impl Machine {
     }
 
     fn emit(&self, event: Event) {
+        let listeners: Vec<Arc<Listener>> = self.listeners.lock().unwrap().iter().map(|(_, l)| l.clone()).collect();
+        for listener in listeners {
+            listener(&event);
+        }
         (self.events)(event);
     }
 
@@ -992,6 +1018,24 @@ mod tests {
         assert_eq!(events.lock().unwrap().iter().find(|e| e["kind"] == "exit"), Some(&json!({ "kind": "exit", "tab": tab })));
         assert!(!m.view(&tab).unwrap().running);
         assert_eq!(events.lock().unwrap().last().unwrap()["tabs"][0]["running"], false);
+    }
+
+    #[test]
+    fn a_listener_hears_events_until_it_unsubscribes() {
+        let m = machine();
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        let id = m.subscribe(Box::new(move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap())));
+        let tab = m.open_tab(None, false);
+        m.unsubscribe(id);
+        m.close_tab(&tab);
+        assert_eq!(
+            *heard.lock().unwrap(),
+            [json!({ "kind": "tabs", "tabs": [{
+                "id": "tab-1", "cwd": "/repo", "bypass": false, "running": false, "status": null,
+                "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1,
+            }] })]
+        );
     }
 
     #[test]

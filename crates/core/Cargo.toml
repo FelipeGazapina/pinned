@@ -12,8 +12,11 @@ portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The binary installs rustls's ring provider before the first request.
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
-tokio = { version = "1", features = ["time", "sync"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "blocking", "rustls-no-provider"] }
+tokio = { version = "1", features = ["time", "sync", "rt", "net", "macros"] }
+# The hub link. The binary installs rustls's ring provider, as for reqwest.
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
