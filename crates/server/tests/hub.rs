@@ -25,6 +25,10 @@ struct TestHub {
 
 impl TestHub {
     fn start(name: &str) -> TestHub {
+        TestHub::start_with(name, true)
+    }
+
+    fn start_with(name: &str, open_signup: bool) -> TestHub {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -43,6 +47,7 @@ impl TestHub {
                 downloads: dir.join("downloads"),
                 public_url: None,
                 key_file: dir.join("hub.key"),
+                open_signup,
             }))
             .unwrap();
         let url = format!("http://{}", running.addr);
@@ -445,6 +450,23 @@ fn sign_in_rejects_wrong_passwords_duplicates_and_logged_out_tokens() {
         assert_eq!(account::login(&url, "ana@acme.dev", "wrong horse"), Err("wrong email or password".into()));
     }
     assert_eq!(account::login(&url, "ana@acme.dev", "correct horse"), Err("too many failed sign ins; try again in 15 minutes".into()));
+}
+
+#[test]
+fn a_closed_hub_takes_only_its_first_account_whose_password_can_change() {
+    let hub = TestHub::start_with("closed", false);
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    assert_eq!(account::signup(&url, "bruno@acme.dev", "correct horse"), Err("this hub takes no new accounts".into()));
+    assert_eq!(account::signup(&url, "ana@acme.dev", "another horse"), Err("this hub takes no new accounts".into()), "a closed hub doesn't say which emails it has");
+
+    assert_eq!(account::change_password(&url, &token, "wrong horse", "battery staple"), Err("the current password is wrong".into()));
+    assert_eq!(account::change_password(&url, &token, "correct horse", "short"), Err("the password needs at least 8 characters".into()));
+    assert_eq!(account::change_password(&url, "not-a-token", "correct horse", "battery staple"), Err("sign in first".into()));
+    account::change_password(&url, &token, "correct horse", "battery staple").unwrap();
+    assert_eq!(account::login(&url, "ana@acme.dev", "correct horse"), Err("wrong email or password".into()));
+    assert!(account::login(&url, "ana@acme.dev", "battery staple").is_ok());
+    assert!(account::register_machine(&url, &token, "vps", "linux").is_ok(), "the login that changed the password stays signed in");
 }
 
 #[test]

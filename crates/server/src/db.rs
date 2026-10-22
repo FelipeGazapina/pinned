@@ -169,6 +169,20 @@ impl Db {
         Ok(row.map(|r| (AccountView { id: r.get::<_, Uuid>(0).to_string(), email: email.to_owned() }, r.get(1))))
     }
 
+    pub async fn has_accounts(&self) -> Result<bool, String> {
+        let row = self.client().await?.query_one("select exists (select 1 from accounts)", &[]).await.map_err(err)?;
+        Ok(row.get(0))
+    }
+
+    pub async fn account(&self, account: Uuid) -> Result<Option<(AccountView, String)>, String> {
+        let row = self.client().await?.query_opt("select email, password_hash from accounts where id = $1", &[&account]).await.map_err(err)?;
+        Ok(row.map(|r| (AccountView { id: account.to_string(), email: r.get(0) }, r.get(1))))
+    }
+
+    pub async fn set_password(&self, account: Uuid, password_hash: &str) -> Result<(), String> {
+        self.client().await?.execute("update accounts set password_hash = $2 where id = $1", &[&account, &password_hash]).await.map_err(err).map(drop)
+    }
+
     pub async fn email(&self, account: Uuid) -> Result<Option<String>, String> {
         let row = self.client().await?.query_opt("select email from accounts where id = $1", &[&account]).await.map_err(err)?;
         Ok(row.map(|r| r.get(0)))

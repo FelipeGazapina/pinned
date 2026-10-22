@@ -57,6 +57,13 @@ pub struct Session {
     pub account: AccountView,
 }
 
+/// `POST /api/password`, with the user token as bearer, takes this.
+#[derive(Serialize, Deserialize)]
+pub struct NewPassword {
+    pub current: String,
+    pub password: String,
+}
+
 /// `POST /api/machines`, with the user token as bearer, takes this.
 #[derive(Serialize, Deserialize)]
 pub struct NewMachine {
@@ -100,6 +107,10 @@ pub fn signup(hub: &str, email: &str, password: &str) -> Result<(String, Account
 pub fn login(hub: &str, email: &str, password: &str) -> Result<(String, AccountView), String> {
     let session: Session = post(hub, "/api/login", None, &SignIn { email: email.into(), password: password.into() })?;
     Ok((session.token, session.account))
+}
+
+pub fn change_password(hub: &str, user_token: &str, current: &str, password: &str) -> Result<(), String> {
+    post::<AccountView>(hub, "/api/password", Some(user_token), &NewPassword { current: current.into(), password: password.into() }).map(drop)
 }
 
 pub fn register_machine(hub: &str, user_token: &str, name: &str, os: &str) -> Result<(MachineView, String), String> {

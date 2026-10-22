@@ -18,6 +18,9 @@ function showAccount() {
     };
     return;
   }
+  // Redrawing would take the password being typed away.
+  const typing = settingsPage.querySelector(".new-password");
+  if (typing && (typing.current.value || typing.password.value)) return;
   const state = document.body.dataset.hub;
   const badge = state === "online" ? "Connected" : state === "refused" ? "Refused by the hub" : "Connecting…";
   const name = machines.get(LOCAL)?.hubView?.name;
@@ -30,7 +33,45 @@ function showAccount() {
       ${TAURI ? `<p>This Mac is <b>${esc(name ?? "…")}</b> in the account. It stays signed in, with its sessions open to your other devices, until you sign out.</p>` : ""}
       ${state === "refused" ? `<p class="error">The hub no longer accepts this sign-in. Sign out, then sign in again.</p>` : ""}
       <div class="actions"><button class="secondary" data-action="sign-out">Sign out</button></div>
-    </div>`;
+    </div>
+    <form class="card new-password">
+      <div class="card-head"><div><b>Password</b></div></div>
+      <input name="username" type="email" value="${esc(account.email)}" autocomplete="username" hidden>
+      <label>Current password <input name="current" type="password" autocomplete="current-password"></label>
+      <label>New password <input name="password" type="password" autocomplete="new-password" minlength="8"></label>
+      <p class="error" id="password-error"></p><p class="hint" id="password-done"></p>
+      <div class="actions"><button class="primary">Change password</button></div>
+    </form>`;
+  settingsPage.querySelector(".new-password").onsubmit = (e) => {
+    e.preventDefault();
+    changePassword(e.target);
+  };
+}
+
+async function changePassword(form) {
+  const error = document.getElementById("password-error");
+  const done = document.getElementById("password-done");
+  const current = form.current.value;
+  const password = form.password.value;
+  error.textContent = done.textContent = "";
+  if (!current || !password) return (error.textContent = "Fill in your current and new password.");
+  form.querySelector("button").disabled = true;
+  try {
+    if (TAURI) await invoke("change_password", { current, password });
+    else {
+      const res = await fetch("/api/password", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${account.user_token}` },
+        body: JSON.stringify({ current, password }),
+      });
+      if (!res.ok) throw (await res.json().catch(() => ({}))).error ?? res.statusText;
+    }
+    form.reset();
+    done.textContent = "Password changed. Sign in with the new one from now on.";
+  } catch (e) {
+    error.textContent = String(e);
+  }
+  form.querySelector("button").disabled = false;
 }
 
 async function signInApp(create) {

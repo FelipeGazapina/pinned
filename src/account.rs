@@ -118,6 +118,17 @@ pub async fn sign_in(app: AppHandle, hub: String, email: String, password: Strin
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub async fn change_password(app: AppHandle, current: String, password: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Account>();
+        let (hub, token) = state.signed_in.read().unwrap().as_ref().map(|s| (s.creds.hub.clone(), s.creds.user_token.clone())).ok_or("sign in first")?;
+        account::change_password(&hub, &token, &current, &password)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Disconnects this Mac and forgets the credentials; the app's own connectors take over again.
 /// The webview removes this machine from the account first, while its login still works.
 #[tauri::command]

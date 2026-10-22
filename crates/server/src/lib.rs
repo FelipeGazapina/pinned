@@ -16,6 +16,8 @@ pub struct Config {
     pub public_url: Option<String>,
     /// The key the integrations' secrets are sealed with in Postgres, created on first start.
     pub key_file: PathBuf,
+    /// Lets anyone who reaches the hub create an account; otherwise only the first one can.
+    pub open_signup: bool,
 }
 
 pub struct Running {
@@ -32,7 +34,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
     let public_url = config.public_url.unwrap_or_else(|| format!("http://{addr}"));
     let hub = hub::Hub::new(db, public_url);
     hub.watch_all().await?;
-    let app = http::router(hub.clone(), config.ui, config.downloads).into_make_service_with_connect_info::<SocketAddr>();
+    let app = http::router(hub.clone(), config.ui, config.downloads, config.open_signup).into_make_service_with_connect_info::<SocketAddr>();
     let server = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             eprintln!("pinned-server: the hub stopped: {e}");

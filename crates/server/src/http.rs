@@ -8,9 +8,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use pinned_core::agent::Subject;
-use pinned_core::account::{Failure, NewMachine, Paired, Pairing, Registered, Session, SignIn};
+use pinned_core::account::{Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn};
 use pinned_core::link::UNAUTHORIZED;
-use pinned_core::wire::{ClientFrame, HubCall, MachineFrame, MachineView, Reply, ToClient, ToMachine};
+use pinned_core::wire::{AccountView, ClientFrame, HubCall, MachineFrame, MachineView, Reply, ToClient, ToMachine};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -42,14 +42,16 @@ pub struct Server {
     downloads: PathBuf,
     attempts: Mutex<HashMap<String, Vec<Instant>>>,
     hashing: tokio::sync::Semaphore,
+    open_signup: bool,
 }
 
-pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf) -> Router {
-    let server = Arc::new(Server { hub, downloads, attempts: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES) });
+pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, open_signup: bool) -> Router {
+    let server = Arc::new(Server { hub, downloads, attempts: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), open_signup });
     Router::new()
         .route("/api/signup", post(signup))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
+        .route("/api/password", post(change_password))
         .route("/api/machines", post(register))
         .route("/api/pair", post(pair))
         .route("/ws/client", get(client_socket))
@@ -95,6 +97,13 @@ fn client_address(peer: SocketAddr, headers: &HeaderMap) -> String {
     }
 }
 
+fn new_password(password: &str) -> Result<(), Error> {
+    if password.chars().count() < MIN_PASSWORD {
+        return Err(Error(StatusCode::BAD_REQUEST, format!("the password needs at least {MIN_PASSWORD} characters")));
+    }
+    Ok(())
+}
+
 fn email(raw: &str) -> Result<String, Error> {
     let email = raw.trim().to_lowercase();
     if !email.contains('@') || email.len() > 254 {
@@ -127,8 +136,10 @@ async fn password_matches(server: &Server, password: String, hash: String) -> bo
 
 async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<SignIn>) -> Answer<Session> {
     let email = email(&body.email)?;
-    if body.password.chars().count() < MIN_PASSWORD {
-        return Err(Error(StatusCode::BAD_REQUEST, format!("the password needs at least {MIN_PASSWORD} characters")));
+    new_password(&body.password)?;
+    // Refused before the email is looked at, so a closed hub tells nobody which accounts it has.
+    if !server.open_signup && server.hub.db.has_accounts().await.map_err(internal)? {
+        return Err(Error(StatusCode::FORBIDDEN, "this hub takes no new accounts".into()));
     }
     if !server.attempt(&[(format!("signup:{}", client_address(peer, &headers)), ADDRESS_SIGNUPS)]) {
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many sign ups; try again in 15 minutes".into()));
@@ -192,6 +203,24 @@ async fn logout(State(server): State<Arc<Server>>, headers: HeaderMap) -> Result
     server.hub.db.logout(token).await.map_err(internal)?;
     server.hub.logged_out(&db::hash(token));
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn change_password(State(server): State<Arc<Server>>, headers: HeaderMap, Json(body): Json<NewPassword>) -> Answer<AccountView> {
+    let account = signed_in(&server, &headers).await?;
+    new_password(&body.password)?;
+    let keys = [(format!("password:{account}"), ADDRESS_ATTEMPTS)];
+    if !server.attempt(&keys) {
+        return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many wrong passwords; try again in 15 minutes".into()));
+    }
+    let (view, hash) = server.hub.db.account(account).await.map_err(internal)?.ok_or_else(|| Error(StatusCode::UNAUTHORIZED, "sign in first".into()))?;
+    if !password_matches(&server, body.current, hash).await {
+        return Err(Error(StatusCode::FORBIDDEN, "the current password is wrong".into()));
+    }
+    server.succeeded(&keys);
+    let hash = hash_password(&server, body.password).await?;
+    server.hub.db.set_password(account, &hash).await.map_err(internal)?;
+    eprintln!("pinned-server: account {account} changed its password");
+    Ok(Json(view))
 }
 
 fn machine_name(name: &str) -> Result<String, Error> {

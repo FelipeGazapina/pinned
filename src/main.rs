@@ -265,6 +265,7 @@ fn main() {
             commands::pick_folder,
             account::account,
             account::sign_in,
+            account::change_password,
             account::sign_out
         ])
         .setup(move |app| {
