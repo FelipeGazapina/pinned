@@ -292,7 +292,11 @@ fn unknown_call(id: u64, e: serde_json::Error) -> Reply {
 }
 
 async fn client_socket(State(server): State<Arc<Server>>, upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(move |socket| serve_client(server.hub.clone(), socket))
+    // A browser sends each message as one frame, and an upload is one message.
+    upgrade
+        .max_message_size(sync::MESSAGE_LIMIT)
+        .max_frame_size(sync::MESSAGE_LIMIT)
+        .on_upgrade(move |socket| serve_client(server.hub.clone(), socket))
 }
 
 async fn serve_client(hub: Arc<Hub>, mut socket: WebSocket) {

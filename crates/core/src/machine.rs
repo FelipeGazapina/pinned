@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, EXE_PLACEHOLDER};
-use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions, sync};
+use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions, sync, uploads};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -213,6 +213,8 @@ pub struct Machine {
     projects_file: Option<PathBuf>,
     /// One file of finished turns per project.
     history_dir: Option<PathBuf>,
+    /// Files clients attached, saved for sessions to read.
+    uploads: Option<PathBuf>,
     clones: PathBuf,
     quitting: AtomicBool,
     usage: Mutex<Usage>,
@@ -239,6 +241,10 @@ impl Machine {
                 projects::save(file, &projects);
             }
         }
+        let uploads = dir.as_ref().map(|d| d.join("uploads"));
+        if let Some(uploads) = &uploads {
+            uploads::sweep(uploads);
+        }
         let home = home();
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
@@ -253,6 +259,7 @@ impl Machine {
             projects: Mutex::new(projects),
             projects_file,
             history_dir: dir.as_ref().map(|d| d.join("history")),
+            uploads,
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
             usage: Mutex::new(Usage::default()),
@@ -300,6 +307,10 @@ impl Machine {
             Call::Clone { repo, token } => json(self.find_folder("", Some(&repo), token.as_deref())?),
             Call::Run { run } => json(self.run(&run)?),
             Call::Deliver { env, text } => json(self.deliver(&env, &text)),
+            Call::Upload { name, data } => {
+                let dir = self.uploads.as_ref().ok_or("this machine keeps no files")?;
+                json(uploads::save(dir, &name, &data.0)?.display().to_string())
+            }
         }
     }
 

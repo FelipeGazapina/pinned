@@ -64,8 +64,10 @@ Drag a tab to reorder it. Drag the tab bar by its ⠿ handle or empty space to t
 left or right side of the panel; left and right stack the tabs vertically. pinned remembers
 the side you picked.
 
-Drop files onto the panel to attach them to the current tab (images included), or paste an
-image from the clipboard.
+Drop files onto the panel to attach them to the current tab (images included), paste an
+image from the clipboard, or click **📎** to pick files. A tab on another machine gets each
+file sent there first, up to 25 MB, into a private `uploads` folder in that machine's config
+folder. Uploads older than a day are deleted.
 
 ## Machines
 
@@ -126,6 +128,16 @@ like a native app. Open the hub's address in Chrome, tap the ⋮ menu, then tap 
 the hub sits behind nginx at its sslip.io address. The installed app opens on the same
 sign-in form, and no session can start until you sign in. Without a network it still opens,
 but it cannot reach your machines until the network comes back.
+
+**📎** attaches files the same way the app does. On a phone it offers the camera, your photos
+and your files. In a desktop browser you can also drop files on the terminal or paste an image.
+
+To hear when a session finishes or needs you, click **Enable** under **Settings → Account →
+Notifications on this device**. A notification shows when that happens while the page is in
+the background or shows another session, and tapping it opens that session's tab. The page title and the
+installed app's icon count the sessions you haven't looked at yet. Notifications arrive only
+while the web app is open or in the background. With the app fully closed they would need
+Web Push, which pinned does not have yet.
 
 ## Connectors and workflows
 

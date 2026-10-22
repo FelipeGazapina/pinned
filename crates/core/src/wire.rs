@@ -105,6 +105,9 @@ pub enum Call {
     Run { run: RunSpec },
     /// `true` when a live tab whose environment holds every pair took `text` as a prompt.
     Deliver { env: Vec<(String, String)>, text: String },
+    /// The absolute path the file was saved under, in a private folder of the machine, for a
+    /// session to read. Refused past `uploads::LIMIT`.
+    Upload { name: String, data: Bytes },
 }
 
 /// A connector's session, the same on any machine.
@@ -398,6 +401,10 @@ mod tests {
         round_trip(
             Call::Deliver { env: vec![("PINNED_SLACK_THREAD".into(), "1.2".into())], text: "yes".into() },
             json!({ "cmd": "deliver", "env": [["PINNED_SLACK_THREAD", "1.2"]], "text": "yes" }),
+        );
+        round_trip(
+            Call::Upload { name: "photo.jpg".into(), data: Bytes(b"\xff\xd8".to_vec()) },
+            json!({ "cmd": "upload", "name": "photo.jpg", "data": "/9g=" }),
         );
     }
 

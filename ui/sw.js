@@ -1,3 +1,4 @@
+importScripts("sw-notifications.js");
 const CACHE = "pinned-shell-v1";
 const BYPASS = ["/api/", "/ws/", "/install.sh", "/download/"];
 
