@@ -40,21 +40,39 @@ const TRIGGERS = {
 };
 
 const settingsPage = document.getElementById("settings-page");
+const LINEAR_KEYS = "https://linear.app/settings/account/security";
 
 /** Mirrors the backend's `get_settings`. Unsaved connectors carry an empty id. */
 let settings = { linear: null, slack: null, connectors: [], checked: null };
-let page = ["general", "connectors", "projects"].includes(load("settings-page")) ? load("settings-page") : "integrations";
+const PAGES = ["general", "integrations", "projects", "connectors", "account", "machines"];
+let page = PAGES.includes(load("settings-page")) && (TAURI || load("settings-page") !== "general") ? load("settings-page") : "integrations";
 /** Names from the connected Linear workspace and Slack channels, for the connector form's suggestions. */
-let suggestions = { labels: [], columns: [], teams: [], channels: [] };
+let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [] };
 
 const settingsOpen = () => document.body.dataset.page === "settings";
 
+/** Signed in, the connectors belong to the account and the hub answers; signed out, the app's own do. */
+const connectorCall = (cmd, args = {}) => (hub ? hub.hub({ cmd, ...args }) : invoke(cmd, args));
+
 async function toggleSettings() {
-  if (settingsOpen()) return active && activate(active);
+  if (settingsOpen()) return active ? activate(active) : delete document.body.dataset.page;
   document.body.dataset.page = "settings";
   picker.hidden = true;
-  settings = await invoke("get_settings");
+  try {
+    settings = await connectorCall("get_settings");
+  } catch (e) {
+    console.warn("get_settings", e);
+  }
   showPage(page);
+}
+
+/** The account's connectors changed on the hub, by another device or a check. */
+function onHubSettings(latest) {
+  settings = latest;
+  if (!settingsOpen() || page !== "connectors") return;
+  if (view.name === "list") return redraw();
+  const line = document.getElementById("checked");
+  if (line) line.textContent = checkedText();
 }
 
 function showPage(name) {
@@ -62,7 +80,7 @@ function showPage(name) {
   save("settings-page", name);
   for (const b of document.querySelectorAll("#settings-nav button")) b.classList.toggle("active", b.dataset.page === name);
   if (name === "connectors" && settings.linear && !suggestions.labels.length) {
-    invoke("linear_suggestions").then((found) => {
+    connectorCall("linear_suggestions").then((found) => {
       Object.assign(suggestions, found);
       fillList("linear-labels", found.labels);
       fillList("linear-columns", found.columns);
@@ -70,13 +88,15 @@ function showPage(name) {
     }, console.warn);
   }
   if (name === "connectors" && settings.slack && !suggestions.channels.length) {
-    invoke("slack_suggestions").then((channels) => {
+    connectorCall("slack_suggestions").then((channels) => {
       suggestions.channels = channels;
       fillList("slack-channels", channels);
     }, console.warn);
   }
   if (name === "projects") return showProjectsPage();
   if (name === "general") return showGeneral();
+  if (name === "account") return showAccount();
+  if (name === "machines") return showMachinesPage();
   if (name === "integrations") settingsPage.innerHTML = integrationsHtml();
   else redraw();
 }
@@ -198,11 +218,16 @@ const STEPS = {
     icon: "✳",
     app: "Claude Code",
     title: "Run a session",
-    summary: (c) => [folderName(c.folder) || "no folder", c.model.trim() || "default model", c.effort, PERMISSIONS[c.permissionMode]].join(" · "),
+    summary: (c) =>
+      [folderName(c.folder) || "no folder", account && runOnName(c), c.model.trim() || "default model", c.effort, PERMISSIONS[c.permissionMode]]
+        .filter(Boolean)
+        .join(" · "),
     issues: (c) => (c.folder.trim() ? [] : ["Choose the folder the session opens in."]),
-    fields: (c) => `<label>Folder
-        <span class="row">${input("folder", c.folder, 'placeholder="/path/to/repo"')}
-        <button class="secondary" data-action="pick-folder">Choose…</button></span></label>
+    fields: (c) => `${account ? `<label>Run on ${runOnHtml(c)}</label>` : ""}
+      <label>Folder${account ? ` on ${esc(machineName(folderMachine(c)))}` : ""}
+        <span class="row">${input("folder", c.folder, 'list="folders" placeholder="/path/to/repo" spellcheck="false"')}
+        ${folderMachine(c) === LOCAL ? `<button class="secondary" data-action="pick-folder">Choose…</button>` : ""}</span></label>
+      <p class="hint" id="repo">${repoHint(c)}</p>
       <div class="grid">
         <label>Model ${input("model", c.model, `list="models" placeholder="claude's default"`)}</label>
         <label>Effort ${select("effort", EFFORTS, undefined, c.effort)}</label>
@@ -270,6 +295,52 @@ const isOn = (c, id) => !STEPS[id].optional || STEPS[id].on(c);
 /** Steps the editor draws as nodes: the ones that run, and an optional one the user just opened to fill in. */
 const shown = (c, id) => isOn(c, id) || (view.name === "edit" && view.open === id);
 
+/** The id a connector names its machine by: the hub's, so this Mac goes by its account machine id. */
+const hubIdOf = (machine) => (machine === LOCAL ? account?.machine_id ?? "" : machine);
+const localIdOf = (id) => (id && id === account?.machine_id ? LOCAL : id);
+const runOnName = (c) => (c.machine ? machineName(localIdOf(c.machine)) : "any machine");
+
+/** Where the connector's folder is picked: its machine, or this Mac (in the browser, the first one online) when any may run it. */
+function folderMachine(c) {
+  const preferred = localIdOf(c.machine);
+  if (preferred && machines.has(preferred)) return preferred;
+  return machines.has(LOCAL) ? LOCAL : onlineMachines()[0];
+}
+
+function runOnHtml(c) {
+  const known = [...machines.entries()].map(([id, m]) => [hubIdOf(id), `${machineName(id)}${m.view.online ? "" : " (offline)"}`]);
+  if (c.machine && !known.some(([id]) => id === c.machine)) known.push([c.machine, "A removed machine"]);
+  const labels = Object.fromEntries([["", "Any online machine"], ...known]);
+  return `${select("machine", Object.keys(labels), (id) => labels[id], c.machine)}
+    <span class="hint">${c.machine ? "Falls back to another online machine while this one is offline." : "Each run goes to whichever machine is online."}</span>`;
+}
+
+const repoHint = (c) =>
+  c.repo ? `A machine without this folder finds or clones <code>${esc(c.repo)}</code>.` : "";
+
+/** Fills the folder suggestions with the projects of the machine the folder is picked on. */
+async function loadFolders(c) {
+  const machine = folderMachine(c);
+  suggestions.folders = [];
+  try {
+    suggestions.folders = (await callOn(machine, { cmd: "list_projects" })).map((p) => p.path);
+  } catch {}
+  fillList("folders", suggestions.folders);
+}
+
+/** Records the folder's git origin, so another machine can clone it. */
+async function fillRepo() {
+  const draft = view.draft;
+  const folder = draft.folder.trim();
+  let repo = null;
+  try {
+    repo = folder ? await callOn(folderMachine(draft), { cmd: "git_remote", path: folder }) : null;
+  } catch {}
+  if (view.draft !== draft || draft.folder.trim() !== folder) return;
+  draft.repo = repo ?? "";
+  refresh();
+}
+
 function connectorsHtml() {
   if (view.name === "edit") return editorHtml();
   if (view.name === "pick") return triggerChoiceHtml();
@@ -298,7 +369,8 @@ function cardHtml(c, i) {
 }
 
 function sentence(c) {
-  const where = folderName(c.folder) ? ` in ${folderName(c.folder)}` : "";
+  const machine = account && c.machine ? ` on ${runOnName(c)}` : "";
+  const where = folderName(c.folder) ? ` in ${folderName(c.folder)}${machine}` : machine;
   if (!isSlack(c)) return `When an issue gets the label “${c.trigger.label}”, Claude picks it up${where}.`;
   const then = c.fix === "off" ? "answers in the thread" : "answers in the thread and fixes bugs";
   return `When the bot is mentioned in #${c.trigger.channel.replace(/^#/, "")}, Claude ${then}${where}.`;
@@ -329,6 +401,7 @@ function editorHtml() {
     <datalist id="linear-teams">${options(suggestions.teams)}</datalist>
     <datalist id="slack-channels">${options(suggestions.channels)}</datalist>
     <datalist id="models">${options(MODELS)}</datalist>
+    <datalist id="folders">${options(suggestions.folders)}</datalist>
     <div class="editor-bar">
       <button class="secondary" data-action="close-editor" title="Back to connectors">←</button>
       ${input("name", c.name, 'class="title" placeholder="Connector name"')}
@@ -377,6 +450,8 @@ function refresh() {
   }
   const command = document.getElementById("command");
   if (command) command.textContent = commandPreview(c);
+  const repo = document.getElementById("repo");
+  if (repo) repo.innerHTML = repoHint(c);
   const save = document.getElementById("save-connector");
   save.disabled = !!c.id && !changed();
   save.textContent = !c.id ? "Create" : changed() ? "Save" : "Saved";
@@ -389,11 +464,13 @@ function redraw() {
 
 function edit(index, draft = clone(settings.connectors[index]), open = null) {
   view = { name: "edit", index, draft, original: JSON.stringify(draft), open };
+  loadFolders(draft);
 }
 
 /** A fresh connector of `kind`, filled with the defaults that make it work once a folder is chosen. */
 function blank(kind) {
-  const common = { id: "", enabled: true, folder: active?.cwd ?? "", model: "opus", effort: "high", permissionMode: "auto", proof: true, team: "", label: "", fix: "off" };
+  const machine = active ? hubIdOf(active.machine) : "";
+  const common = { id: "", enabled: true, folder: active?.view.cwd ?? "", machine, repo: "", model: "opus", effort: "high", permissionMode: "auto", proof: true, team: "", label: "", fix: "off" };
   return kind === "linear-label"
     ? {
         ...common,
@@ -428,6 +505,7 @@ function tidy(c) {
     ...c,
     name: t(c.name),
     folder: t(c.folder),
+    repo: t(c.repo),
     model: t(c.model),
     team: t(c.team),
     label: t(c.label),
@@ -444,6 +522,7 @@ const defaultText = (c) =>
 const RESHAPES = {
   "trigger.kind": (c, kind) => ({ ...c, trigger: kind === "slack-mention" ? { kind, channel: "" } : { kind, label: "" } }),
   fix: (c, fix) => ({ ...c, fix }),
+  machine: (c, machine) => ({ ...c, machine }),
 };
 
 /** Applies `change` to the draft, swapping in the new defaults where the old ones were untouched. */
@@ -454,6 +533,10 @@ function reshape(change) {
   if (before.instructions.trim() === defaultText(before).trim()) after.instructions = defaultText(after);
   if (before.trigger.kind !== after.trigger.kind) view.open = flowOf(after)[0][0];
   view.draft = after;
+  if (before.machine !== after.machine) {
+    loadFolders(after);
+    fillRepo();
+  }
   redraw();
 }
 
@@ -488,19 +571,19 @@ const stepOf = (button) => button.closest(".step").dataset.step;
 
 const actions = {
   "go-integrations": () => showPage("integrations"),
-  "open-linear-keys": () => invoke("open_linear_keys"),
+  "open-linear-keys": () => (TAURI ? invoke("open_linear_keys") : window.open(LINEAR_KEYS, "_blank", "noopener")),
   async "connect-linear"() {
     const key = document.getElementById("linear-key").value;
     if (!key.trim()) return;
     try {
-      settings.linear = await invoke("connect_linear", { key });
+      settings.linear = await connectorCall("connect_linear", { key });
       showPage("integrations");
     } catch (e) {
       document.getElementById("linear-error").textContent = e;
     }
   },
   async "disconnect-linear"() {
-    await invoke("disconnect_linear");
+    await connectorCall("disconnect_linear");
     settings.linear = null;
     suggestions = { ...suggestions, labels: [], columns: [] };
     showPage("integrations");
@@ -509,14 +592,14 @@ const actions = {
     const token = document.getElementById("slack-token").value;
     if (!token.trim()) return;
     try {
-      settings.slack = await invoke("connect_slack", { token });
+      settings.slack = await connectorCall("connect_slack", { token });
       showPage("integrations");
     } catch (e) {
       document.getElementById("slack-error").textContent = e;
     }
   },
   async "disconnect-slack"() {
-    await invoke("disconnect_slack");
+    await connectorCall("disconnect_slack");
     settings.slack = null;
     suggestions.channels = [];
     showPage("integrations");
@@ -557,6 +640,7 @@ const actions = {
     if (!picked) return;
     view.draft.folder = picked;
     redraw();
+    fillRepo();
   },
   async "save-connector"() {
     const c = tidy(view.draft);
@@ -573,7 +657,7 @@ const actions = {
       return;
     }
     try {
-      const saved = await invoke("save_connector", { connector: c });
+      const saved = await connectorCall("save_connector", { connector: c });
       const index = view.index < 0 ? settings.connectors.push(saved) - 1 : view.index;
       settings.connectors[index] = saved;
       edit(index, clone(saved), view.open);
@@ -584,7 +668,7 @@ const actions = {
   },
   async "delete-connector"(button) {
     if (!armed(button, "Click again to delete")) return;
-    await invoke("delete_connector", { id: view.draft.id });
+    await connectorCall("delete_connector", { id: view.draft.id });
     settings.connectors.splice(view.index, 1);
     view = { name: "list" };
     redraw();
@@ -619,11 +703,12 @@ settingsPage.addEventListener("input", (e) => {
 settingsPage.addEventListener("change", async (e) => {
   const path = e.target.dataset.bind;
   if (path in RESHAPES) return reshape((c) => RESHAPES[path](c, e.target.value));
+  if (path === "folder") return fillRepo();
   if (e.target.dataset.toggle !== "enabled") return;
   // The list's switch saves right away, as the connector's other fields are already saved.
   const i = e.target.closest(".flow-card").dataset.index;
   try {
-    settings.connectors[i] = await invoke("save_connector", { connector: { ...settings.connectors[i], enabled: e.target.checked } });
+    settings.connectors[i] = await connectorCall("save_connector", { connector: { ...settings.connectors[i], enabled: e.target.checked } });
   } catch (err) {
     e.target.checked = !e.target.checked;
     document.getElementById("checked").textContent = String(err);
@@ -635,7 +720,7 @@ settingsPage.addEventListener("change", async (e) => {
 for (const b of document.querySelectorAll("#settings-nav button")) b.onclick = () => showPage(b.dataset.page);
 document.getElementById("settings-toggle").onclick = toggleSettings;
 
-win.listen("connectors-checked", ({ payload }) => {
+listen("connectors-checked", (payload) => {
   settings.checked = payload;
   const line = document.getElementById("checked");
   if (line) line.textContent = checkedText();

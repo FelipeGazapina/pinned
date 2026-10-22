@@ -1,22 +1,13 @@
-mod agent;
+mod account;
 mod awake;
-mod connectors;
-mod evidence;
-mod history;
-mod hooks;
-mod linear;
-mod plugin;
-mod projects;
-mod pty;
-mod reminders;
-mod sessions;
-mod slack;
+mod commands;
 
-use portable_pty::CommandBuilder;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::Mutex;
+use pinned_core::machine::{Launch, Machine};
+use pinned_core::wire::{Call, MachineEvent, TabId};
+use pinned_core::{agent, connectors, reminders};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
@@ -25,222 +16,21 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 const OPACITIES: [u8; 6] = [100, 90, 80, 60, 40, 20];
 const DEFAULT_OPACITY: u8 = 94;
-/// Slack after a usage limit's reset time before the session is told to continue.
-const LIMIT_MARGIN_SECS: u64 = 5;
+/// The viewer the webview's terminals attach as.
+const LOCAL: &str = "local";
 
 /// The pill's starting size, and the smallest it can be resized to.
 const PILL: LogicalSize<f64> = LogicalSize { width: 210.0, height: 40.0 };
 const EXPANDED_MIN: LogicalSize<f64> = LogicalSize { width: 150.0, height: 40.0 };
 
-struct Launch {
-    claude: PathBuf,
-    path_env: Option<String>,
-    settings: PathBuf,
-    mcp_config: PathBuf,
-    /// The plugin directory holding the skills that ship inside pinned, and its tutorial helper.
-    plugin_dir: PathBuf,
-    tutorial_helper: PathBuf,
-    sock: PathBuf,
-}
-
-/// One tab in the panel: its own folder and claude session.
-struct Tab {
-    cwd: PathBuf,
-    session: Option<pty::Session>,
-    /// Extra `claude` arguments for the first start only, so a restart doesn't redo the task.
-    launch: Vec<String>,
-    /// Environment for every start, such as the issue a connector's session reports on.
-    env: Vec<(String, String)>,
-    /// Every start runs claude with `--dangerously-skip-permissions`, so nothing asks or is blocked.
-    bypass: bool,
-    /// Claude Code's id for the conversation in progress, known once a hook reports it.
-    claude_session: Option<String>,
-    /// A turn is running, or died on an error: the session has work left if pinned quits now.
-    interrupted: bool,
-    /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
-    resume_at: Option<u64>,
-    /// Working tree and prompt as the running turn began, to diff against when it ends.
-    turn: Option<(String, Option<String>)>,
-}
-
-struct Harness {
-    launch: Launch,
-    default_cwd: PathBuf,
-    tabs: Mutex<HashMap<String, Tab>>,
-    next_tab: AtomicU32,
+/// The panel window's own state; the tabs live in the `Machine`.
+struct Panel {
     expanded: Mutex<LogicalSize<f64>>,
     pill: Mutex<LogicalSize<f64>>,
     /// Where the pill sat when it was last expanded, so shrinking again puts it back there.
     pill_pos: Mutex<Option<tauri::PhysicalPosition<i32>>>,
     update: Mutex<Option<Update>>,
     opacity: AtomicU8,
-    sessions_file: Option<PathBuf>,
-    projects: Mutex<Vec<projects::Project>>,
-    projects_file: Option<PathBuf>,
-    /// One file of finished turns per project.
-    history_dir: Option<PathBuf>,
-    /// Set while the app shuts down, when sessions die without having finished.
-    quitting: AtomicBool,
-}
-
-impl Harness {
-    /// Runs `f` on the tab `id`, failing once the tab is closed.
-    fn tab<R>(&self, id: &str, f: impl FnOnce(&mut Tab) -> R) -> Result<R, String> {
-        self.tabs.lock().unwrap().get_mut(id).map(f).ok_or_else(|| format!("no tab {id}"))
-    }
-
-    fn add_tab(&self, cwd: PathBuf, launch: Vec<String>, env: Vec<(String, String)>, bypass: bool, claude_session: Option<String>) -> String {
-        let id = format!("tab-{}", self.next_tab.fetch_add(1, Ordering::Relaxed));
-        self.tabs.lock().unwrap().insert(id.clone(), Tab { cwd, session: None, launch, env, bypass, claude_session, interrupted: false, resume_at: None, turn: None });
-        id
-    }
-
-    /// The newest tab whose running session answers the delivery's Slack thread.
-    fn slack_tab(&self, d: &connectors::Delivery) -> Option<String> {
-        let subject = agent::Subject::SlackThread { channel: d.channel.clone(), thread: d.thread.clone() };
-        let env = connector_env(&d.connector, &subject);
-        let tabs = self.tabs.lock().unwrap();
-        let live = tabs.iter().filter(|(_, t)| t.session.is_some() && env.iter().all(|e| t.env.contains(e)));
-        live.max_by_key(|(id, _)| tab_number(id)).map(|(id, _)| id.clone())
-    }
-
-    /// Types the delivery's messages into the session that answers its thread, if one is running.
-    fn deliver(&self, d: &connectors::Delivery) -> bool {
-        self.slack_tab(d).is_some_and(|tab| self.type_prompt(&tab, &d.messages.join("\n\n")).is_ok())
-    }
-
-    /// Types `text` into the tab's session as one prompt and submits it.
-    fn type_prompt(&self, tab: &str, text: &str) -> Result<(), String> {
-        self.tab(tab, |t| match t.session.as_mut() {
-            Some(s) => s.write(&paste(text)).map_err(|e| e.to_string()),
-            None => Err(format!("tab {tab} has no running session")),
-        })?
-    }
-
-    /// Writes the tabs whose claude session is still going, in the order they were opened.
-    fn save_sessions(&self) {
-        let Some(file) = &self.sessions_file else { return };
-        let saved: Vec<sessions::Saved> = {
-            let tabs = self.tabs.lock().unwrap();
-            let mut open: Vec<(u32, &Tab)> = tabs
-                .iter()
-                .filter(|(_, t)| t.claude_session.is_some())
-                .map(|(id, t)| (tab_number(id), t))
-                .collect();
-            open.sort_by_key(|(n, _)| *n);
-            open.into_iter()
-                .map(|(_, t)| sessions::Saved {
-                    cwd: t.cwd.clone(),
-                    session: t.claude_session.clone().unwrap(),
-                    env: t.env.clone(),
-                    bypass: t.bypass,
-                    interrupted: t.interrupted,
-                    resume_at: t.resume_at,
-                })
-                .collect()
-        };
-        sessions::save(file, &saved);
-    }
-
-    /// Records `path` as a project opened now and returns its canonical form.
-    fn open_project(&self, path: PathBuf) -> PathBuf {
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
-        let mut projects = self.projects.lock().unwrap();
-        projects::upsert(&mut projects, path.clone(), unix_now());
-        if let Some(file) = &self.projects_file {
-            projects::save(file, &projects);
-        }
-        path
-    }
-
-    /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
-    fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) {
-        let changed = self.tab(tab, |t| {
-            let mut changed = t.claude_session.as_ref() != Some(&session);
-            if let Some(worktree) = reported_cwd.and_then(|c| sessions::worktree(&t.cwd, Path::new(c))) {
-                t.cwd = worktree;
-                changed = true;
-            }
-            t.claude_session = Some(session);
-            changed
-        });
-        if changed == Ok(true) {
-            self.save_sessions();
-        }
-    }
-
-    /// Tracks whether the tab's turn has work left, from the status its hooks report.
-    fn record_status(&self, tab: &str, event: &agent::AgentEvent) {
-        let changed = self.tab(tab, |t| {
-            let before = (t.interrupted, t.resume_at);
-            match event.status {
-                agent::AgentStatus::Working | agent::AgentStatus::Done => {
-                    t.interrupted = event.status == agent::AgentStatus::Working;
-                    t.resume_at = None;
-                }
-                agent::AgentStatus::Failed => {
-                    t.interrupted = true;
-                    t.resume_at = event.resume_at;
-                }
-                agent::AgentStatus::NeedsInput => {}
-            }
-            before != (t.interrupted, t.resume_at)
-        });
-        if changed == Ok(true) {
-            self.save_sessions();
-        }
-    }
-
-    /// Starts a turn on a prompt, or on its end saves what the session changed since.
-    fn record_turn(&self, tab: &str, event: &agent::AgentEvent) {
-        use agent::AgentStatus::*;
-        let Some(tree) = event.snapshot.clone() else { return };
-        match event.status {
-            Working => {
-                let _ = self.tab(tab, |t| t.turn = Some((tree, event.prompt.clone())));
-            }
-            Done | Failed => {
-                let Ok(Some(((before, prompt), cwd, session))) =
-                    self.tab(tab, |t| Some((t.turn.take()?, t.cwd.clone(), t.claude_session.clone()?)))
-                else {
-                    return;
-                };
-                let (Some(dir), Some((files, patch, truncated))) = (&self.history_dir, history::diff(&cwd, &before, &tree)) else { return };
-                let turn = history::Turn { session, title: event.title.clone(), prompt, ended: unix_now(), files, patch, truncated };
-                history::append(&history::file_for(dir, &history::project_of(&cwd)), &turn);
-            }
-            NeedsInput => {}
-        }
-    }
-
-    /// Forgets the tab's session once it finished, unless it only died because the app is quitting.
-    fn end_session(&self, tab: &str) {
-        if self.quitting.load(Ordering::SeqCst) {
-            return;
-        }
-        let _ = self.tab(tab, |t| (t.interrupted, t.resume_at) = (false, None));
-        if self.tab(tab, |t| t.claude_session.take()).ok().flatten().is_some() {
-            self.save_sessions();
-        }
-    }
-}
-
-fn tab_number(id: &str) -> u32 {
-    id.trim_start_matches("tab-").parse().unwrap_or(0)
-}
-
-/// The environment that names a connector's session and its subject, which `slack_tab` finds it by.
-fn connector_env(connector: &str, subject: &agent::Subject) -> Vec<(String, String)> {
-    let mut env = vec![(agent::CONNECTOR_ENV.to_owned(), connector.to_owned())];
-    env.extend(subject.env());
-    env
-}
-
-/// `text` as a bracketed paste and Enter, so its lines reach claude as one prompt that it submits.
-/// Control characters other than newlines and tabs are dropped, so the text can't end the paste early.
-fn paste(text: &str) -> Vec<u8> {
-    let text: String = text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect();
-    [b"\x1b[200~", text.as_bytes(), b"\x1b[201~\r"].concat()
 }
 
 #[derive(serde::Deserialize)]
@@ -250,196 +40,42 @@ enum View {
     Pill,
 }
 
-/// Adds a tab on the project at `path`, or the launch folder, and returns its id.
-/// With `bypass` the tab's claude never asks for permission.
+/// Answers a `wire::Call` from the webview, the same calls the hub forwards from other devices.
+/// Sync commands run one at a time on the main thread, which keeps keystrokes in order.
 #[tauri::command]
-fn open_tab(harness: State<Harness>, path: Option<String>, bypass: bool) -> String {
-    let cwd = match path {
-        Some(path) => harness.open_project(path.into()),
-        None => harness.default_cwd.clone(),
-    };
-    harness.add_tab(cwd, vec![], vec![], bypass, None)
+fn machine_call(machine: State<Arc<Machine>>, call: Call) -> Result<serde_json::Value, String> {
+    machine.call(call)
 }
 
-/// The turns saved for the project at `path`, newest first.
+/// Streams the tab's output to the webview's terminal, starting with what its screen holds.
 #[tauri::command]
-fn project_history(harness: State<Harness>, path: String) -> Vec<history::Turn> {
-    harness.history_dir.as_ref().map(|dir| history::load(&history::file_for(dir, Path::new(&path)))).unwrap_or_default()
-}
-
-#[derive(serde::Serialize)]
-struct ProjectView {
-    path: String,
-    name: String,
+fn attach_tab(machine: State<Arc<Machine>>, tab: String, output: Channel<InvokeResponseBody>) -> Result<(), String> {
+    let sink = move |bytes: &[u8]| drop(output.send(InvokeResponseBody::Raw(bytes.to_vec())));
+    machine.attach(&tab, LOCAL.into(), Box::new(sink))
 }
 
 #[tauri::command]
-fn list_projects(harness: State<Harness>) -> Vec<ProjectView> {
-    let projects = harness.projects.lock().unwrap();
-    projects::recent(&projects)
-        .into_iter()
-        .map(|p| ProjectView {
-            path: p.path.display().to_string(),
-            name: p.path.file_name().map_or_else(|| "/".into(), |n| n.to_string_lossy().into_owned()),
-        })
-        .collect()
+fn detach_tab(machine: State<Arc<Machine>>, tab: String) {
+    machine.detach(&tab, LOCAL);
 }
 
-/// Asks for a folder and records it as a project, returning its path.
+/// Reopens the sessions still going at the last quit, not yet started, and returns their tab ids.
 #[tauri::command]
-async fn pick_project(app: AppHandle, harness: State<'_, Harness>) -> Result<Option<String>, ()> {
-    let picked = connectors::pick_folder(app, None).await;
-    Ok(picked.map(|dir| harness.open_project(dir.into()).display().to_string()))
-}
-
-/// Types `CONTINUE_PROMPT` into the tab's session once its usage limit lifts. Safe to call again
-/// for the same limit: whichever waiter fires first clears `resume_at`, so the rest stand down.
-fn continue_when_limit_lifts(app: &AppHandle, tab: &str) {
-    let harness = app.state::<Harness>();
-    let Ok(Some(at)) = harness.tab(tab, |t| t.resume_at) else { return };
-    let (app, tab) = (app.clone(), tab.to_owned());
-    // A short sleep loop, since a laptop asleep past `at` must fire on wake.
-    std::thread::spawn(move || {
-        let harness = app.state::<Harness>();
-        while unix_now() < at + LIMIT_MARGIN_SECS {
-            std::thread::sleep(std::time::Duration::from_secs(15));
-            if harness.tab(&tab, |t| t.resume_at) != Ok(Some(at)) {
-                return;
-            }
-        }
-        let fired = harness.tab(&tab, |t| t.resume_at.take() == Some(at) && t.session.is_some());
-        if fired != Ok(true) {
-            return;
-        }
-        let type_into = |data: &str| harness.tab(&tab, |t| t.session.as_mut().map(|s| s.write(data.as_bytes())));
-        let _ = type_into(sessions::CONTINUE_PROMPT);
-        // Enter arrives separately, or the TUI takes it as part of a paste.
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let _ = type_into("\r");
-        harness.save_sessions();
-    });
-}
-
-/// Reopens the sessions still going at the last quit, resumed, and returns their tab ids.
-#[tauri::command]
-fn restore_tabs(harness: State<Harness>) -> Vec<String> {
-    // A reloaded webview must not duplicate the tabs that are already open.
-    let Some(file) = harness.sessions_file.as_ref().filter(|_| harness.tabs.lock().unwrap().is_empty()) else {
-        return vec![];
-    };
-    let now = unix_now();
-    sessions::load(file)
-        .into_iter()
-        .filter(|s| s.cwd.is_dir())
-        .map(|s| {
-            let launch = s.launch_args(now);
-            let waiting = s.interrupted && launch.len() == 2;
-            let id = harness.add_tab(s.cwd, launch, s.env, s.bypass, Some(s.session));
-            // A limit that already lifted continues through the launch prompt; one still in force waits.
-            let _ = harness.tab(&id, |t| {
-                t.interrupted = s.interrupted;
-                t.resume_at = s.resume_at.filter(|_| waiting);
-            });
-            id
-        })
-        .collect()
+fn restore_tabs(machine: State<Arc<Machine>>) -> Vec<TabId> {
+    machine.restore_tabs()
 }
 
 #[tauri::command]
-fn tab_bypass(harness: State<Harness>, tab: String) -> Result<bool, String> {
-    harness.tab(&tab, |t| t.bypass)
-}
-
-#[tauri::command]
-fn start_claude(
-    app: AppHandle,
-    harness: State<Harness>,
-    tab: String,
-    cols: u16,
-    rows: u16,
-    output: Channel<InvokeResponseBody>,
-) -> Result<String, String> {
-    let l = &harness.launch;
-    let (cwd, launch, env, bypass) = harness.tab(&tab, |t| {
-        // Without launch arguments this is a fresh conversation, not the one recorded before.
-        if t.launch.is_empty() {
-            t.claude_session = None;
-        }
-        (t.cwd.clone(), std::mem::take(&mut t.launch), t.env.clone(), t.bypass)
-    })?;
-    harness.save_sessions();
-    let mut cmd = CommandBuilder::new(&l.claude);
-    // --mcp-config takes any number of values, so --settings right after it keeps it from swallowing the rest.
-    cmd.arg("--mcp-config");
-    cmd.arg(&l.mcp_config);
-    cmd.arg("--settings");
-    cmd.arg(&l.settings);
-    cmd.arg("--plugin-dir");
-    cmd.arg(&l.plugin_dir);
-    if bypass {
-        cmd.arg("--dangerously-skip-permissions");
-    }
-    cmd.args(launch);
-    cmd.cwd(&cwd);
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-    cmd.env(agent::SOCK_ENV, &l.sock);
-    cmd.env(agent::TAB_ENV, &tab);
-    cmd.env(plugin::HELPER_ENV, &l.tutorial_helper);
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    if let Some(path) = &l.path_env {
-        cmd.env("PATH", path);
-    }
-
-    // Dropping the old session kills it silently, so its exit can't be mistaken for the new one's.
-    harness.tab(&tab, |t| t.session.take())?;
-    let exited = tab.clone();
-    let on_exit_app = app.clone();
-    let session = pty::Session::spawn(
-        cmd,
-        pty::size(cols, rows),
-        move |bytes| {
-            let _ = output.send(InvokeResponseBody::Raw(bytes));
-        },
-        move || {
-            on_exit_app.state::<Harness>().end_session(&exited);
-            let _ = on_exit_app.emit("claude-exit", exited);
-        },
-    )?;
-    harness.tab(&tab, |t| t.session = Some(session))?;
-    continue_when_limit_lifts(&app, &tab);
-    Ok(cwd.display().to_string())
-}
-
-#[tauri::command]
-fn write_input(harness: State<Harness>, tab: String, data: String) -> Result<(), String> {
-    harness.tab(&tab, |t| match t.session.as_mut() {
-        Some(s) => s.write(data.as_bytes()).map_err(|e| e.to_string()),
-        None => Ok(()),
-    })?
-}
-
-#[tauri::command]
-fn resize_pty(harness: State<Harness>, tab: String, cols: u16, rows: u16) -> Result<(), String> {
-    harness.tab(&tab, |t| match t.session.as_ref() {
-        Some(s) => s.resize(pty::size(cols, rows)),
-        None => Ok(()),
-    })?
-}
-
-#[tauri::command]
-fn set_view(window: WebviewWindow, harness: State<Harness>, view: View) -> Result<(), String> {
+fn set_view(window: WebviewWindow, panel: State<Panel>, view: View) -> Result<(), String> {
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
     let current = window.inner_size().map_err(|e| e.to_string())?.to_logical(scale);
     let (leaving, entering, min) = match view {
-        View::Pill => (&harness.expanded, &harness.pill, PILL),
-        View::Expanded => (&harness.pill, &harness.expanded, EXPANDED_MIN),
+        View::Pill => (&panel.expanded, &panel.pill, PILL),
+        View::Expanded => (&panel.pill, &panel.expanded, EXPANDED_MIN),
     };
     *leaving.lock().unwrap() = current;
     if matches!(view, View::Expanded) {
-        *harness.pill_pos.lock().unwrap() = window.outer_position().ok();
+        *panel.pill_pos.lock().unwrap() = window.outer_position().ok();
     }
     let size = *entering.lock().unwrap();
     window.set_min_size(Some(min)).map_err(|e| e.to_string())?;
@@ -447,7 +83,7 @@ fn set_view(window: WebviewWindow, harness: State<Harness>, view: View) -> Resul
     match view {
         View::Expanded => {}
         View::Pill => {
-            if let Some(pos) = *harness.pill_pos.lock().unwrap() {
+            if let Some(pos) = *panel.pill_pos.lock().unwrap() {
                 window.set_position(pos).map_err(|e| e.to_string())?;
             }
         }
@@ -488,41 +124,24 @@ fn focus_panel(app: AppHandle, window: WebviewWindow) {
     let _ = (app, window);
 }
 
-/// Ends the tab's session; the app exits with the last tab.
+/// Ends the tab's session. Signed out, the app exits with the last tab; signed in, it stays up
+/// so other devices can still open sessions on this Mac.
 #[tauri::command]
-fn close_tab(app: AppHandle, harness: State<Harness>, tab: String) {
-    let last = {
-        let mut tabs = harness.tabs.lock().unwrap();
-        tabs.remove(&tab);
-        tabs.is_empty()
-    };
-    harness.save_sessions();
-    if last {
-        harness.quitting.store(true, Ordering::SeqCst);
+fn close_tab(app: AppHandle, machine: State<Arc<Machine>>, account: State<account::Account>, tab: String) {
+    if machine.close_tab(&tab) && !account.is_signed_in() {
+        machine.quit();
         app.exit(0);
     }
 }
 
-/// Returns true when the user picked a folder; the caller then restarts claude there.
 #[tauri::command]
-async fn choose_folder(app: AppHandle, harness: State<'_, Harness>, tab: String) -> Result<bool, String> {
-    let current = harness.tab(&tab, |t| t.cwd.display().to_string())?;
-    let Some(picked) = connectors::pick_folder(app, Some(current)).await else {
-        return Ok(false);
-    };
-    let dir = harness.open_project(picked.into());
-    harness.tab(&tab, |t| t.cwd = dir)?;
-    Ok(true)
+fn get_opacity(panel: State<Panel>) -> u8 {
+    panel.opacity.load(Ordering::Relaxed)
 }
 
 #[tauri::command]
-fn get_opacity(harness: State<Harness>) -> u8 {
-    harness.opacity.load(Ordering::Relaxed)
-}
-
-#[tauri::command]
-fn get_usage(usage: State<Mutex<agent::Usage>>) -> agent::Usage {
-    *usage.lock().unwrap()
+fn get_usage(machine: State<Arc<Machine>>) -> agent::Usage {
+    machine.usage()
 }
 
 fn opacity_file(app: &AppHandle) -> Option<PathBuf> {
@@ -539,79 +158,42 @@ fn saved_opacity(config_dir: Option<PathBuf>) -> u8 {
 
 /// Returns the newer version when one is published, keeping it ready for `install_update`.
 #[tauri::command]
-async fn check_update(app: AppHandle, harness: State<'_, Harness>) -> Result<Option<String>, String> {
+async fn check_update(app: AppHandle, panel: State<'_, Panel>) -> Result<Option<String>, String> {
     let update = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?;
     let version = update.as_ref().map(|u| u.version.clone());
-    *harness.update.lock().unwrap() = update;
+    *panel.update.lock().unwrap() = update;
     Ok(version)
 }
 
 #[tauri::command]
-async fn install_update(app: AppHandle, harness: State<'_, Harness>) -> Result<(), String> {
-    let Some(update) = harness.update.lock().unwrap().take() else {
+async fn install_update(app: AppHandle, panel: State<'_, Panel>, machine: State<'_, Arc<Machine>>) -> Result<(), String> {
+    let Some(update) = panel.update.lock().unwrap().take() else {
         return Err("no update pending".into());
     };
     update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
-    harness.quitting.store(true, Ordering::SeqCst);
-    harness.tabs.lock().unwrap().clear();
+    machine.quit();
     app.restart();
 }
 
-fn find_claude(path_env: Option<&str>) -> PathBuf {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    path_env
-        .into_iter()
-        .flat_map(std::env::split_paths)
-        .map(|dir| dir.join("claude"))
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| home.join(".local/bin/claude"))
+/// Shows each reminder as a macOS notification once it is due.
+fn watch_reminders(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        for reminder in app.state::<reminders::Reminders>().take_due(now) {
+            notify(&reminder.message);
+        }
+    });
 }
 
-/// Apps opened from Finder inherit launchd's bare PATH. Ask the user's login shell for the
-/// PATH their terminal sees, so claude and the tools it runs (git, node, brew) resolve.
-fn login_shell_path() -> Option<String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let out = std::process::Command::new(shell)
-        .args(["-ilc", "printf '\\n__PINNED_PATH__%s__PINNED_PATH__' \"$PATH\""])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.split("__PINNED_PATH__").nth(1).map(str::to_owned)
-}
-
-fn initial_cwd(from_arg: Option<PathBuf>, projects: &[projects::Project]) -> PathBuf {
-    from_arg
-        .or_else(|| projects::recent(projects).first().map(|p| p.path.clone()))
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()))
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
-fn launch() -> std::io::Result<Launch> {
-    let tmp = std::env::temp_dir();
-    let settings = tmp.join("pinned-claude-settings.json");
-    hooks::write_settings(&settings, &std::env::current_exe()?)?;
-    let mcp_config = tmp.join("pinned-claude-mcp.json");
-    reminders::write_mcp_config(&mcp_config, &std::env::current_exe()?)?;
-    let plugin_dir = tmp.join("pinned-plugin");
-    let tutorial_helper = plugin::install(&plugin_dir)?;
-    let path_env = login_shell_path().or_else(|| std::env::var("PATH").ok());
-    Ok(Launch {
-        claude: find_claude(path_env.as_deref()),
-        path_env,
-        settings,
-        mcp_config,
-        plugin_dir,
-        tutorial_helper,
-        sock: tmp.join(format!("pinned-{}.sock", std::process::id())),
-    })
+fn notify(message: &str) {
+    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!("display notification \"{escaped}\" with title \"Reminder\" sound name \"Glass\"");
+    let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
 }
 
 fn add_tray(app: &tauri::App) -> tauri::Result<()> {
-    let current = app.state::<Harness>().opacity.load(Ordering::Relaxed);
+    let current = app.state::<Panel>().opacity.load(Ordering::Relaxed);
     let levels = OPACITIES
         .iter()
         .map(|&p| CheckMenuItem::with_id(app, format!("opacity-{p}"), format!("{p}%"), true, p == current, None::<&str>))
@@ -624,7 +206,7 @@ fn add_tray(app: &tauri::App) -> tauri::Result<()> {
         .menu(&Menu::with_items(app, &[&opacity, &quit])?)
         .on_menu_event(move |app, e| {
             if e.id() == "quit" {
-                app.state::<Harness>().quitting.store(true, Ordering::SeqCst);
+                app.state::<Arc<Machine>>().quit();
                 app.exit(0);
                 return;
             }
@@ -634,7 +216,7 @@ fn add_tray(app: &tauri::App) -> tauri::Result<()> {
             for item in &levels {
                 let _ = item.set_checked(item.id() == e.id());
             }
-            app.state::<Harness>().opacity.store(percent, Ordering::Relaxed);
+            app.state::<Panel>().opacity.store(percent, Ordering::Relaxed);
             if let Some(file) = opacity_file(app) {
                 if let Some(dir) = file.parent() {
                     let _ = std::fs::create_dir_all(dir);
@@ -648,30 +230,14 @@ fn add_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let command = match args.next().as_deref() {
-        Some(hooks::SUBCOMMAND) => return hooks::forward(args.next().as_deref()),
-        Some(hooks::STATUSLINE_SUBCOMMAND) => return hooks::statusline(),
-        Some(reminders::SUBCOMMAND) => return reminders::serve(),
-        Some(hooks::STAGE_SUBCOMMAND) => Some(hooks::stage(args.next().as_deref())),
-        Some(hooks::SLACK_SUBCOMMAND) => Some(hooks::slack(&args.collect::<Vec<_>>())),
-        Some(hooks::LINEAR_SUBCOMMAND) => Some(hooks::linear(&args.collect::<Vec<_>>())),
-        Some(evidence::SUBCOMMAND) => Some(evidence::run(&args.collect::<Vec<_>>())),
-        _ => None,
-    };
-    match command {
-        Some(Ok(done)) => return println!("{done}"),
-        Some(Err(e)) => {
-            eprintln!("pinned: {e}");
-            std::process::exit(1);
-        }
-        None => {}
+    if let Some(code) = pinned_core::cli::dispatch(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        std::process::exit(code);
     }
 
     // The updater and the Linear client share reqwest's rustls, which ships without a crypto provider.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let launch = launch().expect("could not prepare claude launch");
-    let sock = launch.sock.clone();
+    let exe = std::env::current_exe().expect("could not find pinned's own binary");
+    let launch = Launch::prepare(&exe).expect("could not prepare claude launch");
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build());
@@ -679,126 +245,78 @@ fn main() {
     let builder = builder.plugin(tauri_nspanel::init());
     builder
         .invoke_handler(tauri::generate_handler![
-            open_tab,
-            list_projects,
-            pick_project,
+            machine_call,
+            attach_tab,
+            detach_tab,
             restore_tabs,
-            start_claude,
-            tab_bypass,
-            write_input,
-            resize_pty,
             set_view,
             focus_panel,
             close_tab,
-            choose_folder,
-            project_history,
             awake::get_keep_awake,
             awake::set_keep_awake,
             check_update,
             install_update,
             get_opacity,
             get_usage,
-            connectors::get_settings,
-            connectors::open_linear_keys,
-            connectors::connect_linear,
-            connectors::disconnect_linear,
-            connectors::linear_suggestions,
-            connectors::connect_slack,
-            connectors::disconnect_slack,
-            connectors::slack_suggestions,
-            connectors::save_connector,
-            connectors::delete_connector,
-            connectors::pick_folder
+            commands::get_settings,
+            commands::open_linear_keys,
+            commands::connect_linear,
+            commands::disconnect_linear,
+            commands::linear_suggestions,
+            commands::connect_slack,
+            commands::disconnect_slack,
+            commands::slack_suggestions,
+            commands::save_connector,
+            commands::delete_connector,
+            commands::pick_folder,
+            account::account,
+            account::sign_in,
+            account::sign_out
         ])
         .setup(move |app| {
             let config = app.path().app_config_dir().ok();
-            let projects_file = config.as_ref().map(|c| c.join("projects.json"));
-            let mut projects = config
-                .as_ref()
-                .zip(projects_file.as_ref())
-                .map(|(c, file)| projects::load_or_migrate(file, &c.join("last-folder")))
-                .unwrap_or_default();
             let from_arg = std::env::args().nth(1).and_then(|d| std::fs::canonicalize(d).ok()).filter(|p| p.is_dir());
-            if let Some(dir) = &from_arg {
-                projects::upsert(&mut projects, dir.clone(), unix_now());
-                if let Some(file) = &projects_file {
-                    projects::save(file, &projects);
-                }
-            }
-            app.manage(Harness {
-                launch,
-                default_cwd: initial_cwd(from_arg, &projects),
-                tabs: Mutex::new(HashMap::new()),
-                next_tab: AtomicU32::new(1),
+            let handle = app.handle().clone();
+            let machine = Machine::new(launch, config.clone(), from_arg, move |event: MachineEvent| drop(handle.emit("machine", event)));
+            app.manage(machine.clone());
+            app.manage(Panel {
                 expanded: Mutex::new(LogicalSize::new(760.0, 460.0)),
                 pill: Mutex::new(PILL),
                 pill_pos: Mutex::new(None),
                 update: Mutex::new(None),
-                opacity: AtomicU8::new(saved_opacity(app.path().app_config_dir().ok())),
-                sessions_file: app.path().app_config_dir().ok().map(|c| c.join("sessions.json")),
-                projects: Mutex::new(projects),
-                projects_file,
-                history_dir: app.path().app_config_dir().ok().map(|c| c.join("history")),
-                quitting: AtomicBool::new(false),
+                opacity: AtomicU8::new(saved_opacity(config.clone())),
             });
-            app.manage(Mutex::new(agent::Usage::default()));
-            app.manage(awake::Awake::load(app.path().app_config_dir().ok()));
-            app.manage(reminders::Reminders::load(app.path().app_config_dir().ok()));
-            reminders::watch(app.handle().clone());
-            app.manage(connectors::Connectors::load(app.path().app_config_dir()?, std::env::current_exe()?));
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(connectors::watch(handle.clone(), move |work| {
-                let harness = handle.state::<Harness>();
-                match work {
-                    connectors::Work::Run(run) => {
-                        let env = connector_env(&run.connector, &run.subject);
-                        let id = harness.add_tab(run.cwd.clone(), run.args.clone(), env, false, None);
-                        let _ = handle.emit("tab-opened", id);
-                        true
-                    }
-                    connectors::Work::Delivery(d) => harness.deliver(d),
-                }
-            }));
+            app.manage(awake::Awake::load(config.clone()));
+            app.manage(reminders::Reminders::load(config));
+            watch_reminders(app.handle().clone());
+            let storage = connectors::FileStorage::new(app.path().app_config_dir()?);
+            app.manage(connectors::Connectors::new(storage, exe.display().to_string()));
+            app.manage(account::Account::start(app.handle(), app.path().app_config_dir()?, machine.clone()));
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             add_tray(app)?;
             let handle = app.handle().clone();
-            hooks::listen(sock, move |message| match message {
-                agent::Message::Agent(event) => {
-                    if let Some(tab) = &event.tab {
-                        let harness = handle.state::<Harness>();
-                        if let Some(session) = &event.session {
-                            harness.record_session(tab, session.clone(), event.cwd.as_deref());
-                        }
-                        harness.record_status(tab, &event);
-                        harness.record_turn(tab, &event);
-                        continue_when_limit_lifts(&handle, tab);
-                    }
-                    let _ = handle.emit("agent-event", event);
-                    Ok(String::new())
-                }
+            machine.listen(move |message| match message {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),
                 agent::Message::ListReminders => Ok(handle.state::<reminders::Reminders>().list()),
                 agent::Message::CancelReminder { id } => handle.state::<reminders::Reminders>().cancel(id),
-                agent::Message::Usage(report) => {
-                    let state = handle.state::<Mutex<agent::Usage>>();
-                    let mut usage = state.lock().unwrap();
-                    *usage = report.over(*usage, unix_now());
-                    let _ = handle.emit("usage", *usage);
-                    Ok(String::new())
-                }
-                agent::Message::Stage { connector, subject, stage } => tauri::async_runtime::block_on(
-                    handle.state::<connectors::Connectors>().advance(&connector, &subject, stage),
-                ),
-                agent::Message::SlackReply { connector, channel, thread, text } => tauri::async_runtime::block_on(
-                    handle.state::<connectors::Connectors>().reply(&connector, &channel, &thread, &text),
-                ),
-                agent::Message::LinearCreate { connector, channel, thread, title, description, assignee } => tauri::async_runtime::block_on(
-                    handle.state::<connectors::Connectors>().create(&connector, &channel, &thread, &title, &description, &assignee),
-                ),
-                agent::Message::LinearTake { connector, channel, thread, issue } => tauri::async_runtime::block_on(
-                    handle.state::<connectors::Connectors>().take(&connector, &channel, &thread, &issue),
-                ),
+                agent::Message::Agent(_) | agent::Message::Usage(_) => Err("the machine answers this itself".into()),
+                callback => match handle.state::<account::Account>().forward(callback) {
+                    Ok(answer) => answer,
+                    Err(agent::Message::Stage { connector, subject, stage }) => tauri::async_runtime::block_on(
+                        handle.state::<connectors::Connectors>().stage(&connector, &subject, stage),
+                    ),
+                    Err(agent::Message::SlackReply { connector, channel, thread, text }) => tauri::async_runtime::block_on(
+                        handle.state::<connectors::Connectors>().slack_reply(&connector, &channel, &thread, &text),
+                    ),
+                    Err(agent::Message::LinearCreate { connector, channel, thread, title, description, assignee }) => tauri::async_runtime::block_on(
+                        handle.state::<connectors::Connectors>().linear_create(&connector, &channel, &thread, &title, &description, &assignee),
+                    ),
+                    Err(agent::Message::LinearTake { connector, channel, thread, issue }) => tauri::async_runtime::block_on(
+                        handle.state::<connectors::Connectors>().linear_take(&connector, &channel, &thread, &issue),
+                    ),
+                    Err(_) => unreachable!("forward hands back only the callback it was given"),
+                },
             })?;
             let window = app.get_webview_window("main").unwrap();
             window.set_min_size(Some(EXPANDED_MIN))?;
@@ -810,10 +328,10 @@ fn main() {
         .expect("tauri build failed")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                app.state::<Harness>().quitting.store(true, Ordering::SeqCst);
+                app.state::<Arc<Machine>>().quit();
             }
             if let tauri::RunEvent::Exit = event {
-                let _ = std::fs::remove_file(&app.state::<Harness>().launch.sock);
+                let _ = std::fs::remove_file(&app.state::<Arc<Machine>>().launch().sock);
             }
         });
 }
@@ -848,111 +366,4 @@ fn pin_above_fullscreen(window: &WebviewWindow) -> tauri::Result<()> {
     panel.set_hides_on_deactivate(false);
     panel.order_front_regardless();
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    fn harness() -> Harness {
-        Harness {
-            launch: Launch { claude: "claude".into(), path_env: None, settings: "s".into(), mcp_config: "m".into(), plugin_dir: "p".into(), tutorial_helper: "t".into(), sock: "k".into() },
-            default_cwd: "/repo".into(),
-            tabs: Mutex::new(HashMap::new()),
-            next_tab: AtomicU32::new(1),
-            expanded: Mutex::new(PILL),
-            pill: Mutex::new(PILL),
-            pill_pos: Mutex::new(None),
-            update: Mutex::new(None),
-            opacity: AtomicU8::new(DEFAULT_OPACITY),
-            sessions_file: None,
-            projects: Mutex::new(vec![]),
-            projects_file: None,
-            history_dir: None,
-            quitting: AtomicBool::new(false),
-        }
-    }
-
-    /// A pty session running `script` under sh, and everything it prints.
-    fn spawn(script: &str) -> (pty::Session, Arc<Mutex<Vec<u8>>>) {
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.args(["-c", script]);
-        let out = Arc::new(Mutex::new(vec![]));
-        let sink = out.clone();
-        let session = pty::Session::spawn(cmd, pty::size(80, 24), move |b| sink.lock().unwrap().extend(b), || {}).unwrap();
-        (session, out)
-    }
-
-    fn wait_for(what: &str, done: impl Fn() -> bool) {
-        let start = Instant::now();
-        while !done() {
-            assert!(start.elapsed() < Duration::from_secs(5), "timed out waiting for {what}");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    fn slack_env(connector: &str, thread: &str) -> Vec<(String, String)> {
-        connector_env(connector, &agent::Subject::SlackThread { channel: "C0123ABCD".into(), thread: thread.into() })
-    }
-
-    fn delivery(connector: &str, thread: &str, messages: &[&str]) -> connectors::Delivery {
-        connectors::Delivery {
-            connector: connector.into(),
-            channel: "C0123ABCD".into(),
-            thread: thread.into(),
-            messages: messages.iter().map(|m| m.to_string()).collect(),
-            cursor: "1792400090.000000".into(),
-        }
-    }
-
-    #[test]
-    fn a_paste_is_bracketed_submitted_and_cannot_close_itself() {
-        assert_eq!(paste("[Slack reply from ana in the thread]\nyes,\tdo it"), b"\x1b[200~[Slack reply from ana in the thread]\nyes,\tdo it\x1b[201~\r");
-        assert_eq!(paste("a\x1b[201~\rb\x07"), b"\x1b[200~a[201~b\x1b[201~\r");
-    }
-
-    #[test]
-    fn a_delivery_finds_the_live_tab_of_its_thread() {
-        let h = harness();
-        let live = |h: &Harness, env| {
-            let id = h.add_tab("/repo".into(), vec![], env, false, None);
-            h.tab(&id, |t| t.session = Some(spawn("sleep 30").0)).unwrap();
-            id
-        };
-        let issue = connector_env("c2", &agent::Subject::LinearIssue { issue: "uuid".into() });
-        live(&h, issue);
-        live(&h, slack_env("c9", "1792400050.000200"));
-        live(&h, slack_env("c2", "1792499999.000100"));
-        h.add_tab("/repo".into(), vec![], slack_env("c2", "1792400050.000200"), false, None);
-        let d = delivery("c2", "1792400050.000200", &["hi"]);
-        assert_eq!(h.slack_tab(&d), None, "the thread's only tab has no running session");
-        assert!(!h.deliver(&d));
-        let own = live(&h, slack_env("c2", "1792400050.000200"));
-        assert_eq!(own, "tab-5");
-        assert_eq!(h.slack_tab(&d), Some(own));
-        let newer = live(&h, slack_env("c2", "1792400050.000200"));
-        assert_eq!(h.slack_tab(&d), Some(newer));
-    }
-
-    /// The session is a real pty running cat with the terminal in raw mode, so the file holds
-    /// exactly the bytes the session received.
-    #[test]
-    fn a_delivery_reaches_the_session_through_its_pty() {
-        let file = std::env::temp_dir().join(format!("pinned-delivery-{}.bin", std::process::id()));
-        let (session, out) = spawn(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
-        wait_for("stty", || String::from_utf8_lossy(&out.lock().unwrap()).contains("ready"));
-        let h = harness();
-        let tab = h.add_tab("/repo".into(), vec![], slack_env("c2", "1792400050.000200"), false, None);
-        h.tab(&tab, |t| t.session = Some(session)).unwrap();
-
-        let d = delivery("c2", "1792400050.000200", &["[Slack reply from ana in the thread]\nyes, create the task", "[Slack reply from bruno in the thread]\nand ship it"]);
-        assert!(h.deliver(&d));
-        let expected: &[u8] = b"\x1b[200~[Slack reply from ana in the thread]\nyes, create the task\n\n[Slack reply from bruno in the thread]\nand ship it\x1b[201~\r";
-        wait_for("cat to write", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
-        assert_eq!(std::fs::read(&file).unwrap(), expected);
-        assert!(!h.deliver(&delivery("c2", "1792499999.000100", &["elsewhere"])));
-        let _ = std::fs::remove_file(file);
-    }
 }

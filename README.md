@@ -45,7 +45,7 @@ The **＋** button in the tab bar (or ⌘T) lists your projects, most recent fir
 you opened with 📁, ＋, or from a terminal. Pick one (arrow keys and Enter work) to open a tab on
 it, or choose **Open folder…** to add another. Esc or a click outside closes the list. Each tab
 has its own Claude session and status. Each tab's dot shows its status, and the pill reports the tab that
-most needs you. ✕ on a tab (or ⌘W) closes it; the app quits with the last tab. ⌘1–⌘9 switch
+most needs you. ✕ on a tab (or ⌘W) closes it; signed out, the app quits with the last tab. ⌘1–⌘9 switch
 tabs, and ⌘← / ⌘→ move to the previous or next tab (Ctrl on other systems). 📁 changes the folder of the current tab.
 
 Quitting pinned keeps the Claude sessions that were still going. The next launch reopens
@@ -66,6 +66,59 @@ the side you picked.
 
 Drop files onto the panel to attach them to the current tab (images included), or paste an
 image from the clipboard.
+
+## Machines
+
+Sign in under **Settings → Account** to use pinned from more than one machine. The hub
+(`https://pinned.187-127-36-149.sslip.io` unless you change it) holds your account. Enter your
+email and a password, then click **Sign in**, or **Create account** the first time. This Mac
+joins the account under its computer name.
+
+While you are signed in:
+
+- The tab bar shows the tabs of every machine that is online. A tab on another machine
+  carries a badge with that machine's initials, and its tooltip names the machine. Typing,
+  resizing, closing and restarting (Enter after claude exits) all happen on the tab's machine.
+  A tab that opens or closes on one device does the same on every other device.
+- **＋** shows a row of your machines above the projects, with this Mac first. Offline machines
+  are greyed out. Pick a machine, or press ← and →, to list its projects. On another machine,
+  **Type a path…** replaces **Open folder…**. If that folder doesn't exist there, the list
+  says so. 📁 on another machine's tab opens the same list, to move the tab to another folder.
+- The account holds your connectors, Linear and Slack keys, and the hub runs the connectors
+  even when this Mac sleeps. The first time you sign in, pinned moves this Mac's connectors
+  and keys into the account, if the account has none yet. A connector's **Run on** field picks
+  the machine its sessions start on; when that machine is offline, another online machine
+  takes the run and finds or clones the repository there.
+- Closing the last tab leaves pinned running, so your other devices can still open sessions
+  on this Mac.
+
+**Settings → Machines** lists every machine in the account. A green dot means online, and an
+offline machine shows when it was last seen. Click **Rename** to rename a machine. Click
+**Remove** to take a machine out of the account; a second row asks you to confirm.
+**Sign out** under Account removes this Mac from the account, and pinned runs its own
+connectors again.
+
+### Add a server
+
+A Linux server, or another Mac without the app, can run sessions too. Under
+**Settings → Machines**, click **Get a pairing command** and run the command it shows on the
+server:
+
+```sh
+curl -fsSL https://pinned.187-127-36-149.sslip.io/install.sh | sh -s -- K7Q2M9XD
+```
+
+The code works once, for 15 minutes. On Linux the script installs `pinned-server`, pairs it
+with your account, and starts it as a systemd service, so it comes back after a reboot. On a
+Mac it prints the command that runs the node. The server needs `claude` installed and signed
+in, the same as this Mac.
+
+### Web app
+
+Open the hub's address in any browser, a phone's included, and sign in with the same email
+and password. You get the same tabs and settings as in the app, without the panel controls.
+On a phone the tabs sit in one scrolling row on top, and a row of keys above the terminal
+gives you Esc, Tab, ↑, ↓, Ctrl-C and Enter.
 
 ## Integrations and connectors
 
@@ -231,8 +284,12 @@ install, and restart.
 
 ## How it works
 
-- `src/pty.rs` runs `claude` in a pseudo-terminal. `ui/` renders it with xterm.js.
-- `src/hooks.rs` passes Claude Code a `--settings` file with `UserPromptSubmit`, `Stop` and
+- The code is a cargo workspace. `crates/core` (`pinned-core`) holds everything that doesn't
+  need a window, and `src/` is the Tauri app built on it.
+- `crates/core/src/machine.rs` runs each tab's `claude` in a pseudo-terminal
+  (`crates/core/src/pty.rs`) and keeps the last 256 KiB of its output for whoever attaches.
+  `ui/` renders it with xterm.js.
+- `crates/core/src/hooks.rs` passes Claude Code a `--settings` file with `UserPromptSubmit`, `Stop` and
   `Notification` hooks. Each hook runs `pinned hook <status>`, which forwards the event to the
   window over a Unix socket. Your own `~/.claude/settings.json` is not modified.
 - The usage meter comes from the data Claude Code gives its statusline. The `--settings` file
@@ -241,6 +298,10 @@ install, and restart.
   session's first response, so the meter stays hidden until then. A window leaves the meter
   when it resets. If you set a `statusLine` in `~/.claude/settings.json`, `pinned statusline`
   runs it with the same input and prints its output, so your statusline still shows.
+- Signed in, `crates/core/src/link.rs` keeps one outbound WebSocket from this Mac to the hub,
+  which routes calls and terminal output between machines and clients.
+  `crates/server` (`pinned-server`) is the hub and the headless node, and the hub serves
+  `ui/` as the web app. `crates/core/src/wire.rs` defines every message between them.
 - `src/main.rs` turns the window into a non-activating `NSPanel`. macOS only lets that kind
   of window appear inside another app's fullscreen Space.
 

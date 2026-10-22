@@ -16,10 +16,17 @@ async function showGeneral() {
   };
 }
 
-/** The Projects page: every project pinned knows, and the turns its sessions finished in one. */
+/** The machine whose projects the Projects page shows. */
+let projectsMachine = LOCAL;
+
+/** The Projects page: every project a machine knows, and the turns its sessions finished in one. */
 async function showProjectsPage() {
-  const projects = await invoke("list_projects");
+  if (!machines.get(projectsMachine)?.view.online) projectsMachine = onlineMachines()[0];
+  const projects = projectsMachine ? await callOn(projectsMachine, { cmd: "list_projects" }).catch(() => []) : [];
+  const chips = [...machines.entries()].map(([id, m]) =>
+    `<button class="chip${id === projectsMachine ? " active" : ""}" data-action="projects-machine" data-machine="${esc(id)}"${m.view.online ? "" : " disabled"}>${esc(machineName(id))}</button>`);
   settingsPage.innerHTML = `<h2>Projects</h2>
+    ${machines.size > 1 ? `<div class="chips">${chips.join("")}</div>` : ""}
     <p>Pick a project to see what its sessions changed, turn by turn.</p>
     <div class="projects">${
       projects.map((p) => `<button class="project" data-action="open-project" data-path="${esc(p.path)}">
@@ -28,13 +35,17 @@ async function showProjectsPage() {
 }
 
 async function showProjectHistory(path) {
-  const turns = await invoke("project_history", { path });
+  const turns = await callOn(projectsMachine, { cmd: "project_history", path }).catch(() => []);
   const name = path.split("/").filter(Boolean).pop() ?? "/";
   settingsPage.innerHTML = `<button class="secondary" data-action="projects-back">← Projects</button>
     <h2>${esc(name)}</h2><p class="meta">${esc(tilde(path))}</p>
     <div class="history">${historyHtml(turns)}</div>`;
 }
 
+actions["projects-machine"] = (button) => {
+  projectsMachine = button.dataset.machine;
+  showProjectsPage();
+};
 actions["open-project"] = (button) => showProjectHistory(button.dataset.path);
 actions["projects-back"] = showProjectsPage;
 

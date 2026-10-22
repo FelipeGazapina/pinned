@@ -82,6 +82,14 @@ impl Subject {
     }
 }
 
+/// The environment of a connector's session on `subject`, which names it to its callbacks and
+/// finds it again when a Slack thread gets new messages.
+pub fn session_env(connector: &str, subject: &Subject) -> Vec<(String, String)> {
+    let mut env = vec![(CONNECTOR_ENV.to_owned(), connector.to_owned())];
+    env.extend(subject.env());
+    env
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub enum When {

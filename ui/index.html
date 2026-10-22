@@ -2,6 +2,8 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>pinned</title>
 <link rel="stylesheet" href="vendor/xterm.css">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -24,14 +26,19 @@
         <button id="new-tab" title="New tab in a project (⌘T)">＋</button>
         <span id="bar-resize" title="Drag to resize the tabs"></span>
       </nav>
-      <div id="terms"><div id="projects" hidden></div></div>
+      <div id="keys">
+        <button data-send="\u001b">Esc</button><button data-send="\t">Tab</button><button data-send="\u001b[A">↑</button><button data-send="\u001b[B">↓</button><button data-send="\u0003">Ctrl-C</button><button data-send="\r">Enter</button>
+      </div>
+      <div id="terms"><div id="projects" hidden></div><p id="empty">No sessions open. Press ＋ to start one on any of your machines.</p></div>
     </div>
     <div id="settings">
       <nav id="settings-nav">
-        <button data-page="general">General</button>
+        <button data-page="general" data-app-only>General</button>
         <button data-page="integrations">Integrations</button>
         <button data-page="projects">Projects</button>
         <button data-page="connectors">Connectors</button>
+        <button data-page="account">Account</button>
+        <button data-page="machines">Machines</button>
       </nav>
       <section id="settings-page"></section>
     </div>
@@ -44,10 +51,21 @@
     <span id="pill-edge" title="Resize"></span>
     <span id="pill-corner" title="Resize"></span>
   </div>
+  <form id="login" hidden>
+    <h1>pinned</h1>
+    <p class="hint">Sign in to reach your machines and their sessions.</p>
+    <input name="email" type="email" placeholder="Email" autocomplete="username" required>
+    <input name="password" type="password" placeholder="Password" autocomplete="current-password" required>
+    <p class="error"></p>
+    <div class="actions"><button type="button" class="secondary" name="signup">Create account</button><button class="primary">Sign in</button></div>
+  </form>
 <script src="vendor/xterm.js"></script>
 <script src="vendor/addon-fit.js"></script>
+<script src="transport.js"></script>
+<script src="hub.js"></script>
 <script src="main.js"></script>
 <script src="settings.js"></script>
 <script src="history.js"></script>
+<script src="account.js"></script>
 </body>
 </html>

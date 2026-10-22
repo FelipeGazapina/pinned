@@ -1,0 +1,494 @@
+//! The protocol between machines, the hub and clients: one JSON object per WebSocket text frame.
+//! Every enum is internally tagged and unknown fields are ignored, so versions can drift.
+
+use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
+use crate::connectors::{Connector, Settings};
+use base64::Engine;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+/// A tab's id, unique within its machine, such as `tab-3`.
+pub type TabId = String;
+/// The id the hub gives a machine, a uuid.
+pub type MachineId = String;
+
+/// Stands for the pinned binary in a `RunSpec`'s arguments, since the hub builds prompts without
+/// knowing where each machine installed it. The machine that runs it puts its own path there.
+pub const EXE_PLACEHOLDER: &str = "{{pinned}}";
+
+/// Terminal bytes, which need not be UTF-8, carried as a base64 string.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bytes(pub Vec<u8>);
+
+impl Serialize for Bytes {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for Bytes {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        base64::engine::general_purpose::STANDARD.decode(text).map(Bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+/// One tab as every client shows it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct TabView {
+    pub id: TabId,
+    pub cwd: String,
+    pub bypass: bool,
+    /// A claude process is alive in the tab.
+    pub running: bool,
+    pub status: Option<AgentStatus>,
+    pub title: Option<String>,
+    /// What the session asks, while it needs input.
+    pub message: Option<String>,
+    /// Unix time a usage limit lifts, while one stopped the turn.
+    pub resume_at: Option<u64>,
+    /// The connector that opened the tab.
+    pub connector: Option<String>,
+    /// The tab's number, which orders tabs by when they opened.
+    pub opened: u64,
+}
+
+/// A folder a machine offers when opening a tab.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ProjectView {
+    pub path: String,
+    pub name: String,
+}
+
+/// Everything a client may ask a machine to do, local or through the hub. The comment on each
+/// variant names what `Machine::call` answers.
+///
+/// `{"cmd":"start_claude","tab":"tab-1","cols":120,"rows":32}`
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+pub enum Call {
+    /// `Vec<TabView>`.
+    Tabs,
+    /// The new tab's id. `path: null` opens the machine's default folder.
+    OpenTab { path: Option<String>, bypass: bool },
+    /// The folder claude runs in. Restarts claude when it is already running.
+    StartClaude { tab: TabId, cols: u16, rows: u16 },
+    /// `null`. Keystrokes as xterm reports them.
+    WriteInput { tab: TabId, data: String },
+    /// `null`.
+    ResizePty { tab: TabId, cols: u16, rows: u16 },
+    /// `null`.
+    CloseTab { tab: TabId },
+    /// The tab's new folder, canonical. Stands in for the folder dialog on a remote machine;
+    /// the client then sends `StartClaude`.
+    SetFolder { tab: TabId, path: String },
+    /// `Vec<ProjectView>`, most recent first.
+    ListProjects,
+    /// `Vec<history::Turn>`, newest first.
+    ProjectHistory { path: String },
+    /// The folder's `origin` remote, or `null`.
+    GitRemote { path: String },
+    /// The new tab's id, with claude already running. Refused when the folder can't be found or cloned.
+    Run { run: RunSpec },
+    /// `true` when a live tab whose environment holds every pair took `text` as a prompt.
+    Deliver { env: Vec<(String, String)>, text: String },
+}
+
+/// A connector's session, the same on any machine.
+///
+/// `{"folder":"/repo","repo":"git@github.com:o/r.git","args":["--name","ENG-7"],"env":[["PINNED_CONNECTOR","c1"]]}`
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RunSpec {
+    /// The folder on the machine the connector was set up on.
+    pub folder: String,
+    /// The folder's git origin, which finds or clones it on a machine without that folder.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// `claude` arguments, with `EXE_PLACEHOLDER` where the pinned binary goes.
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+}
+
+/// What a machine reports on its own.
+///
+/// `{"kind":"exit","tab":"tab-1"}`, `{"kind":"output","tab":"tab-1","data":"aGk="}`
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum MachineEvent {
+    /// Every tab, after any of them opened, closed, started, exited or changed status, title or folder.
+    Tabs { tabs: Vec<TabView> },
+    /// A hook fired in a tab's session.
+    Agent { event: AgentEvent },
+    /// Output of a tab a client attached to, as the hub passes it on.
+    Output { tab: TabId, data: Bytes },
+    /// The tab's claude exited by itself.
+    Exit { tab: TabId },
+    Usage { usage: Usage },
+}
+
+/// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
+/// commands, so the settings page sends either. The last three come only from machines,
+/// forwarding a connector session's callbacks to the hub, which holds the keys.
+///
+/// `{"cmd":"connect_linear","key":"lin_api_…"}`, `{"cmd":"stage","connector":"c1","issue":"uuid","stage":"coding"}`
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+pub enum HubCall {
+    /// `connectors::Settings`.
+    GetSettings,
+    /// `linear::Account`.
+    ConnectLinear { key: String },
+    DisconnectLinear,
+    /// `connectors::Suggestions`.
+    LinearSuggestions,
+    /// `slack::Account`.
+    ConnectSlack { token: String },
+    DisconnectSlack,
+    /// Channel names.
+    SlackSuggestions,
+    /// The connector as stored.
+    SaveConnector { connector: Connector },
+    DeleteConnector { id: String },
+    /// `Vec<MachineView>`.
+    Machines,
+    RenameMachine { id: MachineId, name: String },
+    RemoveMachine { id: MachineId },
+    /// `PairCode`.
+    PairCode,
+    /// A signed-out app's connectors, moved to the account on its first sign-in.
+    Import { store: Value, linear_key: Option<String>, slack_key: Option<String> },
+    Stage {
+        connector: String,
+        #[serde(flatten)]
+        subject: Subject,
+        stage: Stage,
+    },
+    SlackReply { connector: String, channel: String, thread: String, text: String },
+    LinearCreate {
+        connector: String,
+        channel: String,
+        thread: String,
+        title: String,
+        description: String,
+        #[serde(default)]
+        assignee: String,
+    },
+    LinearTake { connector: String, channel: String, thread: String, issue: String },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MachineView {
+    pub id: MachineId,
+    pub name: String,
+    pub os: String,
+    pub online: bool,
+    /// Unix seconds.
+    pub last_seen: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AccountView {
+    pub id: String,
+    pub email: String,
+}
+
+/// A one-time code that pairs a headless machine, and the command that does it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PairCode {
+    pub code: String,
+    /// Unix seconds.
+    pub expires_at: i64,
+    pub command: String,
+}
+
+/// A tab on some machine.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Target {
+    pub machine: MachineId,
+    pub tab: TabId,
+}
+
+/// The answer to the call that carried `id`: `{"id":4,"ok":…}` or `{"id":4,"err":"…"}`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Reply {
+    pub id: u64,
+    #[serde(flatten)]
+    pub outcome: Outcome,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Ok(Value),
+    Err(String),
+}
+
+impl Reply {
+    pub fn new(id: u64, result: Result<Value, String>) -> Self {
+        Reply { id, outcome: result.map_or_else(Outcome::Err, Outcome::Ok) }
+    }
+
+    pub fn result(self) -> Result<Value, String> {
+        match self.outcome {
+            Outcome::Ok(v) => Ok(v),
+            Outcome::Err(e) => Err(e),
+        }
+    }
+}
+
+/// Client to hub. The first frame must be `Auth` with a login token.
+///
+/// `{"type":"auth","token":"…"}`, `{"type":"call","id":1,"machine":"m1","call":{"cmd":"tabs"}}`,
+/// `{"type":"hub","id":2,"call":{"cmd":"get_settings"}}`, `{"type":"attach","machine":"m1","tab":"tab-1"}`
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientFrame {
+    Auth { token: String },
+    /// Forwarded to the machine; the reply comes back as `ToClient::Reply` with this id.
+    Call { id: u64, machine: MachineId, call: Call },
+    /// Answered by the hub itself.
+    Hub { id: u64, call: HubCall },
+    /// Streams the tab's output as `MachineEvent::Output`, starting with what its screen holds.
+    Attach(Target),
+    Detach(Target),
+}
+
+/// Hub to client.
+///
+/// `{"type":"reply","id":1,"ok":[]}`, `{"type":"event","machine":"m1","event":{"kind":"exit","tab":"tab-1"}}`
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToClient {
+    /// The answer to `Auth`: the account, its machines and every online machine's tabs.
+    Hello { account: AccountView, machines: Vec<MachineView>, tabs: BTreeMap<MachineId, Vec<TabView>> },
+    Reply(Reply),
+    /// Every machine of the account, after one came online, went offline or changed.
+    Machines { machines: Vec<MachineView> },
+    Event { machine: MachineId, event: MachineEvent },
+    /// The account's connectors, after any change or check.
+    Settings { settings: Settings },
+}
+
+/// Machine to hub. The first frame must be `Auth` with the machine's token.
+///
+/// `{"type":"auth","token":"…","name":"mac-mini","os":"macos","version":"0.6.0"}`,
+/// `{"type":"call","id":7,"call":{"cmd":"slack_reply","connector":"c2","channel":"C1","thread":"1.2","text":"done"}}`
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MachineFrame {
+    Auth { token: String, name: String, os: String, version: String },
+    /// The answer to `ToMachine::Call` with this id.
+    Reply(Reply),
+    Event { event: MachineEvent },
+    /// A tab's output for the viewer that subscribed to it, its screen first.
+    Output { viewer: String, tab: TabId, data: Bytes },
+    /// A connector session's callback; the hub answers with `ToMachine::Reply`.
+    Call { id: u64, call: HubCall },
+}
+
+/// Hub to machine.
+///
+/// `{"type":"call","id":3,"call":{"cmd":"close_tab","tab":"tab-2"}}`, `{"type":"subscribe","tab":"tab-2","viewer":"client-4"}`
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToMachine {
+    /// The answer to `Auth`.
+    Hello { machine: MachineView },
+    Call { id: u64, call: Call },
+    Reply(Reply),
+    /// Start sending the tab's output to `viewer`, its screen first, as `MachineFrame::Output`.
+    /// Each client is its own viewer, so one that attaches late gets the screen without the others
+    /// seeing it twice.
+    Subscribe { tab: TabId, viewer: String },
+    Unsubscribe { tab: TabId, viewer: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `frame` serializes to exactly `expected`, and `expected` parses back to the same JSON.
+    fn round_trip<T: Serialize + serde::de::DeserializeOwned>(frame: T, expected: Value) {
+        assert_eq!(serde_json::to_value(&frame).unwrap(), expected);
+        let parsed: T = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), expected);
+    }
+
+    fn tab_view() -> TabView {
+        TabView {
+            id: "tab-3".into(),
+            cwd: "/repo".into(),
+            bypass: false,
+            running: true,
+            status: Some(AgentStatus::NeedsInput),
+            title: Some("Fix the build".into()),
+            message: Some("Claude needs your permission to use Bash".into()),
+            resume_at: None,
+            connector: Some("c1".into()),
+            opened: 3,
+        }
+    }
+
+    #[test]
+    fn calls_to_a_machine_are_tagged_by_cmd() {
+        round_trip(Call::Tabs, json!({ "cmd": "tabs" }));
+        round_trip(
+            Call::StartClaude { tab: "tab-1".into(), cols: 120, rows: 32 },
+            json!({ "cmd": "start_claude", "tab": "tab-1", "cols": 120, "rows": 32 }),
+        );
+        round_trip(
+            Call::Run {
+                run: RunSpec {
+                    folder: "/Users/ana/acme".into(),
+                    repo: Some("git@github.com:acme/app.git".into()),
+                    args: vec!["--name".into(), "ENG-7 Broken button".into(), "Run `'{{pinned}}' stage coding`".into()],
+                    env: vec![("PINNED_CONNECTOR".into(), "c1".into()), ("PINNED_ISSUE".into(), "uuid".into())],
+                },
+            },
+            json!({
+                "cmd": "run",
+                "run": {
+                    "folder": "/Users/ana/acme",
+                    "repo": "git@github.com:acme/app.git",
+                    "args": ["--name", "ENG-7 Broken button", "Run `'{{pinned}}' stage coding`"],
+                    "env": [["PINNED_CONNECTOR", "c1"], ["PINNED_ISSUE", "uuid"]],
+                },
+            }),
+        );
+        round_trip(
+            Call::Deliver { env: vec![("PINNED_SLACK_THREAD".into(), "1.2".into())], text: "yes".into() },
+            json!({ "cmd": "deliver", "env": [["PINNED_SLACK_THREAD", "1.2"]], "text": "yes" }),
+        );
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored_and_a_run_needs_only_folder_and_args() {
+        let call: Call = serde_json::from_value(json!({ "cmd": "run", "run": { "folder": "/repo", "args": [], "later": 1 }, "extra": true })).unwrap();
+        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![] } });
+        assert!(serde_json::from_value::<Call>(json!({ "cmd": "format_disk" })).is_err());
+    }
+
+    #[test]
+    fn machine_events_are_tagged_by_kind_and_output_is_base64() {
+        round_trip(
+            MachineEvent::Output { tab: "tab-1".into(), data: Bytes(b"\x1b[2Jhi\xff".to_vec()) },
+            json!({ "kind": "output", "tab": "tab-1", "data": "G1sySmhp/w==" }),
+        );
+        round_trip(MachineEvent::Exit { tab: "tab-1".into() }, json!({ "kind": "exit", "tab": "tab-1" }));
+        round_trip(
+            MachineEvent::Tabs { tabs: vec![tab_view()] },
+            json!({ "kind": "tabs", "tabs": [{
+                "id": "tab-3", "cwd": "/repo", "bypass": false, "running": true, "status": "needs-input",
+                "title": "Fix the build", "message": "Claude needs your permission to use Bash",
+                "resume_at": null, "connector": "c1", "opened": 3,
+            }] }),
+        );
+        round_trip(
+            MachineEvent::Usage { usage: Usage { five_hour: Some(crate::agent::LimitWindow { used_percentage: 23.5, resets_at: 1792400000 }), seven_day: None } },
+            json!({ "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 1792400000 } } }),
+        );
+        assert!(serde_json::from_value::<MachineEvent>(json!({ "kind": "output", "tab": "t", "data": "not base64!" })).is_err());
+    }
+
+    #[test]
+    fn hub_calls_match_the_tauri_commands() {
+        round_trip(HubCall::GetSettings, json!({ "cmd": "get_settings" }));
+        round_trip(HubCall::ConnectSlack { token: "xoxb-1".into() }, json!({ "cmd": "connect_slack", "token": "xoxb-1" }));
+        round_trip(
+            HubCall::Stage { connector: "c1".into(), subject: Subject::LinearIssue { issue: "uuid".into() }, stage: Stage::Coding },
+            json!({ "cmd": "stage", "connector": "c1", "issue": "uuid", "stage": "coding" }),
+        );
+        round_trip(
+            HubCall::LinearTake { connector: "c2".into(), channel: "C1".into(), thread: "1.2".into(), issue: "ENG-7".into() },
+            json!({ "cmd": "linear_take", "connector": "c2", "channel": "C1", "thread": "1.2", "issue": "ENG-7" }),
+        );
+        round_trip(
+            HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None },
+            json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": "lin_api_1", "slack_key": null }),
+        );
+    }
+
+    #[test]
+    fn client_frames_are_tagged_by_type() {
+        round_trip(ClientFrame::Auth { token: "t0k".into() }, json!({ "type": "auth", "token": "t0k" }));
+        round_trip(
+            ClientFrame::Call { id: 1, machine: "m1".into(), call: Call::CloseTab { tab: "tab-2".into() } },
+            json!({ "type": "call", "id": 1, "machine": "m1", "call": { "cmd": "close_tab", "tab": "tab-2" } }),
+        );
+        round_trip(ClientFrame::Hub { id: 2, call: HubCall::Machines }, json!({ "type": "hub", "id": 2, "call": { "cmd": "machines" } }));
+        round_trip(
+            ClientFrame::Attach(Target { machine: "m1".into(), tab: "tab-2".into() }),
+            json!({ "type": "attach", "machine": "m1", "tab": "tab-2" }),
+        );
+    }
+
+    #[test]
+    fn frames_to_a_client_carry_replies_and_machine_events() {
+        round_trip(ToClient::Reply(Reply::new(1, Ok(json!(["tab-1"])))), json!({ "type": "reply", "id": 1, "ok": ["tab-1"] }));
+        round_trip(ToClient::Reply(Reply::new(2, Ok(Value::Null))), json!({ "type": "reply", "id": 2, "ok": null }));
+        round_trip(
+            ToClient::Reply(Reply::new(3, Err("mac-mini is offline".into()))),
+            json!({ "type": "reply", "id": 3, "err": "mac-mini is offline" }),
+        );
+        let reply: ToClient = serde_json::from_value(json!({ "type": "reply", "id": 3, "err": "gone" })).unwrap();
+        assert!(matches!(reply, ToClient::Reply(r) if r.clone().result() == Err("gone".into())));
+        round_trip(
+            ToClient::Event { machine: "m1".into(), event: MachineEvent::Exit { tab: "tab-1".into() } },
+            json!({ "type": "event", "machine": "m1", "event": { "kind": "exit", "tab": "tab-1" } }),
+        );
+        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000 };
+        round_trip(
+            ToClient::Hello {
+                account: AccountView { id: "a1".into(), email: "ana@acme.dev".into() },
+                machines: vec![machine.clone()],
+                tabs: BTreeMap::from([("m1".into(), vec![])]),
+            },
+            json!({
+                "type": "hello",
+                "account": { "id": "a1", "email": "ana@acme.dev" },
+                "machines": [{ "id": "m1", "name": "mac-mini", "os": "macos", "online": true, "last_seen": 1792400000 }],
+                "tabs": { "m1": [] },
+            }),
+        );
+        round_trip(
+            ToClient::Settings { settings: Settings { linear: None, slack: None, connectors: vec![], checked: None } },
+            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "connectors": [], "checked": null } }),
+        );
+    }
+
+    #[test]
+    fn frames_between_hub_and_machine() {
+        round_trip(
+            MachineFrame::Auth { token: "m-t0k".into(), name: "vps".into(), os: "linux".into(), version: "0.6.0".into() },
+            json!({ "type": "auth", "token": "m-t0k", "name": "vps", "os": "linux", "version": "0.6.0" }),
+        );
+        round_trip(
+            MachineFrame::Event { event: MachineEvent::Exit { tab: "tab-1".into() } },
+            json!({ "type": "event", "event": { "kind": "exit", "tab": "tab-1" } }),
+        );
+        round_trip(
+            MachineFrame::Call { id: 7, call: HubCall::SlackReply { connector: "c2".into(), channel: "C1".into(), thread: "1.2".into(), text: "done".into() } },
+            json!({ "type": "call", "id": 7, "call": { "cmd": "slack_reply", "connector": "c2", "channel": "C1", "thread": "1.2", "text": "done" } }),
+        );
+        round_trip(MachineFrame::Reply(Reply::new(3, Ok(json!("tab-4")))), json!({ "type": "reply", "id": 3, "ok": "tab-4" }));
+        round_trip(
+            ToMachine::Subscribe { tab: "tab-2".into(), viewer: "client-4".into() },
+            json!({ "type": "subscribe", "tab": "tab-2", "viewer": "client-4" }),
+        );
+        round_trip(
+            MachineFrame::Output { viewer: "client-4".into(), tab: "tab-2".into(), data: Bytes(b"hi".to_vec()) },
+            json!({ "type": "output", "viewer": "client-4", "tab": "tab-2", "data": "aGk=" }),
+        );
+        round_trip(
+            ToMachine::Call { id: 3, call: Call::ResizePty { tab: "tab-2".into(), cols: 80, rows: 24 } },
+            json!({ "type": "call", "id": 3, "call": { "cmd": "resize_pty", "tab": "tab-2", "cols": 80, "rows": 24 } }),
+        );
+        round_trip(
+            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0 } },
+            json!({ "type": "hello", "machine": { "id": "m2", "name": "vps", "os": "linux", "online": true, "last_seen": 0 } }),
+        );
+    }
+}

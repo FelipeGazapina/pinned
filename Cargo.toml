@@ -1,3 +1,10 @@
+[workspace]
+members = [".", "crates/core", "crates/server"]
+
+# scripts/release.sh bumps every `version = ` line in this file, this one included.
+[workspace.package]
+version = "0.5.1"
+
 [package]
 name = "pinned"
 version = "0.5.1"
@@ -8,16 +15,14 @@ default-run = "pinned"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+pinned-core = { path = "crates/core" }
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
-portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
+# tauri::generate_context! expands to code that names serde_json.
 serde_json = "1"
 tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
-reqwest = { version = "0.13", default-features = false, features = ["json"] }
-tokio = { version = "1", features = ["time", "sync"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel = "2.1.1"
