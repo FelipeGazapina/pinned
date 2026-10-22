@@ -1,5 +1,6 @@
 const TAURI = window.__TAURI__ ?? null;
 document.documentElement.dataset.shell = TAURI ? "app" : "web";
+if (!TAURI && "serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 
 const invoke = TAURI ? TAURI.core.invoke : (cmd) => Promise.reject(`${cmd} only works in the app`);
 const listen = (event, handler) => TAURI?.event.listen(event, ({ payload }) => handler(payload));
