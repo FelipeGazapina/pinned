@@ -6,7 +6,8 @@ use std::sync::Arc;
 pub struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    /// Taken on drop, when it is killed and reaped.
+    child: Option<Box<dyn Child + Send + Sync>>,
     killed: Arc<AtomicBool>,
 }
 
@@ -40,7 +41,7 @@ impl Session {
             }
         });
 
-        Ok(Self { master: pair.master, writer, child, killed })
+        Ok(Self { master: pair.master, writer, child: Some(child), killed })
     }
 
     pub fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
@@ -56,6 +57,12 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.killed.store(true, Ordering::SeqCst);
-        let _ = self.child.kill();
+        let Some(mut child) = self.child.take() else { return };
+        // portable-pty's kill gives SIGHUP 200ms before SIGKILL and never reaps a process that
+        // outlived the SIGHUP, as claude does: off the caller's thread, and reaped, or a node piles up zombies.
+        std::thread::spawn(move || {
+            let _ = child.kill();
+            let _ = child.wait();
+        });
     }
 }
