@@ -1,5 +1,5 @@
 use pinned_core::account::{self, Credentials};
-use pinned_core::connectors::{self, Connectors, Settings};
+use pinned_core::connectors::{self, Connectors};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::Machine;
 use pinned_core::wire::HubCall;
@@ -158,21 +158,20 @@ fn import_when_empty(app: AppHandle) {
             }
             std::thread::sleep(Duration::from_millis(250));
         }
-        let (store, linear_key, slack_key) = app.state::<Connectors>().export();
+        let (mut store, linear_key, slack_key) = app.state::<Connectors>().export();
         let has_local = linear_key.is_some() || slack_key.is_some() || store["connectors"].as_array().is_some_and(|c| !c.is_empty());
         if !has_local {
             return;
         }
         let signed_in = state.signed_in.read().unwrap();
-        let Some(SignedIn { link, .. }) = signed_in.as_ref() else { return };
-        let result = link.call_hub(HubCall::GetSettings).and_then(|current| {
-            let current: Settings = serde_json::from_value(current).map_err(|e| e.to_string())?;
-            if current.linear.is_some() || current.slack.is_some() || !current.connectors.is_empty() {
-                return Ok(());
+        let Some(SignedIn { link, creds }) = signed_in.as_ref() else { return };
+        // Their folders are on this Mac, so they keep running here while it's online.
+        for connector in store["connectors"].as_array_mut().into_iter().flatten() {
+            if connector["machine"].as_str().unwrap_or_default().is_empty() {
+                connector["machine"] = creds.machine_id.clone().into();
             }
-            link.call_hub(HubCall::Import { store, linear_key, slack_key }).map(drop)
-        });
-        if let Err(e) = result {
+        }
+        if let Err(e) = link.call_hub(HubCall::Import { store, linear_key, slack_key }) {
             eprintln!("pinned: could not move this Mac's connectors to the account: {e}");
         }
     });

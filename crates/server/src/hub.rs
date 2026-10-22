@@ -288,7 +288,10 @@ impl Hub {
             HubCall::SlackSuggestions => (json(c().await?.slack_suggestions().await?), false),
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
-            HubCall::Import { store, linear_key, slack_key } => (json(c().await?.import(store, linear_key, slack_key)?), true),
+            HubCall::Import { store, linear_key, slack_key } => {
+                let imported = c().await?.import(store, linear_key, slack_key)?;
+                (json(imported), imported)
+            }
             HubCall::Stage { connector, subject, stage } => (json(c().await?.stage(&connector, &subject, stage).await?), false),
             HubCall::SlackReply { connector, channel, thread, text } => {
                 (json(c().await?.slack_reply(&connector, &channel, &thread, &text).await?), false)

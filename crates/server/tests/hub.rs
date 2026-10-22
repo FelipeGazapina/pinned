@@ -4,6 +4,7 @@ use pinned_core::agent::{self, Stage, Subject};
 use pinned_core::connectors::{Delivery, Run, Work};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
+use pinned_core::wire::HubCall;
 use serde_json::{json, Value};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -416,6 +417,34 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     node_b.kill();
     client.wait_machines(&[("mac-mini", false), ("vps", false)]);
     assert!(!open(run(Subject::LinearIssue { issue: "uuid-2".into() })), "with no machine online the run is unclaimed, for the next check");
+}
+
+#[test]
+fn an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only() {
+    let hub = TestHub::start("import");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let dir = temp("import-mac");
+    let (machine, machine_token) = account::register_machine(&url, &token, "macbook", "macos").unwrap();
+    let creds = Credentials { hub: url.clone(), email: account.email, user_token: token.clone(), machine_id: machine.id, machine_token };
+    creds.save(&dir).unwrap();
+    let mut node = Node::start(&dir, creds);
+    wait_for("macbook online", || node.online());
+    let link = node.link.as_ref().unwrap();
+    let local = json!({ "connectors": [{
+        "id": "c1", "name": "Bugs", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+        "folder": "/repo", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "",
+    }] });
+    assert_eq!(link.call_hub(HubCall::Import { store: local, linear_key: Some("lin_api_1".into()), slack_key: None }), Ok(json!(true)));
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    assert_eq!(client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["name"], "Bugs");
+
+    let other = HubCall::Import { store: json!({ "connectors": [] }), linear_key: None, slack_key: Some("xoxb-2".into()) };
+    assert_eq!(link.call_hub(other), Ok(json!(false)), "a later machine can't replace the account's connectors");
+    assert_eq!(client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["name"], "Bugs");
+    assert_eq!(link.call_hub(HubCall::GetSettings), Err("a machine may only forward a connector session's callbacks".into()));
+    node.kill();
 }
 
 #[test]

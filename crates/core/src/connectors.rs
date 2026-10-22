@@ -1066,10 +1066,15 @@ impl Connectors {
         self.save(&store)
     }
 
-    /// Replaces the store and keys with exported ones, as when a signed-out app's connectors move
-    /// to its account. An integration whose key didn't come along counts as not connected.
-    pub fn import(&self, store: serde_json::Value, linear_key: Option<String>, slack_key: Option<String>) -> Result<(), String> {
+    /// Takes exported connectors and keys, as when a signed-out app's connectors move to its account,
+    /// and false when there are some already, so a later machine can't replace them. An integration
+    /// whose key didn't come along counts as not connected.
+    pub fn import(&self, store: serde_json::Value, linear_key: Option<String>, slack_key: Option<String>) -> Result<bool, String> {
         let mut imported: Store = serde_json::from_value(store).map_err(|e| format!("not a connectors store: {e}"))?;
+        let mut current = self.store.lock().unwrap();
+        if current.linear.is_some() || current.slack.is_some() || !current.connectors.is_empty() {
+            return Ok(false);
+        }
         let present = |key: Option<String>| key.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty());
         let (linear_key, slack_key) = (present(linear_key), present(slack_key));
         if linear_key.is_none() {
@@ -1085,11 +1090,10 @@ impl Connectors {
             }
         }
         self.channels.lock().unwrap().clear();
-        let mut current = self.store.lock().unwrap();
         *current = imported;
         self.save(&current)?;
         self.wake.notify_one();
-        Ok(())
+        Ok(true)
     }
 
     /// The store and the Linear and Slack keys, as `import` takes them.
@@ -1165,20 +1169,22 @@ mod tests {
     }
 
     #[test]
-    fn an_import_replaces_the_store_and_keys_and_drops_integrations_without_a_key() {
-        let (connectors, dir) = stored("import", vec![linear_connector()]);
+    fn an_import_fills_an_empty_store_and_keys_and_drops_integrations_without_a_key() {
+        let (connectors, dir) = stored("import", vec![]);
         let exported = serde_json::json!({
             "linear": { "name": "Ana", "email": "ana@acme.dev", "organization": "Acme" },
             "slack": { "team": "Acme", "userId": "UBOT", "name": "pinned" },
             "connectors": [serde_json::to_value(Connector { id: "c9".into(), ..slack_connector() }).unwrap()],
         });
-        connectors.import(exported, Some(" lin_api_1 ".into()), None).unwrap();
+        assert_eq!(connectors.import(exported.clone(), Some(" lin_api_1 ".into()), None), Ok(true));
         let (store, linear_key, slack_key) = connectors.export();
         assert_eq!((linear_key.as_deref(), slack_key), (Some("lin_api_1"), None));
         assert_eq!(store["linear"]["email"], "ana@acme.dev");
         assert_eq!(store["slack"], serde_json::Value::Null);
         assert_eq!(store["connectors"][0]["id"], "c9");
         assert_eq!(std::fs::read_to_string(dir.join("linear-key")).unwrap(), "lin_api_1");
+        assert_eq!(connectors.import(serde_json::json!({ "connectors": [] }), None, Some("xoxb-2".into())), Ok(false), "a store with connectors keeps them");
+        assert_eq!(connectors.export().1.as_deref(), Some("lin_api_1"));
         assert!(connectors.import(serde_json::json!({ "connectors": "no" }), None, None).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
