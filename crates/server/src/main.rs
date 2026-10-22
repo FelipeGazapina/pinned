@@ -11,7 +11,6 @@ const USAGE: &str = "usage:
   pinned-server pair <hub url> <code> [--name <name>] [--config-dir <dir>]
   pinned-server login <hub url> <email> [--name <name>] [--config-dir <dir>]   (password on stdin or in PINNED_PASSWORD)
   pinned-server node [--config-dir <dir>]";
-/// The terminal size of a restored session, which starts with no one watching.
 const UNWATCHED: (u16, u16) = (120, 32);
 
 fn main() {
@@ -67,7 +66,6 @@ impl Args {
         self.flags.get(flag).cloned().ok_or_else(|| format!("--{flag} is required\n{USAGE}"))
     }
 
-    /// `--config-dir`, else `$XDG_CONFIG_HOME/pinned`, else `~/.config/pinned`.
     fn config_dir(&self) -> PathBuf {
         if let Some(dir) = self.flags.get("config-dir") {
             return dir.into();

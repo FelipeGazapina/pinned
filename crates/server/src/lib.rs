@@ -1,5 +1,3 @@
-//! pinned's server side: the hub that spans an account's machines, and the headless node.
-
 pub mod db;
 pub mod http;
 pub mod hub;

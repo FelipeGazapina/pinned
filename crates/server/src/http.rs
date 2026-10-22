@@ -1,6 +1,3 @@
-//! The hub's HTTP side: sign up and in, machine registration and pairing, the two WebSockets,
-//! the install script and binaries a pairing command fetches, and the web app.
-
 use crate::db;
 use crate::hub::{Account, Hub};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
@@ -23,7 +20,6 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 const MIN_PASSWORD: usize = 8;
-/// Failed logins allowed per email and per address within `ATTEMPT_WINDOW`.
 const MAX_ATTEMPTS: usize = 10;
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(15 * 60);
 const AUTH_WAIT: Duration = Duration::from_secs(15);
@@ -229,7 +225,6 @@ async fn first_text(socket: &mut WebSocket) -> Option<String> {
     }
 }
 
-/// The id of a frame of one of `calls` types that this hub couldn't read, so it can say so to the caller.
 fn unreadable_call(text: &str, calls: &[&str]) -> Option<u64> {
     let value: Value = serde_json::from_str(text).ok()?;
     calls.contains(&value["type"].as_str()?).then(|| value["id"].as_u64()).flatten()
@@ -272,7 +267,6 @@ async fn serve_client(hub: Arc<Hub>, mut socket: WebSocket) {
         tokio::select! {
             text = outbox.recv() => match text {
                 Some(text) => if sink.send(Message::Text(text.into())).await.is_err() { break },
-                // Signed out.
                 None => {
                     let _ = sink.send(close_unauthorized()).await;
                     break;
@@ -363,7 +357,6 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
         tokio::select! {
             text = outbox.recv() => match text {
                 Some(text) => if sink.send(Message::Text(text.into())).await.is_err() { break },
-                // Replaced or removed.
                 None => break,
             },
             frame = tokio::time::timeout(MACHINE_SILENT, stream.next()) => match frame {

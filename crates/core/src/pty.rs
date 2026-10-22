@@ -6,7 +6,6 @@ use std::sync::Arc;
 pub struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    /// Taken on drop, when it is killed and reaped.
     child: Option<Box<dyn Child + Send + Sync>>,
     killed: Arc<AtomicBool>,
 }

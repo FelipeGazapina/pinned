@@ -1,6 +1,5 @@
 const DEFAULT_HUB = "https://pinned.187-127-36-149.sslip.io";
 
-/** The Account page: a sign-in form, or who is signed in. */
 function showAccount() {
   if (!account) {
     settingsPage.innerHTML = `<h2>Account</h2>
@@ -65,7 +64,6 @@ actions["sign-out"] = async () => {
   showAccount();
 };
 
-/** UI state of the Machines page: the machine being renamed or confirmed for removal, and the last pairing code. */
 let machinesUi = { renaming: null, removing: null, pair: null, error: "" };
 
 function lastSeen(unix) {
@@ -77,7 +75,6 @@ function lastSeen(unix) {
   return `seen ${new Date(unix * 1000).toLocaleDateString()}`;
 }
 
-/** The Machines page: every machine of the account, and pairing a new server. */
 function showMachinesPage() {
   if (!account) {
     settingsPage.innerHTML = `<h2>Machines</h2>
@@ -200,14 +197,12 @@ settingsPage.addEventListener("focusout", (e) => {
 
 const loginForm = document.getElementById("login");
 
-/** The web app's sign-in page, shown until the browser holds a token. */
 function showLogin(reason = "") {
   document.body.dataset.page = "login";
   loginForm.querySelector(".error").textContent = reason;
   loginForm.email.focus();
 }
 
-/** Signs in on the hub that serves this page; `create` makes the account first. */
 async function loginWeb(create) {
   const error = loginForm.querySelector(".error");
   const email = loginForm.email.value.trim();

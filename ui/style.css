@@ -343,7 +343,6 @@ body[data-empty="true"] #empty { display: block; }
 #keys button { flex: none; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: #ffffff0a;
   font-size: 13px; touch-action: manipulation; }
 
-/* The browser has no panel to drag, resize, shrink to a pill or update. */
 html[data-shell="web"] { --opacity: 1; }
 html[data-shell="web"] body { background: rgb(15 17 21); }
 html[data-shell="web"] #expanded { border: 0; border-radius: 0; }
@@ -363,7 +362,6 @@ body[data-page="login"] #login { display: flex; flex-direction: column; gap: 10p
 #login button.primary { background: var(--working); color: #0f1115; font-weight: 600; }
 #login button.secondary { border: 1px solid var(--border); }
 
-/* Touch screens and narrow windows keep the tabs in one scrolling row on top. */
 @media (pointer: coarse) {
   #keys { display: flex; }
   #tab-bar .handle, .tab .resize, #bar-resize { display: none !important; }

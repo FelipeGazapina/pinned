@@ -23,7 +23,6 @@ create table if not exists pair_codes (code text primary key, account uuid not n
   expires_at timestamptz not null);
 ";
 
-/// Characters a person reads off one screen and types on another without mixing them up.
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LEN: usize = 8;
 
@@ -32,7 +31,6 @@ pub struct Db {
     client: Arc<Client>,
 }
 
-/// A secret handed out once, and its hash, which is all the database keeps.
 pub struct Token {
     pub text: String,
     pub hash: Vec<u8>,
@@ -225,7 +223,6 @@ impl Db {
         Ok(Connectors { store: row.get(0), secrets })
     }
 
-    /// Accounts with connectors or integrations, whose watch loops start with the hub.
     pub async fn accounts_with_connectors(&self) -> Result<Vec<Uuid>, String> {
         let rows = self.client.query("select id from accounts where store <> '{}' or secrets <> '{}'", &[]).await.map_err(err)?;
         Ok(rows.iter().map(|r| r.get(0)).collect())

@@ -1,9 +1,4 @@
-//! A machine's connection to its account's hub: one outbound WebSocket that answers the hub's
-//! calls, streams the tabs it subscribes to, reports every machine event, and carries a connector
-//! session's callbacks to the hub, which holds the integrations' keys. It reconnects by itself.
-//!
-//! The link runs on its own thread and runtime, so the app and the headless node use it the same
-//! way. The binary installs rustls's ring provider before spawning it.
+//! The binary installs rustls's ring provider before spawning the link.
 
 use crate::account::Credentials;
 use crate::agent::Message;
@@ -36,7 +31,6 @@ pub struct Link {
 
 #[derive(Default)]
 struct Shared {
-    /// The live connection's outgoing frames, from the hub's hello until the connection ends.
     out: Mutex<Option<channel::UnboundedSender<String>>>,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>,
     next_call: AtomicU64,
@@ -49,7 +43,6 @@ impl Shared {
         out.is_some_and(|out| out.send(serde_json::to_string(frame).unwrap()).is_ok())
     }
 
-    /// Forgets the connection that just ended: its callers fail, and its tabs stop streaming.
     fn disconnected(&self, machine: &Machine) {
         *self.out.lock().unwrap() = None;
         self.pending.lock().unwrap().clear();
@@ -248,7 +241,6 @@ fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSende
         }
         Ok(ToMachine::Hello { .. }) => {}
         Err(e) => {
-            // A hub newer than this machine may call something it doesn't know: say so by the call's id.
             let value: Value = serde_json::from_str(frame).unwrap_or_default();
             if let (Some("call"), Some(id)) = (value["type"].as_str(), value["id"].as_u64()) {
                 let reply = MachineFrame::Reply(Reply::new(id, Err(format!("this machine runs pinned {version}, which can't answer that: {e}"))));

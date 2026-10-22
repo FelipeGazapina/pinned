@@ -1,6 +1,3 @@
-//! This Mac's place in an account: signing in and out, the link to the hub while signed in, and
-//! the app's own connector watcher, which runs only while signed out.
-
 use pinned_core::account::{self, Credentials};
 use pinned_core::connectors::{self, Connectors, Settings};
 use pinned_core::link::{self, Link};
@@ -24,7 +21,6 @@ struct SignedIn {
     link: Link,
 }
 
-/// What the webview needs to open its own client socket to the hub.
 #[derive(serde::Serialize, Default)]
 pub struct View {
     signed_in: bool,
@@ -36,7 +32,6 @@ pub struct View {
 }
 
 impl Account {
-    /// Signed in when `dir` holds credentials: the link starts and the local watcher doesn't.
     pub fn start(app: &AppHandle, dir: PathBuf, machine: Arc<Machine>) -> Account {
         let signed_in = Credentials::load(&dir).map(|creds| SignedIn { link: connect(&creds, machine.clone()), creds });
         let watcher = signed_in.is_none().then(|| watch_connectors(app.clone(), machine));
@@ -47,8 +42,6 @@ impl Account {
         self.signed_in.read().unwrap().is_some()
     }
 
-    /// Sends a connector session's callback to the hub, which holds the keys, while signed in.
-    /// Signed out, it comes back for the app's own connectors to answer.
     pub fn forward(&self, message: pinned_core::agent::Message) -> Result<Result<String, String>, pinned_core::agent::Message> {
         match self.signed_in.read().unwrap().as_ref() {
             Some(signed_in) => Ok(signed_in.link.forward(message)),
@@ -73,7 +66,6 @@ fn connect(creds: &Credentials, machine: Arc<Machine>) -> Link {
     link::spawn(creds.clone(), machine, env!("CARGO_PKG_VERSION"))
 }
 
-/// Runs the app's own connectors, handing their runs to this Mac.
 fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         let open = |work| {
@@ -88,7 +80,6 @@ fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
     })
 }
 
-/// The name the Mac shows in Finder's sidebar, which names it in the account.
 fn computer_name() -> String {
     std::process::Command::new("scutil")
         .args(["--get", "ComputerName"])
@@ -105,8 +96,6 @@ pub fn account(account: State<Account>) -> View {
     account.view()
 }
 
-/// Signs in, or creates the account with `create`, registers this Mac as one of its machines and
-/// connects it. The account's hub then runs the connectors instead of this app.
 #[tauri::command]
 pub async fn sign_in(app: AppHandle, hub: String, email: String, password: String, create: bool) -> Result<View, String> {
     // The account calls block on their own HTTP client, which must not run on an async worker.
@@ -149,8 +138,6 @@ pub async fn sign_out(app: AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Moves this app's connectors and keys into the account once the link is up, if the account
-/// has none yet. An account that already has some keeps them, and this app's stay on disk.
 fn import_when_empty(app: AppHandle) {
     std::thread::spawn(move || {
         let state = app.state::<Account>();

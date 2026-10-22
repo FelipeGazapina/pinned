@@ -1,7 +1,5 @@
-//! A machine's membership in a pinned account: the credentials file, and the hub's HTTP calls
-//! that sign in and register the machine. The calls block, so make them off any async runtime's
-//! workers (reqwest's blocking client panics inside one). The binary installs rustls's ring
-//! provider before the first call.
+//! The calls block, so make them off any async runtime's workers (reqwest's blocking client
+//! panics inside one). The binary installs rustls's ring provider before the first call.
 
 use crate::wire::{AccountView, MachineId, MachineView};
 use serde::de::DeserializeOwned;
@@ -11,7 +9,6 @@ use std::time::Duration;
 
 const FILE: &str = "account.json";
 
-/// What `account.json` holds. A machine paired with a code has no login: its `user_token` is empty.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Credentials {
     pub hub: String,
@@ -90,7 +87,6 @@ pub struct Paired {
     pub email: String,
 }
 
-/// Every error the hub's HTTP API answers with.
 #[derive(Serialize, Deserialize)]
 pub struct Failure {
     pub error: String,
@@ -137,7 +133,6 @@ pub fn logout(hub: &str, user_token: &str) -> Result<(), String> {
     }
 }
 
-/// This machine's host name, which names it in the account until someone renames it.
 pub fn hostname() -> String {
     let out = std::process::Command::new("hostname").stderr(std::process::Stdio::null()).output();
     let name = out.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();

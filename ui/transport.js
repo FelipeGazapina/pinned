@@ -1,4 +1,3 @@
-/** The app's bridge to its own machine, or null in a plain browser, where the hub serves this page as the web app. */
 const TAURI = window.__TAURI__ ?? null;
 document.documentElement.dataset.shell = TAURI ? "app" : "web";
 
@@ -17,10 +16,6 @@ function save(key, value) {
   } catch {}
 }
 
-/**
- * How the UI reaches one machine: `call` sends a `wire::Call` and resolves with its answer,
- * `attach` streams a tab's output to `sink.write(bytes)`, its screen first, until `detach`.
- */
 const localTransport = {
   call: (call) => invoke("machine_call", { call }),
   attach(tab, sink) {

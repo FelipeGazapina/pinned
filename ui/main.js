@@ -9,7 +9,6 @@ if (TAURI) {
 const STATUS_TEXT = { idle: "", working: "working…", done: "done", "needs-input": "needs you", failed: "stopped" };
 const ALERTS = ["done", "needs-input", "failed"];
 const EDGES = ["top", "bottom", "left", "right"];
-/** The app's own machine. Every other key in `machines` is the id the hub gave a machine. */
 const LOCAL = "local";
 
 const workspace = document.getElementById("workspace");
@@ -18,13 +17,10 @@ const tabList = document.getElementById("tab-list");
 const terms = document.getElementById("terms");
 const picker = document.getElementById("projects");
 
-/** Every machine the UI shows, by id. Each: { view: MachineView, tabs: TabView[], transport, usage }. */
 const machines = new Map();
-/** While signed in: { hub, email, machine_id, user_token }, and the hub's client socket. */
 let account = null;
 let hub = null;
 
-/** Tabs of every machine in display order. Each: { key, machine, view: TabView, term, fit, el, button, sink, attached }. */
 const tabs = [];
 let active = null;
 
@@ -38,7 +34,6 @@ const tilde = (path) => path.replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)(?=\
 const tabName = (tab) => tab.view.cwd.split("/").filter(Boolean).pop() || (tab.view.cwd ? "/" : "claude");
 const isVertical = () => ["left", "right"].includes(document.body.dataset.tabs);
 
-/** This UI's tab order as `machine:tab` keys, kept across reloads; a tab of a machine that is offline keeps its place. */
 let order = [];
 try {
   order = JSON.parse(load("tab-order")) ?? [];
@@ -51,7 +46,6 @@ function placeTabs() {
   save("tab-order", JSON.stringify(order.slice(-200)));
 }
 
-/** Shows `views` as the machine's tabs: adds the new ones, updates the rest and removes those gone. */
 function setTabs(machine, views, { forget = true } = {}) {
   const m = machines.get(machine);
   if (!m) return;
@@ -81,7 +75,6 @@ function updateView(tab, view) {
   }
 }
 
-/** Opens a tab on `machine` at `path`, or its default folder when `path` is null, and starts claude there. */
 async function openTab(machine, path, bypass = false) {
   const id = await callOn(machine, { cmd: "open_tab", path, bypass });
   await refreshTabs(machine);
@@ -91,7 +84,6 @@ async function openTab(machine, path, bypass = false) {
   return tab;
 }
 
-/** The picker's target: a machine to open a new tab on, or `tab` to move to another folder. */
 let picking = { machine: LOCAL, tab: null };
 /** The picker's entries in display order, and which one Enter opens. */
 let choices = [];
@@ -107,7 +99,6 @@ function setBypassNext(on) {
   picker.querySelector(".bypass").textContent = on ? "⚡ Skip all permissions: on" : "⚡ Skip all permissions: off";
 }
 
-/** Opens the picker on `machine`, or the first machine online, to start a tab or to move `tab`. */
 async function showProjects({ machine, tab = null } = {}) {
   machine ??= machines.get(picking.machine)?.view.online ? picking.machine : onlineMachines()[0];
   if (!machine) return;
@@ -153,7 +144,6 @@ async function showProjects({ machine, tab = null } = {}) {
   choose(0);
 }
 
-/** The row of machines on top of the picker, shown once there is more than this one. Offline ones can't be picked. */
 function pickerMachinesHtml(current, lockToCurrent) {
   if (machines.size < 2 && current === LOCAL) return "";
   const row = [...machines.entries()].map(([id, m]) => {
@@ -191,7 +181,6 @@ function closeProjects() {
 
 const toggleProjects = () => (pickerOpen() ? closeProjects() : showProjects());
 
-/** Opens a new tab at `path` on the picker's machine, or moves the picker's tab there. Shows a refusal in the picker. */
 async function pickFolder(path) {
   const { machine, tab } = picking;
   try {
@@ -226,7 +215,6 @@ async function openRemote(machine, path, bypass) {
   await startTab(tab);
 }
 
-/** Moves the tab to `path` on its machine and starts claude there afresh. */
 async function moveTab(tab, path) {
   await callOn(tab.machine, { cmd: "set_folder", tab: tab.view.id, path });
   tab.term.reset();
@@ -234,7 +222,6 @@ async function moveTab(tab, path) {
   tab.term.focus();
 }
 
-/** Replaces the picker's last entry with an input for a path on the remote machine. */
 function typePath() {
   const last = picker.querySelectorAll(".choices button")[choices.length - 1];
   const form = document.createElement("form");
@@ -252,7 +239,6 @@ function typePath() {
   };
 }
 
-/** Shows the tab `view` of `machine`, attached to its output. A tab that someone else opened stays in the background. */
 function addTab(machine, view) {
   const el = document.createElement("div");
   el.className = "term";
@@ -294,7 +280,6 @@ function addTab(machine, view) {
   return tab;
 }
 
-/** Keystrokes for the tab's session; Enter restarts claude once it has exited. */
 function typeInto(tab, data) {
   if (tab.view.running) return callOn(tab.machine, { cmd: "write_input", tab: tab.view.id, data });
   if (data === "\r") startTab(tab);
@@ -312,7 +297,6 @@ async function startTab(tab) {
   }
 }
 
-/** Ends the tab on its machine, which removes it from every device showing it. */
 function closeTab(tab) {
   removeTab(tab, true);
   render();
@@ -321,7 +305,6 @@ function closeTab(tab) {
   else callOn(tab.machine, { cmd: "close_tab", tab: tab.view.id }).catch(console.warn);
 }
 
-/** Takes the tab off this UI. `forget` drops its place in the order too, as it is gone for good. */
 function removeTab(tab, forget) {
   const i = tabs.indexOf(tab);
   if (i < 0) return;
@@ -343,7 +326,6 @@ function activate(tab) {
   show(tab);
 }
 
-/** Brings the tab to the front, leaving the picker or settings open over it. */
 function show(tab) {
   active = tab;
   for (const t of tabs) {
@@ -522,7 +504,6 @@ tabBar.addEventListener("mousedown", (e) => {
   });
 });
 
-// ＋ and the folder button toggle the picker themselves, so a click on them doesn't count as outside.
 window.addEventListener("mousedown", (e) => {
   if (pickerOpen() && !e.target.closest("#projects, #new-tab, #folder")) closeProjects();
 }, true);
@@ -545,7 +526,6 @@ function stepTab(step) {
 
 // Caught before xterm, which would otherwise swallow them.
 window.addEventListener("keydown", (e) => {
-  // The path field keeps its keys, except Escape, which goes back to the list.
   if (pickerOpen() && e.target.closest?.(".type-path")) {
     if (e.key === "Escape") showProjects(picking);
     return;
@@ -581,7 +561,6 @@ window.addEventListener("keydown", (e) => {
 }, true);
 
 // Claude Code attaches an image when a file path is pasted, so a drop becomes a paste of the escaped paths.
-// The paths only mean something on this Mac, so a remote tab ignores the drop.
 TAURI?.webview.getCurrentWebview().onDragDropEvent(({ payload }) => {
   if (payload.type !== "drop" || active?.machine !== LOCAL || !active.view.running) return;
   const escaped = payload.paths.map((p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&"));
@@ -598,7 +577,6 @@ document.addEventListener("paste", (e) => {
   callOn(LOCAL, { cmd: "write_input", tab: active.view.id, data: "\x16" });
 }, true);
 
-/** A `wire::MachineEvent` from `machine`. Output never comes here: it goes to the attached terminal. */
 function onMachineEvent(machine, event) {
   if (!machines.has(machine)) return;
   if (event.kind === "tabs") return setTabs(machine, event.tabs);
@@ -627,7 +605,6 @@ function resetsText(resetsAt) {
   return `resets ${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
 }
 
-// The meter shows the subscription of the active tab's machine, which may be signed into another one.
 // A window's figure stops holding once it resets, so it leaves the meter then.
 function renderUsage() {
   const usage = machines.get(active?.machine ?? LOCAL)?.usage ?? {};
@@ -675,7 +652,6 @@ document.getElementById("pill-edge").onmousedown = resizeFrom("East");
 document.getElementById("pill-corner").onmousedown = resizeFrom("SouthEast");
 document.getElementById("grip").onmousedown = resizeFrom("SouthEast");
 
-// Only this Mac has a folder dialog; a remote tab picks its folder from the machine's projects or a typed path.
 document.getElementById("folder").onclick = async () => {
   const tab = active;
   if (!tab) return;
@@ -725,7 +701,6 @@ if (TAURI) {
 
 new ResizeObserver(() => refit(active)).observe(terms);
 
-/** Connects to the hub as `signedIn` and shows its machines next to this one. */
 function connectHub(signedIn) {
   account = signedIn;
   hub = new Hub(signedIn.hub, signedIn.user_token, {
@@ -746,7 +721,6 @@ function connectHub(signedIn) {
   });
 }
 
-/** Mirrors the account's machines; `tabsByMachine` comes with the hub's hello. */
 function showMachines(list, tabsByMachine) {
   for (const view of list) {
     if (view.id === account.machine_id) {
@@ -772,7 +746,6 @@ function showMachines(list, tabsByMachine) {
   if (settingsOpen() && page === "machines" && !machinesUi.renaming) showMachinesPage();
 }
 
-/** Forgets the hub: its machines and their tabs leave this UI. */
 function disconnectHub() {
   hub?.close();
   hub = null;
@@ -795,7 +768,6 @@ async function bootApp() {
     usage: {},
   });
   invoke("get_usage").then((usage) => onMachineEvent(LOCAL, { kind: "usage", usage }));
-  // Sessions still going when pinned quit come back resumed; a reloaded webview finds its tabs already open.
   const restored = await invoke("restore_tabs");
   await refreshTabs(LOCAL);
   for (const id of restored) await startTab(tabByKey(keyOf(LOCAL, id)));

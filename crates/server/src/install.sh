@@ -1,5 +1,4 @@
 #!/bin/sh
-# Installs pinned-server, pairs this machine with a pinned account, and keeps it running.
 # Usage: curl -fsSL {{hub}}/install.sh | sh -s -- <pairing code>
 set -eu
 

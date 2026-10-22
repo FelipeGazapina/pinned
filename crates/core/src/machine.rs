@@ -1,7 +1,3 @@
-//! One machine's tabs: claude sessions in PTYs, their output fanned out to whoever watches, and
-//! what the hooks report about them. Nothing here knows about windows, so the desktop app and the
-//! headless node host the same runtime.
-
 use crate::agent::{AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, EXE_PLACEHOLDER};
 use crate::{history, hooks, plugin, projects, pty, reminders, sessions};
@@ -18,28 +14,21 @@ use std::sync::{Arc, Mutex, Weak};
 pub const OUTPUT_KEEP: usize = 256 * 1024;
 /// Slack after a usage limit's reset time before the session is told to continue.
 const LIMIT_MARGIN_SECS: u64 = 5;
-/// The terminal size of a session that starts with no one watching, as a connector's run does.
 const UNWATCHED: (u16, u16) = (120, 32);
 
-/// Everything a machine reports goes out as a wire event. `Output` is never emitted here: output
-/// reaches viewers through `attach`.
 pub type Event = MachineEvent;
 /// Names a viewer of a tab, such as `local` for the app's own webview; attaching again replaces it.
 pub type ViewerId = String;
 /// Receives a tab's output. It runs on the session's reader thread with the tab's screen locked,
 /// so it must not attach to or detach from that tab.
 pub type Sink = Box<dyn Fn(&[u8]) + Send + Sync>;
-/// Hears every event from when it subscribes, alongside the callback `Machine::new` took.
 pub type Listener = Box<dyn Fn(&Event) + Send + Sync>;
 
-/// How every session starts.
 pub struct Launch {
-    /// This binary, which hooks and connector sessions call back.
     pub exe: PathBuf,
     pub claude: PathBuf,
     pub path_env: Option<String>,
     pub settings: PathBuf,
-    /// The reminders MCP server, which a machine without a desktop to notify on leaves out.
     pub mcp_config: Option<PathBuf>,
     /// The plugin directory holding the skills that ship inside pinned, and its tutorial helper.
     pub plugin_dir: PathBuf,
@@ -124,10 +113,8 @@ const INHERITED_SESSION_ENV: [&str; 11] = [
     "CLAUDE_CODE_SSE_PORT",
 ];
 
-/// What a tab's current session printed, and who is watching it.
 #[derive(Default)]
 struct Screen {
-    /// The last `OUTPUT_KEEP` bytes.
     kept: VecDeque<u8>,
     viewers: Vec<(ViewerId, Sink)>,
     /// Counts starts, so a replaced session's last bytes can't land on its successor's screen.
@@ -135,7 +122,6 @@ struct Screen {
 }
 
 impl Screen {
-    /// Empties the screen for a new session and returns the number its output is pushed under.
     fn restart(&mut self) -> u64 {
         self.kept.clear();
         self.session += 1;
@@ -169,7 +155,6 @@ impl Screen {
     }
 }
 
-/// One tab: its own folder and claude session.
 struct Tab {
     cwd: PathBuf,
     session: Option<pty::Session>,
@@ -189,7 +174,6 @@ struct Tab {
     turn: Option<(String, Option<String>)>,
     status: Option<AgentStatus>,
     title: Option<String>,
-    /// What the session asks, while it needs input.
     message: Option<String>,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
@@ -223,16 +207,13 @@ pub struct Machine {
     projects_file: Option<PathBuf>,
     /// One file of finished turns per project.
     history_dir: Option<PathBuf>,
-    /// Where a run clones a repository this machine has no folder for.
     clones: PathBuf,
-    /// Set while the machine shuts down, when sessions die without having finished.
     quitting: AtomicBool,
     usage: Mutex<Usage>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
     next_listener: AtomicU64,
-    /// The `Arc` this machine lives in, for the threads it starts.
     me: Weak<Machine>,
 }
 
@@ -376,7 +357,6 @@ impl Machine {
         Ok(cwd.display().to_string())
     }
 
-    /// Runs `cmd` as the tab's session, its output going to the tab's screen.
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
         // Dropping the old session kills it silently, so its exit can't be mistaken for the new one's.
         let screen = self.tab(tab, |t| {
@@ -528,7 +508,6 @@ impl Machine {
         ids
     }
 
-    /// The subscription usage Claude Code last reported.
     pub fn usage(&self) -> Usage {
         *self.usage.lock().unwrap()
     }
@@ -615,7 +594,6 @@ impl Machine {
         self.emit(Event::Tabs { tabs: self.tabs() });
     }
 
-    /// The session's claude exited by itself.
     fn exited(&self, tab: &str, session: u64) {
         let Ok(screen) = self.tab(tab, |t| t.screen.clone()) else { return };
         if screen.lock().unwrap().session != session {
@@ -668,7 +646,6 @@ impl Machine {
         }
     }
 
-    /// Tracks the tab's status, and whether its turn has work left, from what its hooks report.
     fn record_status(&self, tab: &str, event: &AgentEvent) {
         let changed = self.tab(tab, |t| {
             let before = (t.interrupted, t.resume_at);
@@ -717,7 +694,6 @@ impl Machine {
         }
     }
 
-    /// Forgets the tab's session once it finished, unless it only died because the machine is quitting.
     fn end_session(&self, tab: &str) {
         if self.quitting.load(Ordering::SeqCst) {
             return;
@@ -755,8 +731,6 @@ impl Machine {
         });
     }
 
-    /// The folder a run works in here: its own folder when this machine has it, else a known
-    /// project with the same git origin, else a fresh clone under `~/pinned`.
     fn find_folder(&self, folder: &str, repo: Option<&str>) -> Result<PathBuf, String> {
         let dir = PathBuf::from(folder);
         if dir.is_dir() {
@@ -796,7 +770,6 @@ fn paste(text: &str) -> Vec<u8> {
     [b"\x1b[200~", text.as_bytes(), b"\x1b[201~\r"].concat()
 }
 
-/// The `origin` remote of the git repository at `dir`.
 pub fn git_remote(dir: &Path) -> Option<String> {
     let out = Command::new("git")
         .arg("-C")
@@ -810,18 +783,15 @@ pub fn git_remote(dir: &Path) -> Option<String> {
     (out.status.success() && !url.is_empty()).then_some(url)
 }
 
-/// The folder name `git clone` gives `repo`.
 fn repo_name(repo: &str) -> Option<&str> {
     let name = repo.trim_end_matches('/').rsplit(['/', ':']).next()?.trim_end_matches(".git");
     (!name.is_empty() && name != "." && name != "..").then_some(name)
 }
 
-/// `host/owner/name` of a git URL, the same for its ssh and https forms.
 fn repo_key(url: &str) -> Option<String> {
     let url = url.trim().trim_end_matches('/').trim_end_matches(".git");
     let rest = match url.split_once("://") {
         Some((_, rest)) => rest.to_owned(),
-        // scp-like `git@host:owner/name`
         None => url.replacen(':', "/", 1),
     };
     let rest = rest.rsplit_once('@').map_or(rest.as_str(), |(_, host_path)| host_path);
@@ -932,14 +902,12 @@ mod tests {
         cmd
     }
 
-    /// A tab whose session runs `script` under sh.
     fn running(m: &Machine, env: Vec<(String, String)>, script: &str) -> TabId {
         let id = m.add_tab("/repo".into(), vec![], env, false, None);
         m.spawn(&id, sh(script), pty::size(80, 24)).unwrap();
         id
     }
 
-    /// A sink and everything it received.
     fn viewer() -> (Arc<Mutex<Vec<u8>>>, Sink) {
         let seen = Arc::new(Mutex::new(vec![]));
         let sink = seen.clone();

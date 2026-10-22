@@ -14,7 +14,6 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 const INTERVAL: Duration = Duration::from_secs(60);
-/// The names each integration's secret is kept under.
 const LINEAR_KEY: &str = "linear-key";
 const SLACK_KEY: &str = "slack-key";
 /// A Slack watermark trails the check that moved it, so a message Slack shows a little late
@@ -134,10 +133,8 @@ pub struct Connector {
     /// Whether a session that opens a pull request must prove it works, with a Playwright video.
     #[serde(default = "on")]
     pub proof: bool,
-    /// The machine this connector's sessions run on when it is online; empty lets the hub pick.
     #[serde(default)]
     pub machine: String,
-    /// The git origin of `folder`, so a fallback machine can find or clone the repository.
     #[serde(default)]
     pub repo: String,
 }
@@ -218,7 +215,6 @@ impl Connector {
         Some(self.repo.trim().to_owned()).filter(|r| !r.is_empty())
     }
 
-    /// Undoes the claim of a session that never opened, so the next check finds its subject again.
     fn unclaim(&mut self, subject: &Subject) {
         let key = match subject {
             Subject::LinearIssue { issue } => issue.clone(),
@@ -309,14 +305,12 @@ impl Store {
     }
 }
 
-/// When the connectors last checked their integrations, and what went wrong.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Check {
     pub at: String,
     pub error: Option<String>,
 }
 
-/// Everything the settings page shows. Keys never leave the storage.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub linear: Option<linear::Account>,
@@ -329,7 +323,6 @@ pub struct Settings {
 #[derive(Clone)]
 pub struct Run {
     pub cwd: PathBuf,
-    /// The git origin of `cwd`, when the connector knows it.
     pub repo: Option<String>,
     pub args: Vec<String>,
     pub connector: String,
@@ -337,7 +330,6 @@ pub struct Run {
 }
 
 impl Run {
-    /// The run as any machine opens it.
     pub fn spec(&self) -> RunSpec {
         RunSpec {
             folder: self.cwd.display().to_string(),
@@ -368,12 +360,10 @@ pub struct Delivery {
 }
 
 impl Delivery {
-    /// The environment of the session that answers the thread.
     pub fn env(&self) -> Vec<(String, String)> {
         agent::session_env(&self.connector, &Subject::SlackThread { channel: self.channel.clone(), thread: self.thread.clone() })
     }
 
-    /// The messages as one prompt.
     pub fn text(&self) -> String {
         self.messages.join("\n\n")
     }
@@ -416,8 +406,6 @@ pub struct Suggestions {
     teams: Vec<String>,
 }
 
-/// Where the connectors keep their store and the integrations' keys: files for the app, the
-/// account's row for the hub.
 pub trait Storage: Send + Sync {
     /// The store's JSON, as `save` last wrote it.
     fn load(&self) -> Option<Vec<u8>>;
@@ -428,7 +416,6 @@ pub trait Storage: Send + Sync {
     fn remove_key(&self, name: &str);
 }
 
-/// `connectors.json` and one file per key in a directory, the keys readable only by the user.
 pub struct FileStorage {
     dir: PathBuf,
 }
@@ -475,7 +462,6 @@ impl Storage for FileStorage {
 
 pub struct Connectors {
     storage: Box<dyn Storage>,
-    /// How prompts name the pinned binary that sessions call back, as in `pinned stage`.
     exe: String,
     store: Mutex<Store>,
     checked: Mutex<Option<Check>>,
@@ -638,7 +624,6 @@ impl Connectors {
         }
     }
 
-    /// Forgets that the connector handled `subject`, and says why.
     fn unclaim(&self, connector: &str, subject: &Subject, folder: &Path) -> String {
         let error = format!("could not open a session in {}; the next check tries again", folder.display());
         let mut store = self.store.lock().unwrap();
@@ -963,7 +948,6 @@ fn filed_note(filed: &Filed) -> String {
     )
 }
 
-/// Each method answers the `wire::HubCall` of the same name.
 impl Connectors {
     /// Polls forever. `open` receives what each check found and answers whether a tab took it,
     /// and `on_check` hears how each check went. A settings change wakes it early.
@@ -1129,7 +1113,6 @@ mod tests {
         dir
     }
 
-    /// Connectors over a store holding `connectors`, as connectors.json in a fresh directory.
     fn stored(name: &str, connectors: Vec<Connector>) -> (Connectors, PathBuf) {
         let dir = temp_dir(name);
         let storage = FileStorage::new(dir.clone());

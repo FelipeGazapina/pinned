@@ -16,10 +16,8 @@ async function showGeneral() {
   };
 }
 
-/** The machine whose projects the Projects page shows. */
 let projectsMachine = LOCAL;
 
-/** The Projects page: every project a machine knows, and the turns its sessions finished in one. */
 async function showProjectsPage() {
   if (!machines.get(projectsMachine)?.view.online) projectsMachine = onlineMachines()[0];
   const projects = projectsMachine ? await callOn(projectsMachine, { cmd: "list_projects" }).catch(() => []) : [];

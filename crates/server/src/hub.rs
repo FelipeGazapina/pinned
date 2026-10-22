@@ -1,6 +1,3 @@
-//! The hub's live state: which machines and clients of each account are connected, the calls in
-//! flight between them, and each account's connectors, whose runs it hands to machines.
-
 use crate::db::{self, Db};
 use pinned_core::connectors::{Connectors, Storage, Work};
 use pinned_core::wire::{
@@ -15,16 +12,13 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
-/// How long a client's call waits for its machine, which may be cloning a repository.
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
 
 pub type Outbox = mpsc::UnboundedSender<String>;
-/// A call on its way to a machine: the machine's name, and where its answer arrives.
 pub type Sent = (String, oneshot::Receiver<Result<Value, String>>);
 
 pub struct Hub {
     pub db: Db,
-    /// The URL machines and browsers reach the hub at.
     pub public_url: String,
     accounts: Mutex<HashMap<Uuid, Arc<Account>>>,
     /// Numbers every socket, so a machine's old connection can't unregister its new one.
@@ -34,7 +28,6 @@ pub struct Hub {
 pub struct Account {
     pub id: Uuid,
     pub email: String,
-    /// One lock for machines and clients, since attaching spans both.
     live: Mutex<Live>,
     connectors: OnceCell<Arc<Connectors>>,
     watching: AtomicBool,
@@ -52,13 +45,11 @@ struct Online {
     out: Outbox,
     pending: HashMap<u64, oneshot::Sender<Result<Value, String>>>,
     next_call: u64,
-    /// Its last `Tabs` event.
     tabs: Vec<TabView>,
 }
 
 struct Client {
     out: Outbox,
-    /// The login token it signed in with, so logging out disconnects it.
     login: Vec<u8>,
     attached: HashSet<Target>,
 }
@@ -176,7 +167,6 @@ impl Hub {
         self.answer(account, machine, sent).await
     }
 
-    /// Waits for the answer to a call `Account::send_call` sent.
     pub async fn answer(&self, account: &Account, machine: &str, sent: Option<Sent>) -> Result<Value, String> {
         let Some((name, answered)) = sent else {
             let known = match Uuid::parse_str(machine) {
@@ -238,7 +228,6 @@ impl Hub {
             HubCall::SlackReply { connector, channel, thread, text } => {
                 (json(c().await?.slack_reply(&connector, &channel, &thread, &text).await?), false)
             }
-            // Both record the issue on the connector.
             HubCall::LinearCreate { connector, channel, thread, title, description, assignee } => {
                 (json(c().await?.linear_create(&connector, &channel, &thread, &title, &description, &assignee).await?), true)
             }
@@ -320,7 +309,6 @@ impl Account {
         }
     }
 
-    /// Online machines that pass `wanted`, `preferred` first, then the most recently connected.
     fn dispatch_order(&self, preferred: &str, wanted: impl Fn(&[TabView]) -> bool) -> Vec<MachineId> {
         let live = self.live.lock().unwrap();
         let mut online: Vec<(&MachineId, &Online)> = live.machines.iter().filter(|(_, m)| wanted(&m.tabs)).collect();
@@ -362,7 +350,6 @@ impl Account {
         }
     }
 
-    /// Passes a tab's output to the client whose viewer it is, while that client is attached.
     pub fn output(&self, machine: &str, viewer: &str, tab: TabId, data: pinned_core::wire::Bytes) {
         let live = self.live.lock().unwrap();
         let Some(client) = client_of(viewer).and_then(|id| live.clients.get(&id)) else { return };

@@ -1,6 +1,3 @@
-//! The hub against a real Postgres and real sockets: accounts, pairing, two in-process nodes
-//! running `cat` as claude, a client driving them, and connector dispatch.
-
 use base64::Engine;
 use pinned_core::account::{self, Credentials};
 use pinned_core::agent::Subject;
@@ -18,7 +15,6 @@ use tungstenite::{Message, WebSocket};
 const POSTGRES: &str = "postgres://pinned@127.0.0.1:5499";
 const WAIT: Duration = Duration::from_secs(10);
 
-/// A hub on its own database, both gone when it drops.
 struct TestHub {
     runtime: tokio::runtime::Runtime,
     running: Option<pinned_server::Running>,
@@ -108,7 +104,6 @@ impl Client {
         Client { ws, frames: vec![], next: 1, closed: None }
     }
 
-    /// Reads what arrived, returning false once the socket closed.
     fn pump(&mut self) -> bool {
         loop {
             match self.ws.read() {
@@ -124,7 +119,6 @@ impl Client {
         }
     }
 
-    /// The first frame received, before now or within `WAIT`, that `pred` picks.
     fn wait(&mut self, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
         let start = Instant::now();
         loop {
@@ -182,7 +176,6 @@ impl Client {
         }
     }
 
-    /// The machines of the latest `Machines` frame, or of `hello`, as `(name, online)`.
     fn machines(&mut self) -> Vec<(String, bool)> {
         self.pump();
         let latest = self.frames.iter().rev().find(|f| f["type"] == "machines" || f["type"] == "hello").unwrap();
@@ -198,7 +191,6 @@ impl Client {
     }
 }
 
-/// A machine whose "claude" is `cat`, linked to the hub with `creds`.
 struct Node {
     machine: Arc<Machine>,
     link: Option<Link>,
@@ -285,7 +277,6 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
         f["type"] == "event" && f["machine"] == b && f["event"]["kind"] == "tabs" && f["event"]["tabs"][0]["running"] == true
     });
     client.send(json!({ "type": "attach", "machine": b, "tab": "tab-1" }));
-    // Many small writes in a row must reach the session in the order they were typed.
     let typed: String = (0..300).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
     for key in typed.chars().chain(['\r']) {
         client.send(json!({ "type": "call", "id": 1000, "machine": b, "call": { "cmd": "write_input", "tab": "tab-1", "data": key.to_string() } }));
@@ -422,7 +413,6 @@ fn sign_in_rejects_wrong_passwords_duplicates_and_logged_out_tokens() {
     assert_eq!((again.closed, again.frames.len()), (Some(4001), 0));
     assert_eq!(account::register_machine(&url, &token, "vps", "linux"), Err("sign in first".into()));
 
-    // Ten failures in 15 minutes from one address (or for one email) lock sign in, even with the right password.
     for _ in 0..8 {
         assert_eq!(account::login(&url, "ana@acme.dev", "wrong horse"), Err("wrong email or password".into()));
     }

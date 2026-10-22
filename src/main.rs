@@ -16,14 +16,12 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 const OPACITIES: [u8; 6] = [100, 90, 80, 60, 40, 20];
 const DEFAULT_OPACITY: u8 = 94;
-/// The viewer the webview's terminals attach as.
 const LOCAL: &str = "local";
 
 /// The pill's starting size, and the smallest it can be resized to.
 const PILL: LogicalSize<f64> = LogicalSize { width: 210.0, height: 40.0 };
 const EXPANDED_MIN: LogicalSize<f64> = LogicalSize { width: 150.0, height: 40.0 };
 
-/// The panel window's own state; the tabs live in the `Machine`.
 struct Panel {
     expanded: Mutex<LogicalSize<f64>>,
     pill: Mutex<LogicalSize<f64>>,
@@ -40,14 +38,12 @@ enum View {
     Pill,
 }
 
-/// Answers a `wire::Call` from the webview, the same calls the hub forwards from other devices.
 /// Sync commands run one at a time on the main thread, which keeps keystrokes in order.
 #[tauri::command]
 fn machine_call(machine: State<Arc<Machine>>, call: Call) -> Result<serde_json::Value, String> {
     machine.call(call)
 }
 
-/// Streams the tab's output to the webview's terminal, starting with what its screen holds.
 #[tauri::command]
 fn attach_tab(machine: State<Arc<Machine>>, tab: String, output: Channel<InvokeResponseBody>) -> Result<(), String> {
     let sink = move |bytes: &[u8]| drop(output.send(InvokeResponseBody::Raw(bytes.to_vec())));
@@ -59,7 +55,6 @@ fn detach_tab(machine: State<Arc<Machine>>, tab: String) {
     machine.detach(&tab, LOCAL);
 }
 
-/// Reopens the sessions still going at the last quit, not yet started, and returns their tab ids.
 #[tauri::command]
 fn restore_tabs(machine: State<Arc<Machine>>) -> Vec<TabId> {
     machine.restore_tabs()
@@ -175,7 +170,6 @@ async fn install_update(app: AppHandle, panel: State<'_, Panel>, machine: State<
     app.restart();
 }
 
-/// Shows each reminder as a macOS notification once it is due.
 fn watch_reminders(app: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(1));

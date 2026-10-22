@@ -1,5 +1,3 @@
-//! The settings page's Tauri commands, answered by the app's own connectors.
-
 use pinned_core::connectors::{Connector, Connectors, Settings, Suggestions};
 use pinned_core::{linear, slack};
 use tauri::{AppHandle, State};

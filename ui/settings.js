@@ -51,7 +51,6 @@ let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [
 
 const settingsOpen = () => document.body.dataset.page === "settings";
 
-/** Signed in, the connectors belong to the account and the hub answers; signed out, the app's own do. */
 const connectorCall = (cmd, args = {}) => (hub ? hub.hub({ cmd, ...args }) : invoke(cmd, args));
 
 async function toggleSettings() {
@@ -66,7 +65,6 @@ async function toggleSettings() {
   showPage(page);
 }
 
-/** The account's connectors changed on the hub, by another device or a check. */
 function onHubSettings(latest) {
   settings = latest;
   if (!settingsOpen() || page !== "connectors") return;
@@ -295,12 +293,10 @@ const isOn = (c, id) => !STEPS[id].optional || STEPS[id].on(c);
 /** Steps the editor draws as nodes: the ones that run, and an optional one the user just opened to fill in. */
 const shown = (c, id) => isOn(c, id) || (view.name === "edit" && view.open === id);
 
-/** The id a connector names its machine by: the hub's, so this Mac goes by its account machine id. */
 const hubIdOf = (machine) => (machine === LOCAL ? account?.machine_id ?? "" : machine);
 const localIdOf = (id) => (id && id === account?.machine_id ? LOCAL : id);
 const runOnName = (c) => (c.machine ? machineName(localIdOf(c.machine)) : "any machine");
 
-/** Where the connector's folder is picked: its machine, or this Mac (in the browser, the first one online) when any may run it. */
 function folderMachine(c) {
   const preferred = localIdOf(c.machine);
   if (preferred && machines.has(preferred)) return preferred;
@@ -318,7 +314,6 @@ function runOnHtml(c) {
 const repoHint = (c) =>
   c.repo ? `A machine without this folder finds or clones <code>${esc(c.repo)}</code>.` : "";
 
-/** Fills the folder suggestions with the projects of the machine the folder is picked on. */
 async function loadFolders(c) {
   const machine = folderMachine(c);
   suggestions.folders = [];
@@ -328,7 +323,6 @@ async function loadFolders(c) {
   fillList("folders", suggestions.folders);
 }
 
-/** Records the folder's git origin, so another machine can clone it. */
 async function fillRepo() {
   const draft = view.draft;
   const folder = draft.folder.trim();

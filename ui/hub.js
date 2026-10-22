@@ -1,12 +1,6 @@
-/** Close codes a hub uses to refuse the token, so retrying with it is pointless. */
 const REFUSED = [1008, 4001, 4003];
 const RETRY_MS = [1000, 30000];
 
-/**
- * The hub's client socket (`/ws/client`), shared by every remote machine and the account calls.
- * Frames are `wire::ClientFrame` and `wire::ToClient`. `on` receives `hello`, `machines`,
- * `event(machine, event)` for everything but output, `settings`, `online(bool)` and `refused`.
- */
 class Hub {
   constructor(base, token, on) {
     this.url = base.replace(/\/$/, "").replace(/^http/, "ws") + "/ws/client";
@@ -14,9 +8,7 @@ class Hub {
     this.on = on;
     this.online = false;
     this.nextId = 1;
-    /** Calls waiting for their reply, by id. */
     this.pending = new Map();
-    /** Attached tabs by `machine:tab`, each with the sinks its output goes to. */
     this.attached = new Map();
     this.retry = RETRY_MS[0];
     this.closed = false;
@@ -92,12 +84,10 @@ class Hub {
     });
   }
 
-  /** Sends a `wire::Call` to `machine` through the hub. */
   call(machine, call) {
     return this.request({ type: "call", machine, call });
   }
 
-  /** Sends a `wire::HubCall`, answered by the hub itself. */
   hub(call) {
     return this.request({ type: "hub", call });
   }
@@ -120,7 +110,6 @@ class Hub {
     this.send({ type: "detach", machine, tab });
   }
 
-  /** A transport for `machine`, the same shape as `localTransport`. */
   transport(machine) {
     return {
       call: (call) => this.call(machine, call),

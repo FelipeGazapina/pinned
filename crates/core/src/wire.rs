@@ -34,13 +34,11 @@ impl<'de> Deserialize<'de> for Bytes {
     }
 }
 
-/// One tab as every client shows it.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TabView {
     pub id: TabId,
     pub cwd: String,
     pub bypass: bool,
-    /// A claude process is alive in the tab.
     pub running: bool,
     pub status: Option<AgentStatus>,
     pub title: Option<String>,
@@ -48,13 +46,11 @@ pub struct TabView {
     pub message: Option<String>,
     /// Unix time a usage limit lifts, while one stopped the turn.
     pub resume_at: Option<u64>,
-    /// The connector that opened the tab.
     pub connector: Option<String>,
     /// The tab's number, which orders tabs by when they opened.
     pub opened: u64,
 }
 
-/// A folder a machine offers when opening a tab.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ProjectView {
     pub path: String,
@@ -119,7 +115,6 @@ pub struct RunSpec {
 pub enum MachineEvent {
     /// Every tab, after any of them opened, closed, started, exited or changed status, title or folder.
     Tabs { tabs: Vec<TabView> },
-    /// A hook fired in a tab's session.
     Agent { event: AgentEvent },
     /// Output of a tab a client attached to, as the hub passes it on.
     Output { tab: TabId, data: Bytes },
@@ -203,7 +198,6 @@ pub struct PairCode {
     pub command: String,
 }
 
-/// A tab on some machine.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Target {
     pub machine: MachineId,
@@ -310,7 +304,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// `frame` serializes to exactly `expected`, and `expected` parses back to the same JSON.
     fn round_trip<T: Serialize + serde::de::DeserializeOwned>(frame: T, expected: Value) {
         assert_eq!(serde_json::to_value(&frame).unwrap(), expected);
         let parsed: T = serde_json::from_value(expected.clone()).unwrap();
