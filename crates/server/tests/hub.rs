@@ -457,8 +457,8 @@ fn a_closed_hub_takes_only_its_first_account_whose_password_can_change() {
     let hub = TestHub::start_with("closed", false);
     let url = hub.url.clone();
     let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
-    assert_eq!(account::signup(&url, "bruno@acme.dev", "correct horse"), Err("this hub takes no new accounts".into()));
-    assert_eq!(account::signup(&url, "ana@acme.dev", "another horse"), Err("this hub takes no new accounts".into()), "a closed hub doesn't say which emails it has");
+    assert_eq!(account::signup(&url, "bruno@acme.dev", "correct horse"), Err("this hub already has its account, so sign in with it instead".into()));
+    assert_eq!(account::signup(&url, "ana@acme.dev", "another horse"), Err("this hub already has its account, so sign in with it instead".into()), "a closed hub doesn't say which emails it has");
 
     assert_eq!(account::change_password(&url, &token, "wrong horse", "battery staple"), Err("the current password is wrong".into()));
     assert_eq!(account::change_password(&url, &token, "correct horse", "short"), Err("the password needs at least 8 characters".into()));

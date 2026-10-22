@@ -139,7 +139,7 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
     new_password(&body.password)?;
     // Refused before the email is looked at, so a closed hub tells nobody which accounts it has.
     if !server.open_signup && server.hub.db.has_accounts().await.map_err(internal)? {
-        return Err(Error(StatusCode::FORBIDDEN, "this hub takes no new accounts".into()));
+        return Err(Error(StatusCode::FORBIDDEN, "this hub already has its account, so sign in with it instead".into()));
     }
     if !server.attempt(&[(format!("signup:{}", client_address(peer, &headers)), ADDRESS_SIGNUPS)]) {
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many sign ups; try again in 15 minutes".into()));
