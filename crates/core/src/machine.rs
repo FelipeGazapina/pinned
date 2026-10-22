@@ -49,11 +49,14 @@ impl Launch {
     /// Writes the settings, MCP config and plugin every session loads, for sessions that call back `exe`.
     pub fn prepare(exe: &Path) -> std::io::Result<Launch> {
         let tmp = std::env::temp_dir();
-        let settings = tmp.join("pinned-claude-settings.json");
+        // One folder per process: the app and a node on the same Mac each point sessions at their own binary.
+        let files = tmp.join(format!("pinned-{}", std::process::id()));
+        std::fs::create_dir_all(&files)?;
+        let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
-        let mcp_config = tmp.join("pinned-claude-mcp.json");
+        let mcp_config = files.join("claude-mcp.json");
         reminders::write_mcp_config(&mcp_config, exe)?;
-        let plugin_dir = tmp.join("pinned-plugin");
+        let plugin_dir = files.join("plugin");
         let tutorial_helper = plugin::install(&plugin_dir)?;
         let path_env = login_shell_path().or_else(|| std::env::var("PATH").ok());
         Ok(Launch {
