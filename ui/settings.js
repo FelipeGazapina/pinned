@@ -347,7 +347,7 @@ function connectorsHtml() {
   return `${intro}
     ${settings.connectors.map(cardHtml).join("")}
     <button class="new-card" data-action="new-connector">＋ New connector</button>
-    <p class="hint" id="checked">${checkedText()}</p>`;
+    <p class="hint" id="checked">${esc(checkedText())}</p>`;
 }
 
 function cardHtml(c, i) {

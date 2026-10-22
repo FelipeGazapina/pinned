@@ -58,9 +58,9 @@ function historyHtml(turns) {
     return `<p class="empty">Nothing recorded yet. Each turn a session finishes in a git project is saved here with the files it changed.</p>`;
   }
   return turns.map((t) => {
-    const added = t.files.reduce((n, f) => n + f.added, 0);
-    const removed = t.files.reduce((n, f) => n + f.removed, 0);
-    const files = t.files.map((f) => `<li><span>${esc(f.path)}</span><span class="add">+${f.added}</span><span class="del">−${f.removed}</span></li>`).join("");
+    const added = t.files.reduce((n, f) => n + Number(f.added), 0);
+    const removed = t.files.reduce((n, f) => n + Number(f.removed), 0);
+    const files = t.files.map((f) => `<li><span>${esc(f.path)}</span><span class="add">+${Number(f.added)}</span><span class="del">−${Number(f.removed)}</span></li>`).join("");
     const patch = t.patch.split("\n").map((l) => `<span class="l ${lineClass(l)}">${esc(l)}</span>`).join("");
     return `<details class="turn">
       <summary>
