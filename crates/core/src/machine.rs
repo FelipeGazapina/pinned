@@ -75,6 +75,9 @@ impl Launch {
 
     fn command(&self, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)]) -> CommandBuilder {
         let mut cmd = CommandBuilder::new(&self.claude);
+        for key in INHERITED_SESSION_ENV {
+            cmd.env_remove(key);
+        }
         if let Some(mcp_config) = &self.mcp_config {
             // --mcp-config takes any number of values, so --settings right after it keeps it from swallowing the rest.
             cmd.arg("--mcp-config");
@@ -103,6 +106,23 @@ impl Launch {
         cmd
     }
 }
+
+/// What a Claude Code session sets for the processes it runs. pinned started from inside one (a
+/// terminal tab of claude, or a node run from it) would pass them on, and each tab's claude
+/// would then take itself for a nested session: no transcript, so `--resume` finds nothing.
+const INHERITED_SESSION_ENV: [&str; 11] = [
+    "CLAUDECODE",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SSE_PORT",
+];
 
 /// What a tab's current session printed, and who is watching it.
 #[derive(Default)]
@@ -1137,6 +1157,16 @@ mod tests {
         let elsewhere = RunSpec { folder: "/nonexistent/acme".into(), repo: None, ..run };
         assert_eq!(m.open_run(&elsewhere), Err("/nonexistent/acme does not exist on this machine".into()));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn claude_does_not_inherit_the_session_pinned_was_started_from() {
+        std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session");
+        std::env::set_var("CLAUDECODE", "1");
+        let cmd = launch().command("tab-1", Path::new("/repo"), false, vec![], &[]);
+        assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
+        assert_eq!(cmd.get_env("CLAUDECODE"), None);
+        assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
     }
 
     #[test]
