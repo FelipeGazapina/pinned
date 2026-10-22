@@ -25,6 +25,8 @@ create table if not exists pair_codes (code text primary key, account uuid not n
 
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LEN: usize = 8;
+/// A login unused this long stops working; every use pushes it back.
+const LOGIN_IDLE_DAYS: i32 = 90;
 
 #[derive(Clone)]
 pub struct Db {
@@ -127,7 +129,11 @@ impl Db {
     pub async fn login(&self, token: &str) -> Result<Option<Uuid>, String> {
         let row = self
             .client().await?
-            .query_opt("update logins set last_used = now() where token_hash = $1 returning account", &[&hash(token)])
+            .query_opt(
+                "update logins set last_used = now() where token_hash = $1 \
+                 and coalesce(last_used, created_at) > now() - make_interval(days => $2) returning account",
+                &[&hash(token), &LOGIN_IDLE_DAYS],
+            )
             .await
             .map_err(err)?;
         Ok(row.map(|r| r.get(0)))

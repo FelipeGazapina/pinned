@@ -64,9 +64,13 @@ impl Drop for TestHub {
 }
 
 fn admin(sql: &str) {
+    admin_on("pinned", sql);
+}
+
+fn admin_on(database: &str, sql: &str) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let (client, connection) = tokio_postgres::connect(&format!("{POSTGRES}/pinned"), tokio_postgres::NoTls).await.unwrap();
+        let (client, connection) = tokio_postgres::connect(&format!("{POSTGRES}/{database}"), tokio_postgres::NoTls).await.unwrap();
         tokio::spawn(connection);
         client.batch_execute(sql).await.unwrap();
     });
@@ -430,6 +434,11 @@ fn sign_in_rejects_wrong_passwords_duplicates_and_logged_out_tokens() {
     wait_for("the stale token to be refused", || !again.pump());
     assert_eq!((again.closed, again.frames.len()), (Some(4001), 0));
     assert_eq!(account::register_machine(&url, &token, "vps", "linux"), Err("sign in first".into()));
+
+    let (idle, _) = account::login(&url, "ana@acme.dev", "correct horse").unwrap();
+    assert!(account::register_machine(&url, &idle, "vps", "linux").is_ok());
+    admin_on(&hub.database, "update logins set last_used = now() - interval '91 days'");
+    assert_eq!(account::register_machine(&url, &idle, "vps", "linux"), Err("sign in first".into()), "a login unused for 90 days expired");
 
     for _ in 0..8 {
         assert_eq!(account::login(&url, "ana@acme.dev", "wrong horse"), Err("wrong email or password".into()));
