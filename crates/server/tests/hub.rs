@@ -8,6 +8,7 @@ use pinned_core::sync;
 use pinned_core::wire::HubCall;
 use serde_json::{json, Value};
 use std::net::TcpStream;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -309,7 +310,7 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
 
     assert_eq!(
         client.call(b, json!({ "cmd": "format_disk" })),
-        Err("this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`, `start_claude`, `write_input`, `resize_pty`, `close_tab`, `set_folder`, `list_projects`, `project_history`, `git_remote`, `browse`, `clone`, `run`, `deliver`".replace("0.5.1", env!("CARGO_PKG_VERSION")))
+        Err("this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`, `start_claude`, `write_input`, `resize_pty`, `close_tab`, `set_folder`, `list_projects`, `project_history`, `git_remote`, `browse`, `clone`, `run`, `deliver`, `upload`".replace("0.5.1", env!("CARGO_PKG_VERSION")))
     );
     assert!(client.hub(json!({ "cmd": "self_destruct" })).unwrap_err().contains("unknown variant `self_destruct`"));
     assert_eq!(client.call("not-a-machine", json!({ "cmd": "tabs" })), Err("this account has no machine not-a-machine".into()));
@@ -550,6 +551,36 @@ fn a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link() {
     assert!(mac.online() && mini.online(), "both links stay up");
     mac.kill();
     mini.kill();
+}
+
+#[test]
+fn a_file_a_client_attaches_lands_in_the_nodes_private_uploads_folder() {
+    let hub = TestHub::start("upload");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let dir = temp("upload-node");
+    let creds = pair(&url, &mut client, "vps", &dir);
+    let machine = creds.machine_id.clone();
+    let node = Node::start(&dir, creds);
+    wait_for("the node online", || node.online());
+    // 20 MB in base64 is past tungstenite's 16 MB default frame, on the client's socket and the node's.
+    let photo: Vec<u8> = (0..20 << 20).map(|i| (i % 251) as u8).collect();
+    let upload = |name: &str, data: &[u8]| json!({ "cmd": "upload", "name": name, "data": base64::engine::general_purpose::STANDARD.encode(data) });
+
+    let path = client.call(&machine, upload("../../.ssh/Foto da praia (1).JPG", &photo)).unwrap();
+    let uploads = dir.join("uploads");
+    assert_eq!(path, json!(uploads.join("Foto_da_praia__1_.JPG").display().to_string()));
+    assert!(std::fs::read(uploads.join("Foto_da_praia__1_.JPG")).unwrap() == photo, "the node holds the photo byte for byte");
+    assert_eq!(std::fs::metadata(&uploads).unwrap().permissions().mode() & 0o777, 0o700);
+    let again = client.call(&machine, upload("Foto da praia (1).JPG", b"second")).unwrap();
+    assert_eq!(again, json!(uploads.join("Foto_da_praia__1_-2.JPG").display().to_string()));
+
+    let too_big = vec![0u8; (25 << 20) + 1];
+    assert_eq!(client.call(&machine, upload("clip.mov", &too_big)), Err("clip.mov is over 25 MB, the largest file pinned attaches".into()));
+    assert!(!uploads.join("clip.mov").exists());
+    assert!(node.online(), "the link stays up");
 }
 
 #[test]
