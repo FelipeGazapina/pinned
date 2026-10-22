@@ -444,6 +444,51 @@ win.listen("agent-event", ({ payload }) => {
   }
 });
 
+const usageMeter = document.getElementById("usage");
+const LIMITS = [
+  ["five_hour", "5h", "5-hour limit"],
+  ["seven_day", "7d", "7-day limit"],
+];
+/** The subscription usage Claude Code last reported, keyed like LIMITS. Each window: { used_percentage, resets_at }. */
+let usage = {};
+
+function resetsText(resetsAt) {
+  const date = new Date(resetsAt * 1000);
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (date.toDateString() === new Date().toDateString()) return `resets ${time}`;
+  return `resets ${date.toLocaleDateString([], { weekday: "short" })} ${time}`;
+}
+
+// A window's figure stops holding once it resets, so it leaves the meter then.
+function renderUsage() {
+  const now = Date.now() / 1000;
+  const shown = LIMITS.filter(([key]) => usage[key]?.resets_at > now);
+  usageMeter.hidden = !shown.length;
+  usageMeter.replaceChildren(
+    ...shown.map(([key, label]) => {
+      const used = usage[key].used_percentage;
+      const limit = document.createElement("span");
+      limit.className = "limit";
+      limit.dataset.level = used >= 90 ? "critical" : used >= 70 ? "high" : "ok";
+      limit.innerHTML = `<span class="text"></span><span class="bar"><span class="fill"></span></span>`;
+      limit.querySelector(".text").textContent = `${label} ${Math.round(used)}%`;
+      limit.querySelector(".fill").style.width = `${Math.min(100, used)}%`;
+      return limit;
+    }),
+  );
+  usageMeter.title = shown
+    .map(([key, , name]) => `${name}: ${+usage[key].used_percentage.toFixed(1)}% used, ${resetsText(usage[key].resets_at)}`)
+    .join("\n");
+}
+
+function showUsage(latest) {
+  usage = latest;
+  renderUsage();
+}
+invoke("get_usage").then(showUsage);
+win.listen("usage", ({ payload }) => showUsage(payload));
+setInterval(renderUsage, 60 * 1000);
+
 async function setView(view) {
   document.body.classList.remove("alert");
   await invoke("set_view", { view });

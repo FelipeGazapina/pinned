@@ -23,6 +23,15 @@ header { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px
   border-bottom: 1px solid var(--border); cursor: grab; user-select: none; }
 #title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
 #status-text { color: var(--status-color); }
+#usage { display: flex; gap: 8px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+#usage[hidden] { display: none; }
+/* Clicks fall through to #usage, which drags the panel like the rest of the header. */
+#usage .limit { display: flex; flex-direction: column; gap: 2px; pointer-events: none; --level-color: var(--working); }
+#usage .bar { height: 2px; border-radius: 1px; background: var(--border); }
+#usage .fill { display: block; height: 100%; border-radius: 1px; background: var(--level-color); }
+#usage .limit[data-level="high"] { --level-color: var(--needs-input); }
+#usage .limit[data-level="critical"] { --level-color: #e5484d; }
+#usage .limit[data-level="critical"] .text { color: #e5484d; }
 #minimize { width: 22px; height: 22px; border-radius: 6px; font-size: 16px; line-height: 1; }
 #minimize:hover, #folder:hover, #new-tab:hover, #settings-toggle:hover { background: #ffffff14; }
 body[data-page="history"] #settings-toggle { width: 22px; height: 22px; border-radius: 6px; font-size: 14px; line-height: 1; }
