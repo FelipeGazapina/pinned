@@ -52,7 +52,7 @@ pub enum Fix {
     /// Analyze and reply; never file an issue or change code.
     #[default]
     Off,
-    /// Analyze, then ask in the thread; file and fix only once someone replied.
+    /// Analyze, then ask in the thread; file and fix only once someone answered it with a mention.
     Ask,
     /// Fix obvious bugs right away, and ask about the rest.
     Auto,
@@ -148,7 +148,10 @@ fn on() -> bool {
 pub struct Followed {
     /// The newest message the session has seen, as a Slack ts.
     pub cursor: String,
-    /// Someone wrote in the thread after its session started, which `Fix::Ask` waits for.
+    /// The newest message pinned read, when people wrote past `cursor` without mentioning the bot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<String>,
+    /// Someone mentioned the bot in the thread after its session started, which `Fix::Ask` waits for.
     #[serde(default)]
     pub replied: bool,
 }
@@ -188,7 +191,7 @@ impl Connector {
             }
             Fix::Ask if !self.followed.get(&key).is_some_and(|f| f.replied) => {
                 return Err(format!(
-                    "connector {:?} files an issue only after someone answers in the thread: ask there, and wait for the reply to reach you",
+                    "connector {:?} files an issue only after someone answers you in the thread with a mention: ask there, and wait for the answer to reach you",
                     self.name
                 ))
             }
@@ -572,15 +575,16 @@ impl Connectors {
                     }
                     // The session starts with these messages, so only later ones are passed on.
                     let cursor = posts.last().map_or_else(|| mention.thread.clone(), |p| p.ts.clone());
-                    connector.followed.insert(key, Followed { cursor, replied: false });
+                    connector.followed.insert(key, Followed { cursor, seen: None, replied: false });
                     let note = mention_note(&mention, now);
                     work.push(Work::Run(slack_run(connector, &channel, &channel_name, &mention.thread, &posts, note, &self.exe)));
                     changed = true;
                 }
                 Found::Replies { replies, .. } if replies.posts.is_empty() => {
-                    // Only bots wrote, so there is nothing to pass on and no reason to read them again.
+                    // Nobody mentioned the bot, so nothing is passed on yet. The session gets these
+                    // messages with the next mention, and nothing reads them again until then.
                     if let Some(followed) = connector.followed.get_mut(&key) {
-                        followed.cursor = replies.newest;
+                        followed.seen = Some(replies.newest);
                         changed = true;
                     }
                 }
@@ -665,7 +669,7 @@ impl Connectors {
     fn follow(&self, connector: &str, channel: &str, thread: &str, cursor: String) -> Result<(), String> {
         let mut store = self.store.lock().unwrap();
         let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) else { return Ok(()) };
-        c.followed.insert(thread_key(channel, thread), Followed { cursor, replied: true });
+        c.followed.insert(thread_key(channel, thread), Followed { cursor, seen: None, replied: true });
         self.save(&store)
     }
 
@@ -685,7 +689,10 @@ impl Connectors {
                 let cursors = c
                     .followed
                     .iter()
-                    .filter_map(|(key, f)| Some((key.strip_prefix(&prefix)?.to_owned(), f.cursor.clone())))
+                    .filter_map(|(key, f)| {
+                        let read = f.seen.clone().unwrap_or_else(|| f.cursor.clone());
+                        Some((key.strip_prefix(&prefix)?.to_owned(), slack::Cursor { given: f.cursor.clone(), read }))
+                    })
                     .collect();
                 let activity = slack::activity(&token, &channel, &bot, since, &cursors).await?;
                 let mut found: Vec<Found> = vec![];
@@ -882,7 +889,7 @@ fn fix_steps(c: &Connector, exe: &str, first: &str) -> String {
 /// What a Slack connector's session may do about a bug, with the commands to run.
 fn fix_rule(c: &Connector, exe: &str) -> String {
     let answer = "- Not a bug, or existing behavior or a known fix already answers it: reply with the answer and stop.";
-    let ask = "reply with your analysis and what you would change, ask in the thread whether to file a Linear issue and fix it, and stop without filing an issue or changing code";
+    let ask = "reply with your analysis and what you would change, ask in the thread whether to file a Linear issue and fix it, telling them to mention you in their answer, and stop without filing an issue or changing code";
     let failed = "If a pinned command fails, reply in the thread with its error and stop.";
     let take = format!(
         "- It asks you to work on an existing Linear issue, such as ENG-123: run `'{exe}' linear take <identifier>` before anything else. \
@@ -894,7 +901,7 @@ fn fix_rule(c: &Connector, exe: &str) -> String {
         Fix::Ask => format!(
             "\n\nDecide what the thread needs, then act:\n{answer}\n- A bug: {ask}.\n\
              When a reply in the thread says yes, fix it, in this order:\n{}\n\
-             If the reply says no, acknowledge it and stop. `pinned linear create` fails until someone has replied in the thread.\n{take}\n{failed}",
+             If the reply says no, acknowledge it and stop. `pinned linear create` fails until someone has mentioned you in the thread.\n{take}\n{failed}",
             fix_steps(c, exe, "Reply that you are opening a Linear issue and fixing it.")
         ),
         Fix::Auto => format!(
@@ -927,7 +934,7 @@ fn slack_run(
     let mut prompt = c.instructions.trim().to_owned();
     prompt += &format!(
         "\n\nAnswer in the Slack thread below by running `'{}' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. \
-         Messages posted in the thread later reach you as `{}` blocks; answer them in the thread the same way.",
+         Later messages in the thread reach you only when one of them mentions you, as `{}` blocks with every message written since the last one you got; answer them in the thread the same way.",
         exe,
         reply_header("<name>")
     );
@@ -1185,7 +1192,7 @@ mod tests {
         linear.handled = vec!["uuid".into(), "older".into()];
         let mut slack = Connector { id: "c2".into(), ..slack_connector() };
         slack.handled = vec!["C0123ABCD:1792400050.000200".into()];
-        slack.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), replied: false });
+        slack.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
         let (connectors, dir) = stored("unclaim", vec![linear, slack]);
         let refuse = |_: Work| async { false };
 
@@ -1354,7 +1361,7 @@ mod tests {
                 "plan",
                 "--name",
                 "#support @pinned export 500s since today",
-                "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Messages posted in the thread later reach you as `[Slack reply from <name> in the thread]` blocks; answer them in the thread the same way.\n\nThis connector only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here",
+                "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\nThis connector only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here",
             ]
         );
     }
@@ -1376,7 +1383,7 @@ mod tests {
         let prompt = connector_thread_run(&fixing_connector(), "2026-10-19T10:00:00Z", "2026-10-19T10:01:00Z").args.pop().unwrap();
         assert_eq!(
             prompt,
-            "Fix what you can.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Messages posted in the thread later reach you as `[Slack reply from <name> in the thread]` blocks; answer them in the thread the same way.\n\n\
+            "Fix what you can.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\n\
              Decide what the thread needs, then act:\n\
              - Not a bug, or existing behavior or a known fix already answers it: reply with the answer and stop.\n\
              - A bug that is obvious, because you reproduced it or found it in the code, and whose fix is small and low-risk: fix it, in this order:\n\
@@ -1386,7 +1393,7 @@ mod tests {
              \x20  4. Implement the fix, run the project's tests and checks, and open the pull request.\n\
              \x20  5. Run `'/bin/pinned' stage review` right after the pull request is open.\n\
              \x20  6. Reply with the pull request link.\n\
-             - A bug that is not obvious, or whose fix is big or risky: reply with your analysis and what you would change, ask in the thread whether to file a Linear issue and fix it, and stop without filing an issue or changing code. When a reply in the thread says yes, fix it in the order above; if it says no, acknowledge it and stop.\n\
+             - A bug that is not obvious, or whose fix is big or risky: reply with your analysis and what you would change, ask in the thread whether to file a Linear issue and fix it, telling them to mention you in their answer, and stop without filing an issue or changing code. When a reply in the thread says yes, fix it in the order above; if it says no, acknowledge it and stop.\n\
              - It asks you to work on an existing Linear issue, such as ENG-123: run `'/bin/pinned' linear take <identifier>` before anything else. If it says another session already works on the issue, reply that the issue is already being worked on and stop. Otherwise it prints the issue: reply that you are taking it, then fix it in the order above, with that issue in place of filing one.\n\
              If a pinned command fails, reply in the thread with its error and stop.\n\n\
              Slack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here"
@@ -1395,10 +1402,10 @@ mod tests {
         let prompt = connector_thread_run(&asking, "2026-10-19T10:00:00Z", "2026-10-19T10:01:00Z").args.pop().unwrap();
         assert_eq!(
             prompt,
-            "Fix what you can.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Messages posted in the thread later reach you as `[Slack reply from <name> in the thread]` blocks; answer them in the thread the same way.\n\n\
+            "Fix what you can.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\n\
              Decide what the thread needs, then act:\n\
              - Not a bug, or existing behavior or a known fix already answers it: reply with the answer and stop.\n\
-             - A bug: reply with your analysis and what you would change, ask in the thread whether to file a Linear issue and fix it, and stop without filing an issue or changing code.\n\
+             - A bug: reply with your analysis and what you would change, ask in the thread whether to file a Linear issue and fix it, telling them to mention you in their answer, and stop without filing an issue or changing code.\n\
              When a reply in the thread says yes, fix it, in this order:\n\
              \x20  1. Reply that you are opening a Linear issue and fixing it.\n\
              \x20  2. Run `'/bin/pinned' linear create \"<title>\" \"<description>\"` to file the issue. It is assigned to the owner of the connected Linear account; if the thread names who should own it, add `--assignee \"<their name or email>\"` right after `create`. It prints the issue identifier and link; reply with them.\n\
@@ -1406,7 +1413,7 @@ mod tests {
              \x20  4. Implement the fix, run the project's tests and checks, and open the pull request.\n\
              \x20  5. Run `'/bin/pinned' stage review` right after the pull request is open.\n\
              \x20  6. Reply with the pull request link.\n\
-             If the reply says no, acknowledge it and stop. `pinned linear create` fails until someone has replied in the thread.\n\
+             If the reply says no, acknowledge it and stop. `pinned linear create` fails until someone has mentioned you in the thread.\n\
              - It asks you to work on an existing Linear issue, such as ENG-123: run `'/bin/pinned' linear take <identifier>` before anything else. If it says another session already works on the issue, reply that the issue is already being worked on and stop. Otherwise it prints the issue: reply that you are taking it, then fix it in the order above, with that issue in place of filing one.\n\
              If a pinned command fails, reply in the thread with its error and stop.\n\n\
              Slack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here"
@@ -1434,11 +1441,11 @@ mod tests {
     #[test]
     fn the_fix_setting_decides_when_a_thread_may_file_an_issue() {
         let new = Ok(Filing::New { team: "ENG".into(), label: "from-slack".into() });
-        let ask_first = Err("connector \"Triage\" files an issue only after someone answers in the thread: ask there, and wait for the reply to reach you".to_owned());
+        let ask_first = Err("connector \"Triage\" files an issue only after someone answers you in the thread with a mention: ask there, and wait for the answer to reach you".to_owned());
         let with = |fix, followed: Option<bool>| {
             let mut c = Connector { fix, ..fixing_connector() };
             if let Some(replied) = followed {
-                c.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), replied });
+                c.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), seen: None, replied });
             }
             c.filing("C0123ABCD", "1792400050.000200")
         };

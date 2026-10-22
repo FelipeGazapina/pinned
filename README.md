@@ -186,8 +186,10 @@ while pinned is closed start their session at the next launch, and the session o
 reply by saying it was offline. Slack rate limits reading history, so a rate-limited check
 reports the error and waits for the next minute.
 
-Later messages in a thread go to the session that answers it, with no need to mention the bot
-again. pinned types each one into the session's tab as a prompt that starts with
+Later messages in a thread go to the session that answers it only when one of them mentions
+the bot, so people can talk in the thread without the session answering each message. When a
+message mentions the bot, pinned types it into the session's tab with every message written
+since the last one the session got, each as a prompt that starts with
 `[Slack reply from <name> in the thread]`, and the session answers in the thread. Messages
 from the bot and from other bots are skipped. If the thread's tab is closed, or pinned
 restarted without resuming it, pinned opens a new session with the whole thread instead.
@@ -199,8 +201,9 @@ The **If it reports a bug** step sets how far the session goes:
   pinned rejects `pinned linear create`.
 - **Analyze, then ask me in the thread before filing.** The session replies with its analysis
   and asks whether to file a Linear issue and fix the bug, then waits. When someone answers
-  yes in the thread, the session files the issue and fixes the bug, as below. pinned rejects
-  `pinned linear create` until someone has written in the thread after the session started.
+  yes in the thread and mentions the bot, the session files the issue and fixes the bug, as
+  below. pinned rejects `pinned linear create` until someone has mentioned the bot in the
+  thread after the session started.
 - **Fix obvious bugs on its own, ask for the rest.** If the bug is obvious and the fix is small
   and low-risk, the session fixes it right away. Otherwise it asks, as above.
 

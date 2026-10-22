@@ -32,10 +32,19 @@ pub struct Mention {
 #[derive(Debug, PartialEq)]
 pub struct Replies {
     pub thread: String,
-    /// The newest message's timestamp, the bot's own included, which the thread's cursor moves to.
+    /// The newest message's timestamp, the bot's own included, which the thread's cursors move to.
     pub newest: String,
-    /// The messages people wrote, oldest first.
+    /// The messages people wrote since the session's last one, oldest first. Empty unless one of
+    /// them mentions the bot.
     pub posts: Vec<Post>,
+}
+
+/// How far a followed thread was read, as Slack timestamps.
+pub struct Cursor {
+    /// The newest message its session has.
+    pub given: String,
+    /// The newest message pinned read, past `given` when people wrote without mentioning the bot.
+    pub read: String,
 }
 
 /// What one check of a channel finds.
@@ -155,14 +164,17 @@ fn ts(at: DateTime<Utc>) -> String {
     format!("{}.{:06}", micros.div_euclid(1_000_000), micros.rem_euclid(1_000_000))
 }
 
+fn mentions(message: &Value, bot: &str) -> bool {
+    message["text"].as_str().is_some_and(|t| t.contains(&format!("<@{bot}>")))
+}
+
 /// Messages after `since` that mention `bot`, other than the bot's own.
 fn mentions_in(messages: &Value, bot: &str, since: DateTime<Utc>) -> Vec<Mention> {
-    let tag = format!("<@{bot}>");
     messages
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|m| m["user"].as_str() != Some(bot) && m["text"].as_str().is_some_and(|t| t.contains(&tag)))
+        .filter(|m| m["user"].as_str() != Some(bot) && mentions(m, bot))
         .filter_map(|m| {
             let ts = m["ts"].as_str()?;
             let at = DateTime::from_timestamp_micros(micros(ts)?)?;
@@ -184,21 +196,23 @@ fn threads_replied_after(history: &Value, since: DateTime<Utc>) -> Vec<String> {
         .collect()
 }
 
-/// Threads of a history page in `cursors`, by thread ts, whose last reply is past their cursor.
-fn followed_with_replies<'a>(history: &Value, cursors: &'a BTreeMap<String, String>) -> Vec<(String, &'a str)> {
+/// Threads of a history page in `cursors`, by thread ts, whose last reply pinned hasn't read,
+/// with the newest message their session has.
+fn followed_with_replies<'a>(history: &Value, cursors: &'a BTreeMap<String, Cursor>) -> Vec<(String, &'a str)> {
     history
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|m| {
             let (thread, cursor) = cursors.get_key_value(m["ts"].as_str()?)?;
-            (micros(m["latest_reply"].as_str()?)? > micros(cursor)?).then(|| (thread.clone(), cursor.as_str()))
+            (micros(m["latest_reply"].as_str()?)? > micros(&cursor.read)?).then(|| (thread.clone(), cursor.given.as_str()))
         })
         .collect()
 }
 
-/// The newest timestamp after `cursor` in a thread, and the messages after it that people wrote:
-/// neither the bot's own nor another bot's.
+/// The newest timestamp after `cursor` in a thread, and the messages after it that people wrote,
+/// neither the bot's own nor another bot's. People talk among themselves in a thread, so their
+/// messages come back only once one of them mentions the bot.
 fn after_cursor(messages: &Value, bot: &str, cursor: &str) -> Option<(String, Vec<Value>)> {
     let cursor = micros(cursor)?;
     let new: Vec<&Value> = messages
@@ -208,11 +222,14 @@ fn after_cursor(messages: &Value, bot: &str, cursor: &str) -> Option<(String, Ve
         .filter(|m| m["ts"].as_str().and_then(micros).is_some_and(|at| at > cursor))
         .collect();
     let newest = new.iter().filter_map(|m| m["ts"].as_str()).max_by_key(|ts| micros(ts))?.to_owned();
-    let people = new
+    let mut people: Vec<Value> = new
         .into_iter()
         .filter(|m| m["user"].as_str() != Some(bot) && m["subtype"].as_str() != Some("bot_message"))
         .cloned()
         .collect();
+    if !people.iter().any(|m| mentions(m, bot)) {
+        people.clear();
+    }
     Some((newest, people))
 }
 
@@ -224,7 +241,7 @@ pub async fn activity(
     channel: &str,
     bot: &str,
     since: DateTime<Utc>,
-    cursors: &BTreeMap<String, String>,
+    cursors: &BTreeMap<String, Cursor>,
 ) -> Result<Activity, String> {
     let oldest = ts(since - THREAD_LOOKBACK);
     let history = call(token, "conversations.history", &[("channel", channel), ("oldest", &oldest), ("limit", PAGE)]).await?;
@@ -238,14 +255,30 @@ pub async fn activity(
     mentions.sort_by_key(|m| m.at);
     mentions.dedup();
     let mut replies = vec![];
-    for (thread, cursor) in followed_with_replies(messages, cursors) {
-        let body = call(token, "conversations.replies", &[("channel", channel), ("ts", &thread), ("oldest", cursor), ("limit", PAGE)]).await?;
-        let Some((newest, people)) = after_cursor(&body["messages"], bot, cursor) else { continue };
+    for (thread, given) in followed_with_replies(messages, cursors) {
+        let Some((newest, people)) = after_cursor(&replies_after(token, channel, &thread, given).await?, bot, given) else { continue };
         let people = Value::Array(people);
         let names = names(token, &people).await?;
         replies.push(Replies { thread, newest, posts: posts(&people, &names) });
     }
     Ok(Activity { mentions, replies })
+}
+
+/// The thread's messages after `oldest`, every page of them, so a mention past the first page
+/// isn't missed.
+async fn replies_after(token: &str, channel: &str, thread: &str, oldest: &str) -> Result<Value, String> {
+    let mut messages = vec![];
+    let mut page = None;
+    loop {
+        let mut params = vec![("channel", channel), ("ts", thread), ("oldest", oldest), ("limit", PAGE)];
+        params.extend(page.as_deref().map(|p| ("cursor", p)));
+        let body = call(token, "conversations.replies", &params).await?;
+        messages.extend(body["messages"].as_array().into_iter().flatten().cloned());
+        match body["response_metadata"]["next_cursor"].as_str() {
+            Some(next) if !next.is_empty() => page = Some(next.to_owned()),
+            _ => return Ok(Value::Array(messages)),
+        }
+    }
 }
 
 /// Users a thread names, as authors or `<@…>` mentions.
@@ -357,32 +390,44 @@ mod tests {
     }
 
     #[test]
-    fn followed_threads_get_a_replies_call_only_past_their_cursor() {
+    fn followed_threads_get_a_replies_call_only_past_what_was_read() {
         let (history, _) = fixture();
+        let cursor = |given: &str, read: &str| Cursor { given: given.into(), read: read.into() };
         let cursors = BTreeMap::from([
-            ("1792400050.000200".to_owned(), "1792400060.000100".to_owned()),
-            ("1792390000.000100".to_owned(), "1792400080.000000".to_owned()),
-            ("1792370000.000000".to_owned(), "1792370000.000000".to_owned()),
+            ("1792400050.000200".to_owned(), cursor("1792400050.000200", "1792400060.000100")),
+            ("1792390000.000100".to_owned(), cursor("1792400070.000000", "1792400080.000000")),
+            ("1792370000.000000".to_owned(), cursor("1792370000.000000", "1792370000.000000")),
         ]);
-        assert_eq!(followed_with_replies(&history, &cursors), [("1792390000.000100".to_owned(), "1792400080.000000")]);
+        assert_eq!(followed_with_replies(&history, &cursors), [("1792390000.000100".to_owned(), "1792400070.000000")]);
         assert_eq!(followed_with_replies(&history, &BTreeMap::new()), []);
     }
 
     #[test]
-    fn follow_ups_are_what_people_wrote_after_the_cursor() {
+    fn follow_ups_are_what_people_wrote_after_the_cursor_once_one_mentions_the_bot() {
         let replies = json!([
             { "ts": "1792390000.000100", "user": "U2", "text": "deploy notes" },
             { "ts": "1792400080.000000", "user": "UBOT", "text": "the cause is X; file it?" },
-            { "ts": "1792400090.000000", "user": "U3", "text": "yes, create the task" },
+            { "ts": "1792400085.000000", "user": "U2", "text": "I think we should" },
+            { "ts": "1792400090.000000", "user": "U3", "text": "<@UBOT> yes, create the task" },
             { "ts": "1792400095.000000", "subtype": "bot_message", "bot_id": "B9", "text": "deploy finished" },
             { "ts": "1792400099.000000", "user": "UBOT", "text": "on it" },
+            { "ts": "1792400105.000000", "user": "U2", "text": "thanks!" },
         ]);
         let (newest, people) = after_cursor(&replies, "UBOT", "1792400080.000000").unwrap();
-        assert_eq!(newest, "1792400099.000000");
-        assert_eq!(people, [json!({ "ts": "1792400090.000000", "user": "U3", "text": "yes, create the task" })]);
+        assert_eq!(newest, "1792400105.000000");
+        assert_eq!(
+            people,
+            [
+                json!({ "ts": "1792400085.000000", "user": "U2", "text": "I think we should" }),
+                json!({ "ts": "1792400090.000000", "user": "U3", "text": "<@UBOT> yes, create the task" }),
+                json!({ "ts": "1792400105.000000", "user": "U2", "text": "thanks!" }),
+            ]
+        );
         let (newest, people) = after_cursor(&replies, "UBOT", "1792400090.000000").unwrap();
-        assert_eq!((newest.as_str(), people.len()), ("1792400099.000000", 0));
-        assert_eq!(after_cursor(&replies, "UBOT", "1792400099.000000"), None);
+        assert_eq!((newest.as_str(), people.len()), ("1792400105.000000", 0));
+        let (newest, people) = after_cursor(&replies, "UBOT", "1792400099.000000").unwrap();
+        assert_eq!((newest.as_str(), people.len()), ("1792400105.000000", 0));
+        assert_eq!(after_cursor(&replies, "UBOT", "1792400105.000000"), None);
     }
 
     #[test]
