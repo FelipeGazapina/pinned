@@ -196,22 +196,31 @@ pub fn slack(args: &[String]) -> Reply {
     ask(Message::SlackReply { connector: env(CONNECTOR_ENV)?, channel: env(SLACK_CHANNEL_ENV)?, thread: env(SLACK_THREAD_ENV)?, text })
 }
 
-/// Runs when a Slack connector's session calls `pinned linear create <title> <description>`: asks
-/// the harness to file a Linear issue for the session's thread and returns its identifier and link.
+/// Runs when a Slack connector's session calls `pinned linear create [--assignee <who>] <title>
+/// <description>`, to file a Linear issue for its thread, or `pinned linear take <identifier>`, to
+/// work on an existing issue no other session works on. Returns what the harness answered.
 pub fn linear(args: &[String]) -> Reply {
-    let (title, description) = match args {
-        [verb, title, description @ ..] if verb == "create" && !title.trim().is_empty() && !description.is_empty() => {
-            (title.clone(), description.join(" "))
+    let usage = || format!("usage: pinned {LINEAR_SUBCOMMAND} create [--assignee <who>] <title> <description> | take <identifier>");
+    let context = || -> Result<_, String> { Ok((env(CONNECTOR_ENV)?, env(SLACK_CHANNEL_ENV)?, env(SLACK_THREAD_ENV)?)) };
+    match args {
+        [verb, rest @ ..] if verb == "create" => {
+            let (assignee, rest) = match rest {
+                [flag, who, rest @ ..] if flag == "--assignee" => (who.clone(), rest),
+                rest => (String::new(), rest),
+            };
+            let [title, description @ ..] = rest else { return Err(usage()) };
+            if title.trim().is_empty() || description.is_empty() {
+                return Err(usage());
+            }
+            let (connector, channel, thread) = context()?;
+            ask(Message::LinearCreate { connector, channel, thread, title: title.clone(), description: description.join(" "), assignee })
         }
-        _ => return Err(format!("usage: pinned {LINEAR_SUBCOMMAND} create <title> <description>")),
-    };
-    ask(Message::LinearCreate {
-        connector: env(CONNECTOR_ENV)?,
-        channel: env(SLACK_CHANNEL_ENV)?,
-        thread: env(SLACK_THREAD_ENV)?,
-        title,
-        description,
-    })
+        [verb, issue] if verb == "take" && !issue.trim().is_empty() => {
+            let (connector, channel, thread) = context()?;
+            ask(Message::LinearTake { connector, channel, thread, issue: issue.clone() })
+        }
+        _ => Err(usage()),
+    }
 }
 
 fn env(k: &str) -> Result<String, String> {
@@ -311,9 +320,10 @@ mod tests {
                 Ok(format!("{connector} moved the issue of {channel}:{thread} to {stage:?}"))
             }
             Message::SlackReply { connector, channel, thread, text } => Ok(format!("{connector} posted {text:?} in {channel}:{thread}")),
-            Message::LinearCreate { connector, channel, thread, title, description } => {
-                Ok(format!("{connector} filed {title:?} / {description:?} for {channel}:{thread}"))
+            Message::LinearCreate { connector, channel, thread, title, description, assignee } => {
+                Ok(format!("{connector} filed {title:?} / {description:?} for {channel}:{thread} to {assignee:?}"))
             }
+            Message::LinearTake { connector, channel, thread, issue } => Ok(format!("{connector} took {issue} for {channel}:{thread}")),
             other => Err(format!("unexpected {other:?}")),
         })
         .unwrap();
@@ -347,10 +357,18 @@ mod tests {
         assert_eq!(stage(Some("review")), Ok("c1 moved the issue of C0123ABCD:1792400050.000200 to Review".to_owned()));
         assert_eq!(
             linear(&args(&["create", "Export 500s", "The export button", "fails"])),
-            Ok("c1 filed \"Export 500s\" / \"The export button fails\" for C0123ABCD:1792400050.000200".to_owned())
+            Ok("c1 filed \"Export 500s\" / \"The export button fails\" for C0123ABCD:1792400050.000200 to \"\"".to_owned())
         );
-        assert_eq!(linear(&args(&["create", "Export 500s"])), Err("usage: pinned linear create <title> <description>".to_owned()));
-        assert_eq!(linear(&args(&["file", "a", "b"])), Err("usage: pinned linear create <title> <description>".to_owned()));
+        assert_eq!(
+            linear(&args(&["create", "--assignee", "Ana Souza", "Export 500s", "The export button", "fails"])),
+            Ok("c1 filed \"Export 500s\" / \"The export button fails\" for C0123ABCD:1792400050.000200 to \"Ana Souza\"".to_owned())
+        );
+        assert_eq!(linear(&args(&["take", "ENG-123"])), Ok("c1 took ENG-123 for C0123ABCD:1792400050.000200".to_owned()));
+        let usage = Err("usage: pinned linear create [--assignee <who>] <title> <description> | take <identifier>".to_owned());
+        assert_eq!(linear(&args(&["create", "Export 500s"])), usage);
+        assert_eq!(linear(&args(&["take"])), usage);
+        assert_eq!(linear(&args(&["create", "--assignee", "Ana", "Export 500s"])), usage);
+        assert_eq!(linear(&args(&["file", "a", "b"])), usage);
         let _ = std::fs::remove_file(sock);
     }
 

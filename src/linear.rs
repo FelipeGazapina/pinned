@@ -141,8 +141,22 @@ fn resolve(data: &Value, team: &str, label: &str) -> Result<(String, Option<Stri
     Ok((team_id, Some(label_id)))
 }
 
-fn create_input(team: &str, title: &str, description: &str, label: Option<&str>) -> Value {
-    let mut input = json!({ "teamId": team, "title": title, "description": description });
+/// The id of the user an issue pinned files is assigned to: `who`, by name, display name or email
+/// ignoring case, or the owner of the API key when `who` is empty, since pinned files on their behalf.
+fn assignee(data: &Value, who: &str) -> Result<String, String> {
+    let who = who.trim();
+    let id = if who.is_empty() {
+        data["viewer"]["id"].as_str()
+    } else {
+        nodes(&data["users"])
+            .find(|u| ["name", "displayName", "email"].iter().any(|k| u[k].as_str().is_some_and(|v| v.eq_ignore_ascii_case(who))))
+            .and_then(|u| u["id"].as_str())
+    };
+    id.map(str::to_owned).ok_or_else(|| if who.is_empty() { "Linear did not say who owns the API key".into() } else { format!("Linear has no user named {who:?}") })
+}
+
+fn create_input(team: &str, assignee: &str, title: &str, description: &str, label: Option<&str>) -> Value {
+    let mut input = json!({ "teamId": team, "assigneeId": assignee, "title": title, "description": description });
     if let Some(label) = label {
         input["labelIds"] = json!([label]);
     }
@@ -157,22 +171,34 @@ fn created(data: &Value) -> Result<Issue, String> {
     serde_json::from_value(result["issue"].clone()).map_err(|e| format!("Linear sent a bad issue: {e}"))
 }
 
-/// Creates an issue in `team`, a team name or key, with the label called `label` unless it is empty.
-pub async fn create_issue(key: &str, team: &str, title: &str, description: &str, label: &str) -> Result<Issue, String> {
+/// Creates an issue in `team`, a team name or key, with the label called `label` unless it is empty,
+/// assigned to the user `assignee` names, or to the owner of the API key when it is empty.
+pub async fn create_issue(key: &str, team: &str, title: &str, description: &str, label: &str, assignee: &str) -> Result<Issue, String> {
     let data = query(
         key,
-        "{ teams(first: 250) { nodes { id key name } } issueLabels(first: 250) { nodes { id name team { id } } } }",
+        "{ viewer { id } users(first: 250) { nodes { id name displayName email } } \
+           teams(first: 250) { nodes { id key name } } issueLabels(first: 250) { nodes { id name team { id } } } }",
         json!({}),
     )
     .await?;
     let (team, label) = resolve(&data, team, label)?;
+    let assignee = self::assignee(&data, assignee)?;
     let data = query(
         key,
         "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id identifier title description url } } }",
-        json!({ "input": create_input(&team, title, description, label.as_deref()) }),
+        json!({ "input": create_input(&team, &assignee, title, description, label.as_deref()) }),
     )
     .await?;
     created(&data)
+}
+
+/// The issue `id` names, either Linear's id or an identifier such as ENG-123.
+pub async fn issue(key: &str, id: &str) -> Result<Issue, String> {
+    let data = query(key, "query($id: String!) { issue(id: $id) { id identifier title description url } }", json!({ "id": id })).await?;
+    if data["issue"].is_null() {
+        return Err(format!("Linear has no issue {id}"));
+    }
+    serde_json::from_value(data["issue"].clone()).map_err(|e| format!("Linear sent a bad issue: {e}"))
 }
 
 /// Issues carrying `label` that were created after `since` (RFC 3339).
@@ -228,10 +254,31 @@ mod tests {
     #[test]
     fn create_sends_the_label_only_when_there_is_one() {
         assert_eq!(
-            create_input("t-eng", "Export 500s", "From Slack", Some("l-bug")),
-            json!({ "teamId": "t-eng", "title": "Export 500s", "description": "From Slack", "labelIds": ["l-bug"] })
+            create_input("t-eng", "u-me", "Export 500s", "From Slack", Some("l-bug")),
+            json!({ "teamId": "t-eng", "assigneeId": "u-me", "title": "Export 500s", "description": "From Slack", "labelIds": ["l-bug"] })
         );
-        assert_eq!(create_input("t-eng", "Export 500s", "", None), json!({ "teamId": "t-eng", "title": "Export 500s", "description": "" }));
+        assert_eq!(
+            create_input("t-eng", "u-me", "Export 500s", "", None),
+            json!({ "teamId": "t-eng", "assigneeId": "u-me", "title": "Export 500s", "description": "" })
+        );
+    }
+
+    #[test]
+    fn an_issue_goes_to_the_key_owner_unless_someone_is_named() {
+        let data = json!({
+            "viewer": { "id": "u-me" },
+            "users": { "nodes": [
+                { "id": "u-me", "name": "Felipe Gazapina", "displayName": "felipe", "email": "felipe@example.com" },
+                { "id": "u-ana", "name": "Ana Souza", "displayName": "ana", "email": "ana@example.com" },
+            ] },
+        });
+        assert_eq!(assignee(&data, ""), Ok("u-me".into()));
+        assert_eq!(assignee(&data, "  "), Ok("u-me".into()));
+        assert_eq!(assignee(&data, "Ana"), Ok("u-ana".into()));
+        assert_eq!(assignee(&data, "ana souza"), Ok("u-ana".into()));
+        assert_eq!(assignee(&data, "ANA@example.com"), Ok("u-ana".into()));
+        assert_eq!(assignee(&data, "bruno"), Err("Linear has no user named \"bruno\"".into()));
+        assert_eq!(assignee(&json!({}), ""), Err("Linear did not say who owns the API key".into()));
     }
 
     #[test]

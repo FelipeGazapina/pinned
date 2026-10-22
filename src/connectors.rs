@@ -252,6 +252,41 @@ impl Store {
     fn connector(&self, id: &str) -> Result<&Connector, String> {
         self.connectors.iter().find(|c| c.id == id).ok_or_else(|| "the connector was deleted".into())
     }
+
+    /// The connector whose session works on the Linear issue `id`, with the thread it answers when a
+    /// Slack thread's session filed or took the issue. An issue gets one session across connectors.
+    fn working_on(&self, id: &str) -> Option<(&Connector, Option<&str>)> {
+        self.connectors.iter().find_map(|c| match c.created.iter().find(|(_, filed)| filed.id == id) {
+            Some((thread, _)) => Some((c, Some(thread.as_str()))),
+            None => c.handled.iter().any(|h| h == id).then_some((c, None)),
+        })
+    }
+
+    /// Gives the Slack thread's session the existing `issue` to work on, unless another session
+    /// already works on it. The thread asked for the issue, so `Fix::Ask` doesn't wait for a reply.
+    fn take(&mut self, connector: &str, channel: &str, thread: &str, issue: &linear::Issue) -> Result<Filed, String> {
+        let key = thread_key(channel, thread);
+        let c = self.connector(connector)?;
+        if c.fix == Fix::Off {
+            return Err(format!("connector {:?} does not work on Linear issues: it is set to only analyze and reply", c.name));
+        }
+        match c.created.get(&key) {
+            Some(filed) if filed.id == issue.id => return Ok(filed.clone()),
+            Some(filed) => return Err(format!("this thread already works on {}: one thread works on one issue", filed.identifier)),
+            None => {}
+        }
+        if let Some((owner, thread)) = self.working_on(&issue.id) {
+            let by = match thread {
+                Some(_) => format!("the session of connector {:?} that answers another Slack thread", owner.name),
+                None => format!("the session connector {:?} started for it", owner.name),
+            };
+            return Err(format!("{} is already being worked on by {by}. No second session starts on it.", issue.identifier));
+        }
+        let filed = Filed { id: issue.id.clone(), identifier: issue.identifier.clone(), url: issue.url.clone() };
+        let c = self.connectors.iter_mut().find(|c| c.id == connector).expect("looked up above");
+        c.created.insert(key, filed.clone());
+        Ok(filed)
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -340,7 +375,8 @@ pub struct Connectors {
     wake: Notify,
     /// Slack channel ids by the name a connector gives, so a check doesn't list every channel.
     channels: Mutex<HashMap<String, String>>,
-    /// Held while a session files a Linear issue, so two calls from one thread can't both file one.
+    /// Held while a session files or takes a Linear issue, and while a check hands out issues, so
+    /// two calls from one thread can't both file one and a check never starts an issue a thread holds.
     filing: tokio::sync::Mutex<()>,
 }
 
@@ -414,6 +450,7 @@ impl Connectors {
             }
         }
 
+        let _filing = self.filing.lock().await;
         let mut store = self.store.lock().unwrap();
         let mut changed = false;
         let watermark = now - SLACK_OVERLAP;
@@ -426,6 +463,12 @@ impl Connectors {
         }
         let mut work = vec![];
         for (id, found) in found {
+            // A Slack thread's session filed or took the issue, or another connector started it.
+            if let Found::Issue(issue) = &found {
+                if store.working_on(&issue.id).is_some_and(|(owner, _)| owner.id != id) {
+                    continue;
+                }
+            }
             // The connector may have been edited or deleted while the integration answered.
             let Some(connector) = store.connectors.iter_mut().find(|c| c.id == id && c.enabled) else { continue };
             let key = found.key();
@@ -579,7 +622,15 @@ impl Connectors {
 
     /// Files a Linear issue for the Slack thread, linking back to it, unless the thread already
     /// filed one. Answers `<identifier> <url>` either way.
-    pub async fn create(&self, connector: &str, channel: &str, thread: &str, title: &str, description: &str) -> Result<String, String> {
+    pub async fn create(
+        &self,
+        connector: &str,
+        channel: &str,
+        thread: &str,
+        title: &str,
+        description: &str,
+        assignee: &str,
+    ) -> Result<String, String> {
         let _filing = self.filing.lock().await;
         let filing = self.store.lock().unwrap().connector(connector)?.filing(channel, thread)?;
         let (team, label) = match filing {
@@ -590,7 +641,7 @@ impl Connectors {
         let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Integrations settings")?;
         let link = slack::permalink(&token, channel, thread).await?;
         let description = format!("{}\n\nSlack thread: {link}", description.trim());
-        let issue = linear::create_issue(&key, &team, title.trim(), &description, &label).await?;
+        let issue = linear::create_issue(&key, &team, title.trim(), &description, &label, assignee).await?;
         let filed = Filed { id: issue.id, identifier: issue.identifier, url: issue.url };
         let mut store = self.store.lock().unwrap();
         // The connector may have been deleted while Linear answered; the issue exists all the same.
@@ -599,6 +650,20 @@ impl Connectors {
             self.save(&store)?;
         }
         Ok(filed.answer())
+    }
+
+    /// Lets the Slack thread's session work on the existing issue `issue`, an identifier such as
+    /// ENG-123, unless another session already works on it. Answers the issue's identifier, link,
+    /// title and description.
+    pub async fn take(&self, connector: &str, channel: &str, thread: &str, issue: &str) -> Result<String, String> {
+        let _filing = self.filing.lock().await;
+        let key = self.key(LINEAR_KEY).ok_or("Linear is not connected: connect it in pinned's Integrations settings")?;
+        let issue = linear::issue(&key, issue.trim()).await?;
+        let mut store = self.store.lock().unwrap();
+        let filed = store.take(connector, channel, thread, &issue)?;
+        self.save(&store)?;
+        let description = issue.description.as_deref().unwrap_or_default().trim();
+        Ok(format!("{}\n\n{}\n\n{description}", filed.answer(), issue.title).trim_end().to_owned())
     }
 
     /// Posts `text` in the Slack thread the connector's session answers.
@@ -681,7 +746,7 @@ fn proof_of_work(exe: &Path) -> String {
 const SLACK_PROOF: &str = "\nPut the link to the Proof comment in your last reply in the thread too.";
 
 const TAB_NAME_CHARS: usize = 50;
-const TRIAGE_ONLY: &str = "\n\nThis connector only triages: never change code, and never file a Linear issue. `pinned linear create` is turned off for it.";
+const TRIAGE_ONLY: &str = "\n\nThis connector only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.";
 const OFFLINE: &str = "\n\npinned was closed when this mention arrived and is only seeing it now. Open your first reply by saying so, in the language of the thread.";
 
 /// The numbered steps that file the issue and fix the bug, starting with the reply `first`.
@@ -689,7 +754,10 @@ fn fix_steps(c: &Connector, exe: &Path, first: &str) -> String {
     let exe = exe.display();
     let mut steps = vec![
         first.to_owned(),
-        format!("Run `'{exe}' linear create \"<title>\" \"<description>\"` to file the issue. It prints the issue identifier and link; reply with them."),
+        format!(
+            "Run `'{exe}' linear create \"<title>\" \"<description>\"` to file the issue. It is assigned to the owner of the connected Linear account; \
+             if the thread names who should own it, add `--assignee \"<their name or email>\"` right after `create`. It prints the issue identifier and link; reply with them."
+        ),
     ];
     if !c.columns.get(Stage::Coding).is_empty() {
         steps.push(format!("Run `'{exe}' stage coding` right before you start changing code."));
@@ -708,18 +776,24 @@ fn fix_rule(c: &Connector, exe: &Path) -> String {
     let answer = "- Not a bug, or existing behavior or a known fix already answers it: reply with the answer and stop.";
     let ask = "reply with your analysis and what you would change, ask in the thread whether to file a Linear issue and fix it, and stop without filing an issue or changing code";
     let failed = "If a pinned command fails, reply in the thread with its error and stop.";
+    let take = format!(
+        "- It asks you to work on an existing Linear issue, such as ENG-123: run `'{}' linear take <identifier>` before anything else. \
+         If it says another session already works on the issue, reply that the issue is already being worked on and stop. \
+         Otherwise it prints the issue: reply that you are taking it, then fix it in the order above, with that issue in place of filing one.",
+        exe.display()
+    );
     match c.fix {
         Fix::Off => TRIAGE_ONLY.to_owned(),
         Fix::Ask => format!(
             "\n\nDecide what the thread needs, then act:\n{answer}\n- A bug: {ask}.\n\
              When a reply in the thread says yes, fix it, in this order:\n{}\n\
-             If the reply says no, acknowledge it and stop. `pinned linear create` fails until someone has replied in the thread.\n{failed}",
+             If the reply says no, acknowledge it and stop. `pinned linear create` fails until someone has replied in the thread.\n{take}\n{failed}",
             fix_steps(c, exe, "Reply that you are opening a Linear issue and fixing it.")
         ),
         Fix::Auto => format!(
             "\n\nDecide what the thread needs, then act:\n{answer}\n\
              - A bug that is obvious, because you reproduced it or found it in the code, and whose fix is small and low-risk: fix it, in this order:\n{}\n\
-             - A bug that is not obvious, or whose fix is big or risky: {ask}. When a reply in the thread says yes, fix it in the order above; if it says no, acknowledge it and stop.\n{failed}",
+             - A bug that is not obvious, or whose fix is big or risky: {ask}. When a reply in the thread says yes, fix it in the order above; if it says no, acknowledge it and stop.\n{take}\n{failed}",
             fix_steps(c, exe, "Reply with what you found, and that you are opening a Linear issue and fixing it.")
         ),
     }
@@ -1036,7 +1110,7 @@ mod tests {
                 "plan",
                 "--name",
                 "#support @pinned export 500s since today",
-                "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Messages posted in the thread later reach you as `[Slack reply from <name> in the thread]` blocks; answer them in the thread the same way.\n\nThis connector only triages: never change code, and never file a Linear issue. `pinned linear create` is turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here",
+                "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Messages posted in the thread later reach you as `[Slack reply from <name> in the thread]` blocks; answer them in the thread the same way.\n\nThis connector only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here",
             ]
         );
     }
@@ -1063,12 +1137,13 @@ mod tests {
              - Not a bug, or existing behavior or a known fix already answers it: reply with the answer and stop.\n\
              - A bug that is obvious, because you reproduced it or found it in the code, and whose fix is small and low-risk: fix it, in this order:\n\
              \x20  1. Reply with what you found, and that you are opening a Linear issue and fixing it.\n\
-             \x20  2. Run `'/bin/pinned' linear create \"<title>\" \"<description>\"` to file the issue. It prints the issue identifier and link; reply with them.\n\
+             \x20  2. Run `'/bin/pinned' linear create \"<title>\" \"<description>\"` to file the issue. It is assigned to the owner of the connected Linear account; if the thread names who should own it, add `--assignee \"<their name or email>\"` right after `create`. It prints the issue identifier and link; reply with them.\n\
              \x20  3. Run `'/bin/pinned' stage coding` right before you start changing code.\n\
              \x20  4. Implement the fix, run the project's tests and checks, and open the pull request.\n\
              \x20  5. Run `'/bin/pinned' stage review` right after the pull request is open.\n\
              \x20  6. Reply with the pull request link.\n\
              - A bug that is not obvious, or whose fix is big or risky: reply with your analysis and what you would change, ask in the thread whether to file a Linear issue and fix it, and stop without filing an issue or changing code. When a reply in the thread says yes, fix it in the order above; if it says no, acknowledge it and stop.\n\
+             - It asks you to work on an existing Linear issue, such as ENG-123: run `'/bin/pinned' linear take <identifier>` before anything else. If it says another session already works on the issue, reply that the issue is already being worked on and stop. Otherwise it prints the issue: reply that you are taking it, then fix it in the order above, with that issue in place of filing one.\n\
              If a pinned command fails, reply in the thread with its error and stop.\n\n\
              Slack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here"
         );
@@ -1082,12 +1157,13 @@ mod tests {
              - A bug: reply with your analysis and what you would change, ask in the thread whether to file a Linear issue and fix it, and stop without filing an issue or changing code.\n\
              When a reply in the thread says yes, fix it, in this order:\n\
              \x20  1. Reply that you are opening a Linear issue and fixing it.\n\
-             \x20  2. Run `'/bin/pinned' linear create \"<title>\" \"<description>\"` to file the issue. It prints the issue identifier and link; reply with them.\n\
+             \x20  2. Run `'/bin/pinned' linear create \"<title>\" \"<description>\"` to file the issue. It is assigned to the owner of the connected Linear account; if the thread names who should own it, add `--assignee \"<their name or email>\"` right after `create`. It prints the issue identifier and link; reply with them.\n\
              \x20  3. Run `'/bin/pinned' stage coding` right before you start changing code.\n\
              \x20  4. Implement the fix, run the project's tests and checks, and open the pull request.\n\
              \x20  5. Run `'/bin/pinned' stage review` right after the pull request is open.\n\
              \x20  6. Reply with the pull request link.\n\
              If the reply says no, acknowledge it and stop. `pinned linear create` fails until someone has replied in the thread.\n\
+             - It asks you to work on an existing Linear issue, such as ENG-123: run `'/bin/pinned' linear take <identifier>` before anything else. If it says another session already works on the issue, reply that the issue is already being worked on and stop. Otherwise it prints the issue: reply that you are taking it, then fix it in the order above, with that issue in place of filing one.\n\
              If a pinned command fails, reply in the thread with its error and stop.\n\n\
              Slack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here"
         );
@@ -1139,6 +1215,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_issue_gets_one_session_across_connectors() {
+        let mut store = Store { connectors: vec![linear_connector(), fixing_connector()], ..Store::default() };
+        let filed = Filed { id: "uuid".into(), identifier: "ENG-7".into(), url: "https://linear.app/x/issue/ENG-7".into() };
+        assert_eq!(store.take("c2", "C0123ABCD", "1792400050.000200", &issue()), Ok(filed.clone()));
+        assert_eq!(store.take("c2", "C0123ABCD", "1792400050.000200", &issue()), Ok(filed));
+        assert_eq!(
+            store.working_on("uuid").map(|(c, thread)| (c.id.as_str(), thread)),
+            Some(("c2", Some("C0123ABCD:1792400050.000200")))
+        );
+        assert_eq!(
+            store.take("c2", "C0123ABCD", "1792499999.000100", &issue()),
+            Err("ENG-7 is already being worked on by the session of connector \"Triage\" that answers another Slack thread. No second session starts on it.".into())
+        );
+
+        store.connectors[0].handled.push("uuid-8".into());
+        let picked = linear::Issue { id: "uuid-8".into(), identifier: "ENG-8".into(), ..issue() };
+        assert_eq!(store.working_on("uuid-8").map(|(c, thread)| (c.id.as_str(), thread)), Some(("c1", None)));
+        assert_eq!(
+            store.take("c2", "C0123ABCD", "1792499999.000100", &picked),
+            Err("ENG-8 is already being worked on by the session connector \"Resolve\" started for it. No second session starts on it.".into())
+        );
+
+        let free = linear::Issue { id: "uuid-9".into(), identifier: "ENG-9".into(), ..issue() };
+        assert_eq!(store.working_on("uuid-9").map(|(c, _)| c.id.clone()), None);
+        assert_eq!(
+            store.take("c2", "C0123ABCD", "1792400050.000200", &free),
+            Err("this thread already works on ENG-7: one thread works on one issue".into())
+        );
+        store.connectors.push(Connector { id: "c3".into(), ..slack_connector() });
+        assert_eq!(
+            store.take("c3", "C0123ABCD", "1792499999.000100", &free),
+            Err("connector \"Triage\" does not work on Linear issues: it is set to only analyze and reply".into())
+        );
+        assert_eq!(store.take("gone", "C0123ABCD", "1792499999.000100", &free), Err("the connector was deleted".into()));
+    }
+
     /// Through the harness's entry points, on a store as connectors.json holds it. No call here
     /// reaches Linear or Slack: each answers from the store or fails before the network.
     #[test]
@@ -1156,7 +1269,7 @@ mod tests {
         let connectors = Connectors::load(dir.clone(), "/bin/pinned".into());
 
         assert_eq!(
-            block_on(connectors.create("c2", "C0123ABCD", "1792400050.000200", "Export 500s again", "dup")),
+            block_on(connectors.create("c2", "C0123ABCD", "1792400050.000200", "Export 500s again", "dup", "")),
             Ok("ENG-12 https://linear.app/x/issue/ENG-12".into())
         );
         let thread = |t: &str| Subject::SlackThread { channel: "C0123ABCD".into(), thread: t.into() };
@@ -1166,10 +1279,10 @@ mod tests {
             Err("this Slack thread has no Linear issue yet: file one with `pinned linear create` first".into())
         );
         assert_eq!(
-            block_on(connectors.create("c3", "C0123ABCD", "1792400050.000200", "Export 500s", "desc")),
+            block_on(connectors.create("c3", "C0123ABCD", "1792400050.000200", "Export 500s", "desc", "")),
             Err("connector \"Triage\" does not file Linear issues: it is set to only analyze and reply".into())
         );
-        assert_eq!(block_on(connectors.create("gone", "C0123ABCD", "1", "t", "d")), Err("the connector was deleted".into()));
+        assert_eq!(block_on(connectors.create("gone", "C0123ABCD", "1", "t", "d", "")), Err("the connector was deleted".into()));
         let _ = std::fs::remove_dir_all(dir);
     }
 

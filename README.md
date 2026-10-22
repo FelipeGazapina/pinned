@@ -158,11 +158,30 @@ the bug, opens a pull request and replies with its link. If the thread is not a 
 already has an answer, the session replies and stops.
 
 `pinned linear create` files the issue in the connector's team with its label, and adds a link
-to the Slack thread to the description. Each thread files one issue. A second call returns the
+to the Slack thread to the description. pinned files on your behalf, so the issue is assigned to
+the owner of the connected Linear account. If the thread names who should own the task, the
+session adds `--assignee "<name or email>"`, and pinned matches it against the workspace's
+users by name, display name or email, ignoring case. Each thread files one issue. A second call returns the
 issue already filed. After filing, `pinned stage coding` and `pinned stage review` move that
 issue through the columns you set. A thread has no issue when pinned picks it up, so a Slack
 connector has no first column. The session fixes code under the connector's **Permissions**,
 so pick a mode that lets it run `git` and `gh`.
+
+### One session per issue
+
+An issue gets one session across all connectors. A Linear connector does not start a session
+for an issue that a Slack thread's session filed or took, even when the issue carries the
+connector's label, and two Linear connectors never both start the same issue.
+
+When a thread asks the session to work on an existing issue, the session runs
+`pinned linear take <identifier>`, for example `pinned linear take ENG-123`, before anything
+else. If another session already works on the issue, the command says which connector's
+session has it, and the session replies in the thread that the issue is already being worked
+on and stops. Otherwise the thread takes the issue: the session replies that it is taking it
+and fixes it as above, `pinned stage` moves that issue, and the Linear connector skips it.
+The thread asked for the issue, so taking one does not wait for a reply under **Analyze, then
+ask me in the thread before filing**. A connector set to **Only analyze and reply** never takes
+an issue.
 
 ### Proof of work
 

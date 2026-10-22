@@ -129,7 +129,17 @@ pub enum Message {
         stage: Stage,
     },
     SlackReply { connector: String, channel: String, thread: String, text: String },
-    LinearCreate { connector: String, channel: String, thread: String, title: String, description: String },
+    LinearCreate {
+        connector: String,
+        channel: String,
+        thread: String,
+        title: String,
+        description: String,
+        /// Who the issue is assigned to, by name or email; empty assigns the Linear account's owner.
+        #[serde(default)]
+        assignee: String,
+    },
+    LinearTake { connector: String, channel: String, thread: String, issue: String },
     Remind { message: String, when: When },
     ListReminders,
     CancelReminder { id: u64 },

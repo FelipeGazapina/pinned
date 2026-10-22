@@ -793,8 +793,11 @@ fn main() {
                 agent::Message::SlackReply { connector, channel, thread, text } => tauri::async_runtime::block_on(
                     handle.state::<connectors::Connectors>().reply(&connector, &channel, &thread, &text),
                 ),
-                agent::Message::LinearCreate { connector, channel, thread, title, description } => tauri::async_runtime::block_on(
-                    handle.state::<connectors::Connectors>().create(&connector, &channel, &thread, &title, &description),
+                agent::Message::LinearCreate { connector, channel, thread, title, description, assignee } => tauri::async_runtime::block_on(
+                    handle.state::<connectors::Connectors>().create(&connector, &channel, &thread, &title, &description, &assignee),
+                ),
+                agent::Message::LinearTake { connector, channel, thread, issue } => tauri::async_runtime::block_on(
+                    handle.state::<connectors::Connectors>().take(&connector, &channel, &thread, &issue),
                 ),
             })?;
             let window = app.get_webview_window("main").unwrap();
