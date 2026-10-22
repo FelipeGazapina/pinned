@@ -14,6 +14,8 @@ pub struct Config {
     pub downloads: PathBuf,
     /// The URL machines and browsers reach the hub at; `http://<listen address>` without one.
     pub public_url: Option<String>,
+    /// The key the integrations' secrets are sealed with in Postgres, created on first start.
+    pub key_file: PathBuf,
 }
 
 pub struct Running {
@@ -24,7 +26,7 @@ pub struct Running {
 
 /// Connects to Postgres, starts every account's connectors and serves until the task ends.
 pub async fn start(config: Config) -> Result<Running, String> {
-    let db = db::Db::connect(&config.db).await?;
+    let db = db::Db::connect(&config.db, db::Sealer::load(&config.key_file)?).await?;
     let listener = tokio::net::TcpListener::bind(&config.listen).await.map_err(|e| format!("could not listen on {}: {e}", config.listen))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let public_url = config.public_url.unwrap_or_else(|| format!("http://{addr}"));

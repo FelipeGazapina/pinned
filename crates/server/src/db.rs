@@ -1,12 +1,18 @@
 //! The hub's Postgres: accounts, logins, machines and pairing codes. Tokens are stored as their
 //! sha256, so the database alone can't sign anyone in.
 
-use rand_core::{OsRng, RngCore};
+use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use rand_core::{OsRng, RngCore};
 use pinned_core::wire::{AccountView, MachineView};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::sync::Arc;
 use tokio_postgres::{Client, NoTls};
 use uuid::Uuid;
@@ -30,6 +36,7 @@ const LOGIN_IDLE_DAYS: i32 = 90;
 
 #[derive(Clone)]
 pub struct Db {
+    sealer: Sealer,
     url: Arc<str>,
     /// Replaced when Postgres drops the connection, as on its restart, so the hub doesn't stay down.
     client: Arc<tokio::sync::Mutex<Arc<Client>>>,
@@ -68,6 +75,54 @@ pub struct Connectors {
     pub secrets: BTreeMap<String, String>,
 }
 
+/// Seals the integrations' keys before they reach Postgres, so a dump or a backup of the
+/// database alone doesn't give them away.
+#[derive(Clone)]
+pub struct Sealer(Arc<ChaCha20Poly1305>);
+
+const SEALED: &str = "sealed:";
+
+impl Sealer {
+    /// The key in `file`, made on first use, readable only by the hub's user.
+    pub fn load(file: &Path) -> Result<Sealer, String> {
+        let key = match std::fs::read(file) {
+            Ok(key) => key,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let key = ChaCha20Poly1305::generate_key(&mut OsRng).to_vec();
+                if let Some(dir) = file.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+                }
+                let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(file).map_err(|e| format!("could not create {}: {e}", file.display()))?;
+                f.write_all(&key).map_err(|e| format!("could not write {}: {e}", file.display()))?;
+                key
+            }
+            Err(e) => return Err(format!("could not read {}: {e}", file.display())),
+        };
+        let key = Key::from_exact_iter(key).ok_or_else(|| format!("{} does not hold a 32-byte key", file.display()))?;
+        Ok(Sealer(Arc::new(ChaCha20Poly1305::new(&key))))
+    }
+
+    fn seal(&self, secret: &str) -> String {
+        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let mut sealed = nonce.to_vec();
+        sealed.extend(self.0.encrypt(&nonce, secret.as_bytes()).expect("sealing a short secret cannot fail"));
+        format!("{SEALED}{}", BASE64.encode(sealed))
+    }
+
+    /// A value written before sealing came in reads as it is, and is sealed when it is next saved.
+    fn open(&self, value: &str) -> Result<String, String> {
+        let Some(sealed) = value.strip_prefix(SEALED) else { return Ok(value.to_owned()) };
+        let unreadable = || "a secret can't be opened with this hub's key file".to_owned();
+        let sealed = BASE64.decode(sealed).map_err(|_| unreadable())?;
+        if sealed.len() < 12 {
+            return Err(unreadable());
+        }
+        let (nonce, ciphertext) = sealed.split_at(12);
+        let secret = self.0.decrypt(Nonce::from_slice(nonce), ciphertext).map_err(|_| unreadable())?;
+        String::from_utf8(secret).map_err(|_| unreadable())
+    }
+}
+
 async fn open(url: &str) -> Result<Client, String> {
     let (client, connection) = tokio_postgres::connect(url, NoTls).await.map_err(|e| format!("could not connect to Postgres: {e}"))?;
     tokio::spawn(async move {
@@ -83,10 +138,10 @@ fn err(e: tokio_postgres::Error) -> String {
 }
 
 impl Db {
-    pub async fn connect(url: &str) -> Result<Db, String> {
+    pub async fn connect(url: &str, sealer: Sealer) -> Result<Db, String> {
         let client = open(url).await?;
         client.batch_execute(SCHEMA).await.map_err(|e| format!("could not create the tables: {e}"))?;
-        Ok(Db { url: url.into(), client: Arc::new(tokio::sync::Mutex::new(Arc::new(client))) })
+        Ok(Db { sealer, url: url.into(), client: Arc::new(tokio::sync::Mutex::new(Arc::new(client))) })
     }
 
     async fn client(&self) -> Result<Arc<Client>, String> {
@@ -240,8 +295,8 @@ impl Db {
 
     pub async fn connectors(&self, account: Uuid) -> Result<Connectors, String> {
         let row = self.client().await?.query_one("select store, secrets from accounts where id = $1", &[&account]).await.map_err(err)?;
-        let secrets: Value = row.get(1);
-        let secrets = serde_json::from_value(secrets).unwrap_or_default();
+        let sealed: BTreeMap<String, String> = serde_json::from_value(row.get(1)).map_err(|e| format!("account {account} has unreadable secrets: {e}"))?;
+        let secrets = sealed.into_iter().map(|(name, value)| Ok((name, self.sealer.open(&value)?))).collect::<Result<_, String>>()?;
         Ok(Connectors { store: row.get(0), secrets })
     }
 
@@ -254,14 +309,32 @@ impl Db {
         self.client().await?.execute("update accounts set store = $2 where id = $1", &[&account, store]).await.map_err(err).map(drop)
     }
 
-    pub async fn save_secrets(&self, account: Uuid, secrets: &Value) -> Result<(), String> {
-        self.client().await?.execute("update accounts set secrets = $2 where id = $1", &[&account, secrets]).await.map_err(err).map(drop)
+    pub async fn save_secrets(&self, account: Uuid, secrets: &BTreeMap<String, String>) -> Result<(), String> {
+        let sealed: BTreeMap<&String, String> = secrets.iter().map(|(name, value)| (name, self.sealer.seal(value))).collect();
+        let sealed = serde_json::to_value(sealed).map_err(|e| e.to_string())?;
+        self.client().await?.execute("update accounts set secrets = $2 where id = $1", &[&account, &sealed]).await.map_err(err).map(drop)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_secret_is_sealed_with_the_key_file_made_on_first_start() {
+        let dir = std::env::temp_dir().join(format!("pinned-sealer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sealer = Sealer::load(&dir.join("hub.key")).unwrap();
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.join("hub.key")).unwrap().permissions()) & 0o777, 0o600);
+        let sealed = sealer.seal("lin_api_secret");
+        assert!(sealed.starts_with("sealed:") && !sealed.contains("lin_api_secret"));
+        assert_ne!(sealer.seal("lin_api_secret"), sealed, "every seal takes a fresh nonce");
+        assert_eq!(Sealer::load(&dir.join("hub.key")).unwrap().open(&sealed), Ok("lin_api_secret".into()), "the key file is reused");
+        assert_eq!(sealer.open("xoxb-written-before-sealing"), Ok("xoxb-written-before-sealing".into()));
+        let other = Sealer::load(&dir.join("other.key")).unwrap();
+        assert_eq!(other.open(&sealed), Err("a secret can't be opened with this hub's key file".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn pair_codes_use_only_unambiguous_characters() {

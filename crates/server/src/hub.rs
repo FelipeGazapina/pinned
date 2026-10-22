@@ -511,7 +511,7 @@ struct PgStorage {
 
 enum Write {
     Store(Value),
-    Secrets(Value),
+    Secrets(BTreeMap<String, String>),
 }
 
 impl PgStorage {
@@ -546,7 +546,7 @@ impl PgStorage {
     }
 
     fn write_keys(&self, keys: &BTreeMap<String, String>) {
-        let _ = self.writes.send(Write::Secrets(serde_json::to_value(keys).unwrap()));
+        let _ = self.writes.send(Write::Secrets(keys.clone()));
     }
 }
 

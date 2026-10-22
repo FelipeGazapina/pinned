@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "usage:
-  pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>]
+  pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>]
   pinned-server pair <hub url> <code> [--name <name>] [--config-dir <dir>]
   pinned-server login <hub url> <email> [--name <name>] [--config-dir <dir>]   (password on stdin or in PINNED_PASSWORD)
   pinned-server node [--config-dir <dir>]";
@@ -83,13 +83,14 @@ impl Args {
 }
 
 fn hub(args: &[String]) -> Result<(), String> {
-    let args = Args::parse(args, &["db", "listen", "ui", "downloads", "public-url"], 0)?;
+    let args = Args::parse(args, &["db", "listen", "ui", "downloads", "public-url", "key-file"], 0)?;
     let config = pinned_server::Config {
         db: args.required("db")?,
         listen: args.required("listen")?,
         ui: args.required("ui")?.into(),
         downloads: args.required("downloads")?.into(),
         public_url: args.flags.get("public-url").cloned(),
+        key_file: args.flags.get("key-file").map_or_else(|| args.config_dir().join("hub.key"), PathBuf::from),
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {

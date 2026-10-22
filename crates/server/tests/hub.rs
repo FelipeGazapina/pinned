@@ -42,6 +42,7 @@ impl TestHub {
                 ui: dir.join("ui"),
                 downloads: dir.join("downloads"),
                 public_url: None,
+                key_file: dir.join("hub.key"),
             }))
             .unwrap();
         let url = format!("http://{}", running.addr);
@@ -471,4 +472,23 @@ fn the_hub_reconnects_when_postgres_drops_it() {
     admin(&format!("select pg_terminate_backend(pid) from pg_stat_activity where datname = '{}'", hub.database));
     std::thread::sleep(Duration::from_millis(200));
     assert!(account::login(&hub.url, "ana@acme.dev", "correct horse").is_ok());
+}
+
+#[test]
+fn integration_keys_reach_postgres_sealed() {
+    let hub = TestHub::start("sealed");
+    let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&hub.url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    client.hub(json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": "lin_api_secret", "slack_key": null })).unwrap();
+    let sealed = || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{POSTGRES}/{}", hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            db.query_one("select secrets::text from accounts", &[]).await.unwrap().get::<_, String>(0)
+        })
+    };
+    wait_for("the keys to be written", || sealed().contains("sealed:"));
+    assert!(!sealed().contains("lin_api_secret"));
 }
