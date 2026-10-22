@@ -9,6 +9,7 @@ pub mod evidence;
 pub mod history;
 pub mod hooks;
 pub mod linear;
+pub mod link;
 pub mod machine;
 pub mod plugin;
 pub mod projects;

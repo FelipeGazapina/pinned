@@ -132,6 +132,18 @@ pub fn pair(hub: &str, code: &str, name: &str, os: &str) -> Result<Credentials, 
     })
 }
 
+/// This machine's host name, which names it in the account until someone renames it.
+pub fn hostname() -> String {
+    let out = std::process::Command::new("hostname").stderr(std::process::Stdio::null()).output();
+    let name = out.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
+    let name = name.strip_suffix(".local").unwrap_or(&name);
+    if name.is_empty() {
+        "machine".into()
+    } else {
+        name.to_owned()
+    }
+}
+
 fn post<T: DeserializeOwned>(hub: &str, path: &str, bearer: Option<&str>, body: &impl Serialize) -> Result<T, String> {
     let hub = hub.trim().trim_end_matches('/');
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
