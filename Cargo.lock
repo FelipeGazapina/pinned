@@ -2447,6 +2447,7 @@ dependencies = [
 name = "pinned-core"
 version = "0.5.1"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "portable-pty",
  "reqwest",

@@ -2,6 +2,7 @@
 //! with a claude session already working on what it found.
 
 use crate::agent::{self, Stage, Subject};
+use crate::wire::RunSpec;
 use crate::{linear, slack};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -298,6 +299,18 @@ pub struct Run {
     pub args: Vec<String>,
     pub connector: String,
     pub subject: Subject,
+}
+
+impl Run {
+    /// The run as any machine opens it.
+    pub fn spec(&self) -> RunSpec {
+        RunSpec {
+            folder: self.cwd.display().to_string(),
+            repo: self.repo.clone(),
+            args: self.args.clone(),
+            env: agent::session_env(&self.connector, &self.subject),
+        }
+    }
 }
 
 /// What a check hands to the tabs.
@@ -1049,6 +1062,16 @@ mod tests {
         let storage = FileStorage::new(dir.clone());
         storage.save(&serde_json::to_vec(&Store { connectors, ..Store::default() }).unwrap()).unwrap();
         (Connectors::new(storage, "/bin/pinned".into()), dir)
+    }
+
+    #[test]
+    fn a_run_built_in_the_hub_names_the_binary_by_placeholder() {
+        let c = Connector { repo: " git@github.com:acme/app.git ".into(), ..linear_connector() };
+        let spec = run(&c, &issue(), crate::wire::EXE_PLACEHOLDER).spec();
+        assert_eq!((spec.folder.as_str(), spec.repo.as_deref()), ("/repo", Some("git@github.com:acme/app.git")));
+        assert_eq!(spec.env, [("PINNED_CONNECTOR".to_owned(), "c1".to_owned()), ("PINNED_ISSUE".to_owned(), "uuid".to_owned())]);
+        assert!(spec.args.last().unwrap().contains("- Run `'{{pinned}}' stage coding` right before you start changing code."));
+        assert_eq!(run(&linear_connector(), &issue(), "/bin/pinned").spec().repo, None);
     }
 
     #[test]

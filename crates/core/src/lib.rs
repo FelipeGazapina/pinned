@@ -13,3 +13,4 @@ pub mod pty;
 pub mod reminders;
 pub mod sessions;
 pub mod slack;
+pub mod wire;
