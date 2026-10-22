@@ -23,6 +23,10 @@ const SESSION_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
 pub const FILE_LIMIT: u64 = 32 << 20;
 /// Compressed bytes sent or fetched in one call.
 const BATCH: u64 = 8 << 20;
+/// The biggest websocket message a sync call makes: a batch just short of `BATCH` plus one file
+/// at `FILE_LIMIT`, in base64, with room for the JSON around it. Both ends of a machine's socket
+/// take messages this big, well past tungstenite's 16 MB default frame.
+pub const MESSAGE_LIMIT: usize = ((BATCH + FILE_LIMIT) as usize).div_ceil(3) * 4 + (1 << 20);
 pub const HISTORY: &str = "history.jsonl";
 
 /// A file as the hub holds it. An empty `sha` marks a deleted one.

@@ -511,6 +511,48 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
 }
 
 #[test]
+fn a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link() {
+    let hub = TestHub::start("big_sync");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("big-sync-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mut mac, mac_home), (mut mini, mini_home)) = (start("mac"), start("mini"));
+    let project = sync::Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
+    let checkout = |home: &Path| sync::Checkout { project: project.clone(), path: home.join("app"), history: None };
+    let session = |home: &Path| sync::claude_dir(home, &home.join("app")).join("session.jsonl");
+    // Random bytes don't compress, so the push carries about 19 MB of base64, past tungstenite's 16 MB default frame.
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let big: Vec<u8> = (0..14 << 20)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        })
+        .collect();
+    std::fs::create_dir_all(session(&mac_home).parent().unwrap()).unwrap();
+    std::fs::write(session(&mac_home), &big).unwrap();
+
+    let now = std::time::SystemTime::now();
+    let pushed = sync::sync(&Through(mac.link.as_ref().unwrap()), &mut sync::State::default(), &mac_home, &checkout(&mac_home), now);
+    assert_eq!(pushed.map(|s| s.pushed), Ok(vec!["claude/session.jsonl".to_owned()]));
+    let pulled = sync::sync(&Through(mini.link.as_ref().unwrap()), &mut sync::State::default(), &mini_home, &checkout(&mini_home), now);
+    assert_eq!(pulled.map(|s| s.pulled), Ok(vec!["claude/session.jsonl".to_owned()]));
+    assert!(std::fs::read(session(&mini_home)).unwrap() == big, "the mini got the session byte for byte");
+    assert!(mac.online() && mini.online(), "both links stay up");
+    mac.kill();
+    mini.kill();
+}
+
+#[test]
 fn sign_in_rejects_wrong_passwords_duplicates_and_logged_out_tokens() {
     let hub = TestHub::start("auth");
     let url = hub.url.clone();

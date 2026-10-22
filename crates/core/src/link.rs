@@ -13,6 +13,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{mpsc as channel, watch};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message as Frame;
 
 const PING: Duration = Duration::from_secs(20);
@@ -213,7 +214,10 @@ async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, ver
 /// connection ended, so the next attempt waits the least.
 async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Machine>, version: &str) -> Result<(), String> {
     let url = ws_url(&creds.hub)?;
-    let (socket, _) = tokio_tungstenite::connect_async(url.as_str()).await.map_err(|e| format!("could not connect to {url}: {e}"))?;
+    let config = WebSocketConfig::default().max_message_size(Some(sync::MESSAGE_LIMIT)).max_frame_size(Some(sync::MESSAGE_LIMIT));
+    let (socket, _) = tokio_tungstenite::connect_async_with_config(url.as_str(), Some(config), false)
+        .await
+        .map_err(|e| format!("could not connect to {url}: {e}"))?;
     let (mut sink, mut stream) = socket.split();
     let auth = MachineFrame::Auth {
         token: creds.machine_token.clone(),

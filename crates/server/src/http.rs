@@ -10,6 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use pinned_core::agent::Subject;
 use pinned_core::account::{Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn};
 use pinned_core::link::UNAUTHORIZED;
+use pinned_core::sync;
 use pinned_core::wire::{AccountView, ClientFrame, HubCall, MachineFrame, MachineView, Reply, ToClient, ToMachine};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -382,7 +383,10 @@ fn client_frame(hub: &Arc<Hub>, account: &Arc<Account>, client: u64, text: &str)
 }
 
 async fn machine_socket(State(server): State<Arc<Server>>, upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(move |socket| serve_machine(server.hub.clone(), socket))
+    upgrade
+        .max_message_size(sync::MESSAGE_LIMIT)
+        .max_frame_size(sync::MESSAGE_LIMIT)
+        .on_upgrade(move |socket| serve_machine(server.hub.clone(), socket))
 }
 
 async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
