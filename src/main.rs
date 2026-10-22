@@ -5,6 +5,7 @@ mod evidence;
 mod history;
 mod hooks;
 mod linear;
+mod plugin;
 mod projects;
 mod pty;
 mod reminders;
@@ -36,6 +37,9 @@ struct Launch {
     path_env: Option<String>,
     settings: PathBuf,
     mcp_config: PathBuf,
+    /// The plugin directory holding the skills that ship inside pinned, and its tutorial helper.
+    plugin_dir: PathBuf,
+    tutorial_helper: PathBuf,
     sock: PathBuf,
 }
 
@@ -370,6 +374,8 @@ fn start_claude(
     cmd.arg(&l.mcp_config);
     cmd.arg("--settings");
     cmd.arg(&l.settings);
+    cmd.arg("--plugin-dir");
+    cmd.arg(&l.plugin_dir);
     if bypass {
         cmd.arg("--dangerously-skip-permissions");
     }
@@ -379,6 +385,7 @@ fn start_claude(
     cmd.env("COLORTERM", "truecolor");
     cmd.env(agent::SOCK_ENV, &l.sock);
     cmd.env(agent::TAB_ENV, &tab);
+    cmd.env(plugin::HELPER_ENV, &l.tutorial_helper);
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -589,12 +596,16 @@ fn launch() -> std::io::Result<Launch> {
     hooks::write_settings(&settings, &std::env::current_exe()?)?;
     let mcp_config = tmp.join("pinned-claude-mcp.json");
     reminders::write_mcp_config(&mcp_config, &std::env::current_exe()?)?;
+    let plugin_dir = tmp.join("pinned-plugin");
+    let tutorial_helper = plugin::install(&plugin_dir)?;
     let path_env = login_shell_path().or_else(|| std::env::var("PATH").ok());
     Ok(Launch {
         claude: find_claude(path_env.as_deref()),
         path_env,
         settings,
         mcp_config,
+        plugin_dir,
+        tutorial_helper,
         sock: tmp.join(format!("pinned-{}.sock", std::process::id())),
     })
 }
@@ -844,7 +855,7 @@ mod tests {
 
     fn harness() -> Harness {
         Harness {
-            launch: Launch { claude: "claude".into(), path_env: None, settings: "s".into(), mcp_config: "m".into(), sock: "k".into() },
+            launch: Launch { claude: "claude".into(), path_env: None, settings: "s".into(), mcp_config: "m".into(), plugin_dir: "p".into(), tutorial_helper: "t".into(), sock: "k".into() },
             default_cwd: "/repo".into(),
             tabs: Mutex::new(HashMap::new()),
             next_tab: AtomicU32::new(1),

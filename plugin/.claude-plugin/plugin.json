@@ -1,0 +1,5 @@
+{
+  "name": "pinned",
+  "description": "Skills that ship inside the pinned app and load in every session it starts.",
+  "version": "1.0.0"
+}

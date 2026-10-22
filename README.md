@@ -87,8 +87,17 @@ claude --model <model> --effort <effort> --permission-mode <mode> [--worktree=<i
 
 The default instructions ask Claude to implement the issue and open a pull request. Edit them
 per connector.
-Each connector has its own column flow. **Move the Linear issue to the column** names
-the column for each stage, and an empty field leaves the issue where it is:
+
+The Connectors page lists each connector with its steps and a sentence that says what it does.
+The switch on a connector turns it on or off right away. Click a connector to open its flow:
+the trigger at the top, then each step it runs, joined by the event that leads to it, as in
+n8n. Click a step to set it up, and click it again to fold it. A dashed **＋** step is optional
+and off: click it to add it, and **Remove step** turns it off again. A **!** marks a step that
+is missing something, and saving opens that step. ⌘S saves. **＋ New connector** asks what
+starts the agent, Linear or Slack, and opens a flow filled with defaults.
+
+Each connector has its own column flow. Each **Move the issue** step names the column for a
+stage, and a stage without the step leaves the issue where it is:
 
 - **When pinned picks it up.** pinned moves the issue before the session starts.
 - **When Claude starts changing code** and **when the pull request is open.** pinned adds a
@@ -131,7 +140,7 @@ from the bot and from other bots are skipped. If the thread's tab is closed, or 
 restarted without resuming it, pinned opens a new session with the whole thread instead.
 pinned follows threads that started in the last 7 days.
 
-**When the thread reports a bug** sets how far the session goes:
+The **If it reports a bug** step sets how far the session goes:
 
 - **Only analyze and reply.** The session replies with its analysis and never changes code.
   pinned rejects `pinned linear create`.
@@ -163,8 +172,11 @@ analyze and reply**. pinned appends a **Proof of work** block to the prompt, aft
 instructions, so editing the instructions does not remove it. The block tells the session to:
 
 1. Write a Playwright script in a temporary directory outside the repository.
-2. Start the app the way the project documents, drive the flow that the change affects, and
-   record a video with `recordVideo` and a small `slowMo`.
+2. Start the app the way the project documents, then record the flow that the change affects
+   with the `pinned:tutorial-video` skill, which pinned loads into every session it starts
+   (`plugin/`, passed with `--plugin-dir`). The video reaches the
+   feature by clicking the sidebar, nav bar and tabs with a visible cursor, never by pasting a
+   URL, and the helper fails the run if the page changes without a click.
 3. After the pull request is open, run
    `pinned evidence <video> --caption "<what the video shows>"`. A Slack session also puts
    the comment link in its last reply in the thread.
@@ -187,9 +199,9 @@ If a browser cannot show the change, because it is a library, a CLI or backend c
 app cannot start in the session, the session records no video. Its `## Proof` comment then
 says `No video: <reason>` and holds the test or command output that proves the change.
 
-**Require a Playwright video, posted as a comment on the pull request** is on by default.
-Clear it to leave the block out of a connector's sessions. A Slack connector that only
-replies never opens a pull request, so the form hides the setting.
+The **Prove it works** step is on by default. Remove it to leave the block out of a
+connector's sessions. A Slack connector that only replies never opens a pull request, so its
+flow has no such step.
 
 ## Updates
 
