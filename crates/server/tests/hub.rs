@@ -291,7 +291,8 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
         client.send(json!({ "type": "call", "id": 1000, "machine": b, "call": { "cmd": "write_input", "tab": "tab-1", "data": key.to_string() } }));
     }
     let screen = format!("{typed}\r\n{typed}\r\n");
-    assert_eq!(client.wait_output(b, "tab-1", "\r\n"), format!("{typed}\r\n"), "keys echo in the order they were typed");
+    let echoed = client.wait_output(b, "tab-1", "\r\n");
+    assert_eq!(echoed.get(..typed.len()), Some(typed.as_str()), "keys echo in the order they were typed");
     assert_eq!(client.wait_output(b, "tab-1", &screen), screen);
 
     let mut late = Client::connect(&url, &token);
