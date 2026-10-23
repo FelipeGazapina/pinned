@@ -144,10 +144,15 @@ function setBypassNext(on) {
 
 async function showProjects({ machine, tab = null } = {}) {
   machine ??= machines.get(picking.machine)?.view.online ? picking.machine : onlineMachines()[0];
-  if (!machine) return;
-  picking = { machine, tab };
   delete document.body.dataset.page;
   picker.hidden = false;
+  choices = [];
+  if (!machine) {
+    picker.dataset.mode = "open";
+    picker.innerHTML = `<p class="loading">No machine is online. Open pinned on a Mac signed into this account, or add a server under Settings → Machines.</p>`;
+    return;
+  }
+  picking = { machine, tab };
   picker.dataset.mode = tab ? "move" : "open";
   picker.innerHTML = `<button class="bypass" title="Opens the next tab with --dangerously-skip-permissions (⇧Enter)"></button>
     ${pickerMachinesHtml(machine, !!tab)}<div class="choices"><p class="loading">Loading projects…</p></div>`;
@@ -309,6 +314,7 @@ function choose(i) {
 }
 
 function openChoice(i, bypass = false) {
+  if (!choices[i]) return;
   if (bypass) bypassNext = true;
   if (!choices[i].keep) closeProjects();
   choices[i].open();
@@ -676,7 +682,7 @@ window.addEventListener("keydown", (e) => {
     if (e.key in PICKER_STEP) choose(chosen + PICKER_STEP[e.key]);
     else if (e.key in TAB_STEP) stepMachine(TAB_STEP[e.key]);
     else if (e.key === "Enter") openChoice(chosen, e.shiftKey);
-    else if (e.key === "b" && !e.ctrlKey && !e.altKey && !picking.tab) setBypassNext(!bypassNext);
+    else if (e.key === "b" && !e.ctrlKey && !e.altKey && !picking.tab && picker.querySelector(".bypass")) setBypassNext(!bypassNext);
     else if (e.key === "Escape") closeProjects();
     e.preventDefault();
     e.stopPropagation();
