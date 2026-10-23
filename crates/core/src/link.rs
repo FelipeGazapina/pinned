@@ -21,6 +21,8 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 const PING: Duration = Duration::from_secs(20);
 /// A hub silent this long, pongs included, is gone even if the socket hasn't said so.
 const SILENT: Duration = Duration::from_secs(60);
+/// A dial still unanswered by then sits on a half-open connection TCP itself never times out.
+const DIAL_WAIT: Duration = Duration::from_secs(15);
 const HELLO_WAIT: Duration = Duration::from_secs(15);
 const CALL_WAIT: Duration = Duration::from_secs(60);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
@@ -267,11 +269,14 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     }
 }
 
-/// Opens the machine's socket to the hub at `url`.
+/// Opens the machine's socket to the hub at `url`, giving up once the TCP, TLS and WebSocket
+/// handshakes together take longer than `DIAL_WAIT`.
 async fn dial(url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, String> {
     let config = WebSocketConfig::default().max_message_size(Some(sync::MESSAGE_LIMIT)).max_frame_size(Some(sync::MESSAGE_LIMIT));
-    let (socket, _) = tokio_tungstenite::connect_async_with_config(url, Some(config), false)
+    let connecting = tokio_tungstenite::connect_async_with_config(url, Some(config), false);
+    let (socket, _) = tokio::time::timeout(DIAL_WAIT, connecting)
         .await
+        .map_err(|_| format!("could not connect to {url}: no answer within {}s", DIAL_WAIT.as_secs()))?
         .map_err(|e| format!("could not connect to {url}: {e}"))?;
     Ok(socket)
 }
