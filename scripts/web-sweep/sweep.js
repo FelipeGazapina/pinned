@@ -33,6 +33,27 @@ const touchCheck = (ok, what) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// iOS Safari keeps the layout viewport its full height under the on-screen keyboard, shrinks the
+// visual viewport, and pans it down to the focused field. Chromium has no such mode, so the phone
+// profile swaps in a visual viewport whose height, offsets, and scale a step can set; otherwise it
+// mirrors the real one.
+function stubVisualViewport() {
+  const real = window.visualViewport;
+  const stub = new EventTarget();
+  let set = {};
+  for (const key of ["width", "height", "offsetTop", "offsetLeft", "pageTop", "pageLeft", "scale"]) {
+    Object.defineProperty(stub, key, { get: () => set[key] ?? real[key] });
+  }
+  for (const type of ["resize", "scroll"]) real.addEventListener(type, () => stub.dispatchEvent(new Event(type)));
+  window.setVisualViewport = (next) => {
+    const was = { height: stub.height, offsetTop: stub.offsetTop, scale: stub.scale };
+    set = next;
+    if (stub.height !== was.height || stub.scale !== was.scale) stub.dispatchEvent(new Event("resize"));
+    if (stub.offsetTop !== was.offsetTop) stub.dispatchEvent(new Event("scroll"));
+  };
+  Object.defineProperty(window, "visualViewport", { value: stub, configurable: true });
+}
+
 async function api(route, body, token) {
   const res = await fetch(`${HUB}${route}`, {
     method: "POST",
@@ -77,6 +98,7 @@ async function sweep(profileName) {
   fs.mkdirSync(shots, { recursive: true });
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ ...profile, permissions: ["clipboard-read", "clipboard-write"] });
+  if (touch) await context.addInitScript(stubVisualViewport);
   const page = await context.newPage();
 
   let seen = [];
@@ -370,6 +392,68 @@ async function sweep(profileName) {
     check(shrunk.rows < rows && shrunk.bottom <= vp.height - 320 + 1, `rows ${rows} -> ${shrunk.rows}, terminal bottom ${shrunk.bottom}`);
     check(back === rows, `rows did not come back: ${back}`);
     return `rows ${rows} -> ${shrunk.rows} -> ${back}`;
+  });
+
+  // Where each edge sits on the screen: the visual viewport's top is screen y 0.
+  const onScreen = () =>
+    page.evaluate(() => {
+      const buffer = active.term.buffer.active;
+      return {
+        top: document.querySelector("#expanded").getBoundingClientRect().top - visualViewport.offsetTop,
+        bottom: document.querySelector("#terms").getBoundingClientRect().bottom - visualViewport.offsetTop,
+        rows: active.term.rows,
+        atBottom: buffer.viewportY === buffer.baseY,
+      };
+    });
+  const keyboard = async (viewport) => {
+    await page.evaluate((v) => setVisualViewport(v), viewport);
+    await sleep(400);
+  };
+
+  await step("Safari keyboard: the page follows the panned visual viewport", async () => {
+    if (!touch) return "desktop has no on-screen keyboard";
+    const vp = page.viewportSize();
+    await page.evaluate(() => active.term.scrollToBottom());
+    const rows = await page.evaluate(() => active.term.rows);
+    await keyboard({ height: 500 });
+    const open = await onScreen();
+    await keyboard({ height: 500, offsetTop: 120 });
+    const panned = await onScreen();
+    await keyboard({ height: 500, offsetTop: 120, scale: 2 });
+    const zoomed = await onScreen();
+    await keyboard({});
+    const closed = await onScreen();
+    check(open.rows < rows && open.bottom <= 501, `keyboard open: rows ${rows} -> ${open.rows}, terminal bottom ${open.bottom} of 500`);
+    check(panned.top >= -1 && panned.bottom <= 501, `panned by 120: header top ${panned.top}, terminal bottom ${panned.bottom} of 500`);
+    check(panned.atBottom, "the terminal scrolled away from the cursor line");
+    check(zoomed.top === -120, `pinch-zoomed: header top ${zoomed.top}, the pan must not move the page`);
+    check(closed.rows === rows && closed.top === 0 && closed.bottom <= vp.height + 1, `keyboard closed: rows ${closed.rows}, header top ${closed.top}, terminal bottom ${closed.bottom}`);
+    return `rows ${rows} -> ${open.rows} -> ${closed.rows}; panned: header top ${panned.top}, terminal bottom ${panned.bottom}`;
+  });
+
+  // Focuses the field, opens the panned keyboard over it, and says where it sits on the screen.
+  const fieldUnderKeyboard = async (field) => {
+    await field.focus();
+    await keyboard({ height: 500, offsetTop: 120 });
+    const r = await field.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const clip = el.closest("#settings-page")?.getBoundingClientRect();
+      return { top: r.top - visualViewport.offsetTop, bottom: r.bottom - visualViewport.offsetTop, clipped: !!clip && (r.top < clip.top || r.bottom > clip.bottom) };
+    });
+    await keyboard({});
+    check(!r.clipped, `the settings page scrolled the field out of view (${r.top}..${r.bottom} on screen)`);
+    check(r.top >= 0 && r.bottom <= 500, `the field sits at ${r.top}..${r.bottom} of 500`);
+    return `field at ${Math.round(r.top)}..${Math.round(r.bottom)} of 500`;
+  };
+
+  await step("Safari keyboard: a focused settings field stays on screen", async () => {
+    if (!touch) return "desktop has no on-screen keyboard";
+    await settingsPage("account");
+    try {
+      return await fieldUnderKeyboard(page.locator(".new-password [name=password]"));
+    } finally {
+      await tapOrClick("#settings-toggle");
+    }
   });
 
   await step("landscape", async () => {
@@ -699,6 +783,11 @@ async function sweep(profileName) {
     const said = await text("#login .error");
     check(/signed out/.test(said), `the form says "${said}"`);
     return said;
+  });
+
+  await step("Safari keyboard: the sign-in form's field stays on screen", async () => {
+    if (!touch) return "desktop has no on-screen keyboard";
+    return fieldUnderKeyboard(page.locator("#login [name=password]"));
   });
 
   await page.fill("#login [name=email]", EMAIL);
