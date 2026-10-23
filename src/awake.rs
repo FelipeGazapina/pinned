@@ -1,7 +1,8 @@
 //! Keeps the Mac from sleeping while the user asks for it, by running `caffeinate`.
 
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use pinned_core::process;
+use std::process::Child;
 use std::sync::Mutex;
 
 pub struct Awake {
@@ -35,7 +36,7 @@ impl Awake {
                 let _ = running.wait();
             }
             None => {
-                let started = Command::new("caffeinate")
+                let started = process::command("caffeinate")
                     .args(["-d", "-i", "-w", &std::process::id().to_string()])
                     .spawn()
                     .map_err(|e| format!("could not run caffeinate: {e}"))?;
@@ -71,7 +72,7 @@ mod tests {
     use super::*;
 
     fn caffeinating() -> bool {
-        let out = Command::new("pgrep").args(["-f", &format!("caffeinate -d -i -w {}", std::process::id())]).output().unwrap();
+        let out = process::command("pgrep").args(["-f", &format!("caffeinate -d -i -w {}", std::process::id())]).output().unwrap();
         out.status.success()
     }
 

@@ -4,10 +4,11 @@
 //! prompt was submitted and one when the turn ended. A snapshot is a git tree written through a
 //! throwaway index, so the user's own index and branches are never touched.
 
+use crate::process;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// A turn's patch is cut here, so one huge generated file can't bloat the history.
 const PATCH_LIMIT: usize = 200_000;
@@ -83,7 +84,7 @@ pub fn load(file: &Path) -> Vec<Turn> {
 }
 
 fn git(cwd: &Path, args: &[&str], index: Option<&Path>) -> Option<Vec<u8>> {
-    let mut cmd = Command::new("git");
+    let mut cmd = process::command("git");
     cmd.args(args).current_dir(cwd).stdin(Stdio::null()).stderr(Stdio::null());
     if let Some(index) = index {
         cmd.env("GIT_INDEX_FILE", index);
@@ -166,7 +167,7 @@ mod tests {
     }
 
     fn run(cwd: &Path, args: &[&str]) {
-        let ok = Command::new("git").args(args).current_dir(cwd).output().unwrap().status.success();
+        let ok = process::command("git").args(args).current_dir(cwd).output().unwrap().status.success();
         assert!(ok, "git {args:?} failed");
     }
 
@@ -217,7 +218,7 @@ mod tests {
         std::fs::write(dir.join("b.txt"), "y\n").unwrap();
         let (files, ..) = diff(&dir, &before, &snapshot(&dir).unwrap()).unwrap();
         assert_eq!(files, vec![FileChange { path: "b.txt".into(), added: 1, removed: 0 }]);
-        let staged = Command::new("git").args(["diff", "--cached", "--name-only"]).current_dir(&dir).output().unwrap().stdout;
+        let staged = process::command("git").args(["diff", "--cached", "--name-only"]).current_dir(&dir).output().unwrap().stdout;
         assert!(staged.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }

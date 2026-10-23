@@ -1,5 +1,6 @@
 use crate::history;
 use crate::ipc::{UnixListener, UnixStream};
+use crate::process;
 use crate::reminders;
 use crate::agent::{
     AgentEvent, AgentStatus, Message, Stage, Subject, Usage, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, SOCK_ENV, TAB_ENV,
@@ -118,7 +119,7 @@ fn user_statusline(config_dir: &Path) -> Option<String> {
 
 /// What `command` prints when given the statusline JSON, run the way Claude Code runs it.
 fn run_statusline(command: &str, input: &str) -> Vec<u8> {
-    let Ok(mut child) = std::process::Command::new("/bin/sh")
+    let Ok(mut child) = process::command("/bin/sh")
         .args(["-c", command])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

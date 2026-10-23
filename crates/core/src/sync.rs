@@ -6,6 +6,7 @@
 //! changed on one side only travels that way, a file deleted on one side is deleted on the other,
 //! and a file changed on both keeps the newer copy; the history keeps the turns of both.
 
+use crate::process;
 use base64::Engine;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -14,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A session untouched this long is never sent the first time; one already shared keeps syncing.
@@ -324,7 +325,7 @@ fn walk(dir: &Path, prefix: &str, files: &mut Vec<(String, PathBuf)>) {
 }
 
 fn tracked(repo: &Path, path: &str) -> bool {
-    let out = Command::new("git").arg("-C").arg(repo).args(["ls-files", "--", path]).stdin(Stdio::null()).stderr(Stdio::null()).output();
+    let out = process::command("git").arg("-C").arg(repo).args(["ls-files", "--", path]).stdin(Stdio::null()).stderr(Stdio::null()).output();
     out.is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 

@@ -2,10 +2,10 @@
 //! API that puts a video inline in a comment, so the video becomes an asset of one prerelease and
 //! the comment links it.
 
+use crate::process;
 use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const SUBCOMMAND: &str = "evidence";
@@ -99,7 +99,7 @@ impl Tools {
 
     /// Runs `program` and returns its stdout, or its stderr as the error.
     fn run<S: AsRef<OsStr>>(&self, program: &str, args: &[S]) -> Result<String, String> {
-        let out = Command::new(program).args(args).env("PATH", &self.path).output().map_err(|e| format!("could not run {program}: {e}"))?;
+        let out = process::command(program).args(args).env("PATH", &self.path).output().map_err(|e| format!("could not run {program}: {e}"))?;
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
         if out.status.success() {

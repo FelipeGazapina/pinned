@@ -1,12 +1,12 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, EXE_PLACEHOLDER};
-use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions, sync, uploads};
+use crate::{github, history, hooks, plugin, process, projects, pty, reminders, sessions, sync, uploads};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -843,7 +843,7 @@ fn paste(text: &str) -> Vec<u8> {
 }
 
 pub fn git_remote(dir: &Path) -> Option<String> {
-    let out = Command::new("git")
+    let out = process::command("git")
         .arg("-C")
         .arg(dir)
         .args(["remote", "get-url", "origin"])
@@ -901,7 +901,7 @@ fn clone(repo: &str, into: &Path, token: Option<&str>) -> Result<(), String> {
 }
 
 fn git_config(repo: &Path, (key, value): &(&str, String)) -> Result<(), String> {
-    let out = Command::new("git").arg("-C").arg(repo).args(["config", "--local", key, value]).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
+    let out = process::command("git").arg("-C").arg(repo).args(["config", "--local", key, value]).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
     out.status.success().then_some(()).ok_or_else(|| format!("git config failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
 }
 
@@ -910,7 +910,7 @@ fn clone_once(repo: &str, into: &Path, config: Option<&(&str, String)>) -> Resul
     if let Some(parent) = into.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let mut git = Command::new("git");
+    let mut git = process::command("git");
     // Through the environment, so the token stays out of the process list.
     if let Some((key, value)) = config {
         git.env("GIT_CONFIG_COUNT", "1").env("GIT_CONFIG_KEY_0", key).env("GIT_CONFIG_VALUE_0", value);
@@ -945,7 +945,7 @@ fn find_claude(path_env: Option<&str>) -> PathBuf {
 /// PATH their terminal sees, so claude and the tools it runs (git, node, brew) resolve.
 fn login_shell_path() -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let out = Command::new(shell)
+    let out = process::command(shell)
         .args(["-ilc", "printf '\\n__PINNED_PATH__%s__PINNED_PATH__' \"$PATH\""])
         .stdin(Stdio::null())
         .output()
@@ -1021,7 +1021,7 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        assert!(Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success(), "git {args:?}");
+        assert!(process::command("git").arg("-C").arg(dir).args(args).status().unwrap().success(), "git {args:?}");
     }
 
     fn slack_env(connector: &str, thread: &str) -> Vec<(String, String)> {

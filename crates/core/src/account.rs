@@ -145,7 +145,7 @@ pub fn logout(hub: &str, user_token: &str) -> Result<(), String> {
 }
 
 pub fn hostname() -> String {
-    let out = std::process::Command::new("hostname").stderr(std::process::Stdio::null()).output();
+    let out = crate::process::command("hostname").stderr(std::process::Stdio::null()).output();
     let name = out.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
     let name = name.strip_suffix(".local").unwrap_or(&name);
     if name.is_empty() {

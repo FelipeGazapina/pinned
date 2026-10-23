@@ -1,10 +1,12 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod account;
 mod awake;
 mod commands;
 
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::wire::{Call, MachineEvent, TabId};
-use pinned_core::{agent, connectors, reminders, uploads};
+use pinned_core::{agent, connectors, process, reminders, uploads};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -193,7 +195,7 @@ fn watch_reminders(app: AppHandle) {
 fn notify(message: &str) {
     let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!("display notification \"{escaped}\" with title \"Reminder\" sound name \"Glass\"");
-    let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+    let _ = process::command("osascript").args(["-e", &script]).status();
 }
 
 fn add_tray(app: &tauri::App) -> tauri::Result<()> {
