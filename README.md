@@ -72,7 +72,7 @@ folder. Uploads older than a day are deleted.
 ## Machines
 
 Sign in under **Settings → Account** to use pinned from more than one machine. The hub
-(`https://pinned.187-127-36-149.sslip.io` unless you change it) holds your account. Enter your
+(`https://pinned-hub-production.up.railway.app` unless you change it) holds your account. Enter your
 email and a password, then click **Sign in**, or **Create account** the first time. This Mac
 joins the account under its computer name.
 
@@ -102,18 +102,17 @@ workflows again.
 
 ### Add a server
 
-A Linux server, or another Mac without the app, can run sessions too. Under
+A Linux server (x86_64 or arm64) can run sessions too. Under
 **Settings → Machines**, click **Get a pairing command** and run the command it shows on the
 server:
 
 ```sh
-curl -fsSL https://pinned.187-127-36-149.sslip.io/install.sh | sh -s -- K7Q2M9XD
+curl -fsSL https://pinned-hub-production.up.railway.app/install.sh | sh -s -- K7Q2M9XD
 ```
 
-The code works once, for 15 minutes. On Linux the script installs `pinned-server`, pairs it
-with your account, and starts it as a systemd service, so it comes back after a reboot. On a
-Mac it prints the command that runs the node. The server needs `claude` installed and signed
-in, the same as this Mac.
+The code works once, for 15 minutes. The script installs `pinned-server`, pairs it with your
+account, and starts it as a systemd service, so it comes back after a reboot. The server needs
+`claude` installed and signed in, the same as this Mac.
 
 ### Web app
 
@@ -128,7 +127,7 @@ keyboard.
 On Android you can install the web app, so it opens from the home screen in its own window
 like a native app. Open the hub's address in Chrome, tap the ⋮ menu, then tap **Install app**
 (older versions say **Add to Home screen**). Chrome offers this only over https, which is why
-the hub sits behind nginx at its sslip.io address. The installed app opens on the same
+the hub runs on Railway at its railway.app address. The installed app opens on the same
 sign-in form, and no session can start until you sign in. Without a network it still opens,
 but it cannot reach your machines until the network comes back.
 

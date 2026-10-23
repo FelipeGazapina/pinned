@@ -1,4 +1,4 @@
-const DEFAULT_HUB = "https://pinned.187-127-36-149.sslip.io";
+const DEFAULT_HUB = "https://pinned-hub-production.up.railway.app";
 
 function showAccount() {
   if (!account) {
