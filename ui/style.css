@@ -300,6 +300,7 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .tab .badge { flex: none; padding: 1px 4px; border-radius: 4px; background: #ffffff1a; color: var(--fg);
   font-size: 9px; font-weight: 700; letter-spacing: 0.03em; }
 .tab .badge[hidden] { display: none; }
+.tab .badge.account { max-width: 7em; overflow: hidden; text-overflow: ellipsis; background: #4ea1ff2e; }
 .dot[data-online="true"] { background: var(--done); }
 .dot[data-online="false"] { background: #4a515c; }
 
