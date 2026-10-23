@@ -20,15 +20,38 @@ let projectsMachine = LOCAL;
 
 async function showProjectsPage() {
   if (!machines.get(projectsMachine)?.view.online) projectsMachine = onlineMachines()[0];
-  const projects = projectsMachine ? await callOn(projectsMachine, { cmd: "list_projects" }).catch(() => []) : [];
+  const [projects, accounts] = projectsMachine
+    ? await Promise.all([callOn(projectsMachine, { cmd: "list_projects" }).catch(() => []), accountsOf(projectsMachine).catch(() => [])])
+    : [[], []];
   settingsPage.innerHTML = `<h2>Projects</h2>
     ${machineChipsHtml(projectsMachine, "projects-machine")}
-    <p>Pick a project to see what its sessions changed, turn by turn.</p>
+    <p>Pick a project to see what its sessions changed, turn by turn${accounts.length ? ", or the account its sessions run under" : ""}.</p>
+    <p class="error" id="projects-error"></p>
     <div class="projects">${
-      projects.map((p) => `<button class="project" data-action="open-project" data-path="${esc(p.path)}">
-        <b>${esc(p.name)}</b><span class="path">${esc(tilde(p.path))}</span></button>`).join("") || `<p class="empty">No projects yet.</p>`
+      projects.map((p) => `<div class="project-row"><button class="project" data-action="open-project" data-path="${esc(p.path)}">
+        <b>${esc(p.name)}</b><span class="path">${esc(tilde(p.path))}</span></button>${projectAccountHtml(p, accounts)}</div>`).join("") || `<p class="empty">No projects yet.</p>`
     }</div>`;
 }
+
+function projectAccountHtml(project, accounts) {
+  if (!accounts.length) return "";
+  const ids = accounts.map((a) => a.id);
+  if (!ids.includes(project.account)) ids.push(project.account);
+  const label = (id) => accountOf(projectsMachine, id)?.name ?? `${id} (removed)`;
+  return `<select data-project-account data-path="${esc(project.path)}" title="The account its sessions run under">${options(ids, label, project.account)}</select>`;
+}
+
+settingsPage.addEventListener("change", async (e) => {
+  if (!("projectAccount" in e.target.dataset)) return;
+  const account = e.target.value;
+  document.getElementById("projects-error").textContent = "";
+  try {
+    await callOn(projectsMachine, { cmd: "set_project_account", path: e.target.dataset.path, account: account === DEFAULT_ACCOUNT ? null : account });
+  } catch (err) {
+    await showProjectsPage();
+    document.getElementById("projects-error").textContent = String(err);
+  }
+});
 
 async function showProjectHistory(path) {
   const turns = await callOn(projectsMachine, { cmd: "project_history", path }).catch(() => []);

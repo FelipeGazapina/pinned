@@ -277,7 +277,9 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
   border: 1px solid var(--border); border-radius: 9px; background: rgb(15 17 21); color: var(--muted); font-size: 11px; }
 
 #settings-page .projects { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
-#settings-page .project { display: flex; justify-content: space-between; gap: 12px; text-align: left; padding: 6px 8px; border-radius: 6px; }
+#settings-page .project-row { display: flex; align-items: center; gap: 6px; }
+#settings-page .project-row select { width: auto; flex: none; max-width: 40%; }
+#settings-page .project { flex: 1; min-width: 0; display: flex; justify-content: space-between; gap: 12px; text-align: left; padding: 6px 8px; border-radius: 6px; }
 #settings-page .project:hover { background: #ffffff0a; }
 #settings-page .project .path { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #settings-page .history .empty { color: var(--muted); }
