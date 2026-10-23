@@ -231,7 +231,8 @@ async function cloneFromGithub() {
 }
 
 async function cloneAndOpen(machine, repo) {
-  picker.querySelector(".folders").innerHTML = `<p class="loading">Cloning ${esc(repo)} on ${esc(machineName(machine))}…</p>`;
+  choices = [];
+  picker.querySelector(".choices").innerHTML = `<p class="loading">Cloning ${esc(repo)} on ${esc(machineName(machine))}…</p><p class="error" id="picker-error"></p>`;
   try {
     const path = hub ? await hub.hub({ cmd: "clone", machine: hubIdOf(machine), repo }) : await invoke("clone_repo", { repo });
     if (await pickFolder(path)) closeProjects();
