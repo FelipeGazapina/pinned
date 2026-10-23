@@ -2,7 +2,7 @@ use crate::db;
 use crate::hub::{Account, Hub, Outbox};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -18,6 +18,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeader;
 use uuid::Uuid;
 
 const MIN_PASSWORD: usize = 8;
@@ -59,7 +61,8 @@ pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, open_signup: bool)
         .route("/ws/machine", get(machine_socket))
         .route("/install.sh", get(install))
         .route("/download/{file}", get(download))
-        .fallback_service(tower_http::services::ServeDir::new(ui))
+        // Without it a browser guesses the files stay fresh for hours, and runs an old UI after a deploy.
+        .fallback_service(SetResponseHeader::overriding(ServeDir::new(ui), header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
         .with_state(server)
 }
 

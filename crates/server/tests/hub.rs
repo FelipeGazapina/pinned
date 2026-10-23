@@ -342,6 +342,8 @@ fn the_hub_serves_the_install_script_binaries_and_the_web_app() {
     assert_eq!(get("/download/pinned-server-aarch64-apple-darwin").0, 404);
     assert_eq!(get("/download/..%2Fui%2Findex.html").0, 404);
     assert_eq!(get("/"), (200, "<title>pinned</title>".into()));
+    let page = reqwest::blocking::get(format!("{}/index.html", hub.url)).unwrap();
+    assert_eq!(page.headers()["cache-control"], "no-cache", "a browser revalidates the web app after each deploy");
 }
 
 #[test]
