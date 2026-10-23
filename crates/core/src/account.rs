@@ -171,7 +171,6 @@ fn post<T: DeserializeOwned>(hub: &str, path: &str, bearer: Option<&str>, body: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn credentials_are_saved_for_the_user_only_and_removed() {
@@ -187,7 +186,8 @@ mod tests {
         };
         creds.save(&dir).unwrap();
         creds.save(&dir).unwrap();
-        assert_eq!(std::fs::metadata(dir.join("account.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.join("account.json")).unwrap().permissions()) & 0o777, 0o600);
         assert_eq!(Credentials::load(&dir), Some(creds));
         Credentials::remove(&dir);
         assert_eq!(Credentials::load(&dir), None);

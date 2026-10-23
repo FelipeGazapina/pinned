@@ -982,7 +982,9 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::agent::{session_env, Subject};
+    #[cfg(unix)]
     use crate::connectors::Delivery;
     use serde_json::json;
     use std::time::{Duration, Instant};
@@ -1011,12 +1013,14 @@ mod tests {
         dunce::canonicalize(dir).unwrap()
     }
 
+    #[cfg(unix)]
     fn sh(script: &str) -> CommandBuilder {
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.args(["-c", script]);
         cmd
     }
 
+    #[cfg(unix)]
     fn running(m: &Machine, env: Vec<(String, String)>, script: &str) -> TabId {
         let id = m.add_tab("/repo".into(), vec![], env, false, None);
         m.spawn(&id, sh(script), pty::size(80, 24)).unwrap();
@@ -1045,10 +1049,12 @@ mod tests {
         assert!(process::command("git").arg("-C").arg(dir).args(args).status().unwrap().success(), "git {args:?}");
     }
 
+    #[cfg(unix)]
     fn slack_env(connector: &str, thread: &str) -> Vec<(String, String)> {
         session_env(connector, &Subject::SlackThread { channel: "C0123ABCD".into(), thread: thread.into() })
     }
 
+    #[cfg(unix)]
     fn delivery(connector: &str, thread: &str, messages: &[&str]) -> Delivery {
         Delivery {
             connector: connector.into(),
@@ -1066,6 +1072,7 @@ mod tests {
         assert_eq!(paste("a\x1b[201~\rb\x07"), b"\x1b[200~a[201~b\x1b[201~\r");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_delivery_finds_the_live_tab_of_its_thread() {
         let m = machine();
@@ -1086,6 +1093,7 @@ mod tests {
 
     /// The session is a real pty running cat with the terminal in raw mode, so the file holds
     /// exactly the bytes the session received.
+    #[cfg(unix)]
     #[test]
     fn a_delivery_reaches_the_session_through_its_pty() {
         let file = std::env::temp_dir().join(format!("pinned-delivery-{}.bin", std::process::id()));
@@ -1122,6 +1130,7 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), output[output.len() - 256 * 1024..]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_late_viewer_gets_the_screen_then_live_output_across_a_restart() {
         let m = machine();
@@ -1148,6 +1157,7 @@ mod tests {
         assert_eq!(text(&again), "second\r\n", "a restart starts a fresh screen");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_session_that_exits_reports_it_and_stops_running() {
         let events = Arc::new(Mutex::new(vec![]));
@@ -1158,6 +1168,63 @@ mod tests {
         assert_eq!(events.lock().unwrap().iter().find(|e| e["kind"] == "exit"), Some(&json!({ "kind": "exit", "tab": tab })));
         assert!(!m.view(&tab).unwrap().running);
         assert_eq!(events.lock().unwrap().last().unwrap()["tabs"][0]["running"], false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_session_runs_in_conpty_and_reports_its_exit() {
+        let events = Arc::new(Mutex::new(vec![]));
+        let seen_events = events.clone();
+        let m = Machine::new(launch(), None, Some("/repo".into()), move |e| seen_events.lock().unwrap().push(serde_json::to_value(e).unwrap()));
+        let tab = m.add_tab("/repo".into(), vec![], vec![], false, None);
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "echo pinned on windows"]);
+        m.spawn(&tab, cmd, pty::size(80, 24)).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        let start = Instant::now();
+        while !text(&seen).contains("pinned on windows") {
+            assert!(start.elapsed() < Duration::from_secs(5), "timed out waiting for the echo, saw {:?}", text(&seen));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!text(&seen).contains("\x1b[6n"), "the cursor request reached the viewer");
+        wait_for("the exit", || events.lock().unwrap().iter().any(|e| e["kind"] == "exit"));
+        assert_eq!(events.lock().unwrap().iter().find(|e| e["kind"] == "exit"), Some(&json!({ "kind": "exit", "tab": tab })));
+        assert!(!m.view(&tab).unwrap().running);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_is_found_on_path_or_where_the_native_installer_puts_it() {
+        let root = temp("find-claude");
+        let (empty, bin) = (root.join("empty"), root.join("bin"));
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(bin.join("claude.d")).unwrap();
+        let path = std::env::join_paths([&empty, &bin]).unwrap().into_string().unwrap();
+        assert_eq!(find_claude(Some(&path)), PathBuf::from(std::env::var("HOME").unwrap()).join(".local/bin/claude"), "a folder is not claude");
+        std::fs::write(bin.join("claude"), "").unwrap();
+        assert_eq!(find_claude(Some(&path)), bin.join("claude"));
+        assert_eq!(find_claude(None), PathBuf::from(std::env::var("HOME").unwrap()).join(".local/bin/claude"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_is_the_native_exe_before_npms_shim_anywhere_on_path() {
+        let root = temp("find-claude");
+        let (npm, native) = (root.join("npm"), root.join("native"));
+        std::fs::create_dir_all(&npm).unwrap();
+        std::fs::create_dir_all(&native).unwrap();
+        for shim in ["claude", "claude.cmd", "claude.ps1"] {
+            std::fs::write(npm.join(shim), "").unwrap();
+        }
+        std::fs::write(native.join("claude.exe"), "").unwrap();
+        let path = std::env::join_paths([&npm, &native]).unwrap().into_string().unwrap();
+        assert_eq!(find_claude(Some(&path)), native.join("claude.exe"));
+        std::fs::remove_file(native.join("claude.exe")).unwrap();
+        assert_eq!(find_claude(Some(&path)), npm.join("claude.cmd"));
+        assert_eq!(find_claude(None), PathBuf::from(std::env::var("USERPROFILE").unwrap()).join(r".local\bin\claude.exe"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
