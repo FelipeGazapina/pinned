@@ -562,6 +562,7 @@ async function sweep(profileName) {
   await step("Workflows: the list's switch turns it off", async () => {
     await action("close-editor");
     await page.waitForSelector("#settings-page .flow-card");
+    check((await page.locator("#settings-page .flow-card").count()) === 1, "the new workflow is listed twice");
     await press(page.locator("#settings-page .flow-card .switch"));
     await waitFor("off", async () => (await page.getAttribute("#settings-page .flow-card", "data-on")) === "false");
     check((await hubCall({ cmd: "get_settings" })).connectors[0].enabled === false, "the hub still has it enabled");

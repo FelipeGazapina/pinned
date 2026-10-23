@@ -702,7 +702,9 @@ const actions = {
     }
     try {
       const saved = await connectorCall("save_connector", { connector: c });
-      const index = view.index < 0 ? settings.connectors.push(saved) - 1 : view.index;
+      // The hub pushes its settings before it answers, so a new workflow may already be listed.
+      let index = settings.connectors.findIndex((known) => known.id === saved.id);
+      if (index < 0) index = settings.connectors.push(saved) - 1;
       settings.connectors[index] = saved;
       edit(index, clone(saved), view.open);
       redraw();
@@ -713,7 +715,7 @@ const actions = {
   async "delete-connector"(button) {
     if (!armed(button, "Click again to delete")) return;
     await connectorCall("delete_connector", { id: view.draft.id });
-    settings.connectors.splice(view.index, 1);
+    settings.connectors = settings.connectors.filter((known) => known.id !== view.draft.id);
     view = { name: "list" };
     redraw();
   },
