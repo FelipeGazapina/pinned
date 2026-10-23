@@ -160,6 +160,9 @@ pub struct RunSpec {
     /// The account's GitHub token, added by the hub, which clones a private repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// The agent account the connector names; none runs the session under its project's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AccountId>,
 }
 
 /// What a machine reports on its own.
@@ -425,6 +428,7 @@ mod tests {
                     args: vec!["--name".into(), "ENG-7 Broken button".into(), "Run `'{{pinned}}' stage coding`".into()],
                     env: vec![("PINNED_CONNECTOR".into(), "c1".into()), ("PINNED_ISSUE".into(), "uuid".into())],
                     token: None,
+                    account: Some("work".into()),
                 },
             },
             json!({
@@ -434,6 +438,7 @@ mod tests {
                     "repo": "git@github.com:acme/app.git",
                     "args": ["--name", "ENG-7 Broken button", "Run `'{{pinned}}' stage coding`"],
                     "env": [["PINNED_CONNECTOR", "c1"], ["PINNED_ISSUE", "uuid"]],
+                    "account": "work",
                 },
             }),
         );
@@ -458,7 +463,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_ignored_and_a_run_needs_only_folder_and_args() {
         let call: Call = serde_json::from_value(json!({ "cmd": "run", "run": { "folder": "/repo", "args": [], "later": 1 }, "extra": true })).unwrap();
-        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![], token: None } });
+        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![], token: None, account: None } });
         assert!(serde_json::from_value::<Call>(json!({ "cmd": "format_disk" })).is_err());
     }
 

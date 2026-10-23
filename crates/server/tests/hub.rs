@@ -214,7 +214,7 @@ struct Node {
 impl Node {
     fn start(dir: &Path, creds: Credentials) -> Node {
         let claude = dir.join("claude");
-        std::fs::write(&claude, "#!/bin/sh\nexec cat\n").unwrap();
+        std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let launch = Launch {
             exe: "/opt/pinned/bin/pinned-server".into(),
@@ -375,10 +375,11 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     let id = connector["id"].as_str().unwrap().to_owned();
     client.wait("the saved connector", |f| f["type"] == "settings" && f["settings"]["connectors"][0]["id"] == id);
     let account_id = uuid::Uuid::parse_str(&account.id).unwrap();
-    let run = |subject: Subject| Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![] });
+    let run = |subject: Subject| Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![], account: None });
     let open = |work| hub.runtime.block_on(hub.hub().open(account_id, work));
     let connector_tabs = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.connector.as_deref() == Some(&id) && t.running).count();
 
+    std::fs::write(dir_b.join("accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
     let mut node_b = Node::start(&dir_b, creds_b);
     wait_for("vps online", || node_b.online());
     client.wait_machines(&[("mac-mini", false), ("vps", true)]);
@@ -418,6 +419,11 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     assert!(open(delivery("1792400050.000200")), "the thread's live session takes its new messages");
     wait_for("the delivered prompt", || String::from_utf8_lossy(&seen.lock().unwrap()).contains("yes, file it"));
     assert!(!open(delivery("1792499999.000100")), "no session answers that thread");
+
+    let work = Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject: Subject::LinearIssue { issue: "uuid-3".into() }, mentioned: vec![], account: Some("work".into()) };
+    assert!(open(Work::Run(work)), "mac-mini has no account work and refuses, so vps runs it");
+    let on_work = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.account == "work").count();
+    assert_eq!((on_work(&node_a), on_work(&node_b)), (0, 1));
 
     node_a.kill();
     node_b.kill();

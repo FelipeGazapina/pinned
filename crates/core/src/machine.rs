@@ -413,12 +413,19 @@ impl Machine {
     }
 
     /// Adds a tab for a connector's run without starting it, and returns its id. Refused when
-    /// the run's folder can't be found or cloned here.
+    /// the run's folder can't be found or cloned here, or its account can't run it here.
     pub fn open_run(&self, run: &RunSpec) -> Result<TabId, String> {
         let cwd = self.find_folder(&run.folder, run.repo.as_deref(), run.token.as_deref())?;
+        let account = self.account_for(run.account.as_deref(), &cwd)?;
+        // The prompt reports through pinned's hooks and commands, which only reach Claude Code.
+        if !account.provider.spec().harness {
+            return Err(format!("account {} runs {}, which can't run a connector's session", account.id, account.provider.spec().name));
+        }
+        if !self.status(&account).signed_in {
+            return Err(format!("account {} is not signed in on this machine", account.id));
+        }
         let exe = self.launch.exe.display().to_string();
         let args = run.args.iter().map(|a| a.replace(EXE_PLACEHOLDER, &exe)).collect();
-        let account = self.account_for(None, &cwd)?;
         let id = self.add_tab(cwd, account, args, run.env.clone(), false, None);
         self.emit_tabs();
         Ok(id)
@@ -1333,13 +1340,14 @@ mod tests {
     #[test]
     fn a_run_opens_in_its_folder_with_this_machines_binary() {
         let dir = temp("run-folder");
-        let m = machine();
+        let m = Machine::new(Launch { bins: fake_bins(&dir.join(".bin")), ..launch() }, None, Some("/repo".into()), |_| {});
         let run = RunSpec {
             folder: dir.display().to_string(),
             repo: Some("git@github.com:acme/app.git".into()),
             args: vec!["--name".into(), "ENG-7".into(), "Run `'{{pinned}}' stage coding` first".into()],
             env: vec![("PINNED_CONNECTOR".into(), "c1".into())],
             token: None,
+            account: None,
         };
         let id = m.open_run(&run).unwrap();
         let view = m.view(&id).unwrap();
@@ -1364,14 +1372,15 @@ mod tests {
     fn a_run_that_cannot_start_leaves_no_tab() {
         let dir = temp("run-unstartable");
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, "/nonexistent/claude".into())]), ..launch() }, None, Some("/repo".into()), |_| {});
-        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec![], env: vec![], token: None };
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec![], env: vec![], token: None, account: None };
         assert!(m.run(&run).is_err());
         assert_eq!(m.tabs(), vec![]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Fake `claude` and `codex` that answer their status command like the real ones (signed in
-    /// on the default home only) and otherwise print what they were started with.
+    /// Fake `claude` and `codex` that answer their status command like the real ones, signed in on
+    /// the default home and on a home holding a `signed-in` file, and otherwise print what they
+    /// were started with.
     fn fake_bins(dir: &Path) -> BTreeMap<Provider, PathBuf> {
         std::fs::create_dir_all(dir).unwrap();
         let script = |name: &str, status: &str, home: &str, signed_in: &str, signed_out: &str| {
@@ -1379,7 +1388,7 @@ mod tests {
             std::fs::write(
                 &path,
                 format!(
-                    "#!/bin/sh\nif [ \"$1 $2\" = \"{status}\" ]; then\n  [ -n \"${home}\" ] && {{ echo '{signed_out}'; exit 1; }}\n  echo '{signed_in}'; exit 0\nfi\n\
+                    "#!/bin/sh\nif [ \"$1 $2\" = \"{status}\" ]; then\n  [ -n \"${home}\" ] && [ ! -e \"${home}/signed-in\" ] && {{ echo '{signed_out}'; exit 1; }}\n  echo '{signed_in}'; exit 0\nfi\n\
                      printf '%s|%s|%s|%s|%s\\n' \"$(basename \"$0\")\" \"$*\" \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" \"$PINNED_ACCOUNT\"\nsleep 30\n"
                 ),
             )
@@ -1472,6 +1481,38 @@ mod tests {
     }
 
     #[test]
+    fn a_run_starts_only_under_a_claude_account_signed_in_here_and_in_its_home() {
+        let root = temp("run-account");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let m = accounts_machine(&root);
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        m.open_project(app.clone());
+        let run = |account: Option<&str>| {
+            let spec = RunSpec { folder: app.display().to_string(), repo: None, args: vec!["Fix ENG-7".into()], env: vec![], token: None, account: account.map(Into::into) };
+            m.call(Call::Run { run: spec })
+        };
+        assert_eq!(run(Some("work")), Err("account work is not signed in on this machine".into()));
+        assert_eq!(run(Some("side")), Err("account side runs Codex, which can't run a connector's session".into()));
+        assert_eq!(run(Some("home")), Err("no account home on this machine".into()));
+        assert_eq!(m.tabs(), vec![], "a refused run leaves no tab");
+
+        let config = root.join("config").display().to_string();
+        std::fs::write(format!("{config}/accounts/work/signed-in"), "").unwrap();
+        let tab = run(Some("work")).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(tab.as_str().unwrap(), "test".into(), sink).unwrap();
+        wait_for("the session", || text(&seen).contains('\n'));
+        assert_eq!(text(&seen), format!("claude|--settings s --plugin-dir p Fix ENG-7|{config}/accounts/work||work\r\n"));
+
+        m.call(Call::SetProjectAccount { path: app.display().to_string(), account: Some("work".into()) }).unwrap();
+        let tab = run(None).unwrap();
+        assert_eq!(m.view(tab.as_str().unwrap()).unwrap().account, "work", "a connector that names no account runs under its project's");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn signing_in_runs_the_providers_login_in_the_accounts_home_and_is_never_resumed() {
         let root = temp("sign-in");
         let m = accounts_machine(&root);
@@ -1560,10 +1601,10 @@ mod tests {
             git(dir, &["init", "-q"]);
             git(dir, &["remote", "add", "origin", origin]);
         }
-        let m = machine();
+        let m = Machine::new(Launch { bins: fake_bins(&root.join("bin")), ..launch() }, None, Some("/repo".into()), |_| {});
         m.open_project(other);
         m.open_project(ours.clone());
-        let run = RunSpec { folder: "/Users/someone-else/app".into(), repo: Some("git@github.com:acme/app.git".into()), args: vec![], env: vec![], token: None };
+        let run = RunSpec { folder: "/Users/someone-else/app".into(), repo: Some("git@github.com:acme/app.git".into()), args: vec![], env: vec![], token: None, account: None };
         let id = m.open_run(&run).unwrap();
         assert_eq!(m.view(&id).unwrap().cwd, ours.display().to_string());
         let _ = std::fs::remove_dir_all(root);
