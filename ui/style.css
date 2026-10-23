@@ -385,6 +385,18 @@ body[data-page="login"] #login { display: flex; flex-direction: column; gap: 10p
 @media (pointer: coarse) {
   #keys { display: flex; }
   #tab-bar .handle, .tab .resize, #bar-resize { display: none !important; }
+  /* Fingers need about 40px to hit a control. */
+  header { padding-top: 2px; padding-bottom: 2px; gap: 2px; }
+  header :is(#attach, #folder, #settings-toggle), #new-tab { width: 40px; height: 40px; font-size: 16px; }
+  .tab { min-height: 40px; -webkit-touch-callout: none; }
+  .tab .close { width: 40px; height: 40px; margin: -3px -4px -3px 0; font-size: 11px; visibility: visible; }
+  .tab.held { background: #4ea1ff33; }
+  #projects button, #projects button.machine, #settings-nav button, #settings button.primary, #settings button.secondary, .chip {
+    min-width: 40px; min-height: 40px; }
+  #projects button { justify-content: center; }
+  .switch input { inset: -12px -8px; }
+  /* Safari zooms into a field whose text is under 16px when it takes focus. */
+  #settings input:not([type="checkbox"]), #settings select, #settings textarea, #projects .type-path input { font-size: 16px; }
 }
 @media (pointer: coarse), (max-width: 600px) {
   body[data-tabs] #workspace { flex-direction: column; }
@@ -399,7 +411,6 @@ body[data-page="login"] #login { display: flex; flex-direction: column; gap: 10p
   #settings-nav button { flex: none; }
   #settings-page { padding: 12px 12px 24px; }
   .editor-bar { top: -12px; margin: -12px -12px 10px; padding: 10px 12px; }
-  #usage { display: none; }
   #projects { width: calc(100% - 16px); }
   .tab .close { visibility: visible; }
 }

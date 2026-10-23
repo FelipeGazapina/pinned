@@ -544,7 +544,7 @@ async function sweep(profileName) {
     const over = await overflowing();
     check(!over.length, `overflowing: ${over}`);
     if (touch) {
-      const small = await smallTargets("#settings-page .editor-bar button, #settings-page .switch");
+      const small = await smallTargets("#settings-page .editor-bar button, #settings-page .switch input");
       touchCheck(!small.length, `small targets: ${small.join(", ")}`);
     }
   });
