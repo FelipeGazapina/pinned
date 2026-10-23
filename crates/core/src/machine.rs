@@ -1,6 +1,6 @@
 use crate::accounts::{self, Account, Accounts, Provider};
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
-use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, EXE_PLACEHOLDER};
+use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, EXE_PLACEHOLDER};
 use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions, sync, uploads};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
@@ -72,27 +72,32 @@ impl Launch {
         self.bins.get(&provider).cloned().unwrap_or_else(|| provider.spec().bin.into())
     }
 
-    fn command(&self, provider: Provider, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)]) -> CommandBuilder {
+    fn command(&self, program: Program, provider: Provider, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)]) -> CommandBuilder {
         let spec = provider.spec();
         let mut cmd = CommandBuilder::new(self.bin(provider));
         for key in INHERITED_SESSION_ENV {
             cmd.env_remove(key);
         }
-        if spec.harness {
-            if let Some(mcp_config) = &self.mcp_config {
-                // --mcp-config takes any number of values, so --settings right after it keeps it from swallowing the rest.
-                cmd.arg("--mcp-config");
-                cmd.arg(mcp_config);
+        match program {
+            Program::Agent => {
+                if spec.harness {
+                    if let Some(mcp_config) = &self.mcp_config {
+                        // --mcp-config takes any number of values, so --settings right after it keeps it from swallowing the rest.
+                        cmd.arg("--mcp-config");
+                        cmd.arg(mcp_config);
+                    }
+                    cmd.arg("--settings");
+                    cmd.arg(&self.settings);
+                    cmd.arg("--plugin-dir");
+                    cmd.arg(&self.plugin_dir);
+                }
+                if bypass {
+                    cmd.arg(spec.bypass_flag);
+                }
+                cmd.args(args);
             }
-            cmd.arg("--settings");
-            cmd.arg(&self.settings);
-            cmd.arg("--plugin-dir");
-            cmd.arg(&self.plugin_dir);
+            Program::SignIn => cmd.args(spec.login),
         }
-        if bypass {
-            cmd.arg(spec.bypass_flag);
-        }
-        cmd.args(args);
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -171,6 +176,7 @@ impl Screen {
 struct Tab {
     cwd: PathBuf,
     account: Account,
+    program: Program,
     session: Option<pty::Session>,
     /// Extra `claude` arguments for the first start only, so a restart doesn't redo the task.
     launch: Vec<String>,
@@ -196,7 +202,11 @@ struct Tab {
 
 impl Tab {
     /// What reopens the tab's conversation, once claude has reported one.
+    /// A sign-in tab has no conversation to resume.
     fn saved(&self) -> Option<sessions::Saved> {
+        if self.program != Program::Agent {
+            return None;
+        }
         Some(sessions::Saved {
             cwd: self.cwd.clone(),
             session: self.claude_session.clone()?,
@@ -213,6 +223,7 @@ impl Tab {
             id: id.to_owned(),
             cwd: self.cwd.display().to_string(),
             account: self.account.id.clone(),
+            program: self.program,
             bypass: self.bypass,
             running: self.session.is_some(),
             status: self.status,
@@ -345,6 +356,7 @@ impl Machine {
             }
             Call::RemoveAccount { account } => json(self.accounts.remove(&account)?),
             Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
+            Call::SignIn { account } => json(self.sign_in(&account)?),
         }
     }
 
@@ -430,19 +442,33 @@ impl Machine {
         Ok(id)
     }
 
-    /// Starts claude in the tab, replacing a session already running there, and returns its
+    /// Opens a tab running the CLI's login for the account, in the account's home, and returns its id.
+    pub fn sign_in(&self, account: &str) -> Result<TabId, String> {
+        let account = self.accounts.get(account).ok_or_else(|| format!("no account {account} on this machine"))?;
+        let home = self.accounts.home(&account);
+        std::fs::create_dir_all(&home).map_err(|e| format!("could not make {}: {e}", home.display()))?;
+        let id = self.add_tab(home, account, vec![], vec![], false, None);
+        self.tab(&id, |t| t.program = Program::SignIn)?;
+        if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
+            self.close_tab(&id);
+            return Err(e);
+        }
+        Ok(id)
+    }
+
+    /// Starts the tab's program, replacing a session already running there, and returns its
     /// folder. Viewers stay attached and see the new session from its first byte.
     pub fn start_claude(&self, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
-        let (cwd, account, args, env, bypass) = self.tab(tab, |t| {
+        let (cwd, account, program, args, env, bypass) = self.tab(tab, |t| {
             // Without launch arguments this is a fresh conversation, not the one recorded before.
             if t.launch.is_empty() {
                 t.claude_session = None;
             }
-            (t.cwd.clone(), t.account.clone(), std::mem::take(&mut t.launch), t.env.clone(), t.bypass)
+            (t.cwd.clone(), t.account.clone(), t.program, std::mem::take(&mut t.launch), t.env.clone(), t.bypass)
         })?;
         self.save_sessions();
         let env = [self.accounts.env(&account), env].concat();
-        let cmd = self.launch.command(account.provider, tab, &cwd, bypass, args, &env);
+        let cmd = self.launch.command(program, account.provider, tab, &cwd, bypass, args, &env);
         self.spawn(tab, cmd, pty::size(cols, rows))?;
         self.continue_when_limit_lifts(tab);
         self.emit_tabs();
@@ -721,6 +747,7 @@ impl Machine {
         let tab = Tab {
             cwd,
             account,
+            program: Program::Agent,
             session: None,
             launch,
             env,
@@ -1225,7 +1252,7 @@ mod tests {
         assert_eq!(
             *heard.lock().unwrap(),
             [json!({ "kind": "tabs", "tabs": [{
-                "id": "tab-1", "cwd": "/repo", "account": "claude", "bypass": false, "running": false, "status": null,
+                "id": "tab-1", "cwd": "/repo", "account": "claude", "program": "agent", "bypass": false, "running": false, "status": null,
                 "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1,
             }] })]
         );
@@ -1264,7 +1291,7 @@ mod tests {
         assert_eq!(
             m.call(Call::Tabs),
             Ok(json!([{
-                "id": "tab-1", "cwd": "/repo", "account": "claude", "bypass": true, "running": false, "status": null,
+                "id": "tab-1", "cwd": "/repo", "account": "claude", "program": "agent", "bypass": true, "running": false, "status": null,
                 "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1,
             }]))
         );
@@ -1327,7 +1354,7 @@ mod tests {
     fn claude_does_not_inherit_the_session_pinned_was_started_from() {
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session");
         std::env::set_var("CLAUDECODE", "1");
-        let cmd = launch().command(Provider::Claude, "tab-1", Path::new("/repo"), false, vec![], &[]);
+        let cmd = launch().command(Program::Agent, Provider::Claude, "tab-1", Path::new("/repo"), false, vec![], &[]);
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
@@ -1441,6 +1468,34 @@ mod tests {
         assert_eq!(m.call(Call::RemoveAccount { account: "claude".into() }), Err("claude is built in and can't be removed".into()));
         assert_eq!(m.call(Call::RemoveAccount { account: "work".into() }), Ok(Value::Null));
         assert_eq!(m.call(Call::ListProjects), Ok(json!([{ "path": path, "name": "app", "account": "claude" }])), "a project whose account is gone runs under the default one");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn signing_in_runs_the_providers_login_in_the_accounts_home_and_is_never_resumed() {
+        let root = temp("sign-in");
+        let m = accounts_machine(&root);
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        let config = root.join("config").display().to_string();
+        let tab = m.call(Call::SignIn { account: "work".into() }).unwrap();
+        assert_eq!(tab, json!("tab-1"));
+        let (seen, sink) = viewer();
+        m.attach("tab-1", "test".into(), sink).unwrap();
+        wait_for("the login", || text(&seen).contains('\n'));
+        assert_eq!(text(&seen), format!("claude|auth login|{config}/accounts/work||work\r\n"));
+        let view = m.view("tab-1").unwrap();
+        assert_eq!((view.cwd, view.account.as_str(), view.program, view.running), (format!("{config}/accounts/work"), "work", Program::SignIn, true));
+        m.record_session("tab-1", "s1".into(), None);
+        assert_eq!(sessions::load(&root.join("config/sessions.json")), vec![], "a login is not a session to resume");
+
+        let side = m.sign_in("side").unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&side, "test".into(), sink).unwrap();
+        wait_for("the login", || text(&seen).contains('\n'));
+        assert_eq!(text(&seen), format!("codex|login||{config}/accounts/side|side\r\n"));
+        assert_eq!(m.call(Call::SignIn { account: "home".into() }), Err("no account home on this machine".into()));
+        assert_eq!(m.tabs().len(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
 
