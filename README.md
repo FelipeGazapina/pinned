@@ -84,8 +84,8 @@ While you are signed in:
   A tab that opens or closes on one device does the same on every other device.
 - **＋** shows a row of your machines above the projects, with this Mac first. Offline machines
   are greyed out. Pick a machine, or press ← and →, to list its projects. On another machine,
-  **Type a path…** replaces **Open folder…**. If that folder doesn't exist there, the list
-  says so. 📁 on another machine's tab opens the same list, to move the tab to another folder.
+  **Browse folders…** replaces **Open folder…**: type a path, or pick folders to step into
+  them. If that folder doesn't exist there, the list says so. 📁 on another machine's tab opens the same list, to move the tab to another folder.
 - The account holds your workflows, Linear and Slack keys, and the hub runs the workflows
   even when this Mac sleeps. The first time you sign in, pinned moves this Mac's workflows
   and keys into the account, if the account has none yet. A workflow's **Run on** field picks
@@ -119,8 +119,11 @@ in, the same as this Mac.
 
 Open the hub's address in any browser, a phone's included, and sign in with the same email
 and password. You get the same tabs and settings as in the app, without the panel controls.
-On a phone the tabs sit in one scrolling row on top, and a row of keys above the terminal
-gives you Esc, Tab, ↑, ↓, Ctrl-C and Enter.
+On a phone the tabs sit in one scrolling row on top; hold a tab to drag it to another place.
+A row of keys above the terminal gives you Esc, Tab, ⇧Tab, ↑, ↓, Ctrl-C and Enter. **Paste**
+types the clipboard's text, and **Select** shows the terminal's text so you can select and
+copy it; tap **Select** again to go back. The terminal shrinks to stay above the on-screen
+keyboard.
 
 On Android you can install the web app, so it opens from the home screen in its own window
 like a native app. Open the hub's address in Chrome, tap the ⋮ menu, then tap **Install app**
