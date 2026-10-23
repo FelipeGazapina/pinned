@@ -1291,6 +1291,7 @@ mod tests {
         assert_eq!(m.call(Call::Deliver { env: vec![], text: "hi".into() }), Ok(json!(false)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn skipping_permissions_restarts_the_tab_on_its_conversation_and_continues_the_turn() {
         let dir = temp("bypass");
