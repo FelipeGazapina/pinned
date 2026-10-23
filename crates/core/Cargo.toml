@@ -23,4 +23,4 @@ flate2 = "1"
 sha2 = "0.10"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "test-util"] }

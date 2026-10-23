@@ -12,9 +12,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc as channel, watch};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message as Frame;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 const PING: Duration = Duration::from_secs(20);
 /// A hub silent this long, pongs included, is gone even if the socket hasn't said so.
@@ -214,11 +216,7 @@ async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, ver
 /// connection ended, so the next attempt waits the least.
 async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Machine>, version: &str) -> Result<(), String> {
     let url = ws_url(&creds.hub)?;
-    let config = WebSocketConfig::default().max_message_size(Some(sync::MESSAGE_LIMIT)).max_frame_size(Some(sync::MESSAGE_LIMIT));
-    let (socket, _) = tokio_tungstenite::connect_async_with_config(url.as_str(), Some(config), false)
-        .await
-        .map_err(|e| format!("could not connect to {url}: {e}"))?;
-    let (mut sink, mut stream) = socket.split();
+    let (mut sink, mut stream) = dial(&url).await?.split();
     let auth = MachineFrame::Auth {
         token: creds.machine_token.clone(),
         name: crate::account::hostname(),
@@ -267,6 +265,15 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
             }
         }
     }
+}
+
+/// Opens the machine's socket to the hub at `url`.
+async fn dial(url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, String> {
+    let config = WebSocketConfig::default().max_message_size(Some(sync::MESSAGE_LIMIT)).max_frame_size(Some(sync::MESSAGE_LIMIT));
+    let (socket, _) = tokio_tungstenite::connect_async_with_config(url, Some(config), false)
+        .await
+        .map_err(|e| format!("could not connect to {url}: {e}"))?;
+    Ok(socket)
 }
 
 /// A thread that answers the connection's calls one after another, so input typed fast reaches
@@ -349,5 +356,20 @@ mod tests {
         assert_eq!(ws_url("https://pinned.example.com/").as_deref(), Ok("wss://pinned.example.com/ws/machine"));
         assert_eq!(ws_url("http://127.0.0.1:8787").as_deref(), Ok("ws://127.0.0.1:8787/ws/machine"));
         assert!(ws_url("pinned.example.com").is_err());
+    }
+
+    /// The paused clock jumps to the next timer whenever the dial waits on the socket, so
+    /// neither the dial's wait nor the outer guard costs real time.
+    #[tokio::test(start_paused = true)]
+    async fn a_dial_the_hub_never_answers_ends_in_an_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _held = listener.accept().await;
+            std::future::pending::<()>().await;
+        });
+        let dialed = tokio::time::timeout(Duration::from_secs(60), dial(&url)).await.expect("the dial never ended");
+        let err = dialed.expect_err("the dial succeeded although the hub never answered");
+        assert!(err.starts_with(&format!("could not connect to {url}: ")), "{err}");
     }
 }
