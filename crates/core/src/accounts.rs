@@ -16,6 +16,10 @@ pub const DEFAULT: &str = "claude";
 const STATUS_WAIT: Duration = Duration::from_secs(10);
 const FILE: &str = "accounts.json";
 
+pub fn default_account() -> AccountId {
+    DEFAULT.into()
+}
+
 /// One row per agent CLI pinned can host. A table, so adding a provider is one entry, not a
 /// branch per call site.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -92,7 +96,7 @@ pub struct Account {
 }
 
 impl Account {
-    fn builtin(provider: Provider) -> Account {
+    pub fn builtin(provider: Provider) -> Account {
         let spec = provider.spec();
         Account { id: spec.builtin.into(), provider, name: spec.name.into() }
     }

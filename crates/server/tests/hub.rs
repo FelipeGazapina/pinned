@@ -1,5 +1,6 @@
 use base64::Engine;
 use pinned_core::account::{self, Credentials};
+use pinned_core::accounts::Provider;
 use pinned_core::agent::{self, Stage, Subject};
 use pinned_core::connectors::{Delivery, Run, Work};
 use pinned_core::link::{self, Link};
@@ -9,6 +10,7 @@ use pinned_core::wire::HubCall;
 use serde_json::{json, Value};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -216,7 +218,7 @@ impl Node {
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let launch = Launch {
             exe: "/opt/pinned/bin/pinned-server".into(),
-            claude,
+            bins: BTreeMap::from([(Provider::Claude, claude)]),
             path_env: None,
             settings: dir.join("settings.json"),
             mcp_config: None,
@@ -310,7 +312,7 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
 
     assert_eq!(
         client.call(b, json!({ "cmd": "format_disk" })),
-        Err("this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`, `start_claude`, `set_bypass`, `write_input`, `resize_pty`, `close_tab`, `set_folder`, `list_projects`, `project_history`, `git_remote`, `browse`, `clone`, `run`, `deliver`, `upload`".replace("0.5.1", env!("CARGO_PKG_VERSION")))
+        Err("this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`, `start_claude`, `set_bypass`, `write_input`, `resize_pty`, `close_tab`, `set_folder`, `list_projects`, `project_history`, `git_remote`, `browse`, `clone`, `run`, `deliver`, `upload`, `list_accounts`, `add_account`, `remove_account`, `set_project_account`".replace("0.5.1", env!("CARGO_PKG_VERSION")))
     );
     assert!(client.hub(json!({ "cmd": "self_destruct" })).unwrap_err().contains("unknown variant `self_destruct`"));
     assert_eq!(client.call("not-a-machine", json!({ "cmd": "tabs" })), Err("this account has no machine not-a-machine".into()));

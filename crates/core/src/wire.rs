@@ -1,6 +1,7 @@
 //! The protocol between machines, the hub and clients: one JSON object per WebSocket text frame.
 //! Every enum is internally tagged and unknown fields are ignored, so versions can drift.
 
+use crate::accounts::{self, AccountId, Provider};
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
 use crate::sync;
@@ -39,6 +40,9 @@ impl<'de> Deserialize<'de> for Bytes {
 pub struct TabView {
     pub id: TabId,
     pub cwd: String,
+    /// The account the tab's sessions run under.
+    #[serde(default = "accounts::default_account")]
+    pub account: AccountId,
     pub bypass: bool,
     pub running: bool,
     pub status: Option<AgentStatus>,
@@ -62,6 +66,9 @@ pub struct ProjectView {
     /// The origin as `host/owner/name`, which names the project on every machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    /// The account its sessions run under, the default one unless the user picked another.
+    #[serde(default = "accounts::default_account")]
+    pub account: AccountId,
 }
 
 /// Everything a client may ask a machine to do, local or through the hub. The comment on each
@@ -111,6 +118,14 @@ pub enum Call {
     /// The absolute path the file was saved under, in a private folder of the machine, for a
     /// session to read. Refused past `uploads::LIMIT`.
     Upload { name: String, data: Bytes },
+    /// `Vec<accounts::View>`: the built-in accounts, then the added ones, each as its CLI reports it.
+    ListAccounts,
+    /// The new account's `accounts::View`. Its id is a slug of `name`.
+    AddAccount { provider: Provider, name: String },
+    /// `null`. Projects that ran under it fall back to the default account.
+    RemoveAccount { account: AccountId },
+    /// The project's `ProjectView`. `account: null` runs it under the default account again.
+    SetProjectAccount { path: String, account: Option<AccountId> },
 }
 
 /// A connector's session, the same on any machine.
@@ -362,6 +377,7 @@ mod tests {
         TabView {
             id: "tab-3".into(),
             cwd: "/repo".into(),
+            account: "work".into(),
             bypass: false,
             running: true,
             status: Some(AgentStatus::NeedsInput),
@@ -405,6 +421,13 @@ mod tests {
                 },
             }),
         );
+        round_trip(Call::ListAccounts, json!({ "cmd": "list_accounts" }));
+        round_trip(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }, json!({ "cmd": "add_account", "provider": "codex", "name": "Side" }));
+        round_trip(Call::RemoveAccount { account: "side".into() }, json!({ "cmd": "remove_account", "account": "side" }));
+        round_trip(
+            Call::SetProjectAccount { path: "/repo".into(), account: None },
+            json!({ "cmd": "set_project_account", "path": "/repo", "account": null }),
+        );
         round_trip(
             Call::Deliver { env: vec![("PINNED_SLACK_THREAD".into(), "1.2".into())], text: "yes".into() },
             json!({ "cmd": "deliver", "env": [["PINNED_SLACK_THREAD", "1.2"]], "text": "yes" }),
@@ -432,7 +455,7 @@ mod tests {
         round_trip(
             MachineEvent::Tabs { tabs: vec![tab_view()] },
             json!({ "kind": "tabs", "tabs": [{
-                "id": "tab-3", "cwd": "/repo", "bypass": false, "running": true, "status": "needs-input",
+                "id": "tab-3", "cwd": "/repo", "account": "work", "bypass": false, "running": true, "status": "needs-input",
                 "title": "Fix the build", "message": "Claude needs your permission to use Bash",
                 "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3,
             }] }),
