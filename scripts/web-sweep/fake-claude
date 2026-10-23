@@ -1,0 +1,59 @@
+#!/usr/bin/env node
+// Stands in for `claude` on the sweep's node: it calls the same hooks and statusline that
+// pinned's --settings file names, and prints every key it gets, so a test can read them back.
+const { execFileSync } = require("child_process");
+const fs = require("fs");
+
+const args = process.argv.slice(2);
+const settingsFile = args[args.indexOf("--settings") + 1];
+const settings = settingsFile ? JSON.parse(fs.readFileSync(settingsFile, "utf8")) : {};
+const session = `fake-${process.pid}`;
+
+function run(command, input) {
+  try {
+    execFileSync("/bin/sh", ["-c", command], { input: JSON.stringify(input), stdio: ["pipe", "ignore", "ignore"] });
+  } catch {}
+}
+const hook = (event, extra = {}) => {
+  const command = settings.hooks?.[event]?.[0]?.hooks?.[0]?.command;
+  if (command) run(command, { session_id: session, cwd: process.cwd(), ...extra });
+};
+const resetsIn = (seconds) => Math.floor(Date.now() / 1000) + seconds;
+if (settings.statusLine?.command) {
+  run(settings.statusLine.command, {
+    session_id: session,
+    rate_limits: { five_hour: { used_percentage: 23.5, resets_at: resetsIn(3600) }, seven_day: { used_percentage: 74, resets_at: resetsIn(86400) } },
+  });
+}
+
+const KEYS = { "\x1b": "[esc]", "\t": "[tab]", "\x1b[A": "[up]", "\x1b[B": "[down]", "\x1bOA": "[up]", "\x1bOB": "[down]", "\x03": "[ctrl-c]" };
+const out = (text) => process.stdout.write(text);
+out(`fake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}\r\n> `);
+
+let line = "";
+function submit() {
+  out("\r\n");
+  if (line === "/exit") process.exit(0);
+  hook("UserPromptSubmit", { prompt: line });
+  if (line === "/ask") hook("Notification", { message: "fake claude needs you" });
+  else if (line === "long") for (let i = 1; i <= 120; i++) out(`line ${i} of a long answer\r\n`);
+  else out(`echo: ${line}\r\n`);
+  if (line !== "/ask") hook("Stop");
+  line = "";
+  out("> ");
+}
+
+process.stdin.setRawMode?.(true);
+process.stdin.on("data", (chunk) => {
+  const text = chunk.toString("utf8");
+  if (KEYS[text]) return out(KEYS[text]);
+  for (const c of text) {
+    if (c === "\r") submit();
+    else if (c === "\x7f") line = line.slice(0, -1);
+    else if (KEYS[c]) out(KEYS[c]);
+    else {
+      line += c;
+      out(c);
+    }
+  }
+});
