@@ -63,11 +63,8 @@ start() {
     git -C "$DIR/home/work" init -q "$p"
     git -C "$DIR/home/work/$p" remote add origin "https://github.com/example/$p.git"
   done
-  run_node() {
-    env HOME="$DIR/home" SHELL="$DIR/bin/shell" PATH="$DIR/bin:$PATH" PINNED_PASSWORD="$PASSWORD" "$SERVER" "$@"
-  }
-  run_node login "$HUB" "$EMAIL" --name sweep-node --config-dir "$DIR/node" >/dev/null
-  run_node node --config-dir "$DIR/node" >"$DIR/node.log" 2>&1 &
+  env HOME="$DIR/home" PINNED_PASSWORD="$PASSWORD" "$SERVER" login "$HUB" "$EMAIL" --name sweep-node --config-dir "$DIR/node" >/dev/null
+  env HOME="$DIR/home" SHELL="$DIR/bin/shell" PATH="$DIR/bin:$PATH" "$SERVER" node --config-dir "$DIR/node" >"$DIR/node.log" 2>&1 &
   echo $! >"$DIR/node.pid"
 
   echo "hub $HUB"
