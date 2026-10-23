@@ -360,7 +360,8 @@ body[data-empty="true"] #attach { display: none; }
 
 html[data-shell="web"] { --opacity: 1; }
 html[data-shell="web"] body { background: rgb(15 17 21); }
-html[data-shell="web"] #expanded { border: 0; border-radius: 0; }
+html[data-shell="web"] #expanded { border: 0; border-radius: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 html[data-shell="web"] header { cursor: default; }
 html[data-shell="web"] :is(#minimize, #grip, #pill, .update, [data-app-only]) { display: none !important; }
 

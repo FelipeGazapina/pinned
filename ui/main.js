@@ -938,6 +938,16 @@ if (TAURI) {
 
 new ResizeObserver(() => refit(active)).observe(terms);
 
+// Safari leaves the page its full height under the on-screen keyboard and shrinks only the visual viewport.
+if (!TAURI && window.visualViewport) {
+  const fitVisible = () => {
+    document.documentElement.style.height = `${visualViewport.height * visualViewport.scale}px`;
+    scrollTo(0, 0);
+  };
+  visualViewport.addEventListener("resize", fitVisible);
+  fitVisible();
+}
+
 function connectHub(signedIn) {
   account = signedIn;
   hub = new Hub(signedIn.hub, signedIn.user_token, {
