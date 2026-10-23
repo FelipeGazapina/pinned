@@ -21,10 +21,8 @@ let projectsMachine = LOCAL;
 async function showProjectsPage() {
   if (!machines.get(projectsMachine)?.view.online) projectsMachine = onlineMachines()[0];
   const projects = projectsMachine ? await callOn(projectsMachine, { cmd: "list_projects" }).catch(() => []) : [];
-  const chips = [...machines.entries()].map(([id, m]) =>
-    `<button class="chip${id === projectsMachine ? " active" : ""}" data-action="projects-machine" data-machine="${esc(id)}"${m.view.online ? "" : " disabled"}>${esc(machineName(id))}</button>`);
   settingsPage.innerHTML = `<h2>Projects</h2>
-    ${machines.size > 1 ? `<div class="chips">${chips.join("")}</div>` : ""}
+    ${machineChipsHtml(projectsMachine, "projects-machine")}
     <p>Pick a project to see what its sessions changed, turn by turn.</p>
     <div class="projects">${
       projects.map((p) => `<button class="project" data-action="open-project" data-path="${esc(p.path)}">

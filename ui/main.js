@@ -81,14 +81,17 @@ async function revealTab(machine, id) {
 /** The machine's accounts, asked once and kept for the tab badges and pickers; `fresh` asks again. Each ask runs every account's CLI. */
 function accountsOf(machine, fresh = false) {
   const m = machines.get(machine);
-  if (fresh || !m.accountsAsked) {
-    m.accountsAsked = callOn(machine, { cmd: "list_accounts" }).then((list) => {
-      m.accounts = list;
-      render();
-      return list;
-    });
-  }
+  if (fresh || !m.accountsAsked) m.accountsAsked = callOn(machine, { cmd: "list_accounts" }).then((list) => setAccounts(machine, list));
   return m.accountsAsked;
+}
+
+function setAccounts(machine, list) {
+  const m = machines.get(machine);
+  if (!m) return list;
+  m.accounts = list;
+  m.accountsAsked = Promise.resolve(list);
+  render();
+  return list;
 }
 
 /** Opens a tab running the CLI's login for the account and shows it. */

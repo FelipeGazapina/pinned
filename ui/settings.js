@@ -45,7 +45,7 @@ const GITHUB_TOKENS = "https://github.com/settings/tokens/new?scopes=repo&descri
 
 /** Mirrors the backend's `get_settings`. Unsaved connectors carry an empty id. */
 let settings = { linear: null, slack: null, connectors: [], checked: null };
-const PAGES = ["general", "integrations", "projects", "connectors", "account", "machines"];
+const PAGES = ["general", "integrations", "accounts", "projects", "connectors", "account", "machines"];
 let page = PAGES.includes(load("settings-page")) && (TAURI || load("settings-page") !== "general") ? load("settings-page") : "integrations";
 /** Names from the connected Linear workspace and Slack channels, for the connector form's suggestions. */
 let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [] };
@@ -98,6 +98,7 @@ function showPage(name) {
       fillList("github-repos", suggestions.repos);
     }, console.warn);
   }
+  if (name === "accounts") return showAccountsPage();
   if (name === "projects") return showProjectsPage();
   if (name === "general") return showGeneral();
   if (name === "account") return showAccount();
@@ -114,6 +115,14 @@ function fillList(id, names) {
 const esc = (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const options = (values, labelOf = (v) => v, selected) =>
   values.map((v) => `<option value="${esc(v)}"${v === selected ? " selected" : ""}>${esc(labelOf(v))}</option>`).join("");
+
+/** A row of chips that picks one of the machines, for pages that show one machine at a time. */
+function machineChipsHtml(current, action) {
+  if (machines.size < 2) return "";
+  const chips = [...machines.entries()].map(([id, m]) =>
+    `<button class="chip${id === current ? " active" : ""}" data-action="${action}" data-machine="${esc(id)}"${m.view.online ? "" : " disabled"}>${esc(machineName(id))}</button>`);
+  return `<div class="chips">${chips.join("")}</div>`;
+}
 
 function integrationsHtml() {
   const account = settings.linear;
