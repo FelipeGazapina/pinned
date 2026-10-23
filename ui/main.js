@@ -1006,13 +1006,20 @@ if (TAURI) {
 
 new ResizeObserver(() => refit(active)).observe(terms);
 
-// Safari leaves the page its full height under the on-screen keyboard and shrinks only the visual viewport.
+// Safari leaves the page its full height under the on-screen keyboard, shrinks only the visual
+// viewport, and pans that down to the focused field; the page follows both. A pinch-zoomed page
+// keeps its size and lets the pan show its other parts. The browser revealed the field against the
+// page's old height, so the shorter settings page scrolls it back into view.
 if (!TAURI && window.visualViewport) {
   const fitVisible = () => {
-    document.documentElement.style.height = `${visualViewport.height * visualViewport.scale}px`;
+    const root = document.documentElement.style;
+    root.height = `${visualViewport.height * visualViewport.scale}px`;
+    root.transform = visualViewport.scale > 1.01 ? "" : `translateY(${visualViewport.offsetTop}px)`;
     scrollTo(0, 0);
+    if (document.activeElement?.closest("#settings-page")) document.activeElement.scrollIntoView({ block: "nearest" });
   };
   visualViewport.addEventListener("resize", fitVisible);
+  visualViewport.addEventListener("scroll", fitVisible);
   fitVisible();
 }
 
