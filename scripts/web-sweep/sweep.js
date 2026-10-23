@@ -483,7 +483,7 @@ async function sweep(profileName) {
     await page.fill("#projects .browse input", `${HOME}/`);
     await waitFor("home listing", async () => (await page.locator("#projects .folders button", { hasText: "work" }).count()) === 1);
     await press(page.locator("#projects .folders button").first());
-    await waitTerm(/fake claude in \S*\/sweep\/home$/m);
+    await waitTerm(/fake claude in \S*\/home$/m);
     return text("#title");
   });
 
