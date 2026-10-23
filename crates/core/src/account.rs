@@ -25,14 +25,11 @@ impl Credentials {
 
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let tmp = dir.join(format!("{FILE}.tmp"));
         let _ = std::fs::remove_file(&tmp);
-        std::fs::OpenOptions::new()
-            .write(true)
+        crate::private::file()
             .create_new(true)
-            .mode(0o600)
             .open(&tmp)
             .and_then(|mut f| f.write_all(&serde_json::to_vec_pretty(self).unwrap()))
             .and_then(|()| std::fs::rename(&tmp, dir.join(FILE)))
@@ -145,7 +142,7 @@ pub fn logout(hub: &str, user_token: &str) -> Result<(), String> {
 }
 
 pub fn hostname() -> String {
-    let out = std::process::Command::new("hostname").stderr(std::process::Stdio::null()).output();
+    let out = crate::process::command("hostname").stderr(std::process::Stdio::null()).output();
     let name = out.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
     let name = name.strip_suffix(".local").unwrap_or(&name);
     if name.is_empty() {
@@ -174,7 +171,6 @@ fn post<T: DeserializeOwned>(hub: &str, path: &str, bearer: Option<&str>, body: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn credentials_are_saved_for_the_user_only_and_removed() {
@@ -190,7 +186,8 @@ mod tests {
         };
         creds.save(&dir).unwrap();
         creds.save(&dir).unwrap();
-        assert_eq!(std::fs::metadata(dir.join("account.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.join("account.json")).unwrap().permissions()) & 0o777, 0o600);
         assert_eq!(Credentials::load(&dir), Some(creds));
         Credentials::remove(&dir);
         assert_eq!(Credentials::load(&dir), None);

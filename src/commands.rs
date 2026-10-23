@@ -1,7 +1,7 @@
 use pinned_core::connectors::{Connector, Connectors, Settings, Suggestions};
 use pinned_core::machine::Machine;
 use pinned_core::wire::Call;
-use pinned_core::{github, linear, slack};
+use pinned_core::{github, linear, process, slack};
 use serde_json::Value;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
@@ -14,7 +14,7 @@ pub fn get_settings(connectors: State<Connectors>) -> Settings {
 
 #[tauri::command]
 pub fn open_linear_keys() -> Result<(), String> {
-    std::process::Command::new("open").arg(linear::KEY_PAGE).spawn().map(drop).map_err(|e| e.to_string())
+    open(linear::KEY_PAGE)
 }
 
 #[tauri::command]
@@ -49,7 +49,7 @@ pub async fn slack_suggestions(connectors: State<'_, Connectors>) -> Result<Vec<
 
 #[tauri::command]
 pub fn open_github_tokens() -> Result<(), String> {
-    std::process::Command::new("open").arg(github::TOKEN_PAGE).spawn().map(drop).map_err(|e| e.to_string())
+    open(github::TOKEN_PAGE)
 }
 
 #[tauri::command]
@@ -93,4 +93,14 @@ pub async fn pick_folder(app: AppHandle, start: Option<String>) -> Option<String
         dialog = dialog.set_directory(start);
     }
     dialog.blocking_pick_folder()?.into_path().ok().map(|p| p.display().to_string())
+}
+
+/// Opens `url` in the default browser. On Windows through explorer.exe, since cmd's `start` would
+/// cut the URL at its first `&`.
+fn open(url: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    let opener = "explorer.exe";
+    #[cfg(not(windows))]
+    let opener = "open";
+    process::command(opener).arg(url).spawn().map(drop).map_err(|e| e.to_string())
 }

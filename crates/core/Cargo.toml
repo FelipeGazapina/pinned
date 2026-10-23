@@ -20,7 +20,12 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tempfile = "3"
 flate2 = "1"
+dunce = "1"
 sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt"] }
+
+[target.'cfg(windows)'.dependencies]
+uds_windows = "1.2"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

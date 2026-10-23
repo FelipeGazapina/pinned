@@ -1,0 +1,48 @@
+name: windows
+
+on:
+  push:
+    branches: [windows-installer]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        # Git Bash, as Claude Code runs the statusline on Windows.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - run: npm ci
+      - run: cargo test -p pinned-core
+      - run: cargo test -p pinned
+      - run: npx tauri build --bundles nsis
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+      - name: Install silently and run the installed binary's CLI
+        run: |
+          setup=$(ls target/release/bundle/nsis/*-setup.exe)
+          echo "$setup"
+          MSYS_NO_PATHCONV=1 "$setup" /S
+          exe="$LOCALAPPDATA/pinned/pinned.exe"
+          test -f "$exe"
+          answer=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' | "$exe" mcp)
+          echo "$answer"
+          test "$(echo "$answer" | jq -c '{id, server: .result.serverInfo.name}')" = '{"id":1,"server":"pinned"}'
+          if refusal=$("$exe" stage coding 2>&1); then echo "stage ran outside a session"; exit 1; fi
+          echo "$refusal"
+          test "$refusal" = "pinned: PINNED_CONNECTOR is not set: run this inside a session a pinned workflow started"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pinned-windows-setup
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error

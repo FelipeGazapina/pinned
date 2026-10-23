@@ -1,12 +1,12 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, EXE_PLACEHOLDER};
-use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions, sync, uploads};
+use crate::{github, history, hooks, plugin, process, projects, pty, reminders, sessions, sync, uploads};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -42,11 +42,13 @@ impl Launch {
         // One folder per process: the app and a node on the same Mac each point sessions at their own binary.
         // A fresh 0700 folder, since Linux shares /tmp: another user who planted a folder by the
         // same name could swap in hooks that run as this machine's user.
-        let files = tempfile::Builder::new()
-            .prefix(&format!("pinned-{}-", std::process::id()))
-            .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
-            .tempdir()?
-            .keep();
+        let prefix = format!("pinned-{}-", std::process::id());
+        let mut files = tempfile::Builder::new();
+        files.prefix(&prefix);
+        // Windows needs no mode: each user has a temp folder of their own.
+        #[cfg(unix)]
+        files.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        let files = files.tempdir()?.keep();
         let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
         let mcp_config = files.join("claude-mcp.json");
@@ -493,7 +495,7 @@ impl Machine {
 
     /// Records `path` as a project opened now and returns its canonical form.
     pub fn open_project(&self, path: PathBuf) -> PathBuf {
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let path = dunce::canonicalize(&path).unwrap_or(path);
         let mut projects = self.projects.lock().unwrap();
         projects::upsert(&mut projects, path.clone(), unix_now());
         if let Some(file) = &self.projects_file {
@@ -823,8 +825,14 @@ impl Machine {
     }
 }
 
+#[cfg(unix)]
+const HOME_ENV: &str = "HOME";
+// Where Claude Code looks for ~/.claude on Windows; HOME there is Git Bash's, when set at all.
+#[cfg(windows)]
+const HOME_ENV: &str = "USERPROFILE";
+
 pub(crate) fn home() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+    PathBuf::from(std::env::var_os(HOME_ENV).unwrap_or_default())
 }
 
 fn json<T: Serialize>(value: T) -> Result<Value, String> {
@@ -843,7 +851,7 @@ fn paste(text: &str) -> Vec<u8> {
 }
 
 pub fn git_remote(dir: &Path) -> Option<String> {
-    let out = Command::new("git")
+    let out = process::command("git")
         .arg("-C")
         .arg(dir)
         .args(["remote", "get-url", "origin"])
@@ -901,7 +909,7 @@ fn clone(repo: &str, into: &Path, token: Option<&str>) -> Result<(), String> {
 }
 
 fn git_config(repo: &Path, (key, value): &(&str, String)) -> Result<(), String> {
-    let out = Command::new("git").arg("-C").arg(repo).args(["config", "--local", key, value]).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
+    let out = process::command("git").arg("-C").arg(repo).args(["config", "--local", key, value]).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
     out.status.success().then_some(()).ok_or_else(|| format!("git config failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
 }
 
@@ -910,7 +918,7 @@ fn clone_once(repo: &str, into: &Path, config: Option<&(&str, String)>) -> Resul
     if let Some(parent) = into.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let mut git = Command::new("git");
+    let mut git = process::command("git");
     // Through the environment, so the token stays out of the process list.
     if let Some((key, value)) = config {
         git.env("GIT_CONFIG_COUNT", "1").env("GIT_CONFIG_KEY_0", key).env("GIT_CONFIG_VALUE_0", value);
@@ -931,27 +939,40 @@ fn clone_once(repo: &str, into: &Path, config: Option<&(&str, String)>) -> Resul
     }
 }
 
+#[cfg(unix)]
+const CLAUDE: [&str; 1] = ["claude"];
+// The native installer's binary first, then npm's shim.
+#[cfg(windows)]
+const CLAUDE: [&str; 2] = ["claude.exe", "claude.cmd"];
+
+/// The first of `CLAUDE` found on `path_env`, or where the native installer puts claude.
 fn find_claude(path_env: Option<&str>) -> PathBuf {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    path_env
-        .into_iter()
-        .flat_map(std::env::split_paths)
-        .map(|dir| dir.join("claude"))
+    let dirs: Vec<PathBuf> = path_env.map(|path| std::env::split_paths(path).collect()).unwrap_or_default();
+    CLAUDE
+        .iter()
+        .flat_map(|name| dirs.iter().map(move |dir| dir.join(name)))
         .find(|p| p.is_file())
-        .unwrap_or_else(|| home.join(".local/bin/claude"))
+        .unwrap_or_else(|| home().join(".local").join("bin").join(CLAUDE[0]))
 }
 
 /// Apps opened from Finder inherit launchd's bare PATH. Ask the user's login shell for the
 /// PATH their terminal sees, so claude and the tools it runs (git, node, brew) resolve.
+#[cfg(unix)]
 fn login_shell_path() -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let out = Command::new(shell)
+    let out = process::command(shell)
         .args(["-ilc", "printf '\\n__PINNED_PATH__%s__PINNED_PATH__' \"$PATH\""])
         .stdin(Stdio::null())
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     text.split("__PINNED_PATH__").nth(1).map(str::to_owned)
+}
+
+/// A Windows app inherits the user's whole PATH already.
+#[cfg(windows)]
+fn login_shell_path() -> Option<String> {
+    None
 }
 
 fn unix_now() -> u64 {
@@ -961,7 +982,9 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::agent::{session_env, Subject};
+    #[cfg(unix)]
     use crate::connectors::Delivery;
     use serde_json::json;
     use std::time::{Duration, Instant};
@@ -987,15 +1010,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pinned-machine-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::canonicalize(dir).unwrap()
+        dunce::canonicalize(dir).unwrap()
     }
 
+    #[cfg(unix)]
     fn sh(script: &str) -> CommandBuilder {
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.args(["-c", script]);
         cmd
     }
 
+    #[cfg(unix)]
     fn running(m: &Machine, env: Vec<(String, String)>, script: &str) -> TabId {
         let id = m.add_tab("/repo".into(), vec![], env, false, None);
         m.spawn(&id, sh(script), pty::size(80, 24)).unwrap();
@@ -1021,13 +1046,15 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        assert!(Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success(), "git {args:?}");
+        assert!(process::command("git").arg("-C").arg(dir).args(args).status().unwrap().success(), "git {args:?}");
     }
 
+    #[cfg(unix)]
     fn slack_env(connector: &str, thread: &str) -> Vec<(String, String)> {
         session_env(connector, &Subject::SlackThread { channel: "C0123ABCD".into(), thread: thread.into() })
     }
 
+    #[cfg(unix)]
     fn delivery(connector: &str, thread: &str, messages: &[&str]) -> Delivery {
         Delivery {
             connector: connector.into(),
@@ -1045,6 +1072,7 @@ mod tests {
         assert_eq!(paste("a\x1b[201~\rb\x07"), b"\x1b[200~a[201~b\x1b[201~\r");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_delivery_finds_the_live_tab_of_its_thread() {
         let m = machine();
@@ -1065,6 +1093,7 @@ mod tests {
 
     /// The session is a real pty running cat with the terminal in raw mode, so the file holds
     /// exactly the bytes the session received.
+    #[cfg(unix)]
     #[test]
     fn a_delivery_reaches_the_session_through_its_pty() {
         let file = std::env::temp_dir().join(format!("pinned-delivery-{}.bin", std::process::id()));
@@ -1101,6 +1130,7 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), output[output.len() - 256 * 1024..]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_late_viewer_gets_the_screen_then_live_output_across_a_restart() {
         let m = machine();
@@ -1127,6 +1157,7 @@ mod tests {
         assert_eq!(text(&again), "second\r\n", "a restart starts a fresh screen");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_session_that_exits_reports_it_and_stops_running() {
         let events = Arc::new(Mutex::new(vec![]));
@@ -1137,6 +1168,63 @@ mod tests {
         assert_eq!(events.lock().unwrap().iter().find(|e| e["kind"] == "exit"), Some(&json!({ "kind": "exit", "tab": tab })));
         assert!(!m.view(&tab).unwrap().running);
         assert_eq!(events.lock().unwrap().last().unwrap()["tabs"][0]["running"], false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_session_runs_in_conpty_and_reports_its_exit() {
+        let events = Arc::new(Mutex::new(vec![]));
+        let seen_events = events.clone();
+        let m = Machine::new(launch(), None, Some("/repo".into()), move |e| seen_events.lock().unwrap().push(serde_json::to_value(e).unwrap()));
+        let tab = m.add_tab("/repo".into(), vec![], vec![], false, None);
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "echo pinned on windows"]);
+        m.spawn(&tab, cmd, pty::size(80, 24)).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        let start = Instant::now();
+        while !text(&seen).contains("pinned on windows") {
+            assert!(start.elapsed() < Duration::from_secs(5), "timed out waiting for the echo, saw {:?}", text(&seen));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!text(&seen).contains("\x1b[6n"), "the cursor request reached the viewer");
+        wait_for("the exit", || events.lock().unwrap().iter().any(|e| e["kind"] == "exit"));
+        assert_eq!(events.lock().unwrap().iter().find(|e| e["kind"] == "exit"), Some(&json!({ "kind": "exit", "tab": tab })));
+        assert!(!m.view(&tab).unwrap().running);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_is_found_on_path_or_where_the_native_installer_puts_it() {
+        let root = temp("find-claude");
+        let (empty, bin) = (root.join("empty"), root.join("bin"));
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(bin.join("claude.d")).unwrap();
+        let path = std::env::join_paths([&empty, &bin]).unwrap().into_string().unwrap();
+        assert_eq!(find_claude(Some(&path)), PathBuf::from(std::env::var("HOME").unwrap()).join(".local/bin/claude"), "a folder is not claude");
+        std::fs::write(bin.join("claude"), "").unwrap();
+        assert_eq!(find_claude(Some(&path)), bin.join("claude"));
+        assert_eq!(find_claude(None), PathBuf::from(std::env::var("HOME").unwrap()).join(".local/bin/claude"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_is_the_native_exe_before_npms_shim_anywhere_on_path() {
+        let root = temp("find-claude");
+        let (npm, native) = (root.join("npm"), root.join("native"));
+        std::fs::create_dir_all(&npm).unwrap();
+        std::fs::create_dir_all(&native).unwrap();
+        for shim in ["claude", "claude.cmd", "claude.ps1"] {
+            std::fs::write(npm.join(shim), "").unwrap();
+        }
+        std::fs::write(native.join("claude.exe"), "").unwrap();
+        let path = std::env::join_paths([&npm, &native]).unwrap().into_string().unwrap();
+        assert_eq!(find_claude(Some(&path)), native.join("claude.exe"));
+        std::fs::remove_file(native.join("claude.exe")).unwrap();
+        assert_eq!(find_claude(Some(&path)), npm.join("claude.cmd"));
+        assert_eq!(find_claude(None), PathBuf::from(std::env::var("USERPROFILE").unwrap()).join(r".local\bin\claude.exe"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1203,6 +1291,7 @@ mod tests {
         assert_eq!(m.call(Call::Deliver { env: vec![], text: "hi".into() }), Ok(json!(false)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn skipping_permissions_restarts_the_tab_on_its_conversation_and_continues_the_turn() {
         let dir = temp("bypass");
