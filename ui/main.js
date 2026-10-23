@@ -139,7 +139,7 @@ const onlineMachines = () => [...machines.entries()].filter(([, m]) => m.view.on
 function setBypassNext(on) {
   bypassNext = on;
   picker.dataset.bypass = on;
-  picker.querySelector(".bypass").textContent = on ? "⚡ Skip all permissions: on" : "⚡ Skip all permissions: off";
+  picker.querySelector(".bypass").textContent = on ? "⚠ Skip all permissions: on" : "⚠ Skip all permissions: off";
 }
 
 async function showProjects({ machine, tab = null } = {}) {
@@ -441,6 +441,17 @@ async function startTab(tab) {
   }
 }
 
+async function setBypass(tab, on) {
+  refit(tab);
+  try {
+    await callOn(tab.machine, { cmd: "set_bypass", tab: tab.view.id, on, cols: tab.term.cols, rows: tab.term.rows });
+    await refreshTabs(tab.machine);
+  } catch (e) {
+    tab.term.write(`\r\n\x1b[31m[could not restart claude: ${e}]\x1b[0m\r\n`);
+  }
+  tab.term.focus();
+}
+
 function closeTab(tab) {
   removeTab(tab, true);
   render();
@@ -496,7 +507,9 @@ function render() {
     const remote = tab.machine !== LOCAL;
     const where = remote ? `${machineName(tab.machine)}: ` : "";
     tab.button.dataset.status = statusOf(tab);
-    tab.button.querySelector(".name").textContent = (tab.view.bypass ? "⚡ " : "") + tabName(tab);
+    const name = tab.button.querySelector(".name");
+    name.textContent = tabName(tab);
+    if (tab.view.bypass) name.prepend(Object.assign(document.createElement("span"), { className: "warn", textContent: "⚠ " }));
     const badge = tab.button.querySelector(".badge");
     badge.hidden = !remote;
     badge.textContent = remote ? initials(machineName(tab.machine)) : "";
@@ -929,6 +942,50 @@ document.getElementById("folder").onclick = async () => {
   const path = await chooseFolder(tab.view.cwd);
   if (path) await moveTab(tab, path);
 };
+
+const sessionActions = document.getElementById("actions");
+const sessionMenu = document.getElementById("actions-menu");
+
+function closeSessionMenu() {
+  sessionMenu.hidden = true;
+  delete sessionActions.dataset.open;
+}
+
+// pinned can't see the session's permission mode, so the toggle offers the opposite of the tab's flag.
+function openSessionMenu(tab) {
+  const item = (label, hint, run, className = "") => {
+    const button = document.createElement("button");
+    button.className = className;
+    button.append(Object.assign(document.createElement("span"), { textContent: label }));
+    if (hint) button.append(Object.assign(document.createElement("span"), { className: "hint", textContent: hint }));
+    button.onclick = () => {
+      closeSessionMenu();
+      run();
+    };
+    return button;
+  };
+  sessionMenu.replaceChildren(
+    tab.view.bypass
+      ? item("Ask for permissions again", "Restarts claude and resumes this conversation.", () => setBypass(tab, false))
+      : item("⚠ Skip all permissions", "Restarts claude with no permission checks and resumes this conversation.", () => setBypass(tab, true), "danger"),
+    item("Attach files…", "", () => document.getElementById("attach").click()),
+    item("Change folder…", "", () => document.getElementById("folder").click()),
+    item("Close tab", "", () => closeTab(tab)),
+  );
+  sessionMenu.hidden = false;
+  sessionActions.dataset.open = "";
+}
+
+document.getElementById("actions-toggle").onclick = () => (sessionMenu.hidden && active ? openSessionMenu(active) : closeSessionMenu());
+window.addEventListener("mousedown", (e) => {
+  if (!sessionMenu.hidden && !e.target.closest("#actions")) closeSessionMenu();
+}, true);
+window.addEventListener("keydown", (e) => {
+  if (sessionMenu.hidden || e.key !== "Escape") return;
+  closeSessionMenu();
+  e.preventDefault();
+  e.stopPropagation();
+}, true);
 
 // Phone keyboards lack these keys, so a row of them sits above the terminal on touch screens.
 for (const key of document.querySelectorAll("#keys button")) {

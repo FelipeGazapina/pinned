@@ -39,7 +39,10 @@
         <button data-send="\u001b">Esc</button><button data-send="\t">Tab</button><button data-send="\u001b[Z" title="Shift-Tab: switch Claude's permission mode">⇧Tab</button><button data-send="\u001b[A">↑</button><button data-send="\u001b[B">↓</button><button data-send="\u0003">Ctrl-C</button><button data-send="\r">Enter</button>
         <button id="paste-key" title="Paste the clipboard's text">Paste</button><button id="select-key" title="Show the terminal's text to select and copy">Select</button>
       </div>
-      <div id="terms"><div id="projects" hidden></div><p id="empty">No sessions open. Press ＋ to start one on any of your machines.</p></div>
+      <div id="terms"><div id="projects" hidden></div><p id="empty">No sessions open. Press ＋ to start one on any of your machines.</p>
+        <div id="actions-edge"></div>
+        <div id="actions"><button id="actions-toggle" title="Session actions">⋮</button><div id="actions-menu" hidden></div></div>
+      </div>
     </div>
     <div id="settings">
       <nav id="settings-nav">

@@ -507,13 +507,53 @@ async function sweep(profileName) {
     await openFolderFromPicker("~/work/beta", { bypass: true });
     await waitTerm(/fake claude in .*work\/beta \(bypass\)/);
     check((await tabCount()) === 2, `${await tabCount()} tabs`);
-    check((await text("#tab-list .tab.active .name")).startsWith("⚡"), "the bypass tab has no ⚡");
+    check((await text("#tab-list .tab.active .name")).startsWith("⚠"), "the bypass tab has no ⚠");
   });
 
   await step("switch tabs", async () => {
     await press(page.locator("#tab-list .tab .name", { hasText: "alpha" }));
     check(/alpha/.test(await text("#title")), "tapping the alpha tab did not show it");
     await waitTerm(/work\/alpha/);
+  });
+
+  await step("session actions: skip permissions mid-session, then ask again", async () => {
+    const shown = () => page.locator("#actions").evaluate((el) => getComputedStyle(el).opacity === "1");
+    const openMenu = async () => {
+      if (!touch) {
+        const terms = await rect("#terms");
+        await page.mouse.move(terms.left + terms.width / 2, terms.top + terms.height / 2);
+        await waitFor("the actions button to fade out over the terminal", async () => !(await shown()));
+        const edge = await rect("#actions-edge");
+        await page.mouse.move(edge.left + edge.width / 2, edge.top + edge.height / 2);
+        await waitFor("the actions button to fade in", shown);
+      }
+      check(await shown(), "the actions button is not shown");
+      await tapOrClick("#actions-toggle");
+      await page.waitForSelector("#actions-menu button");
+    };
+    const item = (label) => page.locator("#actions-menu button", { hasText: label });
+    await typeInTerm("hello\r");
+    await waitTerm(/echo: hello/);
+
+    await openMenu();
+    await page.keyboard.press("Escape");
+    check(await page.locator("#actions-menu").isHidden(), "Escape left the menu open");
+    await openMenu();
+    const labels = await page.locator("#actions-menu button > span:first-child").allTextContents();
+    check(labels.join("|") === "⚠ Skip all permissions|Attach files…|Change folder…|Close tab", `menu: ${labels}`);
+    await press(item("Skip all permissions"));
+    await waitTerm(/work\/alpha \(bypass\)\s*>\s*$/);
+    await waitFor("the ⚠ on the tab", async () => (await text("#tab-list .tab.active .name")).startsWith("⚠"));
+    check((await tabCount()) === 2, `${await tabCount()} tabs`);
+
+    await openMenu();
+    await press(item("Ask for permissions again"));
+    await waitTerm(/work\/alpha\s*>\s*$/);
+    await waitFor("the ⚠ to go", async () => !(await text("#tab-list .tab.active .name")).startsWith("⚠"));
+    if (touch) {
+      const small = await smallTargets("#actions-toggle");
+      touchCheck(!small.length, `small targets: ${small.join(", ")}`);
+    }
   });
 
   await step("drag a tab to reorder", async () => {

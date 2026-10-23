@@ -24,14 +24,15 @@ pub struct Saved {
 pub const CONTINUE_PROMPT: &str = "Continue from where you left off.";
 
 impl Saved {
-    /// The `claude` arguments that reopen this session. An interrupted one picks its work back up
-    /// at once, unless a usage limit still blocks it: then the caller waits for `resume_at`.
-    pub fn launch_args(&self, now: u64) -> Vec<String> {
+    /// The `claude` arguments that reopen this session, and the usage limit still to wait for.
+    /// An interrupted one picks its work back up at once, unless a limit still blocks it.
+    pub fn reopen(&self, now: u64) -> (Vec<String>, Option<u64>) {
         let mut args = vec!["--resume".to_owned(), self.session.clone()];
-        if self.interrupted && self.resume_at.map_or(true, |at| at <= now) {
+        let waiting = self.resume_at.filter(|&at| self.interrupted && at > now);
+        if self.interrupted && waiting.is_none() {
             args.push(CONTINUE_PROMPT.to_owned());
         }
-        args
+        (args, waiting)
     }
 }
 
@@ -71,10 +72,10 @@ mod tests {
         let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at };
         let resumed = vec!["--resume".to_owned(), "s1".to_owned()];
         let continued = [resumed.clone(), vec![CONTINUE_PROMPT.to_owned()]].concat();
-        assert_eq!(saved(false, None).launch_args(100), resumed);
-        assert_eq!(saved(true, None).launch_args(100), continued);
-        assert_eq!(saved(true, Some(100)).launch_args(100), continued);
-        assert_eq!(saved(true, Some(101)).launch_args(100), resumed);
+        assert_eq!(saved(false, None).reopen(100), (resumed.clone(), None));
+        assert_eq!(saved(true, None).reopen(100), (continued.clone(), None));
+        assert_eq!(saved(true, Some(100)).reopen(100), (continued, None));
+        assert_eq!(saved(true, Some(101)).reopen(100), (resumed, Some(101)));
     }
 
     #[test]

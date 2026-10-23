@@ -77,6 +77,9 @@ pub enum Call {
     OpenTab { path: Option<String>, bypass: bool },
     /// The folder claude runs in. Restarts claude when it is already running.
     StartClaude { tab: TabId, cols: u16, rows: u16 },
+    /// The folder claude runs in. Restarts claude with `bypass` turned `on` or off, resuming the
+    /// tab's conversation; a session already running that way is left alone.
+    SetBypass { tab: TabId, on: bool, cols: u16, rows: u16 },
     /// `null`. Keystrokes as xterm reports them.
     WriteInput { tab: TabId, data: String },
     /// `null`.
@@ -377,6 +380,10 @@ mod tests {
         round_trip(
             Call::StartClaude { tab: "tab-1".into(), cols: 120, rows: 32 },
             json!({ "cmd": "start_claude", "tab": "tab-1", "cols": 120, "rows": 32 }),
+        );
+        round_trip(
+            Call::SetBypass { tab: "tab-1".into(), on: true, cols: 120, rows: 32 },
+            json!({ "cmd": "set_bypass", "tab": "tab-1", "on": true, "cols": 120, "rows": 32 }),
         );
         round_trip(
             Call::Run {

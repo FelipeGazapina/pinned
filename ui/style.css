@@ -9,6 +9,7 @@
   --working: #4ea1ff;
   --done: #3fca7a;
   --needs-input: #ffad33;
+  --bypass: #f5a524;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
@@ -75,6 +76,7 @@ body[data-tabs="left"] .tab .resize, body[data-tabs="right"] .tab .resize { disp
 .tab:hover { background: #ffffff0a; }
 .tab.active { background: #ffffff14; color: var(--fg); }
 .tab .name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tab .warn { color: var(--bypass); }
 .tab .close { width: 16px; height: 16px; border-radius: 4px; font-size: 9px; line-height: 1;
   flex: none; visibility: hidden; }
 .tab:hover .close, .tab.active .close { visibility: visible; }
@@ -94,7 +96,7 @@ body[data-tabs="left"] .tab .resize, body[data-tabs="right"] .tab .resize { disp
   text-align: left; }
 #projects button.chosen { background: #ffffff14; }
 #projects button.bypass { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
-#projects[data-bypass="true"] button.bypass { color: #f5a524; }
+#projects[data-bypass="true"] button.bypass { color: var(--bypass); }
 #projects span { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #projects .path { color: var(--muted); font-size: 11px; }
 
@@ -330,6 +332,25 @@ body[data-empty="true"] #attach { display: none; }
   box-shadow: 0 8px 24px #00000080; pointer-events: none; }
 #attach-note[hidden] { display: none; }
 #attach-note[data-error] { border-color: #e5484d; color: #e5484d; }
+/* The edge reveals the actions without covering the terminal; the button takes clicks only while shown. */
+#actions-edge { position: absolute; z-index: 3; top: 0; right: 0; bottom: 0; width: 10px; }
+#actions { position: absolute; z-index: 3; right: 6px; bottom: 8px; opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+#actions-edge:hover ~ #actions, #actions:hover, #actions[data-open] { opacity: 1; pointer-events: auto; }
+body[data-empty="true"] :is(#actions-edge, #actions), #projects:not([hidden]) ~ :is(#actions-edge, #actions) { display: none; }
+#actions-toggle { width: 26px; height: 26px; border-radius: 50%; font-size: 14px; line-height: 1; background: rgb(15 17 21);
+  border: 1px solid var(--border); box-shadow: 0 4px 12px #00000080; }
+#actions-toggle:hover, #actions[data-open] #actions-toggle { background: #23272e; }
+#actions-menu { position: absolute; right: 0; bottom: calc(100% + 6px); width: 250px; padding: 4px;
+  background: rgb(15 17 21); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px #00000080; }
+#actions-menu[hidden] { display: none; }
+#actions-menu button { display: flex; flex-direction: column; width: 100%; padding: 5px 8px; border-radius: 6px; text-align: left; }
+#actions-menu button:hover { background: #ffffff14; }
+#actions-menu button.danger { color: var(--bypass); }
+#actions-menu .hint { color: var(--muted); font-size: 11px; }
+@media (hover: none) {
+  #actions { opacity: 1; pointer-events: auto; }
+  #actions-edge { display: none; }
+}
 #terms[data-dropping]::after { content: ""; position: absolute; inset: 4px; border: 2px dashed var(--working);
   border-radius: 8px; pointer-events: none; }
 
@@ -391,9 +412,10 @@ body[data-page="login"] #login { display: flex; flex-direction: column; gap: 10p
   .tab { min-height: 40px; -webkit-touch-callout: none; }
   .tab .close { width: 40px; height: 40px; margin: -3px -4px -3px 0; font-size: 11px; visibility: visible; }
   .tab.held { background: #4ea1ff33; }
-  #projects button, #projects button.machine, #settings-nav button, #settings button.primary, #settings button.secondary, .chip {
+  #projects button, #projects button.machine, #settings-nav button, #settings button.primary, #settings button.secondary, .chip, #actions-menu button {
     min-width: 40px; min-height: 40px; }
-  #projects button { justify-content: center; }
+  #actions-toggle { width: 40px; height: 40px; font-size: 18px; }
+  #projects button, #actions-menu button { justify-content: center; }
   .switch input { inset: -12px -8px; }
   /* Safari zooms into a field whose text is under 16px when it takes focus. */
   #settings input:not([type="checkbox"]), #settings select, #settings textarea, #projects .type-path input { font-size: 16px; }

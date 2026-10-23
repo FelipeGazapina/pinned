@@ -185,6 +185,18 @@ struct Tab {
 }
 
 impl Tab {
+    /// What reopens the tab's conversation, once claude has reported one.
+    fn saved(&self) -> Option<sessions::Saved> {
+        Some(sessions::Saved {
+            cwd: self.cwd.clone(),
+            session: self.claude_session.clone()?,
+            env: self.env.clone(),
+            bypass: self.bypass,
+            interrupted: self.interrupted,
+            resume_at: self.resume_at,
+        })
+    }
+
     fn view(&self, id: &str) -> TabView {
         TabView {
             id: id.to_owned(),
@@ -293,6 +305,7 @@ impl Machine {
             Call::Tabs => json(self.tabs()),
             Call::OpenTab { path, bypass } => json(self.open_tab(path, bypass)),
             Call::StartClaude { tab, cols, rows } => json(self.start_claude(&tab, cols, rows)?),
+            Call::SetBypass { tab, on, cols, rows } => json(self.set_bypass(&tab, on, cols, rows)?),
             Call::WriteInput { tab, data } => json(self.write_input(&tab, data.as_bytes())?),
             Call::ResizePty { tab, cols, rows } => json(self.resize_pty(&tab, cols, rows)?),
             Call::CloseTab { tab } => {
@@ -382,6 +395,25 @@ impl Machine {
         self.continue_when_limit_lifts(tab);
         self.emit_tabs();
         Ok(cwd.display().to_string())
+    }
+
+    /// Turns the tab's permission skipping on or off and returns its folder. Claude reads the flag
+    /// only at launch, so the tab restarts on its own conversation.
+    pub fn set_bypass(&self, tab: &str, on: bool, cols: u16, rows: u16) -> Result<String, String> {
+        let unchanged = self.tab(tab, |t| {
+            let unchanged = t.bypass == on && t.session.is_some();
+            if !unchanged {
+                t.bypass = on;
+                if let Some(saved) = t.saved() {
+                    (t.launch, t.resume_at) = saved.reopen(unix_now());
+                }
+            }
+            unchanged.then(|| t.cwd.display().to_string())
+        })?;
+        match unchanged {
+            Some(cwd) => Ok(cwd),
+            None => self.start_claude(tab, cols, rows),
+        }
     }
 
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
@@ -547,14 +579,9 @@ impl Machine {
             .into_iter()
             .filter(|s| s.cwd.is_dir())
             .map(|s| {
-                let launch = s.launch_args(now);
-                let waiting = s.interrupted && launch.len() == 2;
+                let (launch, resume_at) = s.reopen(now);
                 let id = self.add_tab(s.cwd, launch, s.env, s.bypass, Some(s.session));
-                // A limit that already lifted continues through the launch prompt; one still in force waits.
-                let _ = self.tab(&id, |t| {
-                    t.interrupted = s.interrupted;
-                    t.resume_at = s.resume_at.filter(|_| waiting);
-                });
+                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at) = (s.interrupted, resume_at));
                 id
             })
             .collect();
@@ -664,22 +691,9 @@ impl Machine {
         let Some(file) = &self.sessions_file else { return };
         let saved: Vec<sessions::Saved> = {
             let tabs = self.tabs.lock().unwrap();
-            let mut open: Vec<(u32, &Tab)> = tabs
-                .iter()
-                .filter(|(_, t)| t.claude_session.is_some())
-                .map(|(id, t)| (tab_number(id), t))
-                .collect();
+            let mut open: Vec<(u32, sessions::Saved)> = tabs.iter().filter_map(|(id, t)| Some((tab_number(id), t.saved()?))).collect();
             open.sort_by_key(|(n, _)| *n);
-            open.into_iter()
-                .map(|(_, t)| sessions::Saved {
-                    cwd: t.cwd.clone(),
-                    session: t.claude_session.clone().unwrap(),
-                    env: t.env.clone(),
-                    bypass: t.bypass,
-                    interrupted: t.interrupted,
-                    resume_at: t.resume_at,
-                })
-                .collect()
+            open.into_iter().map(|(_, s)| s).collect()
         };
         sessions::save(file, &saved);
     }
@@ -1187,6 +1201,32 @@ mod tests {
         assert_eq!(m.call(Call::CloseTab { tab: "tab-1".into() }), Ok(Value::Null));
         assert_eq!(m.call(Call::StartClaude { tab: "tab-1".into(), cols: 80, rows: 24 }), Err("no tab tab-1".into()));
         assert_eq!(m.call(Call::Deliver { env: vec![], text: "hi".into() }), Ok(json!(false)));
+    }
+
+    #[test]
+    fn skipping_permissions_restarts_the_tab_on_its_conversation_and_continues_the_turn() {
+        let dir = temp("bypass");
+        let claude = dir.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { claude, ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let tab = m.add_tab(dir.clone(), vec![], vec![], false, Some("s1".into()));
+        m.spawn(&tab, sh("sleep 30"), pty::size(80, 24)).unwrap();
+        m.tab(&tab, |t| t.interrupted = true).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+
+        let set = |on| m.call(Call::SetBypass { tab: tab.clone(), on, cols: 80, rows: 24 });
+        assert_eq!(set(true), Ok(json!(dir.display().to_string())));
+        wait_for("claude's arguments", || text(&seen).ends_with("\r\n"));
+        assert_eq!(text(&seen), "--settings|s|--plugin-dir|p|--dangerously-skip-permissions|--resume|s1|Continue from where you left off.|\r\n");
+        assert!(m.view(&tab).unwrap().bypass);
+        assert!(sessions::load(&dir.join("sessions.json"))[0].bypass, "a relaunch keeps skipping permissions");
+
+        let session = m.tab(&tab, |t| t.screen.clone()).unwrap().lock().unwrap().session;
+        assert_eq!(set(true), Ok(json!(dir.display().to_string())));
+        assert_eq!(m.tab(&tab, |t| t.screen.clone()).unwrap().lock().unwrap().session, session, "a session already skipping permissions keeps running");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
