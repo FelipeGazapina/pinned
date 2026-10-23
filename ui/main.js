@@ -1032,7 +1032,7 @@ function connectHub(signedIn) {
       document.body.dataset.hub = on ? "online" : "offline";
       if (settingsOpen() && page === "account") showAccount();
     },
-    refused: (reason) => (TAURI ? (document.body.dataset.hub = "refused") : signOutWeb(reason)),
+    refused: () => (TAURI ? (document.body.dataset.hub = "refused") : signOutWeb("You were signed out. Sign in again.")),
   });
 }
 

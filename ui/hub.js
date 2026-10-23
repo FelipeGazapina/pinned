@@ -26,7 +26,7 @@ class Hub {
       this.pending.clear();
       if (wasOnline) this.on.online?.(false);
       if (this.closed) return;
-      if (!wasOnline && REFUSED.includes(e.code)) return this.on.refused?.(e.reason || "The hub refused the sign-in.");
+      if (!wasOnline && REFUSED.includes(e.code)) return this.on.refused?.();
       setTimeout(() => this.closed || this.connect(), this.retry);
       this.retry = Math.min(this.retry * 2, RETRY_MS[1]);
     };

@@ -687,14 +687,18 @@ async function sweep(profileName) {
     const token = await page.evaluate(() => localStorage.getItem("hub-token"));
     await api("/api/logout", {}, token);
     await page.waitForSelector("#login", { state: "visible", timeout: 10000 });
-    return text("#login .error");
+    const said = await text("#login .error");
+    check(/signed out/.test(said), `the form says "${said}"`);
+    return said;
   });
 
   await step("a stale token at load shows the sign-in form", async () => {
     await page.evaluate(() => localStorage.setItem("hub-token", "stale"));
     await page.reload();
     await page.waitForSelector("#login", { state: "visible", timeout: 10000 });
-    return text("#login .error");
+    const said = await text("#login .error");
+    check(/signed out/.test(said), `the form says "${said}"`);
+    return said;
   });
 
   await page.fill("#login [name=email]", EMAIL);
