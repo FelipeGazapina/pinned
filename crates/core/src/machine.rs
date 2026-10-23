@@ -631,9 +631,11 @@ impl Machine {
                 let repo = git_remote(&path)?;
                 let key = repo_key(&repo)?;
                 let name = repo_name(&repo).unwrap_or_default().to_owned();
+                let account = self.account_for(None, &path).ok()?;
                 seen.insert(key.clone()).then(|| sync::Checkout {
                     project: sync::Project { key, name, repo },
                     history: self.history_dir.as_ref().map(|dir| history::file_for(dir, &path)),
+                    claude_home: (account.provider == Provider::Claude).then(|| self.accounts.home(&account)),
                     path,
                 })
             })
@@ -1539,6 +1541,32 @@ mod tests {
         assert_eq!(
             events.lock().unwrap().last(),
             Some(&json!({ "kind": "usage", "usage": { "five_hour": window(5.0), "seven_day": window(90.0) }, "account": "work" }))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_project_syncs_the_claude_files_of_its_account() {
+        let root = temp("sync-account");
+        let m = accounts_machine(&root);
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        for (name, account) in [("own", None), ("work", Some("work")), ("side", Some("side"))] {
+            let app = root.join(name);
+            std::fs::create_dir_all(&app).unwrap();
+            git(&app, &["init", "-q"]);
+            git(&app, &["remote", "add", "origin", &format!("git@github.com:acme/{name}.git")]);
+            m.open_project(app.clone());
+            m.set_project_account(&app.display().to_string(), account.map(Into::into)).unwrap();
+        }
+        let homes: Vec<(String, Option<PathBuf>)> = m.checkouts().into_iter().map(|c| (c.project.name, c.claude_home)).collect();
+        assert_eq!(
+            homes.into_iter().collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                ("own".into(), Some(home().join(".claude"))),
+                ("side".into(), None),
+                ("work".into(), Some(root.join("config/accounts/work"))),
+            ])
         );
         let _ = std::fs::remove_dir_all(root);
     }

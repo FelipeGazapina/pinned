@@ -489,19 +489,19 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
     };
     let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
     let project = sync::Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
-    let checkout = |home: &Path, folder: &str| sync::Checkout { project: project.clone(), path: home.join(folder), history: None };
+    let checkout = |home: &Path, folder: &str| sync::Checkout { project: project.clone(), path: home.join(folder), history: None, claude_home: Some(home.join(".claude")) };
     let (on_mac, on_mini) = (checkout(&mac_home, "projetos/app"), checkout(&mini_home, "pinned/app"));
-    let memory = |home: &Path, c: &sync::Checkout| sync::claude_dir(home, &c.path).join("memory/MEMORY.md");
-    std::fs::create_dir_all(memory(&mac_home, &on_mac).parent().unwrap()).unwrap();
-    std::fs::write(memory(&mac_home, &on_mac), "- deploys go through the VPS").unwrap();
+    let memory = |c: &sync::Checkout| sync::claude_dir(c.claude_home.as_ref().unwrap(), &c.path).join("memory/MEMORY.md");
+    std::fs::create_dir_all(memory(&on_mac).parent().unwrap()).unwrap();
+    std::fs::write(memory(&on_mac), "- deploys go through the VPS").unwrap();
 
     let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
     let now = std::time::SystemTime::now();
-    let pushed = sync::sync(&Through(mac_link), &mut sync::State::default(), &mac_home, &on_mac, now).unwrap().pushed;
+    let pushed = sync::sync(&Through(mac_link), &mut sync::State::default(), &on_mac, now).unwrap().pushed;
     assert_eq!(pushed, vec!["claude/memory/MEMORY.md"]);
-    let pulled = sync::sync(&Through(mini_link), &mut sync::State::default(), &mini_home, &on_mini, now).unwrap().pulled;
+    let pulled = sync::sync(&Through(mini_link), &mut sync::State::default(), &on_mini, now).unwrap().pulled;
     assert_eq!(pulled, vec!["claude/memory/MEMORY.md"]);
-    assert_eq!(std::fs::read_to_string(memory(&mini_home, &on_mini)).unwrap(), "- deploys go through the VPS");
+    assert_eq!(std::fs::read_to_string(memory(&on_mini)).unwrap(), "- deploys go through the VPS");
 
     let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1 }, data: Some("eA==".into()) };
     assert_eq!(
@@ -537,8 +537,8 @@ fn a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link() {
     };
     let ((mut mac, mac_home), (mut mini, mini_home)) = (start("mac"), start("mini"));
     let project = sync::Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
-    let checkout = |home: &Path| sync::Checkout { project: project.clone(), path: home.join("app"), history: None };
-    let session = |home: &Path| sync::claude_dir(home, &home.join("app")).join("session.jsonl");
+    let checkout = |home: &Path| sync::Checkout { project: project.clone(), path: home.join("app"), history: None, claude_home: Some(home.join(".claude")) };
+    let session = |home: &Path| sync::claude_dir(&home.join(".claude"), &home.join("app")).join("session.jsonl");
     // Random bytes don't compress, so the push carries about 19 MB of base64, past tungstenite's 16 MB default frame.
     let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
     let big: Vec<u8> = (0..14 << 20)
@@ -553,9 +553,9 @@ fn a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link() {
     std::fs::write(session(&mac_home), &big).unwrap();
 
     let now = std::time::SystemTime::now();
-    let pushed = sync::sync(&Through(mac.link.as_ref().unwrap()), &mut sync::State::default(), &mac_home, &checkout(&mac_home), now);
+    let pushed = sync::sync(&Through(mac.link.as_ref().unwrap()), &mut sync::State::default(), &checkout(&mac_home), now);
     assert_eq!(pushed.map(|s| s.pushed), Ok(vec!["claude/session.jsonl".to_owned()]));
-    let pulled = sync::sync(&Through(mini.link.as_ref().unwrap()), &mut sync::State::default(), &mini_home, &checkout(&mini_home), now);
+    let pulled = sync::sync(&Through(mini.link.as_ref().unwrap()), &mut sync::State::default(), &checkout(&mini_home), now);
     assert_eq!(pulled.map(|s| s.pulled), Ok(vec!["claude/session.jsonl".to_owned()]));
     assert!(std::fs::read(session(&mini_home)).unwrap() == big, "the mini got the session byte for byte");
     assert!(mac.online() && mini.online(), "both links stay up");

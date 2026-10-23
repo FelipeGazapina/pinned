@@ -67,6 +67,9 @@ pub struct Checkout {
     pub path: PathBuf,
     /// Where pinned keeps this checkout's turns.
     pub history: Option<PathBuf>,
+    /// The Claude Code home of the account the project runs under, which holds its sessions and
+    /// memory. None for a project on another provider, which shares only its skills and turns.
+    pub claude_home: Option<PathBuf>,
 }
 
 /// What a machine remembers between syncs: the files' hashes, to skip hashing unchanged files,
@@ -79,6 +82,10 @@ pub struct State {
     /// taking its files for deleted.
     #[serde(default)]
     agreed: BTreeMap<String, BTreeMap<String, String>>,
+    /// The Claude home each checkout's agreed `claude/` files were in, by the same key. A project
+    /// moved to another account starts its Claude files over instead of taking them for deleted.
+    #[serde(default)]
+    claude_homes: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -122,16 +129,16 @@ pub struct Synced {
     pub pulled: Vec<String>,
 }
 
-/// Claude Code's folder for a project's sessions and memory: the path with every character but
-/// letters and digits made a dash.
-pub fn claude_dir(home: &Path, checkout: &Path) -> PathBuf {
+/// Claude Code's folder for a project's sessions and memory in `claude_home`: the path with every
+/// character but letters and digits made a dash.
+pub fn claude_dir(claude_home: &Path, checkout: &Path) -> PathBuf {
     let slug: String = checkout.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    home.join(".claude/projects").join(slug)
+    claude_home.join("projects").join(slug)
 }
 
 /// Brings one checkout and the hub to the same files.
-pub fn sync(hub: &impl Hub, state: &mut State, home: &Path, checkout: &Checkout, now: SystemTime) -> Result<Synced, String> {
-    let roots = Roots::new(home, checkout);
+pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemTime) -> Result<Synced, String> {
+    let roots = Roots::new(checkout);
     let key = &checkout.project.key;
     let mut local: BTreeMap<String, (String, u64)> = BTreeMap::new();
     for (path, file) in roots.files() {
@@ -142,7 +149,14 @@ pub fn sync(hub: &impl Hub, state: &mut State, home: &Path, checkout: &Checkout,
     let remote: BTreeMap<String, Entry> = hub.list(key)?.into_iter().map(|e| (e.path.clone(), e)).collect();
     let agreed_key = format!("{key} {}", checkout.path.display());
     let mut agreed = state.agreed.remove(&agreed_key).unwrap_or_default();
-    let paths: BTreeSet<String> = local.keys().chain(remote.keys()).chain(agreed.keys()).cloned().collect();
+    if let Some(home) = &checkout.claude_home {
+        if state.claude_homes.insert(agreed_key.clone(), home.clone()).is_some_and(|before| &before != home) {
+            agreed.retain(|path, _| !path.starts_with("claude/"));
+        }
+    }
+    // A file of a folder this checkout doesn't share, such as Claude's for a Codex project, is
+    // neither fetched nor taken for deleted.
+    let paths: BTreeSet<String> = local.keys().chain(remote.keys()).chain(agreed.keys()).filter(|p| roots.local(p).is_some()).cloned().collect();
     let (mut push, mut pull, mut merge) = (vec![], vec![], vec![]);
     for path in &paths {
         let mine = local.get(path).map(|(sha, _)| sha.clone());
@@ -250,17 +264,17 @@ pub fn sync(hub: &impl Hub, state: &mut State, home: &Path, checkout: &Checkout,
 
 /// The folders a checkout shares, and how their files are named on the hub.
 struct Roots {
-    claude: PathBuf,
+    claude: Option<PathBuf>,
     /// None while git tracks the skills, which then travel with the repository.
     skills: Option<PathBuf>,
     history: Option<PathBuf>,
 }
 
 impl Roots {
-    fn new(home: &Path, checkout: &Checkout) -> Roots {
+    fn new(checkout: &Checkout) -> Roots {
         let skills = checkout.path.join(".claude/skills");
         Roots {
-            claude: claude_dir(home, &checkout.path),
+            claude: checkout.claude_home.as_ref().map(|home| claude_dir(home, &checkout.path)),
             skills: (!tracked(&checkout.path, ".claude/skills")).then_some(skills),
             history: checkout.history.clone(),
         }
@@ -269,13 +283,15 @@ impl Roots {
     /// Every shared file here, by its name on the hub.
     fn files(&self) -> Vec<(String, PathBuf)> {
         let mut files = vec![];
-        for entry in std::fs::read_dir(&self.claude).into_iter().flatten().flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".jsonl") && entry.path().is_file() {
-                files.push((format!("claude/{name}"), entry.path()));
+        if let Some(claude) = &self.claude {
+            for entry in std::fs::read_dir(claude).into_iter().flatten().flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.ends_with(".jsonl") && entry.path().is_file() {
+                    files.push((format!("claude/{name}"), entry.path()));
+                }
             }
+            walk(&claude.join("memory"), "claude/memory", &mut files);
         }
-        walk(&self.claude.join("memory"), "claude/memory", &mut files);
         if let Some(skills) = &self.skills {
             walk(skills, "skills", &mut files);
         }
@@ -290,17 +306,17 @@ impl Roots {
         if path == HISTORY {
             return self.history.clone();
         }
-        let (root, rest) = if let Some(rest) = path.strip_prefix("claude/") {
-            (&self.claude, rest)
+        let (root, rest, claude) = if let Some(rest) = path.strip_prefix("claude/") {
+            (self.claude.as_ref()?, rest, true)
         } else if let Some(rest) = path.strip_prefix("skills/") {
-            (self.skills.as_ref()?, rest)
+            (self.skills.as_ref()?, rest, false)
         } else {
             return None;
         };
         let rest = Path::new(rest);
         let inside = rest.components().all(|c| matches!(c, Component::Normal(_))) && rest.components().next().is_some();
         let shared = rest.starts_with("memory") || (rest.components().count() == 1 && rest.extension().is_some_and(|e| e == "jsonl"));
-        (inside && (root != &self.claude || shared)).then(|| root.join(rest))
+        (inside && (!claude || shared)).then(|| root.join(rest))
     }
 }
 
@@ -410,13 +426,14 @@ mod tests {
             let path = home.join(folder);
             std::fs::create_dir_all(&path).unwrap();
             let project = Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
-            Side { checkout: Checkout { project, history: Some(home.join("history/app.jsonl")), path }, home, state: State::default() }
+            let checkout = Checkout { project, history: Some(home.join("history/app.jsonl")), claude_home: Some(home.join(".claude")), path };
+            Side { checkout, home, state: State::default() }
         }
         fn claude(&self, rest: &str) -> PathBuf {
-            claude_dir(&self.home, &self.checkout.path).join(rest)
+            claude_dir(self.checkout.claude_home.as_ref().unwrap(), &self.checkout.path).join(rest)
         }
         fn sync(&mut self, hub: &MemHub) -> Synced {
-            sync(hub, &mut self.state, &self.home, &self.checkout, SystemTime::now()).unwrap()
+            sync(hub, &mut self.state, &self.checkout, SystemTime::now()).unwrap()
         }
     }
 
@@ -433,7 +450,38 @@ mod tests {
 
     #[test]
     fn claude_names_a_project_folder_by_its_path() {
-        assert_eq!(claude_dir(Path::new("/h"), Path::new("/Users/ana/my.app")), PathBuf::from("/h/.claude/projects/-Users-ana-my-app"));
+        assert_eq!(claude_dir(Path::new("/h/.claude"), Path::new("/Users/ana/my.app")), PathBuf::from("/h/.claude/projects/-Users-ana-my-app"));
+    }
+
+    #[test]
+    fn a_project_without_a_claude_account_shares_no_claude_files_and_deletes_none() {
+        let root = root("codex");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        put(&mac.claude("memory/MEMORY.md"), "- deploys go through the VPS");
+        put(&mac.checkout.path.join(".claude/skills/release/SKILL.md"), "---\nname: release\n---");
+        mac.sync(&hub);
+        mini.checkout.claude_home = None;
+        assert_eq!(mini.sync(&hub).pulled, vec!["skills/release/SKILL.md"]);
+        assert!(!root.join("mini/.claude").exists());
+        mac.checkout.claude_home = None;
+        assert_eq!(mac.sync(&hub), Synced::default(), "files left out here are not deleted elsewhere");
+        assert!(hub.0.borrow()["claude/memory/MEMORY.md"].data.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_project_moved_to_another_account_takes_its_claude_files_there() {
+        let root = root("account");
+        let hub = MemHub::default();
+        let mut mac = Side::new(&root, "mac", "app");
+        put(&mac.claude("memory/MEMORY.md"), "- deploys go through the VPS");
+        mac.sync(&hub);
+        mac.checkout.claude_home = Some(root.join("mac/pinned/accounts/work"));
+        assert_eq!(mac.sync(&hub).pulled, vec!["claude/memory/MEMORY.md"], "nothing is taken for deleted");
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "- deploys go through the VPS");
+        assert!(hub.0.borrow()["claude/memory/MEMORY.md"].data.is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -501,7 +549,7 @@ mod tests {
     fn a_file_named_outside_the_shared_folders_is_never_written() {
         let root = root("outside");
         let side = Side::new(&root, "mac", "app");
-        let roots = Roots::new(&side.home, &side.checkout);
+        let roots = Roots::new(&side.checkout);
         for path in ["claude/../../.ssh/authorized_keys", "claude/settings.json", "claude/s1/subagents/a.jsonl", "skills/../../x", "/etc/passwd", "other/x"] {
             assert_eq!(roots.local(path), None, "{path}");
         }
