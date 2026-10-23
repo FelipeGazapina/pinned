@@ -469,6 +469,7 @@ function activate(tab) {
 }
 
 function show(tab) {
+  if (tab !== active) showTermText(false);
   active = tab;
   for (const t of tabs) {
     t.el.hidden = t !== tab;
@@ -900,8 +901,44 @@ document.getElementById("folder").onclick = async () => {
 // Phone keyboards lack these keys, so a row of them sits above the terminal on touch screens.
 for (const key of document.querySelectorAll("#keys button")) {
   key.onpointerdown = (e) => e.preventDefault();
-  key.onclick = () => active && typeInto(active, JSON.parse(`"${key.dataset.send}"`));
+  if (key.dataset.send) key.onclick = () => active && typeInto(active, JSON.parse(`"${key.dataset.send}"`));
 }
+
+// A touch screen has no paste menu on the terminal, which xterm draws on a canvas.
+document.getElementById("paste-key").onclick = async () => {
+  if (!active) return;
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) active.term.paste(text);
+  } catch {
+    showAttachNote("pinned may not read the clipboard. Allow it in the site's settings.", true);
+  }
+};
+
+// xterm selects only with a mouse, so on a touch screen the text opens as a page the phone can select.
+const termText = document.createElement("pre");
+termText.id = "term-text";
+termText.hidden = true;
+terms.append(termText);
+const selectKey = document.getElementById("select-key");
+
+function showTermText(on) {
+  termText.hidden = !on || !active;
+  selectKey.classList.toggle("on", !termText.hidden);
+  if (termText.hidden) return;
+  const buffer = active.term.buffer.active;
+  const lines = [];
+  for (let i = 0; i < buffer.length; i++) {
+    const line = buffer.getLine(i);
+    const text = line.translateToString(true);
+    if (line.isWrapped && lines.length) lines[lines.length - 1] += text;
+    else lines.push(text);
+  }
+  termText.textContent = lines.join("\n").trimEnd();
+  termText.scrollTop = termText.scrollHeight;
+  document.activeElement?.blur();
+}
+selectKey.onclick = () => showTermText(termText.hidden);
 
 async function checkUpdate() {
   try {

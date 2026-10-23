@@ -355,8 +355,12 @@ body[data-empty="true"] #attach { display: none; }
 
 #keys { display: none; flex: none; gap: 4px; padding: 4px 6px; overflow-x: auto; scrollbar-width: none;
   border-bottom: 1px solid var(--border); }
-#keys button { flex: none; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: #ffffff0a;
-  font-size: 13px; touch-action: manipulation; }
+#keys button { flex: none; min-width: 44px; min-height: 40px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: #ffffff0a; font-size: 13px; touch-action: manipulation; }
+#keys button.on { border-color: var(--working); background: #4ea1ff1f; }
+#term-text { position: absolute; z-index: 2; inset: 0; margin: 0; padding: 6px 8px; overflow: auto; background: rgb(15 17 21);
+  font: 12px/1.35 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all; user-select: text; -webkit-user-select: text; }
+#term-text[hidden] { display: none; }
 
 html[data-shell="web"] { --opacity: 1; }
 html[data-shell="web"] body { background: rgb(15 17 21); }
