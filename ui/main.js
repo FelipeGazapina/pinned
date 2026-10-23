@@ -417,6 +417,8 @@ function addTab(machine, view) {
     activate(tab);
     drag(e, { move: (e) => reorder(tab, e) });
   };
+  button.addEventListener("touchstart", (e) => holdToReorder(tab, e), { passive: true });
+  button.oncontextmenu = (e) => e.preventDefault();
   if (!active) show(tab);
   return tab;
 }
@@ -580,6 +582,35 @@ function drag(down, { move, drop }) {
   };
   addEventListener("mousemove", onMove);
   addEventListener("mouseup", onUp);
+}
+
+// A swipe scrolls the tab row, so a finger first holds a tab still to pick it up for dragging.
+const HOLD_MS = 400;
+function holdToReorder(tab, start) {
+  if (start.target.closest(".close") || start.touches.length > 1) return;
+  const from = start.touches[0];
+  let held = false;
+  const timer = setTimeout(() => {
+    held = true;
+    tab.button.classList.add("held");
+  }, HOLD_MS);
+  const move = (e) => {
+    const touch = e.touches[0];
+    if (held) {
+      e.preventDefault();
+      reorder(tab, touch);
+    } else if (Math.hypot(touch.clientX - from.clientX, touch.clientY - from.clientY) > 8) end();
+  };
+  const end = () => {
+    clearTimeout(timer);
+    tab.button.classList.remove("held");
+    removeEventListener("touchmove", move);
+    removeEventListener("touchend", end);
+    removeEventListener("touchcancel", end);
+  };
+  addEventListener("touchmove", move, { passive: false });
+  addEventListener("touchend", end);
+  addEventListener("touchcancel", end);
 }
 
 function reorder(tab, e) {
