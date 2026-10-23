@@ -23,7 +23,7 @@ pub fn load_or_migrate(file: &Path, last_folder: &Path) -> Vec<Project> {
         return load(file);
     }
     let Ok(legacy) = std::fs::read_to_string(last_folder) else { return vec![] };
-    let path = std::fs::canonicalize(&legacy).unwrap_or(legacy.into());
+    let path = dunce::canonicalize(&legacy).unwrap_or(legacy.into());
     let projects = vec![Project { path, last_opened: 0 }];
     save(file, &projects);
     projects
@@ -72,6 +72,8 @@ pub struct Folder {
 /// starting with `pro`, and `~/projetos/` every folder in it. A path without a leading `/` or `~`
 /// starts at `home`. Hidden folders show only once the typed name starts with a dot.
 pub fn browse(typed: &str, home: &Path) -> Result<Folders, String> {
+    #[cfg(windows)]
+    let typed = &typed.replace('\\', "/");
     let typed = typed.trim();
     let (folder, prefix) = match typed.rsplit_once('/') {
         _ if typed == "~" => ("~", ""),

@@ -11,6 +11,7 @@ pub mod linear;
 pub mod link;
 pub mod machine;
 pub mod plugin;
+pub mod private;
 pub mod process;
 pub mod projects;
 pub mod pty;

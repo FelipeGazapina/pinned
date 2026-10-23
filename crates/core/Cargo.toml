@@ -20,6 +20,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tempfile = "3"
 flate2 = "1"
+dunce = "1"
 sha2 = "0.10"
 
 [dev-dependencies]

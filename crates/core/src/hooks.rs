@@ -93,10 +93,8 @@ pub fn statusline() {
     if let (Some(usage), Ok(sock)) = (usage_from_status(&input), std::env::var(SOCK_ENV)) {
         tell(&sock, &Message::Usage(usage));
     }
-    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")));
-    if let Some(command) = config_dir.and_then(|dir| user_statusline(&dir)) {
+    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| crate::machine::home().join(".claude"), PathBuf::from);
+    if let Some(command) = user_statusline(&config_dir) {
         let _ = std::io::stdout().write_all(&run_statusline(&command, &input));
     }
 }

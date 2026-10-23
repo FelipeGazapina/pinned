@@ -288,7 +288,7 @@ fn main() {
         ])
         .setup(move |app| {
             let config = app.path().app_config_dir().ok();
-            let from_arg = std::env::args().nth(1).and_then(|d| std::fs::canonicalize(d).ok()).filter(|p| p.is_dir());
+            let from_arg = std::env::args().nth(1).and_then(|d| dunce::canonicalize(d).ok()).filter(|p| p.is_dir());
             let handle = app.handle().clone();
             let machine = Machine::new(launch, config.clone(), from_arg, move |event: MachineEvent| drop(handle.emit("machine", event)));
             app.manage(machine.clone());

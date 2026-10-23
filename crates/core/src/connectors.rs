@@ -477,13 +477,10 @@ impl Storage for FileStorage {
 
     fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
-        std::fs::OpenOptions::new()
-            .write(true)
+        crate::private::file()
             .create(true)
             .truncate(true)
-            .mode(0o600)
             .open(self.dir.join(name))
             .and_then(|mut f| f.write_all(key.as_bytes()))
             .map_err(|e| e.to_string())

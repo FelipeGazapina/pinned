@@ -42,11 +42,13 @@ impl Launch {
         // One folder per process: the app and a node on the same Mac each point sessions at their own binary.
         // A fresh 0700 folder, since Linux shares /tmp: another user who planted a folder by the
         // same name could swap in hooks that run as this machine's user.
-        let files = tempfile::Builder::new()
-            .prefix(&format!("pinned-{}-", std::process::id()))
-            .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
-            .tempdir()?
-            .keep();
+        let prefix = format!("pinned-{}-", std::process::id());
+        let mut files = tempfile::Builder::new();
+        files.prefix(&prefix);
+        // Windows needs no mode: each user has a temp folder of their own.
+        #[cfg(unix)]
+        files.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        let files = files.tempdir()?.keep();
         let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
         let mcp_config = files.join("claude-mcp.json");
@@ -493,7 +495,7 @@ impl Machine {
 
     /// Records `path` as a project opened now and returns its canonical form.
     pub fn open_project(&self, path: PathBuf) -> PathBuf {
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let path = dunce::canonicalize(&path).unwrap_or(path);
         let mut projects = self.projects.lock().unwrap();
         projects::upsert(&mut projects, path.clone(), unix_now());
         if let Some(file) = &self.projects_file {
@@ -823,8 +825,14 @@ impl Machine {
     }
 }
 
+#[cfg(unix)]
+const HOME_ENV: &str = "HOME";
+// Where Claude Code looks for ~/.claude on Windows; HOME there is Git Bash's, when set at all.
+#[cfg(windows)]
+const HOME_ENV: &str = "USERPROFILE";
+
 pub(crate) fn home() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+    PathBuf::from(std::env::var_os(HOME_ENV).unwrap_or_default())
 }
 
 fn json<T: Serialize>(value: T) -> Result<Value, String> {
@@ -931,18 +939,25 @@ fn clone_once(repo: &str, into: &Path, config: Option<&(&str, String)>) -> Resul
     }
 }
 
+#[cfg(unix)]
+const CLAUDE: [&str; 1] = ["claude"];
+// The native installer's binary first, then npm's shim.
+#[cfg(windows)]
+const CLAUDE: [&str; 2] = ["claude.exe", "claude.cmd"];
+
+/// The first of `CLAUDE` found on `path_env`, or where the native installer puts claude.
 fn find_claude(path_env: Option<&str>) -> PathBuf {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    path_env
-        .into_iter()
-        .flat_map(std::env::split_paths)
-        .map(|dir| dir.join("claude"))
+    let dirs: Vec<PathBuf> = path_env.map(|path| std::env::split_paths(path).collect()).unwrap_or_default();
+    CLAUDE
+        .iter()
+        .flat_map(|name| dirs.iter().map(move |dir| dir.join(name)))
         .find(|p| p.is_file())
-        .unwrap_or_else(|| home.join(".local/bin/claude"))
+        .unwrap_or_else(|| home().join(".local").join("bin").join(CLAUDE[0]))
 }
 
 /// Apps opened from Finder inherit launchd's bare PATH. Ask the user's login shell for the
 /// PATH their terminal sees, so claude and the tools it runs (git, node, brew) resolve.
+#[cfg(unix)]
 fn login_shell_path() -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let out = process::command(shell)
@@ -952,6 +967,12 @@ fn login_shell_path() -> Option<String> {
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     text.split("__PINNED_PATH__").nth(1).map(str::to_owned)
+}
+
+/// A Windows app inherits the user's whole PATH already.
+#[cfg(windows)]
+fn login_shell_path() -> Option<String> {
+    None
 }
 
 fn unix_now() -> u64 {
@@ -987,7 +1008,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pinned-machine-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::canonicalize(dir).unwrap()
+        dunce::canonicalize(dir).unwrap()
     }
 
     fn sh(script: &str) -> CommandBuilder {

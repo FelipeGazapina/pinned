@@ -25,14 +25,11 @@ impl Credentials {
 
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let tmp = dir.join(format!("{FILE}.tmp"));
         let _ = std::fs::remove_file(&tmp);
-        std::fs::OpenOptions::new()
-            .write(true)
+        crate::private::file()
             .create_new(true)
-            .mode(0o600)
             .open(&tmp)
             .and_then(|mut f| f.write_all(&serde_json::to_vec_pretty(self).unwrap()))
             .and_then(|()| std::fs::rename(&tmp, dir.join(FILE)))
