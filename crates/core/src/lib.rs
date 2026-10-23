@@ -6,6 +6,7 @@ pub mod evidence;
 pub mod github;
 pub mod history;
 pub mod hooks;
+pub mod ipc;
 pub mod linear;
 pub mod link;
 pub mod machine;

@@ -1,12 +1,12 @@
 use chrono::{DateTime, Duration, Local, NaiveTime, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
 use crate::agent::{Message, When, SOCK_ENV};
+use crate::ipc::UnixStream;
 
 pub const SUBCOMMAND: &str = "mcp";
 pub const TOOL: &str = "remind_me";

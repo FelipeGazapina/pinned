@@ -1,10 +1,10 @@
 use crate::history;
+use crate::ipc::{UnixListener, UnixStream};
 use crate::reminders;
 use crate::agent::{
     AgentEvent, AgentStatus, Message, Stage, Subject, Usage, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, SOCK_ENV, TAB_ENV,
 };
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
