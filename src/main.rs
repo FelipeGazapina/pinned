@@ -6,7 +6,7 @@ mod commands;
 
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::wire::{Call, MachineEvent, TabId};
-use pinned_core::{agent, connectors, process, reminders, uploads};
+use pinned_core::{agent, connectors, reminders, uploads};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -187,15 +187,22 @@ fn watch_reminders(app: AppHandle) {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         for reminder in app.state::<reminders::Reminders>().take_due(now) {
-            notify(&reminder.message);
+            notify(&app, &reminder.message);
         }
     });
 }
 
-fn notify(message: &str) {
+#[cfg(not(windows))]
+fn notify(_app: &AppHandle, message: &str) {
     let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!("display notification \"{escaped}\" with title \"Reminder\" sound name \"Glass\"");
-    let _ = process::command("osascript").args(["-e", &script]).status();
+    let _ = pinned_core::process::command("osascript").args(["-e", &script]).status();
+}
+
+#[cfg(windows)]
+fn notify(app: &AppHandle, message: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title("Reminder").body(message).show();
 }
 
 fn add_tray(app: &tauri::App) -> tauri::Result<()> {
@@ -249,6 +256,8 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_notification::init());
     builder
         .invoke_handler(tauri::generate_handler![
             machine_call,

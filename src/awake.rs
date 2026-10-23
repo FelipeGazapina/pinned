@@ -1,19 +1,18 @@
-//! Keeps the Mac from sleeping while the user asks for it, by running `caffeinate`.
+//! Keeps the computer from sleeping while the user asks for it: `caffeinate` on macOS,
+//! SetThreadExecutionState on Windows.
 
 use std::path::PathBuf;
-use pinned_core::process;
-use std::process::Child;
 use std::sync::Mutex;
 
 pub struct Awake {
-    child: Mutex<Option<Child>>,
+    hold: Mutex<Option<Hold>>,
     /// Remembers the choice across launches: the file exists while the toggle is on.
     flag: Option<PathBuf>,
 }
 
 impl Awake {
     pub fn load(config_dir: Option<PathBuf>) -> Self {
-        let awake = Awake { child: Mutex::new(None), flag: config_dir.map(|c| c.join("keep-awake")) };
+        let awake = Awake { hold: Mutex::new(None), flag: config_dir.map(|c| c.join("keep-awake")) };
         if awake.flag.as_ref().is_some_and(|f| f.exists()) {
             let _ = awake.set(true);
         }
@@ -21,28 +20,15 @@ impl Awake {
     }
 
     pub fn is_on(&self) -> bool {
-        self.child.lock().unwrap().is_some()
+        self.hold.lock().unwrap().is_some()
     }
 
-    /// `-d` keeps the display on, `-i` the system; `-w` ends it when pinned exits, however that happens.
     pub fn set(&self, on: bool) -> Result<(), String> {
-        let mut child = self.child.lock().unwrap();
-        if on == child.is_some() {
+        let mut hold = self.hold.lock().unwrap();
+        if on == hold.is_some() {
             return Ok(());
         }
-        match child.take() {
-            Some(mut running) => {
-                let _ = running.kill();
-                let _ = running.wait();
-            }
-            None => {
-                let started = process::command("caffeinate")
-                    .args(["-d", "-i", "-w", &std::process::id().to_string()])
-                    .spawn()
-                    .map_err(|e| format!("could not run caffeinate: {e}"))?;
-                *child = Some(started);
-            }
-        }
+        *hold = if on { Some(Hold::start()?) } else { None };
         if let Some(flag) = &self.flag {
             if on {
                 if let Some(dir) = flag.parent() {
@@ -54,6 +40,58 @@ impl Awake {
             }
         }
         Ok(())
+    }
+}
+
+/// Keeps the computer awake until dropped.
+#[cfg(not(windows))]
+struct Hold(std::process::Child);
+
+#[cfg(not(windows))]
+impl Hold {
+    /// `-d` keeps the display on, `-i` the system; `-w` ends it when pinned exits, however that happens.
+    fn start() -> Result<Hold, String> {
+        pinned_core::process::command("caffeinate")
+            .args(["-d", "-i", "-w", &std::process::id().to_string()])
+            .spawn()
+            .map(Hold)
+            .map_err(|e| format!("could not run caffeinate: {e}"))
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for Hold {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Keeps the computer awake until dropped. Windows ties the request to the thread that made it,
+/// and ends it with that thread, so a thread of its own holds it until the sender goes.
+#[cfg(windows)]
+struct Hold {
+    _release: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(windows)]
+impl Hold {
+    fn start() -> Result<Hold, String> {
+        use windows_sys::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (started, start) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let held = unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED) } != 0;
+            let _ = started.send(held);
+            if held {
+                let _ = released.recv();
+                unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+            }
+        });
+        match start.recv() {
+            Ok(true) => Ok(Hold { _release: release }),
+            _ => Err("Windows would not keep the computer awake".into()),
+        }
     }
 }
 
@@ -72,7 +110,7 @@ mod tests {
     use super::*;
 
     fn caffeinating() -> bool {
-        let out = process::command("pgrep").args(["-f", &format!("caffeinate -d -i -w {}", std::process::id())]).output().unwrap();
+        let out = pinned_core::process::command("pgrep").args(["-f", &format!("caffeinate -d -i -w {}", std::process::id())]).output().unwrap();
         out.status.success()
     }
 
