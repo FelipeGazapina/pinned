@@ -1,4 +1,5 @@
 pub mod account;
+pub mod accounts;
 pub mod agent;
 pub mod cli;
 pub mod connectors;
