@@ -26,7 +26,7 @@ if (settings.statusLine?.command) {
   });
 }
 
-const KEYS = { "\x1b": "[esc]", "\t": "[tab]", "\x1b[A": "[up]", "\x1b[B": "[down]", "\x1bOA": "[up]", "\x1bOB": "[down]", "\x03": "[ctrl-c]" };
+const KEYS = { "\x1b": "[esc]", "\t": "[tab]", "\x1b[Z": "[shift-tab]", "\x1b[A": "[up]", "\x1b[B": "[down]", "\x1bOA": "[up]", "\x1bOB": "[down]", "\x03": "[ctrl-c]" };
 const out = (text) => process.stdout.write(text);
 out(`fake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}\r\n> `);
 

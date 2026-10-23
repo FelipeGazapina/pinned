@@ -290,11 +290,11 @@ async function sweep(profileName) {
     return text("#status-text");
   });
 
-  await step("keys row: Esc Tab ↑ ↓ Ctrl-C Enter", async () => {
+  await step("keys row: Esc Tab ⇧Tab ↑ ↓ Ctrl-C Enter", async () => {
     if (!touch) return check(!(await page.locator("#keys").isVisible()), "the keys row shows on desktop");
     check(await page.locator("#keys").isVisible(), "the keys row is hidden on the phone");
-    for (const key of ["Esc", "Tab", "↑", "↓", "Ctrl-C"]) await page.tap(`#keys button:text-is("${key}")`);
-    await waitTerm(/\[esc\]\[tab\]\[up\]\[down\]\[ctrl-c\]/);
+    for (const key of ["Esc", "Tab", "⇧Tab", "↑", "↓", "Ctrl-C"]) await page.tap(`#keys button:text-is("${key}")`);
+    await waitTerm(/\[esc\]\[tab\]\[shift-tab\]\[up\]\[down\]\[ctrl-c\]/);
     await typeInTerm("k");
     await page.tap('#keys button:text-is("Enter")');
     await waitTerm(/echo: k/);
