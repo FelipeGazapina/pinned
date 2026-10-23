@@ -253,7 +253,7 @@ pub struct Machine {
     uploads: Option<PathBuf>,
     clones: PathBuf,
     quitting: AtomicBool,
-    usage: Mutex<Usage>,
+    usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -299,7 +299,7 @@ impl Machine {
             uploads,
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
-            usage: Mutex::new(Usage::default()),
+            usage: Mutex::default(),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -696,8 +696,9 @@ impl Machine {
         ids
     }
 
-    pub fn usage(&self) -> Usage {
-        *self.usage.lock().unwrap()
+    /// Each account's usage, as its sessions last reported it.
+    pub fn usage(&self) -> BTreeMap<accounts::AccountId, Usage> {
+        self.usage.lock().unwrap().clone()
     }
 
     /// Answers the hook socket. Hook events and usage update the tabs; every other message, a
@@ -711,13 +712,15 @@ impl Machine {
                     machine.record_event(event);
                     Ok(String::new())
                 }
-                Message::Usage(report) => {
+                Message::Usage { usage: report, account } => {
+                    let account = account.unwrap_or_else(accounts::default_account);
                     let usage = {
-                        let mut usage = machine.usage.lock().unwrap();
-                        *usage = report.over(*usage, unix_now());
-                        *usage
+                        let mut all = machine.usage.lock().unwrap();
+                        let known = all.entry(account.clone()).or_default();
+                        *known = report.over(*known, unix_now());
+                        *known
                     };
-                    machine.emit(Event::Usage { usage });
+                    machine.emit(Event::Usage { usage, account });
                     Ok(String::new())
                 }
                 message => other(message),
@@ -1509,6 +1512,34 @@ mod tests {
         m.call(Call::SetProjectAccount { path: app.display().to_string(), account: Some("work".into()) }).unwrap();
         let tab = run(None).unwrap();
         assert_eq!(m.view(tab.as_str().unwrap()).unwrap().account, "work", "a connector that names no account runs under its project's");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn usage_is_kept_for_each_account_its_sessions_report() {
+        use std::io::{BufRead, Write};
+        let root = temp("usage");
+        let events = Arc::new(Mutex::new(vec![]));
+        let seen = events.clone();
+        let m = Machine::new(Launch { sock: root.join("sock"), ..launch() }, None, None, move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap()));
+        m.listen(|_| Err("not for this test".into())).unwrap();
+        let report = |line: &str| {
+            let mut sock = std::os::unix::net::UnixStream::connect(root.join("sock")).unwrap();
+            writeln!(sock, "{line}").unwrap();
+            std::io::BufReader::new(sock).read_line(&mut String::new()).unwrap();
+        };
+        report(r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":4102444800}}"#);
+        report(r#"{"kind":"usage","account":"work","seven_day":{"used_percentage":90.0,"resets_at":4102444800}}"#);
+        report(r#"{"kind":"usage","account":"work","five_hour":{"used_percentage":5.0,"resets_at":4102444800}}"#);
+        let window = |used: f64| json!({ "used_percentage": used, "resets_at": 4102444800u64 });
+        assert_eq!(
+            serde_json::to_value(m.usage()).unwrap(),
+            json!({ "claude": { "five_hour": window(23.5) }, "work": { "five_hour": window(5.0), "seven_day": window(90.0) } })
+        );
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&json!({ "kind": "usage", "usage": { "five_hour": window(5.0), "seven_day": window(90.0) }, "account": "work" }))
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

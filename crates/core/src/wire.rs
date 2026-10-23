@@ -178,7 +178,12 @@ pub enum MachineEvent {
     Output { tab: TabId, data: Bytes },
     /// The tab's claude exited by itself.
     Exit { tab: TabId },
-    Usage { usage: Usage },
+    /// The account's usage, after its session reported it.
+    Usage {
+        usage: Usage,
+        #[serde(default = "accounts::default_account")]
+        account: AccountId,
+    },
 }
 
 /// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
@@ -483,9 +488,14 @@ mod tests {
             }] }),
         );
         round_trip(
-            MachineEvent::Usage { usage: Usage { five_hour: Some(crate::agent::LimitWindow { used_percentage: 23.5, resets_at: 1792400000 }), seven_day: None } },
-            json!({ "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 1792400000 } } }),
+            MachineEvent::Usage {
+                usage: Usage { five_hour: Some(crate::agent::LimitWindow { used_percentage: 23.5, resets_at: 1792400000 }), seven_day: None },
+                account: "work".into(),
+            },
+            json!({ "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 1792400000 } }, "account": "work" }),
         );
+        let old: MachineEvent = serde_json::from_value(json!({ "kind": "usage", "usage": {} })).unwrap();
+        assert!(matches!(old, MachineEvent::Usage { account, .. } if account == "claude"), "a machine before accounts reports the default account's usage");
         assert!(serde_json::from_value::<MachineEvent>(json!({ "kind": "output", "tab": "t", "data": "not base64!" })).is_err());
     }
 

@@ -607,7 +607,7 @@ fn a_client_that_connects_later_sees_the_usage_a_machine_reported_before() {
     client.wait_machines(&[("vps", true)]);
     let report = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":4102444800}}"#;
     std::io::Write::write_all(&mut std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap(), format!("{report}\n").as_bytes()).unwrap();
-    let expected = json!({ "type": "event", "machine": creds.machine_id, "event": { "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 4102444800u64 } } } });
+    let expected = json!({ "type": "event", "machine": creds.machine_id, "event": { "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 4102444800u64 } }, "account": "claude" } });
     client.wait("the usage", |f| *f == expected);
 
     let mut later = Client::connect(&url, &token);

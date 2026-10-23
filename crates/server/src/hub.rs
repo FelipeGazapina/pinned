@@ -1,4 +1,5 @@
 use crate::db::{self, Db};
+use pinned_core::accounts::AccountId;
 use pinned_core::agent::{Subject, Usage};
 use pinned_core::connectors::{Connectors, Keys, Storage, Work};
 use base64::Engine;
@@ -96,8 +97,8 @@ struct Online {
     pending: HashMap<u64, oneshot::Sender<Result<Value, String>>>,
     next_call: u64,
     tabs: Vec<TabView>,
-    /// The last usage the machine reported, for clients that connect after it.
-    usage: Option<Usage>,
+    /// The last usage the machine reported for each account, for clients that connect after it.
+    usage: BTreeMap<AccountId, Usage>,
 }
 
 struct Client {
@@ -391,7 +392,7 @@ impl Hub {
 impl Account {
     /// Registers a machine's connection. An older one must have gone offline first.
     pub fn came_online(&self, machine: &str, socket: u64, name: String, out: Outbox) {
-        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: vec![], usage: None };
+        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: vec![], usage: BTreeMap::new() };
         self.live.lock().unwrap().machines.insert(machine.to_owned(), online);
     }
 
@@ -471,7 +472,9 @@ impl Account {
         let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return };
         match &event {
             MachineEvent::Tabs { tabs } => m.tabs = tabs.clone(),
-            MachineEvent::Usage { usage } => m.usage = Some(*usage),
+            MachineEvent::Usage { usage, account } => {
+                m.usage.insert(account.clone(), *usage);
+            }
             _ => {}
         }
         let text = frame(&ToClient::Event { machine: machine.to_owned(), event });
@@ -508,8 +511,9 @@ impl Account {
         let account = pinned_core::wire::AccountView { id: self.id.to_string(), email: self.email.clone() };
         let _ = out.send(frame(&ToClient::Hello { account, machines, tabs }));
         for (id, m) in &live.machines {
-            if let Some(usage) = m.usage {
-                let _ = out.send(frame(&ToClient::Event { machine: id.clone(), event: MachineEvent::Usage { usage } }));
+            for (account, usage) in &m.usage {
+                let event = MachineEvent::Usage { usage: *usage, account: account.clone() };
+                let _ = out.send(frame(&ToClient::Event { machine: id.clone(), event }));
             }
         }
         live.clients.insert(id, Client { out, login, attached: HashSet::new() });
