@@ -24,17 +24,34 @@ type Reply = Result<String, String>;
 pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
     let mut hooks = serde_json::Map::new();
     for (_, arg, hook_event) in AgentStatus::ALL {
-        let command = format!("'{}' {SUBCOMMAND} {arg}", exe.display());
-        hooks.insert(
-            hook_event.into(),
-            serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]),
-        );
+        hooks.insert(hook_event.into(), serde_json::json!([{ "hooks": [hook_command(exe, arg)] }]));
     }
     std::fs::write(path, serde_json::to_vec_pretty(&serde_json::json!({
         "hooks": hooks,
-        "statusLine": { "type": "command", "command": format!("'{}' {STATUSLINE_SUBCOMMAND}", exe.display()) },
+        "statusLine": { "type": "command", "command": statusline_command(exe) },
         "permissions": { "allow": reminders::permissions() },
     }))?)
+}
+
+/// Shell form, which every Claude Code version runs.
+#[cfg(unix)]
+fn hook_command(exe: &Path, arg: &str) -> serde_json::Value {
+    serde_json::json!({ "type": "command", "command": format!("'{}' {SUBCOMMAND} {arg}", exe.display()) })
+}
+
+/// Exec form, with no shell: Windows runs a shell-form hook in Git Bash, or in PowerShell when
+/// Git Bash is missing, and the two quote a path differently.
+#[cfg(windows)]
+fn hook_command(exe: &Path, arg: &str) -> serde_json::Value {
+    serde_json::json!({ "type": "command", "command": exe, "args": [SUBCOMMAND, arg] })
+}
+
+/// A statusline has only shell form. Git Bash, which runs it on Windows, reads a backslash as an escape.
+fn statusline_command(exe: &Path) -> String {
+    let exe = exe.display().to_string();
+    #[cfg(windows)]
+    let exe = exe.replace('\\', "/");
+    format!("'{exe}' {STATUSLINE_SUBCOMMAND}")
 }
 
 /// Runs inside the hook process Claude Code spawns: read the hook payload from stdin and
@@ -117,7 +134,8 @@ fn user_statusline(config_dir: &Path) -> Option<String> {
 
 /// What `command` prints when given the statusline JSON, run the way Claude Code runs it.
 fn run_statusline(command: &str, input: &str) -> Vec<u8> {
-    let Ok(mut child) = process::command("/bin/sh")
+    let Some(shell) = statusline_shell() else { return vec![] };
+    let Ok(mut child) = process::command(shell)
         .args(["-c", command])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -128,6 +146,18 @@ fn run_statusline(command: &str, input: &str) -> Vec<u8> {
     // A command that never reads its input closes the pipe early, and still gets to print.
     let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
     child.wait_with_output().map(|out| out.stdout).unwrap_or_default()
+}
+
+#[cfg(unix)]
+fn statusline_shell() -> Option<PathBuf> {
+    Some("/bin/sh".into())
+}
+
+/// The Git Bash that runs pinned's statusline puts its own bash first on PATH. Searched here
+/// because Windows would try System32 before PATH, and WSL's bash lives there.
+#[cfg(windows)]
+fn statusline_shell() -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join("bash.exe")).find(|p| p.is_file())
 }
 
 const LIMIT_ERROR: &[u8] = br#""apiError":"usage_limit_reached""#;
@@ -406,6 +436,44 @@ mod tests {
         assert_eq!(run_statusline(&command, r#"{"cwd":"/repo"}"#), br#"{"CWD":"/REPO"}"#);
         assert_eq!(run_statusline("echo done", &"x".repeat(1 << 20)), b"done\n");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_run_the_hooks_and_statusline_through_the_shell() {
+        let file = std::env::temp_dir().join(format!("pinned-settings-{}.json", std::process::id()));
+        write_settings(&file, Path::new("/Applications/pinned.app/Contents/MacOS/pinned")).unwrap();
+        let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(
+            settings["hooks"]["StopFailure"],
+            serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook failed" }] }])
+        );
+        assert_eq!(
+            settings["statusLine"],
+            serde_json::json!({ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' statusline" })
+        );
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn settings_run_the_hooks_without_a_shell_and_the_statusline_in_git_bash() {
+        let file = std::env::temp_dir().join(format!("pinned-settings-{}.json", std::process::id()));
+        write_settings(&file, Path::new(r"C:\Users\Ana Souza\AppData\Local\pinned\pinned.exe")).unwrap();
+        let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(
+            settings["hooks"]["StopFailure"],
+            serde_json::json!([{ "hooks": [{
+                "type": "command",
+                "command": r"C:\Users\Ana Souza\AppData\Local\pinned\pinned.exe",
+                "args": ["hook", "failed"],
+            }] }])
+        );
+        assert_eq!(
+            settings["statusLine"],
+            serde_json::json!({ "type": "command", "command": "'C:/Users/Ana Souza/AppData/Local/pinned/pinned.exe' statusline" })
+        );
+        let _ = std::fs::remove_file(file);
     }
 
     #[test]
