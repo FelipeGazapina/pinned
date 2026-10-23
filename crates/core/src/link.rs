@@ -1,7 +1,7 @@
 //! The binary installs rustls's ring provider before spawning the link.
 
 use crate::account::Credentials;
-use crate::agent::Message;
+use crate::agent::{Message, Usage};
 use crate::machine::{Machine, ViewerId};
 use crate::sync;
 use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
@@ -240,6 +240,10 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     let calls = in_order(machine.clone(), out.clone());
     eprintln!("pinned: connected to {}", creds.hub);
     shared.send(&MachineFrame::Event { event: MachineEvent::Tabs { tabs: machine.tabs() } });
+    let usage = machine.usage();
+    if usage != Usage::default() {
+        shared.send(&MachineFrame::Event { event: MachineEvent::Usage { usage } });
+    }
 
     let mut ping = tokio::time::interval(PING);
     let mut heard = Instant::now();

@@ -1,5 +1,5 @@
 use crate::db::{self, Db};
-use pinned_core::agent::Subject;
+use pinned_core::agent::{Subject, Usage};
 use pinned_core::connectors::{Connectors, Keys, Storage, Work};
 use base64::Engine;
 use pinned_core::{github, sync};
@@ -96,6 +96,8 @@ struct Online {
     pending: HashMap<u64, oneshot::Sender<Result<Value, String>>>,
     next_call: u64,
     tabs: Vec<TabView>,
+    /// The last usage the machine reported, for clients that connect after it.
+    usage: Option<Usage>,
 }
 
 struct Client {
@@ -389,7 +391,7 @@ impl Hub {
 impl Account {
     /// Registers a machine's connection. An older one must have gone offline first.
     pub fn came_online(&self, machine: &str, socket: u64, name: String, out: Outbox) {
-        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: vec![] };
+        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: vec![], usage: None };
         self.live.lock().unwrap().machines.insert(machine.to_owned(), online);
     }
 
@@ -463,12 +465,14 @@ impl Account {
         }
     }
 
-    /// Passes a machine's event to the clients, keeping its tabs for those that connect later.
+    /// Passes a machine's event to the clients, keeping its tabs and usage for those that connect later.
     pub fn machine_event(&self, machine: &str, socket: u64, event: MachineEvent) {
         let mut live = self.live.lock().unwrap();
         let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return };
-        if let MachineEvent::Tabs { tabs } = &event {
-            m.tabs = tabs.clone();
+        match &event {
+            MachineEvent::Tabs { tabs } => m.tabs = tabs.clone(),
+            MachineEvent::Usage { usage } => m.usage = Some(*usage),
+            _ => {}
         }
         let text = frame(&ToClient::Event { machine: machine.to_owned(), event });
         for client in live.clients.values() {
@@ -503,6 +507,11 @@ impl Account {
         let tabs: BTreeMap<MachineId, Vec<TabView>> = live.machines.iter().map(|(id, m)| (id.clone(), m.tabs.clone())).collect();
         let account = pinned_core::wire::AccountView { id: self.id.to_string(), email: self.email.clone() };
         let _ = out.send(frame(&ToClient::Hello { account, machines, tabs }));
+        for (id, m) in &live.machines {
+            if let Some(usage) = m.usage {
+                let _ = out.send(frame(&ToClient::Event { machine: id.clone(), event: MachineEvent::Usage { usage } }));
+            }
+        }
         live.clients.insert(id, Client { out, login, attached: HashSet::new() });
     }
 

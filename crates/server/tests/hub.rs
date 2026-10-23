@@ -584,6 +584,34 @@ fn a_file_a_client_attaches_lands_in_the_nodes_private_uploads_folder() {
 }
 
 #[test]
+fn a_client_that_connects_later_sees_the_usage_a_machine_reported_before() {
+    let hub = TestHub::start("usage");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let dir = temp("usage-node");
+    let creds = pair(&url, &mut client, "vps", &dir);
+    let mut node = Node::start(&dir, creds.clone());
+    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    client.wait_machines(&[("vps", true)]);
+    let report = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":4102444800}}"#;
+    std::io::Write::write_all(&mut std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap(), format!("{report}\n").as_bytes()).unwrap();
+    let expected = json!({ "type": "event", "machine": creds.machine_id, "event": { "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 4102444800u64 } } } });
+    client.wait("the usage", |f| *f == expected);
+
+    let mut later = Client::connect(&url, &token);
+    later.wait("the usage the hub kept", |f| *f == expected);
+
+    node.link.take().unwrap().stop();
+    client.wait_machines(&[("vps", false)]);
+    node.link = Some(link::spawn(creds, node.machine.clone(), "0.0.0-test"));
+    client.wait_machines(&[("vps", true)]);
+    let mut after_reconnect = Client::connect(&url, &token);
+    after_reconnect.wait("the usage the machine sent again", |f| *f == expected);
+}
+
+#[test]
 fn sign_in_rejects_wrong_passwords_duplicates_and_logged_out_tokens() {
     let hub = TestHub::start("auth");
     let url = hub.url.clone();
