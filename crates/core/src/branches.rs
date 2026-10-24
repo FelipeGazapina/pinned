@@ -74,6 +74,10 @@ pub fn of(cwd: &Path, path: Option<&str>) -> Result<Branches, String> {
     }
     out.default = git(&["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]).ok().and_then(|r| r.trim().split_once('/').map(|(_, b)| b.to_owned()));
     out.remote = git(&["remote", "get-url", "origin"]).is_ok();
+    // A branch with no upstream is ahead by the commits no remote branch has.
+    if out.upstream.is_none() {
+        out.ahead = git(&["rev-list", "--count", "HEAD", "--not", "--remotes"]).ok().and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+    }
     out.ahead_of_default = out.default.as_ref().and_then(|d| git(&["rev-list", "--count", &format!("origin/{d}..HEAD")]).ok()).and_then(|n| n.trim().parse().ok());
     out.changed = changed(cwd, path)?;
     Ok(out)

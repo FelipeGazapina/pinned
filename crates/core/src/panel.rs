@@ -618,7 +618,13 @@ impl Shells {
         let id = format!("shell-{}", self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
         #[cfg(unix)]
         let mut cmd = {
-            let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
+            // SHELL can name a wrapper, as a test's does; a shell this doesn't know falls back to one it does.
+            const KNOWN: [&str; 8] = ["zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "nu"];
+            let shell = std::env::var("SHELL")
+                .ok()
+                .filter(|s| Path::new(s).file_name().is_some_and(|n| KNOWN.contains(&n.to_string_lossy().as_ref())))
+                .or_else(|| ["/bin/zsh", "/bin/bash"].into_iter().find(|s| Path::new(s).exists()).map(str::to_owned))
+                .unwrap_or_else(|| "/bin/sh".into());
             let mut cmd = portable_pty::CommandBuilder::new(shell);
             cmd.arg("-l");
             cmd
