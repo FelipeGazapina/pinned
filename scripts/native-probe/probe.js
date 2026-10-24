@@ -51,17 +51,73 @@
     return [ok, { terminal, gui, back, again, screen: { width: screen.availWidth, height: screen.availHeight } }];
   });
 
-  await step("the browser panel shows a localhost page", async () => {
+  const page = () => shownSurface(active);
+  const until = async (test, ms = 8000) => {
+    for (let t = 0; t < ms && !(await test()); t += 100) await sleep(100);
+    return test();
+  };
+  await step("the browser panel shows a localhost page in a native webview", async () => {
     openPanel("browser");
     setBrowserUrl(`${base}/frame`);
     renderPanel();
     let ran = false;
-    for (let i = 0; i < 20 && !ran; i++) {
+    for (let i = 0; i < 40 && !ran; i++) {
       await sleep(250);
       ran = await (await fetch(`${base}/seen?what=frame-ran`)).json();
     }
-    const rect = document.querySelector("#panel iframe").getBoundingClientRect();
-    return [ran && rect.width > 100 && rect.height > 100, { ran, width: Math.round(rect.width), height: Math.round(rect.height) }];
+    const rect = document.querySelector("#panel .viewport .page").getBoundingClientRect();
+    const fills = document.documentElement.clientWidth === window.innerWidth && Math.abs(window.innerWidth - (await size()).width) <= 1;
+    return [ran && rect.width > 100 && rect.height > 100 && placedPage === page().id && !document.querySelector("#panel iframe") && fills, { ran, width: Math.round(rect.width), height: Math.round(rect.height), placed: placedPage, fills }];
+  });
+
+  await step("the browser tab reads the page's title", async () => {
+    await until(() => document.querySelector("#panel-tabs .ptab.active")?.textContent.trim() === "pinned probe page");
+    return [document.querySelector("#panel-tabs .ptab.active")?.textContent.trim() === "pinned probe page", { tab: document.querySelector("#panel-tabs .ptab.active")?.textContent.trim(), title: page().title }];
+  });
+
+  await step("Back and Forward step through the page's own history", async () => {
+    await invoke("browser_eval", { id: page().id, js: "(() => { document.querySelector('a').click(); return true; })()" });
+    await until(() => page().url.endsWith("/two") && page().back);
+    const after = { url: page().url, back: page().back, title: page().title };
+    document.querySelector('#panel-body [data-nav="back"]').click();
+    await until(() => page().url.endsWith("/frame") && page().forward);
+    const backed = { url: page().url, forward: page().forward };
+    document.querySelector('#panel-body [data-nav="forward"]').click();
+    await until(() => page().url.endsWith("/two"));
+    const forwarded = { url: page().url };
+    return [after.url.endsWith("/two") && after.title === "probe two" && backed.url.endsWith("/frame") && backed.forward && forwarded.url.endsWith("/two"), { after, backed, forwarded }];
+  });
+
+  await step("devtools open and close for the page", async () => {
+    const width = () => invoke("browser_eval", { id: page().id, js: "innerWidth" });
+    const before = await width();
+    toggleDevtools(page());
+    const opened = await until(() => page().shownDevtools === true, 5000);
+    await sleep(1500);
+    const expanded = document.body.dataset.view === "expanded";
+    toggleDevtools(page());
+    const closed = await until(() => page().shownDevtools === false, 5000);
+    await sleep(1200);
+    const after = await width();
+    return [opened && closed && expanded && after === before, { opened, closed, expanded, before, after }];
+  });
+
+  await step("zoom, a screenshot, and hiding under a menu", async () => {
+    const width = () => invoke("browser_eval", { id: page().id, js: "innerWidth" });
+    const before = await width();
+    zoomBrowser(page(), 1);
+    await sleep(600);
+    const zoomed = await width();
+    zoomBrowser(page(), 0);
+    const png = new Uint8Array(await invoke("browser_snapshot", { id: page().id }));
+    const signature = [...png.slice(1, 4)].map((c) => String.fromCharCode(c)).join("");
+    document.querySelector('#panel-body [data-nav="more"]').click();
+    await sleep(400);
+    const hidden = placedPage === null;
+    closeMenu();
+    await sleep(400);
+    const back = placedPage === page().id;
+    return [Math.abs(zoomed * 2 - before) <= 2 && signature === "PNG" && png.length > 1000 && hidden && back, { before, zoomed, png: png.length, signature, hidden, back }];
   });
 
   await step("opening a link outside reaches the system browser", async () => {

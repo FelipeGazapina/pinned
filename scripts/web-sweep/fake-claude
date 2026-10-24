@@ -183,6 +183,14 @@ function submit() {
         res.setHeader("content-type", "text/html; charset=utf-8");
         res.end("<!doctype html><title>Sweep server</title><p>served by fake claude</p>");
       };
+      if (req.url === "/a") {
+        res.setHeader("content-type", "text/html; charset=utf-8");
+        return res.end('<!doctype html><title>Page A</title><link rel="icon" href="/dot.png"><p>page a</p><a href="/">home</a>');
+      }
+      if (req.url === "/dot.png") {
+        res.setHeader("content-type", "image/png");
+        return res.end(Buffer.from(DOT_PNG, "base64"));
+      }
       req.url === "/slow" ? setTimeout(send, 2500) : send();
     });
     server.listen(0, "127.0.0.1", () => {

@@ -14,6 +14,16 @@ Object.assign(ICON_PATHS, {
   "circle-dot": `<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/>`,
   tag: `<path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/>`,
   users: `<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>`,
+  "mouse-pointer-click": `<path d="M14 4.1 12 6"/><path d="m5.1 8-2.9-.8"/><path d="m6 12-1.9 2"/><path d="M7.2 2.2 8 5.1"/><path d="M9.037 9.69a.498.498 0 0 1 .653-.653l11 4.5a.5.5 0 0 1-.074.949l-4.349 1.041a1 1 0 0 0-.74.739l-1.04 4.35a.5.5 0 0 1-.95.074z"/>`,
+  camera: `<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>`,
+  "picture-in-picture-2": `<path d="M21 9V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10c0 1.1.9 2 2 2h4"/><rect width="10" height="7" x="12" y="13" rx="2"/>`,
+  "ellipsis-vertical": `<circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/>`,
+  "rotate-ccw": `<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>`,
+  lock: `<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`,
+  "lock-open": `<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>`,
+  "volume-2": `<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>`,
+  "volume-x": `<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><line x1="22" x2="16" y1="9" y2="15"/><line x1="16" x2="22" y1="9" y2="15"/>`,
+  "chevron-left": `<path d="m15 18-6-6 6-6"/>`,
 });
 
 const SURFACES = {
@@ -104,16 +114,20 @@ function closeSurface(id = panelOf(active).active) {
   p.surfaces.splice(i, 1);
   if (p.active === id) p.active = (p.surfaces[i] ?? p.surfaces[i - 1])?.id ?? null;
   if (!p.surfaces.length) p.open = false;
+  if (!p.surfaces.some((s) => s.id === p.pip)) p.pip = null;
   savePanel(tab);
   renderPanel();
+  closeGonePages();
 }
 function keepSurfaces(keep) {
   const p = panelOf(active);
   p.surfaces = p.surfaces.filter(keep);
   if (!p.surfaces.some((s) => s.id === p.active)) p.active = p.surfaces.at(-1)?.id ?? null;
   if (!p.surfaces.length) p.open = false;
+  if (!p.surfaces.some((s) => s.id === p.pip)) p.pip = null;
   savePanel(active);
   renderPanel();
+  closeGonePages();
 }
 
 const surfaceTitle = (tab, s) => {
@@ -165,12 +179,14 @@ function addMenu() {
   ];
 }
 
+const kindIcon = (s) => (s.kind === "browser" && /^(https?:|data:image\/)/.test(s.icon ?? "") ? `<img class="i kind favicon" src="${esc(s.icon)}" alt="">` : icon(SURFACES[s.kind].icon, "kind"));
 function renderPanelTabs(tab) {
   const p = panelOf(tab);
   const html = p.surfaces.map((s) => {
     const title = surfaceTitle(tab, s);
+    const audio = s.kind === "browser" && (s.muted || s.audible) ? `<button type="button" class="audio" data-mute="${esc(s.id)}" title="${s.muted ? "Unmute tab" : "Mute tab"}">${icon(s.muted ? "volume-x" : "volume-2")}</button>` : "";
     return `<div class="ptab${s.id === p.active ? " active" : ""}" data-surface="${esc(s.id)}" data-panel="${s.kind}" title="${esc(title)}" draggable="true">
-      <button type="button" class="lead" data-close-surface="${esc(s.id)}" title="Close tab">${icon(SURFACES[s.kind].icon, "kind")}${icon("x", "x")}</button><span>${esc(title)}</span></div>`;
+      <button type="button" class="lead" data-close-surface="${esc(s.id)}" title="Close ${esc(title)}">${kindIcon(s)}${icon("x", "x")}${s.pending ? `<span class="pending"></span>` : ""}</button>${audio}<span>${esc(title)}</span></div>`;
   }).join("");
   if (tabStrip.dataset.html !== html) {
     tabStrip.dataset.html = html;
@@ -178,9 +194,14 @@ function renderPanelTabs(tab) {
   }
 }
 
+tabStrip.addEventListener("error", (e) => {
+  if (e.target.matches?.("img.favicon")) e.target.outerHTML = icon("globe", "kind");
+}, true);
 tabStrip.addEventListener("click", (e) => {
   const close = e.target.closest("[data-close-surface]");
   if (close) return closeSurface(close.dataset.closeSurface);
+  const mute = e.target.closest("[data-mute]");
+  if (mute) return toggleMute(panelOf(active).surfaces.find((s) => s.id === mute.dataset.mute));
   const t = e.target.closest(".ptab");
   if (!t) return;
   panelOf(active).active = t.dataset.surface;
@@ -197,7 +218,9 @@ tabStrip.addEventListener("contextmenu", (e) => {
   e.preventDefault();
   const id = t.dataset.surface;
   const ids = panelOf(active).surfaces.map((s) => s.id);
+  const s = panelOf(active).surfaces.find((x) => x.id === id);
   popMenu(t, [
+    ...(s?.kind === "browser" ? [{ label: s.muted ? "Unmute" : "Mute", run: () => toggleMute(s) }, "-"] : []),
     { label: "Close", run: () => closeSurface(id) },
     { label: "Close others", disabled: ids.length < 2, run: () => keepSurfaces((s) => s.id === id) },
     { label: "Close to the right", disabled: ids.indexOf(id) === ids.length - 1, run: () => keepSurfaces((s) => ids.indexOf(s.id) <= ids.indexOf(id)) },
@@ -273,7 +296,8 @@ function renderPanel() {
   if (layoutControls.parentElement !== home) home.append(layoutControls);
   setPanelWidth(p.width || Number(load("gui-panel-width")) || 540);
   renderOpenIn(tab);
-  if (!guiOn() || !p.open) return;
+  renderPip(tab);
+  if (!guiOn() || !p.open) return placePages();
   renderPanelTabs(tab);
   const s = shownSurface(tab);
   panelBody.dataset.kind = s?.kind ?? "launcher";
@@ -281,6 +305,7 @@ function renderPanel() {
   else if (s.kind === "diff") renderDiffPanel();
   else if (s.kind === "browser") renderBrowser(s);
   else renderPrPanel(s);
+  placePages();
 }
 
 function renderLauncher() {
@@ -318,26 +343,70 @@ document.body.append(panelMenu);
 let menuEntries = [];
 let menuAnchor = null;
 /** A menu under `anchor`. An entry with `confirm` asks again, in its place, before it runs. */
+const menuHtml = (entries) => entries.map((m, i) => (m === "-" ? `<hr>` : m.group ? `<p class="group">${esc(m.group)}</p>`
+  : m.zoom ? `<div class="zoom"><span class="label">${esc(m.label)}</span><button type="button" class="step" data-zoom="-0.1" title="Zoom out">${icon("minus")}</button><span class="value">${esc(m.value)}</span><button type="button" class="step" data-zoom="0.1" title="Zoom in">${icon("plus")}</button><button type="button" class="step" data-zoom="0" title="Reset zoom">${icon("rotate-ccw")}</button></div>`
+  : `<button type="button" data-i="${i}"${m.disabled ? " disabled" : ""}${m.danger ? ` class="danger"` : ""}${m.sub ? ` data-sub` : ""}>${m.checked ? icon("check") : m.icon ? icon(m.icon) : `<span class="i"></span>`}<span class="label">${esc(m.label)}</span>${m.hint ? `<span class="hint">${esc(m.hint)}</span>` : ""}${m.kbd ? `<kbd>${esc(m.kbd)}</kbd>` : ""}${m.sub ? icon("chevron-right", "more") : ""}</button>`)).join("");
+/** A menu under `anchor`. An entry with `sub` opens its entries beside it; one with `zoom` is a row of steppers. */
 function popMenu(anchor, entries) {
   menuEntries = entries;
   menuAnchor = anchor;
-  panelMenu.innerHTML = entries.map((m, i) => (m === "-" ? `<hr>` : m.group ? `<p class="group">${esc(m.group)}</p>`
-    : `<button type="button" data-i="${i}"${m.disabled ? " disabled" : ""}${m.danger ? ` class="danger"` : ""}>${m.checked ? icon("check") : m.icon ? icon(m.icon) : `<span class="i"></span>`}<span class="label">${esc(m.label)}</span>${m.hint ? `<span class="hint">${esc(m.hint)}</span>` : ""}${m.kbd ? `<kbd>${esc(m.kbd)}</kbd>` : ""}</button>`)).join("");
+  panelMenu.innerHTML = menuHtml(entries);
   panelMenu.hidden = false;
+  closeSubmenu();
   const r = anchor.getBoundingClientRect();
   panelMenu.style.top = `${Math.max(8, Math.min(r.bottom + 4, innerHeight - panelMenu.offsetHeight - 8))}px`;
   panelMenu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - panelMenu.offsetWidth - 8))}px`;
   panelMenu.querySelector("button:not([disabled])")?.focus({ preventScroll: true });
+  placePages();
+}
+const subMenu = document.createElement("div");
+subMenu.id = "panel-submenu";
+subMenu.className = "panel-menu";
+subMenu.hidden = true;
+document.body.append(subMenu);
+let subEntries = [];
+function openSubmenu(button) {
+  const m = menuEntries[button.dataset.i];
+  if (!m?.sub || m.disabled) return;
+  subEntries = m.sub;
+  subMenu.innerHTML = menuHtml(m.sub);
+  subMenu.hidden = false;
+  subMenu.dataset.of = button.dataset.i;
+  const r = button.getBoundingClientRect();
+  const left = r.right + 4 + subMenu.offsetWidth > innerWidth - 8 ? r.left - subMenu.offsetWidth - 4 : r.right + 4;
+  subMenu.style.top = `${Math.max(8, Math.min(r.top - 4, innerHeight - subMenu.offsetHeight - 8))}px`;
+  subMenu.style.left = `${Math.max(8, left)}px`;
+}
+function closeSubmenu() {
+  subMenu.hidden = true;
+  subEntries = [];
 }
 const toggleMenu = (anchor, entries) => (!panelMenu.hidden && menuAnchor === anchor ? closeMenu() : popMenu(anchor, entries));
 function closeMenu() {
   panelMenu.hidden = true;
   menuEntries = [];
   menuAnchor = null;
+  closeSubmenu();
 }
-panelMenu.addEventListener("click", (e) => {
+panelMenu.addEventListener("pointerover", (e) => {
   const b = e.target.closest("button[data-i]");
   if (!b) return;
+  if (b.hasAttribute("data-sub")) openSubmenu(b);
+  else closeSubmenu();
+});
+subMenu.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-i]");
+  if (!b || b.disabled) return;
+  const m = subEntries[b.dataset.i];
+  closeMenu();
+  m.run();
+});
+panelMenu.addEventListener("click", (e) => {
+  const step = e.target.closest("[data-zoom]");
+  if (step) return menuEntries.find((m) => m.zoom)?.run(Number(step.dataset.zoom));
+  const b = e.target.closest("button[data-i]");
+  if (!b) return;
+  if (b.hasAttribute("data-sub")) return openSubmenu(b);
   const m = menuEntries[b.dataset.i];
   if (m.confirm && !b.dataset.armed) {
     b.dataset.armed = "true";
@@ -348,21 +417,29 @@ panelMenu.addEventListener("click", (e) => {
   m.run();
 });
 addEventListener("pointerdown", (e) => {
-  if (!panelMenu.hidden && !panelMenu.contains(e.target) && !menuAnchor?.contains(e.target)) closeMenu();
+  if (!panelMenu.hidden && !panelMenu.contains(e.target) && !subMenu.contains(e.target) && !menuAnchor?.contains(e.target)) closeMenu();
 }, true);
 
 let panelNoteTimer;
-/** A short note at the bottom of the window, such as what a copy put on the clipboard. */
-function flash(text) {
+/** A short note at the bottom of the window, such as what a copy put on the clipboard, with the
+ * `actions` buttons a saved capture offers. */
+function flash(text, actions = []) {
   let note = document.getElementById("panel-note");
   if (!note) {
-    note = Object.assign(document.createElement("p"), { id: "panel-note" });
+    note = Object.assign(document.createElement("div"), { id: "panel-note" });
+    note.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-note]");
+      if (b) note.actions?.[b.dataset.note]?.run();
+    });
+    note.addEventListener("pointerenter", () => clearTimeout(panelNoteTimer));
+    note.addEventListener("pointerleave", () => (panelNoteTimer = setTimeout(() => (note.hidden = true), 2000)));
     document.body.append(note);
   }
-  note.textContent = text;
+  note.actions = actions;
+  note.innerHTML = `<span>${esc(text)}</span>${actions.map((a, i) => `<button type="button" class="outline" data-note="${i}">${esc(a.label)}</button>`).join("")}`;
   note.hidden = false;
   clearTimeout(panelNoteTimer);
-  panelNoteTimer = setTimeout(() => (note.hidden = true), 2000);
+  panelNoteTimer = setTimeout(() => (note.hidden = true), actions.length ? 6000 : 2000);
 }
 const copyText = (text, note = "Copied") => {
   navigator.clipboard?.writeText(text).then(() => flash(note), () => flash("Couldn't reach the clipboard"));
@@ -678,16 +755,52 @@ const DEVICES = [
   ["Laptop", 1280, 800],
 ];
 
+const MOD = IS_MAC ? "⌘" : "Ctrl+";
+
 function frameStyle(s) {
   const zoom = s.zoom ?? 1;
   const [w, h] = s.device ? [s.device.w, s.device.h] : [null, null];
   return `width:${w ? `${w}px` : `${100 / zoom}%`};height:${h ? `${h}px` : `${100 / zoom}%`};transform:scale(${zoom})`;
 }
 
+/** In the app a page is a native webview laid over `.viewport .page` (src/browser.rs); on the web it is
+ * an iframe, which can't read a cross-origin page, so that page's title and icon come from the machine. */
+const NATIVE_PAGES = !!TAURI;
+
+function browserChrome(s) {
+  const native = NATIVE_PAGES && s.url;
+  const back = native ? s.back : s.frameBack > 0;
+  const forward = native ? s.forward : s.frameForward > 0;
+  return `<form class="url-bar">
+      <span class="nav"><button type="button" class="icon" data-nav="back" title="Back"${back ? "" : " disabled"}>${icon("arrow-left")}</button><button type="button" class="icon" data-nav="forward" title="Forward"${forward ? "" : " disabled"}>${icon("arrow-right")}</button>
+      <button type="button" class="icon" data-nav="reload" title="${s.loading ? "Stop" : `Reload (${MOD}R)`}"${s.url ? "" : " disabled"}>${icon(s.loading ? "x" : "rotate-cw")}</button></span>
+      <label class="address"><input name="url" value="${esc(s.url)}" placeholder="Search or enter URL" spellcheck="false" autocomplete="off" autocapitalize="off">
+        <button type="button" class="icon" data-nav="external" title="Open in system browser">${icon("external-link")}</button></label>
+      ${NATIVE_PAGES ? `<button type="button" class="icon${s.picking ? " on" : ""}" data-nav="pick" title="${s.picking ? "Cancel annotation (Esc)" : "Annotate elements, regions, and drawings"}"${s.url ? "" : " disabled"}>${icon("mouse-pointer-click")}</button>
+      <button type="button" class="icon${recording?.id === s.id ? " on recording" : ""}" data-nav="capture" title="${recording?.id === s.id ? "Stop recording" : "Screenshot · Shift-click to record"}"${s.url ? "" : " disabled"}>${icon("camera")}</button>` : ""}
+      <button type="button" class="icon${panelOf(active).pip === s.id ? " on" : ""}" data-nav="pip" title="${panelOf(active).pip === s.id ? "Close floating preview" : "Float preview over chat"}"${s.url ? "" : " disabled"}>${icon("picture-in-picture-2")}</button>
+      <button type="button" class="icon" data-nav="more" title="More">${icon("ellipsis-vertical")}</button>
+      <span class="loading-bar"${s.loading ? "" : " hidden"}></span></form>`;
+}
+
+function deviceBar(s) {
+  const device = s.device;
+  return `<div class="device-bar"><label class="scope"><select data-device aria-label="Device">${DEVICES.map(([name, w, h]) => `<option value="${name}"${(device?.name ?? "Responsive") === name ? " selected" : ""}>${esc(name)}${w ? ` · ${w}×${h}` : ""}</option>`).join("")}</select>${icon("chevron-down")}</label>
+      <input data-size="w" inputmode="numeric" value="${device?.w ?? ""}" placeholder="Width" aria-label="Width"><span class="muted">×</span><input data-size="h" inputmode="numeric" value="${device?.h ?? ""}" placeholder="Height" aria-label="Height">
+      <button type="button" class="icon${s.aspectLock ? " on" : ""}" data-nav="lock" title="${s.aspectLock ? "Unlock aspect ratio" : "Lock aspect ratio"}"${device ? "" : " disabled"}>${icon(s.aspectLock ? "lock" : "lock-open")}</button>
+      <button type="button" class="icon" data-nav="rotate" title="Rotate"${device ? "" : " disabled"}>${icon("rotate-ccw-square")}</button></div>`;
+}
+
+function pageHtml(s) {
+  if (panelOf(active).pip === s.id) return `<div class="viewport floating"><p class="muted">This page is floating over the chat.</p><button type="button" class="outline" data-nav="pip">${icon("picture-in-picture-2")}Return it to the panel</button></div>`;
+  if (NATIVE_PAGES) return `<div class="viewport native${s.device ? " device" : ""}"><div class="page" data-page="${esc(s.id)}"></div></div>`;
+  return `<div class="viewport${s.device ? " device" : ""}"><iframe src="${esc(s.url)}" title="Preview" style="${frameStyle(s)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"></iframe></div>`;
+}
+
 function renderBrowser(s, servers = false) {
   const tab = active;
-  const shown = `${s.id}\n${s.url}\n${JSON.stringify(s.device)}\n${s.devices}`;
-  if (panelBody.querySelector(".browser") && panelBody.dataset.url === shown && !servers) return;
+  const shown = `${s.id}\n${NATIVE_PAGES ? !!s.url : s.url}\n${JSON.stringify(s.device)}\n${s.devices}\n${panelOf(tab).pip === s.id}`;
+  if (panelBody.querySelector(".browser") && panelBody.dataset.url === shown && !servers) return syncChrome(s);
   if (servers && panelBody.dataset.url !== shown) return;
   panelBody.dataset.url = shown;
   const t = tab && threadOf(tab);
@@ -697,145 +810,607 @@ function renderBrowser(s, servers = false) {
   const own = ports?.filter((p) => p.own);
   const local = ports ? (own.length ? own : ports).map((p) => ({ url: `http://localhost:${p.port}`, name: p.own ? p.command : "Listening" })) : tab ? seenUrls(tab).map((url) => ({ url, name: "Listening" })) : [];
   const remote = tab && tab.machine !== LOCAL;
-  const device = s.device;
   const cards = (rows, ic) => `<div class="servers">${rows.map((r) => `<button type="button" data-url="${esc(r.url)}">${icon(ic)}<span><b>${esc(r.name)}</b><span>${esc(r.url.replace(/^https?:\/\//, ""))}</span></span></button>`).join("")}</div>`;
   const recent = recentUrls.map((url) => ({ url, name: hostOf(url) || url }));
-  const changed = showPanel(`<div class="browser"><form class="url-bar">
-      <button type="button" class="icon" data-nav="back" title="Back">${icon("arrow-left")}</button><button type="button" class="icon" data-nav="forward" title="Forward">${icon("arrow-right")}</button>
-      <button type="button" class="icon" data-nav="reload" title="Reload (${IS_MAC ? "⌘" : "Ctrl+"}R)">${icon("rotate-cw")}</button>
-      <input name="url" value="${esc(s.url)}" placeholder="Search or enter URL" spellcheck="false" autocomplete="off" autocapitalize="off">
-      <button type="button" class="icon" data-nav="external" title="Open in system browser">${icon("external-link")}</button>
-      <button type="button" class="icon" data-nav="more" title="More">${icon("ellipsis")}</button>
-      <span class="loading-bar" hidden></span></form>
-    ${s.devices ? `<div class="device-bar"><label class="scope"><select data-device aria-label="Device">${DEVICES.map(([name, w, h]) => `<option value="${name}"${(device?.name ?? "Responsive") === name ? " selected" : ""}>${esc(name)}${w ? ` · ${w}×${h}` : ""}</option>`).join("")}</select>${icon("chevron-down")}</label>
-      <input data-size="w" inputmode="numeric" value="${device?.w ?? ""}" placeholder="Width" aria-label="Width"><span class="muted">×</span><input data-size="h" inputmode="numeric" value="${device?.h ?? ""}" placeholder="Height" aria-label="Height">
-      <button type="button" class="icon" data-nav="rotate" title="Rotate"${device ? "" : " disabled"}>${icon("rotate-ccw-square")}</button></div>` : ""}
+  const changed = showPanel(`<div class="browser">${browserChrome(s)}${s.devices ? deviceBar(s) : ""}
     ${s.url
-      ? `<div class="viewport${device ? " device" : ""}"><iframe src="${esc(s.url)}" title="Preview" style="${frameStyle(s)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"></iframe></div>`
+      ? pageHtml(s)
       : `<div class="browser-empty">${icon("globe", "big")}<p class="title">No preview yet</p><p>Type a URL above, or start a dev server in this thread.</p>
         ${recent.length ? `<p class="group">Recently used</p>${cards(recent, "history")}` : ""}
         ${local.length ? `<p class="group">Local servers</p>${cards(local, "radio-tower")}` : ""}
         ${remote ? `<p class="hint">This thread runs on ${esc(machineName(tab.machine))}, so its local servers are that machine's, not this device's.</p>` : ""}</div>`}</div>`);
   if (!changed) return;
-  const form = panelBody.querySelector(".url-bar");
-  const frame = panelBody.querySelector("iframe");
-  const bar = form.querySelector(".loading-bar");
-  const reload = form.querySelector('[data-nav="reload"]');
-  const loading = (on) => {
-    bar.hidden = !on;
-    panelBody.querySelector(".browser").toggleAttribute("data-loading", on);
-    reload.innerHTML = icon(on ? "x" : "rotate-cw");
-    reload.title = on ? "Stop" : `Reload (${IS_MAC ? "⌘" : "Ctrl+"}R)`;
-  };
-  if (frame) {
-    loading(true);
-    frame.onload = () => {
-      loading(false);
-      let title = "";
-      // Safari reports even a caught read of another origin's document as an error.
-      try {
-        if (sameOrigin(frame)) title = frame.contentDocument?.title ?? "";
-      } catch {}
-      if (title !== (s.title ?? "")) {
-        s.title = title;
-        savePanel(tab);
-        renderPanelTabs(tab);
-      }
-    };
-  }
-  const go = (url) => {
-    Object.assign(s, { url, title: "" });
-    remember(url);
-    savePanel(tab);
-    renderPanel();
-  };
-  form.onsubmit = (e) => {
-    e.preventDefault();
-    let url = form.url.value.trim();
-    if (url && !/^https?:\/\//.test(url)) {
-      url = /^(localhost|127\.|0\.0\.0\.0|\[::1\])/.test(url) ? `http://${url}` : /\.\w{2,}($|\/)/.test(url) ? `https://${url}` : `https://duckduckgo.com/?q=${encodeURIComponent(url)}`;
-    }
-    go(url);
-  };
-  form.onclick = (e) => {
-    const nav = e.target.closest("[data-nav]")?.dataset.nav;
-    if (nav === "external" && s.url) openOutside(s.url);
-    else if (nav === "reload" && frame) {
-      if (!bar.hidden) {
-        try {
-          if (sameOrigin(frame)) frame.contentWindow.stop();
-        } catch {}
-        loading(false);
-      } else {
-        loading(true);
-        frame.src = frame.src;
-      }
-    } else if ((nav === "back" || nav === "forward") && frame && sameOrigin(frame)) {
-      try {
-        frame.contentWindow.history[nav]();
-      } catch {}
-    } else if (nav === "more") {
-      const key = IS_MAC ? "⌘" : "Ctrl+";
-      toggleMenu(e.target.closest("[data-nav]"), [
-        { label: `${s.devices ? "Hide" : "Show"} device toolbar`, icon: "smartphone", run: () => {
-          s.devices = !s.devices;
-          if (!s.devices) s.device = null;
-          savePanel(tab);
-          renderBrowser(s);
-        } },
-        "-",
-        { label: "Zoom in", kbd: `${key}=`, run: () => zoomBrowser(s, 0.1) },
-        { label: "Zoom out", kbd: `${key}-`, run: () => zoomBrowser(s, -0.1) },
-        { label: "Actual size", kbd: `${key}0`, disabled: (s.zoom ?? 1) === 1, run: () => zoomBrowser(s, 0) },
-      ]);
-    }
-  };
-  const bars = panelBody.querySelector(".device-bar");
-  if (bars) {
-    const setDevice = (device) => {
-      s.device = device;
-      savePanel(tab);
-      renderBrowser(s);
-    };
-    bars.querySelector("[data-device]").onchange = (e) => {
-      const [name, w, h] = DEVICES.find(([n]) => n === e.target.value);
-      setDevice(w ? { name, w, h } : null);
-    };
-    for (const input of bars.querySelectorAll("[data-size]")) {
-      input.onchange = () => {
-        const [w, h] = [...bars.querySelectorAll("[data-size]")].map((i) => Math.round(Number(i.value)));
-        setDevice(w > 0 && h > 0 ? { name: "Custom", w: Math.min(w, 4000), h: Math.min(h, 4000) } : null);
-      };
-    }
-    bars.querySelector('[data-nav="rotate"]').onclick = () => device && setDevice({ ...device, w: device.h, h: device.w });
-  }
-  for (const b of panelBody.querySelectorAll("[data-url]")) b.onclick = () => go(b.dataset.url);
+  const frame = panelBody.querySelector(".browser iframe");
+  if (frame) mountFrame(tab, s, frame);
+  placePages();
 }
 
-const sameOrigin = (frame) => hostOf(frame.src) !== "" && new URL(frame.src).origin === location.origin;
+/** Brings the chrome row up to date with the page without touching the page, or a URL being typed. */
+function syncChrome(s) {
+  const form = panelBody.querySelector(".url-bar");
+  if (!form) return;
+  const html = browserChrome(s);
+  if (form.dataset.html === html) return;
+  const input = form.url;
+  const typing = document.activeElement === input && [input.value, input.selectionStart, input.selectionEnd];
+  form.outerHTML = html;
+  const next = panelBody.querySelector(".url-bar");
+  next.dataset.html = html;
+  if (!typing) return;
+  next.url.value = typing[0];
+  next.url.focus();
+  next.url.setSelectionRange(typing[1], typing[2]);
+}
+
+function mountFrame(tab, s, frame) {
+  s.loading = true;
+  s.frameBack = 0;
+  s.frameForward = 0;
+  frameHistory = { s, length: history.length };
+  syncChrome(s);
+  frame.onload = () => {
+    s.loading = false;
+    trackFrameHistory();
+    let title = "";
+    // Safari reports even a caught read of another origin's document as an error.
+    try {
+      if (sameOrigin(frame)) title = frame.contentDocument?.title ?? "";
+    } catch {}
+    if (title) setPageMeta(tab, s, { title });
+    else fetchPageMeta(tab, s);
+    syncChrome(s);
+  };
+}
+
+/** A frame's own navigations land in the page's joint session history, so `history.length` growing
+ * while a frame is shown is the frame going somewhere, and `history.back()` steps the frame back. */
+let frameHistory = null;
+function trackFrameHistory() {
+  const h = frameHistory;
+  if (!h || !h.s.url) return;
+  const grew = history.length - h.length;
+  h.length = history.length;
+  if (grew <= 0) return;
+  h.s.frameBack += grew;
+  h.s.frameForward = 0;
+  if (shownSurface(active) === h.s) syncChrome(h.s);
+}
+setInterval(trackFrameHistory, 500);
+
+const metaFetched = new Map();
+async function fetchPageMeta(tab, s) {
+  const url = s.url;
+  if (!url || metaFetched.get(s.id) === url) return;
+  metaFetched.set(s.id, url);
+  const meta = await callOn(tab.machine, { cmd: "page_meta", url }).catch(() => null);
+  if (meta && s.url === url) setPageMeta(tab, s, meta);
+}
+
+function setPageMeta(tab, s, { title = s.title ?? "", icon: favicon = s.icon ?? "" }) {
+  if (title === (s.title ?? "") && favicon === (s.icon ?? "")) return;
+  Object.assign(s, { title, icon: favicon });
+  savePanel(tab);
+  if (tab === active) renderPanelTabs(tab);
+}
+
+const browserTab = (s) => {
+  for (const [key, p] of panelStates) if (p.surfaces.includes(s)) return tabByKey(key);
+  return null;
+};
+const surfaceById = (id) => {
+  for (const p of panelStates.values()) for (const s of p.surfaces) if (s.id === id) return s;
+  return null;
+};
+
+function go(s, url) {
+  const tab = browserTab(s) ?? active;
+  Object.assign(s, { url, title: "", icon: "" });
+  remember(url);
+  savePanel(tab);
+  if (NATIVE_PAGES && openPages.has(s.id)) invoke("browser_do", { id: s.id, action: { do: "go", url } }).catch((e) => flash(String(e)));
+  renderPanel();
+}
+
+function navigate(s, nav, e) {
+  const frame = panelBody.querySelector(".browser iframe");
+  const native = NATIVE_PAGES && openPages.has(s.id);
+  const act = (action) => invoke("browser_do", { id: s.id, action }).catch((err) => flash(String(err)));
+  if (nav === "external" && s.url) openOutside(s.url);
+  else if (nav === "reload" && s.url) {
+    if (native) act({ do: s.loading ? "stop" : "reload" });
+    else if (frame && s.loading) {
+      try {
+        if (sameOrigin(frame)) frame.contentWindow.stop();
+      } catch {}
+      s.loading = false;
+      syncChrome(s);
+    } else if (frame) {
+      s.loading = true;
+      syncChrome(s);
+      frame.src = frame.src;
+    }
+  } else if (nav === "back" || nav === "forward") {
+    if (native) act({ do: nav });
+    else if (frame) {
+      const step = nav === "back" ? -1 : 1;
+      if ((step < 0 ? s.frameBack : s.frameForward) <= 0) return;
+      s.frameBack += step;
+      s.frameForward -= step;
+      history.go(step);
+      syncChrome(s);
+    }
+  } else if (nav === "pick") pickElement(s);
+  else if (nav === "capture") capture(s, e.shiftKey);
+  else if (nav === "pip") togglePip(s);
+  else if (nav === "more") toggleMenu(e.target.closest("[data-nav]"), browserMenu(s));
+  else if (nav === "lock") {
+    s.aspectLock = !s.aspectLock;
+    savePanel(active);
+    syncDeviceBar(s);
+  } else if (nav === "rotate" && s.device) setDevice(s, { ...s.device, w: s.device.h, h: s.device.w });
+}
+
+function browserMenu(s) {
+  const native = NATIVE_PAGES && openPages.has(s.id);
+  const act = (action) => () => invoke("browser_do", { id: s.id, action }).catch((e) => flash(String(e)));
+  const scheme = s.scheme ?? "system";
+  return [
+    { label: "Hard reload", disabled: !s.url, run: native ? act({ do: "hard-reload" }) : () => go(s, s.url) },
+    ...(NATIVE_PAGES ? [
+      { label: s.shownDevtools ? "Close DevTools" : "Open DevTools", disabled: !native, run: () => toggleDevtools(s) },
+      { label: "Open separate preview window", disabled: !s.url, run: () => invoke("browser_window", { url: s.url }).catch((e) => flash(String(e))) },
+    ] : []),
+    { label: `${s.devices ? "Hide" : "Show"} device toolbar`, run: () => {
+      s.devices = !s.devices;
+      if (!s.devices) s.device = null;
+      savePanel(active);
+      renderBrowser(s);
+    } },
+    ...(NATIVE_PAGES ? [{ label: "Appearance", disabled: !native, sub: ["system", "light", "dark"].map((mode) => ({ label: mode[0].toUpperCase() + mode.slice(1), checked: scheme === mode, run: () => {
+      s.scheme = mode;
+      savePanel(active);
+      act({ do: "appearance", mode })();
+    } })) }] : []),
+    "-",
+    { zoom: true, label: "Zoom", value: `${Math.round((s.zoom ?? 1) * 100)}%`, run: (step) => zoomBrowser(s, step) },
+    ...(native ? ["-", { label: "Clear cookies", run: act({ do: "clear-cookies" }) }, { label: "Clear cache", run: act({ do: "clear-cache" }) }] : []),
+  ];
+}
+
+function setDevice(s, device) {
+  s.device = device;
+  savePanel(active);
+  renderBrowser(s);
+}
+function syncDeviceBar(s) {
+  const bar = panelBody.querySelector(".device-bar");
+  if (bar) bar.outerHTML = deviceBar(s);
+}
 
 /** Zooms the page by `step`, or back to 100% when it is 0. */
 function zoomBrowser(s, step) {
   s.zoom = step ? Math.min(3, Math.max(0.25, Math.round(((s.zoom ?? 1) + step) * 100) / 100)) : 1;
-  const frame = panelBody.querySelector("iframe");
+  const frame = panelBody.querySelector(".browser iframe");
   if (frame) frame.style.cssText = frameStyle(s);
+  placePages(true);
   flash(`Zoom ${Math.round(s.zoom * 100)}%`);
   savePanel(active);
+  const value = panelMenu.querySelector(".zoom .value");
+  if (value) value.textContent = `${Math.round(s.zoom * 100)}%`;
 }
 
-/** ⌘R, ⌘L and zoom, while the browser surface (not the page inside it) has focus. */
+panelBody.addEventListener("submit", (e) => {
+  if (!e.target.matches(".url-bar")) return;
+  e.preventDefault();
+  const s = shownSurface(active);
+  let url = e.target.url.value.trim();
+  if (!s || !url) return;
+  if (!/^https?:\/\//.test(url)) {
+    url = /^(localhost|127\.|0\.0\.0\.0|\[::1\])/.test(url) ? `http://${url}` : /\.\w{2,}($|\/)/.test(url) ? `https://${url}` : `https://duckduckgo.com/?q=${encodeURIComponent(url)}`;
+  }
+  e.target.url.blur();
+  go(s, url);
+});
+panelBody.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && e.target.matches(".url-bar input")) {
+    e.target.value = shownSurface(active)?.url ?? "";
+    e.target.blur();
+  }
+});
+panelBody.addEventListener("click", (e) => {
+  const nav = e.target.closest(".browser [data-nav]");
+  const s = shownSurface(active);
+  if (nav && s?.kind === "browser" && !nav.disabled) return navigate(s, nav.dataset.nav, e);
+  const card = e.target.closest(".browser [data-url]");
+  if (card && s) go(s, card.dataset.url);
+});
+panelBody.addEventListener("change", (e) => {
+  const s = shownSurface(active);
+  if (s?.kind !== "browser") return;
+  if (e.target.matches("[data-device]")) {
+    const [name, w, h] = DEVICES.find(([n]) => n === e.target.value);
+    setDevice(s, w ? { name, w, h } : null);
+  } else if (e.target.matches("[data-size]")) {
+    const inputs = [...panelBody.querySelectorAll("[data-size]")];
+    let [w, h] = inputs.map((i) => Math.round(Number(i.value)));
+    if (s.aspectLock && s.device) {
+      const ratio = s.device.w / s.device.h;
+      if (e.target.dataset.size === "w") h = Math.round(w / ratio);
+      else w = Math.round(h * ratio);
+    }
+    setDevice(s, w > 0 && h > 0 ? { name: "Custom", w: Math.min(w, 4000), h: Math.min(h, 4000) } : null);
+  }
+});
+
+const sameOrigin = (frame) => hostOf(frame.src) !== "" && new URL(frame.src).origin === location.origin;
+
+/** ⌘R, ⌘L and zoom, while the browser surface or (in the app) the page inside it has focus. */
+function browserKey(key) {
+  const s = active && shownSurface(active);
+  if (s?.kind !== "browser") return false;
+  const zoom = { "=": 0.1, "+": 0.1, "-": -0.1, 0: 0 }[key];
+  if (key === "r") navigate(s, "reload");
+  else if (key === "l") {
+    const input = panelBody.querySelector(".url-bar input");
+    input?.focus();
+    input?.select();
+  } else if (zoom !== undefined) zoomBrowser(s, zoom);
+  else return false;
+  return true;
+}
 document.getElementById("panel").addEventListener("keydown", (e) => {
   const mod = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-  const s = active && shownSurface(active);
-  if (!mod || e.altKey || s?.kind !== "browser" || !e.target.closest(".browser")) return;
-  const zoom = { "=": 0.1, "+": 0.1, "-": -0.1, 0: 0 }[e.key];
-  if (e.key === "r") panelBody.querySelector('[data-nav="reload"]').click();
-  else if (e.key === "l") panelBody.querySelector(".url-bar input").select();
-  else if (zoom !== undefined) zoomBrowser(s, zoom);
-  else return;
+  if (!mod || e.altKey || e.shiftKey || !e.target.closest(".browser") || !browserKey(e.key)) return;
   e.preventDefault();
   e.stopPropagation();
 });
+
+/** Native pages this run has opened, by surface id. */
+const openPages = new Set();
+let placedPage = null;
+let placedAt = "";
+const placedZoom = new Map();
+
+/** Where the shown page's native webview goes: over its `.page` box in the panel or the floating
+ * frame, unless something on the page, such as a menu, sits over that box. */
+function pageTarget() {
+  if (!NATIVE_PAGES || !guiOn() || document.hidden || !active) return null;
+  const p = panelOf(active);
+  const pip = p.pip && p.surfaces.find((x) => x.id === p.pip);
+  const s = pip || (p.open && shownSurface(active)?.kind === "browser" ? shownSurface(active) : null);
+  if (!s?.url) return null;
+  const box = pip ? document.querySelector("#preview-pip .page") : panelBody.querySelector(`.page[data-page="${CSS.escape(s.id)}"]`);
+  if (!box) return null;
+  const r = box.getBoundingClientRect();
+  if (r.width < 2 || r.height < 2) return null;
+  for (const [x, y] of [[0.5, 0.5], [0.04, 0.04], [0.96, 0.04], [0.04, 0.96], [0.96, 0.96]]) {
+    const hit = document.elementFromPoint(r.left + r.width * x, r.top + r.height * y);
+    if (hit !== box && !box.contains(hit) && !hit?.closest("#panel-note")) return null;
+  }
+  return { s, box, r };
+}
+
+function fitDevice(s, box) {
+  const area = box.parentElement.getBoundingClientRect();
+  if (!s.device) {
+    box.style.cssText = "";
+    return 1;
+  }
+  const scale = Math.max(0.1, Math.min(1, (area.width - 32) / s.device.w, (area.height - 32) / s.device.h));
+  box.style.cssText = `width:${Math.round(s.device.w * scale)}px;height:${Math.round(s.device.h * scale)}px`;
+  return scale;
+}
+
+function placePages(force = false) {
+  const target = pageTarget();
+  if (!target) {
+    if (placedPage) invoke("browser_hide", { id: placedPage }).catch(() => {});
+    placedPage = null;
+    placedAt = "";
+    return;
+  }
+  const { s, box } = target;
+  const scale = box.closest("#preview-pip") ? 1 : fitDevice(s, box);
+  const r = box.getBoundingClientRect();
+  const at = { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) };
+  const key = JSON.stringify(at);
+  if (placedPage && placedPage !== s.id) invoke("browser_hide", { id: placedPage }).catch(() => {});
+  const zoom = Math.round((s.zoom ?? 1) * scale * 1000) / 1000;
+  if (placedPage !== s.id) {
+    placedPage = s.id;
+    placedAt = key;
+    const first = !openPages.has(s.id);
+    openPages.add(s.id);
+    invoke("browser_show", { id: s.id, url: s.url, at }).then(() => {
+      if (first && s.scheme && s.scheme !== "system") invoke("browser_do", { id: s.id, action: { do: "appearance", mode: s.scheme } });
+      if (first && s.muted) invoke("browser_do", { id: s.id, action: { do: "mute", on: true } });
+    }, (e) => {
+      openPages.delete(s.id);
+      placedPage = null;
+      flash(String(e));
+    });
+  } else if (key !== placedAt || force) {
+    placedAt = key;
+    invoke("browser_place", { id: s.id, at }).catch(() => {});
+  }
+  if (placedZoom.get(s.id) !== zoom) {
+    placedZoom.set(s.id, zoom);
+    invoke("browser_do", { id: s.id, action: { do: "zoom", factor: zoom } }).catch(() => {});
+  }
+}
+
+if (NATIVE_PAGES) {
+  invoke("browser_close", { keep: [] }).catch(() => {});
+  setInterval(placePages, 120);
+  setInterval(() => placedPage && invoke("browser_state", { id: placedPage }).catch(() => {}), 1000);
+  addEventListener("resize", () => placePages());
+  TAURI.event.listen("browser", ({ payload: e }) => {
+    const s = surfaceById(e.id);
+    if (e.kind === "key") {
+      if (!(e.shift || e.alt) && browserKey(e.key)) return;
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: e.shift && e.key.length === 1 ? e.key.toUpperCase() : e.key, code: e.code, metaKey: IS_MAC, ctrlKey: !IS_MAC, shiftKey: e.shift, altKey: e.alt, bubbles: true, cancelable: true }));
+      return;
+    }
+    if (!s) return;
+    const tab = browserTab(s);
+    if (e.kind === "popup") {
+      if (tab) addSurface(tab, newBrowser(e.url));
+      return;
+    }
+    const was = s.loading;
+    // Docking and undocking the inspector resizes the page's webview, so it goes back in its place.
+    const { url, title, back, forward, loading, devtools, audible } = e.state;
+    if (devtools !== !!s.shownDevtools) {
+      setTimeout(() => placePages(true), 700);
+      if (!devtools && s.shownDevtools) s.devtools = false;
+      s.shownDevtools = devtools;
+    }
+    Object.assign(s, { back, forward, loading, audible });
+    if (url && url !== s.url && /^https?:/.test(url)) {
+      s.url = url;
+      remember(url);
+    }
+    if (title !== (s.title ?? "")) s.title = title;
+    if (was && !loading) pageIcon(s);
+    if (tab) savePanel(tab);
+    if (tab === active) {
+      renderPanelTabs(tab);
+      if (shownSurface(tab) === s) syncChrome(s);
+      if (panelOf(tab).pip === s.id) renderPip(tab);
+    }
+  });
+}
+
+const ICON_JS = `(() => { const l = [...document.querySelectorAll('link[rel~="icon"], link[rel="apple-touch-icon"]')].find((l) => l.href); return l ? l.href : location.origin + "/favicon.ico"; })()`;
+async function pageIcon(s) {
+  const href = await invoke("browser_eval", { id: s.id, js: ICON_JS }).catch(() => null);
+  if (typeof href === "string" && /^https?:/.test(href) && href !== s.icon) {
+    s.icon = href;
+    const tab = browserTab(s);
+    if (tab) savePanel(tab);
+    if (tab === active) renderPanelTabs(tab);
+  }
+}
+
+/** `devtools` is what was asked for, ahead of the inspector's window showing, which `shownDevtools` follows. */
+function toggleDevtools(s) {
+  s.devtools = !s.shownDevtools;
+  invoke("browser_do", { id: s.id, action: { do: "devtools" } }).catch((e) => flash(String(e)));
+}
+
+/** A page's devtools window takes the focus from the app's, which must not shrink to the pill for it. */
+const pageDevtoolsOpen = () => [...panelStates.values()].some((p) => p.surfaces.some((s) => s.devtools || s.shownDevtools));
+
+/** Keeps the native pages of surfaces still open, and closes the rest. */
+function closeGonePages() {
+  if (!NATIVE_PAGES) return;
+  const keep = [...panelStates.values()].flatMap((p) => p.surfaces.filter((s) => s.kind === "browser").map((s) => s.id));
+  for (const id of openPages) if (!keep.includes(id)) openPages.delete(id);
+  if (placedPage && !keep.includes(placedPage)) placedPage = null;
+  invoke("browser_close", { keep }).catch(() => {});
+}
+
+function toggleMute(s) {
+  s.muted = !s.muted;
+  savePanel(active);
+  if (openPages.has(s.id)) invoke("browser_do", { id: s.id, action: { do: "mute", on: s.muted } }).catch((e) => flash(String(e)));
+  renderPanelTabs(active);
+}
+
+/** The floating preview: the thread's page over the chat, while the panel shows something else. */
+function togglePip(s) {
+  const p = panelOf(active);
+  p.pip = p.pip === s.id ? null : s.id;
+  savePanel(active);
+  renderPanel();
+}
+const pipFrame = document.createElement("div");
+pipFrame.id = "preview-pip";
+pipFrame.hidden = true;
+document.getElementById("chat").append(pipFrame);
+function renderPip(tab) {
+  const p = panelOf(tab);
+  const s = guiOn() && p.pip && p.surfaces.find((x) => x.id === p.pip);
+  pipFrame.hidden = !s;
+  if (!s) {
+    pipFrame.dataset.id = "";
+    pipFrame.innerHTML = "";
+    return;
+  }
+  const title = surfaceTitle(tab, s);
+  if (pipFrame.dataset.id === s.id) {
+    pipFrame.querySelector(".title").textContent = title;
+    return;
+  }
+  pipFrame.dataset.id = s.id;
+  pipFrame.innerHTML = `<div class="page">${NATIVE_PAGES ? "" : `<iframe src="${esc(s.url)}" title="Floating preview" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"></iframe>`}</div>
+    <div class="pill"><span class="title">${esc(title)}</span><button type="button" class="icon" data-pip="panel" title="Open preview in right panel">${icon("panel-right")}</button><button type="button" class="icon" data-pip="close" title="Close floating preview">${icon("x")}</button></div>`;
+}
+pipFrame.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-pip]");
+  if (!b || !active) return;
+  const p = panelOf(active);
+  const id = p.pip;
+  p.pip = null;
+  if (b.dataset.pip === "panel") {
+    p.active = id;
+    p.open = true;
+  }
+  savePanel(active);
+  renderPanel();
+});
+pipFrame.addEventListener("pointerdown", (down) => {
+  if (!down.target.closest(".pill") || down.target.closest("button")) return;
+  down.preventDefault();
+  const chat = document.getElementById("chat").getBoundingClientRect();
+  const start = pipFrame.getBoundingClientRect();
+  drag(down, {
+    move: (e) => {
+      const right = Math.max(12, Math.min(chat.width - start.width - 12, chat.right - (start.right + e.clientX - down.clientX)));
+      const bottom = Math.max(12, Math.min(chat.height - start.height - 12, chat.bottom - (start.bottom + e.clientY - down.clientY)));
+      pipFrame.style.right = `${right}px`;
+      pipFrame.style.bottom = `${bottom}px`;
+    },
+    drop: () => {},
+  });
+});
+
+/** Saves `blob` to Downloads and says where, with what T3's toast offers. */
+async function saveCapture(name, blob, kind) {
+  const path = await invoke("save_capture", { name, bytes: [...new Uint8Array(await blob.arrayBuffer())] });
+  flash(`${kind} saved`, [
+    ...(blob.type === "image/png" ? [{ label: "Copy image", run: () => navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(() => flash("Image copied"), () => flash("Couldn't reach the clipboard")) }] : []),
+    { label: "Copy path", run: () => copyText(path, "Path copied") },
+    { label: IS_MAC ? "Show in Finder" : "Show in folder", run: () => invoke("reveal_file", { path }) },
+  ]);
+}
+const stamp = () => new Date().toISOString().slice(0, 19).replace("T", " at ").replace(/:/g, ".");
+const snapshotOf = async (s) => new Blob([await invoke("browser_snapshot", { id: s.id })], { type: "image/png" });
+
+let recording = null;
+async function capture(s, record) {
+  if (recording) return stopRecording();
+  if (!openPages.has(s.id)) return;
+  if (!record) {
+    try {
+      await saveCapture(`Screenshot ${stamp()}.png`, await snapshotOf(s), "Screenshot");
+    } catch (e) {
+      flash(`Couldn't capture the page: ${e}`);
+    }
+    return;
+  }
+  const canvas = document.createElement("canvas");
+  const first = await createImageBitmap(await snapshotOf(s)).catch(() => null);
+  if (!first) return flash("Couldn't capture the page");
+  Object.assign(canvas, { width: first.width, height: first.height });
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(first, 0, 0);
+  const type = ["video/webm", "video/mp4"].find((t) => window.MediaRecorder?.isTypeSupported(t));
+  if (!type) return flash("This system can't record video");
+  const chunks = [];
+  const recorder = new MediaRecorder(canvas.captureStream(10), { mimeType: type });
+  recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  recording = { id: s.id, recorder, done: new Promise((r) => (recorder.onstop = r)) };
+  recorder.start(1000);
+  syncChrome(s);
+  (async () => {
+    while (recording?.recorder === recorder) {
+      const frame = await snapshotOf(s).then(createImageBitmap).catch(() => null);
+      if (frame && recording?.recorder === recorder) ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+      await new Promise((r) => setTimeout(r, 80));
+    }
+  })();
+  recording.save = async () => saveCapture(`Recording ${stamp()}.${type.split("/")[1]}`, new Blob(chunks, { type }), "Recording");
+}
+async function stopRecording() {
+  const r = recording;
+  recording = null;
+  r.recorder.stop();
+  await r.done;
+  const s = surfaceById(r.id);
+  if (s && shownSurface(active) === s) syncChrome(s);
+  r.save().catch((e) => flash(String(e)));
+}
+
+/** The annotation picker runs inside the page: hovering outlines an element, a click picks it, a drag
+ * picks a region, and with Shift held a drag draws. The pick waits in `__pinnedPick` for the panel. */
+const PICK_JS = `(() => {
+  if (window.__pinnedPicker) return true;
+  const ui = document.createElement("div");
+  ui.style.cssText = "position:fixed;inset:0;z-index:2147483647;cursor:crosshair";
+  const box = document.createElement("div");
+  box.style.cssText = "position:fixed;pointer-events:none;border:2px solid #346bf1;background:rgb(52 107 241/.12);border-radius:3px;display:none";
+  const ink = document.createElement("canvas");
+  ink.style.cssText = "position:fixed;inset:0;pointer-events:none";
+  ink.width = innerWidth * devicePixelRatio; ink.height = innerHeight * devicePixelRatio;
+  const pen = ink.getContext("2d"); pen.scale(devicePixelRatio, devicePixelRatio); pen.strokeStyle = "#ff4d4f"; pen.lineWidth = 3; pen.lineCap = "round";
+  ui.append(ink, box); document.documentElement.append(ui);
+  const show = (r) => Object.assign(box.style, { display: "block", left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px" });
+  const under = (x, y) => { ui.style.display = "none"; const el = document.elementFromPoint(x, y); ui.style.display = ""; return el; };
+  const path = (el) => { const parts = []; for (let e = el; e && e.nodeType === 1 && parts.length < 5; e = e.parentElement) { let p = e.localName; if (e.id) { parts.unshift(p + "#" + e.id); break; } const cls = [...e.classList].slice(0, 2).join("."); if (cls) p += "." + cls; parts.unshift(p); } return parts.join(" > "); };
+  let down = null, strokes = [];
+  const done = (pick) => { ui.remove(); removeEventListener("keydown", key, true); window.__pinnedPicker = null; window.__pinnedPick = pick; };
+  const cancel = () => done({ cancelled: true });
+  const key = (e) => { if (e.key === "Escape") { e.preventDefault(); cancel(); } };
+  addEventListener("keydown", key, true);
+  ui.onpointermove = (e) => {
+    if (down?.draw) { pen.lineTo(e.clientX, e.clientY); pen.stroke(); strokes.at(-1).push([e.clientX, e.clientY]); return; }
+    if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) { down.region = true; return show({ left: Math.min(down.x, e.clientX), top: Math.min(down.y, e.clientY), width: Math.abs(e.clientX - down.x), height: Math.abs(e.clientY - down.y) }); }
+    if (!down) { const el = under(e.clientX, e.clientY); if (el) show(el.getBoundingClientRect()); }
+  };
+  ui.onpointerdown = (e) => { e.preventDefault(); down = { x: e.clientX, y: e.clientY, draw: e.shiftKey }; if (down.draw) { pen.beginPath(); pen.moveTo(e.clientX, e.clientY); strokes.push([[e.clientX, e.clientY]]); } };
+  ui.onpointerup = (e) => {
+    const d = down; down = null;
+    if (!d) return;
+    const view = { width: innerWidth, height: innerHeight, url: location.href, title: document.title };
+    if (d.draw) { const xs = strokes.flat().map((p) => p[0]), ys = strokes.flat().map((p) => p[1]); return done({ kind: "drawing", ...view, rect: { left: Math.min(...xs) - 8, top: Math.min(...ys) - 8, width: Math.max(...xs) - Math.min(...xs) + 16, height: Math.max(...ys) - Math.min(...ys) + 16 } }); }
+    if (d.region) { const r = box.getBoundingClientRect(); return done({ kind: "region", ...view, rect: { left: r.left, top: r.top, width: r.width, height: r.height } }); }
+    const el = under(e.clientX, e.clientY);
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    done({ kind: "element", ...view, selector: path(el), tag: el.localName, text: (el.innerText || el.value || "").trim().slice(0, 200), html: el.outerHTML.slice(0, 400), rect: { left: r.left, top: r.top, width: r.width, height: r.height } });
+  };
+  window.__pinnedPicker = { cancel }; window.__pinnedPick = null;
+  return true;
+})()`;
+
+async function pickElement(s) {
+  if (s.picking) {
+    s.picking = false;
+    invoke("browser_eval", { id: s.id, js: "(() => { window.__pinnedPicker?.cancel(); return true; })()" }).catch(() => {});
+    return syncChrome(s);
+  }
+  if (!openPages.has(s.id)) return;
+  s.picking = true;
+  syncChrome(s);
+  await invoke("browser_eval", { id: s.id, js: PICK_JS }).catch((e) => flash(String(e)));
+  let pick = null;
+  while (s.picking && !pick) {
+    await new Promise((r) => setTimeout(r, 250));
+    pick = await invoke("browser_eval", { id: s.id, js: "(() => { const p = window.__pinnedPick; window.__pinnedPick = null; return p ?? null; })()" }).catch(() => null);
+  }
+  s.picking = false;
+  syncChrome(s);
+  if (!pick || pick.cancelled) return;
+  const tab = browserTab(s);
+  const note = pick.kind === "element"
+    ? `[${hostOf(pick.url)} ${pick.selector}${pick.text ? ` "${pick.text.replace(/\s+/g, " ").slice(0, 80)}"` : ""}]`
+    : `[${hostOf(pick.url)} ${pick.kind} at ${Math.round(pick.rect.left)},${Math.round(pick.rect.top)} ${Math.round(pick.rect.width)}×${Math.round(pick.rect.height)}]`;
+  const head = prompt.value.replace(/\s+$/, "");
+  prompt.value = `${head}${head ? " " : ""}${note} `;
+  prompt.dispatchEvent(new Event("input"));
+  try {
+    const shot = await createImageBitmap(await snapshotOf(s));
+    const ratio = shot.width / pick.width;
+    const r = pick.rect;
+    const canvas = Object.assign(document.createElement("canvas"), { width: Math.max(1, Math.round(r.width * ratio)), height: Math.max(1, Math.round(r.height * ratio)) });
+    canvas.getContext("2d").drawImage(shot, r.left * ratio, r.top * ratio, r.width * ratio, r.height * ratio, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((done) => canvas.toBlob(done, "image/png"));
+    await attachFiles(tab, [new File([blob], `annotation-${Date.now().toString(36)}.png`, { type: "image/png" })]);
+  } catch {
+    flash("The annotation was kept without the screenshot");
+  }
+}
 
 const checkState = (c) => {
   const v = (c.conclusion || c.state || c.status || "").toUpperCase();

@@ -1017,15 +1017,18 @@ async function sweep(profileName) {
     await waitFor("the loading bar", () => page.locator("#panel-body .loading-bar").isVisible(), 2000);
     check((await page.getAttribute('#panel-body [data-nav="reload"]', "title")) === "Stop", "while loading, Reload isn't Stop");
     await waitFor("the page to load", async () => !(await page.locator("#panel-body .loading-bar").isVisible()), 10000);
-    check((await text("#panel-tabs .ptab.active")) === `localhost:${port}`, `the browser tab reads ${await text("#panel-tabs .ptab.active")}`);
+    await waitFor("the page's title on its tab", async () => (await text("#panel-tabs .ptab.active")) === "Sweep server");
     const more = async (label) => {
       await press(gui('#panel-body [data-nav="more"]'));
       await press(gui(`#panel-menu button:has-text("${label}")`));
     };
-    await more("Zoom in");
+    await press(gui('#panel-body [data-nav="more"]'));
+    await press(gui('#panel-menu [data-zoom="0.1"]'));
     const scale = () => page.locator("#panel-body iframe").evaluate((f) => f.style.transform);
     check((await scale()) === "scale(1.1)", `zoomed in, the page is ${await scale()}`);
-    await more("Actual size");
+    check((await text("#panel-menu .zoom .value")) === "110%", `the menu's zoom reads ${await text("#panel-menu .zoom .value")}`);
+    await press(gui('#panel-menu [data-zoom="0"]'));
+    await page.keyboard.press("Escape");
     await more("Show device toolbar");
     await page.selectOption("#panel-body [data-device]", "iPhone SE");
     const width = () => page.locator("#panel-body iframe").evaluate((f) => Math.round(f.getBoundingClientRect().width));
@@ -1091,6 +1094,34 @@ async function sweep(profileName) {
     await waitFor("gh to mark it ready", async () => /pr ready -- https:\/\/github\.com\/example\/alpha\/pull\/41/.test(readLog("gh.log")));
     await tapOrClick("#toggle-panel");
     return items.join(" | ");
+  });
+
+  await step("app view: the browser's Back and Forward step through a cross-origin page, and its tab shows the page's title and icon", async () => {
+    const port = readLog("serve.port").trim();
+    await tapOrClick("#toggle-panel");
+    await fromPlus("Browser");
+    await page.fill("#panel-body .url-bar input", `http://localhost:${port}/a`);
+    await page.press("#panel-body .url-bar input", "Enter");
+    const frame = page.frameLocator("#panel-body iframe");
+    await waitFor("page A", async () => /page a/.test((await frame.locator("body").textContent().catch(() => "")) ?? ""), 10000);
+    await waitFor("the tab to read the page's title", async () => (await text("#panel-tabs .ptab.active")) === "Page A", 10000);
+    await waitFor("the page's icon on the tab", async () => /^data:image\/png/.test((await page.getAttribute("#panel-tabs .ptab.active img.favicon", "src").catch(() => "")) ?? ""));
+    check(await page.isDisabled('#panel-body [data-nav="back"]'), "Back works before the page went anywhere");
+    await press(frame.locator("a"));
+    await waitFor("the page's own link to land", async () => /served by fake claude/.test((await frame.locator("body").textContent().catch(() => "")) ?? ""), 10000);
+    await waitFor("Back to wake", async () => !(await page.isDisabled('#panel-body [data-nav="back"]')));
+    await press(gui('#panel-body [data-nav="back"]'));
+    await waitFor("Back to return to page A", async () => /page a/.test((await frame.locator("body").textContent().catch(() => "")) ?? ""), 10000);
+    check(!(await page.isDisabled('#panel-body [data-nav="forward"]')), "Forward is off after going back");
+    await press(gui('#panel-body [data-nav="forward"]'));
+    await waitFor("Forward to the page's link again", async () => /served by fake claude/.test((await frame.locator("body").textContent().catch(() => "")) ?? ""), 10000);
+    await press(gui('#panel-body [data-nav="more"]'));
+    const items = await page.locator("#panel-menu button .label").allTextContents();
+    check(items.join("|") === "Hard reload|Show device toolbar", `the web app's More menu: ${items.join(" | ")}`);
+    await page.keyboard.press("Escape");
+    const title = await text("#panel-tabs .ptab.active");
+    await tapOrClick("#toggle-panel");
+    return title;
   });
 
   await step("app view: Open in an editor from the header", async () => {

@@ -932,10 +932,10 @@ async function setView(view) {
 }
 document.getElementById("new-tab").onclick = () => toggleProjects();
 document.getElementById("minimize").onclick = () => setView("pill");
-// Clicking outside the expanded panel shrinks it to the pill, as the minimize button does.
-window.addEventListener("blur", () => {
-  // Focus moving into the side panel's browser blurs the window too.
-  if (TAURI && document.body.dataset.view === "expanded" && !choosingFolder && document.activeElement?.tagName !== "IFRAME") setView("pill");
+// Clicking outside the expanded panel shrinks it to the pill, as the minimize button does. This is the
+// window's focus, not the page's: a click into the browser panel's page leaves the window focused.
+win?.onFocusChanged(({ payload: focused }) => {
+  if (!focused && document.body.dataset.view === "expanded" && !choosingFolder && !pageDevtoolsOpen()) setView("pill");
 });
 track.onclick = async (e) => {
   const tab = tabByKey(e.target.closest(".item")?.dataset.tab);
