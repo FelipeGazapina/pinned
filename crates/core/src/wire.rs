@@ -3,6 +3,7 @@
 
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
+use crate::panel::{ReviewComment, ReviewEvent};
 use crate::workspace::{DiffScope, PrAction};
 use crate::{sync, thread};
 use base64::Engine;
@@ -138,6 +139,9 @@ pub enum Call {
         scope: DiffScope,
         #[serde(default)]
         ignore_whitespace: bool,
+        /// The branch `DiffScope::Base` compares with, instead of the default one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
     },
     /// `Vec<workspace::Listener>`: the machine's web servers, the tab's session's own first.
     Ports { tab: TabId },
@@ -163,6 +167,77 @@ pub enum Call {
         #[serde(default)]
         create: bool,
     },
+    /// `panel::PageMeta` of the web page at `url`, fetched from this machine.
+    PageMeta { url: String },
+    /// `panel::FileText` of `path` in the tab's folder, or in its repository when `root`, as of `rev` when given.
+    ReadFile {
+        tab: TabId,
+        path: String,
+        #[serde(default)]
+        root: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+    /// The saved file's new hash. Refused when the file changed since the read that answered `since`.
+    WriteFile {
+        tab: TabId,
+        path: String,
+        #[serde(default)]
+        root: bool,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<String>,
+    },
+    /// `Vec<panel::Hit>`: the lines of the tab's folder that hold `query`.
+    Search {
+        tab: TabId,
+        query: String,
+        #[serde(default)]
+        case: bool,
+        #[serde(default)]
+        regex: bool,
+    },
+    /// `null`. Retitles `pr` or rewrites its description.
+    PrEdit {
+        tab: TabId,
+        pr: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+    },
+    /// `null`. Comments on `pr`, or answers its review thread `reply_to`.
+    PrComment {
+        tab: TabId,
+        pr: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
+    },
+    /// `null`. Submits a review of `pr` with its line comments.
+    PrReview {
+        tab: TabId,
+        pr: String,
+        event: ReviewEvent,
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        comments: Vec<ReviewComment>,
+    },
+    /// `null`. Runs the check at `check`, a GitHub Actions link, again.
+    PrRerun { tab: TabId, check: String },
+    /// `{guide, run}`: the review guide kept for `pr` and the run writing one. `write` starts a run.
+    PrGuide {
+        tab: TabId,
+        pr: String,
+        #[serde(default)]
+        write: bool,
+    },
+    /// The id of a new login shell in the tab's folder, which `attach`, `write_input`, `resize_pty`
+    /// and `close_shell` take as a tab id.
+    OpenShell { tab: TabId, cols: u16, rows: u16 },
+    /// `null`. Ends the shell `shell`.
+    CloseShell { shell: String },
 }
 
 impl Call {
@@ -185,6 +260,15 @@ impl Call {
                 | Call::Files { .. }
                 | Call::Branches { .. }
                 | Call::Checkout { .. }
+                | Call::PageMeta { .. }
+                | Call::ReadFile { .. }
+                | Call::WriteFile { .. }
+                | Call::Search { .. }
+                | Call::PrEdit { .. }
+                | Call::PrComment { .. }
+                | Call::PrReview { .. }
+                | Call::PrRerun { .. }
+                | Call::PrGuide { .. }
         )
     }
 }
@@ -502,8 +586,30 @@ mod tests {
             json!({ "cmd": "upload", "name": "photo.jpg", "data": "/9g=" }),
         );
         round_trip(
-            Call::Diff { tab: "tab-1".into(), scope: DiffScope::Base, ignore_whitespace: true },
+            Call::Diff { tab: "tab-1".into(), scope: DiffScope::Base, ignore_whitespace: true, base: None },
             json!({ "cmd": "diff", "tab": "tab-1", "scope": "base", "ignore_whitespace": true }),
+        );
+        round_trip(
+            Call::Diff { tab: "tab-1".into(), scope: DiffScope::Base, ignore_whitespace: false, base: Some("origin/dev".into()) },
+            json!({ "cmd": "diff", "tab": "tab-1", "scope": "base", "ignore_whitespace": false, "base": "origin/dev" }),
+        );
+        round_trip(
+            Call::ReadFile { tab: "tab-1".into(), path: "src/a.rs".into(), root: true, rev: Some("HEAD".into()) },
+            json!({ "cmd": "read_file", "tab": "tab-1", "path": "src/a.rs", "root": true, "rev": "HEAD" }),
+        );
+        round_trip(
+            Call::PrReview {
+                tab: "tab-1".into(),
+                pr: "https://github.com/o/r/pull/7".into(),
+                event: ReviewEvent::RequestChanges,
+                body: "".into(),
+                comments: vec![ReviewComment { path: "a.rs".into(), line: 3, side: "RIGHT".into(), start_line: None, body: "why".into() }],
+            },
+            json!({ "cmd": "pr_review", "tab": "tab-1", "pr": "https://github.com/o/r/pull/7", "event": "REQUEST_CHANGES", "body": "", "comments": [{ "path": "a.rs", "line": 3, "side": "RIGHT", "body": "why" }] }),
+        );
+        round_trip(
+            Call::PrAction { tab: "tab-1".into(), pr: "7".into(), action: PrAction::AutoSquash },
+            json!({ "cmd": "pr_action", "tab": "tab-1", "pr": "7", "action": "auto_squash" }),
         );
         round_trip(
             Call::PrAction { tab: "tab-1".into(), pr: "7".into(), action: PrAction::Ready },

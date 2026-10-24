@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const DIFF_LIMIT: usize = 400_000;
-const PR_FIELDS: &str = "number,title,state,isDraft,url,body,author,createdAt,updatedAt,mergedAt,closedAt,headRefName,baseRefName,additions,deletions,changedFiles,reviewDecision,mergeable,statusCheckRollup,reviews,comments,commits,labels,reviewRequests";
+const PR_FIELDS: &str = "number,title,state,isDraft,url,body,author,createdAt,updatedAt,mergedAt,closedAt,headRefName,baseRefName,headRefOid,baseRefOid,additions,deletions,changedFiles,reviewDecision,mergeable,statusCheckRollup,reviews,comments,commits,labels,reviewRequests,autoMergeRequest";
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -42,6 +42,11 @@ pub fn pull_request(cwd: &Path, pr: &str, path: Option<&str>) -> Result<Value, S
         view["truncated"] = true.into();
     }
     view["diff"] = diff.into();
+    if let Value::Object(extras) = crate::panel::pr_extras(cwd, pr, &view, path) {
+        for (key, value) in extras {
+            view[key] = value;
+        }
+    }
     Ok(view)
 }
 
@@ -53,6 +58,15 @@ pub enum PrAction {
     Rebase,
     /// Marks a draft ready for review.
     Ready,
+    Close,
+    Reopen,
+    /// Opens a pull request that undoes this merged one.
+    Revert,
+    /// Merges once the required checks and reviews pass, by the method named.
+    AutoMerge,
+    AutoSquash,
+    AutoRebase,
+    DisableAuto,
 }
 
 pub fn pr_action(cwd: &Path, pr: &str, action: PrAction, path: Option<&str>) -> Result<(), String> {
@@ -62,6 +76,13 @@ pub fn pr_action(cwd: &Path, pr: &str, action: PrAction, path: Option<&str>) -> 
         PrAction::Squash => &["pr", "merge", "--squash", "--", pr],
         PrAction::Rebase => &["pr", "merge", "--rebase", "--", pr],
         PrAction::Ready => &["pr", "ready", "--", pr],
+        PrAction::Close => &["pr", "close", "--", pr],
+        PrAction::Reopen => &["pr", "reopen", "--", pr],
+        PrAction::Revert => &["pr", "revert", "--", pr],
+        PrAction::AutoMerge => &["pr", "merge", "--auto", "--merge", "--", pr],
+        PrAction::AutoSquash => &["pr", "merge", "--auto", "--squash", "--", pr],
+        PrAction::AutoRebase => &["pr", "merge", "--auto", "--rebase", "--", pr],
+        PrAction::DisableAuto => &["pr", "merge", "--disable-auto", "--", pr],
     };
     gh(cwd, path, args).map(drop)
 }
@@ -109,13 +130,19 @@ pub struct Diff {
     pub base: Option<String>,
 }
 
-pub fn diff(cwd: &Path, scope: DiffScope, ignore_whitespace: bool) -> Result<Diff, String> {
+pub fn diff(cwd: &Path, scope: DiffScope, ignore_whitespace: bool, against: Option<&str>) -> Result<Diff, String> {
     let git = |args: &[&str]| run(cwd, None, "git", args).ok().map(|out| out.trim().to_owned()).filter(|out| !out.is_empty());
     let tree = history::snapshot(cwd).ok_or("this folder is not a git repository")?;
     let (from, base) = match scope {
         DiffScope::Uncommitted => (git(&["rev-parse", "--verify", "-q", "HEAD"]).unwrap_or_else(|| EMPTY_TREE.to_owned()), None),
         DiffScope::Base => {
-            let base = git(&["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"])
+            let chosen = match against {
+                Some(b) if b.starts_with('-') || b.is_empty() => return Err(format!("{b:?} is not a branch")),
+                Some(b) => Some(git(&["rev-parse", "--verify", "-q", b]).map(|_| b.to_owned()).ok_or_else(|| format!("there is no branch {b}"))?),
+                None => None,
+            };
+            let base = chosen
+                .or_else(|| git(&["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]))
                 .or_else(|| ["origin/main", "origin/master", "main", "master"].into_iter().find(|b| git(&["rev-parse", "--verify", "-q", b]).is_some()).map(str::to_owned))
                 .ok_or("there is no default branch to compare with: no origin/HEAD, main or master")?;
             let fork = git(&["merge-base", "HEAD", &base]).ok_or_else(|| format!("this branch shares no history with {base}"))?;
@@ -411,16 +438,16 @@ mod tests {
         let repo = dir.path();
         git(repo, &["init", "-q", "-b", "main"]);
         std::fs::write(repo.join("new.txt"), "fresh\n").unwrap();
-        let before_any_commit = diff(repo, DiffScope::Uncommitted, false).unwrap();
+        let before_any_commit = diff(repo, DiffScope::Uncommitted, false, None).unwrap();
         assert!(before_any_commit.patch.contains("+++ b/new.txt"), "{}", before_any_commit.patch);
 
         std::fs::write(repo.join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
         commit(repo, "first");
         std::fs::write(repo.join("a.rs"), "fn a() {}\n    fn b() {}\nfn c() {}\n").unwrap();
         std::fs::write(repo.join("untracked.md"), "hi\n").unwrap();
-        let all = diff(repo, DiffScope::Uncommitted, false).unwrap();
+        let all = diff(repo, DiffScope::Uncommitted, false, None).unwrap();
         assert!(all.patch.contains("+    fn b() {}") && all.patch.contains("+++ b/untracked.md"), "{}", all.patch);
-        let trimmed = diff(repo, DiffScope::Uncommitted, true).unwrap();
+        let trimmed = diff(repo, DiffScope::Uncommitted, true, None).unwrap();
         assert!(!trimmed.patch.contains("+    fn b() {}") && trimmed.patch.contains("+fn c() {}"), "{}", trimmed.patch);
         assert_eq!((all.base, all.truncated), (None, false));
     }
@@ -436,14 +463,19 @@ mod tests {
         std::fs::write(repo.join("feature.txt"), "two\n").unwrap();
         commit(repo, "feature");
         std::fs::write(repo.join("wip.txt"), "three\n").unwrap();
-        let changes = diff(repo, DiffScope::Base, false).unwrap();
+        let changes = diff(repo, DiffScope::Base, false, None).unwrap();
         assert_eq!(changes.base.as_deref(), Some("main"));
+        let against_feature = diff(repo, DiffScope::Base, false, Some("feature")).unwrap();
+        assert_eq!(against_feature.base.as_deref(), Some("feature"));
+        assert!(against_feature.patch.contains("b/wip.txt") && !against_feature.patch.contains("b/feature.txt"), "{}", against_feature.patch);
+        assert!(diff(repo, DiffScope::Base, false, Some("--output=x")).unwrap_err().contains("is not a branch"));
+        assert!(diff(repo, DiffScope::Base, false, Some("nope")).unwrap_err().contains("no branch nope"));
         assert!(changes.patch.contains("b/feature.txt") && changes.patch.contains("b/wip.txt") && !changes.patch.contains("main.txt"), "{}", changes.patch);
 
         let lone = tempfile::tempdir().unwrap();
         git(lone.path(), &["init", "-q", "-b", "trunk"]);
-        assert!(diff(lone.path(), DiffScope::Base, false).unwrap_err().contains("no default branch"));
-        assert!(diff(&lone.path().join(".git"), DiffScope::Uncommitted, false).is_err());
+        assert!(diff(lone.path(), DiffScope::Base, false, None).unwrap_err().contains("no default branch"));
+        assert!(diff(&lone.path().join(".git"), DiffScope::Uncommitted, false, None).is_err());
     }
 
     #[test]
