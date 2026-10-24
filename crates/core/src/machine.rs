@@ -336,6 +336,17 @@ impl Machine {
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
             Call::Workspace { tab } => json(workspace::of(&self.tab(&tab, |t| t.cwd.clone())?)),
             Call::PullRequest { tab, pr } => json(workspace::pull_request(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
+            Call::PrAction { tab, pr, action } => json(workspace::pr_action(&self.tab(&tab, |t| t.cwd.clone())?, &pr, action, self.launch.path_env.as_deref())?),
+            Call::Diff { tab, scope, ignore_whitespace } => json(workspace::diff(&self.tab(&tab, |t| t.cwd.clone())?, scope, ignore_whitespace)?),
+            Call::Ports { tab } => {
+                let pid = self.tab(&tab, |t| t.session.as_ref().and_then(|s| s.pid()))?;
+                json(workspace::listeners(pid, self.launch.path_env.as_deref()))
+            }
+            Call::Editors => json(workspace::editors(&home(), self.launch.path_env.as_deref())),
+            Call::OpenIn { tab, editor, path } => {
+                let cwd = self.tab(&tab, |t| t.cwd.clone())?;
+                json(workspace::open_in(&cwd, &editor, path.as_deref(), &home(), self.launch.path_env.as_deref())?)
+            }
         }
     }
 

@@ -3,6 +3,7 @@
 
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
+use crate::workspace::{DiffScope, PrAction};
 use crate::{sync, thread};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -126,13 +127,45 @@ pub enum Call {
     Workspace { tab: TabId },
     /// What `gh pr view` answers for `pr`, a number or URL, run in the tab's folder, plus `diff`.
     PullRequest { tab: TabId, pr: String },
+    /// `null`. Merges `pr`, or marks it ready, through gh in the tab's folder.
+    PrAction { tab: TabId, pr: String, action: PrAction },
+    /// `workspace::Diff`: the tab's working tree against HEAD or the default branch.
+    Diff {
+        tab: TabId,
+        scope: DiffScope,
+        #[serde(default)]
+        ignore_whitespace: bool,
+    },
+    /// `Vec<workspace::Listener>`: the machine's web servers, the tab's session's own first.
+    Ports { tab: TabId },
+    /// `Vec<workspace::Editor>` installed on the machine.
+    Editors,
+    /// `null`. Opens the tab's folder, or `path` inside its repository, in the editor `editor`.
+    OpenIn {
+        tab: TabId,
+        editor: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
 }
 
 impl Call {
     /// Runs off the machine's call queue, which carries keystrokes in order: a run may clone a
     /// repository for minutes, gh waits on GitHub, and the others read files or run git.
     pub fn may_wait(&self) -> bool {
-        matches!(self, Call::Run { .. } | Call::PullRequest { .. } | Call::Thread { .. } | Call::Workspace { .. } | Call::ProjectHistory { .. })
+        matches!(
+            self,
+            Call::Run { .. }
+                | Call::PullRequest { .. }
+                | Call::PrAction { .. }
+                | Call::Thread { .. }
+                | Call::Workspace { .. }
+                | Call::ProjectHistory { .. }
+                | Call::Diff { .. }
+                | Call::Ports { .. }
+                | Call::Editors
+                | Call::OpenIn { .. }
+        )
     }
 }
 
@@ -447,6 +480,15 @@ mod tests {
             Call::Upload { name: "photo.jpg".into(), data: Bytes(b"\xff\xd8".to_vec()) },
             json!({ "cmd": "upload", "name": "photo.jpg", "data": "/9g=" }),
         );
+        round_trip(
+            Call::Diff { tab: "tab-1".into(), scope: DiffScope::Base, ignore_whitespace: true },
+            json!({ "cmd": "diff", "tab": "tab-1", "scope": "base", "ignore_whitespace": true }),
+        );
+        round_trip(
+            Call::PrAction { tab: "tab-1".into(), pr: "7".into(), action: PrAction::Ready },
+            json!({ "cmd": "pr_action", "tab": "tab-1", "pr": "7", "action": "ready" }),
+        );
+        round_trip(Call::OpenIn { tab: "tab-1".into(), editor: "zed".into(), path: None }, json!({ "cmd": "open_in", "tab": "tab-1", "editor": "zed" }));
     }
 
     #[test]
