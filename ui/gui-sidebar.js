@@ -53,6 +53,8 @@ function threadRow(tab) {
   const slot = statusSlot(tab);
   row.classList.toggle("receded", tab !== active && !slot);
   row.classList.toggle("working", phaseOf(tab) === "working" && tab !== active);
+  const draft = tab !== active && hasDraft(tab);
+  row.classList.toggle("draft", draft);
   row.dataset.tab = tab.key;
   const pr = prOf(tab);
   const ws = t.workspace;
@@ -62,7 +64,7 @@ function threadRow(tab) {
     : `<span class="branch">${esc(tilde(tab.view.cwd))}</span>`;
   row.innerHTML = `<span class="l1"><span class="project">${esc(projectName(tab))}</span>${remote}${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}
       ${slot ? `<span class="status ${slot.tone}">${icon(slot.icon)}${slot.text}</span>` : `<span class="when">${esc(ago(tab.view.updated))}</span>`}</span>
-    <span class="l2">${esc(threadTitle(tab))}</span>
+    <span class="l2">${draft ? `<span class="draft-pen" title="Unsent draft">${icon("square-pen")}</span>` : ""}${esc(threadTitle(tab))}</span>
     <span class="l3">${where}${pr ? `<span class="pr" data-pr="${esc(pr.url)}" title="Open pull request #${pr.number}">${icon("git-pull-request")}#${pr.number}</span>` : ""}<span class="provider">${icon("claude")}</span></span>`;
   row.onclick = (e) => {
     activate(tab);

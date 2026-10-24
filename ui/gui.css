@@ -49,7 +49,7 @@ body[data-mode="gui"][data-sidebar="closed"] #workspace { grid-template-columns:
 body[data-mode="gui"][data-panel="open"] #workspace { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--panel-width); }
 body[data-mode="gui"][data-panel="open"][data-sidebar="closed"] #workspace { grid-template-columns: 0 minmax(0, 1fr) var(--panel-width); }
 body[data-mode="gui"][data-panel="open"][data-panel-max="true"] #workspace { grid-template-columns: 0 0 minmax(0, 1fr); }
-body[data-mode="gui"][data-drawer="open"] #workspace { grid-template-rows: minmax(0, 1fr) 280px; }
+body[data-mode="gui"][data-drawer="open"] #workspace { grid-template-rows: minmax(0, 1fr) var(--drawer-height, 280px); }
 body[data-mode="gui"] #sidebar { display: flex; grid-column: 1; grid-row: 1 / -1; }
 body[data-mode="gui"] #chat { display: flex; grid-column: 2; grid-row: 1; }
 body[data-mode="gui"] #panel { display: flex; grid-column: 3; grid-row: 1 / -1; }
