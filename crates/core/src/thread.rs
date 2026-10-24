@@ -28,6 +28,8 @@ pub enum Item {
     Note { id: String, at: String, text: String },
     /// A pull request the session opened or worked on.
     Pr { number: u64, url: String, repo: String },
+    /// The model the session runs from here on, by its marketing name, such as `Haiku 5.5`.
+    Model { name: String },
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -75,6 +77,10 @@ fn items_of(line: &Value) -> Vec<Item> {
             None => vec![],
         },
         Some("user") => user_items(&line["message"]["content"], id, at),
+        Some("attachment") if line["attachment"]["type"] == "model" => match line["attachment"]["identity"]["marketingName"].as_str() {
+            Some(name) => vec![Item::Model { name: name.to_owned() }],
+            None => vec![],
+        },
         Some("assistant") => {
             let blocks = line["message"]["content"].as_array().cloned().unwrap_or_default();
             blocks
@@ -225,6 +231,8 @@ mod tests {
             r#"{"type":"user","uuid":"u2","timestamp":"2026-10-23T10:00:09Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok","is_error":false}]}}"#,
             r#"{"type":"assistant","uuid":"a2","timestamp":"2026-10-23T10:01:00Z","message":{"content":[{"type":"text","text":"Fixed."}]}}"#,
             r#"{"type":"pr-link","prNumber":7,"prUrl":"https://github.com/o/r/pull/7","prRepository":"o/r"}"#,
+            r#"{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"claude-haiku-5-5","marketingName":"Haiku 5.5"}}}"#,
+            r#"{"type":"attachment","attachment":{"type":"hook_success","content":"x"}}"#,
         ])
         .items;
         assert_eq!(
@@ -235,6 +243,7 @@ mod tests {
                 Item::Result { tool: "t1".into(), at: "2026-10-23T10:00:09Z".into(), error: false, text: "ok".into() },
                 Item::Text { id: "a2:0".into(), at: "2026-10-23T10:01:00Z".into(), text: "Fixed.".into() },
                 Item::Pr { number: 7, url: "https://github.com/o/r/pull/7".into(), repo: "o/r".into() },
+                Item::Model { name: "Haiku 5.5".into() },
             ]
         );
     }

@@ -84,7 +84,11 @@ const firstPrompt = (tab) => threadOf(tab).items.find((i) => i.kind === "user")?
 const threadTitle = (tab) => tab.view.title || firstPrompt(tab) || "New thread";
 const prOf = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kind === "pr");
 const asksPermission = (tab) => statusOf(tab) === "needs-input" && /permission/i.test(tab.view.message ?? "");
-const unseenDone = (tab) => statusOf(tab) === "done" && tab !== active && (tab.view.updated ?? 0) > (seenAt[tab.key] ?? 0);
+/** claude sends "waiting for your input" a while after a turn ends: the turn is over, nothing is asked. */
+const idleNotice = (tab) => statusOf(tab) === "needs-input" && !asksPermission(tab) && !tab.menu && /waiting for your input/i.test(tab.view.message ?? "");
+/** A turn is live while claude works on it or waits on an answer to carry on. */
+const turnLive = (tab) => statusOf(tab) === "working" || (statusOf(tab) === "needs-input" && !idleNotice(tab));
+const unseenDone = (tab) => (statusOf(tab) === "done" || idleNotice(tab)) && tab !== active && (tab.view.updated ?? 0) > (seenAt[tab.key] ?? 0);
 const settled = (tab) => !!tab.view.updated && ["idle", "done"].includes(statusOf(tab)) && tab !== active && Date.now() / 1000 - tab.view.updated > SETTLE_AFTER_S;
 
 function markThreadSeen(tab) {
@@ -99,7 +103,7 @@ function statusSlot(tab) {
   if (tab.menu) return { icon: "shield-question", text: "Approval", tone: "warning" };
   if (status === "working") return { icon: "circle-dashed", text: "Working", tone: "info" };
   if (asksPermission(tab)) return { icon: "shield-question", text: "Approval", tone: "warning" };
-  if (status === "needs-input") return { icon: "circle-alert", text: "Input", tone: "input" };
+  if (status === "needs-input" && !idleNotice(tab)) return { icon: "circle-alert", text: "Input", tone: "input" };
   if (status === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "warning" } : { icon: "circle-alert", text: "Failed", tone: "error" };
   if (unseenDone(tab)) return { icon: "circle-check", text: "Done", tone: "success" };
   return null;
@@ -205,7 +209,7 @@ function turnsOf(items) {
   const results = new Map(items.filter((i) => i.kind === "result").map((r) => [r.tool, r]));
   let turn = null;
   for (const item of items) {
-    if (item.kind === "result") continue;
+    if (item.kind === "result" || item.kind === "model") continue;
     if (item.kind === "user" || !turn) {
       turn = { id: item.id ?? `t${turns.length}`, user: item.kind === "user" ? item : null, steps: [], prs: [], notes: [] };
       turns.push(turn);
@@ -321,7 +325,7 @@ function renderThread() {
   if (pr) chip.querySelector("span").textContent = `#${pr.number}`;
 
   const turns = turnsOf(t.items);
-  const working = ["working", "needs-input"].includes(statusOf(tab));
+  const working = turnLive(tab);
   const changes = changesByTurn(t.history, turns);
   const body = turns.length
     ? turns.map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && i === turns.length - 1)).join("")
@@ -392,6 +396,7 @@ async function fetchThread(tab) {
     }
     t.unsupported = false;
     const grew = page.items.length > 0 || !t.loaded;
+    if (page.items.some((i) => i.kind === "model")) t.picked = null;
     t.items.push(...page.items);
     t.next = page.next;
     t.loaded = true;
@@ -497,6 +502,7 @@ function renderComposer(tab) {
   document.querySelector("#send").innerHTML = icon(working && prompt.value.trim() ? "list-plus" : "arrow-up");
   document.querySelector("#send").title = working ? "Queue message (Enter)" : "Send (Enter)";
   renderApproval(tab);
+  document.querySelector("#model-button .name").textContent = tab ? modelName(tab) : "Default";
   const footer = document.getElementById("composer-footer");
   if (!tab) return (footer.innerHTML = "");
   const t = threadOf(tab);
@@ -545,7 +551,7 @@ function terminalMenu(tab) {
   }
   if (options.length < 2) return null;
   const rule = lines.slice(0, first).findLastIndex((l) => /^\s*[─━]{8,}/.test(l));
-  const question = lines.slice(rule + 1, first).map((l) => l.trim()).filter(Boolean).join("\n");
+  const question = lines.slice(rule + 1, first).map((l) => l.trim()).filter((l) => l && !/^[─━╌┄┈═-]+$/.test(l)).join("\n");
   return { question, options };
 }
 const CURSOR = /[❯›](?= )/;
@@ -680,14 +686,15 @@ const sendSlash = (text) => active && callOn(active.machine, { cmd: "prompt", ta
 document.getElementById("model-button").onclick = (e) =>
   openMenu(e.currentTarget, MODELS_MENU.map(([id, label, hint]) => [label, hint, () => {
     sendSlash(`/model ${id}`);
-    save("gui-model", id);
-    renderModel();
+    threadOf(active).picked = label;
+    renderComposer(active);
   }]));
-function renderModel() {
-  const id = load("gui-model") ?? "default";
-  document.querySelector("#model-button .name").textContent = MODELS_MENU.find(([m]) => m === id)?.[1] ?? "Default";
+
+/** The model claude last reported in the transcript, or the one just picked until it reports again. */
+function modelName(tab) {
+  const t = threadOf(tab);
+  return t.picked ?? [...t.items].reverse().find((i) => i.kind === "model")?.name ?? "Default";
 }
-renderModel();
 
 document.getElementById("more-button").onclick = (e) => {
   const tab = active;

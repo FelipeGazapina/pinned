@@ -294,7 +294,7 @@ body[data-shell="web"] #gui-minimize { display: none !important; }
 #composer-footer button:hover { background: var(--g-accent); }
 #composer-footer .spacer { padding: 0; }
 
-#approval { display: flex; gap: 10px; align-items: flex-start; width: calc(100% - 44px); margin-bottom: -17px; padding: 12px 12px 29px;
+#approval { display: flex; gap: 10px; align-items: flex-start; width: calc(100% - 44px); max-width: calc(var(--lane) - 44px); margin-bottom: -17px; padding: 12px 12px 29px;
   border-radius: 18px 18px 0 0; border: 1px solid rgb(254 154 0 / 0.28); background: rgb(254 154 0 / 0.08); backdrop-filter: blur(12px); }
 #approval[hidden] { display: none; }
 #approval[data-kind="input"] { border-color: rgb(81 162 255 / 0.28); background: rgb(81 162 255 / 0.08); }
