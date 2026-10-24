@@ -15,6 +15,7 @@ pub mod machine;
 pub mod plugin;
 pub mod projects;
 pub mod pty;
+pub mod pulls;
 pub mod reminders;
 pub mod sessions;
 pub mod slack;

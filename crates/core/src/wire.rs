@@ -4,7 +4,7 @@
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
 use crate::workspace::{DiffScope, PrAction};
-use crate::{sync, thread};
+use crate::{pulls, sync, thread};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -163,6 +163,14 @@ pub enum Call {
         #[serde(default)]
         create: bool,
     },
+    /// `pulls::PullRequests` of the GitHub repositories of the machine's folders `paths`, through gh.
+    PullRequests {
+        paths: Vec<String>,
+        state: pulls::ListState,
+        involvement: pulls::Involvement,
+        #[serde(default)]
+        query: String,
+    },
     /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since` on.
     TokenUsage { since: u64 },
 }
@@ -188,6 +196,7 @@ impl Call {
                 | Call::Branches { .. }
                 | Call::Checkout { .. }
                 | Call::TokenUsage { .. }
+                | Call::PullRequests { .. }
         )
     }
 }

@@ -197,6 +197,7 @@ function actionItems() {
     resume && { icon: "copy", title: "Copy thread ID", sub: threadOf(tab).session, hint: chordLabel("C", { shift: true }), terms: ["copy thread id", "resume session reference"], run: () => copyResume() },
     tab && { icon: "git-pull-request", title: "Show linked pull requests", disabled: !pr, terms: ["show linked pull requests", "pr"], run: () => openSurface("pr") },
     { icon: "folder-plus", title: "Add project", terms: ["add project", "open folder"], run: () => addProject() },
+    { icon: "git-pull-request", title: "Open pull requests", terms: ["open pull requests", "prs reviews"], run: () => openPage("pull-requests") },
     { icon: "chart-column", title: "Open usage", hint: chordLabel("U"), terms: ["open usage", "cost tokens limits"], run: () => openPage("usage") },
     { icon: "square-terminal", title: "Switch to terminal view", hint: chordLabel("E"), terms: ["switch to terminal view", "mode"], run: () => setMode("terminal") },
     { icon: "settings", title: "Open settings", hint: chordLabel(","), terms: ["open settings", "settings preferences configuration"], run: () => openSettings() },
@@ -665,3 +666,221 @@ SHELL_PAGES.usage = {
 };
 onGuiKey("u", () => openPage("usage"));
 
+/** T3 Code's Pull requests page: the pull requests of every open project's GitHub repository, from
+ * each machine's gh, grouped by the viewer's part in them. A row opens in the side panel. */
+const PR_STATES = [
+  ["all", "All"],
+  ["open", "Open"],
+  ["closed", "Closed"],
+  ["merged", "Merged"],
+];
+const PR_INVOLVEMENTS = [
+  ["all", "All"],
+  ["reviewing", "Reviewing"],
+  ["authored", "Authored"],
+];
+const PR_SORTS = [
+  ["ready", "Merge readiness"],
+  ["blocked", "Blocked on me"],
+  ["updated", "Recently updated"],
+  ["newest", "Newest shown"],
+  ["oldest", "Oldest shown"],
+  ["largest", "Largest shown"],
+  ["smallest", "Smallest shown"],
+];
+const PR_GROUPS = [
+  ["authored", "Authored", "pencil"],
+  ["reviewing", "Review requested", "eye"],
+  ["others", "Others", "users"],
+];
+const PR_STATE_ICON = {
+  open: ["git-pull-request-arrow", "#059669", "Open"],
+  draft: ["git-pull-request-draft", "#71717a", "Draft"],
+  closed: ["git-pull-request-closed", "#dc2626", "Closed"],
+  merged: ["git-merge", "#7c3aed", "Merged"],
+};
+const PR_CHECKS = { passing: ["circle-check", "#059669", "Checks passing"], failing: ["circle-x", "#dc2626", "Checks failing"], pending: ["circle-dot", "#d97706", "Checks pending"] };
+const PR_REVIEW = { approved: ["user-check", "#059669", "Approved"], changes_requested: ["user-round-x", "#d97706", "Changes requested"], review_required: ["user-round", "", "Awaiting review"] };
+const pulls = { state: "open", involvement: "all", sort: "ready", q: "", rows: null, error: "", loading: false, fetchedAt: 0, seq: 0 };
+try {
+  const saved = JSON.parse(load("gui-pr-page"));
+  for (const [key, list] of [["state", PR_STATES], ["involvement", PR_INVOLVEMENTS], ["sort", PR_SORTS]]) if (list.some(([v]) => v === saved?.[key])) pulls[key] = saved[key];
+} catch {}
+
+/** The open projects' folders, per machine. */
+function openProjects() {
+  const byMachine = new Map();
+  for (const tab of tabs) {
+    if (!machines.get(tab.machine)?.view.online) continue;
+    if (!byMachine.has(tab.machine)) byMachine.set(tab.machine, new Set());
+    byMachine.get(tab.machine).add(projectOfTab(tab));
+  }
+  return byMachine;
+}
+
+async function fetchPulls() {
+  const seq = ++pulls.seq;
+  Object.assign(pulls, { loading: true, error: "" });
+  renderPullsPage();
+  const asks = [...openProjects()].map(([m, paths]) => callOn(m, { cmd: "pull_requests", paths: [...paths], state: pulls.state, involvement: pulls.involvement, query: pulls.q }));
+  const answers = await Promise.allSettled(asks);
+  if (seq !== pulls.seq) return;
+  const seen = new Set();
+  const rows = answers.flatMap((a) => (a.status === "fulfilled" ? a.value.rows : [])).filter((r) => !seen.has(r.url) && seen.add(r.url));
+  const failed = answers.find((a) => a.status === "rejected");
+  Object.assign(pulls, { rows: failed && !rows.length && pulls.rows === null ? null : rows, error: failed ? String(failed.reason) : "", loading: false, fetchedAt: Date.now() });
+  if (shellPage() === "pull-requests") renderPullsPage();
+}
+
+const savePulls = () => save("gui-pr-page", JSON.stringify({ state: pulls.state, involvement: pulls.involvement, sort: pulls.sort }));
+function setPulls(change) {
+  Object.assign(pulls, change);
+  savePulls();
+  fetchPulls();
+}
+
+const sizeOf = (r) => r.additions + r.deletions;
+const PR_SORT_RANK = {
+  ready: (r) => (r.conflicting ? 4 : r.state === "merged" || r.state === "closed" ? 3 : r.state === "draft" ? 2 : r.checks === "passing" && r.review === "approved" ? 0 : r.checks === "passing" ? 1 : 2),
+  author: (r) => (r.state === "merged" || r.state === "closed" ? 6 : r.conflicting ? 0 : r.review === "changes_requested" ? 1 : r.checks === "failing" ? 2 : r.state === "draft" ? 3 : r.checks === "passing" && r.review === "approved" ? 5 : 4),
+  reviewer: (r) => (r.state === "open" || r.state === "draft" ? 0 : 1),
+};
+/** T3 Code's orders within a group; "updated" keeps GitHub's, and a search keeps its relevance. */
+function sortPulls(list, group) {
+  const { sort } = pulls;
+  const recent = (a, b) => b.updated_at.localeCompare(a.updated_at);
+  const bySize = (a, b) => Number(sizeOf(b) > 0) - Number(sizeOf(a) > 0);
+  if (sort === "ready") return pulls.q.trim() ? list : [...list].sort((a, b) => PR_SORT_RANK.ready(a) - PR_SORT_RANK.ready(b) || bySize(a, b) || sizeOf(a) - sizeOf(b) || recent(a, b));
+  if (sort === "blocked") {
+    const role = group === "others" ? pulls.involvement : group;
+    if (pulls.q.trim() || role === "all") return list;
+    const rank = role === "authored" ? PR_SORT_RANK.author : PR_SORT_RANK.reviewer;
+    return [...list].sort((a, b) => rank(a) - rank(b) || recent(a, b));
+  }
+  if (sort === "newest" || sort === "oldest") return [...list].sort((a, b) => (sort === "newest" ? -1 : 1) * a.created_at.localeCompare(b.created_at) || recent(a, b));
+  if (sort === "largest" || sort === "smallest") return [...list].sort((a, b) => bySize(a, b) || (sort === "largest" ? -1 : 1) * (sizeOf(a) - sizeOf(b)) || recent(a, b));
+  return list;
+}
+
+const unixOfIso = (iso) => Date.parse(iso) / 1000 || 0;
+function pullRowHtml(r) {
+  const [stateIcon, stateColor, stateLabel] = PR_STATE_ICON[r.state];
+  const checks = r.checks && PR_CHECKS[r.checks];
+  const review = r.review && PR_REVIEW[r.review];
+  const mark = ([ic, color, label], cls) => `<span class="${cls}" title="${label}" style="${color ? `color:${color}` : ""}">${icon(ic)}</span>`;
+  const labels = r.labels.slice(0, 3).map((l) => `<span class="label" style="--label:#${/^[0-9a-f]{6}$/i.test(l.color) ? l.color : "818181"}">${esc(l.name)}</span>`).join("") + (r.labels.length > 3 ? `<span class="more">+${r.labels.length - 3}</span>` : "");
+  const open = r.state === "open" || r.state === "draft";
+  const quick = [
+    open && `<button type="button" class="danger" data-quick="close">Close</button>`,
+    r.state === "open" && `<button type="button" data-quick="merge">Merge</button>`,
+    r.state === "draft" && `<button type="button" data-quick="ready">Ready for review</button>`,
+    r.state === "closed" && `<button type="button" data-quick="reopen">Reopen</button>`,
+  ].filter(Boolean).join("");
+  return `<div class="pr-row${active && threadOf(active).prUrl === r.url ? " selected" : ""}" role="button" tabindex="0" data-url="${esc(r.url)}">
+    <span class="state" title="${stateLabel}" style="color:${stateColor}">${icon(stateIcon)}${open && r.state === "open" && r.conflicting ? `<span class="conflict" title="Conflicts with ${esc(r.base)}">${icon("triangle-alert")}</span>` : ""}</span>
+    <span class="body"><span class="line1"><span class="num">#${r.number}</span><span class="title">${esc(r.title)}</span>${checks ? mark(checks, "checks") : ""}${review ? mark(review, "review") : ""}
+      <span class="right">${sizeOf(r) ? `<span class="stat"><span class="add">+${r.additions}</span> <span class="del">-${r.deletions}</span></span>` : ""}</span></span>
+    <span class="line2">${/^https:\/\/avatars\.githubusercontent\.com\//.test(r.avatar) ? `<img src="${esc(r.avatar)}" alt="" referrerpolicy="no-referrer">` : ""}<span class="login">${esc(r.author)}</span><span class="repo">${esc(r.repo)}</span>${labels}<span class="when">${agoLong(unixOfIso(r.updated_at))}</span></span></span>
+    ${quick ? `<span class="quick">${quick}</span>` : ""}</div>`;
+}
+
+function pullsEmptyHtml() {
+  const art = `<span class="art">${icon("git-pull-request")}</span>`;
+  if (!openProjects().size) return `<div class="pr-empty">${art}<h2>No projects in this workspace</h2><p>Add a project, and the pull requests from its repository appear here.</p><button type="button" class="outline" data-pr="add-project">Add project</button></div>`;
+  if (pulls.q.trim()) return `<div class="pr-empty">${art}<h2>Nothing matches “${esc(pulls.q.trim())}”</h2><p>The hosts were searched for it. Try fewer words, or search by number, author or branch.</p>
+    <span class="buttons"><button type="button" class="outline" data-pr="clear">Clear search</button><button type="button" class="outline" data-pr="refresh">${pulls.loading ? "Checking..." : "Check again"}</button></span></div>`;
+  if (pulls.state !== "open" || pulls.involvement !== "all") return `<div class="pr-empty">${art}<h2>Nothing under these filters</h2><p>Widen the state, involvement or project filter to see more.</p></div>`;
+  return `<div class="pr-empty">${art}<h2>No pull requests</h2><p>Pull requests from every project in this workspace appear here.</p></div>`;
+}
+
+function pullsListHtml() {
+  if (pulls.rows === null) {
+    if (pulls.error) return `<div class="pr-empty"><h2>Could not load pull requests</h2><p>${esc(pulls.error)}</p><span class="buttons"><button type="button" class="outline" data-pr="refresh">Retry</button></span></div>`;
+    return `<div class="pr-list" aria-label="Loading pull requests">${Array.from({ length: 7 }, () => `<div class="pr-row ghost-row"><i class="ghost"></i><i class="ghost"></i></div>`).join("")}</div>`;
+  }
+  const warn = pulls.error ? `<p class="pr-warn">${icon("triangle-alert")}<span>${esc(pulls.error)} Showing the last pull requests loaded.</span><button type="button" class="outline" data-pr="refresh">Retry</button></p>` : "";
+  if (!pulls.rows.length) return warn + pullsEmptyHtml();
+  if (pulls.involvement !== "all") return `${warn}<div class="pr-list">${sortPulls(pulls.rows, pulls.involvement).map(pullRowHtml).join("")}</div>`;
+  return warn + PR_GROUPS.map(([key, label, ic]) => {
+    const list = pulls.rows.filter((r) => r.group === key);
+    if (!list.length) return "";
+    return `<section class="pr-group" data-group="${key}"><h3>${icon(ic)}<span>${label}</span><span class="count">${list.length}</span><span class="rule"></span></h3><div class="pr-list">${sortPulls(list, key).map(pullRowHtml).join("")}</div></section>`;
+  }).join("");
+}
+
+function renderPullsPage() {
+  const focused = document.activeElement?.matches?.("#page-view .pr-search input");
+  const caret = focused ? document.activeElement.selectionStart : null;
+  const stateLabel = PR_STATES.find(([v]) => v === pulls.state)[1];
+  const involvementLabel = PR_INVOLVEMENTS.find(([v]) => v === pulls.involvement)[1];
+  pageView.innerHTML = `${headHtml("Pull Requests")}<div class="page-body"><div class="page-wrap pulls"${pulls.loading && pulls.rows ? " data-refreshing" : ""}>
+    <div class="pr-toolbar"><label class="pr-search">${icon("search")}<input type="search" placeholder="Search pull requests, or label:bug" aria-label="Search pull requests" value="${esc(pulls.q)}" spellcheck="false" autocomplete="off"></label>
+      <button type="button" class="outline" data-pr="sort" title="Sort">${icon("arrow-down-up")}<span>Sort</span></button>
+      <button type="button" class="outline" data-pr="filters" title="Filters">${icon("list-filter")}<span>${stateLabel} · ${involvementLabel}</span></button>
+      <button type="button" class="outline icon-only" data-pr="refresh" title="Refresh pull requests" aria-label="Refresh pull requests">${icon("refresh-cw")}</button></div>
+    ${pullsListHtml()}</div></div>`;
+  if (focused) {
+    const input = pageView.querySelector(".pr-search input");
+    input.focus();
+    input.setSelectionRange(caret, caret);
+  }
+}
+
+let pullSearchTimer = 0;
+pageView.addEventListener("input", (e) => {
+  if (shellPage() !== "pull-requests" || !e.target.matches(".pr-search input")) return;
+  pulls.q = e.target.value;
+  clearTimeout(pullSearchTimer);
+  pullSearchTimer = setTimeout(fetchPulls, 300);
+});
+pageView.addEventListener("click", (e) => {
+  if (shellPage() !== "pull-requests") return;
+  const act = e.target.closest("[data-pr]")?.dataset.pr;
+  if (act === "refresh") return fetchPulls();
+  if (act === "add-project") return addProject();
+  if (act === "clear") return setPulls({ q: "" });
+  if (act === "sort") return openSideMenu(PR_SORTS.map(([value, label]) => ({ label, checked: pulls.sort === value, run: () => (Object.assign(pulls, { sort: value }), savePulls(), renderPullsPage()) })), e.target.closest("button"));
+  if (act === "filters") {
+    return openSideMenu([
+      { label: "State", icon: "git-pull-request", children: () => PR_STATES.map(([value, label]) => ({ label, checked: pulls.state === value, run: () => setPulls({ state: value }) })) },
+      { label: "Involvement", icon: "users", children: () => PR_INVOLVEMENTS.map(([value, label]) => ({ label, checked: pulls.involvement === value, run: () => setPulls({ involvement: value }) })) },
+    ], e.target.closest("button"));
+  }
+  const quick = e.target.closest("[data-quick]");
+  const row = e.target.closest(".pr-row[data-url]");
+  if (quick && row) return quickPull(row.dataset.url, quick.dataset.quick);
+  if (row) openPull(row.dataset.url);
+});
+pageView.addEventListener("keydown", (e) => {
+  const row = e.target.closest?.(".pr-row[data-url]");
+  if (row && (e.key === "Enter" || e.key === " ") && shellPage() === "pull-requests") {
+    e.preventDefault();
+    openPull(row.dataset.url);
+  }
+});
+function openPull(url) {
+  if (!active) return openOutside(url);
+  openPr(active, url);
+  renderPullsPage();
+}
+async function quickPull(url, action) {
+  if (!active) return openOutside(url);
+  try {
+    await callOn(active.machine, { cmd: "pr_action", tab: active.view.id, pr: url, action });
+    fetchPulls();
+  } catch (e) {
+    tell(`Couldn't ${action === "ready" ? "mark it ready" : action} the pull request: ${esc(e)}`, 6000);
+  }
+}
+for (const type of ["keydown", "keyup"]) window.addEventListener(type, (e) => e.key === "Shift" && (document.body.dataset.shiftHeld = e.type === "keydown"));
+window.addEventListener("blur", () => delete document.body.dataset.shiftHeld);
+onGuiKey("f", () => pageView.querySelector(".pr-search input")?.focus(), { when: () => shellPage() === "pull-requests" });
+setInterval(() => shellPage() === "pull-requests" && !document.hidden && fetchPulls(), 5 * 60 * 1000);
+document.addEventListener("visibilitychange", () => shellPage() === "pull-requests" && !document.hidden && Date.now() - pulls.fetchedAt > 10000 && fetchPulls());
+
+SHELL_PAGES["pull-requests"] = {
+  show() {
+    renderPullsPage();
+    fetchPulls();
+  },
+};

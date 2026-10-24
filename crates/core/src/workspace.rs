@@ -53,6 +53,8 @@ pub enum PrAction {
     Rebase,
     /// Marks a draft ready for review.
     Ready,
+    Close,
+    Reopen,
 }
 
 pub fn pr_action(cwd: &Path, pr: &str, action: PrAction, path: Option<&str>) -> Result<(), String> {
@@ -62,6 +64,8 @@ pub fn pr_action(cwd: &Path, pr: &str, action: PrAction, path: Option<&str>) -> 
         PrAction::Squash => &["pr", "merge", "--squash", "--", pr],
         PrAction::Rebase => &["pr", "merge", "--rebase", "--", pr],
         PrAction::Ready => &["pr", "ready", "--", pr],
+        PrAction::Close => &["pr", "close", "--", pr],
+        PrAction::Reopen => &["pr", "reopen", "--", pr],
     };
     gh(cwd, path, args).map(drop)
 }

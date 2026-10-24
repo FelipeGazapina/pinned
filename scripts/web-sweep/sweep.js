@@ -1946,6 +1946,84 @@ async function sweep(profileName) {
     return before;
   });
 
+  const prNumbers = (group) => page.locator(`#page-view ${group ? `.pr-group[data-group="${group}"] ` : ""}.pr-row[data-url] .num`).allTextContents();
+  const prFilter = async (kind, label) => {
+    await tapOrClick('#page-view [data-pr="filters"]');
+    await press(page.locator("#side-menu button", { hasText: kind }));
+    await press(page.locator("#side-menu button", { hasText: label }));
+  };
+  await step("shell: the Pull requests page lists the open projects' pull requests", async () => {
+    fs.writeFileSync(path.join(HOME, "gh.log"), "");
+    await showSidebar();
+    await tapOrClick('#sidebar footer [data-open-page="pull-requests"]');
+    await waitFor("the Pull requests page", () => page.locator("#page-view h1", { hasText: "Pull Requests" }).isVisible());
+    await waitFor("three groups", async () => (await page.locator("#page-view .pr-group").count()) === 3, 15000);
+    const groups = await page.locator("#page-view .pr-group h3 > span:nth-child(2)").allTextContents();
+    check(groups.join() === "Authored,Review requested,Others", `groups: ${groups.join()}`);
+    const rows = [await prNumbers("authored"), await prNumbers("reviewing"), await prNumbers("others")].map((n) => n.join());
+    check(rows.join(" | ") === "#42 | #41 | #43", `rows: ${rows.join(" | ")}`);
+    const search = readLog("gh.log").match(/ -F (q=.*)$/m)?.[1];
+    check(/^q=is:pr is:open sort:updated-desc repo:example\/\w+ repo:example\/\w+$/.test(search ?? ""), `gh searched: ${search}`);
+    const busy = '#page-view .pr-row[data-url$="/pull/43"]';
+    check(await page.locator(`${busy} .conflict`).isVisible(), "#43's conflict isn't marked");
+    check((await page.getAttribute(`${busy} .checks`, "title")) === "Checks failing", "#43's failing checks aren't shown");
+    check((await text(`${busy} .stat`)) === "+120 -30", `#43's size: ${await text(`${busy} .stat`)}`);
+    check((await page.locator(`${busy} .label`).count()) === 3 && (await text(`${busy} .more`)) === "+1", "#43 doesn't show three labels and +1");
+    check((await page.getAttribute('#page-view .pr-row[data-url$="/pull/42"] .review', "title")) === "Approved", "#42 isn't approved");
+    await prFilter("State", "Merged");
+    await waitFor("the merged pull request", async () => (await prNumbers()).join() === "#40");
+    await prFilter("State", "Open");
+    await waitFor("open again", async () => (await prNumbers()).length === 3);
+    await prFilter("Involvement", "Authored");
+    await waitFor("only the viewer's", async () => (await prNumbers()).join() === "#42" && !(await page.locator("#page-view .pr-group").count()));
+    await prFilter("Involvement", "All");
+    await page.fill("#page-view .pr-search input", "beta build");
+    await waitFor("the search", async () => (await prNumbers()).join() === "#43");
+    await page.fill("#page-view .pr-search input", "zzqx");
+    await waitFor("nothing matches", async () => (await text("#page-view .pr-empty h2")) === "Nothing matches “zzqx”");
+    await press(page.locator('#page-view [data-pr="clear"]'));
+    await waitFor("every row again", async () => (await prNumbers()).length === 3);
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    if (!touch) {
+      await page.keyboard.down("Shift");
+      await page.hover('#page-view .pr-row[data-url$="/pull/41"]');
+      await press(page.locator('#page-view .pr-row[data-url$="/pull/41"] [data-quick="ready"]'));
+      await page.keyboard.up("Shift");
+      await waitFor("gh to mark #41 ready", () => /pr ready -- https:\/\/github.com\/example\/alpha\/pull\/41/.test(readLog("gh.log")));
+    }
+    await press(page.locator('#page-view .pr-row[data-url$="/pull/42"]'));
+    await waitFor("#42 in the side panel", () => gui('#panel-tabs .ptab.active[data-panel="pr"]').isVisible());
+    await waitFor("#42's details", async () => (await page.locator("#panel-body", { hasText: "Add notes" }).count()) > 0, 10000);
+    if (touch) {
+      await page.evaluate(() => closePanel());
+      await pageSidebar();
+      await tapOrClick("#sidebar footer .back");
+    } else {
+      await page.keyboard.press("Escape");
+      if (!(await page.locator("#chat").isVisible())) await page.keyboard.press("Escape");
+    }
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+    if (await page.evaluate(() => document.body.dataset.panel === "open")) await tapOrClick("#toggle-panel");
+    return "#42 authored, #41 to review, #43 others";
+  });
+
+  await step("shell: ⌘K opens the Pull requests and Usage pages", async () => {
+    if (touch) return "touch: no keyboard";
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type("open pull requests");
+    await page.keyboard.press("Enter");
+    await waitFor("the Pull requests page", () => page.locator("#page-view h1", { hasText: "Pull Requests" }).isVisible());
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type("open usage");
+    await page.keyboard.press("Enter");
+    await waitFor("the Usage page", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
+    await page.keyboard.press("Escape");
+    await waitFor("back on Pull requests", () => page.locator("#page-view h1", { hasText: "Pull Requests" }).isVisible());
+    await page.keyboard.press("Escape");
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+  });
+
   await step("app view: back to the terminal", async () => {
     await showSidebar();
     await tapOrClick("#mode-terminal");

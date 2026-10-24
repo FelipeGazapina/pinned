@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
-use crate::{branches, commands, files, github, history, hooks, plugin, projects, pty, reminders, sessions, sync, thread, uploads, usage, workspace};
+use crate::{branches, commands, files, github, history, hooks, plugin, projects, pty, pulls, reminders, sessions, sync, thread, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -361,6 +361,12 @@ impl Machine {
                     return Err("claude is working in this folder. Switch branches when the turn ends.".into());
                 }
                 json(branches::checkout(&cwd, &branch, create, self.launch.path_env.as_deref())?)
+            }
+            Call::PullRequests { paths, state, involvement, query } => {
+                let mut repos: Vec<String> = paths.iter().filter_map(|p| git_remote(Path::new(p))).filter_map(|r| pulls::github_repo(&r)).collect();
+                repos.sort_by_key(|r| r.to_lowercase());
+                repos.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+                json(pulls::list(&home(), self.launch.path_env.as_deref(), repos, state, involvement, &query)?)
             }
             Call::TokenUsage { since } => json(usage::read(&thread::projects_dir(&home()), since, &usage::rates(self.rates_file.as_deref()))),
         }

@@ -310,7 +310,7 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
 
     assert_eq!(
         client.call(b, json!({ "cmd": "format_disk" })),
-        Err("this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`, `start_claude`, `set_bypass`, `write_input`, `resize_pty`, `close_tab`, `set_folder`, `list_projects`, `project_history`, `git_remote`, `browse`, `clone`, `run`, `deliver`, `upload`, `thread`, `prompt`, `workspace`, `pull_request`, `pr_action`, `diff`, `ports`, `editors`, `open_in`, `commands`, `files`, `branches`, `checkout`, `token_usage`".replace("0.5.1", env!("CARGO_PKG_VERSION")))
+        Err("this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`, `start_claude`, `set_bypass`, `write_input`, `resize_pty`, `close_tab`, `set_folder`, `list_projects`, `project_history`, `git_remote`, `browse`, `clone`, `run`, `deliver`, `upload`, `thread`, `prompt`, `workspace`, `pull_request`, `pr_action`, `diff`, `ports`, `editors`, `open_in`, `commands`, `files`, `branches`, `checkout`, `pull_requests`, `token_usage`".replace("0.5.1", env!("CARGO_PKG_VERSION")))
     );
     assert!(client.hub(json!({ "cmd": "self_destruct" })).unwrap_err().contains("unknown variant `self_destruct`"));
     assert_eq!(client.call("not-a-machine", json!({ "cmd": "tabs" })), Err("this account has no machine not-a-machine".into()));
