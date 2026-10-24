@@ -303,3 +303,20 @@ body:not([data-mode="gui"]) #minimap { display: none !important; }
 .tl-dialog .actions .primary:hover { background: #3061d9; }
 @media (pointer: coarse) { .tl-dialog .actions button { min-height: 40px; } }
 #thread button.xs:disabled { opacity: 0.4; pointer-events: none; }
+
+#pr-card { position: fixed; z-index: 70; width: 320px; max-width: calc(100vw - 32px); padding: 12px; border-radius: 14px; border: 1px solid var(--g-border);
+  background: rgb(17 17 17 / 0.92); backdrop-filter: blur(16px) saturate(1.08); -webkit-backdrop-filter: blur(16px) saturate(1.08); box-shadow: 0 12px 28px -12px #000; color: var(--g-fg); }
+#pr-card[hidden] { display: none; }
+#pr-card .head, #pr-card .who { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--g-muted); }
+#pr-card .head { font-size: 11px; }
+#pr-card .repo, #pr-card .who .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#pr-card .head > :not(.repo) { flex: none; }
+#pr-card .state { display: inline-flex; align-items: center; gap: 4px; }
+#pr-card .state .i { width: 12px; height: 12px; }
+#pr-card .state.open .i { color: rgb(94 233 181 / 0.9); }
+#pr-card .state.draft .i { color: rgb(159 159 169 / 0.8); }
+#pr-card .state.closed .i { color: rgb(255 162 162 / 0.9); }
+#pr-card .state.merged .i { color: rgb(196 180 255 / 0.9); }
+#pr-card .title { margin: 4px 0 0; font-size: 14px; font-weight: 500; line-height: 1.375; text-wrap: pretty; }
+#pr-card .who { margin-top: 8px; font-size: 12px; }
+#pr-card .who img { width: 16px; height: 16px; border-radius: 50%; flex: none; }

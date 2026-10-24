@@ -14,6 +14,8 @@ Object.assign(ICON_PATHS, {
   play: `<polygon points="6 3 20 12 6 21 6 3"/>`,
   "minimize-2": `<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" x2="21" y1="10" y2="3"/><line x1="3" x2="10" y1="21" y2="14"/>`,
   "corner-left-up": `<polyline points="14 9 9 4 4 9"/><path d="M20 20h-7a4 4 0 0 1-4-4V4"/>`,
+  "git-pull-request-draft": `<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M18 6V5"/><path d="M18 11v-1"/><line x1="6" x2="6" y1="9" y2="21"/>`,
+  "git-pull-request-closed": `<circle cx="6" cy="6" r="3"/><path d="M6 9v12"/><path d="m21 3-6 6"/><path d="m21 9-6-6"/><path d="M18 11.5V15"/><circle cx="18" cy="18" r="3"/>`,
 });
 
 const PLAN_TOOL = "ExitPlanMode";
@@ -852,6 +854,73 @@ minimap.addEventListener("wheel", (e) => {
 }, { passive: false });
 threadView.addEventListener("scroll", markMinimapInView, { passive: true });
 new ResizeObserver(layoutMinimap).observe(threadView);
+
+/** T3 Code's pull request preview: resting on a PR link for 350ms opens a card with its repository,
+ * number, state, title and author, read through gh once per link. */
+const prCard = Object.assign(document.createElement("div"), { id: "pr-card", hidden: true });
+document.body.append(prCard);
+const prDetails = new Map();
+const PR_STATES = { open: ["Open", "git-pull-request"], draft: ["Draft", "git-pull-request-draft"], closed: ["Closed", "git-pull-request-closed"], merged: ["Merged", "git-merge"] };
+const relativeTime = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+function openedAgo(at) {
+  const seconds = (Date.parse(at) - Date.now()) / 1000;
+  for (const [unit, size] of [["year", 31536000], ["month", 2592000], ["week", 604800], ["day", 86400], ["hour", 3600], ["minute", 60]]) {
+    if (Math.abs(seconds) >= size) return relativeTime.format(Math.round(seconds / size), unit);
+  }
+  return "just now";
+}
+let prHover = { link: null, timer: 0, close: 0 };
+
+function prCardHtml(d) {
+  const state = d.isDraft && d.state === "OPEN" ? "draft" : (d.state ?? "open").toLowerCase();
+  const [label, glyph] = PR_STATES[state] ?? PR_STATES.open;
+  const repo = /github\.com\/([^/]+\/[^/]+)\/pull/.exec(d.url ?? "")?.[1] ?? "";
+  const login = d.author?.login ?? "ghost";
+  const who = d.author?.name && d.author.name !== login ? `${d.author.name} (@${login})` : login;
+  return `<div class="head"><span class="repo">${esc(repo)}</span><span>#${esc(String(d.number))}</span><span aria-hidden="true">·</span><span class="state ${state}">${icon(glyph)}${label}</span></div>
+    <p class="title">${esc(d.title ?? "")}</p>
+    <div class="who"><img alt="" loading="lazy" src="https://github.com/${encodeURIComponent(login)}.png?size=32"><span class="name">${esc(who)}</span><span aria-hidden="true">·</span><span>opened ${esc(openedAgo(d.createdAt))}</span></div>`;
+}
+
+async function showPrCard(link) {
+  const url = link.dataset.pr;
+  const tab = active;
+  if (!prDetails.has(url)) prDetails.set(url, callOn(tab.machine, { cmd: "pull_request", tab: tab.view.id, pr: url }).catch(() => null));
+  const detail = await prDetails.get(url);
+  if (prHover.link !== link || !detail) return;
+  prCard.innerHTML = prCardHtml(detail);
+  prCard.hidden = false;
+  const r = link.getBoundingClientRect();
+  const width = prCard.offsetWidth;
+  prCard.style.left = `${Math.max(8, Math.min(innerWidth - width - 8, r.left + r.width / 2 - width / 2))}px`;
+  const below = r.bottom + 6 + prCard.offsetHeight < innerHeight;
+  prCard.style.top = `${below ? r.bottom + 6 : r.top - 6 - prCard.offsetHeight}px`;
+}
+
+function leavePr() {
+  clearTimeout(prHover.timer);
+  clearTimeout(prHover.close);
+  prHover.close = setTimeout(() => {
+    prHover.link = null;
+    prCard.hidden = true;
+  }, 120);
+}
+threadView.addEventListener("pointerover", (e) => {
+  const link = e.pointerType === "mouse" && e.target.closest("[data-pr]");
+  if (!link || link === prHover.link) return;
+  clearTimeout(prHover.timer);
+  clearTimeout(prHover.close);
+  prHover.link = link;
+  prCard.hidden = true;
+  prHover.timer = setTimeout(() => showPrCard(link), 350);
+});
+threadView.addEventListener("pointerout", (e) => e.target.closest?.("[data-pr]") && !e.target.closest("[data-pr]").contains(e.relatedTarget) && leavePr());
+prCard.addEventListener("pointerenter", () => clearTimeout(prHover.close));
+prCard.addEventListener("pointerleave", leavePr);
+threadView.addEventListener("scroll", () => {
+  prHover.link = null;
+  prCard.hidden = true;
+}, { passive: true });
 
 /** T3 Code's alert dialog: a title, a description, an optional field, and buttons; resolves to the
  * chosen button's value and the field's text, or null when dismissed. */

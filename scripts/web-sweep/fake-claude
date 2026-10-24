@@ -189,6 +189,8 @@ function submit() {
   } else if (line === "revertme") {
     fs.writeFileSync("revert.txt", "made by claude\n");
     wrote([{ type: "text", text: "Wrote revert.txt." }]);
+  } else if (line === "prlink") {
+    wrote([{ type: "text", text: "Opened [the pull request](https://github.com/example/alpha/pull/42)." }]);
   } else if (line === "notice") {
     said("<local-command-stdout>Set model to Haiku 5.5\nfor this session</local-command-stdout>");
   } else if (line === "limit") {

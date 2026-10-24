@@ -1091,6 +1091,18 @@ async function sweep(profileName) {
     return `drew ${drawn[1]} of ${drawn[0]}, ${ticks} ticks`;
   });
 
+  await step("app view: resting on a PR link previews the pull request", async () => {
+    await sendPrompt("prlink");
+    await answered("Opened the pull request");
+    if (touch) return "a touch screen has no hover";
+    await gui('#thread .turn:last-of-type a[data-pr]').hover();
+    await waitFor("the preview card", () => page.locator("#pr-card").isVisible(), 8000);
+    const card = await page.evaluate(() => [...document.querySelectorAll("#pr-card .head > *, #pr-card .title, #pr-card .who > *")].map((el) => el.textContent.trim()).filter(Boolean).join(" | "));
+    check(/^example\/alpha \| #42 \| · \| Open \| Add notes \| sweeper \| · \| opened .+ ago$/.test(card), `the card reads ${card}`);
+    await page.mouse.move(5, 5);
+    await waitFor("the card to close", async () => !(await page.locator("#pr-card").isVisible()), 2000);
+  });
+
   await step("app view: back on alpha after the timeline's own threads", async () => {
     await toThread("alpha");
   });
