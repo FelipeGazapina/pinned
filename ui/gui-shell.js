@@ -816,6 +816,7 @@ shellDialog.hidden = true;
 document.body.append(shellDialog);
 const dialogOpen = () => !shellDialog.hidden;
 function showDialog(html) {
+  delete shellDialog.dataset.kind;
   shellDialog.innerHTML = `<div class="backdrop"></div><div class="popup" role="dialog" aria-modal="true">${html}<button type="button" class="icon close" title="Close" aria-label="Close">${icon("x")}</button></div>`;
   shellDialog.hidden = false;
   shellDialog.querySelector(".backdrop").onclick = shellDialog.querySelector(".close").onclick = closeDialog;
