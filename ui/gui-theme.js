@@ -472,6 +472,7 @@ function openThemeEditor({ editingId = null, seedId = null, seedName = "", appea
   };
   const panel = document.createElement("div");
   panel.id = "theme-editor";
+  panel.dataset.themeEditorPanel = "";
   panel.setAttribute("role", "dialog");
   panel.setAttribute("aria-label", editingId ? "Edit theme" : "Create theme");
   document.body.append(panel);
@@ -483,6 +484,8 @@ function openThemeEditor({ editingId = null, seedId = null, seedName = "", appea
 
 function closeThemeEditor() {
   clearInspectHover();
+  closeColorPicker();
+  stopUsageWatch();
   document.getElementById("theme-editor")?.remove();
   themeEditor = null;
   if (themeRoot.dataset.themeId === THEME_PREVIEW_ID) delete themeRoot.dataset.themeId;
@@ -510,12 +513,15 @@ function previewThemeEditor() {
   if (was !== themeEditor.appearance) rehighlight();
 }
 
+/** ThemeColorPicker.tsx's ThemeColorField: the label toggles where the color is used, the swatch opens
+ * the picker, and the hex field types a value. */
 function themeField(role, label) {
   const value = themeEditor.colors[themeEditor.appearance][role];
-  const hex = colorHex(value) ?? "#000000";
-  return `<div class="te-field${themeEditor.selected === role ? " selected" : ""}" data-theme-color-role="${role}"><span class="te-label">${esc(label)}</span>
-    <label class="te-swatch" style="background:${esc(value)}" title="Choose ${esc(label)} color"><input type="color" value="${hex.slice(0, 7)}" data-role="${role}" aria-label="Choose ${esc(label)} color"></label>
-    <input class="te-value" value="${esc(hex)}" data-role="${role}" spellcheck="false" autocomplete="off" aria-label="${esc(label)}"></div>`;
+  const selected = themeEditor.selected === role;
+  return `<div class="te-field${selected ? " selected" : ""}" data-theme-color-role="${role}">
+    <button type="button" class="te-label" data-te-usage="${role}" aria-pressed="${selected}" aria-label="${selected ? "Hide" : "Show"} ${esc(label)} usage" title="${selected ? "Hide" : "Show"} where ${esc(label)} is used">${esc(label)}</button>
+    <button type="button" class="te-swatch" data-te-pick="${role}" aria-label="Choose ${esc(label)} color" title="Choose ${esc(label)} color"><span style="background:${esc(value)}"></span></button>
+    <input class="te-value" value="${esc(colorHex(value) ?? value)}" data-role="${role}" spellcheck="false" autocomplete="off" aria-label="${esc(label)} hex value"></div>`;
 }
 
 function renderThemeEditor() {
@@ -530,7 +536,7 @@ function renderThemeEditor() {
   const fields = groups.length
     ? groups.map(([group, f]) => `<div class="te-group">${group ? `<h4>${esc(group)}</h4>` : ""}${f.map(([role, label]) => themeField(role, label)).join("")}</div>`).join("")
     : `<p class="te-empty">No matches.</p>`;
-  const sub = ed.inspecting ? "Select an element · Esc to cancel" : ed.selected ? familyLabel(ed.selected) : "Select a color below";
+  const sub = editorSubtitle();
   panel.dataset.minimized = ed.minimized;
   panel.innerHTML = `<header class="te-head"><div class="te-title"><b>${editing ? "Edit theme" : "Create theme"}</b>${ed.minimized ? "" : `<span>${sub}</span>`}</div>
       <button type="button" class="te-inspect${ed.inspecting ? " on" : ""}" data-te="inspect" aria-label="${ed.inspecting ? "Cancel inspecting app colors" : "Inspect app colors"}" title="${ed.inspecting ? "Cancel and clear the selection" : "Pick a color from the app"}">${ed.inspecting ? "Cancel" : "Inspect"}</button>
@@ -548,7 +554,22 @@ function renderThemeEditor() {
     <footer class="te-foot"><button type="button" class="ghost" data-te="cancel">Cancel</button><button type="button" class="primary" data-te="save"></button></footer>
     <span class="te-grip" aria-hidden="true"></span>`;
   refreshThemeEditorControls();
+  watchUsage();
+  if (!colorPicker) return;
+  const anchor = panel.querySelector(`[data-te-pick="${colorPicker.role}"]`);
+  if (!anchor) return closeColorPicker();
+  colorPicker.anchor = anchor;
+  syncColorPicker(true);
+  placeColorPicker();
 }
+
+const editorSubtitle = () => {
+  const ed = themeEditor;
+  if (ed.inspecting) return "Select an element · Esc to cancel";
+  if (!ed.selected) return "Select a color below";
+  const n = usageWatch?.count ?? 0;
+  return `${familyLabel(ed.selected)} · ${n} ${n === 1 ? "use" : "uses"}`;
+};
 
 /** What the name decides, kept in place while typing: the save label and the locked appearances. */
 function refreshThemeEditorControls() {
@@ -599,14 +620,21 @@ function bindThemeEditor(panel) {
     }
     if (act === "save") return saveThemeEditor();
     if (act === "inspect") return setInspecting(!ed.inspecting);
+    const usage = e.target.closest("[data-te-usage]")?.dataset.teUsage;
+    if (usage) {
+      ed.selected = ed.selected === usage ? null : usage;
+      renderThemeEditor();
+      return panel.querySelector(`[data-te-usage="${usage}"]`)?.focus();
+    }
+    const pick = e.target.closest("[data-te-pick]");
+    if (pick) return colorPicker?.role === pick.dataset.tePick ? closeColorPicker() : openColorPicker(pick.dataset.tePick, pick);
   });
-  panel.addEventListener("focusin", (e) => {
-    const field = e.target.closest("[data-theme-color-role]");
-    if (!field) return;
-    themeEditor.selected = field.dataset.themeColorRole;
-    for (const f of panel.querySelectorAll(".te-field")) f.classList.toggle("selected", f === field);
-    panel.querySelector(".te-title span").textContent = familyLabel(themeEditor.selected);
-  });
+  for (const type of ["focusin", "pointerdown"]) {
+    panel.addEventListener(type, (e) => {
+      const field = e.target.closest(".te-value, .te-swatch")?.closest("[data-theme-color-role]");
+      if (field) selectThemeField(field.dataset.themeColorRole);
+    });
+  }
   panel.addEventListener("input", (e) => {
     const ed = themeEditor;
     if (e.target.id === "theme-name") {
@@ -626,15 +654,15 @@ function bindThemeEditor(panel) {
     const role = e.target.dataset.role;
     if (!role) return;
     setThemeEditorColor(role, e.target.value);
-    const field = e.target.closest(".te-field");
-    field.querySelector(".te-swatch").style.background = themeEditor.colors[ed.appearance][role];
-    if (e.target.type === "color") field.querySelector(".te-value").value = e.target.value;
-    else if (parseColor(e.target.value)) field.querySelector('input[type="color"]').value = (colorHex(e.target.value) ?? "#000000").slice(0, 7);
+    e.target.closest(".te-field").querySelector(".te-swatch span").style.background = themeEditor.colors[ed.appearance][role];
+    if (colorPicker?.role === role) syncColorPicker();
   });
   panel.addEventListener("change", (e) => {
     const ed = themeEditor;
     if (e.target.dataset.te === "advanced") {
       ed.advanced = e.target.checked;
+      if (!ed.advanced && !["canvas", "accent"].includes(ed.selected)) ed.selected = null;
+      closeColorPicker();
       if (!ed.advanced && ed.regenerate) {
         for (const m of ["light", "dark"]) ed.colors[m] = vividThemeColors(chatColors(m), ed.colors[m].canvas, ed.colors[m].accent, m);
         ed.regenerate = false;
@@ -665,6 +693,7 @@ function bindThemeEditor(panel) {
       const left = Math.min(Math.max(8, ev.clientX - dx), innerWidth - r.width - 8);
       const top = Math.min(Math.max(8, ev.clientY - dy), innerHeight - 48);
       Object.assign(panel.style, { left: `${left}px`, top: `${top}px`, right: "auto", bottom: "auto" });
+      placeColorPicker();
     };
     const up = () => removeEventListener("pointermove", move) || removeEventListener("pointerup", up);
     addEventListener("pointermove", move);
@@ -732,6 +761,22 @@ const FAMILY_PROBES = {
   terminalBackground: ["terminalBackground", "terminalForeground"], error: ["error"], warning: ["warning", "warningForeground"],
 };
 const PROBE_PAINTS = [["backgroundColor", "backgroundImage"], ["borderTopColor", "borderRightColor", "borderBottomColor", "borderLeftColor", "outlineColor", "boxShadow"], ["color", "fill", "stroke"]];
+/** Paints each role's variables (and their channels) in the probe color; the return undoes it. */
+function probeRoles(roles) {
+  const vars = roles.flatMap((r) => [[themeVar(r), "#01fea7"], ...(CHANNEL_ROLES.includes(r) ? [[`${themeVar(r)}-rgb`, "1 254 167"]] : [])]);
+  const saved = vars.map(([v]) => themeRoot.style.getPropertyValue(v));
+  for (const [v, probe] of vars) themeRoot.style.setProperty(v, probe);
+  return () => vars.forEach(([v], i) => themeRoot.style.setProperty(v, saved[i]));
+}
+function withProbeSession(run) {
+  themeRoot.dataset.themeTokenProbe = "";
+  try {
+    return run();
+  } finally {
+    void getComputedStyle(themeRoot).color;
+    delete themeRoot.dataset.themeTokenProbe;
+  }
+}
 function familyAt(el) {
   const paints = () => {
     const s = getComputedStyle(el);
@@ -739,19 +784,13 @@ function familyAt(el) {
   };
   const before = paints();
   const found = [null, null, null];
-  themeRoot.dataset.themeTokenProbe = "";
-  for (const [family, roles] of Object.entries(FAMILY_PROBES)) {
-    const vars = roles.map(themeVar);
-    const channels = roles.filter((r) => CHANNEL_ROLES.includes(r)).map((r) => `${themeVar(r)}-rgb`);
-    const saved = vars.map((v) => themeRoot.style.getPropertyValue(v));
-    const savedChannels = channels.map((v) => themeRoot.style.getPropertyValue(v));
-    for (const v of vars) themeRoot.style.setProperty(v, "#01fea7");
-    for (const v of channels) themeRoot.style.setProperty(v, "1 254 167");
-    paints().forEach((p, i) => (found[i] ??= p !== before[i] ? family : null));
-    vars.forEach((v, i) => themeRoot.style.setProperty(v, saved[i]));
-    channels.forEach((v, i) => themeRoot.style.setProperty(v, savedChannels[i]));
-  }
-  delete themeRoot.dataset.themeTokenProbe;
+  withProbeSession(() => {
+    for (const [family, roles] of Object.entries(FAMILY_PROBES)) {
+      const restore = probeRoles(roles);
+      paints().forEach((p, i) => (found[i] ??= p !== before[i] ? family : null));
+      restore();
+    }
+  });
   return found.find(Boolean) ?? null;
 }
 const familyLabel = (role) => THEME_FAMILIES.flatMap(([, f]) => f).find(([r]) => r === role)?.[1] ?? role;
@@ -777,7 +816,7 @@ function clearInspectHover() {
   const box = document.getElementById("theme-inspector-hover");
   if (box) box.hidden = true;
 }
-const outsideEditor = (e) => e.target instanceof Element && !e.target.closest("#theme-editor");
+const outsideEditor = (e) => e.target instanceof Element && !e.target.closest("[data-theme-editor-panel]");
 const inspecting = () => themeEditor?.inspecting;
 document.addEventListener("pointerover", (e) => {
   if (!inspecting() || !outsideEditor(e)) return;
@@ -827,6 +866,329 @@ function selectThemeFamily(role) {
   const field = document.querySelector(`#theme-editor [data-theme-color-role="${role}"]`);
   field?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   field?.querySelector(".te-value")?.focus({ preventScroll: true });
+}
+/** ThemeColorPicker.tsx's popover: a saturation and brightness plane, a hue slider, and HEX and RGB
+ * fields. Drags commit once per frame; the alpha of the original color is kept. */
+let colorPicker = null;
+function hexToHsv(hex) {
+  const n = parseInt(hex.slice(1, 7), 16);
+  const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((c) => c / 255);
+  const max = Math.max(r, g, b);
+  const d = max - Math.min(r, g, b);
+  let h = 0;
+  if (d) h = (max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4) * 60;
+  return { h: h < 0 ? h + 360 : h, s: max ? d / max : 0, v: max };
+}
+function hsvToHex({ h, s, v }) {
+  const hue = ((h % 360) + 360) % 360;
+  const c = v * s;
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
+  const m = v - c;
+  const [r, g, b] = hue < 60 ? [c, x, 0] : hue < 120 ? [x, c, 0] : hue < 180 ? [0, c, x] : hue < 240 ? [0, x, c] : hue < 300 ? [x, 0, c] : [c, 0, x];
+  return `#${[r, g, b].map((ch) => Math.round((ch + m) * 255).toString(16).padStart(2, "0")).join("")}`;
+}
+const pickerHex = (value) => (colorHex(value) ?? "#000000").slice(0, 7);
+const rgbText = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(", ");
+function rgbTextToHex(text) {
+  const ch = text.trim().replace(/^rgb\(\s*/i, "").replace(/\s*\)$/, "").split(/[,\s]+/).filter(Boolean).map(Number);
+  return ch.length === 3 && ch.every((c) => Number.isInteger(c) && c >= 0 && c <= 255) ? `#${ch.map((c) => c.toString(16).padStart(2, "0")).join("")}` : null;
+}
+
+function openColorPicker(role, anchor) {
+  closeColorPicker();
+  const label = anchor.closest(".te-field").querySelector(".te-label").textContent;
+  const value = themeEditor.colors[themeEditor.appearance][role];
+  const full = colorHex(value) ?? "#000000";
+  colorPicker = { role, label, anchor, alpha: full.length === 9 && !full.endsWith("ff") ? full.slice(7) : "", hsv: hexToHsv(pickerHex(value)), pending: null, frame: 0 };
+  const el = document.createElement("div");
+  el.id = "theme-color-picker";
+  el.dataset.themeEditorPanel = "";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-label", `${label} color`);
+  el.innerHTML = `<div class="cp-head"><div><p class="cp-title">${esc(label)}</p><p class="cp-sub">Choose a color</p></div><span class="cp-dot"></span></div>
+    <div class="cp-body">
+      <div class="cp-plane" role="group" aria-label="${esc(label)} saturation and brightness">
+        <input type="range" class="cp-axis" data-axis="s" min="0" max="100" step="any" aria-label="${esc(label)} saturation">
+        <input type="range" class="cp-axis" data-axis="v" min="0" max="100" step="any" aria-label="${esc(label)} brightness">
+        <span class="cp-thumb"></span></div>
+      <div class="cp-hue" role="slider" tabindex="0" aria-label="${esc(label)} hue" aria-valuemin="0" aria-valuemax="360"><span class="cp-track"></span><span class="cp-thumb"></span></div>
+      <div class="cp-fields"><label><span>HEX</span><span class="cp-input"><i></i><input data-cp="hex" aria-label="${esc(label)} picker hex value" spellcheck="false" autocomplete="off"></span></label>
+        <label><span>RGB</span><span class="cp-input"><input data-cp="rgb" aria-label="${esc(label)} picker RGB value" spellcheck="false" autocomplete="off"></span></label></div></div>`;
+  document.body.append(el);
+  bindColorPicker(el);
+  syncColorPicker(true);
+  placeColorPicker();
+}
+function closeColorPicker() {
+  if (!colorPicker) return;
+  flushColorPicker();
+  document.getElementById("theme-color-picker")?.remove();
+  colorPicker = null;
+}
+/** Below the swatch, its right edge on the swatch's, flipped above when there is no room. */
+function placeColorPicker() {
+  const el = document.getElementById("theme-color-picker");
+  const a = colorPicker?.anchor;
+  if (!el || !a?.isConnected) return;
+  const r = a.getBoundingClientRect();
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  const left = Math.min(Math.max(8, r.right - w), innerWidth - w - 8);
+  const top = r.bottom + 10 + h <= innerHeight - 8 ? r.bottom + 10 : Math.max(8, r.top - 10 - h);
+  Object.assign(el.style, { left: `${left}px`, top: `${top}px` });
+}
+/** Paints the picker from its HSV, and the text fields from it unless one is being typed in. */
+function syncColorPicker(fromValue = false) {
+  const el = document.getElementById("theme-color-picker");
+  if (!el || !colorPicker) return;
+  const p = colorPicker;
+  if (fromValue) {
+    const hex = pickerHex(themeEditor.colors[themeEditor.appearance][p.role]);
+    if (hsvToHex(p.hsv) !== hex) p.hsv = hexToHsv(hex);
+  }
+  const hex = hsvToHex(p.hsv);
+  el.querySelector(".cp-dot").style.background = hex;
+  el.querySelector(".cp-input i").style.background = hex;
+  const plane = el.querySelector(".cp-plane");
+  plane.style.backgroundColor = `hsl(${p.hsv.h} 100% 50%)`;
+  Object.assign(plane.querySelector(".cp-thumb").style, { left: `calc(${p.hsv.s} * (100% - 12px) + 6px)`, top: `calc(${1 - p.hsv.v} * (100% - 12px) + 6px)` });
+  for (const axis of plane.querySelectorAll(".cp-axis")) {
+    axis.value = p.hsv[axis.dataset.axis] * 100;
+    axis.setAttribute("aria-valuetext", `${Math.round(p.hsv[axis.dataset.axis] * 100)}%`);
+  }
+  const hue = el.querySelector(".cp-hue");
+  hue.setAttribute("aria-valuenow", Math.round(p.hsv.h));
+  Object.assign(hue.querySelector(".cp-thumb").style, { left: `calc(${p.hsv.h / 360} * (100% - 16px) + 8px)`, background: `hsl(${p.hsv.h} 100% 50%)` });
+  for (const input of el.querySelectorAll("[data-cp]")) if (document.activeElement !== input) input.value = input.dataset.cp === "hex" ? hex : rgbText(hex);
+}
+function commitPickerColor(color, now = false) {
+  const p = colorPicker;
+  p.pending = color;
+  if (now) return flushColorPicker();
+  if (!p.frame) p.frame = requestAnimationFrame(flushColorPicker);
+}
+function flushColorPicker() {
+  const p = colorPicker;
+  if (!p) return;
+  cancelAnimationFrame(p.frame);
+  p.frame = 0;
+  if (p.pending === null || !themeEditor) return;
+  const color = p.pending;
+  p.pending = null;
+  setThemeEditorColor(p.role, color);
+  const field = document.querySelector(`#theme-editor [data-theme-color-role="${p.role}"]`);
+  if (!field) return;
+  const value = themeEditor.colors[themeEditor.appearance][p.role];
+  field.querySelector(".te-swatch span").style.background = value;
+  field.querySelector(".te-value").value = colorHex(value) ?? value;
+}
+function setPickerHsv(hsv) {
+  colorPicker.hsv = hsv;
+  syncColorPicker();
+  commitPickerColor(hsvToHex(hsv) + colorPicker.alpha);
+}
+function bindColorPicker(el) {
+  const clamp = (n) => Math.min(1, Math.max(0, n));
+  const drag = (target, update) => {
+    target.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      (target.querySelector(".cp-axis") ?? target).focus({ preventScroll: true });
+      target.setPointerCapture(e.pointerId);
+      update(e);
+      const move = (ev) => update(ev);
+      const end = () => {
+        target.removeEventListener("pointermove", move);
+        target.removeEventListener("lostpointercapture", end);
+        flushColorPicker();
+      };
+      target.addEventListener("pointermove", move);
+      target.addEventListener("lostpointercapture", end);
+    });
+  };
+  const plane = el.querySelector(".cp-plane");
+  drag(plane, (e) => {
+    const r = plane.getBoundingClientRect();
+    setPickerHsv({ ...colorPicker.hsv, s: clamp((e.clientX - r.left) / r.width), v: 1 - clamp((e.clientY - r.top) / r.height) });
+  });
+  const hue = el.querySelector(".cp-hue");
+  drag(hue, (e) => {
+    const r = hue.getBoundingClientRect();
+    setPickerHsv({ ...colorPicker.hsv, h: clamp((e.clientX - r.left) / r.width) * 360 });
+  });
+  for (const axis of plane.querySelectorAll(".cp-axis")) {
+    axis.addEventListener("keydown", (e) => {
+      const k = axis.dataset.axis;
+      const step = e.shiftKey ? 0.1 : 0.02;
+      const now = colorPicker.hsv[k];
+      const next = { ArrowRight: now + step, ArrowUp: now + step, ArrowLeft: now - step, ArrowDown: now - step, Home: 0, End: 1 }[e.key];
+      if (next === undefined) return;
+      e.preventDefault();
+      setPickerHsv({ ...colorPicker.hsv, [k]: clamp(next) });
+    });
+  }
+  hue.addEventListener("keydown", (e) => {
+    if (!["ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp"].includes(e.key)) return;
+    e.preventDefault();
+    const dir = e.key === "ArrowRight" || e.key === "ArrowUp" ? 1 : -1;
+    setPickerHsv({ ...colorPicker.hsv, h: (colorPicker.hsv.h + dir * (e.shiftKey ? 10 : 1) + 360) % 360 });
+  });
+  el.addEventListener("input", (e) => {
+    const kind = e.target.dataset.cp;
+    if (!kind) return;
+    const hex = kind === "hex" ? (/^#[0-9a-f]{6}$/i.test(e.target.value) ? e.target.value.toLowerCase() : null) : rgbTextToHex(e.target.value);
+    if (!hex) return;
+    colorPicker.hsv = hexToHsv(hex);
+    syncColorPicker();
+    commitPickerColor(kind === "hex" ? hex : hex + colorPicker.alpha, true);
+  });
+  el.addEventListener("focusout", (e) => e.target.dataset.cp && syncColorPicker());
+}
+document.addEventListener("pointerdown", (e) => {
+  if (!colorPicker || !(e.target instanceof Element)) return;
+  if (e.target.closest("#theme-color-picker") || e.target.closest("[data-te-pick]") === colorPicker.anchor) return;
+  closeColorPicker();
+}, true);
+document.addEventListener("keydown", (e) => {
+  if (!colorPicker || e.key !== "Escape") return;
+  e.preventDefault();
+  e.stopPropagation();
+  const anchor = colorPicker.anchor;
+  closeColorPicker();
+  anchor.focus();
+}, true);
+addEventListener("resize", () => placeColorPicker());
+addEventListener("scroll", () => placeColorPicker(), true);
+
+/** Using a field's swatch or hex value selects it, as T3's onSelect: Advanced colors only show there. */
+function selectThemeField(role) {
+  const ed = themeEditor;
+  if (ed.selected === role) return;
+  ed.selected = role;
+  const panel = document.getElementById("theme-editor");
+  for (const f of panel.querySelectorAll(".te-field")) {
+    const on = f.dataset.themeColorRole === role;
+    f.classList.toggle("selected", on);
+    const label = f.querySelector(".te-label");
+    label.setAttribute("aria-pressed", on);
+    label.setAttribute("aria-label", `${on ? "Hide" : "Show"} ${label.textContent} usage`);
+    label.title = `${on ? "Hide" : "Show"} where ${label.textContent} is used`;
+  }
+  watchUsage();
+}
+
+/** themeInspector.ts's highlightThemeRoleUsage: every element whose paint changes when the selected
+ * color's roles take the probe color, cut out of a dimmed overlay. In Advanced a field stands for its
+ * family's roles; Background and Accent stand for every role that holds the same color. */
+let usageWatch = null;
+function usageRoles() {
+  const ed = themeEditor;
+  if (!ed?.selected || ed.inspecting) return [];
+  if (ed.advanced) return FAMILY_PROBES[ed.selected] ?? [ed.selected];
+  const colors = ed.colors[ed.appearance];
+  const value = colors[ed.selected]?.trim().toLowerCase();
+  return THEME_PALETTES.roles.filter((r) => colors[r]?.trim().toLowerCase() === value);
+}
+function watchUsage() {
+  const roles = usageRoles();
+  const key = roles.join(",");
+  if (usageWatch?.key === key) return showUsageCount();
+  stopUsageWatch();
+  if (!roles.length) return;
+  const watch = { key, count: 0, timer: 0, frame: 0, last: 0 };
+  usageWatch = watch;
+  const refresh = () => {
+    watch.timer = 0;
+    watch.last = performance.now();
+    watch.count = highlightUsage(roles);
+    showUsageCount();
+  };
+  refresh();
+  watch.observer = new MutationObserver((mutations) => {
+    if (mutations.every((m) => m.target instanceof Element && m.target.closest("#theme-inspector-spotlight, [data-theme-editor-panel]"))) return;
+    if (!watch.timer) watch.timer = setTimeout(refresh, Math.max(0, 500 - (performance.now() - watch.last)));
+  });
+  watch.observer.observe(document.body, { childList: true, subtree: true });
+  watch.reflow = () => {
+    if (!watch.frame) watch.frame = requestAnimationFrame(() => ((watch.frame = 0), drawSpotlight([...document.querySelectorAll("[data-theme-inspector-match]")])));
+  };
+  addEventListener("resize", watch.reflow);
+  addEventListener("scroll", watch.reflow, true);
+}
+function stopUsageWatch() {
+  if (!usageWatch) return;
+  usageWatch.observer?.disconnect();
+  clearTimeout(usageWatch.timer);
+  cancelAnimationFrame(usageWatch.frame);
+  removeEventListener("resize", usageWatch.reflow);
+  removeEventListener("scroll", usageWatch.reflow, true);
+  usageWatch = null;
+  for (const el of document.querySelectorAll("[data-theme-inspector-match]")) el.removeAttribute("data-theme-inspector-match");
+  document.getElementById("theme-inspector-spotlight")?.remove();
+}
+function showUsageCount() {
+  const sub = document.querySelector("#theme-editor .te-title span");
+  if (sub) sub.textContent = editorSubtitle();
+}
+
+function paintSnapshot(el) {
+  const s = getComputedStyle(el);
+  if (s.display === "none" || s.visibility === "hidden" || Number(s.opacity) === 0) return null;
+  const borders = [["Top"], ["Right"], ["Bottom"], ["Left"]].filter(([side]) => s[`border${side}Style`] !== "none" && parseFloat(s[`border${side}Width`]) > 0).map(([side]) => s[`border${side}Color`]);
+  if (s.outlineStyle !== "none" && parseFloat(s.outlineWidth) > 0) borders.push(s.outlineColor);
+  if (s.boxShadow !== "none") borders.push(s.boxShadow);
+  const text = el.matches("input, textarea, select, option") || [...el.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && n.textContent.trim());
+  const fg = [text ? s.color : "", el instanceof SVGElement ? `${s.fill}|${s.stroke}` : "", el.matches("input, textarea") ? s.caretColor : "", s.textDecorationLine !== "none" ? s.textDecorationColor : ""];
+  return `${s.backgroundColor}|${s.backgroundImage}\n${borders.join("|")}\n${fg.join("|")}`;
+}
+function highlightUsage(roles) {
+  for (const el of document.querySelectorAll("[data-theme-inspector-match]")) el.removeAttribute("data-theme-inspector-match");
+  const candidates = [document.body, ...document.body.querySelectorAll("*")].filter((el) => !el.closest("[data-theme-editor-panel], #theme-inspector-spotlight, #theme-inspector-hover"));
+  const changed = withProbeSession(() => {
+    const before = new Map();
+    for (const el of candidates) {
+      const p = paintSnapshot(el);
+      if (p) before.set(el, p);
+    }
+    const restore = probeRoles(roles);
+    try {
+      return [...before].filter(([el, p]) => paintSnapshot(el) !== p).map(([el]) => el);
+    } finally {
+      restore();
+    }
+  });
+  const marked = new Set(changed.map((el) => (el instanceof SVGElement ? el.closest("svg") ?? el : el)));
+  for (const el of marked) el.setAttribute("data-theme-inspector-match", "");
+  drawSpotlight([...marked]);
+  return marked.size;
+}
+function spotlightRect(el) {
+  const r = el.getBoundingClientRect();
+  if (r.width <= 0 || r.height <= 0 || r.right < 0 || r.bottom < 0 || r.left > innerWidth || r.top > innerHeight) return null;
+  const pad = 5;
+  return { x: r.left - pad, y: r.top - pad, width: r.width + pad * 2, height: r.height + pad * 2, radius: Math.min(18, Math.max(7, (parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0) + pad)) };
+}
+function drawSpotlight(els) {
+  const rects = new Map();
+  for (const el of els) {
+    const r = spotlightRect(el);
+    if (r) rects.set([r.x, r.y, r.width, r.height].map(Math.round).join(":"), r);
+  }
+  let svg = document.getElementById("theme-inspector-spotlight");
+  if (!rects.size) return svg?.remove();
+  if (!svg) {
+    svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.id = "theme-inspector-spotlight";
+    svg.setAttribute("aria-hidden", "true");
+    document.body.append(svg);
+  }
+  svg.setAttribute("viewBox", `0 0 ${innerWidth} ${innerHeight}`);
+  const box = (r) => `x="${r.x}" y="${r.y}" width="${r.width}" height="${r.height}" rx="${r.radius}"`;
+  const all = [...rects.values()];
+  svg.innerHTML = `<defs><mask id="theme-inspector-spotlight-mask" maskUnits="userSpaceOnUse"><rect width="${innerWidth}" height="${innerHeight}" fill="white"/>${all.map((r) => `<rect ${box(r)} fill="black"/>`).join("")}</mask>
+    <filter id="theme-inspector-spotlight-glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+    <rect class="dimmer" width="${innerWidth}" height="${innerHeight}" mask="url(#theme-inspector-spotlight-mask)"/>
+    <g>${all.map((r) => `<rect class="glow" ${box(r)} filter="url(#theme-inspector-spotlight-glow)"/>`).join("")}</g>`;
 }
 
 applyTheme();

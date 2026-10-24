@@ -1298,6 +1298,52 @@ async function sweep(profileName) {
     }
   });
 
+  await step("app view: a theme color's swatch opens T3's picker (plane, hue, HEX, RGB) that paints live, and its label spotlights every use with a count", async () => {
+    await resetTheme();
+    const sub = () => text("#theme-editor .te-title span");
+    const field = (role) => page.locator(`#theme-editor .te-value[data-role="${role}"]`);
+    try {
+      await themeKey("T", true);
+      await waitFor("the editor", () => page.locator("#theme-editor").isVisible());
+      const labels = await page.locator("#theme-editor .te-label").evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
+      check(labels.join(",") === "Show Background usage,Show Accent usage", `labels: ${labels.join(", ")}`);
+      await press(page.locator('#theme-editor [data-te-usage="canvas"]'));
+      const uses = await page.evaluate(() => [...document.querySelectorAll("[data-theme-inspector-match]")].map((e) => e.id));
+      check(uses.includes("expanded") && (await sub()) === `Background · ${uses.length} ${uses.length === 1 ? "use" : "uses"}`, `Background: ${await sub()}, marked ${uses.join(" ")}`);
+      check((await page.locator("#theme-inspector-spotlight mask rect").count()) > 1, "no spotlight cut out");
+      check((await page.locator('#theme-editor [data-te-usage="canvas"]').getAttribute("aria-pressed")) === "true", "the label isn't pressed");
+      await press(page.locator('#theme-editor [data-te-usage="canvas"]'));
+      check((await page.locator("#theme-inspector-spotlight, [data-theme-inspector-match]").count()) === 0 && (await sub()) === "Select a color below", `a second press leaves ${await sub()}`);
+      const before = await field("accent").inputValue();
+      await press(page.locator('#theme-editor [data-te-pick="accent"]'));
+      await waitFor("the picker", () => page.locator("#theme-color-picker").isVisible());
+      const head = [await text("#theme-color-picker .cp-title"), await text("#theme-color-picker .cp-sub"), await page.inputValue('#theme-color-picker [data-cp="hex"]'), await page.inputValue('#theme-color-picker [data-cp="rgb"]')];
+      const rgb = [1, 3, 5].map((i) => parseInt(before.slice(i, i + 2), 16)).join(", ");
+      check(head.join("|") === `Accent|Choose a color|${before.slice(0, 7)}|${rgb}`, `the picker opens as ${head.join(" | ")}`);
+      check(/^Accent · \d+ uses?$/.test(await sub()) && (await page.evaluate(() => document.querySelector("#send").hasAttribute("data-theme-inspector-match"))), `the swatch selects Accent: ${await sub()}`);
+      const plane = await rect("#theme-color-picker .cp-plane");
+      const corner = { x: plane.right - 2, y: plane.top + 2 };
+      if (touch) await page.touchscreen.tap(corner.x, corner.y);
+      else await page.mouse.click(corner.x, corner.y);
+      await sleep(100);
+      const vivid = await page.inputValue('#theme-color-picker [data-cp="hex"]');
+      const hsv = await page.evaluate(() => colorPicker.hsv);
+      check(hsv.s > 0.97 && hsv.v > 0.97 && vivid !== before.slice(0, 7), `the plane's corner gives ${vivid} (${JSON.stringify(hsv)})`);
+      check((await field("accent").inputValue()) === (await page.evaluate(() => colorHex(themeEditor.colors.dark.accent))) && (await field("accent").inputValue()) !== before, "the field didn't take the picked color");
+      await page.fill('#theme-color-picker [data-cp="rgb"]', "224, 86, 154");
+      check((await page.inputValue('#theme-color-picker [data-cp="hex"]')) === "#e0569a", `RGB 224, 86, 154 shows hex ${await page.inputValue('#theme-color-picker [data-cp="hex"]')}`);
+      const painted = await page.evaluate(() => [colorHex(themeEditor.colors.dark.accent), document.documentElement.dataset.themeId]);
+      check(painted[1] === "__preview" && painted[0] !== before, `the preview: ${painted.join(" ")}`);
+      await page.keyboard.press("Escape");
+      check((await page.locator("#theme-color-picker").count()) === 0 && (await page.locator("#theme-editor").isVisible()), "Escape didn't close just the picker");
+      await press(page.locator('#theme-editor [data-te="inspect"]'));
+      check((await page.locator("#theme-inspector-spotlight").count()) === 0, "inspecting kept the usage spotlight");
+    } finally {
+      await page.evaluate(() => themeEditor && closeThemeEditor());
+      await resetTheme();
+    }
+  });
+
   await step("app view: changed files and mentions carry T3 Code's file-type icons", async () => {
     await sendPrompt("icons");
     await answered("Wrote two files.");

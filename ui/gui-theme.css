@@ -367,9 +367,13 @@ body[data-mode="gui"] #terms { background: var(--g-term-bg); }
 #theme-editor h4 { margin: 0 0 2px; font-size: 14px; font-weight: 500; }
 #theme-editor .te-field { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 8px; border-radius: 8px; }
 #theme-editor .te-field:focus-within { background: color-mix(in srgb, var(--g-accent) 60%, transparent); }
-#theme-editor .te-label { flex: 1; min-width: 0; color: var(--g-muted); }
-#theme-editor .te-swatch { position: relative; width: 24px; height: 24px; border-radius: 50%; border: 1px solid color-mix(in srgb, var(--g-fg) 30%, transparent); cursor: pointer; flex: none; overflow: hidden; }
-#theme-editor .te-swatch input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; border: 0; padding: 0; }
+#theme-editor .te-label { flex: 1; min-width: 0; overflow: hidden; padding: 0; border-radius: 6px; text-align: left; white-space: nowrap; text-overflow: ellipsis; font: inherit; color: var(--g-muted); }
+#theme-editor .te-label:hover { color: var(--g-fg); }
+#theme-editor .te-label:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--g-primary); }
+#theme-editor .te-swatch { position: relative; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border-radius: 50%; border: 1px solid color-mix(in srgb, var(--g-fg) 30%, transparent); cursor: pointer; flex: none; transition: transform 0.15s; }
+#theme-editor .te-swatch:hover { transform: scale(1.05); }
+#theme-editor .te-swatch:focus-visible { outline: 2px solid var(--g-primary); outline-offset: -2px; }
+#theme-editor .te-swatch span { position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 1px 2px color-mix(in srgb, var(--g-shadow) 20%, transparent); }
 #theme-editor .te-value { width: 112px; flex: none; font-family: var(--g-mono); font-size: 12px; }
 #theme-editor .te-empty { margin: 0; color: var(--g-muted); }
 #theme-editor .te-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 8px 12px; border-top: 1px solid color-mix(in srgb, var(--g-border) 70%, transparent); }
@@ -384,6 +388,39 @@ body[data-mode="gui"] #terms { background: var(--g-term-bg); }
 #theme-editor .te-grip { position: absolute; right: 0; bottom: 0; width: 20px; height: 20px; cursor: nwse-resize; touch-action: none;
   background: linear-gradient(135deg, transparent 55%, var(--g-muted) 55% 60%, transparent 60% 72%, var(--g-muted) 72% 77%, transparent 77%); opacity: 0.6; }
 #theme-editor[data-minimized="true"] .te-grip { display: none; }
+/* ThemeColorPicker.tsx and ui/color-picker.tsx */
+#theme-color-picker { position: fixed; z-index: 120; width: 288px; overflow: hidden; border-radius: 12px; border: 1px solid var(--g-border); background: var(--g-overlay); color: var(--g-fg);
+  box-shadow: 0 12px 28px -12px var(--g-shadow); font-family: var(--g-sans); }
+#theme-color-picker .cp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px; border-bottom: 1px solid color-mix(in srgb, var(--g-border) 70%, transparent); }
+#theme-color-picker .cp-head > div { min-width: 0; }
+#theme-color-picker p { margin: 0; }
+#theme-color-picker .cp-title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 600; }
+#theme-color-picker .cp-sub { font-size: 11px; color: var(--g-muted); }
+#theme-color-picker .cp-dot { width: 28px; height: 28px; flex: none; border-radius: 50%; box-shadow: 0 1px 2px color-mix(in srgb, var(--g-shadow) 20%, transparent); }
+#theme-color-picker .cp-body { display: grid; gap: 12px; padding: 12px; }
+#theme-color-picker .cp-plane { position: relative; height: 128px; border-radius: 8px; overflow: hidden; cursor: crosshair; touch-action: none;
+  background-image: linear-gradient(to top, var(--g-picker-black), transparent), linear-gradient(to right, var(--g-picker-white), transparent); }
+#theme-color-picker .cp-plane:has(:focus-visible) { box-shadow: inset 0 0 0 2px var(--g-primary); }
+#theme-color-picker .cp-axis { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; opacity: 0; }
+#theme-color-picker .cp-thumb { position: absolute; width: 12px; height: 12px; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none;
+  border: 2px solid var(--g-picker-white); box-shadow: 0 0 0 1px var(--g-picker-ring); }
+#theme-color-picker .cp-hue { position: relative; display: flex; align-items: center; height: 24px; border-radius: 9999px; cursor: pointer; touch-action: none; outline: none; }
+#theme-color-picker .cp-hue:focus-visible { box-shadow: inset 0 0 0 2px var(--g-primary); }
+#theme-color-picker .cp-track { width: 100%; height: 10px; border-radius: 9999px; background: var(--g-picker-hues); box-shadow: inset 0 0 0 1px var(--g-picker-edge); }
+#theme-color-picker .cp-hue .cp-thumb { top: 50%; width: 16px; height: 16px; }
+#theme-color-picker .cp-fields { display: grid; grid-template-columns: 1fr 1.2fr; gap: 8px; }
+#theme-color-picker label { display: grid; gap: 4px; min-width: 0; }
+#theme-color-picker label > span:first-child { padding: 0 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.1em; color: var(--g-muted); }
+#theme-color-picker .cp-input { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 8px; border-radius: 8px; border: 1px solid var(--g-input); background: var(--g-canvas); }
+#theme-color-picker .cp-input:focus-within { border-color: var(--g-primary); }
+#theme-color-picker .cp-input i { width: 14px; height: 14px; flex: none; border-radius: 50%; }
+#theme-color-picker .cp-input input { flex: 1; min-width: 0; height: 32px; padding: 0; border: 0; outline: none; background: transparent; color: var(--g-fg); font: 12px var(--g-mono); }
+
+/* themeInspector.ts's usage spotlight. */
+#theme-inspector-spotlight { position: fixed; z-index: 100; inset: 0; width: 100vw; height: 100dvh; overflow: visible; pointer-events: none; }
+#theme-inspector-spotlight .dimmer { fill: var(--g-spotlight-dim); }
+#theme-inspector-spotlight .glow { fill: color-mix(in oklab, var(--g-primary) 9%, transparent); stroke: color-mix(in oklab, var(--g-primary) 72%, white); stroke-width: 2px; opacity: 0.92; vector-effect: non-scaling-stroke; }
+
 html[data-theme-token-probe], html[data-theme-token-probe] *, html[data-theme-token-probe] *::before, html[data-theme-token-probe] *::after { transition: none !important; }
 #theme-inspector-hover { position: fixed; z-index: 101; pointer-events: none; border: 1px solid color-mix(in oklab, var(--g-primary) 70%, white);
   background: color-mix(in oklab, var(--g-primary) 7%, transparent); box-shadow: 0 0 0 3px color-mix(in oklab, var(--g-primary) 16%, transparent), 0 0 18px color-mix(in oklab, var(--g-primary) 38%, transparent); }
