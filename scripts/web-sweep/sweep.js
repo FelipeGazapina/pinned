@@ -10,7 +10,8 @@
 // Screenshots and sweep-<profile>.json land in SWEEP_DIR. Exits 1 when any step is not "works".
 const fs = require("fs");
 const path = require("path");
-const { chromium, devices } = require(process.env.PLAYWRIGHT || "playwright");
+const playwright = require(process.env.PLAYWRIGHT || "playwright");
+const { devices } = playwright;
 
 const DIR = process.env.SWEEP_DIR || path.join(process.env.TMPDIR || "/tmp", "pinned-web-sweep");
 const HUB = `http://127.0.0.1:${process.env.SWEEP_HUB_PORT || 8797}`;
@@ -21,6 +22,8 @@ const HOME = path.join(DIR, "home");
 const PROFILES = {
   phone: { ...devices["Pixel 7"] },
   desktop: { viewport: { width: 1280, height: 800 }, hasTouch: false, isMobile: false },
+  // WebKit, the engine of the macOS app's webview and of Safari.
+  safari: { engine: "webkit", viewport: { width: 1280, height: 800 }, hasTouch: false, isMobile: false },
 };
 
 class Broken extends Error {}
@@ -92,12 +95,12 @@ async function seedConnectors(name) {
 }
 
 async function sweep(profileName) {
-  const profile = PROFILES[profileName];
+  const { engine = "chromium", ...profile } = PROFILES[profileName];
   const touch = !!profile.hasTouch;
   const shots = path.join(DIR, "shots", profileName);
   fs.mkdirSync(shots, { recursive: true });
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ ...profile, permissions: ["clipboard-read", "clipboard-write"] });
+  const browser = await playwright[engine].launch({ headless: true });
+  const context = await browser.newContext({ ...profile, permissions: engine === "chromium" ? ["clipboard-read", "clipboard-write"] : [] });
   if (touch) await context.addInitScript(stubVisualViewport);
   // The terminal steps run in terminal view; the app-view steps switch to it themselves.
   await context.addInitScript(() => localStorage.getItem("mode") || localStorage.setItem("mode", "terminal"));
@@ -937,7 +940,8 @@ async function sweep(profileName) {
     check(command.startsWith(`curl -fsSL ${HUB}/install.sh | sh -s -- `), command);
     await action("copy-pair");
     await waitFor("Copied", async () => (await text('#settings-page [data-action="copy-pair"]')) === "Copied", 3000);
-    check((await page.evaluate(() => navigator.clipboard.readText())) === command, "the clipboard lacks the command");
+    // WebKit lets a page write the clipboard but never lets automation read it back.
+    if (engine === "chromium") check((await page.evaluate(() => navigator.clipboard.readText())) === command, "the clipboard lacks the command");
     const script = await fetch(`${HUB}/install.sh`);
     check(script.ok && (await script.text()).startsWith("#!"), `install.sh answered ${script.status}`);
     return command;
