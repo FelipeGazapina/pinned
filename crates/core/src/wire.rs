@@ -4,11 +4,11 @@
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
 use crate::workspace::{DiffScope, PrAction};
-use crate::{sync, thread};
+use crate::{pulls, sync, thread, usage};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// A tab's id, unique within its machine, such as `tab-3`.
 pub type TabId = String;
@@ -170,6 +170,28 @@ pub enum Call {
         #[serde(default)]
         create: bool,
     },
+    /// `pulls::PullRequests` of the GitHub repositories of the machine's folders `paths`, through gh.
+    PullRequests {
+        paths: Vec<String>,
+        state: pulls::ListState,
+        involvement: pulls::Involvement,
+        #[serde(default)]
+        query: String,
+        /// Rows per search at most; the page asks for more 100 at a time.
+        #[serde(default = "pulls_limit")]
+        limit: usize,
+    },
+    /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since` on.
+    /// `prices` are the user's, per model, which win over LiteLLM's list.
+    TokenUsage {
+        since: u64,
+        #[serde(default)]
+        prices: HashMap<String, usage::Price>,
+    },
+}
+
+fn pulls_limit() -> usize {
+    100
 }
 
 impl Call {
@@ -195,6 +217,8 @@ impl Call {
                 | Call::Files { .. }
                 | Call::Branches { .. }
                 | Call::Checkout { .. }
+                | Call::TokenUsage { .. }
+                | Call::PullRequests { .. }
         )
     }
 }

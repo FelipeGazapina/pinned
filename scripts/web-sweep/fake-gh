@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Stands in for `gh` on the sweep's node, which has no GitHub login: it answers `pr view`, `pr diff`,
-// `pr merge` and `pr ready` for the pull requests fake claude links, #41 a draft and the others open, and
-// logs every call to $HOME/gh.log so a test can read them back.
+// `pr merge` and `pr ready` for the pull requests fake claude links, #41 a draft and the others open, the
+// Pull requests page's `api graphql` search, and logs every call to $HOME/gh.log so a test can read them back.
 const fs = require("fs");
 const path = require("path");
 
@@ -50,6 +50,40 @@ if (cmd === "pr" && sub === "view") {
 } else if (cmd === "pr" && sub === "ready") {
   fs.writeFileSync(stateFile, "open");
   process.stdout.write(`✓ Pull request #${number} is marked as "ready for review"\n`);
+} else if (cmd === "api" && sub === "graphql") {
+  // The Pull requests page's search: #42 the viewer's, #41 awaiting their review, #43 someone else's
+  // with failing checks and a conflict, and #40 merged, across example/alpha and example/beta.
+  const q = (args.find((a) => a.startsWith("q=")) ?? "q=").slice(2);
+  const pr = (number, repo, title, author, extra = {}) => ({
+    number, title, url: `https://github.com/${repo}/pull/${number}`, isDraft: false, state: "OPEN", mergeable: "MERGEABLE", reviewDecision: "REVIEW_REQUIRED",
+    additions: 2, deletions: 0, createdAt: at(number - 40), updatedAt: at(50 - number), headRefName: `sweep/notes-${number}`, baseRefName: "main",
+    author: { login: author, avatarUrl: "" }, repository: { nameWithOwner: repo }, labels: { nodes: [] }, reviewRequests: { nodes: [] },
+    commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] }, ...extra,
+  });
+  const all = [
+    pr(42, "example/alpha", "Add notes", "sweeper", { reviewDecision: "APPROVED" }),
+    pr(41, "example/alpha", "Draft the notes", "octocat", { isDraft: true, reviewRequests: { nodes: [{ requestedReviewer: { login: "sweeper" } }] } }),
+    pr(43, "example/beta", "Rework the beta build", "hubot", { mergeable: "CONFLICTING", additions: 120, deletions: 30,
+      labels: { nodes: [{ name: "build", color: "fbca04" }, { name: "beta", color: "0e8a16" }, { name: "ci", color: "1d76db" }, { name: "slow", color: "d93f0b" }] },
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] } }),
+    pr(40, "example/alpha", "Seed the notes", "sweeper", { state: "MERGED" }),
+  ];
+  // "label:many" finds 150, two pages of GitHub's 100.
+  if (q.includes("label:many")) {
+    const after = args.find((a) => a.startsWith("after="))?.slice(6);
+    const many = Array.from({ length: after ? 50 : 100 }, (_, i) => pr(1000 + i + (after ? 100 : 0), "example/alpha", `Bulk change ${i + (after ? 100 : 0)}`, "hubot"));
+    process.stdout.write(JSON.stringify({ data: { viewer: { login: "sweeper" }, search: { pageInfo: { hasNextPage: !after, endCursor: after ? null : "page-2" }, nodes: many } } }));
+    process.exit(0);
+  }
+  const words = q.split(" ").filter((w) => w && !w.includes(":")).map((w) => w.toLowerCase());
+  const repos = [...q.matchAll(/repo:(\S+)/g)].map((m) => m[1]);
+  const nodes = all.filter((n) =>
+    repos.includes(n.repository.nameWithOwner) &&
+    (q.includes("is:open") ? n.state === "OPEN" : q.includes("is:merged") ? n.state === "MERGED" : q.includes("is:closed") ? n.state === "CLOSED" : true) &&
+    (!q.includes("author:@me") || n.author.login === "sweeper") &&
+    (!q.includes("review-requested:@me") || n.reviewRequests.nodes.some((r) => r.requestedReviewer.login === "sweeper")) &&
+    words.every((w) => n.title.toLowerCase().includes(w)));
+  process.stdout.write(JSON.stringify({ data: { viewer: { login: "sweeper" }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } }));
 } else {
   process.stderr.write(`fake gh can't ${args.join(" ")}\n`);
   process.exit(1);

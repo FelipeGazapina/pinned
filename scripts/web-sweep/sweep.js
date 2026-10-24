@@ -2145,6 +2145,333 @@ async function sweep(profileName) {
     touchCheck(!small.length, `small: ${small.join(", ")}`);
   });
 
+  const paletteGroups = () => page.locator("#palette .group .label").allTextContents();
+  const paletteItems = () => page.locator("#palette .item .name").allTextContents();
+  await step("shell: ⌘K opens the command palette, finds threads, nests pages", async () => {
+    if (touch) return "touch: no keyboard";
+    const alpha = await keyFor("alpha");
+    await openRow(alpha);
+    await page.keyboard.press("Meta+k");
+    await waitFor("the palette", () => page.locator("#palette").isVisible());
+    check(await page.evaluate(() => document.activeElement === paletteInput), "the palette's input has no focus");
+    check((await page.getAttribute("#palette input", "placeholder")) === "Search commands, projects, and threads...", "wrong placeholder");
+    const groups = await paletteGroups();
+    check(groups.join() === "Actions,Recent Threads", `groups: ${groups.join()}`);
+    const items = await paletteItems();
+    check(items[0] === "New thread in alpha", `first item: ${items[0]}`);
+    check(items.includes("Open settings") && items.includes("Find in current thread"), `actions: ${items.join(" | ")}`);
+    check(await page.locator("#palette .item.hi").first().evaluate((el) => el.dataset.i === "0"), "the first row isn't highlighted");
+    const pop = await rect("#palette .popup");
+    check(pop.width <= 576 && pop.height <= 420, `the palette is ${pop.width}x${pop.height}`);
+    await page.keyboard.type("beta");
+    await waitFor("the Threads group", async () => (await paletteGroups()).includes("Threads"));
+    check(!(await paletteGroups()).includes("Recent Threads"), "a query still shows Recent Threads");
+    await page.keyboard.press("Enter");
+    await waitFor("beta to open from the palette", async () => (await crumbProject()) === "beta");
+    check(!(await page.locator("#palette").isVisible()), "the palette stayed open");
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type(">sett");
+    await waitFor("actions only", async () => (await paletteGroups()).join() === "Actions");
+    check((await paletteItems()).join() === "Open settings,Project settings", `> results: ${(await paletteItems()).join(" | ")}`);
+    await page.fill("#palette input", "new thread in");
+    await waitFor("the sub-page item", async () => (await paletteItems())[0] === "New thread in...");
+    await page.keyboard.press("Enter");
+    await waitFor("the projects sub-page", async () => (await page.getAttribute("#palette input", "placeholder")) === "Search...");
+    const nested = await paletteItems();
+    check(nested[0] === "No project" && nested.includes("alpha") && nested.includes("beta"), `sub-page: ${nested.join(" | ")}`);
+    check((await text("#palette .item[data-i='1'] .hint")) === "⌘2", "the second row has no ⌘2 hint");
+    await page.keyboard.press("Backspace");
+    await waitFor("the root again", async () => (await page.inputValue("#palette input")) === "new thread in");
+    await page.fill("#palette input", "zzqx");
+    await waitFor("the empty state", async () => (await text("#palette .empty")) === "No matching commands, projects, or threads.");
+    await page.keyboard.press("Escape");
+    check(!(await page.locator("#palette").isVisible()), "Escape left the palette open");
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type("find in current");
+    await page.keyboard.press("Enter");
+    await waitFor("⌘K's Find in current thread", () => page.locator("#thread-find").isVisible());
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.press("Meta+k");
+    check(!(await page.locator("#palette").isVisible()), "a second ⌘K didn't close the palette");
+    return `${items.length} actions and threads`;
+  });
+
+  await step("shell: ⌘[ and ⌘] go back and forward between threads", async () => {
+    if (touch) return "touch: no keyboard";
+    const [alpha, beta] = [await keyFor("alpha"), await keyFor("beta")];
+    await openRow(alpha);
+    await openRow(beta);
+    await page.keyboard.press("Meta+[");
+    await waitFor("⌘[ to go back to alpha", async () => (await crumbProject()) === "alpha");
+    await page.keyboard.press("Meta+]");
+    await waitFor("⌘] to go forward to beta", async () => (await crumbProject()) === "beta");
+    await page.keyboard.press("Meta+[");
+    await waitFor("alpha again", async () => (await crumbProject()) === "alpha");
+    return "alpha, beta, alpha";
+  });
+
+  // Priced usage the transcripts recorded: opus today and three days ago, and a model the price list lacks.
+  const seedUsage = () => {
+    const at = (hoursAgo) => new Date(Date.now() - hoursAgo * 3600 * 1000).toISOString();
+    const line = (id, session, hoursAgo, model, usage) => JSON.stringify({ type: "assistant", timestamp: at(hoursAgo), sessionId: session, requestId: `req-${id}`, message: { id, model, role: "assistant", content: [{ type: "text", text: "spent" }], usage } });
+    const dir = path.join(HOME, ".claude", "projects", "-sweep-usage");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "u1.jsonl"), [
+      line("m1", "u1", 2, "claude-opus-5-5", { input_tokens: 1000, cache_read_input_tokens: 2000000, cache_creation_input_tokens: 100000, output_tokens: 50000, speed: "standard" }),
+      line("m1", "u1", 2, "claude-opus-5-5", { input_tokens: 1000, cache_read_input_tokens: 2000000, cache_creation_input_tokens: 100000, output_tokens: 50000, speed: "standard" }),
+      line("m2", "u1", 2, "claude-mystery-1", { input_tokens: 0, output_tokens: 1000 }),
+    ].join("\n") + "\n");
+    fs.writeFileSync(path.join(dir, "u2.jsonl"), line("m3", "u2", 72, "claude-opus-5-5", { input_tokens: 500, output_tokens: 10000 }) + "\n");
+    fs.writeFileSync(path.join(DIR, "node", "usage-model-rates.json"), JSON.stringify({
+      "claude-opus-5-5": { input_cost_per_token: 5e-6, output_cost_per_token: 25e-6, cache_read_input_token_cost: 0.5e-6, cache_creation_input_token_cost: 6.25e-6 },
+    }));
+  };
+  const pageSidebar = async () => {
+    if (await page.locator("#sidebar").isVisible()) return;
+    await tapOrClick("#page-view .side-toggle");
+    await waitFor("the sidebar", () => page.locator("#sidebar").isVisible());
+  };
+  const usagePick = async (seg, value) => {
+    if (touch) await page.selectOption(`#page-view select.seg-select[data-seg="${seg}"]`, value);
+    else await page.click(`#page-view .seg[data-seg="${seg}"] button[data-value="${value}"]`);
+  };
+  const tile = (label) => text(`#page-view .tiles div:has(dt:text-is("${label}")) dd`);
+  await step("shell: the Usage page shows limits, cost and tokens from the transcripts", async () => {
+    seedUsage();
+    await page.evaluate(() => save("gui-usage-page", null));
+    await showSidebar();
+    await tapOrClick('#sidebar footer [data-open-page="usage"]');
+    await waitFor("the Usage page", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
+    check(!(await page.locator("#chat").isVisible()), "the thread still shows beside Usage");
+    await pageSidebar();
+    check(await page.locator("#sidebar footer .back").isVisible(), "the footer has no Back button");
+    await waitFor("two limit windows", async () => (await page.locator("#page-view .limit-card").count()) === 2);
+    const left = await page.locator("#page-view .limit-card .figure b").allTextContents();
+    check(left.join() === "77%,26%", `limits left: ${left.join()}`);
+    check(/↻ \d+[hm]/.test(await text('#page-view .limit-card[data-window="five_hour"] .chip')), "the session window has no reset time");
+    if (touch) await usagePick("metric", "cost");
+    else await page.keyboard.press("c");
+    await waitFor("the total cost", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    check((await text("#page-view .lead > p")) === "2 sessions · API estimate", `under the total: ${await text("#page-view .lead > p")}`);
+    check(/33\.3% unpriced/.test(await page.getAttribute("#page-view .info", "title")), "the unpriced share is missing");
+    check((await page.locator("#page-view .x-axis span").count()) === 3, "the chart has no three x labels");
+    check((await page.locator("#page-view .plot path.line").getAttribute("d")).startsWith("M"), "the chart has no line");
+    const tiles = [await tile("Processed tokens"), await tile("Cached input"), await tile("Uncached input"), await tile("Output"), await tile("Cache savings")];
+    check(tiles.join() === "2.16M,2M,1.50K,61K,$9.00", `totals: ${tiles.join()}`);
+    const models = await page.locator("#page-view table tbody tr td.model span").allTextContents();
+    check(models.join() === "claude-opus-5-5,claude-mystery-1", `models: ${models.join()}`);
+    check((await text('#page-view tr[data-model="claude-mystery-1"] td:nth-child(3)')) === "Unpriced", "the unknown model isn't Unpriced");
+    if (!touch) {
+      const plot = await rect("#page-view .plot");
+      await page.mouse.move(plot.left + plot.width - 4, plot.top + plot.height / 2);
+      await waitFor("the chart's tooltip", async () => /Total/.test(await text("#page-view .tip")));
+      await page.keyboard.press("Meta+Shift+1");
+    } else await usagePick("days", "1");
+    await waitFor("the past 24 hours", async () => (await text("#page-view .total")) === "$2.88");
+    check((await text("#page-view .chart-col h2")) === "Hourly cost", "the chart isn't hourly");
+    if (touch) await usagePick("metric", "tokens");
+    else await page.keyboard.press("t");
+    await waitFor("tokens", async () => (await text("#page-view .total")) === "2.15M");
+    await usagePick("breakdown", "day");
+    check((await page.locator("#page-view table th").first().textContent()) === "Hour", "the breakdown isn't by hour");
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    check(JSON.parse(await page.evaluate(() => load("gui-usage-page"))).days === 1, "the period wasn't saved");
+    if (touch) {
+      await pageSidebar();
+      await tapOrClick("#sidebar footer .back");
+    } else await page.keyboard.press("Escape");
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+    return "limits 77%/26%, $3.13 in 30 days, $2.88 and 2.15M in 24h";
+  });
+
+  await step("shell: ⌘U opens Usage, and ⌘[ comes back", async () => {
+    if (touch) return "touch: no keyboard";
+    const before = await crumbProject();
+    await page.keyboard.press("Meta+u");
+    await waitFor("⌘U to open Usage", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
+    await page.keyboard.press("Meta+[");
+    await waitFor("⌘[ to leave Usage", () => page.locator("#chat").isVisible());
+    check((await crumbProject()) === before, `back on ${await crumbProject()}, not ${before}`);
+    await page.keyboard.press("Meta+]");
+    await waitFor("⌘] to return to Usage", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
+    await page.keyboard.press("Escape");
+    await waitFor("Escape to leave Usage", () => page.locator("#chat").isVisible());
+    return before;
+  });
+
+  await step("shell: a model's details on Usage, and a price set for an unpriced one", async () => {
+    await showSidebar();
+    await tapOrClick('#sidebar footer [data-open-page="usage"]');
+    await waitFor("the Usage page", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
+    await usagePick("metric", "cost");
+    await usagePick("days", "30");
+    await usagePick("breakdown", "model");
+    await waitFor("the 30-day cost", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    await press(page.locator('#page-view tr[data-model="claude-mystery-1"]'));
+    await waitFor("the model's details", () => page.locator("#shell-dialog .dialog-head", { hasText: "claude-mystery-1" }).isVisible());
+    const stat = (label) => text(`#shell-dialog .stats div:has(dt:text-is("${label}")) dd`);
+    check((await stat("Cost")) === "Unpriced" && (await stat("Tokens")) === "1K", `stats: ${await stat("Cost")} ${await stat("Tokens")}`);
+    check((await text("#shell-dialog .dialog-foot .muted")) === "1K tokens have no known price", "no unpriced note");
+    await press(page.locator("#shell-dialog [data-set-price]"));
+    await waitFor("the prices dialog", () => page.locator("#shell-dialog table.prices").isVisible());
+    check((await page.inputValue('#shell-dialog tbody tr:last-child [data-field="model"]')) === "claude-mystery-1", "the model isn't filled in");
+    await page.fill('#shell-dialog tbody tr:last-child [data-field="input"]', "2");
+    await page.fill('#shell-dialog tbody tr:last-child [data-field="output"]', "10");
+    await press(page.locator("#shell-dialog [data-save]"));
+    await waitFor("the priced total", async () => (await text("#page-view .total")) === "$3.14", 15000);
+    check(!(await page.locator("#page-view .info").count()), "the unpriced note stayed");
+    await press(page.locator('#page-view tr[data-model="claude-mystery-1"]'));
+    await waitFor("the priced model", async () => (await stat("Cost")) === "$0.01");
+    if (touch) await press(page.locator("#shell-dialog .close"));
+    else await page.keyboard.press("Escape");
+    check(!(await page.locator("#shell-dialog").isVisible()), "the details stayed open");
+    check(await page.locator("#page-view h1", { hasText: "Usage" }).isVisible(), "closing the details left Usage");
+    await press(page.locator("#page-view .machine-filter"));
+    await press(page.locator("#side-menu button", { hasText: "Model prices" }));
+    await press(page.locator("#shell-dialog tbody tr:first-child [data-remove]"));
+    await press(page.locator("#shell-dialog [data-save]"));
+    await waitFor("the list price again", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    if (touch) {
+      await pageSidebar();
+      await tapOrClick("#sidebar footer .back");
+    } else await page.keyboard.press("Escape");
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+    return "Unpriced, then $0.01 at $2/$10 per 1M";
+  });
+
+  const prNumbers = (group) => page.locator(`#page-view ${group ? `.pr-group[data-group="${group}"] ` : ""}.pr-row[data-url] .num`).allTextContents();
+  const prFilter = async (kind, label) => {
+    await tapOrClick('#page-view [data-pr="filters"]');
+    await press(page.locator("#side-menu button", { hasText: kind }));
+    await press(page.locator("#side-menu button", { hasText: label }));
+  };
+  await step("shell: the Pull requests page lists the open projects' pull requests", async () => {
+    fs.writeFileSync(path.join(HOME, "gh.log"), "");
+    await showSidebar();
+    await tapOrClick('#sidebar footer [data-open-page="pull-requests"]');
+    await waitFor("the Pull requests page", () => page.locator("#page-view h1", { hasText: "Pull Requests" }).isVisible());
+    await waitFor("three groups", async () => (await page.locator("#page-view .pr-group").count()) === 3, 15000);
+    const groups = await page.locator("#page-view .pr-group h3 > span:nth-child(2)").allTextContents();
+    check(groups.join() === "Authored,Review requested,Others", `groups: ${groups.join()}`);
+    const rows = [await prNumbers("authored"), await prNumbers("reviewing"), await prNumbers("others")].map((n) => n.join());
+    check(rows.join(" | ") === "#42 | #41 | #43", `rows: ${rows.join(" | ")}`);
+    const search = readLog("gh.log").match(/ -f (q=.*)$/m)?.[1];
+    check(/^q=is:pr is:open sort:updated-desc repo:example\/\w+ repo:example\/\w+$/.test(search ?? ""), `gh searched: ${search}`);
+    const busy = '#page-view .pr-row[data-url$="/pull/43"]';
+    check(await page.locator(`${busy} .conflict`).isVisible(), "#43's conflict isn't marked");
+    check((await page.getAttribute(`${busy} .checks`, "title")) === "Checks failing", "#43's failing checks aren't shown");
+    check((await text(`${busy} .stat`)) === "+120 -30", `#43's size: ${await text(`${busy} .stat`)}`);
+    check((await page.locator(`${busy} .label`).count()) === 3 && (await text(`${busy} .more`)) === "+1", "#43 doesn't show three labels and +1");
+    check((await page.getAttribute('#page-view .pr-row[data-url$="/pull/42"] .review', "title")) === "Approved", "#42 isn't approved");
+    await prFilter("State", "Merged");
+    await waitFor("the merged pull request", async () => (await prNumbers()).join() === "#40");
+    await prFilter("State", "Open");
+    await waitFor("open again", async () => (await prNumbers()).length === 3);
+    await prFilter("Involvement", "Authored");
+    await waitFor("only the viewer's", async () => (await prNumbers()).join() === "#42" && !(await page.locator("#page-view .pr-group").count()));
+    await prFilter("Involvement", "All");
+    await page.fill("#page-view .pr-search input", "beta build");
+    await waitFor("the search", async () => (await prNumbers()).join() === "#43");
+    await page.fill("#page-view .pr-search input", "zzqx");
+    await waitFor("nothing matches", async () => (await text("#page-view .pr-empty h2")) === "Nothing matches “zzqx”");
+    await press(page.locator('#page-view [data-pr="clear"]'));
+    await waitFor("every row again", async () => (await prNumbers()).length === 3);
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    if (!touch) {
+      await page.keyboard.down("Shift");
+      await page.hover('#page-view .pr-row[data-url$="/pull/41"]');
+      await press(page.locator('#page-view .pr-row[data-url$="/pull/41"] [data-quick="ready"]'));
+      await page.keyboard.up("Shift");
+      await waitFor("gh to mark #41 ready", () => /pr ready -- https:\/\/github.com\/example\/alpha\/pull\/41/.test(readLog("gh.log")));
+    }
+    await press(page.locator('#page-view .pr-row[data-url$="/pull/42"]'));
+    await waitFor("#42 in the side panel", () => gui('#panel-tabs .ptab.active[data-panel="pr"]').isVisible());
+    await waitFor("#42's details", async () => (await page.locator("#panel-body", { hasText: "Add notes" }).count()) > 0, 10000);
+    if (touch) {
+      await page.evaluate(() => closePanel());
+      await pageSidebar();
+      await tapOrClick("#sidebar footer .back");
+    } else {
+      await page.keyboard.press("Escape");
+      if (!(await page.locator("#chat").isVisible())) await page.keyboard.press("Escape");
+    }
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+    if (await page.evaluate(() => document.body.dataset.panel === "open")) await tapOrClick("#toggle-panel");
+    return "#42 authored, #41 to review, #43 others";
+  });
+
+  await step("shell: ⌘K opens the Pull requests and Usage pages", async () => {
+    if (touch) return "touch: no keyboard";
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type("open pull requests");
+    await page.keyboard.press("Enter");
+    await waitFor("the Pull requests page", () => page.locator("#page-view h1", { hasText: "Pull Requests" }).isVisible());
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type("open usage");
+    await page.keyboard.press("Enter");
+    await waitFor("the Usage page", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
+    await page.keyboard.press("Escape");
+    await waitFor("back on Pull requests", () => page.locator("#page-view h1", { hasText: "Pull Requests" }).isVisible());
+    await page.keyboard.press("Escape");
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+  });
+
+  await step("shell: Pull requests load more, condense the header, copy a link and list checks", async () => {
+    fs.writeFileSync(path.join(HOME, "gh.log"), "");
+    await showSidebar();
+    await tapOrClick('#sidebar footer [data-open-page="pull-requests"]');
+    await waitFor("the rows", async () => (await prNumbers()).length === 3, 15000);
+    await page.fill("#page-view .pr-search input", "label:many");
+    await waitFor("GitHub's first page", async () => (await prNumbers()).length === 100, 15000);
+    await press(page.locator('#page-view [data-pr="more"]'));
+    await waitFor("the second page", async () => (await prNumbers()).length === 150, 15000);
+    check(!(await page.locator('#page-view [data-pr="more"]').count()), "Load more stayed after the last page");
+    check(/-f after=page-2/.test(readLog("gh.log")), "gh never asked for the second page");
+    await page.locator("#page-view .page-body").evaluate((el) => (el.scrollTop = 2000));
+    await waitFor("the condensed header", () => page.locator("#page-view .page-head .condensed").isVisible());
+    check((await page.locator("#page-view .page-head .condensed .crumb-menu").allTextContents()).join() === "Open,All", "the condensed filters are wrong");
+    await press(page.locator('#page-view .page-head [data-pr="search-top"]'));
+    await waitFor("the search, scrolled back", async () => (await page.evaluate(() => document.activeElement?.closest?.(".pr-search") !== null)) && !(await page.locator("#page-view .page-head .condensed").isVisible()));
+    await page.fill("#page-view .pr-search input", "");
+    await waitFor("every row again", async () => (await prNumbers()).length === 3, 15000);
+    const num = page.locator('#page-view .pr-row[data-url$="/pull/42"] .num');
+    if (touch) {
+      const box = await num.boundingBox();
+      await num.dispatchEvent("contextmenu", { clientX: box.x + 4, clientY: box.y + 4 });
+    } else await num.click({ button: "right" });
+    await waitFor("the number's menu", () => page.locator("#side-menu").isVisible());
+    const items = await page.locator("#side-menu button .label").allTextContents();
+    check(items.join() === "Copy link,Copy number,Open on GitHub", `menu: ${items.join()}`);
+    await press(page.locator("#side-menu button", { hasText: "Copy link" }));
+    const copied = await clipboard();
+    check(copied === null || copied === "https://github.com/example/alpha/pull/42", `copied ${copied}`);
+    await press(page.locator('#page-view .pr-row[data-url$="/pull/43"] .checks'));
+    await waitFor("the checks", () => page.locator("#side-menu button", { hasText: "build" }).isVisible(), 10000);
+    check((await text('#side-menu button:has-text("build") .hint')) === "success", "the check's result is missing");
+    if (touch) await page.evaluate(() => closeSideMenu());
+    else await page.keyboard.press("Escape");
+    if (!touch) {
+      await press(page.locator('#page-view .pr-row[data-url$="/pull/42"]'));
+      await waitFor("#42 selected", () => page.locator('#page-view .pr-row.selected[data-url$="/pull/42"]').isVisible());
+      await page.evaluate(() => navigator.clipboard?.writeText("").catch(() => {}));
+      await page.keyboard.press("Meta+Shift+c");
+      const link = await clipboard();
+      check(link === null || link === "https://github.com/example/alpha/pull/42", `⌘⇧C copied ${link}`);
+      await page.evaluate(() => closePanel());
+      await page.keyboard.press("Escape");
+    } else {
+      await pageSidebar();
+      await tapOrClick("#sidebar footer .back");
+    }
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+    return "100, then 150 rows";
+  });
+
   await step("app view: back to the terminal", async () => {
     await showSidebar();
     await tapOrClick("#mode-terminal");

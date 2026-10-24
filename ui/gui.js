@@ -207,11 +207,11 @@ function renderGui() {
   }
   for (const key of threads.keys()) if (!tabByKey(key)) threads.delete(key);
   markThreadSeen(active);
+  noteVisit();
   renderSidebar();
   if (active && threadOf(active).unsupported) renderUnsupported();
   else renderThread();
   renderPanel();
-  renderGuiUsage();
 }
 
 setInterval(() => {
@@ -221,12 +221,6 @@ setInterval(() => {
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
 document.addEventListener("visibilitychange", () => markThreadSeen(active));
 
-function renderGuiUsage() {
-  const meter = document.getElementById("gui-usage");
-  meter.replaceChildren(...[...usageMeter.children].map((c) => c.cloneNode(true)));
-  meter.title = usageMeter.title;
-}
-
 function stepThread(step) {
   const order = [...threadList.querySelectorAll(".thread-row")].map((r) => tabByKey(r.dataset.tab));
   const i = order.indexOf(active);
@@ -235,9 +229,9 @@ function stepThread(step) {
 
 /** The app view's shortcuts, which each part of it adds with `onGuiKey`. They are ⌘ chords, Ctrl ones
  * off the Mac, where a shell in the terminal needs Ctrl+E to end the line. With Option a key goes by
- * position, since Option turns B into ∫ on a Mac. */
+ * position, since Option turns B into ∫ on a Mac. A chord given `when` overrides the others while `when()` holds. */
 const guiKeys = [];
-const onGuiKey = (key, run, { shift = false, alt = false } = {}) => guiKeys.push({ keys: [key].flat(), run, shift, alt });
+const onGuiKey = (key, run, { shift = false, alt = false, when = null } = {}) => guiKeys.push({ keys: [key].flat(), run, shift, alt, when });
 
 window.addEventListener("keydown", (e) => {
   if (settingsOpen() || pickerOpen()) return;
@@ -248,7 +242,8 @@ window.addEventListener("keydown", (e) => {
   if (switchView) setMode(guiOn() ? "terminal" : "gui");
   else if (!guiOn() || (!IS_MAC && e.target.closest?.("#terms"))) return;
   else {
-    const hit = guiKeys.find((k) => k.keys.includes(key) && k.shift === e.shiftKey && k.alt === e.altKey);
+    const hits = guiKeys.filter((k) => k.keys.includes(key) && k.shift === e.shiftKey && k.alt === e.altKey && k.when?.() !== false);
+    const hit = hits.find((k) => k.when) ?? hits[0];
     if (!hit) return;
     hit.run(e);
   }
