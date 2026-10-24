@@ -56,12 +56,20 @@ The app view has three columns:
   those files. **Open diff** shows them in the side panel. Type below and press Enter to send.
   While Claude works, Enter queues your message and the red button stops the turn.
   The menu under the prompt picks the model.
-- **Side panel.** ⌘D opens the **Diff** of each turn, unified or split. **Browser** previews a
-  page your project serves, such as `localhost:3000`, and offers the local servers the session
-  mentioned. **Pull request** shows the pull request the session opened: its description,
-  checks, reviews and code. It reads them with the GitHub CLI, so `gh` must be installed and
-  signed in on the machine the session runs on. Click the PR number in the header or under the
-  prompt to open it.
+- **Side panel.** Each thread keeps its own panel: its tabs, the one shown, its width, and
+  whether it is open or maximized. **+** (⌘T while the panel is open) adds a tab, and ⌘W closes
+  the shown tab before it ever closes a thread. ⌘D opens the **Diff**: one turn, the latest
+  turn, **Uncommitted** changes, or **Changes** since the branch left the default branch, unified
+  or split, with syntax colors, a file tree, and whitespace changes hidden by default. Click a line
+  number to write a review comment; it goes into the prompt as `path:line: comment`.
+  **Browser** (⌘⇧J) previews a page your project serves, such as `localhost:3000`, at a device's
+  size if you like, and lists the web servers the session started and the pages you opened
+  recently. **Pull request** shows the pull request the session opened: reviewers, labels,
+  description, checks, a timeline, and the code with **Viewed** marks. Its menu copies the link
+  or number (⌘⇧K), merges, or marks a draft ready, each after you confirm. It uses the GitHub CLI,
+  so `gh` must be installed and signed in on the machine the session runs on. Click the PR number
+  in the header or under the prompt to open it. **Open** in the header (⌘O) opens the thread's
+  folder in an editor installed on that machine; its arrow picks which one.
 
 When Claude asks something in its terminal, such as whether to trust a new folder or to allow a
 command, the app view shows the question above the prompt with Claude's own options. Pick one,
