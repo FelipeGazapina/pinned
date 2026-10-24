@@ -1,0 +1,22 @@
+
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   ~/work/app
+
+
+❯ Use the AskUserQuestion tool once to ask me which color I prefer, with exactly two options: Red (description: warm
+  and bold) and Blue (description: calm and cool). Do nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Color
+
+Which color do you prefer?
+
+❯ 1. Red
+     warm and bold
+  2. Blue
+     calm and cool
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

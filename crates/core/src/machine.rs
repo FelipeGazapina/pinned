@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
-use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions, sync, thread, uploads, workspace};
+use crate::{branches, commands, files, github, history, hooks, plugin, projects, pty, reminders, sessions, sync, thread, uploads, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -212,6 +212,7 @@ impl Tab {
             subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
             updated: self.updated,
+            session: self.claude_session.clone(),
         }
     }
 }
@@ -336,6 +337,28 @@ impl Machine {
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
             Call::Workspace { tab } => json(workspace::of(&self.tab(&tab, |t| t.cwd.clone())?)),
             Call::PullRequest { tab, pr } => json(workspace::pull_request(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
+            Call::PrAction { tab, pr, action } => json(workspace::pr_action(&self.tab(&tab, |t| t.cwd.clone())?, &pr, action, self.launch.path_env.as_deref())?),
+            Call::Diff { tab, scope, ignore_whitespace } => json(workspace::diff(&self.tab(&tab, |t| t.cwd.clone())?, scope, ignore_whitespace)?),
+            Call::Ports { tab } => {
+                let pid = self.tab(&tab, |t| t.session.as_ref().and_then(|s| s.pid()))?;
+                json(workspace::listeners(pid, self.launch.path_env.as_deref()))
+            }
+            Call::Editors => json(workspace::editors(&home(), self.launch.path_env.as_deref())),
+            Call::OpenIn { tab, editor, path } => {
+                let cwd = self.tab(&tab, |t| t.cwd.clone())?;
+                json(workspace::open_in(&cwd, &editor, path.as_deref(), &home(), self.launch.path_env.as_deref())?)
+            }
+            Call::Commands { tab } => json(commands::list(&home(), &self.tab(&tab, |t| t.cwd.clone())?)),
+            Call::Files { tab } => json(files::list(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())),
+            Call::Branches { tab } => json(branches::of(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
+            Call::Checkout { tab, branch, create } => {
+                // A permission prompt mid-turn reports NeedsInput with the turn still open.
+                let (cwd, working) = self.tab(&tab, |t| (t.cwd.clone(), t.status == Some(AgentStatus::Working) || (t.status == Some(AgentStatus::NeedsInput) && t.interrupted)))?;
+                if working {
+                    return Err("claude is working in this folder. Switch branches when the turn ends.".into());
+                }
+                json(branches::checkout(&cwd, &branch, create, self.launch.path_env.as_deref())?)
+            }
         }
     }
 
@@ -381,7 +404,9 @@ impl Machine {
         let cwd = self.find_folder(&run.folder, run.repo.as_deref(), run.token.as_deref())?;
         let exe = self.launch.exe.display().to_string();
         let args = run.args.iter().map(|a| a.replace(EXE_PLACEHOLDER, &exe)).collect();
-        let id = self.add_tab(cwd, args, run.env.clone(), false, None);
+        // A run resuming a conversation shows its transcript before claude's first hook names it.
+        let resumed = run.args.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone());
+        let id = self.add_tab(cwd, args, run.env.clone(), false, resumed);
         self.emit_tabs();
         Ok(id)
     }
@@ -1214,6 +1239,26 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_switch_waits_for_claude_to_finish_the_turn() {
+        let dir = temp("checkout");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(&dir, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        git(&dir, &["branch", "other"]);
+        let m = machine();
+        let tab = m.add_tab(dir.clone(), vec![], vec![], false, None);
+        let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None };
+        m.record_event(working.clone());
+        let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false };
+        assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"));
+        m.record_event(AgentEvent { status: AgentStatus::NeedsInput, ..working.clone() });
+        assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"), "a permission prompt mid-turn let the branch switch");
+        m.record_event(AgentEvent { status: AgentStatus::Done, ..working.clone() });
+        m.record_event(AgentEvent { status: AgentStatus::NeedsInput, ..working });
+        assert_eq!(m.call(checkout), Ok(Value::Null));
+        assert_eq!(m.call(Call::Workspace { tab }).unwrap()["branch"], "other");
+    }
+
+    #[test]
     fn calls_answer_with_the_json_a_client_reads() {
         let m = machine();
         assert_eq!(m.call(Call::OpenTab { path: None, bypass: true }), Ok(json!("tab-1")));
@@ -1276,6 +1321,21 @@ mod tests {
         assert_eq!(m.tab(&id, |t| t.launch.clone()).unwrap(), ["--name", "ENG-7", "Run `'/opt/pinned/bin/pinned' stage coding` first"]);
         let elsewhere = RunSpec { folder: "/nonexistent/acme".into(), repo: None, ..run };
         assert_eq!(m.open_run(&elsewhere), Err("/nonexistent/acme does not exist on this machine".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_resuming_a_session_reads_its_transcript_from_the_start() {
+        let dir = temp("run-resume");
+        let m = machine();
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec!["--resume".into(), "s1".into()], env: vec![], token: None };
+        let id = m.open_run(&run).unwrap();
+        assert_eq!(m.tab(&id, |t| t.claude_session.clone()).unwrap().as_deref(), Some("s1"));
+        assert_eq!(m.thread(&id, 0).unwrap().session.as_deref(), Some("s1"));
+        assert_eq!(m.view(&id).unwrap().session.as_deref(), Some("s1"), "the tab's view lacks the session clients key it by");
+        let fresh = m.open_run(&RunSpec { args: vec![], ..run }).unwrap();
+        assert_eq!(m.tab(&fresh, |t| t.claude_session.clone()).unwrap(), None);
+        assert_eq!(m.view(&fresh).unwrap().session, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 

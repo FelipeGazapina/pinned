@@ -65,7 +65,9 @@ const refreshTabs = async (machine) => setTabs(machine, await callOn(machine, { 
 
 function updateView(tab, view) {
   const before = statusOf(tab);
+  const key = threadKey(tab);
   tab.view = view;
+  if (threadKey(tab) !== key) rekeyThread(key, threadKey(tab));
   const after = statusOf(tab);
   if (after === before) return;
   if (!TAURI) return attend(tab, ALERTS.includes(after));
@@ -453,6 +455,7 @@ async function setBypass(tab, on) {
 }
 
 function closeTab(tab) {
+  rememberClosed(tab);
   removeTab(tab, true);
   render();
   // The app quits with its last tab while signed out, so the local close goes through its own command.
@@ -755,9 +758,11 @@ window.addEventListener("keydown", (e) => {
   }
   if (!e.metaKey || e.ctrlKey) return;
   if (e.key === ",") toggleSettings();
+  else if (e.key === "t" && guiOn() && ui.panelOpen) document.getElementById("panel-add").click();
   else if (e.key === "t") toggleProjects();
+  else if (e.key === "w" && guiOn() && ui.panelOpen) closeSurface();
   else if (e.key === "w" && active) closeTab(active);
-  else if (/^[1-9]$/.test(e.key) && tabs[e.key - 1]) activate(tabs[e.key - 1]);
+  else if (/^[1-9]$/.test(e.key) && !guiOn() && tabs[e.key - 1]) activate(tabs[e.key - 1]);
   else return;
   e.preventDefault();
   e.stopPropagation();
@@ -766,8 +771,8 @@ window.addEventListener("keydown", (e) => {
 const UPLOAD_LIMIT = 25 << 20;
 
 // Claude Code attaches an image when a file path is pasted, so an attached file becomes a paste of its escaped path.
-function pastePaths(tab, paths) {
-  if (guiOn() && tab === active) return insertPaths(paths);
+function pastePaths(tab, paths, files) {
+  if (guiOn() && tab === active) return insertPaths(paths, files);
   tab.term.paste(paths.map((p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&")).join(" ") + " ");
   tab.term.focus();
 }
@@ -778,6 +783,7 @@ attachNote.hidden = true;
 terms.append(attachNote);
 let attachNoteTimer;
 function showAttachNote(text, error = false) {
+  if (guiOn()) return showComposerNote(text, error);
   clearTimeout(attachNoteTimer);
   attachNote.textContent = text;
   attachNote.toggleAttribute("data-error", error);
@@ -808,7 +814,7 @@ async function attachFiles(tab, files) {
   } catch (e) {
     showAttachNote(String(e), true);
   }
-  if (paths.length && tabs.includes(tab)) pastePaths(tab, paths);
+  if (paths.length && tabs.includes(tab)) pastePaths(tab, paths, files);
 }
 
 const attachInput = document.getElementById("attach-input");
@@ -828,7 +834,7 @@ attachInput.onchange = () => {
 
 TAURI?.webview.getCurrentWebview().onDragDropEvent(async ({ payload }) => {
   if (payload.type !== "drop" || !active) return;
-  const tab = active;
+  const tab = threadAt(payload.position) ?? active;
   if (tab.machine === LOCAL) return tab.view.running && pastePaths(tab, payload.paths);
   try {
     const files = await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split("/").pop())));

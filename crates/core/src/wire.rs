@@ -3,6 +3,7 @@
 
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
+use crate::workspace::{DiffScope, PrAction};
 use crate::{sync, thread};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -56,6 +57,9 @@ pub struct TabView {
     /// Unix time the session last reported a status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated: Option<u64>,
+    /// Claude Code's id for the conversation, which outlives the tab's id across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -126,13 +130,62 @@ pub enum Call {
     Workspace { tab: TabId },
     /// What `gh pr view` answers for `pr`, a number or URL, run in the tab's folder, plus `diff`.
     PullRequest { tab: TabId, pr: String },
+    /// `null`. Merges `pr`, or marks it ready, through gh in the tab's folder.
+    PrAction { tab: TabId, pr: String, action: PrAction },
+    /// `workspace::Diff`: the tab's working tree against HEAD or the default branch.
+    Diff {
+        tab: TabId,
+        scope: DiffScope,
+        #[serde(default)]
+        ignore_whitespace: bool,
+    },
+    /// `Vec<workspace::Listener>`: the machine's web servers, the tab's session's own first.
+    Ports { tab: TabId },
+    /// `Vec<workspace::Editor>` installed on the machine.
+    Editors,
+    /// `null`. Opens the tab's folder, or `path` inside its repository, in the editor `editor`.
+    OpenIn {
+        tab: TabId,
+        editor: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    /// `Vec<commands::Command>`, the slash commands claude offers in the tab's folder.
+    Commands { tab: TabId },
+    /// `Vec<String>`: the tab's folder's files and folders, relative, for `@` mentions.
+    Files { tab: TabId },
+    /// `branches::Branches` of the tab's folder.
+    Branches { tab: TabId },
+    /// `null`. Switches the tab's folder to `branch`, a new one when `create`. Refused while claude works there.
+    Checkout {
+        tab: TabId,
+        branch: String,
+        #[serde(default)]
+        create: bool,
+    },
 }
 
 impl Call {
     /// Runs off the machine's call queue, which carries keystrokes in order: a run may clone a
     /// repository for minutes, gh waits on GitHub, and the others read files or run git.
     pub fn may_wait(&self) -> bool {
-        matches!(self, Call::Run { .. } | Call::PullRequest { .. } | Call::Thread { .. } | Call::Workspace { .. } | Call::ProjectHistory { .. })
+        matches!(
+            self,
+            Call::Run { .. }
+                | Call::PullRequest { .. }
+                | Call::PrAction { .. }
+                | Call::Thread { .. }
+                | Call::Workspace { .. }
+                | Call::ProjectHistory { .. }
+                | Call::Diff { .. }
+                | Call::Ports { .. }
+                | Call::Editors
+                | Call::OpenIn { .. }
+                | Call::Commands { .. }
+                | Call::Files { .. }
+                | Call::Branches { .. }
+                | Call::Checkout { .. }
+        )
     }
 }
 
@@ -405,6 +458,7 @@ mod tests {
             subject: Some(Subject::LinearIssue { issue: "uuid".into() }),
             opened: 3,
             updated: Some(1792400000),
+            session: Some("s1".into()),
         }
     }
 
@@ -447,6 +501,15 @@ mod tests {
             Call::Upload { name: "photo.jpg".into(), data: Bytes(b"\xff\xd8".to_vec()) },
             json!({ "cmd": "upload", "name": "photo.jpg", "data": "/9g=" }),
         );
+        round_trip(
+            Call::Diff { tab: "tab-1".into(), scope: DiffScope::Base, ignore_whitespace: true },
+            json!({ "cmd": "diff", "tab": "tab-1", "scope": "base", "ignore_whitespace": true }),
+        );
+        round_trip(
+            Call::PrAction { tab: "tab-1".into(), pr: "7".into(), action: PrAction::Ready },
+            json!({ "cmd": "pr_action", "tab": "tab-1", "pr": "7", "action": "ready" }),
+        );
+        round_trip(Call::OpenIn { tab: "tab-1".into(), editor: "zed".into(), path: None }, json!({ "cmd": "open_in", "tab": "tab-1", "editor": "zed" }));
     }
 
     #[test]
@@ -468,7 +531,7 @@ mod tests {
             json!({ "kind": "tabs", "tabs": [{
                 "id": "tab-3", "cwd": "/repo", "bypass": false, "running": true, "status": "needs-input",
                 "title": "Fix the build", "message": "Claude needs your permission to use Bash",
-                "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3, "updated": 1792400000,
+                "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3, "updated": 1792400000, "session": "s1",
             }] }),
         );
         round_trip(

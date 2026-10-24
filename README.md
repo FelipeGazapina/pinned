@@ -49,26 +49,55 @@ The app view has three columns:
 
 - **Sidebar.** Your threads, one per tab, with the project, the title Claude gave the session, the
   branch and the pull request. A thread that is working, waiting for your approval, or finished
-  while you were away says so. Search filters the list, and **All projects** narrows it to one
-  project. Threads idle for 3 days move under **Settled**. ⌘B hides the sidebar.
+  while you were away says so. Pinned threads (⌘⇧P) stay on top; new threads come next. Search
+  matches titles, projects, branches, PR numbers and the messages themselves; ↑ and ↓ pick a
+  result and Enter opens it. **All projects** narrows the list to one project. Threads idle for
+  3 days move under **Settled**, and **Settle** on a row (or ⌘⇧S) moves one there now; the clock
+  snoozes a thread until a time you pick, after which it shows **Woke**. ⌘Z undoes a settle,
+  snooze or unpin for 5 seconds. Right-click a row to pin, settle, snooze, rename, mark it
+  unread, filter by its project, copy its path, branch or session ID, or close it. Double-click
+  a title to rename it. Hold ⌘ to see which row ⌘1–⌘9 opens. Drag the sidebar's edge to resize
+  it; double-click the edge to reset it. ⌘B hides the sidebar.
 - **Thread.** Your prompts and Claude's answers. The tool calls of a turn fold into one
   **Worked for** row; click it to see each one. A turn that changed files ends with a card of
   those files. **Open diff** shows them in the side panel. Type below and press Enter to send.
   While Claude works, Enter queues your message and the red button stops the turn.
   The menu under the prompt picks the model.
-- **Side panel.** ⌘D opens the **Diff** of each turn, unified or split. **Browser** previews a
-  page your project serves, such as `localhost:3000`, and offers the local servers the session
-  mentioned. **Pull request** shows the pull request the session opened: its description,
-  checks, reviews and code. It reads them with the GitHub CLI, so `gh` must be installed and
-  signed in on the machine the session runs on. Click the PR number in the header or under the
-  prompt to open it.
+- **Side panel.** Each thread keeps its own panel: its tabs, the one shown, its width, and
+  whether it is open or maximized. **+** (⌘T while the panel is open) adds a tab, and ⌘W closes
+  the shown tab before it ever closes a thread. ⌘D opens the **Diff**: one turn, the latest
+  turn, **Uncommitted** changes, or **Changes** since the branch left the default branch, unified
+  or split, with syntax colors, a file tree, and whitespace changes hidden by default. Click a line
+  number to write a review comment; it goes into the prompt as `path:line: comment`.
+  **Browser** (⌘⇧J) previews a page your project serves, such as `localhost:3000`, at a device's
+  size if you like, and lists the web servers the session started and the pages you opened
+  recently. **Pull request** shows the pull request the session opened: reviewers, labels,
+  description, checks, a timeline, and the code with **Viewed** marks. Its menu copies the link
+  or number (⌘⇧K), merges, or marks a draft ready, each after you confirm. It uses the GitHub CLI,
+  so `gh` must be installed and signed in on the machine the session runs on. Click the PR number
+  in the header or under the prompt to open it. **Open** in the header (⌘O) opens the thread's
+  folder in an editor installed on that machine; its arrow picks which one.
 
 When Claude asks something in its terminal, such as whether to trust a new folder or to allow a
 command, the app view shows the question above the prompt with Claude's own options. Pick one,
-or click **Terminal** to answer there. ⌘J opens the terminal under the thread at any time.
+or click **Terminal** to answer there. Typing instead answers it too: on a permission it declines
+and tells Claude what to do instead, on a question it is your own answer, and on a plan it is
+feedback that refines it. A question's options also take the keys 1 to 9. ⌘J opens the terminal
+under the thread at any time; drag its top edge to resize it.
 
-Other keys in the app view: ⌘N for a new thread, ⌘⇧[ and ⌘⇧] for the previous or next thread,
-and ⌘⌥B to show or hide the side panel. On Windows and Linux these keys use Ctrl, they do nothing
+The composer keeps a draft per thread, and the sidebar marks threads with one. ⌘S sets a draft
+aside in the **Stash** above the prompt. ↑ and ↓ in an empty prompt bring back the thread's
+earlier prompts, and `/` lists Claude's commands with your own and your project's commands and
+skills. Attached files show above the prompt and go out with it. Next to the model menu (⌘⇧M),
+the mode menu (⌘⇧A, or ⇧Tab in the prompt) switches Claude between Supervised, Auto-accept
+edits, Plan and Auto. The branch under the prompt (⌘⇧G) switches or creates branches once Claude
+is between turns, and the Git button in the header asks Claude to commit, push or open a pull
+request, whichever the branch needs.
+
+Other keys in the app view: ⌘N for a new thread (in the current project when only one is open,
+otherwise it asks where), ⌘⇧N for a new thread in the current project, ⌘⌥N for one in the home
+folder, ⌘⇧T to reopen the last thread you closed, ⌘⇧C to copy `claude --resume <session>`,
+⌘⇧[ and ⌘⇧] for the previous or next thread, and ⌘⌥B to show or hide the side panel. On Windows and Linux these keys use Ctrl, they do nothing
 while the terminal has the focus, and Ctrl+Shift+E switches views, since a shell needs Ctrl+E.
 
 ## Tabs
