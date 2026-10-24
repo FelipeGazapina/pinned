@@ -120,6 +120,68 @@
     return [Math.abs(zoomed * 2 - before) <= 2 && signature === "PNG" && png.length > 1000 && hidden && back, { before, zoomed, png: png.length, signature, hidden, back }];
   });
 
+  await step("appearance, cookies, mute, a separate window and the floating preview", async () => {
+    const run = (js) => invoke("browser_eval", { id: page().id, js });
+    const act = (action) => invoke("browser_do", { id: page().id, action });
+    await act({ do: "appearance", mode: "dark" });
+    await sleep(300);
+    const dark = await run("matchMedia('(prefers-color-scheme: dark)').matches");
+    await act({ do: "appearance", mode: "light" });
+    await sleep(300);
+    const light = !(await run("matchMedia('(prefers-color-scheme: dark)').matches"));
+    await run("(() => { document.cookie = 'probe=1; max-age=600'; return document.cookie; })()");
+    await act({ do: "clear-cookies" });
+    await sleep(500);
+    await act({ do: "reload" });
+    await until(async () => !page().loading && (await run("document.readyState")) === "complete");
+    const cookies = await run("document.cookie");
+    await act({ do: "mute", on: true });
+    await invoke("browser_window", { url: `${base}/frame` });
+    await sleep(1500);
+    const windows = (await TAURI.webviewWindow.getAllWebviewWindows()).map((w) => w.label);
+    await setView("expanded");
+    await sleep(500);
+    togglePip(page());
+    await sleep(500);
+    const pip = document.querySelector("#preview-pip .page")?.getBoundingClientRect();
+    const floating = placedPage === page().id && pip?.width > 100 && !!document.querySelector("#panel-body .viewport.floating");
+    togglePip(page());
+    await sleep(500);
+    const returned = placedPage === page().id && !!document.querySelector("#panel .viewport .page");
+    return [dark && light && cookies === "" && windows.some((l) => l.startsWith("preview-window-")) && floating && returned, { dark, light, cookies, windows, floating, returned }];
+  });
+
+  await step("an annotation picks an element into the prompt with its picture", async () => {
+    prompt.value = "";
+    const s = page();
+    pickElement(s);
+    await until(() => s.picking);
+    await sleep(500);
+    await invoke("browser_eval", { id: s.id, js: `(() => {
+      const h1 = document.querySelector("h1").getBoundingClientRect();
+      const at = { clientX: h1.left + 5, clientY: h1.top + 5, bubbles: true };
+      const layer = document.documentElement.lastElementChild;
+      layer.dispatchEvent(new PointerEvent("pointerdown", at));
+      layer.dispatchEvent(new PointerEvent("pointerup", at));
+      return true;
+    })()` });
+    await until(() => !s.picking && /\[127\.0\.0\.1:\d+ h1 /.test(prompt.value), 6000);
+    await until(() => (threadOf(active).attachments ?? []).some((f) => /annotation-.*\.png$/.test(f.path)), 8000);
+    const attached = (threadOf(active).attachments ?? []).map((f) => f.name);
+    return [/\[127\.0\.0\.1:\d+ h1 "two"\]/.test(prompt.value) && attached.some((n) => /^annotation-.*\.png$/.test(n)), { prompt: prompt.value, attached }];
+  });
+
+  await step("a shift-click on Capture records the page to Downloads", async () => {
+    const s = page();
+    await capture(s, true);
+    await sleep(1500);
+    const recordingNow = recording?.id === s.id;
+    await stopRecording();
+    await sleep(800);
+    const note = document.getElementById("panel-note")?.textContent ?? "";
+    return [recordingNow && /Recording saved/.test(note), { recordingNow, note }];
+  });
+
   await step("opening a link outside reaches the system browser", async () => {
     openOutside(`${base}/opened`);
     let hit = false;

@@ -1347,7 +1347,7 @@ const PICK_JS = `(() => {
   ui.append(ink, box); document.documentElement.append(ui);
   const show = (r) => Object.assign(box.style, { display: "block", left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px" });
   const under = (x, y) => { ui.style.display = "none"; const el = document.elementFromPoint(x, y); ui.style.display = ""; return el; };
-  const path = (el) => { const parts = []; for (let e = el; e && e.nodeType === 1 && parts.length < 5; e = e.parentElement) { let p = e.localName; if (e.id) { parts.unshift(p + "#" + e.id); break; } const cls = [...e.classList].slice(0, 2).join("."); if (cls) p += "." + cls; parts.unshift(p); } return parts.join(" > "); };
+  const path = (el) => { const parts = []; for (let e = el; e && e.nodeType === 1 && e !== document.body && e !== document.documentElement && parts.length < 5; e = e.parentElement) { let p = e.localName; if (e.id) { parts.unshift(p + "#" + e.id); break; } const cls = [...e.classList].slice(0, 2).join("."); if (cls) p += "." + cls; parts.unshift(p); } return parts.join(" > "); };
   let down = null, strokes = [];
   const done = (pick) => { ui.remove(); removeEventListener("keydown", key, true); window.__pinnedPicker = null; window.__pinnedPick = pick; };
   const cancel = () => done({ cancelled: true });

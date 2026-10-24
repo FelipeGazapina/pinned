@@ -256,6 +256,7 @@ pub async fn browser_window(app: AppHandle, url: String) -> Result<(), String> {
 #[tauri::command]
 pub fn save_capture(app: AppHandle, name: String, bytes: Vec<u8>) -> Result<String, String> {
     let dir = app.path().download_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let name = std::path::Path::new(&name).file_name().ok_or("no file name")?.to_string_lossy().to_string();
     let (stem, ext) = name.rsplit_once('.').unwrap_or((&name, ""));
     let mut path = dir.join(&name);

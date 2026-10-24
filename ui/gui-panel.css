@@ -152,6 +152,11 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 #preview-pip .pill { position: absolute; top: 6px; right: 6px; display: flex; align-items: center; gap: 2px; height: 32px; padding: 2px 2px 2px 8px; border-radius: 8px;
   border: 1px solid rgb(255 255 255 / 0.1); background: rgb(20 20 20 / 0.92); color: var(--g-fg); font-size: 12px; cursor: grab; opacity: 0; transition: opacity 0.15s; }
 #preview-pip:hover .pill, #preview-pip .pill:focus-within { opacity: 1; }
+/* A native page draws over the page's own HTML, so in the app the pill gets a strip above it. */
+:root[data-shell="app"] #preview-pip { background: #141414; height: 252px; }
+:root[data-shell="app"] #preview-pip .page { top: 32px; height: auto; bottom: 0; }
+:root[data-shell="app"] #preview-pip .pill { top: 0; right: 0; left: 0; height: 32px; border: 0; border-radius: 0; background: none; opacity: 1; }
+:root[data-shell="app"] #preview-pip .pill .title { flex: 1; max-width: none; }
 #preview-pip .pill .title { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 4px; }
 #preview-pip .icon { width: 24px; height: 24px; }
 #preview-pip .icon .i { width: 14px; height: 14px; }
