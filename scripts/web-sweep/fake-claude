@@ -71,6 +71,7 @@ function submit() {
     fs.appendFileSync("notes.md", `edited at ${new Date().toISOString()}\nsecond line\n`);
     said([{ type: "tool_result", tool_use_id: id, content: "The file notes.md has been updated." }]);
     wrote([{ type: "text", text: "I edited **notes.md** and opened a pull request.\n\n- one change\n- `notes.md`" }]);
+    record({ type: "pr-link", prNumber: 41, prUrl: "https://github.com/example/alpha/pull/41", prRepository: "example/alpha" });
     record({ type: "pr-link", prNumber: 42, prUrl: "https://github.com/example/alpha/pull/42", prRepository: "example/alpha" });
     out("edited notes.md\r\n");
   } else {

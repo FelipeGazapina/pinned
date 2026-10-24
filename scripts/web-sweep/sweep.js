@@ -619,6 +619,16 @@ async function sweep(profileName) {
     await waitFor("the PR panel", prPanelSettled, 15000);
     check(await page.locator('#panel-tabs [data-panel="pr"].active').isVisible(), "the PR tab is not the active one");
     const shown = (await text("#panel-body")).slice(0, 80);
+    await tapOrClick('#thread .pr-link[data-pr$="/pull/41"]');
+    await waitFor("#41 in the PR panel", async () => /#41/.test(await text("#panel-body")) && !/Loading/.test(await text("#panel-body")), 15000);
+    check(/#41/.test(await text('#panel-tabs [data-panel="pr"]')), `the PR tab reads ${await text('#panel-tabs [data-panel="pr"]')} after clicking #41`);
+    if (!touch) {
+      const tabsBefore = await page.locator("#thread-list .thread-row").count();
+      await page.keyboard.press("Meta+w");
+      await waitFor("⌘W to close the panel", async () => !(await page.locator("#panel").isVisible()));
+      check((await page.locator("#thread-list .thread-row").count()) === tabsBefore, "⌘W closed a thread while the panel was open");
+      await tapOrClick("#toggle-panel");
+    }
     if (touch) {
       await tapOrClick("#panel-close");
       await tapOrClick("#toggle-panel");
