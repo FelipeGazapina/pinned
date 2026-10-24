@@ -614,7 +614,10 @@ async function sweep(profileName) {
     const thought = await text("#thread .turn:last-of-type .group .tool.thought .label");
     check(thought === "Planning the read", `the thinking row reads ${thought}`);
     check((await text("#thread .codeblock .lang")) === "rust", `the code block's language is ${await text("#thread .codeblock .lang")}`);
-    check((await page.locator("#thread .codeblock .hljs-keyword").count()) >= 2, "the code is not highlighted");
+    // Shiki with T3 Code's Pierre Dark theme: `fn` is a keyword, `main` a function, `42` a number.
+    await waitFor("highlighted code", async () => (await page.locator("#thread .codeblock code.shiki").count()) > 0, 5000);
+    const colors = await gui("#thread .codeblock code.shiki").evaluate((code) => [...code.querySelectorAll("span")].filter((s) => ["fn", "main", "42"].includes(s.textContent)).map((s) => `${s.textContent}=${s.style.color}`));
+    check(colors.join(" ") === "fn=rgb(255, 103, 141) main=rgb(157, 106, 251) 42=rgb(104, 205, 242)", `the code is colored ${colors.join(" ")}`);
     const block = gui("#thread .codeblock");
     check((await block.getAttribute("data-wrap")) === "true", "code doesn't wrap by default");
     await press(block.locator("[data-code-wrap]"));

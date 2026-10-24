@@ -109,7 +109,7 @@ button.xs.copied { color: var(--g-success); }
 .codeblock .code-actions { display: flex; gap: 2px; }
 .md .codeblock pre { margin: 0; border-radius: 0; background: transparent; padding: 8px 14.4px 12.8px; }
 .codeblock[data-wrap="true"] pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-.md .codeblock pre code { color: #e5e5e5; }
+.md .codeblock pre code { color: #fafafa; }
 .hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
 .hljs-string, .hljs-regexp, .hljs-symbol, .hljs-char.escape_, .hljs-template-tag, .hljs-addition { color: var(--hl-string); }
 .hljs-number, .hljs-literal { color: var(--hl-number); }
