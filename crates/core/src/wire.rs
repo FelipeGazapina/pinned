@@ -169,6 +169,8 @@ pub enum Call {
     },
     /// `panel::PageMeta` of the web page at `url`, fetched from this machine.
     PageMeta { url: String },
+    /// `panel::Refs`: the tab's folder's local and remote branches, for picking what to compare with.
+    Refs { tab: TabId },
     /// `panel::FileText` of `path` in the tab's folder, or in its repository when `root`, as of `rev` when given.
     ReadFile {
         tab: TabId,
@@ -238,6 +240,12 @@ pub enum Call {
     OpenShell { tab: TabId, cols: u16, rows: u16 },
     /// `null`. Ends the shell `shell`.
     CloseShell { shell: String },
+    /// The address of the machine's device hub, which mirrors its simulators and emulators. It
+    /// starts on the first call; `embed` is the origin of a page that frames it.
+    DeviceHub {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        embed: Option<String>,
+    },
 }
 
 impl Call {
@@ -261,6 +269,7 @@ impl Call {
                 | Call::Branches { .. }
                 | Call::Checkout { .. }
                 | Call::PageMeta { .. }
+                | Call::Refs { .. }
                 | Call::ReadFile { .. }
                 | Call::WriteFile { .. }
                 | Call::Search { .. }
@@ -269,6 +278,7 @@ impl Call {
                 | Call::PrReview { .. }
                 | Call::PrRerun { .. }
                 | Call::PrGuide { .. }
+                | Call::DeviceHub { .. }
         )
     }
 }

@@ -172,6 +172,30 @@ fn unescape(text: &str) -> String {
     out
 }
 
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Refs {
+    pub local: Vec<String>,
+    /// As `origin/main`.
+    pub remote: Vec<String>,
+}
+
+/// Every local and remote branch of the folder, newest commit first.
+pub fn refs(cwd: &Path, path: Option<&str>) -> Result<Refs, String> {
+    let out = run(cwd, path, "git", &["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/heads", "refs/remotes"]).map_err(|e| match e {
+        Failure::Missing => "git isn't installed on this machine".to_owned(),
+        Failure::Said(said) => format!("git: {said}"),
+    })?;
+    let mut refs = Refs { local: vec![], remote: vec![] };
+    for name in out.lines() {
+        if let Some(local) = name.strip_prefix("refs/heads/") {
+            refs.local.push(local.to_owned());
+        } else if let Some(remote) = name.strip_prefix("refs/remotes/").filter(|r| !r.ends_with("/HEAD")) {
+            refs.remote.push(remote.to_owned());
+        }
+    }
+    Ok(refs)
+}
+
 /// A file as the panel shows it: text, an image, or neither when it is binary.
 #[derive(Serialize, Debug, PartialEq, Default)]
 pub struct FileText {
@@ -589,6 +613,59 @@ pub fn guide(cwd: &Path, pr: &str, write: bool, store: &Path, claude: &Path, pat
     Ok(running)
 }
 
+/// Expo's device hub, the server T3 Code's Device surface streams simulators and emulators from,
+/// run once per machine on a port of its own. Its dashboard is the Device tab's page.
+pub const DEVICE_HUB: &str = "expo-device-hub@0.15.3";
+
+#[derive(Default)]
+pub struct DeviceHub {
+    running: std::sync::Mutex<Option<(std::process::Child, u16)>>,
+}
+
+impl DeviceHub {
+    /// The hub's address, starting it first when it isn't running. `embed` is the origin of a page
+    /// that frames the dashboard, which the hub must allow. The first start downloads the hub.
+    pub fn url(&self, embed: Option<&str>, path: Option<&str>) -> Result<String, String> {
+        let mut running = self.running.lock().unwrap();
+        if let Some((child, port)) = running.as_mut() {
+            if child.try_wait().ok().flatten().is_none() {
+                return Ok(format!("http://localhost:{port}/"));
+            }
+        }
+        let port = std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map_err(|e| e.to_string())?.port();
+        let port_arg = port.to_string();
+        let mut args = vec!["-y", DEVICE_HUB, "--host", "127.0.0.1", "--port", &port_arg];
+        if let Some(origin) = embed.filter(|o| o.starts_with("http://") || o.starts_with("https://")) {
+            args.extend(["--frame-ancestor", origin]);
+        }
+        let mut command = Command::new("npx");
+        command.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let mut child = command.spawn().map_err(|_| "Mirroring a device needs Node.js on this machine. Install it, then open the Device tab again.".to_owned())?;
+        for _ in 0..600 {
+            if std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(200)).is_ok() {
+                *running = Some((child, port));
+                return Ok(format!("http://localhost:{port}/"));
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                return Err(format!("the device hub stopped before it started ({status})"));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let _ = child.kill();
+        Err("the device hub took too long to start".into())
+    }
+
+    pub fn stop(&self) {
+        if let Some((mut child, _)) = self.running.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 const SHELL_KEEP: usize = 256 * 1024;
 
 /// Login shells that the panel's Terminal surface runs in a tab's folder, beside the tab's claude.
@@ -618,7 +695,13 @@ impl Shells {
         let id = format!("shell-{}", self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
         #[cfg(unix)]
         let mut cmd = {
-            let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
+            // SHELL can name a wrapper, as a test's does; a shell this doesn't know falls back to one it does.
+            const KNOWN: [&str; 8] = ["zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "nu"];
+            let shell = std::env::var("SHELL")
+                .ok()
+                .filter(|s| Path::new(s).file_name().is_some_and(|n| KNOWN.contains(&n.to_string_lossy().as_ref())))
+                .or_else(|| ["/bin/zsh", "/bin/bash"].into_iter().find(|s| Path::new(s).exists()).map(str::to_owned))
+                .unwrap_or_else(|| "/bin/sh".into());
             let mut cmd = portable_pty::CommandBuilder::new(shell);
             cmd.arg("-l");
             cmd
@@ -761,6 +844,21 @@ mod tests {
         assert_eq!(std::fs::read_to_string(src.join("a.rs")).unwrap(), "fn a() { 2 }\n");
         assert!(write_file(&src, "a.rs", false, "lost", Some(&now.hash)).unwrap_err().contains("changed on disk"));
         assert_eq!(write_file(&src, "a.rs", false, "fn a() { 3 }\n", Some(&saved)).map(drop), Ok(()));
+    }
+
+    #[test]
+    fn refs_list_local_and_remote_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "one"]);
+        git(repo, &["branch", "feature"]);
+        git(repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        let found = refs(repo, None).unwrap();
+        let mut local = found.local.clone();
+        local.sort();
+        assert_eq!((local, found.remote), (vec!["feature".to_owned(), "main".to_owned()], vec!["origin/main".to_owned()]));
     }
 
     #[test]

@@ -58,6 +58,8 @@ pub enum PrAction {
     Rebase,
     /// Marks a draft ready for review.
     Ready,
+    /// Turns an open pull request back into a draft.
+    Draft,
     Close,
     Reopen,
     /// Opens a pull request that undoes this merged one.
@@ -67,15 +69,26 @@ pub enum PrAction {
     AutoSquash,
     AutoRebase,
     DisableAuto,
+    /// Deletes a merged pull request's branch on GitHub.
+    DeleteBranch,
 }
 
 pub fn pr_action(cwd: &Path, pr: &str, action: PrAction, path: Option<&str>) -> Result<(), String> {
     check_pr(pr)?;
+    if action == PrAction::DeleteBranch {
+        let view: Value = serde_json::from_str(&gh(cwd, path, &["pr", "view", "--json", "headRefName,headRepository,headRepositoryOwner", "--", pr])?).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+        let (owner, repo, branch) = (view["headRepositoryOwner"]["login"].as_str().unwrap_or(""), view["headRepository"]["name"].as_str().unwrap_or(""), view["headRefName"].as_str().unwrap_or(""));
+        if owner.is_empty() || repo.is_empty() || branch.is_empty() {
+            return Err("gh didn't say which branch this pull request is on".into());
+        }
+        return gh(cwd, path, &["api", "-X", "DELETE", &format!("repos/{owner}/{repo}/git/refs/heads/{branch}")]).map(drop);
+    }
     let args: &[&str] = match action {
         PrAction::Merge => &["pr", "merge", "--merge", "--", pr],
         PrAction::Squash => &["pr", "merge", "--squash", "--", pr],
         PrAction::Rebase => &["pr", "merge", "--rebase", "--", pr],
         PrAction::Ready => &["pr", "ready", "--", pr],
+        PrAction::Draft => &["pr", "ready", "--undo", "--", pr],
         PrAction::Close => &["pr", "close", "--", pr],
         PrAction::Reopen => &["pr", "reopen", "--", pr],
         PrAction::Revert => &["pr", "revert", "--", pr],
@@ -83,6 +96,7 @@ pub fn pr_action(cwd: &Path, pr: &str, action: PrAction, path: Option<&str>) -> 
         PrAction::AutoSquash => &["pr", "merge", "--auto", "--squash", "--", pr],
         PrAction::AutoRebase => &["pr", "merge", "--auto", "--rebase", "--", pr],
         PrAction::DisableAuto => &["pr", "merge", "--disable-auto", "--", pr],
+        PrAction::DeleteBranch => unreachable!("answered above"),
     };
     gh(cwd, path, args).map(drop)
 }
@@ -128,6 +142,8 @@ pub struct Diff {
     pub truncated: bool,
     /// The ref `DiffScope::Base` compared with, such as `origin/main`.
     pub base: Option<String>,
+    /// The working tree's snapshot the diff ends on, a git tree, to read its files from.
+    pub tree: String,
 }
 
 pub fn diff(cwd: &Path, scope: DiffScope, ignore_whitespace: bool, against: Option<&str>) -> Result<Diff, String> {
@@ -159,7 +175,7 @@ pub fn diff(cwd: &Path, scope: DiffScope, ignore_whitespace: bool, against: Opti
         Failure::Said(said) => format!("git: {said}"),
     })?;
     let truncated = clip(&mut patch);
-    Ok(Diff { patch, truncated, base })
+    Ok(Diff { patch, truncated, base, tree })
 }
 
 /// A TCP port a process on the machine listens on and that answers HTTP with a page.

@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
-use crate::panel::Shells;
+use crate::panel::{DeviceHub, Shells};
 use crate::{branches, commands, files, github, history, hooks, panel, plugin, projects, pty, reminders, sessions, sync, thread, uploads, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
@@ -234,6 +234,7 @@ pub struct Machine {
     /// The review guides claude wrote for pull requests.
     guides: PathBuf,
     shells: Shells,
+    device_hub: DeviceHub,
     clones: PathBuf,
     quitting: AtomicBool,
     usage: Mutex<Usage>,
@@ -281,6 +282,7 @@ impl Machine {
             uploads,
             guides: dir.as_ref().map(|d| d.join("guides")).unwrap_or_else(|| std::env::temp_dir().join("pinned-guides")),
             shells: Shells::default(),
+            device_hub: DeviceHub::default(),
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
             usage: Mutex::new(Usage::default()),
@@ -366,6 +368,7 @@ impl Machine {
                 json(branches::checkout(&cwd, &branch, create, self.launch.path_env.as_deref())?)
             }
             Call::PageMeta { url } => json(panel::page_meta(&url)?),
+            Call::Refs { tab } => json(panel::refs(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
             Call::ReadFile { tab, path, root, rev } => json(panel::read_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, root, rev.as_deref())?),
             Call::WriteFile { tab, path, root, text, since } => json(panel::write_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, root, &text, since.as_deref())?),
             Call::Search { tab, query, case, regex } => json(panel::search(&self.tab(&tab, |t| t.cwd.clone())?, &query, case, regex, self.launch.path_env.as_deref())?),
@@ -379,6 +382,7 @@ impl Machine {
                 self.shells.close(&shell);
                 Ok(Value::Null)
             }
+            Call::DeviceHub { embed } => json(self.device_hub.url(embed.as_deref(), self.launch.path_env.as_deref())?),
         }
     }
 
@@ -704,6 +708,7 @@ impl Machine {
     pub fn quit(&self) {
         self.quitting.store(true, Ordering::SeqCst);
         self.tabs.lock().unwrap().clear();
+        self.device_hub.stop();
     }
 
     fn record_event(&self, event: AgentEvent) {
@@ -842,7 +847,7 @@ impl Machine {
                     return;
                 };
                 let (Some(dir), Some((files, patch, truncated))) = (&self.history_dir, history::diff(&cwd, &before, &tree)) else { return };
-                let turn = history::Turn { session, title: event.title.clone(), prompt, ended: unix_now(), files, patch, truncated };
+                let turn = history::Turn { session, title: event.title.clone(), prompt, ended: unix_now(), files, patch, truncated, tree: Some(tree) };
                 history::append(&history::file_for(dir, &history::project_of(&cwd)), &turn);
             }
             NeedsInput => {}
