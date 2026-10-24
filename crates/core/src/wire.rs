@@ -130,6 +130,13 @@ pub enum Call {
     Workspace { tab: TabId },
     /// What `gh pr view` answers for `pr`, a number or URL, run in the tab's folder, plus `diff`.
     PullRequest { tab: TabId, pr: String },
+    /// `workspace::PrStatus`: whether `pr` is open, a draft, merged or closed, without its diff.
+    PrStatus { tab: TabId, pr: String },
+    /// `Option<String>`: the icon of the tab's project, where T3 Code looks for one, as a data URL.
+    Favicon { tab: TabId },
+    /// `String`: a new title for the tab's conversation, which `claude -p` writes from `thread`, its
+    /// messages, and the `previous` title.
+    RegenerateTitle { tab: TabId, previous: String, thread: String },
     /// `null`. Merges `pr`, or marks it ready, through gh in the tab's folder.
     PrAction { tab: TabId, pr: String, action: PrAction },
     /// `workspace::Diff`: the tab's working tree against HEAD or the default branch.
@@ -173,6 +180,9 @@ impl Call {
             self,
             Call::Run { .. }
                 | Call::PullRequest { .. }
+                | Call::PrStatus { .. }
+                | Call::Favicon { .. }
+                | Call::RegenerateTitle { .. }
                 | Call::PrAction { .. }
                 | Call::Thread { .. }
                 | Call::Workspace { .. }

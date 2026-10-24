@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
-use crate::{branches, commands, files, github, history, hooks, plugin, projects, pty, reminders, sessions, sync, thread, uploads, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, plugin, projects, pty, reminders, sessions, sync, thread, titles, uploads, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -103,7 +103,7 @@ impl Launch {
 /// What a Claude Code session sets for the processes it runs. pinned started from inside one (a
 /// terminal tab of claude, or a node run from it) would pass them on, and each tab's claude
 /// would then take itself for a nested session: no transcript, so `--resume` finds nothing.
-const INHERITED_SESSION_ENV: [&str; 11] = [
+pub(crate) const INHERITED_SESSION_ENV: [&str; 11] = [
     "CLAUDECODE",
     "CLAUDE_PID",
     "CLAUDE_EFFORT",
@@ -336,6 +336,12 @@ impl Machine {
             Call::Thread { tab, from } => json(self.thread(&tab, from)?),
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
             Call::Workspace { tab } => json(workspace::of(&self.tab(&tab, |t| t.cwd.clone())?)),
+            Call::RegenerateTitle { tab, previous, thread } => {
+                let cwd = self.tab(&tab, |t| t.cwd.clone())?;
+                json(titles::regenerate(&self.launch.claude, &cwd, self.launch.path_env.as_deref(), &previous, &thread)?)
+            }
+            Call::Favicon { tab } => json(favicon::of(&history::project_of(&self.tab(&tab, |t| t.cwd.clone())?))),
+            Call::PrStatus { tab, pr } => json(workspace::pr_status(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
             Call::PullRequest { tab, pr } => json(workspace::pull_request(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
             Call::PrAction { tab, pr, action } => json(workspace::pr_action(&self.tab(&tab, |t| t.cwd.clone())?, &pr, action, self.launch.path_env.as_deref())?),
             Call::Diff { tab, scope, ignore_whitespace } => json(workspace::diff(&self.tab(&tab, |t| t.cwd.clone())?, scope, ignore_whitespace)?),

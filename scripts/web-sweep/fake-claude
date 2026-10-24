@@ -6,6 +6,11 @@ const fs = require("fs");
 const path = require("path");
 
 const args = process.argv.slice(2);
+// `claude -p`, which pinned runs to title a conversation: the title names the thread's first prompt.
+if (args.includes("-p")) {
+  process.stdout.write(`${JSON.stringify({ title: `Titled ${args.at(-1).match(/USER: (.*)/)?.[1] ?? "nothing"}` })}\n`);
+  process.exit(0);
+}
 const settingsFile = args[args.indexOf("--settings") + 1];
 const settings = settingsFile ? JSON.parse(fs.readFileSync(settingsFile, "utf8")) : {};
 // --resume carries on the named session, so its transcript grows where it left off, as claude's does.
@@ -167,6 +172,10 @@ function submit() {
     record({ type: "pr-link", prNumber: 41, prUrl: "https://github.com/example/alpha/pull/41", prRepository: "example/alpha" });
     record({ type: "pr-link", prNumber: 42, prUrl: "https://github.com/example/alpha/pull/42", prRepository: "example/alpha" });
     out("edited notes.md\r\n");
+  } else if (line === "open-pr") {
+    wrote([{ type: "text", text: "I opened a pull request." }]);
+    record({ type: "pr-link", prNumber: 43, prUrl: "https://github.com/example/beta/pull/43", prRepository: "example/beta" });
+    out("opened #43\r\n");
   } else if (line === "code") {
     const id = `tool-${lines}`;
     const source = 'const answer = 42; // the answer\nfunction greet(name) {\n  return "hi " + name;\n}\n';

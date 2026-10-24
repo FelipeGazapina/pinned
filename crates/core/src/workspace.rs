@@ -45,6 +45,50 @@ pub fn pull_request(cwd: &Path, pr: &str, path: Option<&str>) -> Result<Value, S
     Ok(view)
 }
 
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    Open,
+    Draft,
+    Merged,
+    Closed,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct PrStatus {
+    pub state: PrState,
+    pub title: String,
+    pub merged_at: Option<String>,
+    pub closed_at: Option<String>,
+}
+
+pub fn pr_status(cwd: &Path, pr: &str, path: Option<&str>) -> Result<PrStatus, String> {
+    check_pr(pr)?;
+    parse_pr_status(&gh(cwd, path, &["pr", "view", "--json", "state,isDraft,title,mergedAt,closedAt", "--", pr])?)
+}
+
+fn parse_pr_status(view: &str) -> Result<PrStatus, String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct View {
+        state: String,
+        #[serde(default)]
+        is_draft: bool,
+        #[serde(default)]
+        title: String,
+        merged_at: Option<String>,
+        closed_at: Option<String>,
+    }
+    let view: View = serde_json::from_str(view).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+    let state = match view.state.as_str() {
+        "MERGED" => PrState::Merged,
+        "CLOSED" => PrState::Closed,
+        _ if view.is_draft => PrState::Draft,
+        _ => PrState::Open,
+    };
+    Ok(PrStatus { state, title: view.title, merged_at: view.merged_at, closed_at: view.closed_at })
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PrAction {
@@ -398,6 +442,20 @@ mod tests {
         }
         let missing = pull_request(dir.path(), "7", Some(dir.path().to_str().unwrap())).unwrap_err();
         assert!(missing.contains("isn't installed"), "{missing}");
+        assert!(pr_status(dir.path(), "--web", None).unwrap_err().contains("is not a pull request"));
+    }
+
+    #[test]
+    fn a_pull_request_status_reads_gh_states() {
+        let status = |json: &str| parse_pr_status(json).unwrap();
+        assert_eq!(status(r#"{"state":"OPEN","isDraft":false,"title":"Add notes","mergedAt":null,"closedAt":null}"#).state, PrState::Open);
+        assert_eq!(status(r#"{"state":"OPEN","isDraft":true,"title":"t","mergedAt":null,"closedAt":null}"#).state, PrState::Draft);
+        assert_eq!(status(r#"{"state":"CLOSED","isDraft":true,"title":"t","mergedAt":null,"closedAt":"2026-01-02T00:00:00Z"}"#).state, PrState::Closed);
+        assert_eq!(
+            status(r#"{"state":"MERGED","isDraft":false,"title":"Add notes","mergedAt":"2026-01-01T10:40:00Z","closedAt":"2026-01-01T10:40:00Z"}"#),
+            PrStatus { state: PrState::Merged, title: "Add notes".into(), merged_at: Some("2026-01-01T10:40:00Z".into()), closed_at: Some("2026-01-01T10:40:00Z".into()) }
+        );
+        assert!(parse_pr_status("not json").unwrap_err().contains("bad answer"));
     }
 
     fn commit(dir: &Path, message: &str) {
