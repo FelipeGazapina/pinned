@@ -124,9 +124,13 @@ async function fetchThread(tab) {
 
 async function fetchWorkspace(tab) {
   const t = threadOf(tab);
-  if (t.workspaceFor === tab.view.cwd) return;
-  t.workspaceFor = tab.view.cwd;
-  t.workspace = await callOn(tab.machine, { cmd: "workspace", tab: tab.view.id }).catch(() => null);
+  const cwd = tab.view.cwd;
+  if (t.workspaceFor === cwd) return;
+  t.workspaceFor = cwd;
+  const workspace = await callOn(tab.machine, { cmd: "workspace", tab: tab.view.id }).catch(() => null);
+  // A tab opened on a remote machine starts in its home folder and moves; the older answer loses.
+  if (t.workspaceFor !== cwd) return;
+  t.workspace = workspace;
   if (!t.workspace) t.workspaceFor = null;
   if (!guiOn()) return;
   renderSidebar();
