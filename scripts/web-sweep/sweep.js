@@ -551,7 +551,8 @@ async function sweep(profileName) {
   const gui = (selector) => page.locator(selector).filter({ visible: true }).first();
   const sendPrompt = async (words) => {
     await page.fill("#prompt", words);
-    if (touch) await page.tap("#send");
+    // While claude asks a question or shows its plan, T3 Code's pills take Send's place.
+    if (touch) await page.tap((await page.locator("#pill-actions .pill").first().isVisible()) ? "#pill-actions .pill >> nth=0" : "#send");
     else {
       // Enter in the `/` menu picks its highlighted command, so a word sent as typed closes it first.
       if (await page.locator('#composer-menu:is([data-kind="slash"], [data-kind="mention"])').isVisible()) await page.press("#prompt", "Escape");
@@ -1132,10 +1133,11 @@ async function sweep(profileName) {
     await page.fill("#prompt", "");
     const model = await text("#model-button");
     await tapOrClick("#model-button");
-    await tapOrClick("#composer-menu button");
+    await press(page.locator("#composer-menu .model").first());
     await sleep(300);
     check(!/\/model/.test(await termText()), "picking a model typed into claude's menu");
     check((await text("#model-button")) === model, `the model button changed to ${await text("#model-button")} with nothing sent`);
+    check((await text("#composer-note")) === "This applies once claude finishes the turn.", `the pick wasn't held for the turn: ${await text("#composer-note")}`);
     await press(gui('#approval [data-option="2"]'));
     await waitTerm(/chose 2/);
     await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()), 1500);
@@ -1143,6 +1145,7 @@ async function sweep(profileName) {
     check(!/ran it/.test(await termText()), "claude finished before the banner was checked");
     check(!/Approval/.test(row), `after the answer, while claude still works: ${JSON.stringify(row)}`);
     await waitTerm(/ran it/);
+    await waitFor("the held model pick to apply", async () => (await text("#model-button")) === "Fable 5.1", 10000);
     return options.join(" | ");
   });
 
@@ -1223,54 +1226,79 @@ async function sweep(profileName) {
 
   await step("composer: claude's plan is refined by typed feedback, or implemented from a blank send", async () => {
     await sendPrompt("/plan-ready");
-    await waitFor("the plan banner", async () => (await text("#approval .kind")) === "Plan ready");
+    await waitFor("the plan banner", async () => (await page.locator("#approval").isVisible()) && (await text("#approval .kind")) === "Plan ready");
     const placeholder = await page.getAttribute("#prompt", "placeholder");
     check(placeholder === "Add feedback to refine the plan, or leave this blank to implement it", `placeholder: ${placeholder}`);
     await sendPrompt("also say goodbye");
     await waitTerm(/answered: also say goodbye/);
     await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
     await sendPrompt("/plan-ready");
-    await waitFor("the plan banner again", async () => (await text("#approval .kind")) === "Plan ready");
+    await waitFor("the plan banner again", async () => (await page.locator("#approval").isVisible()) && (await text("#approval .kind")) === "Plan ready");
     await sendPrompt("");
     await waitTerm(/answered: Yes, and use auto mode/);
     await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
     return placeholder;
   });
 
-  await step("composer: the mode control shows claude's mode and sets it with Shift+Tab", async () => {
+  await step("composer: Access and Build / Plan read claude's mode and set it with Shift+Tab", async () => {
+    // A narrow composer, as on a phone, folds Access and Build / Plan into "…".
+    const folded = await page.evaluate(() => composer.dataset.compact === "true");
+    const openAccess = () => tapOrClick(folded ? "#more-button" : "#mode-button");
+    const accessRows = () => page.evaluate(() => {
+      const rows = [...composerMenu.children];
+      const from = rows.findIndex((r) => r.textContent === "Access");
+      return rows.slice(from + 1).filter((r) => r.tagName === "BUTTON").map((r) => `${r.querySelector(".label").textContent}${r.classList.contains("checked") ? "*" : ""}`);
+    });
+    const pickAccess = async (label) => {
+      await openAccess();
+      await press(page.locator("#composer-menu button", { hasText: label }).last());
+    };
+    const togglePlan = async (to) => {
+      if (!folded) return tapOrClick("#plan-toggle");
+      await tapOrClick("#more-button");
+      await press(page.locator("#composer-menu button", { hasText: to }).last());
+    };
     check(!(await page.locator("#mode-button").isVisible()), "a mode shows before claude drew its mode line");
     await sendPrompt("/modes");
-    await waitFor("the mode control", async () => (await text("#mode-button")) === "Supervised");
-    await tapOrClick("#mode-button");
-    const modes = await page.locator("#composer-menu .label").allTextContents();
-    check(modes.join("|") === "Supervised|Auto-accept edits|Plan|Auto", `modes: ${modes.join("|")}`);
-    check((await page.locator("#composer-menu button.checked .label").allTextContents()).join() === "Supervised", "the menu doesn't check Supervised");
-    await press(page.locator("#composer-menu button", { hasText: "Plan" }).first());
-    await waitFor("Plan", async () => (await text("#mode-button")) === "Plan");
+    await waitFor("the mode control", async () => (await text("#mode-button")) === "Supervised" && (await text("#plan-toggle")) === "Build");
+    await openAccess();
+    const modes = await accessRows();
+    check(modes.join("|") === "Supervised*|Auto-accept edits|Auto|Full access", `access modes: ${modes.join("|")}`);
+    await press(page.locator("#composer-menu button", { hasText: "Auto-accept edits" }).last());
+    await waitFor("Auto-accept edits", async () => (await text("#mode-button")) === "Auto-accept edits");
+    await togglePlan("Plan");
+    await waitFor("Plan", async () => (await text("#plan-toggle")) === "Plan" && (await page.getAttribute("#plan-toggle", "aria-pressed")) === "true");
     check(/plan mode on/.test(await termText()), "claude's screen never reached plan mode");
+    check((await text("#mode-button")) === "Auto-accept edits", `in Plan, Access shows ${await text("#mode-button")}`);
+    await pickAccess("Supervised");
+    await waitFor("Supervised kept for Build", async () => (await text("#mode-button")) === "Supervised");
+    check((await text("#plan-toggle")) === "Plan", "picking an access mode left Plan");
+    await togglePlan("Chat");
+    await waitFor("Build in Supervised", async () => (await text("#plan-toggle")) === "Build" && (await text("#mode-button")) === "Supervised");
+    check(/manual mode on/.test((await termText()).split("\n").filter(Boolean).slice(-3).join("\n")), "Build didn't go back to claude's manual mode");
     if (!touch) {
       await page.focus("#prompt");
       await page.keyboard.press("Shift+Tab");
-      await waitFor("Shift+Tab to cycle to Auto", async () => (await text("#mode-button")) === "Auto");
+      await waitFor("Shift+Tab to cycle to Auto-accept edits", async () => (await text("#mode-button")) === "Auto-accept edits");
       await page.keyboard.press("Meta+Shift+A");
-      await waitFor("⌘⇧A to open the mode menu", () => page.locator("#composer-menu button.checked", { hasText: "Auto" }).isVisible());
+      await waitFor("⌘⇧A to open the access menu", () => page.locator("#composer-menu button.checked", { hasText: "Auto-accept edits" }).isVisible());
       await page.keyboard.press("Escape");
+      await pickAccess("Supervised");
+      await waitFor("Supervised again", async () => (await text("#mode-button")) === "Supervised");
     }
-    await tapOrClick("#mode-button");
-    await press(page.locator("#composer-menu button", { hasText: "Supervised" }).first());
-    await waitFor("Supervised again", async () => (await text("#mode-button")) === "Supervised");
     return modes.join(" | ");
   });
 
-  await step("composer: the model menu checks the current model, ⌘⇧M opens it", async () => {
+  await step("composer: the model picker lists Claude's models, ⌘⇧M opens it", async () => {
     if (touch) await tapOrClick("#model-button");
     else await page.keyboard.press("Meta+Shift+M");
-    await waitFor("the model menu", () => page.locator("#composer-menu").isVisible());
-    const checked = await page.locator("#composer-menu button.checked .label").allTextContents();
-    check(checked.join() === "Default", `checked: ${checked.join()}`);
-    if (touch) await page.tap("#thread");
+    await waitFor("the model picker", () => page.locator('#composer-menu[data-kind="models"] .model').first().isVisible());
+    const names = await page.locator("#composer-menu .model .name").allTextContents();
+    check(names.join("|") === "Claude Fable 5.1|Claude Opus 5.5|Claude Sonnet 5.5|Claude Haiku 5.5New|Legacy models", `models: ${names.join("|")}`);
+    if (touch) await page.tap("#model-button");
     else await page.keyboard.press("Escape");
-    await waitFor("the menu to close", async () => !(await page.locator("#composer-menu").isVisible()));
+    await waitFor("the picker to close", async () => !(await page.locator("#composer-menu").isVisible()));
+    return names.join(", ");
   });
 
   await step("composer: / lists claude's commands with the project's and user's own", async () => {
@@ -1324,13 +1352,22 @@ async function sweep(profileName) {
     await page.fill("#prompt", "");
     await page.evaluate(() => document.activeElement.blur());
     await page.evaluate(() => (threadView.scrollTop = 0));
+    if (touch) {
+      await sleep(300);
+      check(await page.evaluate(() => composer.dataset.resting !== "true"), "a phone's composer rested, which T3 Code's doesn't");
+      await page.evaluate(() => (threadView.scrollTop = threadView.scrollHeight));
+      return "no resting on a phone";
+    }
     await waitFor("the resting composer", () => page.evaluate(() => composer.dataset.resting === "true"));
     const resting = (await rect("#composer .box")).height;
-    check(resting < 60, `the resting composer is ${Math.round(resting)}px tall`);
+    check(Math.round(resting) === 48, `the resting composer is ${Math.round(resting)}px tall`);
+    check(await page.locator("#composer-footer #model-button").isVisible(), "the model control didn't move into the strip");
+    check(await page.locator("#composer-footer").isVisible(), "the strip went with the rest");
     await page.focus("#prompt");
     await waitFor("the full composer", () => page.evaluate(() => composer.dataset.resting === "false"));
     const full = (await rect("#composer .box")).height;
     check(full > 100, `the focused composer is ${Math.round(full)}px tall`);
+    check(await page.locator("#composer .tools #model-button").isVisible(), "the model control didn't come back");
     await page.fill("#prompt", "sent while scrolled up");
     await page.evaluate(() => (threadView.scrollTop = 0));
     await tapOrClick("#send");
@@ -1353,12 +1390,17 @@ async function sweep(profileName) {
     return walk.join(" → ");
   });
 
-  await step("composer: the More menu switches sending to ⌘Enter", async () => {
-    const toggle = async () => {
-      await tapOrClick("#more-button");
-      await press(page.locator("#composer-menu button", { hasText: "Send with ⌘Enter" }));
+  await step("composer: the send shortcut setting: Enter, ⌘Enter for multiline prompts, ⌘Enter always", async () => {
+    const pick = async (value) => {
+      await page.evaluate(() => toggleSettings());
+      await tapOrClick('#settings-nav [data-page="general"]');
+      const options = await page.locator("#send-shortcut option").allTextContents();
+      await page.selectOption("#send-shortcut", value);
+      await page.evaluate(() => toggleSettings());
+      return options;
     };
-    await toggle();
+    const options = await pick("mod-enter");
+    check(options.join("|") === "Enter|⌘ + Enter for multiline prompts|⌘ + Enter always", `choices: ${options.join("|")}`);
     check((await page.getAttribute("#send", "title")) === "Send (⌘Enter)", `the send button says ${await page.getAttribute("#send", "title")}`);
     if (!touch) {
       await page.fill("#prompt", "two");
@@ -1368,9 +1410,21 @@ async function sweep(profileName) {
       await page.press("#prompt", "Meta+Enter");
       await waitTerm(/echo: two/);
       check((await page.inputValue("#prompt")) === "", "⌘Enter didn't send");
+      await pick("mod-enter-multiline");
+      await page.fill("#prompt", "one line");
+      await page.press("#prompt", "Enter");
+      await waitTerm(/echo: one line/);
+      await page.fill("#prompt", "a second\nline");
+      check((await page.getAttribute("#send", "title")) === "Send (⌘Enter)", "a multiline prompt doesn't ask for ⌘Enter");
+      await page.press("#prompt", "Enter");
+      check((await page.inputValue("#prompt")) === "a second\nline\n", `Enter on a multiline prompt left ${JSON.stringify(await page.inputValue("#prompt"))}`);
+      await page.press("#prompt", "Meta+Enter");
+      await waitTerm(/echo: a second/);
     }
-    await toggle();
+    await pick("enter");
+    await page.fill("#prompt", "");
     check((await page.getAttribute("#send", "title")) === "Send (Enter)", "the setting didn't switch back");
+    return options.join(" | ");
   });
 
   await step("composer: attached files show above the prompt and go out with it", async () => {
@@ -1380,20 +1434,42 @@ async function sweep(profileName) {
     };
     const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
     await attach({ name: "shot.png", mimeType: "image/png", buffer: png });
-    await waitFor("the thumbnail", () => page.locator("#attachments .attachment img").isVisible());
-    check((await text("#attachments .name")) === "shot.png", `the chip reads ${await text("#attachments .name")}`);
+    await waitFor("the thumbnail", () => page.locator("#attachments .tile img").isVisible());
+    const tile = await rect("#attachments .tile");
+    check(Math.round(tile.width) === 64 && Math.round(tile.height) === 64, `the tile is ${Math.round(tile.width)}x${Math.round(tile.height)}`);
+    check((await page.getAttribute("#attachments .tile img", "alt")) === "shot.png", "the tile isn't named shot.png");
     check((await page.inputValue("#prompt")) === "", "the file's path went into the text");
+    await press(page.locator("#attachments .zoom"));
+    await waitFor("the picture full size", () => page.locator("#image-zoom").isVisible());
+    await press(page.locator("#image-zoom"));
     await sendPrompt("what is in this picture");
     await waitTerm(/echo: what is in this picture \S*shot\.png/);
-    await waitFor("the chips to go", async () => !(await page.locator("#attachments").isVisible()));
-    await attach({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hi") });
-    await waitFor("the file chip", () => page.locator("#attachments .attachment").isVisible());
+    await waitFor("the strip to go", async () => !(await page.locator("#attachments").isVisible()));
+    await attach({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hi there") });
+    await waitFor("the file row", () => page.locator("#attachments .file").isVisible());
+    const row = `${await text("#attachments .file .name")} ${await text("#attachments .file .size")}`;
+    check(row === "notes.txt 8 B", `the row reads ${row}`);
+    check(await page.locator("#attachments .file svg.ficon use[href='#file-tree-builtin-text']").count() === 1, "the row has no text-file icon");
+    await press(page.locator("#attachments .file .name"));
+    await waitFor("the preview", async () => (await text("#file-preview pre")) === "hi there");
+    await press(page.locator("#file-preview [data-close]"));
     await press(page.locator("#attachments .remove"));
-    check(!(await page.locator("#attachments").isVisible()), "the chip's X left it there");
+    check(!(await page.locator("#attachments").isVisible()), "the row's X left it there");
+    await page.evaluate((data) => {
+      const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([bytes], "pasted.png", { type: "image/png" }));
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", { value: transfer });
+      prompt.focus();
+      prompt.dispatchEvent(paste);
+    }, png.toString("base64"));
+    await waitFor("the pasted picture in the strip", async () => (await page.getAttribute("#attachments .tile img", "alt").catch(() => null)) === "pasted.png");
+    await press(page.locator("#attachments .remove"));
     await attach({ name: "huge.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(26 << 20) });
     await waitFor("the upload error", async () => /over 25 MB/.test(await text("#composer-note")));
     check(await page.locator("#composer-note").isVisible(), "the upload error isn't in the app view");
-    return await text("#composer-note");
+    return `${row}; ${await text("#composer-note")}`;
   });
 
   await step("composer: a draft stays with its thread, and ⌘S stashes it", async () => {
@@ -1512,6 +1588,396 @@ async function sweep(profileName) {
     await waitFor("the default height", async () => Math.abs((await rect("#terms")).height - 280) < 3);
     await tapOrClick("#toggle-terminal");
     return `${Math.round(before)} → ${Math.round(taller)}, ${Math.round(top)}, ${Math.round(bottom)}`;
+  });
+
+  await step("composer: the screen reader finds claude's effort marks and its /effort and /model menus", async () => {
+    const screen = (name) => fs.readFileSync(path.join(__dirname, "screens", name), "utf8").split("\n");
+    const marks = await page.evaluate((screens) => screens.map(traitsOn), ["effort-ultracode", "fast-on", "manual-mode"].map((s) => screen(`claude-2.1.310-${s}.txt`)));
+    check(JSON.stringify(marks) === JSON.stringify([{ effort: "max", ultracode: true, fast: false }, { effort: "medium", ultracode: false, fast: true }, null]), `marks: ${JSON.stringify(marks)}`);
+    const slider = await page.evaluate((lines) => effortMenuOn(lines), screen("claude-2.1.310-effort-menu.txt"));
+    check(JSON.stringify(slider) === JSON.stringify({ levels: ["low", "medium", "high", "xhigh", "max"], at: 1, ultracode: false }), `slider: ${JSON.stringify(slider)}`);
+    const tabs = await page.evaluate((screens) => screens.map((lines) => lines.map(questionTabsOf).find(Boolean)), ["first", "multi", "review"].map((s) => screen(`claude-2.1.310-questions-${s}.txt`)));
+    check(JSON.stringify(tabs) === JSON.stringify([{ headers: ["Color", "Sizes"], answered: [false, false] }, { headers: ["Color", "Sizes"], answered: [true, false] }, { headers: ["Color", "Sizes"], answered: [true, true] }]), `question tabs: ${JSON.stringify(tabs)}`);
+    const multi = await page.evaluate((lines) => menuOn(lines), screen("claude-2.1.310-questions-multi.txt"));
+    check(multi?.options.map((o) => o.head).join("|") === "[ ] Small (tiny)|[ ] Large (huge)|[ ] Type something|Chat about this", `multi-select options: ${multi?.options.map((o) => o.head).join("|")}`);
+    const models = await page.evaluate((lines) => modelMenuOn(lines), screen("claude-2.1.310-model-menu.txt"));
+    const rows = models?.options.map((o) => `${o.n}${o.chosen ? "*" : ""} ${o.head.split(/\s/)[0]}`).join(", ");
+    check(rows === "1* Default, 2 Sonnet, 3 Fable, 4 Opus, 5 Haiku", `/model rows: ${rows}`);
+    return rows;
+  });
+
+  await step("composer: the model picker searches, stars favorites, and picks a model for this session", async () => {
+    // These steps print a lot, so they run in a thread of their own and leave alpha's screen as it was.
+    const rows = await page.locator("#thread-list .thread-row").count();
+    await page.evaluate(() => newThread(true));
+    await waitFor("a thread for the composer's steps", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1, 10000);
+    await waitTerm(/fake claude in .*work\/alpha/);
+    await page.evaluate(() => (window.composerThread = active.key));
+    await sendPrompt("/modes");
+    await waitFor("the mode control", async () => (await text("#mode-button")) === "Supervised");
+    await tapOrClick("#model-button");
+    await waitFor("the model picker", () => page.locator('#composer-menu[data-kind="models"] .model').first().isVisible());
+    check((await text('#composer-menu .model[data-row="claude-haiku-5-5"] .new')) === "New", "Haiku 5.5 has no NEW badge");
+    check((await text('#composer-menu .model[data-row="legacy"] .sub')) === "9 models", `legacy: ${await text('#composer-menu .model[data-row="legacy"] .sub')}`);
+    await page.fill("#composer-menu .search", "opus");
+    const found = await page.locator("#composer-menu .model .name").allTextContents();
+    check(found.join("|") === "Claude Opus 5.5|Claude Opus 5|Claude Opus 4.8|Claude Opus 4.7|Claude Opus 4.6|Claude Opus 4.5", `search: ${found.join("|")}`);
+    await press(page.locator('#composer-menu [data-fav="claude-opus-5-5"]'));
+    await page.fill("#composer-menu .search", "");
+    await press(page.locator('#composer-menu [data-provider="favorites"]'));
+    const favorites = await page.locator("#composer-menu .model .name").allTextContents();
+    check(favorites.join("|") === "Claude Opus 5.5", `favorites: ${favorites.join("|")}`);
+    await press(page.locator('#composer-menu [data-provider="claude"]'));
+    check((await page.locator("#composer-menu .model .name").first().textContent()) === "Claude Opus 5.5", "the favorite isn't first");
+    await press(page.locator('#composer-menu .model[data-row="claude-haiku-5-5"]'));
+    await waitTerm(/model Haiku 5\.5 for this session/);
+    await waitFor("Haiku 5.5 on the button", async () => (await text("#model-button")) === "Haiku 5.5");
+    await tapOrClick("#model-button");
+    check(await page.locator('#composer-menu .model[data-row="claude-haiku-5-5"] .check').isVisible(), "Haiku 5.5 isn't checked");
+    await press(page.locator('#composer-menu [data-fav="claude-opus-5-5"]'));
+    if (touch) await page.tap("#model-button");
+    else await page.keyboard.press("Escape");
+    return found.join(", ");
+  });
+
+  await step("composer: Traits sets claude's effort for this session, Ultrathink goes in the prompt, ⌘⇧E", async () => {
+    const folded = await page.evaluate(() => composer.dataset.compact === "true");
+    const openTraits = () => tapOrClick(folded ? "#more-button" : "#traits-button");
+    await sendPrompt("/traits");
+    await waitFor("the traits control", async () => (await text("#traits-button")) === "Medium");
+    await tapOrClick("#model-button");
+    await press(page.locator('#composer-menu .model[data-row="claude-opus-5-5"]'));
+    await waitFor("Opus 5.5, whose traits have Fast Mode", async () => (await text("#model-button")) === "Opus 5.5");
+    await openTraits();
+    const shown = await page.evaluate(() => {
+      const rows = [...composerMenu.children];
+      const end = rows.findIndex((r) => r.textContent === "Mode");
+      return rows.slice(0, end < 0 ? rows.length : end).filter((r) => !r.matches(".rule")).map((r) => `${r.querySelector(".label")?.textContent ?? r.textContent}${r.classList.contains("checked") ? "*" : ""}`);
+    });
+    check(shown.join("|") === "Reasoning|Low|MediumDefault*|High|Extra High|Max|Ultracode|Ultrathink|Fast Mode|On|Off*", `traits menu: ${shown.join("|")}`);
+    await press(page.locator("#composer-menu button", { hasText: /^\s*High\s*$/ }).first());
+    await waitTerm(/effort high for this session/);
+    await waitFor("High", async () => (await text("#traits-button")) === "High");
+    if (touch) await openTraits();
+    else await page.keyboard.press("Meta+Shift+E");
+    await press(page.locator("#composer-menu button", { hasText: /^\s*Ultracode/ }).first());
+    await waitTerm(/effort xhigh ultracode for this session/);
+    await waitFor("Ultracode", async () => (await text("#traits-button")) === "Ultracode");
+    await page.fill("#prompt", "think hard about it");
+    await openTraits();
+    await press(page.locator("#composer-menu button", { hasText: /^\s*Ultrathink/ }).first());
+    check((await page.inputValue("#prompt")) === "Ultrathink:\nthink hard about it", `Ultrathink left the prompt ${JSON.stringify(await page.inputValue("#prompt"))}`);
+    await waitFor("Ultrathink", async () => (await text("#traits-button")) === "Ultrathink");
+    await openTraits();
+    await press(page.locator("#composer-menu button", { hasText: /^\s*Medium/ }).first());
+    await waitTerm(/effort medium for this session/);
+    check((await page.inputValue("#prompt")) === "think hard about it", "picking Medium kept the Ultrathink prefix");
+    await page.fill("#prompt", "");
+    await openTraits();
+    await press(page.locator("#composer-menu button", { hasText: /^\s*On\s*$/ }).first());
+    await waitFor("Medium Fast", async () => (await text("#traits-button")) === "Medium Fast");
+    await openTraits();
+    await press(page.locator("#composer-menu button", { hasText: /^\s*Off\s*$/ }).first());
+    await waitFor("Medium", async () => (await text("#traits-button")) === "Medium");
+    return shown.join(" | ");
+  });
+
+  await step("composer: a legacy model and Full access restart claude on the conversation", async () => {
+    const rows = await page.locator("#thread-list .thread-row").count();
+    await page.evaluate(() => newThread(true));
+    await waitFor("a new thread", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1, 10000);
+    await waitTerm(/fake claude in .*work\/alpha/);
+    await sendPrompt("/modes");
+    await waitFor("the mode control", async () => (await text("#mode-button")) === "Supervised");
+    await tapOrClick("#model-button");
+    await press(page.locator('#composer-menu .model[data-row="legacy"]'));
+    await press(page.locator('#composer-menu .model[data-row="claude-opus-4-8"]'));
+    await waitTerm(/\(model claude-opus-4-8\)/);
+    await waitFor("Opus 4.8 on the button", async () => (await text("#model-button")) === "Opus 4.8");
+    await sendPrompt("/modes");
+    await waitFor("the mode control", async () => (await text("#mode-button")) === "Supervised");
+    await tapOrClick((await page.evaluate(() => composer.dataset.compact === "true")) ? "#more-button" : "#mode-button");
+    await press(page.locator("#composer-menu button", { hasText: "Full access" }).first());
+    await waitTerm(/\(bypass\) \(model claude-opus-4-8\)/);
+    check(await page.evaluate(() => active.view.bypass), "the session doesn't skip permissions");
+    await page.evaluate(() => closeTab(active));
+    await waitFor("the thread to close", async () => (await page.locator("#thread-list .thread-row").count()) === rows);
+    await page.evaluate(() => activate(tabs.find((t) => t.key === window.composerThread)));
+    await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
+  });
+
+  await step("composer: a narrow composer folds Traits, Mode and Access into …", async () => {
+    if (!touch) await page.evaluate(() => document.documentElement.style.setProperty("--lane", "560px"));
+    try {
+      await waitFor("the … button", () => page.locator("#more-button").isVisible());
+      check(!(await page.locator("#traits-button").isVisible()) && !(await page.locator("#mode-button").isVisible()), "Traits and Access stay out with …");
+      await tapOrClick("#more-button");
+      const headings = await page.locator("#composer-menu .heading").allTextContents();
+      check(headings.join("|") === "Reasoning|Fast Mode|Mode|Access", `… menu for Opus 5.5: ${headings.join("|")}`);
+      await press(page.locator("#composer-menu button", { hasText: "Plan" }).last());
+      await waitFor("plan mode", async () => /plan mode on/.test((await termText()).split("\n").filter(Boolean).slice(-3).join("\n")));
+      await tapOrClick("#more-button");
+      await press(page.locator("#composer-menu button", { hasText: "Chat" }));
+      await waitFor("manual mode", async () => /manual mode on/.test((await termText()).split("\n").filter(Boolean).slice(-3).join("\n")));
+      return headings.join(" | ");
+    } finally {
+      await page.evaluate(() => document.documentElement.style.removeProperty("--lane"));
+    }
+  });
+
+  await step("composer: the context ring shows how full the window is, and a cold long session compacts first", async () => {
+    await sendPrompt("full");
+    await waitFor("the context ring", () => page.locator("#context-meter").isVisible());
+    check((await page.getAttribute("#context-meter", "aria-label")) === "Context window 23% used", `ring: ${await page.getAttribute("#context-meter", "aria-label")}`);
+    await tapOrClick("#context-meter");
+    await waitFor("the context card", () => page.locator("#context-card").isVisible());
+    const card = (await text("#context-card .head")).replace(/\s+/g, " ");
+    check(card === "Context Window23%·231k/1m", `card: ${card}`);
+    check(await page.locator("#context-card [data-compact]").isVisible(), "no Compact context button");
+    await tapOrClick("#context-meter");
+    await waitFor("the compact pill", async () => (await text("#compact-pill")) === "Compact231k");
+    check((await page.getAttribute("#send", "title")) === "Summarize 231k tokens of history, then send", `send says ${await page.getAttribute("#send", "title")}`);
+    await tapOrClick("#compact-pill");
+    check((await text("#compact-pill")) === "Full231k", "the pill didn't switch to keeping the history");
+    await tapOrClick("#compact-pill");
+    await sendPrompt("after the break");
+    await waitTerm(/\/compact[\s\S]*echo: after the break/);
+    await waitFor("the compaction note", async () => (await page.locator("#thread", { hasText: "The conversation was compacted." }).count()) > 0, 10000);
+    await waitFor("the pill to go", async () => !(await page.locator("#compact-pill").isVisible()));
+    return card;
+  });
+
+  await step("composer: @ files become chips with their icons, $ lists skills, # lists pull requests, ⌘⌥Enter", async () => {
+    fs.mkdirSync(path.join(HOME, "work/alpha/docs"), { recursive: true });
+    fs.writeFileSync(path.join(HOME, "work/alpha/docs/notes-guide.md"), "guide");
+    const skill = path.join(HOME, ".claude/skills/tidy-up/SKILL.md");
+    fs.mkdirSync(path.dirname(skill), { recursive: true });
+    fs.writeFileSync(skill, "---\nname: tidy-up\ndescription: Tidy the code\n---\n");
+    const pick = async () => (touch ? page.tap("#composer-menu [data-pick]") : page.press("#prompt", "Enter"));
+    try {
+      await page.fill("#prompt", "look at @notes-gu");
+      await waitFor("the @ menu", () => page.locator('#composer-menu[data-kind="mention"] [data-pick="@docs/notes-guide.md"]').isVisible());
+      check(await page.locator('#composer-menu [data-pick="@docs/notes-guide.md"] use[href="#file-tree-builtin-markdown"]').count() === 1, "the menu has no Markdown icon");
+      await pick();
+      check((await page.inputValue("#prompt")) === "look at @notes-guide.md ", `the pick left ${JSON.stringify(await page.inputValue("#prompt"))}`);
+      await waitFor("the chip", () => page.locator("#prompt-mirror .chip.mention").isVisible());
+      check((await text("#prompt-mirror .chip.mention")) === "@notes-guide.md", `the chip reads ${await text("#prompt-mirror .chip.mention")}`);
+      check(await page.locator("#prompt-mirror .chip.mention use[href='#file-tree-builtin-markdown']").count() === 1, "the chip has no Markdown icon");
+      const [chip, typed] = await page.evaluate(() => [document.querySelector("#prompt-mirror .chip").getBoundingClientRect().width, getComputedStyle(prompt).color]);
+      check(chip > 40 && typed === "rgba(0, 0, 0, 0)", `chip ${Math.round(chip)}px, prompt text ${typed}`);
+      if (!touch) {
+        await page.focus("#prompt");
+        await page.keyboard.press("End");
+        await page.keyboard.press("Backspace");
+        await page.keyboard.press("Backspace");
+        check((await page.inputValue("#prompt")) === "look at ", `Backspace left ${JSON.stringify(await page.inputValue("#prompt"))}`);
+        await page.keyboard.type("@notes-gu");
+        await waitFor("the @ menu again", () => page.locator('#composer-menu [data-pick="@docs/notes-guide.md"]').isVisible());
+        await pick();
+      }
+      await page.focus("#prompt");
+      await page.keyboard.press("End");
+      await page.keyboard.type("please");
+      await sendPrompt(await page.inputValue("#prompt"));
+      await waitTerm(/echo: look at @docs\/notes-guide\.md please/);
+      await page.fill("#prompt", "$");
+      await waitFor("the $ menu", () => page.locator('#composer-menu[data-kind="skill"] [data-pick="$tidy-up"]').isVisible());
+      await page.fill("#prompt", "$tid");
+      await waitFor("the $ menu", () => page.locator('#composer-menu[data-kind="skill"] [data-pick="$tidy-up"]').isVisible());
+      await pick();
+      check((await text("#prompt-mirror .chip.skill")) === "$tidy-up", "the skill isn't a chip");
+      await sendPrompt(await page.inputValue("#prompt"));
+      await waitTerm(/echo: \/tidy-up/);
+      await page.fill("#prompt", "see #");
+      await waitFor("the # menu", () => page.locator('#composer-menu[data-kind="pr"] [data-pick="#42"]').isVisible());
+      const prs = await page.locator("#composer-menu [data-pick]").evaluateAll((els) => els.map((e) => e.textContent));
+      check(prs.join("|") === "#42Add notes|#41Draft the notes", `pull requests: ${prs.join("|")}`);
+      await pick();
+      check((await text("#prompt-mirror .chip.pr")) === "#42", "the pull request isn't a chip");
+      await sendPrompt(await page.inputValue("#prompt"));
+      await waitTerm(/echo: see https:\/\/github\.com\/example\/alpha\/pull\/42/);
+      if (touch) return prs.join(", ");
+      const rows = await page.locator("#thread-list .thread-row").count();
+      await page.fill("#prompt", "spin off");
+      await page.press("#prompt", "Meta+Alt+Enter");
+      await waitFor("a new thread after ⌘⌥Enter", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1, 10000);
+      await waitTerm(/fake claude in .*work\/alpha/);
+      await page.evaluate(() => closeTab(active));
+      await waitFor("the thread to close", async () => (await page.locator("#thread-list .thread-row").count()) === rows);
+      await page.evaluate(() => activate(tabs.find((t) => t.key === window.composerThread)));
+      await waitTerm(/echo: spin off/);
+      return prs.join(", ");
+    } finally {
+      fs.rmSync(path.join(HOME, "work/alpha/docs"), { recursive: true, force: true });
+      fs.rmSync(path.join(HOME, ".claude/skills"), { recursive: true, force: true });
+    }
+  });
+
+  await step("composer: claude's questions: header, 1/2, checks, Previous, Next question and Submit answers", async () => {
+    const pill = () => text("#pill-actions .pill");
+    // A narrow composer, as on a phone, shortens the pill as T3 Code's does.
+    const folded = await page.evaluate(() => composer.dataset.compact === "true");
+    await sendPrompt("/questions");
+    await waitFor("the first question", async () => (await text("#approval .q-header")) === "Color" && (await text("#approval .q-count")) === "1/2");
+    check((await pill()) === (folded ? "Next" : "Next question") && !(await page.locator('#pill-actions [data-q="previous"]').isVisible()), `pills: ${await text("#pill-actions")}`);
+    check(!(await page.locator("#send").isVisible()), "Send shows beside the question's pill");
+    await press(page.locator("#approval .choice", { hasText: "Red" }));
+    check(await page.locator('#approval .choice[data-picked] .tick').isVisible(), "the picked option shows no check");
+    await waitFor("the second question", async () => (await text("#approval .q-header")) === "Sizes" && (await text("#approval .q-count")) === "2/2");
+    check((await text("#approval .q-multi")) === "Select one or more options.", "the multi-select question doesn't say so");
+    check((await pill()) === (folded ? "Submit" : "Submit answers"), `the last question's pill reads ${await pill()}`);
+    await press(page.locator("#approval .choice", { hasText: "Small" }));
+    await waitFor("Small checked", () => page.locator("#approval .choice[data-picked]", { hasText: "Small" }).isVisible());
+    await press(page.locator("#approval .choice", { hasText: "Large" }));
+    await waitFor("Large checked", () => page.locator("#approval .choice[data-picked]", { hasText: "Large" }).isVisible());
+    await press(page.locator('#pill-actions [data-q="previous"]'));
+    await waitFor("back on the first question", async () => (await text("#approval .q-header")) === "Color");
+    check(await page.locator("#approval .choice[data-picked]", { hasText: "Red" }).isVisible(), "the answered option has no check");
+    await press(page.locator("#pill-actions .pill"));
+    await waitFor("on to the second question", async () => (await text("#approval .q-header")) === "Sizes");
+    await press(page.locator("#approval .q-head"));
+    await waitFor("the folded question", async () => (await text("#approval .q-text")) === "Which sizes?" && !(await page.locator("#approval .q-body").isVisible()));
+    await press(page.locator("#approval .q-header"));
+    await waitFor("the question open again", () => page.locator("#approval .q-body").isVisible());
+    await press(page.locator("#pill-actions .pill"));
+    await waitTerm(/answered: Which color\? → Red · Which sizes\? → Small, Large/);
+    await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
+    check(await page.locator("#send").isVisible(), "Send didn't come back");
+  });
+
+  await step("composer: claude's plan offers Refine, Implement, and Implement in a new thread", async () => {
+    await sendPrompt("/plan-ready");
+    await waitFor("the plan banner", async () => (await page.locator("#approval").isVisible()) && (await text("#approval .kind")) === "Plan ready");
+    check((await text("#pill-actions .pill")) === "Implement", `the plan's pill reads ${await text("#pill-actions .pill")}`);
+    await page.fill("#prompt", "shorter please");
+    await waitFor("Refine", async () => (await text("#pill-actions .pill")) === "Refine");
+    await page.fill("#prompt", "");
+    await waitFor("Implement", async () => (await text("#pill-actions .pill")) === "Implement");
+    const rows = await page.locator("#thread-list .thread-row").count();
+    await press(page.locator('#pill-actions [data-plan="more"]'));
+    await press(page.locator("#composer-menu button", { hasText: "Implement in a new thread" }));
+    await waitFor("the new thread", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1, 10000);
+    await waitTerm(/PLEASE IMPLEMENT THIS PLAN:/, 15000);
+    check(/1\. Add a hello comment to a\.py\./.test(await termText()), "the plan didn't go to the new thread");
+    await showSidebar();
+    check(await page.locator("#thread-list .thread-row.active", { hasText: "Implement plan" }).isVisible(), "the new thread isn't titled Implement plan");
+    await page.evaluate(() => closeTab(active));
+    await waitFor("the thread to close", async () => (await page.locator("#thread-list .thread-row").count()) === rows);
+    await page.evaluate(() => activate(tabs.find((t) => t.key === window.composerThread)));
+    await waitTerm(/answered: esc/);
+    await page.evaluate(() => closeTab(active));
+    await waitFor("the composer's thread to close", async () => (await page.locator("#thread-list .thread-row").count()) === rows - 1);
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+    await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
+  });
+
+  await step("composer: an empty thread asks what to build in its project, which the headline switches", async () => {
+    const rows = await page.locator("#thread-list .thread-row").count();
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
+    await page.evaluate(() => newThread(true));
+    await waitFor("an empty thread in beta", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1, 10000);
+    await waitFor("the headline", () => page.locator("#hero-head h1").isVisible());
+    const said = (await page.locator("#hero-head h1").innerText()).replace(/\s+/g, " ").trim();
+    check(/^What should we build (in )?beta ?\?$/.test(said) || said === "What should we build? beta", `the headline reads ${said}`);
+    await press(page.locator("[data-hero-project]"));
+    await waitFor("the projects", () => page.locator('#composer-menu[data-kind="projects"] [data-path$="/alpha"]').isVisible());
+    check((await page.getAttribute('#composer-menu[data-kind="projects"] .search', "placeholder")) === "Search projects...", "the project search isn't T3's");
+    check(await page.locator("#composer-menu [data-add]").isVisible(), "no Add project");
+    await page.fill('#composer-menu[data-kind="projects"] .search', "zzz");
+    check((await text("#composer-menu .none")) === "No matching projects.", "no empty state");
+    await page.fill('#composer-menu[data-kind="projects"] .search', "alp");
+    await press(page.locator('#composer-menu [data-path$="/alpha"]'));
+    await waitTerm(/fake claude in .*work\/alpha/);
+    await waitFor("alpha's thread in place of beta's empty one", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1 && /alpha/.test(await text("#chat-head .crumb")));
+    await page.evaluate(() => closeTab(active));
+    await waitFor("the thread to close", async () => (await page.locator("#thread-list .thread-row").count()) === rows);
+    return said;
+  });
+
+  await step("composer: before the first prompt the strip moves the thread to a new worktree and back, ⌘⇧X, ⌘⇧L", async () => {
+    const beta = path.join(HOME, "work/beta");
+    const git = (...args) => require("child_process").execFileSync("git", ["-C", beta, ...args]).toString().trim();
+    const rows = await page.locator("#thread-list .thread-row").count();
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
+    await page.evaluate(() => newThread(true));
+    await waitFor("a new thread in beta", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1, 10000);
+    await waitFor("the open workspace menu", () => page.locator("#composer-footer button.where").isVisible());
+    check((await text("#composer-footer .where .label")) === "sweep-node", `the strip names ${await text("#composer-footer .where .label")}`);
+    await tapOrClick("#composer-footer button.where");
+    const menu = await page.locator('#composer-menu[data-kind="workspace"] :is(.heading, .label)').allTextContents();
+    check(menu.join("|") === "Run on|sweep-node|Workspace|Current checkout|New worktree", `workspace menu: ${menu.join("|")}`);
+    await press(page.locator("#composer-menu button", { hasText: "New worktree" }));
+    await waitTerm(/fake claude in .*work\/beta\/\.claude\/worktrees\/pinned-/, 15000);
+    await waitFor("New worktree in the strip", async () => (await page.getAttribute("#composer-footer .where .ws-icon", "title")) === "New worktree");
+    const tree = await page.evaluate(() => active.view.cwd);
+    check(git("worktree", "list").includes(tree.split("/").pop()), "git has no such worktree");
+    check(!git("status", "--porcelain").includes(".claude"), "the worktree shows in beta's status");
+    await tapOrClick("#composer-footer .branch");
+    await waitFor("the ref picker", () => page.locator("#composer-menu .from-remote").isVisible());
+    check((await page.getAttribute("#composer-menu .search", "placeholder")) === "Search refs...", "the search isn't T3's");
+    await page.fill("#composer-menu .search", "#42");
+    check((await text("#composer-menu [data-pr-checkout]")) === "Checkout PR #42", "no Checkout PR row");
+    await page.fill("#composer-menu .search", "brand-new-ref");
+    check((await text("#composer-menu [data-create]")) === 'Create new ref "brand-new-ref"', "the create row isn't T3's");
+    if (touch) await page.tap("#composer-footer .branch");
+    else await page.keyboard.press("Escape");
+    if (touch) await tapOrClick("#composer-footer button.where");
+    else await page.keyboard.press("Meta+Shift+X");
+    await press(page.locator("#composer-menu button", { hasText: "Current checkout" }));
+    await waitFor("back in beta's checkout", async () => (await page.evaluate(() => active.view.cwd)).endsWith("/work/beta"), 15000);
+    await waitFor("the unused worktree to go", async () => !fs.existsSync(tree));
+    await tapOrClick("#composer-footer button.where");
+    await press(page.locator("#composer-menu button", { hasText: "New worktree" }));
+    await waitFor("a worktree again", async () => /\.claude\/worktrees\/pinned-/.test(await page.evaluate(() => active.view.cwd)), 15000);
+    const kept = await page.evaluate(() => active.view.cwd);
+    await waitFor("claude in the second worktree", async () => (await termText()).includes(`${kept.split("/").pop()}\n`), 15000);
+    await sendPrompt("work here");
+    await waitTerm(/echo: work here/);
+    await waitFor("the strip locks", async () => !(await page.locator("#composer-footer button.where").isVisible()) && (await page.getAttribute("#composer-footer .where .ws-icon", "title")) === "Worktree");
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
+    await page.evaluate(() => newThread(true));
+    await waitFor("another thread in beta", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 2, 10000);
+    await waitFor("the open workspace menu", () => page.locator("#composer-footer button.where").isVisible());
+    await tapOrClick("#composer-footer button.where");
+    check(await page.locator("#composer-menu button", { hasText: "Previous worktree (pinned/" }).isVisible(), "no Previous worktree");
+    if (touch) await press(page.locator("#composer-menu button", { hasText: "Previous worktree" }));
+    else {
+      await page.keyboard.press("Escape");
+      await page.keyboard.press("Meta+Shift+L");
+    }
+    await waitFor("the previous worktree", async () => (await page.evaluate(() => active.view.cwd)) === kept, 15000);
+    for (let i = 0; i < 2; i++) await page.evaluate(() => closeTab(tabs.findLast((t) => t.view.cwd.includes("/.claude/worktrees/"))));
+    await waitFor("the threads to close", async () => (await page.locator("#thread-list .thread-row").count()) === rows);
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+    return menu.join(" | ");
+  });
+
+  await step("composer: Send says Connecting or Environment disconnected, and the placeholder is T3's", async () => {
+    check((await page.getAttribute("#prompt", "placeholder")) === "Ask anything, @tag files/folders, $use skills, or / for commands", `placeholder: ${await page.getAttribute("#prompt", "placeholder")}`);
+    await page.fill("#prompt", "while offline");
+    try {
+      await page.evaluate(() => {
+        document.body.dataset.hub = "offline";
+        renderComposer(active);
+      });
+      check((await page.getAttribute("#send", "title")) === "Connecting" && (await page.isDisabled("#send")), "Send doesn't wait for the hub");
+      check(await page.evaluate(() => composer.dataset.spinning === "true"), "no spinner while connecting");
+      await page.evaluate(() => {
+        document.body.dataset.hub = "online";
+        machines.get(active.machine).view.online = false;
+        renderComposer(active);
+      });
+      check((await page.getAttribute("#send", "title")) === "Environment disconnected", `send says ${await page.getAttribute("#send", "title")}`);
+      check((await page.getAttribute("#prompt", "placeholder")) === "Ask for changes, send follow-ups, or attach images", "the offline placeholder isn't T3's");
+    } finally {
+      await page.evaluate(() => {
+        document.body.dataset.hub = "online";
+        machines.get(active.machine).view.online = true;
+        renderComposer(active);
+      });
+      await page.fill("#prompt", "");
+    }
+    check(!(await page.isDisabled("#send")), "Send stayed off");
   });
 
   await step("app view: the terminal drawer shows the same session", async () => {

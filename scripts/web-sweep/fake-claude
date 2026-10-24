@@ -6,6 +6,11 @@ const fs = require("fs");
 const path = require("path");
 
 const args = process.argv.slice(2);
+// A headless run, as the Git action's commit message asks of claude, answers at once.
+if (args.includes("-p")) {
+  process.stdout.write("Write the sweep's notes\n");
+  process.exit(0);
+}
 const settingsFile = args[args.indexOf("--settings") + 1];
 const settings = settingsFile ? JSON.parse(fs.readFileSync(settingsFile, "utf8")) : {};
 // --resume carries on the named session, so its transcript grows where it left off, as claude's does.
@@ -65,7 +70,7 @@ function drawTrust() {
   TRUST.forEach((c, i) => out(`${i + 1 === trusting ? " ❯" : "  "} ${c}\r\n`));
   out("\r\n Enter to confirm · Esc to cancel\r\n");
 }
-const greet = () => out(`fake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}\r\n> `);
+const greet = () => out(`fake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}${args.includes("--model") ? ` (model ${args[args.indexOf("--model") + 1]})` : ""}\r\n> `);
 if (resumed) out(`resumed ${resumed}\r\n`);
 if (trusting) drawTrust();
 else greet();
@@ -81,6 +86,42 @@ function submit() {
     line = "";
     hook("Stop");
     return prompt();
+  }
+  if (line === "/traits") {
+    traits = { effort: "medium", ultracode: false, fast: false };
+    line = "";
+    hook("Stop");
+    return prompt();
+  }
+  if (line === "/effort" && traits) {
+    effortMenu = { at: LEVELS.indexOf(traits.effort), ultracode: traits.ultracode };
+    line = "";
+    return drawEffort();
+  }
+  if (line === "/model") {
+    modelMenu = 1;
+    line = "";
+    return drawModels();
+  }
+  if (/^\/fast (on|off)$/.test(line) && traits) {
+    traits.fast = line.endsWith("on");
+    said(`<local-command-stdout>${traits.fast ? "↯ Fast mode ON" : "Fast mode OFF"}</local-command-stdout>`);
+    line = "";
+    hook("Stop");
+    return prompt();
+  }
+  if (line === "full") {
+    record({ type: "assistant", timestamp: new Date(Date.now() - 2 * 3600 * 1000).toISOString(), message: { role: "assistant", content: [{ type: "text", text: "A long session." }], usage: { input_tokens: 4, cache_read_input_tokens: 230000, output_tokens: 600 } } });
+    line = "";
+    hook("Stop");
+    return prompt();
+  }
+  if (line === "/questions") {
+    asked = { at: 0, answers: [null, []], cursor: 1 };
+    wrote([{ type: "tool_use", id: `questions-${lines}`, name: "AskUserQuestion", input: { questions: QUESTIONS.map(({ header, question, multiSelect }) => ({ header, question, multiSelect })) } }]);
+    hook("Notification", { message: "Claude needs your input" });
+    line = "";
+    return drawAsked();
   }
   if (CHOICES_MENUS[line]) {
     choosing = CHOICES_MENUS[line];
@@ -203,8 +244,64 @@ function submit() {
 const MODES = { manual: "⏸ manual mode on · ? for shortcuts", accept: "⏵⏵ accept edits on (shift+tab to cycle)", plan: "⏸ plan mode on (shift+tab to cycle)", auto: "⏵⏵ auto mode on (shift+tab to cycle)" };
 let mode = null;
 function prompt() {
+  if (traits) out(`${" ".repeat(60)}${GLYPHS[traits.effort]} ${traits.effort}${traits.ultracode ? " · ultracode" : ""} · /effort\r\n${"─".repeat(60)}${traits.fast ? " ↯ /fast ─" : ""}\r\n`);
   if (mode) out(`  ${MODES[mode]}\r\n`);
   out("> ");
+}
+
+// After /traits, claude 2.1's effort marks, its /effort slider, its /model menu and /fast, as
+// recorded in scripts/web-sweep/screens.
+const LEVELS = ["low", "medium", "high", "xhigh", "max"];
+const GLYPHS = { low: "○", medium: "◐", high: "●", xhigh: "◉", max: "◈" };
+let traits = null;
+let effortMenu = null;
+function drawEffort() {
+  const starts = [];
+  let labels = "";
+  for (const level of LEVELS) {
+    starts.push(labels.length + Math.floor(level.length / 2));
+    labels += `${level}${" ".repeat(level === "xhigh" ? 6 : 5)}`;
+  }
+  const rail = [..."─".repeat(42)].map((c, i) => (i === starts[effortMenu.at] ? "▲" : c)).join("");
+  const pad = " ".repeat(29);
+  out(`${"─".repeat(60)}\r\n  Effort\r\n${pad}Faster${" ".repeat(29)}Smarter\r\n${pad}${rail}      Ultracode  ${effortMenu.ultracode ? "on" : "off"}\r\n${pad}${labels} Tab to toggle\r\n\r\n  ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel\r\n`);
+}
+function answerEffort(key) {
+  if (key === "\x1b[C" || key === "\x1b[D") effortMenu.at = Math.min(LEVELS.length - 1, Math.max(0, effortMenu.at + (key === "\x1b[C" ? 1 : -1)));
+  else if (key === "\t") effortMenu.ultracode = !effortMenu.ultracode;
+  else if (key === "s" || key === "\r" || key === "\x1b") {
+    if (key !== "\x1b") {
+      Object.assign(traits, { effort: LEVELS[effortMenu.at], ultracode: effortMenu.ultracode });
+      said(`<local-command-stdout>Set effort level to ${traits.effort} (${key === "s" ? "this session only" : "saved as your default for new sessions"})</local-command-stdout>`);
+      out(`effort ${traits.effort}${traits.ultracode ? " ultracode" : ""} ${key === "s" ? "for this session" : "saved"}\r\n`);
+    }
+    effortMenu = null;
+    hook("Stop");
+    return prompt();
+  } else return;
+  drawEffort();
+}
+const MODEL_ROWS = [["Default (recommended) ✔", "Sonnet 5.5"], ["Sonnet", "Sonnet 5.5"], ["Fable", "Fable 5.1"], ["Opus", "Opus 5.5"], ["Haiku", "Haiku 5.5"]];
+let modelMenu = 0;
+function drawModels() {
+  out(`${"▔".repeat(60)}\r\n   Select model\r\n   Switch between Claude models. Your pick becomes the default for new sessions.\r\n\r\n`);
+  MODEL_ROWS.forEach(([name, model], i) => out(`   ${i + 1 === modelMenu ? "❯" : " "} ${i + 1}. ${name.padEnd(24)} ${model}\r\n`));
+  out(`\r\n   ${GLYPHS[traits?.effort ?? "medium"]} ${traits?.effort ?? "medium"} effort ←/→ to adjust\r\n   Enter to set as default · s to use this session only · Esc to cancel\r\n`);
+}
+function answerModels(key) {
+  if (key === "\x1b[B" || key === "\x1b[A") {
+    modelMenu = Math.min(MODEL_ROWS.length, Math.max(1, modelMenu + (key === "\x1b[B" ? 1 : -1)));
+    return drawModels();
+  }
+  if (key !== "s" && key !== "\r" && key !== "\x1b") return;
+  if (key !== "\x1b") {
+    const name = MODEL_ROWS[modelMenu - 1][1];
+    record({ type: "attachment", attachment: { type: "model", identity: { modelId: name, marketingName: name } } });
+    out(`model ${name} ${key === "s" ? "for this session" : "saved"}\r\n`);
+  }
+  modelMenu = 0;
+  hook("Stop");
+  prompt();
 }
 
 // Choices as claude 2.1 draws them: AskUserQuestion's numbered options with descriptions, a
@@ -223,6 +320,66 @@ const CHOICES_MENUS = {
     tool: { name: "ExitPlanMode", input: { plan: "1. Add a hello comment to a.py." } },
   },
 };
+// AskUserQuestion with two questions, as claude 2.1 draws them: a row of tabs with the shown one on
+// a background, number keys that answer and move on, Space toggling a multi-select option, ←/→
+// between tabs, and a review tab that submits them.
+const QUESTIONS = [
+  { header: "Color", question: "Which color?", options: [["Red", "Warm red tone"], ["Blue", "Calm blue tone"]] },
+  { header: "Sizes", question: "Which sizes?", multiSelect: true, options: [["Small", "Tiny size"], ["Large", "Huge size"]] },
+];
+let asked = null;
+function drawAsked() {
+  const lit = (text, on) => (on ? `\x1b[48;5;153m\x1b[38;5;16m ${text} \x1b[39m\x1b[49m` : ` ${text} `);
+  const tabs = QUESTIONS.map((q, i) => lit(`${(i === 0 ? asked.answers[0] : asked.answers[1].length) ? "☒" : "☐"} ${q.header}`, asked.at === i));
+  out(`${"─".repeat(40)}\r\n← ${tabs.join(" ")} ${lit("✔ Submit", asked.at === QUESTIONS.length)} →\r\n\r\n`);
+  if (asked.at === QUESTIONS.length) {
+    out(`Review your answers\r\n\r\n ● Which color?\r\n   → ${asked.answers[0] ?? ""}\r\n ● Which sizes?\r\n   → ${asked.answers[1].join(", ")}\r\n\r\nReady to submit your answers?\r\n\r\n`);
+    ["Submit answers", "Cancel"].forEach((c, i) => out(`${i + 1 === asked.cursor ? "❯" : " "} ${i + 1}. ${c}\r\n`));
+    return out("\r\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\r\n");
+  }
+  const q = QUESTIONS[asked.at];
+  out(`${q.question}\r\n\r\n`);
+  q.options.forEach(([label, about], i) => {
+    const box = q.multiSelect ? `[${asked.answers[1].includes(label) ? "✔" : " "}] ` : "";
+    const done = !q.multiSelect && asked.answers[0] === label ? " ✔" : "";
+    out(`${i + 1 === asked.cursor ? "❯" : " "} ${i + 1}. ${box}${label}${done}\r\n${" ".repeat(q.multiSelect ? 9 : 5)}${about}\r\n`);
+  });
+  out("\r\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\r\n");
+}
+function answerAsked(key) {
+  const review = asked.at === QUESTIONS.length;
+  const q = QUESTIONS[asked.at];
+  const count = review ? 2 : q.options.length;
+  if (key === "\x1b[B" || key === "\x1b[A") asked.cursor = Math.min(count, Math.max(1, asked.cursor + (key === "\x1b[B" ? 1 : -1)));
+  else if (key === "\x1b[C" || key === "\x1b[D") {
+    asked.at = Math.min(QUESTIONS.length, Math.max(0, asked.at + (key === "\x1b[C" ? 1 : -1)));
+    asked.cursor = 1;
+  } else if (key === " " && q?.multiSelect) {
+    const label = q.options[asked.cursor - 1][0];
+    asked.answers[1] = asked.answers[1].includes(label) ? asked.answers[1].filter((l) => l !== label) : [...asked.answers[1], label];
+  } else if (key === "\r" || /^[1-9]$/.test(key) || key === "\x1b") {
+    if (/^[1-9]$/.test(key)) asked.cursor = Number(key);
+    if (key === "\x1b" || (review && asked.cursor === 2)) {
+      out("questions dismissed\r\n");
+      asked = null;
+      hook("Stop");
+      return prompt();
+    }
+    if (review) {
+      out(`answered: Which color? → ${asked.answers[0]} · Which sizes? → ${asked.answers[1].join(", ")}\r\n`);
+      said([{ type: "tool_result", tool_use_id: "questions", content: "The user answered." }]);
+      asked = null;
+      hook("Stop");
+      return prompt();
+    }
+    if (q.multiSelect) return;
+    asked.answers[0] = q.options[asked.cursor - 1][0];
+    asked.at += 1;
+    asked.cursor = 1;
+  } else return;
+  drawAsked();
+}
+
 let choosing = null;
 let questioning = 0;
 let typed = "";
@@ -323,8 +480,20 @@ process.stdin.on("data", (chunk) => {
     for (const key of text.match(/\x1b\[[AB]|[\s\S]/g)) answerMenu(key);
     return;
   }
+  if (asked) {
+    for (const key of text.match(/\x1b\[[A-D]|[\s\S]/g)) asked && answerAsked(key);
+    return;
+  }
   if (questioning) {
     for (const key of text.match(/\x1b\[[AB]|[\s\S]/g)) answerQuestion(key);
+    return;
+  }
+  if (effortMenu) {
+    for (const key of text.match(/\x1b\[[A-D]|[\s\S]/g)) effortMenu && answerEffort(key);
+    return;
+  }
+  if (modelMenu) {
+    for (const key of text.match(/\x1b\[[A-D]|[\s\S]/g)) modelMenu && answerModels(key);
     return;
   }
   if (text === "\x1b[Z" && mode) {
