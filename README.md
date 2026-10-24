@@ -78,6 +78,16 @@ The app view has three columns:
   in the header or under the prompt to open it. **Open** in the header (⌘O) opens the thread's
   folder in an editor installed on that machine; its arrow picks which one.
 
+The composer works like T3 Code's. Its controls pick the model (⌘⇧M), the reasoning effort
+(⌘⇧E, set for that session alone through Claude Code's own menus, with Ultrathink put in the
+prompt), the access mode (⌘⇧A) and Build or Plan; a narrow composer folds them into **…**. `@`
+mentions a file, `$` a skill and `#` a pull request, each as a chip. The ring beside **Send** shows
+how full the context window is. Before a thread's first prompt, the strip under the composer can
+move it to a new git worktree (⌘⇧X) or the previous one (⌘⇧L), and **Send and new thread** is
+⌘⌥Enter. The header's **+** keeps project actions, commands per project that run in a terminal of
+the drawer, and the Git action commits (with a message Claude writes), pushes and opens pull
+requests itself. ⌘⇧B shows the thread's details in one card.
+
 When Claude asks something in its terminal, such as whether to trust a new folder or to allow a
 command, the app view shows the question above the prompt with Claude's own options. Pick one,
 or click **Terminal** to answer there. Typing instead answers it too: on a permission it declines

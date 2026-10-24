@@ -60,9 +60,11 @@
           <span class="crumb" data-tauri-drag-region></span>
           <button id="pr-chip" class="chip" title="Open the pull request" hidden><i data-icon="github"></i><span></span></button>
           <button class="update" title="Install the new version and restart"></button>
+          <span id="scripts-control" class="split" hidden></span>
           <span id="open-in" class="split" hidden><button type="button" class="main outline" title="Open in editor"><i data-ic="square-arrow-out-up-right"></i><span class="label">Open</span></button><button type="button" class="pick outline" title="Choose the editor"><i data-ic="chevron-down"></i></button></span>
-          <span id="git-action" hidden><button class="main"></button><button class="more" title="Git actions"><i data-icon="chevron-down"></i></button><div id="git-menu" hidden></div></span>
-          <span class="controls"><button id="panel-expand" class="icon" title="Maximize panel"><i data-icon="maximize-2"></i></button><button id="toggle-terminal" class="icon" title="Terminal (⌘J)"><i data-icon="panel-bottom"></i></button>
+          <span id="git-action" hidden><button class="main"></button><button class="more" title="Git actions"><i data-icon="chevron-down"></i></button></span>
+          <div id="header-menu" hidden></div>
+          <span class="controls"><button id="panel-expand" class="icon" title="Maximize panel"><i data-icon="maximize-2"></i></button><button id="toggle-details" class="icon" title="Thread details (⌘⇧B)" aria-label="Thread details"></button><button id="toggle-terminal" class="icon" title="Terminal (⌘J)"><i data-icon="panel-bottom"></i></button>
           <button id="toggle-panel" class="icon" title="Side panel (⌘⌥B)"><i data-icon="panel-right"></i></button>
           <button id="gui-minimize" class="icon" title="Shrink to pill"><i data-icon="minus"></i></button></span>
         </header>
@@ -79,13 +81,17 @@
             <div id="attachments" hidden></div>
             <textarea id="prompt" rows="1" placeholder="Ask anything"></textarea>
             <div class="tools">
-              <button type="button" id="model-button" class="pick" title="Model (⌘⇧M)"><i data-icon="claude"></i><span class="name">Default</span><i data-icon="chevron-down"></i></button>
-              <button type="button" id="mode-button" class="pick" title="Mode (⇧Tab cycles, ⌘⇧A)" hidden></button>
-              <button type="button" id="more-button" class="icon" title="More"><i data-icon="ellipsis"></i></button>
+              <span class="controls"><button type="button" id="model-button" class="pick" title="Model (⌘⇧M)"><i data-icon="claude"></i><span class="name">Default</span><i data-icon="chevron-down"></i></button>
+                <span class="block" id="traits-block" hidden><span class="sep"></span><button type="button" id="traits-button" class="pick" title="Reasoning (⌘⇧E)"></button></span>
+                <span class="block" id="mode-block" hidden><span class="sep"></span><button type="button" id="mode-button" class="pick" title="Access (⌘⇧A)"></button><span class="sep"></span><button type="button" id="plan-toggle" class="pick"></button></span>
+                <button type="button" id="more-button" class="pick" aria-label="More composer controls" title="More composer controls" hidden><i data-icon="ellipsis"></i></button></span>
               <span class="spacer"></span>
+              <button type="button" id="context-meter" class="icon" hidden></button>
               <button type="button" id="composer-attach" class="icon" title="Attach files"><i data-icon="paperclip"></i></button>
-              <button type="button" id="stop" class="round stop" title="Interrupt (Esc)"><span class="square"></span></button>
+              <button type="button" id="compact-pill" hidden></button>
+              <button type="button" id="stop" class="round stop" title="Interrupt"><span class="square"></span></button>
               <button type="button" id="send" class="round send" title="Send (Enter)"><i data-icon="arrow-up"></i></button>
+              <span id="pill-actions" hidden></span>
             </div>
             <div id="composer-menu" hidden></div>
           </div>
@@ -151,6 +157,8 @@
 <script src="vendor/marked.js"></script>
 <script src="vendor/highlight.min.js"></script>
 <script src="vendor/pierre-icons.js"></script>
+<script src="vendor/file-icons.js"></script>
+<script src="vendor/editor-icons.js"></script>
 <script src="icons.js"></script>
 <script src="terminal-menu.js"></script>
 <script src="diff.js"></script>

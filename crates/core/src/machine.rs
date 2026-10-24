@@ -1,7 +1,7 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, projects, pty, pulls, reminders, sessions, sync, thread, titles, uploads, usage, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, projects, pty, pulls, reminders, scripts, sessions, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -175,6 +175,10 @@ struct Tab {
     interrupted: bool,
     /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
     resume_at: Option<u64>,
+    /// The model every start of this tab passes as `--model`, picked for its conversation alone.
+    model: Option<String>,
+    /// The worktree made for this tab by `set_workspace`, dropped when the tab leaves it unused.
+    made: Option<PathBuf>,
     /// Working tree and prompt as the running turn began, to diff against when it ends.
     turn: Option<(String, Option<String>)>,
     status: Option<AgentStatus>,
@@ -196,6 +200,7 @@ impl Tab {
             bypass: self.bypass,
             interrupted: self.interrupted,
             resume_at: self.resume_at,
+            model: self.model.clone(),
         })
     }
 
@@ -320,6 +325,7 @@ impl Machine {
             Call::OpenTab { path, bypass } => json(self.open_tab(path, bypass)),
             Call::StartClaude { tab, cols, rows } => json(self.start_claude(&tab, cols, rows)?),
             Call::SetBypass { tab, on, cols, rows } => json(self.set_bypass(&tab, on, cols, rows)?),
+            Call::SetModel { tab, model, cols, rows } => json(self.set_model(&tab, &model, cols, rows)?),
             Call::WriteInput { tab, data } => json(self.write_input(&tab, data.as_bytes())?),
             Call::ResizePty { tab, cols, rows } => json(self.resize_pty(&tab, cols, rows)?),
             Call::CloseTab { tab } => {
@@ -354,6 +360,7 @@ impl Machine {
             Call::Favicon { tab } => json(favicon::of(&history::project_of(&self.tab(&tab, |t| t.cwd.clone())?))),
             Call::PrStatus { tab, pr } => json(workspace::pr_status(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
             Call::PullRequest { tab, pr } => json(workspace::pull_request(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
+            Call::PrList { tab } => json(workspace::pull_requests(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
             Call::PrAction { tab, pr, action } => json(workspace::pr_action(&self.tab(&tab, |t| t.cwd.clone())?, &pr, action, self.launch.path_env.as_deref())?),
             Call::Diff { tab, scope, ignore_whitespace, base } => json(workspace::diff(&self.tab(&tab, |t| t.cwd.clone())?, scope, ignore_whitespace, base.as_deref())?),
             Call::Ports { tab } => {
@@ -368,14 +375,25 @@ impl Machine {
             Call::Commands { tab } => json(commands::list(&home(), &self.tab(&tab, |t| t.cwd.clone())?)),
             Call::Files { tab } => json(files::list(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())),
             Call::Branches { tab } => json(branches::of(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
-            Call::Checkout { tab, branch, create } => {
-                // A permission prompt mid-turn reports NeedsInput with the turn still open.
-                let (cwd, working) = self.tab(&tab, |t| (t.cwd.clone(), t.status == Some(AgentStatus::Working) || (t.status == Some(AgentStatus::NeedsInput) && t.interrupted)))?;
-                if working {
-                    return Err("claude is working in this folder. Switch branches when the turn ends.".into());
-                }
-                json(branches::checkout(&cwd, &branch, create, self.launch.path_env.as_deref())?)
+            Call::Checkout { tab, branch, create, from } => {
+                let cwd = self.idle_folder(&tab, "Switch branches")?;
+                json(branches::checkout(&cwd, &branch, create, from.as_deref(), self.launch.path_env.as_deref())?)
             }
+            Call::CheckoutPr { tab, pr } => {
+                let cwd = self.idle_folder(&tab, "Check out the pull request")?;
+                json(workspace::checkout_pr(&cwd, &pr, self.launch.path_env.as_deref())?)
+            }
+            Call::ProjectScripts { tab } => json(scripts::of(self.scripts_file().as_deref(), &history::project_of(&self.tab(&tab, |t| t.cwd.clone())?))),
+            Call::SaveProjectScripts { tab, scripts } => {
+                let project = history::project_of(&self.tab(&tab, |t| t.cwd.clone())?);
+                let file = self.scripts_file().ok_or("this machine keeps no scripts")?;
+                json(scripts::save(&file, &project, scripts)?)
+            }
+            Call::Git { tab, step } => {
+                let cwd = self.idle_folder(&tab, "Run git")?;
+                json(branches::run_step(&cwd, &step, &self.launch.claude, self.launch.path_env.as_deref())?)
+            }
+            Call::SetWorkspace { tab, worktree, cols, rows } => json(self.set_workspace(&tab, worktree.as_deref(), cols, rows)?),
             Call::PullRequests { paths, state, involvement, query, limit } => {
                 let mut repos: Vec<String> = paths.iter().filter_map(|p| git_remote(Path::new(p))).filter_map(|r| pulls::github_repo(&r)).collect();
                 repos.sort_by_key(|r| r.to_lowercase());
@@ -497,9 +515,9 @@ impl Machine {
         match page {
             Some(page) => {
                 let page = page.map_err(|e| format!("could not read the transcript: {e}"))?;
-                Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset })
+                Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context })
             }
-            None => Ok(ThreadPage { session, items: vec![], next: 0, reset: false }),
+            None => Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None }),
         }
     }
 
@@ -565,7 +583,11 @@ impl Machine {
             if t.launch.is_empty() {
                 t.claude_session = None;
             }
-            (t.cwd.clone(), std::mem::take(&mut t.launch), t.env.clone(), t.bypass)
+            let mut args = std::mem::take(&mut t.launch);
+            if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
+                args.extend(["--model".to_owned(), model]);
+            }
+            (t.cwd.clone(), args, t.env.clone(), t.bypass)
         })?;
         self.save_sessions();
         let cmd = self.launch.command(tab, &cwd, bypass, args, &env);
@@ -592,6 +614,66 @@ impl Machine {
             Some(cwd) => Ok(cwd),
             None => self.start_claude(tab, cols, rows),
         }
+    }
+
+    /// Where the projects' scripts are kept, beside the saved sessions.
+    fn scripts_file(&self) -> Option<PathBuf> {
+        self.sessions_file.as_ref().map(|f| f.with_file_name("scripts.json"))
+    }
+
+    /// The tab's folder, refused while claude works there: `what` names what to do once the turn ends.
+    fn idle_folder(&self, tab: &str, what: &str) -> Result<PathBuf, String> {
+        // A permission prompt mid-turn reports NeedsInput with the turn still open.
+        let (cwd, working) = self.tab(tab, |t| (t.cwd.clone(), t.status == Some(AgentStatus::Working) || (t.status == Some(AgentStatus::NeedsInput) && t.interrupted)))?;
+        if working {
+            return Err(format!("claude is working in this folder. {what} when the turn ends."));
+        }
+        Ok(cwd)
+    }
+
+    /// Moves the tab to a new worktree of its project (`"new"`), an existing one, or the project's
+    /// own checkout (`None`), and restarts claude there. A worktree made for the tab and left
+    /// unused goes when the tab moves on.
+    pub fn set_workspace(&self, tab: &str, worktree: Option<&str>, cols: u16, rows: u16) -> Result<String, String> {
+        let cwd = self.idle_folder(tab, "Change the workspace")?;
+        let path = self.launch.path_env.as_deref();
+        let project = history::project_of(&cwd);
+        let target = match worktree {
+            None => project.clone(),
+            Some("new") => branches::new_worktree(&cwd, path)?,
+            Some(dir) => {
+                let dir = PathBuf::from(dir);
+                if !dir.is_dir() || history::project_of(&dir) != project {
+                    return Err(format!("{} is not a worktree of {}", dir.display(), project.display()));
+                }
+                dir
+            }
+        };
+        let left = self.tab(tab, |t| {
+            let made = t.made.take();
+            t.made = if worktree == Some("new") || made.as_ref() == Some(&target) { Some(target.clone()) } else { None };
+            t.cwd = target.clone();
+            made.filter(|m| *m != target)
+        })?;
+        if let Some(made) = left {
+            branches::drop_worktree(&made, path);
+        }
+        self.start_claude(tab, cols, rows)
+    }
+
+    /// Restarts the tab's claude on its conversation with `model`, for this conversation alone, and
+    /// returns its folder. Claude's own /model saves its pick as the default for every session.
+    pub fn set_model(&self, tab: &str, model: &str, cols: u16, rows: u16) -> Result<String, String> {
+        if model.starts_with('-') || !model.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.[]_".contains(&b)) {
+            return Err(format!("{model:?} is not a model name"));
+        }
+        self.tab(tab, |t| {
+            t.model = Some(model.to_owned());
+            if let Some(saved) = t.saved() {
+                (t.launch, t.resume_at) = saved.reopen(unix_now());
+            }
+        })?;
+        self.start_claude(tab, cols, rows)
     }
 
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
@@ -771,7 +853,7 @@ impl Machine {
             .map(|s| {
                 let (launch, resume_at) = s.reopen(now);
                 let id = self.add_tab(s.cwd, launch, s.env, s.bypass, Some(s.session));
-                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at) = (s.interrupted, resume_at));
+                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.model) = (s.interrupted, resume_at, s.model));
                 id
             })
             .collect();
@@ -844,6 +926,8 @@ impl Machine {
             claude_session,
             interrupted: false,
             resume_at: None,
+            model: None,
+            made: None,
             turn: None,
             status: None,
             updated: None,
@@ -1433,7 +1517,7 @@ mod tests {
         let tab = m.add_tab(dir.clone(), vec![], vec![], false, None);
         let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None };
         m.record_event(working.clone());
-        let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false };
+        let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false, from: None };
         assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"));
         m.record_event(AgentEvent { status: AgentStatus::NeedsInput, ..working.clone() });
         assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"), "a permission prompt mid-turn let the branch switch");
@@ -1486,6 +1570,51 @@ mod tests {
         let session = m.tab(&tab, |t| t.screen.clone()).unwrap().lock().unwrap().session;
         assert_eq!(set(true), Ok(json!(dir.display().to_string())));
         assert_eq!(m.tab(&tab, |t| t.screen.clone()).unwrap().lock().unwrap().session, session, "a session already skipping permissions keeps running");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_model_picked_for_a_conversation_restarts_it_with_that_model_and_keeps_it() {
+        let dir = temp("model");
+        let claude = dir.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { claude, ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let tab = m.add_tab(dir.clone(), vec![], vec![], false, Some("s1".into()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+
+        assert_eq!(m.call(Call::SetModel { tab: tab.clone(), model: "--evil".into(), cols: 80, rows: 24 }), Err("\"--evil\" is not a model name".into()));
+        assert_eq!(m.call(Call::SetModel { tab: tab.clone(), model: "claude-opus-4-8".into(), cols: 80, rows: 24 }), Ok(json!(dir.display().to_string())));
+        wait_for("claude's arguments", || text(&seen).ends_with("\r\n"));
+        assert_eq!(text(&seen), "--settings|s|--plugin-dir|p|--resume|s1|--model|claude-opus-4-8|\r\n");
+        assert_eq!(sessions::load(&dir.join("sessions.json"))[0].model.as_deref(), Some("claude-opus-4-8"), "a relaunch keeps the model");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_thread_moves_to_a_new_worktree_and_back_dropping_it_unused() {
+        let dir = temp("workspace");
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let claude = dir.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\npwd; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { claude, ..launch() }, None, None, |_| {});
+        let tab = m.add_tab(std::fs::canonicalize(&repo).unwrap(), vec![], vec![], false, None);
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+
+        let set = |worktree: Option<&str>| m.call(Call::SetWorkspace { tab: tab.clone(), worktree: worktree.map(Into::into), cols: 80, rows: 24 });
+        let tree = PathBuf::from(set(Some("new")).unwrap().as_str().unwrap());
+        assert!(tree.starts_with(std::fs::canonicalize(&repo).unwrap().join(".claude/worktrees")), "{}", tree.display());
+        wait_for("claude in the worktree", || text(&seen).contains(".claude/worktrees/pinned-"));
+        assert_eq!(m.call(Call::Workspace { tab: tab.clone() }).unwrap()["worktree"], true);
+        assert!(set(Some("/elsewhere")).unwrap_err().contains("is not a worktree of"));
+        assert_eq!(PathBuf::from(set(None).unwrap().as_str().unwrap()), std::fs::canonicalize(&repo).unwrap());
+        assert!(!tree.exists(), "the unused worktree stayed");
         let _ = std::fs::remove_dir_all(dir);
     }
 

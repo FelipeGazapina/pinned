@@ -7,11 +7,13 @@ async function showGeneral() {
     <p class="error" id="awake-error"></p>` : ""}
     ${themeSettingsHtml()}
     ${appearanceHtml()}
-    ${sidebarSettingsHtml()}${panelSettingsHtml()}`;
+    ${sidebarSettingsHtml()}${panelSettingsHtml()}
+    ${sendShortcutHtml()}`;
   bindThemeSettings();
   bindAppearance();
   bindSidebarSettings();
   bindPanelSettings();
+  bindSendShortcut();
   if (!TAURI) return;
   document.getElementById("keep-awake").onchange = async (e) => {
     try {

@@ -128,6 +128,7 @@ async function fetchThread(tab) {
     t.unsupported = false;
     const grew = page.items.length > 0 || !t.loaded;
     if (page.items.some((i) => i.kind === "model")) t.picked = null;
+    if (page.context) t.context = page.context;
     t.items.push(...page.items);
     t.next = page.next;
     t.loaded = true;
@@ -200,7 +201,7 @@ function renderGui() {
       t.watching = true;
       watchMenu(tab);
     }
-    tab.menu = terminalMenu(tab);
+    tab.menu = tab.answering ? null : terminalMenu(tab);
     if (!t.loaded) fetchThread(tab);
     fetchWorkspace(tab);
     if (tab === active && !t.history) fetchHistory(tab);
