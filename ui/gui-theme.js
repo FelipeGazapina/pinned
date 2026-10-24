@@ -131,6 +131,7 @@ new MutationObserver(themeSurroundings).observe(document.body, { attributes: tru
 new MutationObserver(themeSurroundings).observe(document.getElementById("terms"), { childList: true });
 systemDark.addEventListener("change", () => themeState().mode === "system" && applyTheme());
 window.addEventListener("storage", (e) => {
+  if (e.key === CONTRAST_KEY || e.key === null) applyContrast(), showContrast();
   if (![THEME_KEY, THEME_MODE_KEY, THEME_HALVES_KEY, CUSTOM_THEMES_KEY, null].includes(e.key)) return;
   if (e.key === CUSTOM_THEMES_KEY || e.key === null) customThemes = (readThemeJson(CUSTOM_THEMES_KEY) ?? []).filter((t) => t?.id && t.colors);
   applyTheme();
@@ -223,12 +224,66 @@ onGuiKey("a", () => openThemePicker(), { alt: true });
 onGuiKey("a", () => cycleAppearance(), { alt: true, shift: true });
 onGuiKey("t", () => toggleThemeEditor(), { alt: true, shift: true });
 
+/** appearanceContrast.ts: 50 to 200%. Under 100 the text and borders fade toward their surface, over
+ * 100 the text moves toward black or white and the borders toward the text (gui-theme.css). */
+const CONTRAST_KEY = "gui-contrast";
+const CONTRAST = { min: 50, max: 200, standard: 100 };
+function contrastLevel() {
+  const n = Number(load(CONTRAST_KEY));
+  return Number.isInteger(n) && n >= CONTRAST.min && n <= CONTRAST.max ? n : CONTRAST.standard;
+}
+function applyContrast() {
+  const c = contrastLevel();
+  if (c === CONTRAST.standard) delete themeRoot.dataset.contrast;
+  else themeRoot.dataset.contrast = c;
+  themeRoot.style.setProperty("--g-contrast-base", `${Math.min(c, 100)}%`);
+  themeRoot.style.setProperty("--g-contrast-boost", `${Math.max(c - 100, 0)}%`);
+  themeRoot.style.setProperty("--g-contrast-border-boost", `${Math.max(c - 100, 0) / 4}%`);
+}
+function setContrast(c) {
+  if (c === CONTRAST.standard) localStorage.removeItem(CONTRAST_KEY);
+  else save(CONTRAST_KEY, String(c));
+  applyContrast();
+}
+
+/** AppearanceSettingsPanel.tsx's Interface row. */
+function contrastSettingsHtml() {
+  return `<div class="look" id="contrast-row"><div class="contrast-head"><label for="appearance-contrast">Contrast</label><button type="button" class="reset" data-contrast-reset aria-label="Reset contrast to default" title="Reset to default">${icon("undo-2")}</button></div>
+    <p class="meta">Adjust the contrast of colors and borders across the interface.</p>
+    <div class="contrast-control"><output for="appearance-contrast"></output><input type="range" class="settings-slider" id="appearance-contrast" aria-label="Contrast" min="${CONTRAST.min}" max="${CONTRAST.max}" step="5"></div></div>`;
+}
+function showContrast() {
+  const row = document.getElementById("contrast-row");
+  if (!row) return;
+  const c = contrastLevel();
+  const ratio = (c - CONTRAST.min) / (CONTRAST.max - CONTRAST.min);
+  const input = row.querySelector("input");
+  input.value = c;
+  input.style.setProperty("--settings-slider-progress", `${ratio * 100}%`);
+  input.style.setProperty("--settings-slider-fill-offset", `${0.5 - ratio}rem`);
+  row.querySelector("output").textContent = `${c}%`;
+  row.querySelector("[data-contrast-reset]").hidden = c === CONTRAST.standard;
+}
+document.addEventListener("input", (e) => {
+  if (e.target.id !== "appearance-contrast") return;
+  const c = Number(e.target.value);
+  if (!Number.isInteger(c) || c < CONTRAST.min || c > CONTRAST.max) return;
+  setContrast(c);
+  showContrast();
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest?.("[data-contrast-reset]")) return;
+  setContrast(CONTRAST.standard);
+  showContrast();
+});
+
 /** ThemeSettings.tsx: the Color scheme tiles, then the theme library. */
 function themeSettingsHtml() {
   return `<section id="theme-section" aria-label="Colors &amp; themes"></section>`;
 }
 function bindThemeSettings() {
   renderThemeSection();
+  showContrast();
 }
 
 const WIREFRAME_LINE = "rgb(127 127 127 / 0.25)";
@@ -775,3 +830,4 @@ function selectThemeFamily(role) {
 }
 
 applyTheme();
+applyContrast();
