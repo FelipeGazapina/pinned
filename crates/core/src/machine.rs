@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
-use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions, sync, thread, uploads, workspace};
+use crate::{branches, commands, files, github, history, hooks, plugin, projects, pty, reminders, sessions, sync, thread, uploads, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -336,6 +336,16 @@ impl Machine {
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
             Call::Workspace { tab } => json(workspace::of(&self.tab(&tab, |t| t.cwd.clone())?)),
             Call::PullRequest { tab, pr } => json(workspace::pull_request(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
+            Call::Commands { tab } => json(commands::list(&home(), &self.tab(&tab, |t| t.cwd.clone())?)),
+            Call::Files { tab } => json(files::list(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())),
+            Call::Branches { tab } => json(branches::of(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
+            Call::Checkout { tab, branch, create } => {
+                let (cwd, working) = self.tab(&tab, |t| (t.cwd.clone(), t.status == Some(AgentStatus::Working)))?;
+                if working {
+                    return Err("claude is working in this folder. Switch branches when the turn ends.".into());
+                }
+                json(branches::checkout(&cwd, &branch, create, self.launch.path_env.as_deref())?)
+            }
         }
     }
 
@@ -1211,6 +1221,23 @@ mod tests {
         m.record_event(event(AgentStatus::Working, None, Some("ignored while working")));
         let view = m.view(&tab).unwrap();
         assert_eq!((view.status, view.title.as_deref(), view.message), (Some(AgentStatus::Working), Some("Fix the build"), None));
+    }
+
+    #[test]
+    fn a_branch_switch_waits_for_claude_to_finish_the_turn() {
+        let dir = temp("checkout");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(&dir, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        git(&dir, &["branch", "other"]);
+        let m = machine();
+        let tab = m.add_tab(dir.clone(), vec![], vec![], false, None);
+        let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None };
+        m.record_event(working.clone());
+        let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false };
+        assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"));
+        m.record_event(AgentEvent { status: AgentStatus::Done, ..working });
+        assert_eq!(m.call(checkout), Ok(Value::Null));
+        assert_eq!(m.call(Call::Workspace { tab }).unwrap()["branch"], "other");
     }
 
     #[test]

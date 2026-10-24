@@ -126,13 +126,26 @@ pub enum Call {
     Workspace { tab: TabId },
     /// What `gh pr view` answers for `pr`, a number or URL, run in the tab's folder, plus `diff`.
     PullRequest { tab: TabId, pr: String },
+    /// `Vec<commands::Command>`, the slash commands claude offers in the tab's folder.
+    Commands { tab: TabId },
+    /// `Vec<String>`: the tab's folder's files and folders, relative, for `@` mentions.
+    Files { tab: TabId },
+    /// `branches::Branches` of the tab's folder.
+    Branches { tab: TabId },
+    /// `null`. Switches the tab's folder to `branch`, a new one when `create`. Refused while claude works there.
+    Checkout {
+        tab: TabId,
+        branch: String,
+        #[serde(default)]
+        create: bool,
+    },
 }
 
 impl Call {
     /// Runs off the machine's call queue, which carries keystrokes in order: a run may clone a
     /// repository for minutes, gh waits on GitHub, and the others read files or run git.
     pub fn may_wait(&self) -> bool {
-        matches!(self, Call::Run { .. } | Call::PullRequest { .. } | Call::Thread { .. } | Call::Workspace { .. } | Call::ProjectHistory { .. })
+        matches!(self, Call::Run { .. } | Call::PullRequest { .. } | Call::Thread { .. } | Call::Workspace { .. } | Call::ProjectHistory { .. } | Call::Commands { .. } | Call::Files { .. } | Call::Branches { .. } | Call::Checkout { .. })
     }
 }
 

@@ -18,7 +18,7 @@ function save(key, value) {
 }
 
 /** The calls `Call::may_wait` lets run out of order, which machine_call would run on the app's main thread. */
-const WAITING_CALLS = new Set(["run", "pull_request", "thread", "workspace", "project_history"]);
+const WAITING_CALLS = new Set(["run", "pull_request", "thread", "workspace", "project_history", "commands", "files", "branches", "checkout"]);
 
 const localTransport = {
   call: (call) => invoke(WAITING_CALLS.has(call.cmd) ? "machine_call_slow" : "machine_call", { call }),
