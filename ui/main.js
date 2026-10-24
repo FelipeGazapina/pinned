@@ -453,6 +453,7 @@ async function setBypass(tab, on) {
 }
 
 function closeTab(tab) {
+  rememberClosed(tab);
   removeTab(tab, true);
   render();
   // The app quits with its last tab while signed out, so the local close goes through its own command.
@@ -758,7 +759,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "t") toggleProjects();
   else if (e.key === "w" && guiOn() && ui.panelOpen) closePanel();
   else if (e.key === "w" && active) closeTab(active);
-  else if (/^[1-9]$/.test(e.key) && tabs[e.key - 1]) activate(tabs[e.key - 1]);
+  else if (/^[1-9]$/.test(e.key) && !guiOn() && tabs[e.key - 1]) activate(tabs[e.key - 1]);
   else return;
   e.preventDefault();
   e.stopPropagation();
@@ -829,7 +830,7 @@ attachInput.onchange = () => {
 
 TAURI?.webview.getCurrentWebview().onDragDropEvent(async ({ payload }) => {
   if (payload.type !== "drop" || !active) return;
-  const tab = active;
+  const tab = threadAt(payload.position) ?? active;
   if (tab.machine === LOCAL) return tab.view.running && pastePaths(tab, payload.paths);
   try {
     const files = await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split("/").pop())));

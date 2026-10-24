@@ -49,8 +49,15 @@ The app view has three columns:
 
 - **Sidebar.** Your threads, one per tab, with the project, the title Claude gave the session, the
   branch and the pull request. A thread that is working, waiting for your approval, or finished
-  while you were away says so. Search filters the list, and **All projects** narrows it to one
-  project. Threads idle for 3 days move under **Settled**. ⌘B hides the sidebar.
+  while you were away says so. Pinned threads (⌘⇧P) stay on top; new threads come next. Search
+  matches titles, projects, branches, PR numbers and the messages themselves; ↑ and ↓ pick a
+  result and Enter opens it. **All projects** narrows the list to one project. Threads idle for
+  3 days move under **Settled**, and **Settle** on a row (or ⌘⇧S) moves one there now; the clock
+  snoozes a thread until a time you pick, after which it shows **Woke**. ⌘Z undoes a settle,
+  snooze or unpin for 5 seconds. Right-click a row to pin, settle, snooze, rename, mark it
+  unread, filter by its project, copy its path, branch or session ID, or close it. Double-click
+  a title to rename it. Hold ⌘ to see which row ⌘1–⌘9 opens. Drag the sidebar's edge to resize
+  it; double-click the edge to reset it. ⌘B hides the sidebar.
 - **Thread.** Your prompts and Claude's answers. The tool calls of a turn fold into one
   **Worked for** row; click it to see each one. A turn that changed files ends with a card of
   those files. **Open diff** shows them in the side panel. Type below and press Enter to send.
@@ -67,8 +74,10 @@ When Claude asks something in its terminal, such as whether to trust a new folde
 command, the app view shows the question above the prompt with Claude's own options. Pick one,
 or click **Terminal** to answer there. ⌘J opens the terminal under the thread at any time.
 
-Other keys in the app view: ⌘N for a new thread, ⌘⇧[ and ⌘⇧] for the previous or next thread,
-and ⌘⌥B to show or hide the side panel. On Windows and Linux these keys use Ctrl, they do nothing
+Other keys in the app view: ⌘N for a new thread (in the current project when only one is open,
+otherwise it asks where), ⌘⇧N for a new thread in the current project, ⌘⌥N for one in the home
+folder, ⌘⇧T to reopen the last thread you closed, ⌘⇧C to copy `claude --resume <session>`,
+⌘⇧[ and ⌘⇧] for the previous or next thread, and ⌘⌥B to show or hide the side panel. On Windows and Linux these keys use Ctrl, they do nothing
 while the terminal has the focus, and Ctrl+Shift+E switches views, since a shell needs Ctrl+E.
 
 ## Tabs

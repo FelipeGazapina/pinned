@@ -713,6 +713,259 @@ async function sweep(profileName) {
     await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
   });
 
+  // The sidebar's organization, as T3 Code's: rows by project with icons, pins, shelves, the row
+  // menu, search, new-thread shortcuts, reopen and resize. Every step leaves alpha open.
+  const keyFor = (name) => page.evaluate((n) => tabs.find((t) => projectName(t) === n)?.key, name);
+  const rowSel = (key) => `#thread-list .thread-row[data-tab="${key}"]`;
+  const sideOrder = () => page.evaluate(() => [...document.querySelectorAll("#thread-list .thread-row")].map((r) => projectName(tabByKey(r.dataset.tab))));
+  const crumbProject = () => text("#chat-head .crumb .project > span");
+  const openRow = async (key) => {
+    await showSidebar();
+    await press(page.locator(rowSel(key)));
+    await waitFor("the thread to open", () => page.evaluate((k) => active?.key === k, key));
+  };
+  const rowMenu = async (selector) => {
+    await showSidebar();
+    const row = page.locator(selector).first();
+    if (touch) {
+      const box = await row.boundingBox();
+      await row.dispatchEvent("contextmenu", { clientX: box.x + 24, clientY: box.y + 18 });
+    } else await row.click({ button: "right" });
+    await waitFor("the row menu", () => page.locator("#side-menu").isVisible());
+  };
+  const menuPick = (label) => press(page.locator("#side-menu button", { hasText: label }).first());
+  const rowAct = async (key, act) => {
+    await page.locator(rowSel(key)).hover();
+    await press(page.locator(`${rowSel(key)} [data-act="${act}"]`));
+  };
+
+  await step("app view: rows carry project icons, ⌘1-9 follow the visible rows", async () => {
+    await showSidebar();
+    const marks = await page.locator("#thread-list .thread-row .monogram").allTextContents();
+    check(marks.length === 2 && marks.includes("AA") && marks.includes("BA"), `monograms: ${marks.join(", ")}`);
+    check((await page.locator("#chat-head .crumb .monogram").count()) === 1 && (await crumbProject()) === "alpha", "the header's project has no icon");
+    const order = await sideOrder();
+    if (touch) return order.join(", ");
+    await page.keyboard.down("Meta");
+    await waitFor("the jump hints", () => page.evaluate(() => "jumpHints" in document.body.dataset), 2000);
+    const hints = await page.locator("#thread-list .thread-row").evaluateAll((rows) => rows.map((r) => getComputedStyle(r, "::after").content));
+    check(hints.join(" ") === `"⌘1" "⌘2"`, `hints: ${hints.join(" ")}`);
+    for (const n of [1, 2]) {
+      await page.keyboard.press(String(n));
+      await waitFor(`⌘${n} to open ${order[n - 1]}`, async () => (await crumbProject()) === order[n - 1]);
+    }
+    await page.keyboard.up("Meta");
+    check(!(await page.evaluate(() => "jumpHints" in document.body.dataset)), "the hints stayed after ⌘ was let go");
+    await page.fill("#thread-search", order[1]);
+    await page.keyboard.press("Meta+1");
+    await waitFor("⌘1 to open the only row the search left", async () => (await crumbProject()) === order[1]);
+    await page.fill("#thread-search", "");
+    await openRow(await keyFor("alpha"));
+    return order.join(", ");
+  });
+
+  await step("app view: pin and settle, with undo, hover controls and shelves", async () => {
+    const alpha = await keyFor("alpha");
+    const beta = await keyFor("beta");
+    const pinned = async () => (await page.locator(`${rowSel(alpha)} .pin`).count()) === 1;
+    await openRow(alpha);
+    await showSidebar();
+    if (touch) {
+      await rowMenu(rowSel(alpha));
+      await menuPick("Pin thread");
+    } else await page.keyboard.press("Meta+Shift+P");
+    await waitFor("alpha pinned on top", async () => (await pinned()) && (await sideOrder())[0] === "alpha");
+    await press(page.locator(`${rowSel(alpha)} .pin`));
+    await waitFor("the pin to come off", async () => !(await pinned()));
+    check(/Unpinned 1 thread/.test(await text("#side-notice")), `notice: ${await text("#side-notice")}`);
+    if (touch) await press(gui("#side-notice [data-undo]"));
+    else {
+      await page.focus("#prompt");
+      await page.keyboard.press("Meta+z");
+    }
+    await waitFor("the undo to pin it back", pinned);
+    await press(page.locator(`${rowSel(alpha)} .pin`));
+    await waitFor("unpinned", async () => !(await pinned()));
+
+    if (touch) {
+      await rowMenu(rowSel(beta));
+      await menuPick("Settle thread");
+    } else await rowAct(beta, "settle");
+    await waitFor("the settled shelf", async () => (await text('#thread-list .settled-head[data-shelf="settled"]')) === "Settled (1)");
+    check(!(await page.locator(rowSel(beta)).count()), "beta shows while the shelf is collapsed");
+    await press(gui('#thread-list .settled-head[data-shelf="settled"]'));
+    await waitFor("beta's slim row", () => page.locator(`${rowSel(beta)}.slim`).isVisible());
+    if (touch) {
+      await rowMenu(rowSel(beta));
+      await menuPick("Un-settle thread");
+    } else await rowAct(beta, "unsettle");
+    await waitFor("beta back among the cards", () => page.locator(`${rowSel(beta)}.tall`).isVisible());
+
+    if (touch) {
+      await rowMenu(rowSel(alpha));
+      await menuPick("Settle thread");
+    } else await page.keyboard.press("Meta+Shift+S");
+    await waitFor("settling alpha to open beta", async () => (await crumbProject()) === "beta");
+    await showSidebar();
+    await waitFor("alpha in the settled shelf", () => page.locator(`${rowSel(alpha)}.slim`).isVisible());
+    await rowMenu(rowSel(alpha));
+    await menuPick("Un-settle thread");
+    await waitFor("alpha back among the cards", () => page.locator(`${rowSel(alpha)}.tall`).isVisible());
+    await openRow(alpha);
+  });
+
+  await step("app view: the row menu renames, snoozes, marks unread and copies", async () => {
+    const alpha = await keyFor("alpha");
+    const beta = await keyFor("beta");
+    await rowMenu(rowSel(alpha));
+    const labels = await page.locator("#side-menu button .label").allTextContents();
+    const want = ["Pin thread", "Settle thread", "Snooze", "Rename thread", "Mark unread", "Filter by alpha", "Copy", "Close thread"];
+    check(want.every((l) => labels.includes(l)), `menu: ${labels.join(" | ")}`);
+    await menuPick("Rename thread");
+    await page.fill(`${rowSel(alpha)} input.rename`, "Renamed in the sidebar");
+    await page.press(`${rowSel(alpha)} input.rename`, "Enter");
+    await waitFor("the new title in the row and the header", async () =>
+      (await text(`${rowSel(alpha)} .l2`)) === "Renamed in the sidebar" && (await text("#chat-head .crumb .title")) === "Renamed in the sidebar");
+    if (!touch) {
+      await page.dblclick("#chat-head .crumb .title");
+      await page.fill("#chat-head input.rename", "");
+      await page.press("#chat-head input.rename", "Enter");
+      check(/cannot be empty/.test(await text("#side-notice")), `an empty title gave: ${await text("#side-notice")}`);
+      await page.fill("#chat-head input.rename", "Renamed in the header");
+      await page.press("#chat-head input.rename", "Enter");
+      await waitFor("the header's title in the row", async () => (await text(`${rowSel(alpha)} .l2`)) === "Renamed in the header");
+    }
+
+    await rowMenu(rowSel(beta));
+    await menuPick("Snooze");
+    await menuPick("In 1 hour");
+    await waitFor("the snoozed shelf", async () => (await text('#thread-list .settled-head[data-shelf="snoozed"]')) === "Snoozed (1)");
+    await press(gui('#thread-list .settled-head[data-shelf="snoozed"]'));
+    await waitFor("beta's wake time", async () => /^\d+m$/.test(await text(`${rowSel(beta)} .wake-at`)));
+    const wakeAt = await text(`${rowSel(beta)} .wake-at`);
+    if (touch) {
+      await rowMenu(rowSel(beta));
+      await menuPick("Wake thread");
+    } else await rowAct(beta, "wake");
+    await waitFor("beta awake", () => page.locator(`${rowSel(beta)}.tall`).isVisible());
+    await page.evaluate((k) => snooze(tabByKey(k), Date.now() / 1000 + 1.5), beta);
+    await waitFor("Woke when the snooze ran out", async () => /Woke/.test(await text(`${rowSel(beta)} .stamp`)), 6000);
+    await press(page.locator(`${rowSel(beta)} [data-act="dismiss"]`));
+    await waitFor("Woke dismissed", async () => !/Woke/.test(await text(`${rowSel(beta)} .slot`)));
+
+    await openRow(beta);
+    await rowMenu(rowSel(alpha));
+    await menuPick("Mark unread");
+    await waitFor("alpha marked Done again", async () => /Done/.test(await text(`${rowSel(alpha)} .stamp`)));
+    await rowMenu(rowSel(alpha));
+    await menuPick("Copy");
+    await menuPick("Path");
+    await waitFor("the copy notice", async () => /Copied path|Couldn't copy path/.test(await text("#side-notice")));
+    const cwd = await page.evaluate((k) => tabByKey(k).view.cwd, alpha);
+    if (engine === "chromium") check((await page.evaluate(() => navigator.clipboard.readText())) === cwd, "the clipboard lacks alpha's path");
+    await openRow(alpha);
+    if (!touch) {
+      await page.keyboard.press("Meta+Shift+C");
+      await waitFor("the resume notice", async () => /claude --resume/.test(await text("#side-notice")));
+      const session = await page.evaluate(() => threadOf(active).session);
+      if (engine === "chromium") check((await page.evaluate(() => navigator.clipboard.readText())) === `claude --resume ${session}`, "⌘⇧C copied something else");
+    }
+    return `snoozed for ${wakeAt}`;
+  });
+
+  await step("app view: search finds message text, steps with arrows, clears", async () => {
+    await showSidebar();
+    await page.fill("#thread-search", "hello from the app");
+    await waitFor("a message match", async () => (await page.locator("#thread-list .thread-row.result mark").count()) === 1);
+    check((await text("#thread-list .thread-row.result mark")) === "hello from the app", `marked: ${await text("#thread-list .thread-row.result mark")}`);
+    check(await page.locator("#search-clear").isVisible(), "no clear button while searching");
+    await tapOrClick("#search-clear");
+    check((await page.inputValue("#thread-search")) === "" && !(await page.locator("#search-clear").isVisible()), "the clear button left the search");
+    check((await page.locator("#thread-list .thread-row.tall").count()) === 2, "the rows didn't come back");
+    if (touch) return "touch";
+    await page.fill("#thread-search", "a");
+    await waitFor("two results", async () => (await page.locator("#thread-list .thread-row.result").count()) === 2);
+    const second = await page.evaluate(() => projectName(tabByKey(document.querySelectorAll("#thread-list .thread-row.result")[1].dataset.tab)));
+    await page.press("#thread-search", "ArrowDown");
+    check(await page.locator("#thread-list .thread-row.result").nth(1).evaluate((r) => r.classList.contains("hit")), "ArrowDown didn't move to the second result");
+    await page.press("#thread-search", "Enter");
+    await waitFor("Enter to open it", async () => (await crumbProject()) === second && (await page.inputValue("#thread-search")) === "");
+    await openRow(await keyFor("alpha"));
+  });
+
+  await step("app view: new thread here, the header's project, reopen with ⌘⇧T, add project", async () => {
+    const rows = () => page.locator("#thread-list .thread-row").count();
+    await openRow(await keyFor("alpha"));
+    if (touch) {
+      await rowMenu(rowSel(await keyFor("alpha")));
+      await menuPick("New thread");
+    } else await page.click("#new-thread", { modifiers: ["Shift"] });
+    await waitFor("a third thread", async () => (await rows()) === 3, 10000);
+    check(await page.locator("#projects").isHidden(), "the picker opened");
+    const header = async () => `${await crumbProject()} / ${await text("#chat-head .crumb .title")}`;
+    await waitFor("the new thread in alpha", async () => (await header()) === "alpha / New thread").catch(async (e) => check(false, `${e.message}: the header reads ${await header()}`));
+    await waitTerm(/fake claude in .*work\/alpha/);
+    await sendPrompt("before closing");
+    await waitFor("its answer", async () => (await page.locator("#thread .assistant", { hasText: "echo: before closing" }).count()) > 0);
+    const session = await page.evaluate(() => threadOf(active).session);
+    if (touch) {
+      await rowMenu("#thread-list .thread-row.active");
+      await menuPick("Close thread");
+    } else await page.keyboard.press("Meta+w");
+    await waitFor("two threads", async () => (await rows()) === 2);
+    if (touch) return "touch: ⌘⇧T and the header's project need a keyboard and a wide screen";
+    await page.keyboard.press("Meta+Shift+T");
+    await waitFor("the reopened thread", async () => (await rows()) === 3, 10000);
+    await waitTerm(new RegExp(`resumed ${session}`));
+    await waitFor("its conversation", async () => (await page.locator("#thread .bubble", { hasText: "before closing" }).count()) > 0);
+    await page.keyboard.press("Meta+w");
+    await waitFor("two threads", async () => (await rows()) === 2);
+
+    await openRow(await keyFor("alpha"));
+    await page.click("#chat-head .crumb [data-new-here]");
+    await waitFor("a thread from the header", async () => (await rows()) === 3, 10000);
+    check((await crumbProject()) === "alpha", `the header opened a thread in ${await crumbProject()}`);
+    await page.keyboard.press("Meta+w");
+    await waitFor("two threads", async () => (await rows()) === 2);
+
+    await tapOrClick("#add-project");
+    await waitFor("the path field", () => page.locator("#projects .browse input").isVisible());
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    await waitFor("the picker to close", () => page.locator("#projects").isHidden());
+    await openRow(await keyFor("alpha"));
+  });
+
+  await step("app view: drop a file on a row, resize the sidebar", async () => {
+    const beta = await keyFor("beta");
+    await showSidebar();
+    await page.evaluate((k) => {
+      const row = document.querySelector(`#thread-list .thread-row[data-tab="${k}"]`);
+      const data = new DataTransfer();
+      data.items.add(new File(["dropped"], "dropped-on-row.txt", { type: "text/plain" }));
+      for (const type of ["dragover", "drop"]) row.dispatchEvent(new DragEvent(type, { dataTransfer: data, bubbles: true, cancelable: true }));
+    }, beta);
+    await waitFor("beta to open", async () => (await crumbProject()) === "beta");
+    await waitFor("the file's path in the composer", async () => /dropped-on-row\.txt/.test(await page.inputValue("#prompt")), 10000);
+    await page.fill("#prompt", "");
+    await openRow(await keyFor("alpha"));
+    if (touch) return "touch: the sidebar is a full-width sheet";
+    await showSidebar();
+    const rail = await rect("#sidebar-resize");
+    const left = (await rect("#sidebar")).left;
+    await page.mouse.move(rail.left + rail.width / 2, 300);
+    await page.mouse.down();
+    await page.mouse.move(rail.left + rail.width / 2 + 100, 300, { steps: 8 });
+    await page.mouse.up();
+    const want = Math.round(rail.left + rail.width / 2 + 100 - left);
+    const width = Math.round((await rect("#sidebar")).width);
+    check(width === want, `the sidebar is ${width}px after a drag to ${want}`);
+    check((await page.evaluate(() => load("gui-sidebar-width"))) === String(want), "the width wasn't saved");
+    await page.dblclick("#sidebar-resize");
+    check(Math.round((await rect("#sidebar")).width) === 256, "double-click didn't reset the width");
+    return `${want}px, then 256px`;
+  });
+
   await step("app view: controls are big enough to tap", async () => {
     if (!touch) return "desktop";
     const small = await smallTargets("#chat-head button, #composer button, #composer-footer button");

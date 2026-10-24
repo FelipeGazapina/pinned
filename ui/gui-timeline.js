@@ -132,7 +132,7 @@ function renderThread() {
     return;
   }
   const t = threadOf(tab);
-  crumb.innerHTML = `<span class="project">${esc(projectName(tab))}</span><span class="sep">/</span><span class="title" title="${esc(threadTitle(tab))}">${esc(threadTitle(tab))}</span>`;
+  if (!crumb.querySelector("input.rename:focus")) crumb.innerHTML = crumbHtml(tab);
   const pr = prOf(tab);
   const chip = document.getElementById("pr-chip");
   chip.hidden = !pr;

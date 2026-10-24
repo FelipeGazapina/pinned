@@ -38,11 +38,14 @@
       <aside id="sidebar">
         <div class="brand" data-tauri-drag-region><button id="sidebar-toggle" class="icon" title="Toggle sidebar (⌘B)"><i data-icon="panel-left"></i></button><b data-tauri-drag-region>pinned</b></div>
         <div class="side-head">
-          <div class="row"><label class="search"><i data-icon="search"></i><input id="thread-search" placeholder="Search" autocomplete="off" spellcheck="false"></label>
-            <button id="new-thread" class="icon" title="New thread (⌘N)"><i data-icon="square-pen"></i></button></div>
-          <div class="row"><label class="projects"><i data-icon="folder"></i><select id="project-filter"></select><i data-icon="chevron-down"></i></label></div>
+          <div class="row"><label class="search"><i data-icon="search"></i><input id="thread-search" placeholder="Search" autocomplete="off" spellcheck="false"><button id="search-clear" class="clear" title="Clear search" hidden><i data-icon="x"></i></button></label>
+            <button id="new-thread" class="icon" title="New thread (⌘N), here with Shift (⌘⇧N)"><i data-icon="square-pen"></i></button></div>
+          <div class="row"><label class="projects"><i data-icon="folder"></i><select id="project-filter"></select><i data-icon="chevron-down"></i></label>
+            <button id="add-project" class="icon" title="Add project"></button></div>
         </div>
         <div id="thread-list"></div>
+        <p id="side-notice" role="status" hidden></p>
+        <span id="sidebar-resize" title="Drag to resize, double-click to reset"></span>
         <footer><button id="gui-settings" class="icon" title="Settings (⌘,)"><i data-icon="settings"></i></button>
           <button id="mode-terminal" class="icon" title="Terminal view (⌘E)"><i data-icon="square-terminal"></i></button>
           <span id="gui-usage"></span></footer>

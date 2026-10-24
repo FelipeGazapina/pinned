@@ -8,7 +8,6 @@ const panelBody = document.getElementById("panel-body");
 const guiOn = () => document.body.dataset.mode === "gui";
 const POLL_MS = 1200;
 const PANELS = ["diff", "browser", "pr"];
-const SETTLE_AFTER_S = 3 * 86400;
 const narrow = (px) => matchMedia(`(max-width: ${px}px)`).matches;
 
 const threads = new Map();
@@ -73,7 +72,7 @@ const ago = (unix) => {
 };
 const projectName = (tab) => (threadOf(tab).workspace?.project ?? tab.view.cwd).split("/").filter(Boolean).pop() || "/";
 const firstPrompt = (tab) => threadOf(tab).items.find((i) => i.kind === "user")?.text.split("\n")[0];
-const threadTitle = (tab) => tab.view.title || firstPrompt(tab) || "New thread";
+const threadTitle = (tab) => sideMarks.titles[tab.key] || tab.view.title || firstPrompt(tab) || "New thread";
 const prOf = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kind === "pr");
 /** claude's hooks report no answer to a permission menu, so a permission notice with no menu on
  * screen means the turn went on. It sends "waiting for your input" a while after a turn ends. */
@@ -87,7 +86,6 @@ function phaseOf(tab) {
 }
 const turnLive = (tab) => ["working", "asking", "input"].includes(phaseOf(tab));
 const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && (tab.view.updated ?? 0) > (seenAt[tab.key] ?? 0);
-const settled = (tab) => !!tab.view.updated && ["idle", "done"].includes(statusOf(tab)) && tab !== active && Date.now() / 1000 - tab.view.updated > SETTLE_AFTER_S;
 
 async function fetchThread(tab) {
   const t = threadOf(tab);
