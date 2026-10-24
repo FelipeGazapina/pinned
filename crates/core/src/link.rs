@@ -284,8 +284,7 @@ fn in_order(machine: Arc<Machine>, out: channel::UnboundedSender<String>) -> mps
 
 fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSender<String>, calls: &mpsc::Sender<(u64, Call)>, frame: &str, version: &str) {
     match serde_json::from_str::<ToMachine>(frame) {
-        // A run may clone a repository for minutes and gh may wait on GitHub, so neither holds up the calls behind it.
-        Ok(ToMachine::Call { id, call: call @ (Call::Run { .. } | Call::PullRequest { .. }) }) => {
+        Ok(ToMachine::Call { id, call }) if call.may_wait() => {
             let (machine, out) = (machine.clone(), out.clone());
             std::thread::spawn(move || {
                 let reply = MachineFrame::Reply(Reply::new(id, machine.call(call)));

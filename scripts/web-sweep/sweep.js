@@ -22,7 +22,6 @@ const HOME = path.join(DIR, "home");
 const PROFILES = {
   phone: { ...devices["Pixel 7"] },
   desktop: { viewport: { width: 1280, height: 800 }, hasTouch: false, isMobile: false },
-  // WebKit, the engine of the macOS app's webview and of Safari.
   safari: { engine: "webkit", viewport: { width: 1280, height: 800 }, hasTouch: false, isMobile: false },
 };
 
@@ -102,7 +101,6 @@ async function sweep(profileName) {
   const browser = await playwright[engine].launch({ headless: true });
   const context = await browser.newContext({ ...profile, permissions: engine === "chromium" ? ["clipboard-read", "clipboard-write"] : [] });
   if (touch) await context.addInitScript(stubVisualViewport);
-  // The terminal steps run in terminal view; the app-view steps switch to it themselves.
   await context.addInitScript(() => localStorage.getItem("mode") || localStorage.setItem("mode", "terminal"));
   const page = await context.newPage();
 
@@ -204,7 +202,6 @@ async function sweep(profileName) {
       verdict = e instanceof TouchUnusable ? "unusable on touch" : "broken";
       note = e.message.split("\n")[0];
     }
-    // An uncaught exception breaks the page even when the step's own checks pass.
     const thrown = seen.find((s) => s.startsWith("pageerror"));
     if (verdict === "works" && thrown) [verdict, note] = ["broken", thrown];
     await page.screenshot({ path: path.join(shots, `${String(results.length + 1).padStart(2, "0")}-${name.replace(/\W+/g, "-")}.png`) }).catch(() => {});
@@ -598,7 +595,6 @@ async function sweep(profileName) {
     await press(gui('#panel-body [data-diff="unified"]'));
     const bad = await overflowing();
     check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
-    // On a phone the panel is a sheet over the thread, closed before reaching the header again.
     if (touch) await tapOrClick("#panel-close");
     return `${card}, ${added} lines added`;
   });
@@ -607,8 +603,8 @@ async function sweep(profileName) {
     check(await page.locator("#pr-chip").isVisible(), "the header has no PR chip after the session linked #42");
     check(/#42/.test(await text("#composer-footer .pr")), "the composer footer doesn't show #42");
     await tapOrClick("#pr-chip");
-    // The sweep's node has no gh login, so the panel ends on the error and the link to GitHub.
-    await waitFor("the PR panel", async () => /Open #42 on GitHub|#42/.test(await text("#panel-body")) && !/Loading/.test(await text("#panel-body")), 15000);
+    const prPanelSettled = async () => /#42/.test(await text("#panel-body")) && !/Loading/.test(await text("#panel-body"));
+    await waitFor("the PR panel", prPanelSettled, 15000);
     check(await page.locator('#panel-tabs [data-panel="pr"].active').isVisible(), "the PR tab is not the active one");
     const shown = (await text("#panel-body")).slice(0, 80);
     if (touch) {

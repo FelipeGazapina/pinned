@@ -1,12 +1,9 @@
-//! The checkout a tab works in: its branch, whether it is a worktree, and its pull requests.
-
 use crate::history;
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// A pull request's diff is cut here, as a turn's patch is.
 const DIFF_LIMIT: usize = 400_000;
 const PR_FIELDS: &str = "number,title,state,isDraft,url,body,author,createdAt,headRefName,baseRefName,additions,deletions,changedFiles,reviewDecision,mergeable,statusCheckRollup,reviews,comments";
 

@@ -19,7 +19,6 @@ const hook = (event, extra = {}) => {
   const command = settings.hooks?.[event]?.[0]?.hooks?.[0]?.command;
   if (command) run(command, { session_id: session, cwd: process.cwd(), ...extra });
 };
-// Claude Code's transcript, in the shape the GUI reads: one JSON object per line.
 const transcript = path.join(process.env.HOME, ".claude", "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${session}.jsonl`);
 fs.mkdirSync(path.dirname(transcript), { recursive: true });
 let lines = 0;
@@ -40,8 +39,8 @@ if (settings.statusLine?.command) {
 
 const KEYS = { "\x1b": "[esc]", "\t": "[tab]", "\x1b[Z": "[shift-tab]", "\x1b[A": "[up]", "\x1b[B": "[down]", "\x1bOA": "[up]", "\x1bOB": "[down]", "\x03": "[ctrl-c]" };
 const out = (text) => process.stdout.write(text);
-// A folder holding .untrusted asks first, as claude does in a folder it hasn't seen: unnumbered, "No" chosen.
-let trusting = fs.existsSync(".untrusted") ? 1 : 0;
+const UNTRUSTED_MARKER = ".untrusted";
+let trusting = fs.existsSync(UNTRUSTED_MARKER) ? 1 : 0;
 const TRUST = ["No, exit", "Yes, I trust this folder"];
 function drawTrust() {
   out(`${"─".repeat(40)}\r\n Accessing workspace:\r\n\r\n ${process.cwd()}\r\n\r\n Quick safety check: is this a project you trust?\r\n\r\n`);
@@ -83,7 +82,6 @@ function submit() {
   out("> ");
 }
 
-// A permission menu drawn the way claude draws one, answered with the arrows and Enter.
 const CHOICES = ["Yes", "Yes, and don't ask again for rm commands", "No, and tell Claude what to do differently (esc)"];
 let asking = 0;
 function drawMenu() {

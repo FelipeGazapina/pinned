@@ -495,7 +495,6 @@ function show(tab) {
   markSeen(tab);
 }
 
-/** Gives the keyboard to the active session: its terminal, or in the app view the prompt unless the terminal drawer is open. */
 function focusInput() {
   if (!active) return;
   if (guiOn() && document.body.dataset.drawer !== "open") prompt.focus();
@@ -707,7 +706,10 @@ window.addEventListener("mousedown", (e) => {
 
 // The panel is nonactivating, so a click alone doesn't give it keyboard focus.
 if (TAURI) {
-  window.addEventListener("mousedown", (e) => invoke("focus_panel").then(() => settingsOpen() || (guiOn() ? e.target.closest("#terms") && focusInput() : focusInput())), true);
+  const typesIntoTerminal = (e) => !guiOn() || e.target.closest("#terms");
+  window.addEventListener("mousedown", (e) => invoke("focus_panel").then(() => {
+    if (!settingsOpen() && typesIntoTerminal(e)) focusInput();
+  }), true);
   invoke("focus_panel");
 }
 

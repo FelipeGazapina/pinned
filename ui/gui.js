@@ -1,7 +1,3 @@
-/** The app view, after T3 Code: threads in a sidebar, the conversation in the middle, and a panel
- * with the diff, a browser and the pull request on the right. claude keeps running in its
- * terminal underneath, so switching views never touches the session. */
-
 const threadList = document.getElementById("thread-list");
 const threadView = document.getElementById("thread");
 const composer = document.getElementById("composer");
@@ -12,11 +8,9 @@ const panelBody = document.getElementById("panel-body");
 const guiOn = () => document.body.dataset.mode === "gui";
 const POLL_MS = 1200;
 const PANELS = ["diff", "browser", "pr"];
-/** A thread nobody touched for this long moves under "Settled", as T3 Code's auto-settle does. */
 const SETTLE_AFTER_S = 3 * 86400;
 const narrow = (px) => matchMedia(`(max-width: ${px}px)`).matches;
 
-/** What the GUI knows of each tab, by tab key. `items` is the transcript read so far, from `next` on. */
 const threads = new Map();
 const threadOf = (tab) => {
   if (!threads.has(tab.key)) threads.set(tab.key, { session: null, next: 0, items: [], loaded: false, workspace: null, history: null, open: new Set() });
@@ -55,7 +49,6 @@ function setMode(mode) {
   if (TAURI) fitWindowTo(mode).catch(console.warn);
 }
 
-/** The app starts as a small panel; the three columns need room, and terminal view gets its own size back. */
 async function fitWindowTo(mode) {
   const size = (await win.innerSize()).toLogical(await win.scaleFactor());
   let sizes = {};
@@ -63,13 +56,12 @@ async function fitWindowTo(mode) {
     sizes = JSON.parse(load("mode-sizes")) ?? {};
   } catch {}
   sizes[mode === "gui" ? "terminal" : "gui"] = { width: size.width, height: size.height };
+  const want = sizes[mode] ?? (mode === "gui" ? { width: Math.max(size.width, 1180), height: Math.max(size.height, 760) } : size);
+  const fit = { width: Math.min(want.width, screen.availWidth - 40), height: Math.min(want.height, screen.availHeight - 40) };
+  sizes[mode] = fit;
   save("mode-sizes", JSON.stringify(sizes));
-  const want = sizes[mode] ?? (mode === "gui" ? { width: Math.max(size.width, 1180), height: Math.max(size.height, 760) } : null);
-  if (!want || (Math.round(want.width) === Math.round(size.width) && Math.round(want.height) === Math.round(size.height))) return;
-  await win.setSize(new TAURI.dpi.LogicalSize(Math.min(want.width, screen.availWidth - 40), Math.min(want.height, screen.availHeight - 40)));
+  if (Math.round(fit.width) !== Math.round(size.width) || Math.round(fit.height) !== Math.round(size.height)) await win.setSize(new TAURI.dpi.LogicalSize(fit.width, fit.height));
 }
-
-// ── Sidebar ────────────────────────────────────────────────────────────────
 
 const ago = (unix) => {
   if (!unix) return "";
@@ -86,7 +78,6 @@ const prOf = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kind === 
 const asksPermission = (tab) => statusOf(tab) === "needs-input" && /permission/i.test(tab.view.message ?? "");
 /** claude sends "waiting for your input" a while after a turn ends: the turn is over, nothing is asked. */
 const idleNotice = (tab) => statusOf(tab) === "needs-input" && !asksPermission(tab) && !tab.menu && /waiting for your input/i.test(tab.view.message ?? "");
-/** A turn is live while claude works on it or waits on an answer to carry on. */
 const turnLive = (tab) => statusOf(tab) === "working" || (statusOf(tab) === "needs-input" && !idleNotice(tab));
 const unseenDone = (tab) => (statusOf(tab) === "done" || idleNotice(tab)) && tab !== active && (tab.view.updated ?? 0) > (seenAt[tab.key] ?? 0);
 const settled = (tab) => !!tab.view.updated && ["idle", "done"].includes(statusOf(tab)) && tab !== active && Date.now() / 1000 - tab.view.updated > SETTLE_AFTER_S;
@@ -97,7 +88,6 @@ function markThreadSeen(tab) {
   save("gui-seen", JSON.stringify(seenAt));
 }
 
-/** The row's status slot: a label while the session needs attention, otherwise how long ago it last moved. */
 function statusSlot(tab) {
   const status = statusOf(tab);
   if (tab.menu) return { icon: "shield-question", text: "Approval", tone: "warning" };
@@ -182,7 +172,6 @@ document.getElementById("project-filter").onchange = (e) => {
   save("gui-project", ui.project);
   renderSidebar();
 };
-// On a phone the sheet would cover the thread the picker opens.
 document.getElementById("new-thread").onclick = () => {
   if (narrow(768)) toggleSidebar(false);
   toggleProjects();
@@ -194,16 +183,10 @@ function toggleSidebar(open = !ui.sidebarOpen) {
   document.body.dataset.sidebar = open ? "open" : "closed";
 }
 for (const id of ["sidebar-toggle", "chat-sidebar-toggle"]) document.getElementById(id).onclick = () => toggleSidebar();
-// On a phone the sidebar is a sheet over the thread; a tap beside it closes it.
 document.getElementById("workspace").addEventListener("click", (e) => {
   if (e.target.id === "workspace" && narrow(768) && ui.sidebarOpen) toggleSidebar(false);
 });
 
-// ── Thread ─────────────────────────────────────────────────────────────────
-
-/** Splits the items into turns: the prompt, the work done for it, and what the assistant said.
- * As in T3 Code, the first and the last message stay in view, and the tool calls and the
- * narration between them fold into one "Worked for" row. */
 function turnsOf(items) {
   const turns = [];
   const results = new Map(items.filter((i) => i.kind === "result").map((r) => [r.tool, r]));
@@ -231,7 +214,6 @@ function turnsOf(items) {
   return turns;
 }
 
-/** T3 Code's formatDuration: `4.2s`, `38s`, `3m 43s`, `1h 2m`. */
 function duration(ms) {
   if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
   if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
@@ -262,12 +244,12 @@ function toolHtml(step, cwd) {
     ${state === "error" ? icon("x", "failed") : ""}${body ? icon("chevron-right", "chev") : ""}</summary>${body}</details>`;
 }
 
-/** The saved diff of each turn: a turn's diff is the one that ended after its prompt and before the next.
- * `ended` is in whole seconds, so it may read up to a second before the prompt that follows. */
+const endOfSecond = (seconds) => seconds * 1000 + 999;
+
 function changesByTurn(history, turns) {
   const found = new Map();
   for (const h of history ?? []) {
-    const turn = turns.findLast((t) => t.user && t.start <= h.ended * 1000 + 999);
+    const turn = turns.findLast((t) => t.user && t.start <= endOfSecond(h.ended));
     if (turn && !found.has(turn)) found.set(turn, h);
   }
   return found;
@@ -340,7 +322,6 @@ function renderThread() {
   renderComposer(tab);
 }
 
-// The live turn's clock ticks on its own, without rebuilding the thread.
 setInterval(() => {
   for (const ticker of threadView.querySelectorAll(".ticker")) ticker.textContent = duration(Date.now() - Number(ticker.dataset.since));
 }, 1000);
@@ -374,7 +355,6 @@ threadView.addEventListener("toggle", (e) => {
 
 const openOutside = (url) => (TAURI ? invoke("open_url", { url }).catch(console.warn) : window.open(url, "_blank", "noopener"));
 
-/** A link to a local server opens in the side panel's browser; any other, or with ⌘, in the system browser. */
 function openLink(url, outside = false) {
   if (!outside && /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?/.test(url)) {
     setBrowserUrl(url);
@@ -416,7 +396,7 @@ async function fetchThread(tab) {
 
 function renderUnsupported() {
   threadView.dataset.key = "";
-  threadView.innerHTML = `<div class="blank"><p>${esc(machineName(active.machine))} runs an older pinned that can't show conversations.</p>
+  threadView.innerHTML = `<div class="blank"><p>This thread can't be shown here yet: ${esc(machineName(active.machine))} or the hub runs an older pinned.</p>
     <p class="hint">Update pinned there, or use the terminal view.</p><button class="primary" data-mode-terminal>Terminal view</button></div>`;
 }
 
@@ -448,8 +428,7 @@ async function fetchHistory(tab) {
   }
 }
 
-/** Each tab's status at the last render, so a finished turn refetches its diff. */
-const lastStatus = new Map();
+const statusBeforeRender = new Map();
 
 function renderGui() {
   if (!guiOn()) return;
@@ -462,9 +441,9 @@ function renderGui() {
     }
     if (!t.loaded) fetchThread(tab);
     fetchWorkspace(tab);
-    const before = lastStatus.get(tab.key);
-    lastStatus.set(tab.key, statusOf(tab));
-    if (before === "working" && statusOf(tab) !== "working") {
+    const finished = statusBeforeRender.get(tab.key) === "working" && statusOf(tab) !== "working";
+    statusBeforeRender.set(tab.key, statusOf(tab));
+    if (finished) {
       t.history = null;
       fetchThread(tab).then(() => fetchHistory(tab));
     }
@@ -485,8 +464,6 @@ setInterval(() => {
 }, POLL_MS);
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
 document.addEventListener("visibilitychange", () => markThreadSeen(active));
-
-// ── Composer ───────────────────────────────────────────────────────────────
 
 const MODELS_MENU = [
   ["default", "Default", "The model your Claude Code settings pick"],
@@ -524,7 +501,6 @@ function renderComposer(tab) {
 function terminalMenu(tab) {
   const buffer = tab.term.buffer.active;
   const bottom = buffer.baseY + tab.term.rows;
-  // A narrow terminal wraps a long line onto more rows; they join back into one.
   const lines = [];
   for (let i = buffer.baseY; i < bottom; i++) {
     const row = buffer.getLine(i);
@@ -556,7 +532,6 @@ function terminalMenu(tab) {
 }
 const CURSOR = /[❯›](?= )/;
 
-/** Re-reads the active terminal's menu after claude draws, so the banner follows it. */
 function watchMenu(tab) {
   let queued = false;
   tab.term.onWriteParsed(() => {
@@ -573,17 +548,17 @@ function watchMenu(tab) {
   });
 }
 
-/** Picks a menu option the way a person does in the terminal: arrows to it, then Enter. */
+const ARROW_DOWN = "\x1b[B";
+const ARROW_UP = "\x1b[A";
+
 function chooseOption(tab, n) {
   const from = tab.menu.options.find((o) => o.chosen)?.n ?? 1;
-  const keys = (n > from ? "\x1b[B" : "\x1b[A").repeat(Math.abs(n - from)) + "\r";
+  const keys = (n > from ? ARROW_DOWN : ARROW_UP).repeat(Math.abs(n - from)) + "\r";
   tab.menu = null;
   renderComposer(tab);
   return callOn(tab.machine, { cmd: "write_input", tab: tab.view.id, data: keys });
 }
 
-/** Claude asks in its terminal. The banner offers its menu's own options, or, before the menu
- * reaches this screen, the keys a permission prompt takes. */
 function renderApproval(tab) {
   const menu = tab?.menu;
   const asking = !!tab && (!!menu || asksPermission(tab));
@@ -653,7 +628,6 @@ async function send() {
 
 const stop = () => active && callOn(active.machine, { cmd: "write_input", tab: active.view.id, data: "\x1b" });
 
-/** Attached files go into the prompt as paths, which Claude Code reads, images included. */
 function insertPaths(paths) {
   const text = paths.map((p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&")).join(" ");
   prompt.value = `${prompt.value}${prompt.value && !prompt.value.endsWith(" ") ? " " : ""}${text} `;
@@ -662,24 +636,24 @@ function insertPaths(paths) {
 }
 document.getElementById("composer-attach").onclick = () => document.getElementById("attach").click();
 
-const menu = document.getElementById("composer-menu");
+const composerMenu = document.getElementById("composer-menu");
 function openMenu(anchor, entries) {
-  menu.replaceChildren(...entries.map(([label, hint, run, cls]) => {
+  composerMenu.replaceChildren(...entries.map(([label, hint, run, cls]) => {
     const b = document.createElement("button");
     b.type = "button";
     b.className = cls ?? "";
     b.innerHTML = `<span>${esc(label)}</span>${hint ? `<span class="hint">${esc(hint)}</span>` : ""}`;
     b.onclick = () => {
-      menu.hidden = true;
+      composerMenu.hidden = true;
       run();
     };
     return b;
   }));
-  menu.hidden = false;
-  menu.style.left = `${anchor.offsetLeft}px`;
+  composerMenu.hidden = false;
+  composerMenu.style.left = `${anchor.offsetLeft}px`;
 }
 window.addEventListener("mousedown", (e) => {
-  if (!menu.hidden && !e.target.closest("#composer-menu, #model-button, #more-button")) menu.hidden = true;
+  if (!composerMenu.hidden && !e.target.closest("#composer-menu, #model-button, #more-button")) composerMenu.hidden = true;
 }, true);
 
 const sendSlash = (text) => active && callOn(active.machine, { cmd: "prompt", tab: active.view.id, text }).then(() => setTimeout(() => fetchThread(active), 400));
@@ -690,7 +664,6 @@ document.getElementById("model-button").onclick = (e) =>
     renderComposer(active);
   }]));
 
-/** The model claude last reported in the transcript, or the one just picked until it reports again. */
 function modelName(tab) {
   const t = threadOf(tab);
   return t.picked ?? [...t.items].reverse().find((i) => i.kind === "model")?.name ?? "Default";
@@ -710,8 +683,6 @@ document.getElementById("more-button").onclick = (e) => {
   ]);
 };
 
-// ── Terminal drawer ────────────────────────────────────────────────────────
-
 function toggleDrawer(open = !ui.drawer) {
   ui.drawer = open;
   document.body.dataset.drawer = open ? "open" : "closed";
@@ -719,8 +690,6 @@ function toggleDrawer(open = !ui.drawer) {
   focusInput();
 }
 document.getElementById("toggle-terminal").onclick = () => toggleDrawer();
-
-// ── Side panel ─────────────────────────────────────────────────────────────
 
 function openPanel(kind) {
   ui.panel = kind;
@@ -776,7 +745,6 @@ function renderPanel() {
   else renderPrPanel();
 }
 
-/** `git diff` output as files of hunks, each line with its old and new number. */
 function parseDiff(patch) {
   const files = [];
   let file = null;
@@ -813,7 +781,6 @@ function diffRows(hunk) {
   if (ui.diffView === "unified") {
     return hunk.lines.map((l) => `<div class="dl ${l.type}"><span class="no">${l.type === "del" ? l.old : l.new}</span><span class="code">${esc(l.text) || " "}</span></div>`).join("");
   }
-  // Removed and added runs pair up side by side; context lines sit on both sides.
   const rows = [];
   let dels = [];
   let adds = [];
@@ -920,9 +887,6 @@ panelBody.addEventListener("click", (e) => {
   renderPanel();
 });
 
-// ── Browser ────────────────────────────────────────────────────────────────
-
-/** Local servers the session mentioned, newest first, offered in the browser's empty state. */
 function seenUrls(tab) {
   const found = new Set();
   const pattern = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?:\/[^\s"'`)<>\]]*)?/g;
@@ -981,8 +945,6 @@ function renderBrowser() {
     };
   }
 }
-
-// ── Pull request ───────────────────────────────────────────────────────────
 
 const checkState = (c) => {
   const v = (c.conclusion || c.state || c.status || "").toUpperCase();
@@ -1045,8 +1007,6 @@ function renderPrPanel() {
   panelBody.innerHTML = `<div class="pr">${head}${ui.prTab === "code" ? code : summary}</div>`;
 }
 
-// ── Usage, keys, start ─────────────────────────────────────────────────────
-
 function renderGuiUsage() {
   const meter = document.getElementById("gui-usage");
   meter.replaceChildren(...[...usageMeter.children].map((c) => c.cloneNode(true)));
@@ -1090,6 +1050,8 @@ document.getElementById("gui-settings").onclick = () => toggleSettings();
 document.getElementById("gui-minimize").onclick = () => setView("pill");
 
 document.body.dataset.mode = load("mode") === "terminal" ? "terminal" : "gui";
+const firstLaunch = !load("mode-sizes");
+if (TAURI && guiOn() && firstLaunch) fitWindowTo("gui").catch(console.warn);
 document.body.dataset.panel = "closed";
 document.body.dataset.drawer = "closed";
 document.body.dataset.sidebar = ui.sidebarOpen ? "open" : "closed";

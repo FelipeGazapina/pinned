@@ -128,6 +128,13 @@ pub enum Call {
     PullRequest { tab: TabId, pr: String },
 }
 
+impl Call {
+    /// Runs off the machine's call queue: a run may clone a repository for minutes and gh may wait on GitHub.
+    pub fn may_wait(&self) -> bool {
+        matches!(self, Call::Run { .. } | Call::PullRequest { .. })
+    }
+}
+
 /// A step of a tab's conversation. A client holding items of another `session` starts over.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct ThreadPage {

@@ -1,17 +1,10 @@
-//! A session's conversation as the GUI shows it, read from the transcript Claude Code writes.
-//!
-//! The transcript is one JSON object per line, appended as the session runs. A client reads it
-//! in steps: each read starts at the byte offset the last one ended on, and takes whole lines only.
-
 use serde::Serialize;
 use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-/// Text kept from one tool result or tool input, so a long output can't bloat a read.
 const PREVIEW_CHARS: usize = 4000;
 const SUMMARY_CHARS: usize = 300;
-/// The most a single read takes from the file; the client asks again from `next`.
 const READ_LIMIT: u64 = 8 << 20;
 
 #[derive(Serialize, Debug, PartialEq, Clone)]
@@ -39,12 +32,10 @@ pub struct Page {
     pub next: u64,
 }
 
-/// Where Claude Code keeps its projects' transcripts.
 pub fn projects_dir(home: &Path) -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| home.join(".claude"), PathBuf::from).join("projects")
 }
 
-/// The transcript of `session`, in whichever project folder Claude Code filed it.
 pub fn find(projects: &Path, session: &str) -> Option<PathBuf> {
     let name = format!("{session}.jsonl");
     std::fs::read_dir(projects).ok()?.flatten().map(|dir| dir.path().join(&name)).find(|path| path.is_file())
@@ -54,8 +45,8 @@ pub fn find(projects: &Path, session: &str) -> Option<PathBuf> {
 pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
     let mut f = std::fs::File::open(file)?;
     let len = f.metadata()?.len();
-    // A transcript that shrank was replaced, so the client starts over.
-    let from = if from > len { 0 } else { from };
+    let replaced = from > len;
+    let from = if replaced { 0 } else { from };
     f.seek(SeekFrom::Start(from))?;
     let mut bytes = vec![];
     f.take(READ_LIMIT).read_to_end(&mut bytes)?;
@@ -144,8 +135,8 @@ enum Spoken {
     Note(String),
 }
 
-/// What a user line says to the person reading the thread. Claude Code wraps the slash commands
-/// it runs and the messages it injects in tags; only the commands and their output are shown.
+/// Claude Code wraps the slash commands it runs and the messages it injects in tags; only the
+/// commands and their output are shown.
 fn spoken(text: &str) -> Option<Spoken> {
     let text = text.trim();
     if let Some(name) = tag(text, "command-name") {
@@ -175,7 +166,6 @@ fn result_text(content: &Value) -> String {
     }
 }
 
-/// A one-line summary of a tool call, and the longer text the GUI shows when it is opened.
 fn describe_tool(name: &str, input: &Value) -> (String, String) {
     let field = |k: &str| input[k].as_str().unwrap_or_default();
     let summary = match name {

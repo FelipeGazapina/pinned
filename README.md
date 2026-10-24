@@ -39,6 +39,37 @@ From a terminal you can open a specific folder:
 /Applications/pinned.app/Contents/MacOS/pinned ~/path/to/project
 ```
 
+## App view and terminal view
+
+pinned opens in the app view, laid out like T3 Code. Press ⌘E, or click the view button, to
+switch between it and the terminal view. Both views show the same running `claude` session, so
+switching never restarts or interrupts it. A prompt you type in one view shows in the other.
+
+The app view has three columns:
+
+- **Sidebar.** Your threads, one per tab, with the project, the title Claude gave the session, the
+  branch and the pull request. A thread that is working, waiting for your approval, or finished
+  while you were away says so. Search filters the list, and **All projects** narrows it to one
+  project. Threads idle for 3 days move under **Settled**. ⌘B hides the sidebar.
+- **Thread.** Your prompts and Claude's answers. The tool calls of a turn fold into one
+  **Worked for** row; click it to see each one. A turn that changed files ends with a card of
+  those files. **Open diff** shows them in the side panel. Type below and press Enter to send.
+  While Claude works, Enter queues your message and the red button stops the turn.
+  The menu under the prompt picks the model.
+- **Side panel.** ⌘D opens the **Diff** of each turn, unified or split. **Browser** previews a
+  page your project serves, such as `localhost:3000`, and offers the local servers the session
+  mentioned. **Pull request** shows the pull request the session opened: its description,
+  checks, reviews and code. It reads them with the GitHub CLI, so `gh` must be installed and
+  signed in on the machine the session runs on. Click the PR number in the header or under the
+  prompt to open it.
+
+When Claude asks something in its terminal, such as whether to trust a new folder or to allow a
+command, the app view shows the question above the prompt with Claude's own options. Pick one,
+or click **Terminal** to answer there. ⌘J opens the terminal under the thread at any time.
+
+Other keys in the app view: ⌘N for a new thread, ⌘⇧[ and ⌘⇧] for the previous or next thread,
+and ⌘⌥B to show or hide the side panel.
+
 ## Tabs
 
 The **＋** button in the tab bar (or ⌘T) lists your projects, most recent first: every folder

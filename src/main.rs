@@ -44,8 +44,6 @@ fn machine_call(machine: State<Arc<Machine>>, call: Call) -> Result<serde_json::
     machine.call(call)
 }
 
-/// For a call that may wait seconds, such as asking GitHub about a pull request, off the main
-/// thread and out of order with the rest.
 #[tauri::command]
 async fn machine_call_slow(machine: State<'_, Arc<Machine>>, call: Call) -> Result<serde_json::Value, String> {
     let machine = machine.inner().clone();
