@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
-use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, EXE_PLACEHOLDER};
-use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions, sync, uploads};
+use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
+use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions, sync, thread, uploads, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -177,6 +177,7 @@ struct Tab {
     /// Working tree and prompt as the running turn began, to diff against when it ends.
     turn: Option<(String, Option<String>)>,
     status: Option<AgentStatus>,
+    updated: Option<u64>,
     title: Option<String>,
     message: Option<String>,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
@@ -210,6 +211,7 @@ impl Tab {
             connector: self.env.iter().find(|(k, _)| k == CONNECTOR_ENV).map(|(_, v)| v.clone()),
             subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
+            updated: self.updated,
         }
     }
 }
@@ -314,7 +316,13 @@ impl Machine {
             }
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
-            Call::ProjectHistory { path } => json(self.project_history(&path)),
+            Call::ProjectHistory { path, session } => {
+                let mut turns = self.project_history(&path);
+                if let Some(session) = session {
+                    turns.retain(|t| t.session == session);
+                }
+                json(turns)
+            }
             Call::GitRemote { path } => json(git_remote(Path::new(&path))),
             Call::Browse { path } => json(projects::browse(&path, &home())?),
             Call::Clone { repo, token } => json(self.find_folder("", Some(&repo), token.as_deref())?),
@@ -324,6 +332,23 @@ impl Machine {
                 let dir = self.uploads.as_ref().ok_or("this machine keeps no files")?;
                 json(uploads::save(dir, &name, &data.0)?.display().to_string())
             }
+            Call::Thread { tab, from } => json(self.thread(&tab, from)?),
+            Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
+            Call::Workspace { tab } => json(workspace::of(&self.tab(&tab, |t| t.cwd.clone())?)),
+            Call::PullRequest { tab, pr } => json(workspace::pull_request(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
+        }
+    }
+
+    /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
+    pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
+        let session = self.tab(tab, |t| t.claude_session.clone())?;
+        let page = session.as_deref().and_then(|s| thread::find(&thread::projects_dir(&home()), s)).map(|file| thread::read(&file, from));
+        match page {
+            Some(page) => {
+                let page = page.map_err(|e| format!("could not read the transcript: {e}"))?;
+                Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset })
+            }
+            None => Ok(ThreadPage { session, items: vec![], next: 0, reset: false }),
         }
     }
 
@@ -655,6 +680,7 @@ impl Machine {
             resume_at: None,
             turn: None,
             status: None,
+            updated: None,
             title: None,
             message: None,
             screen: Arc::default(),
@@ -727,6 +753,10 @@ impl Machine {
                     t.resume_at = event.resume_at;
                 }
                 AgentStatus::NeedsInput => {}
+            }
+            let idle_notice = event.status == AgentStatus::NeedsInput && t.status == Some(AgentStatus::Done);
+            if !idle_notice {
+                t.updated = Some(unix_now());
             }
             t.status = Some(event.status);
             if event.title.is_some() {

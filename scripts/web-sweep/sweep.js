@@ -10,7 +10,8 @@
 // Screenshots and sweep-<profile>.json land in SWEEP_DIR. Exits 1 when any step is not "works".
 const fs = require("fs");
 const path = require("path");
-const { chromium, devices } = require(process.env.PLAYWRIGHT || "playwright");
+const playwright = require(process.env.PLAYWRIGHT || "playwright");
+const { devices } = playwright;
 
 const DIR = process.env.SWEEP_DIR || path.join(process.env.TMPDIR || "/tmp", "pinned-web-sweep");
 const HUB = `http://127.0.0.1:${process.env.SWEEP_HUB_PORT || 8797}`;
@@ -21,6 +22,7 @@ const HOME = path.join(DIR, "home");
 const PROFILES = {
   phone: { ...devices["Pixel 7"] },
   desktop: { viewport: { width: 1280, height: 800 }, hasTouch: false, isMobile: false },
+  safari: { engine: "webkit", viewport: { width: 1280, height: 800 }, hasTouch: false, isMobile: false },
 };
 
 class Broken extends Error {}
@@ -92,13 +94,14 @@ async function seedConnectors(name) {
 }
 
 async function sweep(profileName) {
-  const profile = PROFILES[profileName];
+  const { engine = "chromium", ...profile } = PROFILES[profileName];
   const touch = !!profile.hasTouch;
   const shots = path.join(DIR, "shots", profileName);
   fs.mkdirSync(shots, { recursive: true });
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ ...profile, permissions: ["clipboard-read", "clipboard-write"] });
+  const browser = await playwright[engine].launch({ headless: true });
+  const context = await browser.newContext({ ...profile, permissions: engine === "chromium" ? ["clipboard-read", "clipboard-write"] : [] });
   if (touch) await context.addInitScript(stubVisualViewport);
+  await context.addInitScript(() => localStorage.getItem("mode") || localStorage.setItem("mode", "terminal"));
   const page = await context.newPage();
 
   let seen = [];
@@ -199,12 +202,38 @@ async function sweep(profileName) {
       verdict = e instanceof TouchUnusable ? "unusable on touch" : "broken";
       note = e.message.split("\n")[0];
     }
+    const thrown = seen.find((s) => s.startsWith("pageerror"));
+    if (verdict === "works" && thrown) [verdict, note] = ["broken", thrown];
     await page.screenshot({ path: path.join(shots, `${String(results.length + 1).padStart(2, "0")}-${name.replace(/\W+/g, "-")}.png`) }).catch(() => {});
     results.push({ step: name, verdict, note, seen: [...new Set(seen)] });
     console.log(`${profileName.padEnd(7)} ${verdict.padEnd(17)} ${name}${note ? `: ${note}` : ""}`);
   }
 
   await page.goto(HUB);
+
+  // The page's scripts share one global scope, where a second function of the same name silently wins.
+  await step("scripts: no global name declared twice", async () => {
+    const owners = new Map();
+    for (const file of fs.readdirSync(path.join(__dirname, "../../ui")).filter((f) => f.endsWith(".js"))) {
+      const source = fs.readFileSync(path.join(__dirname, "../../ui", file), "utf8");
+      for (const [, name] of source.matchAll(/^(?:async )?(?:function|const|let|var|class) ([\w$]+)/gm)) owners.set(name, [...(owners.get(name) ?? []), file]);
+    }
+    const twice = [...owners].filter(([, files]) => files.length > 1).map(([name, files]) => `${name} in ${files.join(", ")}`);
+    check(!twice.length, twice.join("; "));
+    return `${owners.size} names`;
+  });
+
+  await step("scripts: the menu parser reads recorded claude screens", async () => {
+    const screen = (name) => fs.readFileSync(path.join(__dirname, "screens", name), "utf8").split("\n");
+    const idle = await page.evaluate((lines) => menuOn(lines), screen("claude-2.1.310-idle.txt"));
+    check(idle === null, `an idle screen parsed as ${JSON.stringify(idle)}`);
+    const menu = await page.evaluate((lines) => menuOn(lines), screen("claude-2.1.310-permission.txt"));
+    check(menu?.box === "touch made-by-bash-2.txt", `the command box is ${JSON.stringify(menu?.box)}`);
+    check(menu.question.split("\n").at(-1) === "Do you want to proceed?" && menu.question.startsWith("Bash command"), `the question is ${JSON.stringify(menu.question)}`);
+    const labels = menu.options.map((o) => o.label);
+    check(labels.length === 4 && labels[1] === "Yes, and always allow access to /Users/me/work/app from this project" && menu.options[0].chosen, `options: ${labels.join(" | ")}`);
+    return labels.join(" | ");
+  });
 
   await step("login: wrong password shows an error", async () => {
     await page.fill("#login [name=email]", EMAIL);
@@ -475,7 +504,10 @@ async function sweep(profileName) {
     await typeInTerm("/ask");
     await page.keyboard.press("Enter");
     await waitFor("needs-input", async () => (await page.getAttribute("header", "data-status")) === "needs-input");
-    return text("#status-text");
+    const said = await text("#status-text");
+    await page.keyboard.press("Escape");
+    await waitTerm(/chose esc/);
+    return said;
   });
 
   await step("claude exits, Enter restarts it", async () => {
@@ -514,6 +546,187 @@ async function sweep(profileName) {
     await press(page.locator("#tab-list .tab .name", { hasText: "alpha" }));
     check(/alpha/.test(await text("#title")), "tapping the alpha tab did not show it");
     await waitTerm(/work\/alpha/);
+  });
+
+  const gui = (selector) => page.locator(selector).filter({ visible: true }).first();
+  const sendPrompt = async (words) => {
+    await page.fill("#prompt", words);
+    if (touch) await page.tap("#send");
+    else await page.press("#prompt", "Enter");
+  };
+  const showSidebar = async () => {
+    if (await page.locator("#sidebar").isVisible()) return;
+    await tapOrClick("#chat-sidebar-toggle");
+    await waitFor("the sidebar", () => page.locator("#sidebar").isVisible());
+  };
+
+  await step("app view: switch from the terminal, threads in the sidebar", async () => {
+    await typeInTerm("typed in the terminal");
+    await page.keyboard.press("Enter");
+    await waitTerm(/echo: typed in the terminal/);
+    await tapOrClick("#mode-gui");
+    await waitFor("the app view", () => page.locator("#chat").isVisible());
+    check(!(await page.locator("#tab-bar").isVisible()), "the tab bar still shows in the app view");
+    await showSidebar();
+    const rows = await page.locator("#thread-list .thread-row").count();
+    check(rows === 2, `${rows} threads in the sidebar, expected 2`);
+    check(/alpha/.test(await text("#thread-list .thread-row.active .project")), "the active row is not alpha");
+    if (touch) await page.tap("#workspace", { position: { x: (await rect("#workspace")).width - 4, y: 300 } });
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    return `${rows} threads`;
+  });
+
+  await step("app view: the thread shows what was typed in the terminal", async () => {
+    await waitFor("the transcript", async () => (await page.locator("#thread .bubble").count()) > 0);
+    const prompts = await page.locator("#thread .bubble").allTextContents();
+    check(prompts.includes("typed in the terminal"), `prompts: ${prompts.join(" | ")}`);
+    check((await page.locator("#thread .assistant", { hasText: "echo: typed in the terminal" }).count()) === 1, "the answer is missing");
+    check(/alpha/.test(await text("#chat-head .crumb")), "the header doesn't name the project");
+    return `${prompts.length} prompts`;
+  });
+
+  await step("app view: a prompt from the composer reaches the same session", async () => {
+    await sendPrompt("hello from the app");
+    await waitFor("the answer", async () => (await page.locator("#thread .assistant", { hasText: "echo: hello from the app" }).count()) > 0);
+    check(/hello from the app/.test(await termText()), "the terminal behind the app view never got the prompt");
+    check((await page.inputValue("#prompt")) === "", "the composer kept the sent text");
+  });
+
+  await step("app view: a turn's changed files open in the Diff panel", async () => {
+    await sendPrompt("edit");
+    await waitFor("the changed-files card", async () => (await page.locator("#thread .changes").count()) > 0, 10000);
+    const card = await text("#thread .changes .count");
+    await press(gui("#thread .open-diff"));
+    await waitFor("the diff panel", () => page.locator("#panel-body .file").first().isVisible());
+    check(/notes\.md/.test(await text("#panel-body .file .path")), "the diff doesn't show notes.md");
+    const added = await page.locator("#panel-body .dl.add").count();
+    check(added >= 2, `${added} added lines in the diff`);
+    await press(gui('#panel-body [data-diff="split"]'));
+    check((await page.locator("#panel-body .dl.split").count()) > 0, "split view shows no side-by-side rows");
+    await press(gui('#panel-body [data-diff="unified"]'));
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    if (touch) await tapOrClick("#panel-close");
+    return `${card}, ${added} lines added`;
+  });
+
+  await step("app view: the PR link opens the pull request panel", async () => {
+    check(await page.locator("#pr-chip").isVisible(), "the header has no PR chip after the session linked #42");
+    check(/#42/.test(await text("#composer-footer .pr")), "the composer footer doesn't show #42");
+    await tapOrClick("#pr-chip");
+    const prPanelSettled = async () => /#42/.test(await text("#panel-body")) && !/Loading/.test(await text("#panel-body"));
+    await waitFor("the PR panel", prPanelSettled, 15000);
+    check(await page.locator('#panel-tabs [data-panel="pr"].active').isVisible(), "the PR tab is not the active one");
+    const shown = (await text("#panel-body")).slice(0, 80);
+    if (touch) {
+      await tapOrClick("#panel-close");
+      await tapOrClick("#toggle-panel");
+    }
+    return shown;
+  });
+
+  await step("app view: the browser panel loads a URL", async () => {
+    await press(gui('#panel-tabs [data-panel="browser"]'));
+    await page.fill("#panel-body .url-bar input", `${HUB}/manifest.webmanifest`);
+    await page.press("#panel-body .url-bar input", "Enter");
+    await waitFor("the frame", async () => (await page.locator("#panel-body iframe").getAttribute("src"))?.endsWith("manifest.webmanifest"));
+    const frame = page.frameLocator("#panel-body iframe");
+    await waitFor("the page in the frame", async () => /pinned/.test((await frame.locator("body").textContent().catch(() => "")) ?? ""));
+    await tapOrClick("#panel-close");
+    check(!(await page.locator("#panel").isVisible()), "the panel didn't close");
+    await sleep(200);
+  });
+
+  await step("app view: the approval banner answers claude's prompt", async () => {
+    await sendPrompt("/ask");
+    await waitFor("the banner", () => page.locator("#approval").isVisible());
+    check(/Command approval/.test(await text("#approval .kind")), `banner says ${await text("#approval .kind")}`);
+    check((await text("#approval pre")) === "rm -rf build", `the banner shows the command as ${await text("#approval pre")}`);
+    check((await text("#approval .about")) === "Remove the build folder", `the banner describes it as ${await text("#approval .about")}`);
+    check(/Do you want to proceed/.test(await text("#approval .what")), `the banner asks ${await text("#approval .what")}`);
+    const options = await page.locator("#approval .options button").allTextContents();
+    check(options.length === 3 && options[1].startsWith("Yes, and don't ask again"), `options: ${options.join(" | ")}`);
+    await sendPrompt("typed while claude asks");
+    check(!/typed while claude asks/.test(await termText()), "the composer typed into claude's menu");
+    await page.fill("#prompt", "");
+    const model = await text("#model-button");
+    await tapOrClick("#model-button");
+    await tapOrClick("#composer-menu button");
+    await sleep(300);
+    check(!/\/model/.test(await termText()), "picking a model typed into claude's menu");
+    check((await text("#model-button")) === model, `the model button changed to ${await text("#model-button")} with nothing sent`);
+    await press(gui('#approval [data-option="2"]'));
+    await waitTerm(/chose 2/);
+    await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()), 1500);
+    const row = await text("#thread-list .thread-row.active");
+    check(!/ran it/.test(await termText()), "claude finished before the banner was checked");
+    check(!/Approval/.test(row), `after the answer, while claude still works: ${JSON.stringify(row)}`);
+    await waitTerm(/ran it/);
+    return options.join(" | ");
+  });
+
+  await step("app view: claude's folder trust menu, answered from the banner", async () => {
+    await showSidebar();
+    await tapOrClick("#new-thread");
+    await page.waitForSelector("#projects .choices button");
+    await press(page.locator("#projects .choices button", { hasText: "Browse folders…" }));
+    await page.fill("#projects .browse input", `${HOME}/work/gamma/`);
+    await waitFor("the folder listing", async () => (await text("#projects .folders button")).startsWith("Open "));
+    await press(page.locator("#projects .folders button").first());
+    await waitFor("the trust banner", () => page.locator("#approval .options button").first().isVisible());
+    const options = await page.locator("#approval .options button").allTextContents();
+    check(options.join("|") === "No, exit|Yes, I trust this folder", `options: ${options.join(" | ")}`);
+    check(/No, exit/.test(await text("#approval .primary")), "the banner doesn't mark claude's own default");
+    await press(gui('#approval [data-option="2"]'));
+    await waitTerm(/fake claude in .*work\/gamma/);
+    await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
+    await page.evaluate(() => closeTab(active));
+    await waitFor("two threads again", async () => (await page.locator("#thread-list .thread-row").count()) === 2);
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+    return options.join(" | ");
+  });
+
+  await step("app view: the terminal drawer shows the same session", async () => {
+    await tapOrClick("#toggle-terminal");
+    await waitFor("the drawer", () => page.locator(".term:not([hidden])").evaluate((el) => getComputedStyle(el).visibility === "visible" && el.getBoundingClientRect().height > 60));
+    check(/hello from the app/.test(await termText()), "the drawer's terminal lacks the prompt sent from the composer");
+    await tapOrClick("#toggle-terminal");
+  });
+
+  await step("app view: the sidebar switches threads", async () => {
+    await showSidebar();
+    await press(page.locator("#thread-list .thread-row", { hasText: "beta" }).first());
+    await waitFor("beta", async () => /beta/.test(await text("#chat-head .crumb")));
+    await showSidebar();
+    await press(page.locator("#thread-list .thread-row", { hasText: "alpha" }).first());
+    await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
+  });
+
+  await step("app view: controls are big enough to tap", async () => {
+    if (!touch) return "desktop";
+    const small = await smallTargets("#chat-head button, #composer button, #composer-footer button");
+    touchCheck(!small.length, `small: ${small.join(", ")}`);
+  });
+
+  await step("app view: back to the terminal", async () => {
+    await showSidebar();
+    await tapOrClick("#mode-terminal");
+    await waitFor("the tab bar", () => page.locator("#tab-bar").isVisible());
+    check(!(await page.locator("#chat").isVisible()), "the app view still shows");
+    await waitTerm(/work\/alpha/);
+    if (!touch) {
+      await page.keyboard.press("Meta+e");
+      await waitFor("⌘E to open the app view", () => page.locator("#chat").isVisible());
+      const panelOpen = () => page.evaluate(() => document.body.dataset.panel === "open");
+      const before = await panelOpen();
+      await page.keyboard.press("Meta+Alt+KeyB");
+      check((await panelOpen()) !== before, "⌘⌥B didn't toggle the side panel");
+      await page.keyboard.press("Meta+Alt+KeyB");
+      await page.keyboard.press("Meta+e");
+      await waitFor("⌘E to go back to the terminal", () => page.locator("#tab-bar").isVisible());
+      check(!(await page.locator("#chat").isVisible()), "⌘E left the app view up");
+    }
   });
 
   await step("session actions: skip permissions mid-session, then ask again", async () => {
@@ -759,7 +972,8 @@ async function sweep(profileName) {
     check(command.startsWith(`curl -fsSL ${HUB}/install.sh | sh -s -- `), command);
     await action("copy-pair");
     await waitFor("Copied", async () => (await text('#settings-page [data-action="copy-pair"]')) === "Copied", 3000);
-    check((await page.evaluate(() => navigator.clipboard.readText())) === command, "the clipboard lacks the command");
+    // WebKit lets a page write the clipboard but never lets automation read it back.
+    if (engine === "chromium") check((await page.evaluate(() => navigator.clipboard.readText())) === command, "the clipboard lacks the command");
     const script = await fetch(`${HUB}/install.sh`);
     check(script.ok && (await script.text()).startsWith("#!"), `install.sh answered ${script.status}`);
     return command;

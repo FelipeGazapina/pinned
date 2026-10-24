@@ -16,5 +16,7 @@ pub mod reminders;
 pub mod sessions;
 pub mod slack;
 pub mod sync;
+pub mod thread;
 pub mod uploads;
 pub mod wire;
+pub mod workspace;

@@ -323,7 +323,7 @@ function openChoice(i, bypass = false) {
 
 function closeProjects() {
   picker.hidden = true;
-  active?.term.focus();
+  focusInput();
   markSeen(active);
 }
 
@@ -378,7 +378,7 @@ async function moveTab(tab, path) {
   await callOn(tab.machine, { cmd: "set_folder", tab: tab.view.id, path });
   tab.term.reset();
   await startTab(tab);
-  tab.term.focus();
+  focusInput();
 }
 
 function addTab(machine, view) {
@@ -449,7 +449,7 @@ async function setBypass(tab, on) {
   } catch (e) {
     tab.term.write(`\r\n\x1b[31m[could not restart claude: ${e}]\x1b[0m\r\n`);
   }
-  tab.term.focus();
+  focusInput();
 }
 
 function closeTab(tab) {
@@ -491,8 +491,14 @@ function show(tab) {
   }
   refit(tab);
   render();
-  if (!pickerOpen() && !settingsOpen()) tab.term.focus();
+  if (!pickerOpen() && !settingsOpen()) focusInput();
   markSeen(tab);
+}
+
+function focusInput() {
+  if (!active) return;
+  if (guiOn() && document.body.dataset.drawer !== "open") prompt.focus();
+  else active.term.focus();
 }
 
 // A hidden terminal can't measure itself, so each tab fits when it is shown.
@@ -516,6 +522,7 @@ function render() {
     tab.button.title = `${where}${tab.view.cwd}${tab.view.bypass ? "\nPermissions skipped" : ""}`;
   }
   document.body.dataset.empty = !tabs.length;
+  renderGui();
   renderCarousel();
   renderUsage();
   const header = document.querySelector("header");
@@ -699,7 +706,10 @@ window.addEventListener("mousedown", (e) => {
 
 // The panel is nonactivating, so a click alone doesn't give it keyboard focus.
 if (TAURI) {
-  window.addEventListener("mousedown", () => invoke("focus_panel").then(() => settingsOpen() || active?.term.focus()), true);
+  const typesIntoTerminal = (e) => !guiOn() || e.target.closest("#terms");
+  window.addEventListener("mousedown", (e) => invoke("focus_panel").then(() => {
+    if (!settingsOpen() && typesIntoTerminal(e)) focusInput();
+  }), true);
   invoke("focus_panel");
 }
 
@@ -757,6 +767,7 @@ const UPLOAD_LIMIT = 25 << 20;
 
 // Claude Code attaches an image when a file path is pasted, so an attached file becomes a paste of its escaped path.
 function pastePaths(tab, paths) {
+  if (guiOn() && tab === active) return insertPaths(paths);
   tab.term.paste(paths.map((p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&")).join(" ") + " ");
   tab.term.focus();
 }
@@ -917,7 +928,8 @@ document.getElementById("new-tab").onclick = () => toggleProjects();
 document.getElementById("minimize").onclick = () => setView("pill");
 // Clicking outside the expanded panel shrinks it to the pill, as the minimize button does.
 window.addEventListener("blur", () => {
-  if (TAURI && document.body.dataset.view === "expanded" && !choosingFolder) setView("pill");
+  // Focus moving into the side panel's browser blurs the window too.
+  if (TAURI && document.body.dataset.view === "expanded" && !choosingFolder && document.activeElement?.tagName !== "IFRAME") setView("pill");
 });
 track.onclick = async (e) => {
   const tab = tabByKey(e.target.closest(".item")?.dataset.tab);
