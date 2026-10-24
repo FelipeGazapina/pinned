@@ -264,7 +264,8 @@ window.addEventListener("keydown", (e) => {
 }, true);
 
 /** With the thread scrolled up and a one-line prompt not being typed in, the composer rests as one
- * row, as T3 Code's does, to show more of the thread. */
+ * row, as T3 Code's does, to show more of the thread. Like T3's, it comes to rest on a scroll, not
+ * on a blur: pressing Send takes the focus, and a blur would move Send out from under the press. */
 function rest() {
   const away = threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight > 40;
   const t = active && threadOf(active);
@@ -273,7 +274,6 @@ function rest() {
 }
 threadView.addEventListener("scroll", rest, { passive: true });
 prompt.addEventListener("focus", rest);
-prompt.addEventListener("blur", rest);
 
 function autosize() {
   prompt.style.height = "auto";

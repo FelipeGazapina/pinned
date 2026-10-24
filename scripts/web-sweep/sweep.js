@@ -1331,6 +1331,10 @@ async function sweep(profileName) {
     await waitFor("the full composer", () => page.evaluate(() => composer.dataset.resting === "false"));
     const full = (await rect("#composer .box")).height;
     check(full > 100, `the focused composer is ${Math.round(full)}px tall`);
+    await page.fill("#prompt", "sent while scrolled up");
+    await page.evaluate(() => (threadView.scrollTop = 0));
+    await tapOrClick("#send");
+    await waitTerm(/echo: sent while scrolled up/);
     await page.evaluate(() => (threadView.scrollTop = threadView.scrollHeight));
     return `${Math.round(resting)}px → ${Math.round(full)}px`;
   });
@@ -1760,6 +1764,7 @@ async function sweep(profileName) {
     }, beta);
     await waitFor("beta to open", async () => (await crumbProject()) === "beta");
     await waitFor("the file's chip in the composer", async () => (await page.locator("#attachments .name", { hasText: "dropped-on-row.txt" }).count()) === 1, 10000);
+    await openRow(beta);
     await press(page.locator("#attachments .remove"));
     await openRow(await keyFor("alpha"));
     if (touch) return "touch: the sidebar is a full-width sheet";
