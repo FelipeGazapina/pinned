@@ -204,7 +204,7 @@ async function loadPr(tab, pr) {
 /** The pull request the thread last clicked, or else its latest. */
 const shownPr = (tab) => {
   const t = threadOf(tab);
-  return t.items.find((i) => i.kind === "pr" && i.url === t.prUrl) ?? prOf(tab);
+  return t.items.find((i) => i.kind === "pr" && i.url === t.prUrl) ?? prOfUrl(t.prUrl) ?? prOf(tab);
 };
 function openPr(tab, url) {
   threadOf(tab).prUrl = url;
