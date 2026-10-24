@@ -56,7 +56,8 @@
           <span class="crumb" data-tauri-drag-region></span>
           <button id="pr-chip" class="chip" title="Open the pull request" hidden><i data-icon="github"></i><span></span></button>
           <button class="update" title="Install the new version and restart"></button>
-          <span class="controls"><button id="toggle-terminal" class="icon" title="Terminal (⌘J)"><i data-icon="panel-bottom"></i></button>
+          <span id="open-in" class="split" hidden><button type="button" class="main outline" title="Open in editor"><i data-ic="square-arrow-out-up-right"></i><span class="label">Open</span></button><button type="button" class="pick outline" title="Choose the editor"><i data-ic="chevron-down"></i></button></span>
+          <span class="controls"><button id="panel-expand" class="icon" title="Maximize panel"><i data-icon="maximize-2"></i></button><button id="toggle-terminal" class="icon" title="Terminal (⌘J)"><i data-icon="panel-bottom"></i></button>
           <button id="toggle-panel" class="icon" title="Side panel (⌘⌥B)"><i data-icon="panel-right"></i></button>
           <button id="gui-minimize" class="icon" title="Shrink to pill"><i data-icon="minus"></i></button></span>
         </header>
@@ -80,8 +81,7 @@
       </section>
       <aside id="panel">
         <span id="panel-resize" title="Drag to resize"></span>
-        <nav id="panel-tabs"><button data-panel="diff"><i data-icon="file-diff"></i><span>Diff</span></button><button data-panel="browser"><i data-icon="globe"></i><span>Browser</span></button><button data-panel="pr"><i data-icon="git-pull-request"></i><span>Pull request</span></button>
-          <span class="spacer"></span><button id="panel-expand" class="icon" title="Maximize panel"><i data-icon="maximize-2"></i></button><button id="panel-close" class="icon" title="Close panel"><i data-icon="x"></i></button></nav>
+        <nav id="panel-tabs"><div class="strip" role="tablist"></div><button id="panel-add" class="icon" title="Open a surface (⌘T)"><i data-icon="plus"></i></button><span class="spacer"></span></nav>
         <div id="panel-body"></div>
       </aside>
       <nav id="tab-bar">
@@ -135,6 +135,7 @@
 <script src="settings.js"></script>
 <script src="history.js"></script>
 <script src="vendor/marked.js"></script>
+<script src="vendor/highlight.min.js"></script>
 <script src="icons.js"></script>
 <script src="terminal-menu.js"></script>
 <script src="diff.js"></script>

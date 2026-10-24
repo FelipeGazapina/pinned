@@ -7,7 +7,6 @@ const panelBody = document.getElementById("panel-body");
 
 const guiOn = () => document.body.dataset.mode === "gui";
 const POLL_MS = 1200;
-const PANELS = ["diff", "browser", "pr"];
 const narrow = (px) => matchMedia(`(max-width: ${px}px)`).matches;
 
 const threads = new Map();
@@ -22,20 +21,27 @@ try {
 } catch {}
 
 const ui = {
-  panel: PANELS.includes(load("gui-panel")) ? load("gui-panel") : "diff",
-  panelOpen: load("gui-panel-open") === "true",
+  get panel() {
+    return shownSurface(active)?.kind;
+  },
+  get panelOpen() {
+    return panelOf(active).open;
+  },
   sidebarOpen: load("gui-sidebar") !== "false" && !narrow(768),
   drawer: false,
   search: "",
   project: load("gui-project") ?? "",
   settledOpen: load("gui-settled-open") === "true",
+  diffScope: "turn",
   diffTurn: null,
   diffView: load("gui-diff-view") === "split" ? "split" : "unified",
   diffWrap: load("gui-diff-wrap") !== "false",
+  diffHideSpace: load("gui-diff-whitespace") !== "false",
+  diffTree: load("gui-diff-tree") === "true",
   collapsed: new Set(),
-  browserUrl: load("gui-browser-url") ?? "",
-  pr: null,
-  prTab: "summary",
+  seenFiles: new Set(),
+  treeClosed: new Set(),
+  commentAt: null,
 };
 
 function setMode(mode) {
@@ -161,7 +167,7 @@ function renderGui() {
   for (const tab of tabs) {
     const finished = statusBeforeRender.get(tab.key) === "working" && statusOf(tab) !== "working";
     statusBeforeRender.set(tab.key, statusOf(tab));
-    if (finished) Object.assign(threadOf(tab), { history: null, workspaceFor: null });
+    if (finished) Object.assign(threadOf(tab), { history: null, workspaceFor: null, gitDiff: null });
   }
   for (const key of statusBeforeRender.keys()) if (!tabByKey(key)) statusBeforeRender.delete(key);
   if (!guiOn()) return;

@@ -600,6 +600,7 @@ async function sweep(profileName) {
     await press(gui("#thread .open-diff"));
     await waitFor("the diff panel", () => page.locator("#panel-body .file").first().isVisible());
     check(/notes\.md/.test(await text("#panel-body .file .path")), "the diff doesn't show notes.md");
+    await press(gui("#panel-body .file > header .change"));
     const added = await page.locator("#panel-body .dl.add").count();
     check(added >= 2, `${added} added lines in the diff`);
     await press(gui('#panel-body [data-diff="split"]'));
@@ -607,7 +608,7 @@ async function sweep(profileName) {
     await press(gui('#panel-body [data-diff="unified"]'));
     const bad = await overflowing();
     check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
-    if (touch) await tapOrClick("#panel-close");
+    if (touch) await tapOrClick("#toggle-panel");
     return `${card}, ${added} lines added`;
   });
 
@@ -621,31 +622,266 @@ async function sweep(profileName) {
     const shown = (await text("#panel-body")).slice(0, 80);
     await tapOrClick('#thread .pr-link[data-pr$="/pull/41"]');
     await waitFor("#41 in the PR panel", async () => /#41/.test(await text("#panel-body")) && !/Loading/.test(await text("#panel-body")), 15000);
-    check(/#41/.test(await text('#panel-tabs [data-panel="pr"]')), `the PR tab reads ${await text('#panel-tabs [data-panel="pr"]')} after clicking #41`);
+    check(/#41/.test(await text('#panel-tabs [data-panel="pr"].active')), `the PR tab reads ${await text('#panel-tabs [data-panel="pr"].active')} after clicking #41`);
     if (!touch) {
       const tabsBefore = await page.locator("#thread-list .thread-row").count();
-      await page.keyboard.press("Meta+w");
+      for (let n = await page.locator("#panel-tabs .ptab").count(); n > 0; n--) await page.keyboard.press("Meta+w");
       await waitFor("⌘W to close the panel", async () => !(await page.locator("#panel").isVisible()));
       check((await page.locator("#thread-list .thread-row").count()) === tabsBefore, "⌘W closed a thread while the panel was open");
       await tapOrClick("#toggle-panel");
     }
     if (touch) {
-      await tapOrClick("#panel-close");
+      await tapOrClick("#toggle-panel");
       await tapOrClick("#toggle-panel");
     }
     return shown;
   });
 
   await step("app view: the browser panel loads a URL", async () => {
-    await press(gui('#panel-tabs [data-panel="browser"]'));
+    await press(gui("#panel-add"));
+    await press(gui('#panel-menu button:has-text("Browser")'));
     await page.fill("#panel-body .url-bar input", `${HUB}/manifest.webmanifest`);
     await page.press("#panel-body .url-bar input", "Enter");
     await waitFor("the frame", async () => (await page.locator("#panel-body iframe").getAttribute("src"))?.endsWith("manifest.webmanifest"));
     const frame = page.frameLocator("#panel-body iframe");
     await waitFor("the page in the frame", async () => /pinned/.test((await frame.locator("body").textContent().catch(() => "")) ?? ""));
-    await tapOrClick("#panel-close");
+    await tapOrClick("#toggle-panel");
     check(!(await page.locator("#panel").isVisible()), "the panel didn't close");
     await sleep(200);
+  });
+
+  const openTab = (kind) => gui(`#panel-tabs .ptab.active[data-panel="${kind}"]`);
+  const fromPlus = async (label) => {
+    await press(gui("#panel-add"));
+    await press(gui(`#panel-menu button:has-text("${label}")`));
+  };
+  const readLog = (name) => (fs.existsSync(path.join(HOME, name)) ? fs.readFileSync(path.join(HOME, name), "utf8") : "");
+  const threadCount = () => page.locator("#thread-list .thread-row").count();
+
+  await step("app view: panel tabs open from + and the launcher, close, and stay with their thread", async () => {
+    await tapOrClick("#toggle-panel");
+    await waitFor("the panel", () => page.locator("#panel").isVisible());
+    check((await page.locator("#panel-tabs #toggle-panel").count()) === 1, "with the panel open, the layout controls stayed in the chat header");
+    for (let n = await page.locator("#panel-tabs .ptab").count(); n > 0; n--) await press(gui("#panel-tabs .ptab .lead"));
+    await waitFor("the last tab's × to close the panel", async () => !(await page.locator("#panel").isVisible()));
+    check((await page.locator("#chat-head #toggle-panel").count()) === 1, "with the panel closed, the layout controls didn't return to the chat header");
+    await tapOrClick("#toggle-panel");
+    await waitFor("the launcher", async () => /Open a surface/.test(await text("#panel-body")));
+    const rows = await page.locator("#panel-body .launcher button").allTextContents();
+    check(rows.join("|") === "BrowserB|DiffD|Pull requestP", `launcher rows: ${rows.join(" | ")}`);
+    if (touch) await press(gui('#panel-body [data-launch="1"]'));
+    else await page.keyboard.press("d");
+    await waitFor("the Diff tab", () => openTab("diff").isVisible());
+    if (touch) await tapOrClick("#panel-add");
+    else await page.keyboard.press("Meta+t");
+    await waitFor("the + menu", () => page.locator("#panel-menu").isVisible());
+    check(!(await page.evaluate(() => pickerOpen())), "⌘T opened the project picker while the panel was open");
+    const items = await page.locator("#panel-menu button .label").allTextContents();
+    check(items.join("|") === "Browser|Diff|Pull request", `+ menu: ${items.join(" | ")}`);
+    await press(gui('#panel-menu button:has-text("Pull request")'));
+    await waitFor("a PR tab", () => openTab("pr").isVisible());
+    check((await page.locator("#panel-tabs .ptab").count()) === 2, `${await page.locator("#panel-tabs .ptab").count()} tabs, expected Diff and the PR`);
+    if (!touch) {
+      await page.click('#panel-tabs .ptab[data-panel="diff"]', { button: "right" });
+      await press(gui('#panel-menu button:has-text("Close others")'));
+      await waitFor("Close others", async () => (await page.locator("#panel-tabs .ptab").count()) === 1);
+    }
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
+    await waitFor("beta's own, closed panel", async () => !(await page.locator("#panel").isVisible()));
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+    await waitFor("alpha's panel back on its tab", () => openTab(touch ? "pr" : "diff").isVisible());
+    if (!touch) {
+      await tapOrClick("#panel-expand");
+      check((await page.evaluate(() => document.body.dataset.panelMax)) === "true", "maximize didn't maximize");
+      check((await page.getAttribute("#panel-expand", "title")) === "Restore panel size", `maximized, the button says ${await page.getAttribute("#panel-expand", "title")}`);
+      check((await page.locator("#panel").evaluate((el) => getComputedStyle(el).borderLeftWidth)) === "0px", "the maximized panel kept its left border");
+      await tapOrClick("#panel-expand");
+      check((await page.getAttribute("#panel-expand", "title")) === "Maximize panel", "restore didn't restore");
+      const threads = await threadCount();
+      await page.focus("#prompt");
+      await page.keyboard.press("Meta+w");
+      await waitFor("⌘W to close the last panel tab and the panel", async () => !(await page.locator("#panel").isVisible()));
+      check((await threadCount()) === threads, "⌘W closed a thread");
+    } else {
+      for (let n = await page.locator("#panel-tabs .ptab").count(); n > 0; n--) await press(gui("#panel-tabs .ptab .lead"));
+    }
+    return items.join(" | ");
+  });
+
+  await step("app view: diff scopes, hidden whitespace, file tree and highlighting", async () => {
+    await sendPrompt("code");
+    await waitFor("the code turn's changes", async () => (await page.locator("#thread .open-diff").count()) >= 2, 15000);
+    await press(page.locator("#thread .open-diff").last());
+    await waitFor("app.js in the diff", () => page.locator('#panel-body .file[data-path="app.js"]').isVisible());
+    const open = await page.locator("#panel-body .file").evaluateAll((els) => els.filter((e) => !e.hasAttribute("data-collapsed")).map((e) => e.dataset.path));
+    check(!open.length, `open by default: ${open.join(", ")}`);
+    check(!(await page.locator('#panel-body .file[data-path="notes.md"]').count()), "notes.md, changed only in whitespace, shows while whitespace is hidden");
+    await press(gui('#panel-body [data-diff="whitespace"]'));
+    await waitFor("notes.md with whitespace shown", () => page.locator('#panel-body .file[data-path="notes.md"]').isVisible());
+    await press(gui('#panel-body [data-diff="whitespace"]'));
+    await press(gui('#panel-body .file[data-path="app.js"] > header .change'));
+    await waitFor("highlighted code", async () => (await page.locator('#panel-body .file[data-path="app.js"] .code .hljs-keyword').count()) >= 2);
+    const color = await page.locator('#panel-body .file[data-path="app.js"] .code .hljs-keyword').first().evaluate((el) => getComputedStyle(el).color);
+    check(color === "rgb(255, 103, 141)", `keywords are ${color}`);
+    const options = await page.locator("#diff-scope option").allTextContents();
+    check(options.slice(0, 3).join("|") === "Changes|Uncommitted|Latest turn" && options.length >= 5 && options.slice(3).every((o) => /^Turn \d+ · \S+/.test(o)), `scopes: ${options.join(" | ")}`);
+    await press(gui('#panel-body .file[data-path="app.js"] > header .change'));
+    await press(gui('#panel-body [data-diff="tree"]'));
+    await waitFor("the file tree", () => page.locator("#panel-body .file-tree").isVisible());
+    await press(gui('#panel-body .file-tree [data-tree-file="app.js"]'));
+    await waitFor("the tree to open app.js", async () => (await page.locator('#panel-body .file[data-path="app.js"]').getAttribute("data-collapsed")) === null);
+    await press(gui('#panel-body [data-diff="tree"]'));
+    await page.selectOption("#diff-scope", "uncommitted");
+    await waitFor("the uncommitted changes", async () => (await page.locator('#panel-body .file[data-path="notes.md"]').count()) === 1 && (await page.locator('#panel-body .file[data-path="app.js"]').count()) === 1);
+    check(await gui('#panel-body [data-diff="refresh"]').isVisible(), "the working-tree scope has no Refresh");
+    await press(gui('#panel-body [data-diff="refresh"]'));
+    await page.selectOption("#diff-scope", "base");
+    await waitFor("the base scope's answer", async () => /no default branch/.test(await text("#panel-body")));
+    await page.selectOption("#diff-scope", "latest");
+    await waitFor("the latest turn", () => page.locator('#panel-body .file[data-path="app.js"]').isVisible());
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    return options.join(" | ");
+  });
+
+  await step("app view: a comment on a diff line goes into the composer", async () => {
+    if (await page.locator('#panel-body .file[data-path="app.js"]').getAttribute("data-collapsed") === "") await press(gui('#panel-body .file[data-path="app.js"] > header .change'));
+    await press(gui('#panel-body .file[data-path="app.js"] .no[data-line="2"]'));
+    await page.fill("#panel-body [data-comment-text]", "rename greet");
+    if (touch) await press(gui("#panel-body [data-comment-save]"));
+    else await page.press("#panel-body [data-comment-text]", "Meta+Enter");
+    await waitFor("the saved comment", () => page.locator("#panel-body .dcomment:not(.draft)").isVisible());
+    check((await page.inputValue("#prompt")) === "app.js:2: rename greet\n", `the prompt holds ${JSON.stringify(await page.inputValue("#prompt"))}`);
+    await press(gui("#panel-body [data-comment-delete]"));
+    await waitFor("the comment to go", async () => !(await page.locator("#panel-body .dcomment").count()));
+    check((await page.inputValue("#prompt")) === "", `after deleting, the prompt holds ${JSON.stringify(await page.inputValue("#prompt"))}`);
+  });
+
+  await step("app view: local servers come from the session's listening ports", async () => {
+    if (touch && (await page.locator("#panel").isVisible())) await tapOrClick("#toggle-panel");
+    await sendPrompt("serve");
+    await waitFor("the fake server", async () => !!readLog("serve.port"));
+    const port = readLog("serve.port").trim();
+    await waitFor("the answer", async () => (await page.locator("#thread .assistant", { hasText: "Started a web server" }).count()) > 0);
+    const scraped = await page.evaluate((p) => threadOf(active).items.some((i) => `${i.text ?? ""}${i.detail ?? ""}`.includes(`:${p}`)), port);
+    check(!scraped, "the transcript names the port, so this step can't tell discovery from scraping");
+    if (!(await page.locator("#panel").isVisible())) await tapOrClick("#toggle-panel");
+    await fromPlus("Browser");
+    const card = `#panel-body .servers button[data-url="http://localhost:${port}"]`;
+    await waitFor("the server's card", async () => (await page.locator(card).count()) > 0, 12000);
+    check(/node/.test(await text(`${card} b`)), `the card is titled ${await text(`${card} b`)}`);
+    await press(gui(card));
+    const frame = page.frameLocator("#panel-body iframe");
+    await waitFor("the server's page", async () => /served by fake claude/.test((await frame.locator("body").textContent().catch(() => "")) ?? ""), 10000);
+    return `port ${port}`;
+  });
+
+  await step("app view: browser loading bar, tab title, device sizes, recently used, ⌘⇧J", async () => {
+    const port = readLog("serve.port").trim();
+    await page.fill("#panel-body .url-bar input", `http://localhost:${port}/slow`);
+    await page.press("#panel-body .url-bar input", "Enter");
+    await waitFor("the loading bar", () => page.locator("#panel-body .loading-bar").isVisible(), 2000);
+    check((await page.getAttribute('#panel-body [data-nav="reload"]', "title")) === "Stop", "while loading, Reload isn't Stop");
+    await waitFor("the page to load", async () => !(await page.locator("#panel-body .loading-bar").isVisible()), 10000);
+    check((await text("#panel-tabs .ptab.active")) === `localhost:${port}`, `the browser tab reads ${await text("#panel-tabs .ptab.active")}`);
+    const more = async (label) => {
+      await press(gui('#panel-body [data-nav="more"]'));
+      await press(gui(`#panel-menu button:has-text("${label}")`));
+    };
+    await more("Zoom in");
+    const scale = () => page.locator("#panel-body iframe").evaluate((f) => f.style.transform);
+    check((await scale()) === "scale(1.1)", `zoomed in, the page is ${await scale()}`);
+    await more("Actual size");
+    await more("Show device toolbar");
+    await page.selectOption("#panel-body [data-device]", "iPhone SE");
+    const width = () => page.locator("#panel-body iframe").evaluate((f) => Math.round(f.getBoundingClientRect().width));
+    await waitFor("the iPhone SE size", async () => (await width()) === 375);
+    await press(gui('#panel-body [data-nav="rotate"]'));
+    await waitFor("the rotated size", async () => (await width()) === 667);
+    await more("Hide device toolbar");
+    await fromPlus("Browser");
+    await waitFor("Recently used", async () => /Recently used/.test(await text("#panel-body .browser-empty")));
+    check((await page.locator(`#panel-body .servers button[data-url="${HUB}/manifest.webmanifest"]`).count()) === 1, "the earlier page isn't among Recently used");
+    if (!touch) {
+      await page.focus("#prompt");
+      await page.keyboard.press("Meta+Shift+j");
+      await waitFor("⌘⇧J to close the preview", async () => !(await page.locator("#panel").isVisible()));
+      await page.keyboard.press("Meta+Shift+j");
+      await waitFor("⌘⇧J to open the preview", () => openTab("browser").isVisible());
+    }
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+  });
+
+  await step("app view: PR reviewers, labels, timeline, Viewed, copy, and merge after a confirm", async () => {
+    await tapOrClick("#toggle-panel");
+    await tapOrClick("#pr-chip");
+    await waitFor("#42's details", async () => /Add notes/.test(await text("#panel-body .pr-head h3")), 15000);
+    const meta = await text("#panel-body .meta");
+    check(/monalisa/.test(meta) && /octocat/.test(meta) && /documentation/.test(meta), `reviewers and labels: ${meta}`);
+    await press(gui('#panel-body [data-pr-tab="timeline"]'));
+    const timeline = await text("#panel-body .pr-timeline");
+    check(/opened this pull request/.test(timeline) && /Write the notes/.test(timeline) && /View commit/.test(timeline), `timeline: ${timeline.slice(0, 120)}`);
+    await press(gui('#panel-body [data-pr-tab="code"]'));
+    await press(gui("#panel-body label.viewed input"));
+    await waitFor("the viewed file to fold", async () => (await page.locator('#panel-body .file[data-path="notes.md"]').getAttribute("data-collapsed")) === "");
+    check(await page.isChecked("#panel-body label.viewed input"), "Viewed didn't stay checked");
+    check(/notes\.md/.test(await page.evaluate(() => localStorage.getItem("gui-pr-viewed"))), "Viewed isn't saved");
+    await press(gui("#panel-body [data-pr-more]"));
+    const items = await page.locator("#panel-menu button .label").allTextContents();
+    for (const want of ["Refresh", "Merge now", "Open on GitHub", "Copy link", "Copy PR number"]) check(items.includes(want), `More menu: ${items.join(" | ")}`);
+    await press(gui('#panel-menu button:has-text("Copy PR number")'));
+    if (engine === "chromium") {
+      await waitFor("the number on the clipboard", async () => (await page.evaluate(() => navigator.clipboard.readText())) === "#42");
+      if (!touch) {
+        await page.evaluate(() => navigator.clipboard.writeText(""));
+        await page.focus("#prompt");
+        await page.keyboard.press("Meta+Shift+k");
+        await waitFor("⌘⇧K to copy the number", async () => (await page.evaluate(() => navigator.clipboard.readText())) === "#42");
+      }
+    }
+    await press(gui('#panel-body [data-pr-do="merge"]'));
+    check(/Confirm merge\?/.test(await text("#panel-body [data-pr-do]")), `after one click the button reads ${await text("#panel-body [data-pr-do]")}`);
+    check(!/pr merge/.test(readLog("gh.log")), "one click merged");
+    await press(gui('#panel-body [data-pr-do="merge"]'));
+    await waitFor("gh to merge", async () => /pr merge --merge -- https:\/\/github\.com\/example\/alpha\/pull\/42/.test(readLog("gh.log")));
+    await waitFor("the Merged state", async () => /Merged/.test(await text("#panel-body .pr-head .crumbs")), 15000);
+    await tapOrClick("#toggle-panel");
+    await tapOrClick('#thread .pr-link[data-pr$="/pull/41"]');
+    await waitFor("#41's details", async () => /Draft the notes/.test(await text("#panel-body .pr-head h3")), 15000);
+    await press(gui("#panel-body [data-pr-more]"));
+    await press(gui('#panel-menu button:has-text("Mark ready for review")'));
+    check(await gui('#panel-menu button:has-text("Confirm ready?")').isVisible(), "Mark ready didn't ask to confirm");
+    check(!/pr ready/.test(readLog("gh.log")), "one click marked it ready");
+    await press(gui('#panel-menu button:has-text("Confirm ready?")'));
+    await waitFor("gh to mark it ready", async () => /pr ready -- https:\/\/github\.com\/example\/alpha\/pull\/41/.test(readLog("gh.log")));
+    await tapOrClick("#toggle-panel");
+    return items.join(" | ");
+  });
+
+  await step("app view: Open in an editor from the header", async () => {
+    await waitFor("the Open button", () => page.locator("#open-in").isVisible());
+    await tapOrClick("#open-in .pick");
+    const editors = await page.locator("#panel-menu button .label").allTextContents();
+    check(editors.includes("Zed") && editors.includes("Finder"), `editors: ${editors.join(" | ")}`);
+    await press(gui('#panel-menu button:has-text("Zed")'));
+    await sleep(300);
+    check(!readLog("open.log"), "picking an editor opened it");
+    await tapOrClick("#open-in .main");
+    const opened = new RegExp(`^-a .*/home/Applications/Zed\\.app ${HOME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/work/alpha$`, "m");
+    await waitFor("the folder to open in Zed", async () => opened.test(readLog("open.log")));
+    if (!touch) {
+      await page.focus("#prompt");
+      await page.keyboard.press("Meta+o");
+      await waitFor("⌘O to open it again", async () => readLog("open.log").trim().split("\n").length === 2);
+    }
+    await tapOrClick("#toggle-panel");
+    if (!(await openTab("diff").count())) await fromPlus("Diff");
+    await waitFor("app.js in the diff", () => page.locator('#panel-body .file[data-path="app.js"] .path').isVisible());
+    await press(gui('#panel-body .file[data-path="app.js"] > header .path'));
+    await waitFor("the file to open in Zed", async () => /Zed\.app .*\/work\/alpha\/app\.js$/m.test(readLog("open.log")));
+    await tapOrClick("#toggle-panel");
+    return editors.join(" | ");
   });
 
   await step("app view: the approval banner answers claude's prompt", async () => {

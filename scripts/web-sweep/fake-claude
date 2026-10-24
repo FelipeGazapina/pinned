@@ -77,6 +77,29 @@ function submit() {
     record({ type: "pr-link", prNumber: 41, prUrl: "https://github.com/example/alpha/pull/41", prRepository: "example/alpha" });
     record({ type: "pr-link", prNumber: 42, prUrl: "https://github.com/example/alpha/pull/42", prRepository: "example/alpha" });
     out("edited notes.md\r\n");
+  } else if (line === "code") {
+    const id = `tool-${lines}`;
+    const source = 'const answer = 42; // the answer\nfunction greet(name) {\n  return "hi " + name;\n}\n';
+    wrote([{ type: "tool_use", id, name: "Write", input: { file_path: path.join(process.cwd(), "app.js"), content: source } }]);
+    fs.writeFileSync("app.js", source);
+    if (fs.existsSync("notes.md")) fs.writeFileSync("notes.md", fs.readFileSync("notes.md", "utf8").replace(/^second line$/gm, "  second line"));
+    said([{ type: "tool_result", tool_use_id: id, content: "File created." }]);
+    wrote([{ type: "text", text: "I wrote app.js and indented notes.md." }]);
+    out("wrote app.js\r\n");
+  } else if (line === "serve") {
+    // The address stays out of the transcript, so only port discovery can find the server.
+    const server = require("http").createServer((req, res) => {
+      const send = () => {
+        res.setHeader("content-type", "text/html; charset=utf-8");
+        res.end("<!doctype html><title>Sweep server</title><p>served by fake claude</p>");
+      };
+      req.url === "/slow" ? setTimeout(send, 2500) : send();
+    });
+    server.listen(0, "127.0.0.1", () => {
+      fs.writeFileSync(path.join(process.env.HOME, "serve.port"), String(server.address().port));
+      out(`serving on ${server.address().port}\r\n`);
+    });
+    wrote([{ type: "text", text: "Started a web server." }]);
   } else {
     wrote([{ type: "text", text: `echo: ${line}` }]);
     out(`echo: ${line}\r\n`);

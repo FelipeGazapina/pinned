@@ -756,8 +756,9 @@ window.addEventListener("keydown", (e) => {
   }
   if (!e.metaKey || e.ctrlKey) return;
   if (e.key === ",") toggleSettings();
+  else if (e.key === "t" && guiOn() && ui.panelOpen) document.getElementById("panel-add").click();
   else if (e.key === "t") toggleProjects();
-  else if (e.key === "w" && guiOn() && ui.panelOpen) closePanel();
+  else if (e.key === "w" && guiOn() && ui.panelOpen) closeSurface();
   else if (e.key === "w" && active) closeTab(active);
   else if (/^[1-9]$/.test(e.key) && !guiOn() && tabs[e.key - 1]) activate(tabs[e.key - 1]);
   else return;
