@@ -79,6 +79,8 @@ const ago = (unix) => {
 const projectName = (tab) => (threadOf(tab).workspace?.project ?? tab.view.cwd).split("/").filter(Boolean).pop() || "/";
 const firstPrompt = (tab) => threadOf(tab).items.find((i) => i.kind === "user")?.text.split("\n")[0];
 const threadTitle = (tab) => sideMarks.titles[tab.key] || tab.view.title || firstPrompt(tab) || "New thread";
+/** `text` as a head that CSS truncates and its last 8 characters, once it is longer than `over`. */
+const middle = (text, over = 14) => (text.length > over ? `<span class="head">${esc(text.slice(0, -8))}</span><span class="tail">${esc(text.slice(-8))}</span>` : `<span class="head">${esc(text)}</span>`);
 const prOf = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kind === "pr");
 /** claude's hooks report no answer to a permission menu, so a permission notice with no menu on
  * screen means the turn went on. It sends "waiting for your input" a while after a turn ends. */

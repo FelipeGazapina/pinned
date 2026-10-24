@@ -358,7 +358,6 @@ function fileTree(files) {
 }
 
 const stat = (added, removed) => `<span class="add">+${compact(Number(added))}</span><span class="del">−${compact(Number(removed))}</span>`;
-const middle = (name) => (name.length > 18 ? `<span class="head">${esc(name.slice(0, -8))}</span><span class="tail">${esc(name.slice(-8))}</span>` : `<span class="head">${esc(name)}</span>`);
 
 function changesHtml(change, open) {
   const n = change.files.length;
@@ -371,7 +370,7 @@ function changesHtml(change, open) {
     for (const node of nodes) {
       const pad = `style="padding-left:${8 + depth * 14}px"`;
       if (!node.children) {
-        rows.push(`<li data-ended="${change.ended}" data-file="${esc(node.path)}" title="${esc(node.path)}" ${pad}>${hasDirs || depth ? `<span class="indent"></span>` : ""}${icon("file", "file-icon")}<span class="path">${middle(node.name)}</span>${stat(node.added, node.removed)}</li>`);
+        rows.push(`<li data-ended="${change.ended}" data-file="${esc(node.path)}" title="${esc(node.path)}" ${pad}>${hasDirs || depth ? `<span class="indent"></span>` : ""}${icon("file", "file-icon")}<span class="path">${middle(node.name, 18)}</span>${stat(node.added, node.removed)}</li>`);
         continue;
       }
       const isOpen = open.has(`dir:${change.ended}:${node.path}`) ? !allOpen : allOpen;

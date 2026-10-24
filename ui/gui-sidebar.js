@@ -171,7 +171,6 @@ const pinMark = (tab) => (isPinned(tab) ? `<span class="pin" role="button" data-
 const titleHtml = (tab) =>
   ui.renaming === tab.key ? `<input class="rename" value="${esc(threadTitle(tab))}" aria-label="Thread title" spellcheck="false">` : esc(threadTitle(tab));
 /** The branch's start shrinks with an ellipsis and its last characters stay, as T3 Code's MiddleTruncate does. */
-const middle = (text) => (text.length > 14 ? `<span class="head">${esc(text.slice(0, -8))}</span><span class="tail">${esc(text.slice(-8))}</span>` : `<span class="head">${esc(text)}</span>`);
 
 function cardRow(tab) {
   const slot = statusSlot(tab);
