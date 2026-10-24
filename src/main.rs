@@ -202,6 +202,18 @@ fn notify(message: &str) {
     let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
 }
 
+/// Debug builds run the script `PINNED_PROBE` names in the main window once it has loaded, so
+/// scripts/native-probe can check what only the native window does.
+#[cfg(debug_assertions)]
+fn run_probe(app: &tauri::App) {
+    let Some(script) = std::env::var_os("PINNED_PROBE").and_then(|path| std::fs::read_to_string(path).ok()) else { return };
+    let Some(window) = app.get_webview_window("main") else { return };
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        drop(window.eval(&script));
+    });
+}
+
 fn add_tray(app: &tauri::App) -> tauri::Result<()> {
     let current = app.state::<Panel>().opacity.load(Ordering::Relaxed);
     let levels = OPACITIES
@@ -314,6 +326,8 @@ fn main() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             add_tray(app)?;
+            #[cfg(debug_assertions)]
+            run_probe(app);
             let handle = app.handle().clone();
             machine.listen(move |message| match message {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),

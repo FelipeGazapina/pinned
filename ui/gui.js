@@ -53,13 +53,13 @@ async function fitWindowTo(mode) {
   const size = (await win.innerSize()).toLogical(await win.scaleFactor());
   let sizes = {};
   try {
-    sizes = JSON.parse(load("mode-sizes")) ?? {};
+    sizes = JSON.parse(load("view-sizes")) ?? {};
   } catch {}
   sizes[mode === "gui" ? "terminal" : "gui"] = { width: size.width, height: size.height };
   const want = sizes[mode] ?? (mode === "gui" ? { width: Math.max(size.width, 1180), height: Math.max(size.height, 760) } : size);
   const fit = { width: Math.min(want.width, screen.availWidth - 40), height: Math.min(want.height, screen.availHeight - 40) };
   sizes[mode] = fit;
-  save("mode-sizes", JSON.stringify(sizes));
+  save("view-sizes", JSON.stringify(sizes));
   if (Math.round(fit.width) !== Math.round(size.width) || Math.round(fit.height) !== Math.round(size.height)) await win.setSize(new TAURI.dpi.LogicalSize(fit.width, fit.height));
 }
 
@@ -987,8 +987,8 @@ document.getElementById("gui-settings").onclick = () => toggleSettings();
 document.getElementById("gui-minimize").onclick = () => setView("pill");
 
 document.body.dataset.mode = load("mode") === "terminal" ? "terminal" : "gui";
-const firstLaunch = !load("mode-sizes");
-if (TAURI && guiOn() && firstLaunch) fitWindowTo("gui").catch(console.warn);
+// The window always opens at the terminal's size.
+if (TAURI && guiOn()) fitWindowTo("gui").catch(console.warn);
 document.body.dataset.panel = "closed";
 document.body.dataset.drawer = "closed";
 document.body.dataset.sidebar = ui.sidebarOpen ? "open" : "closed";
