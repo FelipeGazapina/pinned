@@ -1095,14 +1095,17 @@ async function sweep(profileName) {
   });
 
   await step("app view: Open in an editor from the header", async () => {
-    await waitFor("the Open button", () => page.locator("#open-in").isVisible());
-    await tapOrClick("#open-in .pick");
-    const editors = await page.locator("#panel-menu button .label").allTextContents();
+    // A phone's header leaves Open to the thread details card, as T3 Code's does.
+    if (touch) await tapOrClick("#toggle-details");
+    await waitFor("the Open button", () => page.locator(touch ? '#details-card [data-act="open-in"]' : "#open-in").isVisible());
+    await tapOrClick(touch ? '#details-card [data-act="editors"]' : "#open-in .pick");
+    const editors = await page.locator(touch ? "#header-menu button .label" : "#panel-menu button .label").allTextContents();
     check(editors.includes("Zed") && editors.includes("Finder"), `editors: ${editors.join(" | ")}`);
-    await press(gui('#panel-menu button:has-text("Zed")'));
+    await press(gui(touch ? '#header-menu button:has-text("Zed")' : '#panel-menu button:has-text("Zed")'));
     await sleep(300);
     check(!readLog("open.log"), "picking an editor opened it");
-    await tapOrClick("#open-in .main");
+    await tapOrClick(touch ? '#details-card [data-act="open-in"]' : "#open-in .main");
+    if (touch) await tapOrClick("#toggle-details");
     const opened = new RegExp(`^-a .*/home/Applications/Zed\\.app ${HOME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/work/alpha$`, "m");
     await waitFor("the folder to open in Zed", async () => opened.test(readLog("open.log")));
     if (!touch) {
@@ -1449,7 +1452,7 @@ async function sweep(profileName) {
     await waitFor("the file row", () => page.locator("#attachments .file").isVisible());
     const row = `${await text("#attachments .file .name")} ${await text("#attachments .file .size")}`;
     check(row === "notes.txt 8 B", `the row reads ${row}`);
-    check(await page.locator("#attachments .file svg.ficon use[href='#file-tree-builtin-text']").count() === 1, "the row has no text-file icon");
+    check(await page.locator("#attachments .file svg.ftype use[href='#file-tree-builtin-text']").count() === 1, "the row has no text-file icon");
     await press(page.locator("#attachments .file .name"));
     await waitFor("the preview", async () => (await text("#file-preview pre")) === "hi there");
     await press(page.locator("#file-preview [data-close]"));
@@ -1527,7 +1530,7 @@ async function sweep(profileName) {
     check(!(await page.evaluate(() => composer.dataset.sending)), "the spinner stayed");
   });
 
-  await step("composer: the branch picker switches branches, ⌘⇧G, and the Git action asks claude", async () => {
+  await step("composer: the branch picker switches branches, ⌘⇧G, and the Git action reads the branch", async () => {
     const git = (...args) => require("child_process").execFileSync("git", ["-C", path.join(HOME, "work/beta"), "-c", "user.email=s@example.test", "-c", "user.name=s", ...args]).toString().trim();
     git("add", "-A");
     git("commit", "-q", "--allow-empty", "-m", "first");
@@ -1548,12 +1551,11 @@ async function sweep(profileName) {
     await press(page.locator('#composer-menu [data-create="try-this"]'));
     await waitFor("try-this in the footer", async () => (await text("#composer-footer .branch")) === "try-this");
     await waitFor("the Git action", async () => (await text("#git-action .main")) === "Push & create PR");
-    await tapOrClick("#git-action .main");
-    await waitTerm(/echo: Push the current branch, then open a pull request with gh pr create\./);
-    await tapOrClick("#git-action .more");
-    const actions = await page.locator("#git-menu .label").allTextContents();
+    if (touch) await tapOrClick("#toggle-details");
+    await tapOrClick(touch ? '#details-card [data-act="git-menu"]' : "#git-action .more");
+    const actions = await page.locator("#header-menu .label").allTextContents();
     check(actions.join("|") === "Commit|Push|Create PR", `Git menu: ${actions.join("|")}`);
-    await tapOrClick("#git-action .more");
+    await tapOrClick(touch ? "#toggle-details" : "#git-action .more");
     await page.evaluate(() => closeTab(active));
     await waitFor("two threads", async () => (await page.locator("#thread-list .thread-row").count()) === 2);
     await showSidebar();
@@ -1609,8 +1611,9 @@ async function sweep(profileName) {
   await step("composer: the model picker searches, stars favorites, and picks a model for this session", async () => {
     // These steps print a lot, so they run in a thread of their own and leave alpha's screen as it was.
     const rows = await page.locator("#thread-list .thread-row").count();
+    const before = await page.evaluate(() => active?.key);
     await page.evaluate(() => newThread(true));
-    await waitFor("a thread for the composer's steps", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1, 10000);
+    await waitFor("a thread for the composer's steps", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1 && (await page.evaluate((key) => active?.key !== key, before)), 10000);
     await waitTerm(/fake claude in .*work\/alpha/);
     await page.evaluate(() => (window.composerThread = active.key));
     await sendPrompt("/modes");
@@ -1684,8 +1687,9 @@ async function sweep(profileName) {
 
   await step("composer: a legacy model and Full access restart claude on the conversation", async () => {
     const rows = await page.locator("#thread-list .thread-row").count();
+    const before = await page.evaluate(() => active?.key);
     await page.evaluate(() => newThread(true));
-    await waitFor("a new thread", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1, 10000);
+    await waitFor("a new thread", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1 && (await page.evaluate((key) => active?.key !== key, before)), 10000);
     await waitTerm(/fake claude in .*work\/alpha/);
     await sendPrompt("/modes");
     await waitFor("the mode control", async () => (await text("#mode-button")) === "Supervised");
@@ -1800,7 +1804,7 @@ async function sweep(profileName) {
       const rows = await page.locator("#thread-list .thread-row").count();
       await page.fill("#prompt", "spin off");
       await page.press("#prompt", "Meta+Alt+Enter");
-      await waitFor("a new thread after ⌘⌥Enter", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1, 10000);
+      await waitFor("a new thread after ⌘⌥Enter", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1 && (await page.evaluate(() => active?.key !== window.composerThread)), 10000);
       await waitTerm(/fake claude in .*work\/alpha/);
       await page.evaluate(() => closeTab(active));
       await waitFor("the thread to close", async () => (await page.locator("#thread-list .thread-row").count()) === rows);
@@ -1855,8 +1859,9 @@ async function sweep(profileName) {
     await waitFor("Implement", async () => (await text("#pill-actions .pill")) === "Implement");
     const rows = await page.locator("#thread-list .thread-row").count();
     await press(page.locator('#pill-actions [data-plan="more"]'));
+    const before = await page.evaluate(() => active?.key);
     await press(page.locator("#composer-menu button", { hasText: "Implement in a new thread" }));
-    await waitFor("the new thread", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1, 10000);
+    await waitFor("the new thread", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1 && (await page.evaluate((key) => active?.key !== key, before)), 10000);
     await waitTerm(/PLEASE IMPLEMENT THIS PLAN:/, 15000);
     check(/1\. Add a hello comment to a\.py\./.test(await termText()), "the plan didn't go to the new thread");
     await showSidebar();
@@ -1874,8 +1879,9 @@ async function sweep(profileName) {
   await step("composer: an empty thread asks what to build in its project, which the headline switches", async () => {
     const rows = await page.locator("#thread-list .thread-row").count();
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
+    const before = await page.evaluate(() => active?.key);
     await page.evaluate(() => newThread(true));
-    await waitFor("an empty thread in beta", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1, 10000);
+    await waitFor("an empty thread in beta", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1 && (await page.evaluate((key) => active?.key !== key, before)), 10000);
     await waitFor("the headline", () => page.locator("#hero-head h1").isVisible());
     const said = (await page.locator("#hero-head h1").innerText()).replace(/\s+/g, " ").trim();
     check(/^What should we build (in )?beta ?\?$/.test(said) || said === "What should we build? beta", `the headline reads ${said}`);
@@ -1899,8 +1905,9 @@ async function sweep(profileName) {
     const git = (...args) => require("child_process").execFileSync("git", ["-C", beta, ...args]).toString().trim();
     const rows = await page.locator("#thread-list .thread-row").count();
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
+    const before = await page.evaluate(() => active?.key);
     await page.evaluate(() => newThread(true));
-    await waitFor("a new thread in beta", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1, 10000);
+    await waitFor("a new thread in beta", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1 && (await page.evaluate((key) => active?.key !== key, before)), 10000);
     await waitFor("the open workspace menu", () => page.locator("#composer-footer button.where").isVisible());
     check((await text("#composer-footer .where .label")) === "sweep-node", `the strip names ${await text("#composer-footer .where .label")}`);
     await tapOrClick("#composer-footer button.where");
@@ -1978,6 +1985,176 @@ async function sweep(profileName) {
       await page.fill("#prompt", "");
     }
     check(!(await page.isDisabled("#send")), "Send stayed off");
+  });
+
+  await step("composer: the header title shows a chevron and opens the thread menu a moment after a click", async () => {
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+    await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
+    if (!touch) {
+      await page.hover("#chat-head .crumb .title");
+      await waitFor("the chevron", async () => (await page.evaluate(() => getComputedStyle(document.querySelector("#chat-head .crumb"), "::after").opacity)) === "0.6");
+    }
+    await press(page.locator("#chat-head .crumb .title"));
+    if (!touch) check(!(await page.locator("#side-menu").isVisible()), "the menu opened before a double-click could rename");
+    await waitFor("the thread menu", () => page.locator("#side-menu").isVisible(), 2000);
+    const items = await page.locator("#side-menu button").allTextContents();
+    check(items.some((i) => /Rename/.test(i)), `menu: ${items.join(" | ")}`);
+    await page.keyboard.press("Escape");
+    if (touch) await page.tap("#thread");
+    await waitFor("the menu to close", async () => !(await page.locator("#side-menu").isVisible()));
+    if (!touch) {
+      await page.dblclick("#chat-head .crumb .title");
+      await waitFor("the rename field", () => page.locator("#chat-head .crumb input.rename").isVisible());
+      await sleep(700);
+      check(!(await page.locator("#side-menu").isVisible()), "a double-click opened the menu too");
+      await page.keyboard.press("Escape");
+    }
+    return items.slice(0, 4).join(" | ");
+  });
+
+  await step("composer: project actions: import from t3.json, run in a drawer terminal, add with a shortcut, delete", async () => {
+    // A login zsh in a home without a .zshrc stops to offer its setup wizard.
+    if (!fs.existsSync(path.join(HOME, ".zshrc"))) fs.writeFileSync(path.join(HOME, ".zshrc"), "");
+    const t3 = path.join(HOME, "work/alpha/t3.json");
+    fs.writeFileSync(t3, JSON.stringify({ scripts: [{ name: "Lint", command: "echo lint-$((40+2))", icon: "lint" }] }));
+    // A phone reaches the actions through the thread details card, as T3 Code's.
+    const details = async () => touch && !(await page.locator("#details-card").isVisible()) && (await tapOrClick("#toggle-details"));
+    const openMenu = async () => {
+      await details();
+      await tapOrClick(touch ? '#details-card [data-act="scripts"]' : (await page.locator("#scripts-control .pick").isVisible()) ? "#scripts-control .pick" : "#scripts-control button");
+    };
+    try {
+      await page.evaluate(() => scriptsOf.clear());
+      await page.evaluate(() => renderComposer(active));
+      await waitFor("the Actions button", async () => (await text("#scripts-control")) === "Actions");
+      await openMenu();
+      const menu = await page.locator("#header-menu :is(.heading, .label)").allTextContents();
+      check(menu.join("|") === "From t3.json|Lint|Add action", `scripts menu: ${menu.join("|")}`);
+      await press(page.locator("#header-menu button", { hasText: "Lint" }));
+      await waitFor("Lint as the main action", async () => (await page.getAttribute("#scripts-control .main", "aria-label")) === "Run Lint");
+      await details();
+      await tapOrClick(touch ? '#details-card [data-act="run"]' : "#scripts-control .main");
+      await waitFor("the drawer's Lint terminal", () => page.locator("#drawer-tabs button[aria-pressed='true']", { hasText: "Lint" }).isVisible());
+      await waitFor("the script's output", () => page.evaluate(() => { const b = scriptShells.at(-1).term.buffer.active; for (let y = 0; y < b.length; y++) if (b.getLine(y).translateToString(true).trim() === "lint-42") return true; return false; }), 10000);
+      await press(page.locator("#drawer-tabs button", { hasText: "claude" }));
+      check(await page.evaluate(() => !active.el.hidden), "claude's terminal didn't come back");
+      await openMenu();
+      await press(page.locator("#header-menu button", { hasText: "Add action" }));
+      await waitFor("the action dialog", () => page.locator("#composer-dialog form").isVisible());
+      check((await text("#composer-dialog h2")) === "Add Action", "the dialog isn't T3's Add Action");
+      await page.fill("#composer-dialog [name=name]", "Greet");
+      await press(page.locator("#composer-dialog .icon-pick"));
+      await press(page.locator('#composer-dialog [data-icon="test"]'));
+      if (!touch) {
+        await page.focus("#composer-dialog [name=keybinding]");
+        await page.keyboard.press("Meta+Shift+Y");
+        check((await page.inputValue("#composer-dialog [name=keybinding]")) === "⌘⇧Y", `shortcut: ${await page.inputValue("#composer-dialog [name=keybinding]")}`);
+      }
+      await page.fill("#composer-dialog [name=command]", "echo greet-$((1+1))");
+      await press(page.locator("#composer-dialog [type=submit]"));
+      await waitFor("the dialog to close", async () => !(await page.locator("#composer-dialog").isVisible()));
+      const scriptsFile = () => {
+        try {
+          return JSON.parse(fs.readFileSync(path.join(DIR, "node", "scripts.json"), "utf8"));
+        } catch {
+          return null;
+        }
+      };
+      await waitFor("Greet saved", () => JSON.stringify(scriptsFile() ?? {}).includes("Greet"));
+      const greet = Object.values(scriptsFile())[0].find((s) => s.name === "Greet");
+      check(greet?.icon === "test" && greet.command === "echo greet-$((1+1))", `saved: ${JSON.stringify(greet)}`);
+      if (!touch) {
+        await page.focus("#prompt");
+        await page.keyboard.press("Meta+Shift+Y");
+        await waitFor("the shortcut's run", () => page.locator("#drawer-tabs button[aria-pressed='true']", { hasText: "Greet" }).isVisible());
+        await waitFor("its output", () => page.evaluate(() => { const b = scriptShells.at(-1).term.buffer.active; for (let y = 0; y < b.length; y++) if (b.getLine(y).translateToString(true).trim() === "greet-2") return true; return false; }), 10000);
+      }
+      await openMenu();
+      await press(page.locator('#header-menu [data-edit="greet"]'));
+      await waitFor("the edit dialog", async () => (await text("#composer-dialog h2")) === "Edit Action");
+      await press(page.locator("#composer-dialog [data-delete]"));
+      check((await text("#composer-dialog [data-delete]")) === 'Delete action "Greet"?', "delete didn't ask first");
+      await press(page.locator("#composer-dialog [data-delete]"));
+      await waitFor("Greet gone", async () => !JSON.stringify(scriptsFile() ?? { Greet: 1 }).includes("Greet"));
+      for (let left = await page.locator("#drawer-tabs .close").count(); left; left--) await press(page.locator("#drawer-tabs .close").first());
+      check(!(await page.locator("#drawer-tabs .close").count()), "a script's terminal stayed after its ×");
+      if (await page.evaluate(() => document.body.dataset.drawer === "open")) await tapOrClick("#toggle-terminal");
+      if (await page.locator("#details-card").isVisible()) await tapOrClick("#toggle-details");
+      return menu.join(", ");
+    } finally {
+      fs.rmSync(t3, { force: true });
+    }
+  });
+
+  await step("composer: the Git action commits with a written message, pushes and opens a PR, as T3 Code's picks it", async () => {
+    const beta = path.join(HOME, "work/beta");
+    const bare = path.join(DIR, "beta-remote.git");
+    const git = (...args) => require("child_process").execFileSync("git", ["-C", beta, "-c", "user.email=s@example.test", "-c", "user.name=s", ...args]).toString().trim();
+    require("child_process").execFileSync("git", ["init", "-q", "--bare", bare]);
+    git("remote", "set-url", "origin", bare);
+    const hints = await page.evaluate(() => [
+      quickAction(null, { repo: false }, false).label,
+      quickAction({ refs: [{ name: "x", current: true }], dirty: false, upstream: null, remote: false, ahead: 1, behind: 0 }, { repo: true }, false).label,
+      quickAction({ refs: [{ name: "x", current: true }], dirty: false, upstream: "origin/x", remote: true, ahead: 1, behind: 2 }, { repo: true }, false).hint,
+      quickAction({ refs: [], detached: true }, { repo: true }, false).hint,
+    ]);
+    check(JSON.stringify(hints) === JSON.stringify(["Initialize Git", "Publish repository", "Branch has diverged from upstream. Rebase/merge first.", "Create and checkout a ref before pushing or opening a PR."]), `quick actions: ${JSON.stringify(hints)}`);
+    try {
+      await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
+      await waitFor("beta", async () => /beta/.test(await text("#chat-head .crumb")));
+      fs.writeFileSync(path.join(beta, "keep.txt"), "kept");
+      fs.writeFileSync(path.join(beta, "leave.txt"), "left out");
+      await page.evaluate(() => Object.assign(threadOf(active), { gitFor: null }) && renderComposer(active));
+      await waitFor("the Git action", async () => (await text("#git-action .main")) === "Commit, push & PR");
+      // A phone runs the Git action from the thread details card, as T3 Code's.
+      if (touch) await tapOrClick("#toggle-details");
+      await tapOrClick(touch ? '#details-card [data-act="git-menu"]' : "#git-action .more");
+      await press(page.locator("#header-menu button", { hasText: "Commit" }));
+      await waitFor("the commit dialog", async () => (await text("#composer-dialog h2")) === "Commit changes");
+      await page.uncheck('#composer-dialog .files label:has-text("leave.txt") input');
+      await page.fill("#composer-dialog [name=message]", "Keep the kept file");
+      await press(page.locator("#composer-dialog [type=submit]"));
+      await waitFor("the commit", () => git("log", "-1", "--format=%s") === "Keep the kept file", 10000);
+      check(git("status", "--porcelain").includes("leave.txt"), "the unchecked file went into the commit");
+      await page.evaluate(() => Object.assign(threadOf(active), { gitFor: null }) && renderComposer(active));
+      await waitFor("Commit, push & PR again", async () => (await text("#git-action .main")) === "Commit, push & PR");
+      if (touch) {
+        if (!(await page.locator("#details-card").isVisible())) await tapOrClick("#toggle-details");
+        await tapOrClick('#details-card [data-act="git"]');
+      } else await tapOrClick("#git-action .main");
+      await waitFor("the progress label", async () => /\.\.\./.test(await text("#git-action .main .progress").catch(() => "")), 5000);
+      await waitFor("gh to open the pull request", async () => /^pr create --fill$/m.test(readLog("gh.log")), 20000);
+      await waitFor("the action to end", async () => !(await page.evaluate(() => !!gitRun)), 10000);
+      check(git("log", "-1", "--format=%s") === "Write the sweep's notes", `the written message: ${git("log", "-1", "--format=%s")}`);
+      const branch = git("symbolic-ref", "--short", "HEAD");
+      check(require("child_process").execFileSync("git", ["-C", bare, "branch"]).toString().includes(branch), "nothing was pushed");
+      await page.evaluate(() => openPublishDialog(active));
+      check((await text("#composer-dialog h2")) === "Publish repository", "no publish dialog");
+      await page.fill("#composer-dialog [name=name]", "beta-pub");
+      await press(page.locator("#composer-dialog [type=submit]"));
+      await waitFor("gh repo create", async () => /repo create beta-pub --private --source \. --remote origin --push/.test(readLog("gh.log")));
+      return hints.slice(0, 2).join(", ");
+    } finally {
+      if (await page.locator("#details-card").isVisible()) await tapOrClick("#toggle-details");
+      git("remote", "set-url", "origin", "https://github.com/example/beta.git");
+      await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+    }
+  });
+
+  await step("composer: thread details (⌘⇧B) hold the workspace, editor, actions, branch, Git action and PRs", async () => {
+    check((await page.getAttribute("#open-in .main svg", "viewBox")) === "0 0 96 96", "the Open button doesn't show Zed's icon");
+    if (touch) await tapOrClick("#toggle-details");
+    else await page.keyboard.press("Meta+Shift+B");
+    await waitFor("the details", () => page.locator("#details-card").isVisible());
+    const rows = (await page.locator("#details-card .row .label").allTextContents()).map((r) => r.trim());
+    check(rows.includes("Open in Zed") && rows.includes("Lint") && rows.some((r) => /^#4[12]$/.test(r)) && rows.includes("master"), `rows: ${rows.join(" | ")}`);
+    const opened = readLog("open.log").trim().split("\n").length;
+    await press(page.locator('#details-card [data-act="open-in"]'));
+    await waitFor("Zed to open", async () => readLog("open.log").trim().split("\n").length === opened + 1);
+    if (touch) await tapOrClick("#toggle-details");
+    else await page.keyboard.press("Escape");
+    await waitFor("the details to close", async () => !(await page.locator("#details-card").isVisible()));
+    return rows.join(" | ");
   });
 
   await step("app view: the terminal drawer shows the same session", async () => {

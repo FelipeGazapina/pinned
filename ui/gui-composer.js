@@ -20,10 +20,10 @@ Object.assign(ICON_PATHS, {
  * menu that picks one for the session alone; a model it doesn't list restarts claude with --model. */
 document.body.insertAdjacentHTML("afterbegin", `<div id="file-icon-sprite" aria-hidden="true">${fileIcons.sprite}</div>`);
 /** T3 Code's file-type icon for `path`, or a folder's. */
-function fileIcon(path, cls = "") {
+function fileTypeIcon(path, cls = "") {
   if (path.endsWith("/")) return icon("folder", cls);
   const { symbol, color } = fileIcons.of(path);
-  return `<svg class="i ficon ${cls}" viewBox="0 0 16 16" style="color:${color}" aria-hidden="true"><use href="#${symbol}"/></svg>`;
+  return `<svg class="i ftype ${cls}" viewBox="0 0 16 16" style="color:${color}" aria-hidden="true"><use href="#${symbol}"/></svg>`;
 }
 
 const REASONING = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra High", max: "Max", ultracode: "Ultracode", ultrathink: "Ultrathink" };
@@ -56,16 +56,6 @@ const MODES = {
   plan: { label: "Plan", icon: "pencil-ruler" },
 };
 const ACCESS = ["manual", "accept", "auto", "bypass"];
-
-const GIT_ACTIONS = {
-  commit: { label: "Commit", icon: "git-commit", prompt: "Commit the current changes with a clear commit message." },
-  commit_push: { label: "Commit & push", icon: "cloud-upload", prompt: "Commit the current changes with a clear commit message, then push the branch." },
-  commit_push_pr: { label: "Commit, push & PR", icon: "github", prompt: "Commit the current changes with a clear commit message, push the branch, and open a pull request with gh pr create." },
-  push: { label: "Push", icon: "cloud-upload", prompt: "Push the current branch." },
-  create_pr: { label: "Create PR", icon: "github", prompt: "Push the current branch if it isn't, then open a pull request with gh pr create." },
-  push_pr: { label: "Push & create PR", icon: "github", prompt: "Push the current branch, then open a pull request with gh pr create." },
-  pull: { label: "Pull", icon: "cloud-download", prompt: "Pull the latest changes into the current branch." },
-};
 
 let drafts = {};
 try {
@@ -167,6 +157,9 @@ function renderComposer(tab) {
   renderContext(tab);
   renderCompactPill(tab);
   renderGitAction(tab);
+  renderScripts(tab);
+  renderDetails(tab);
+  renderDrawer();
   if (tab) drainIdle(tab);
   const footer = document.getElementById("composer-footer");
   if (!tab) return (footer.innerHTML = "");
@@ -700,7 +693,7 @@ function renderAttachments(t) {
   const rows = files.map((f, i) => [f, i]).filter(([f]) => !f.url);
   attachmentsRow.innerHTML = `${tiles.length ? `<div class="tiles">${tiles.map(([f, i]) => `<span class="tile" title="${esc(f.path)}"><button type="button" class="zoom" data-zoom="${i}" aria-label="Preview ${esc(f.name)}"><img src="${esc(f.url)}" alt="${esc(f.name)}"></button>
       <button type="button" class="remove" data-remove="${i}" aria-label="Remove ${esc(f.name)}" title="Remove ${esc(f.name)}">${icon("x")}</button></span>`).join("")}</div>` : ""}
-    ${rows.length ? `<div class="rows">${rows.map(([f, i]) => `<div class="file" title="${esc(f.path)}">${fileIcon(f.name)}<button type="button" class="name" data-preview="${i}"${f.file ? "" : " disabled"}>${esc(f.name)}</button>
+    ${rows.length ? `<div class="rows">${rows.map(([f, i]) => `<div class="file" title="${esc(f.path)}">${fileTypeIcon(f.name)}<button type="button" class="name" data-preview="${i}"${f.file ? "" : " disabled"}>${esc(f.name)}</button>
       <span class="size">${formatSize(f.size)}</span><button type="button" class="remove" data-remove="${i}" aria-label="Remove ${esc(f.name)}" title="Remove ${esc(f.name)}">${icon("x")}</button></div>`).join("")}</div>` : ""}`;
 }
 const filePreview = Object.assign(document.createElement("div"), { id: "file-preview", hidden: true });
@@ -709,7 +702,7 @@ document.body.append(filePreview);
 async function previewFile(f) {
   const text = f.size <= 1 << 20 ? await f.file.text().catch(() => null) : null;
   const shown = text !== null && !/\u0000/.test(text.slice(0, 4096));
-  filePreview.innerHTML = `<div class="sheet" role="dialog" aria-label="${esc(f.name)}"><header>${fileIcon(f.name)}<span class="name">${esc(f.name)}</span><span class="size">${formatSize(f.size)}</span>
+  filePreview.innerHTML = `<div class="sheet" role="dialog" aria-label="${esc(f.name)}"><header>${fileTypeIcon(f.name)}<span class="name">${esc(f.name)}</span><span class="size">${formatSize(f.size)}</span>
       <button type="button" class="icon" data-close aria-label="Close">${icon("x")}</button></header>${shown ? `<pre>${esc(text)}</pre>` : `<p class="none">No preview for this file.</p>`}</div>`;
   filePreview.hidden = false;
 }
@@ -1300,11 +1293,11 @@ async function showTrigger() {
     } else if (kind === "pr") {
       b.dataset.pick = `#${item.number}`;
       b.dataset.url = item.url;
-      b.innerHTML = `${icon(PR_STATE_ICONS[prState(item)], `lead pr-${prState(item)}`)}<span class="name">#${item.number}</span><span class="about">${esc(item.title)}</span>`;
+      b.innerHTML = `${icon(PR_STATE_ICONS[prMenuState(item)], `lead pr-${prMenuState(item)}`)}<span class="name">#${item.number}</span><span class="about">${esc(item.title)}</span>`;
     } else {
       b.dataset.pick = `@${item}`;
       const [dir, base] = item.replace(/\/$/, "").match(/^(.*\/)?([^/]*)$/).slice(1);
-      b.innerHTML = `${fileIcon(item, "lead")}<span class="name">${esc(base)}</span><span class="about">${esc(dir ?? "")}</span>`;
+      b.innerHTML = `${fileTypeIcon(item, "lead")}<span class="name">${esc(base)}</span><span class="about">${esc(dir ?? "")}</span>`;
     }
     b.onmousedown = (e) => e.preventDefault();
     b.onclick = () => pickTrigger(b.dataset.pick, b.dataset.url);
@@ -1313,7 +1306,7 @@ async function showTrigger() {
   composerMenu.hidden = false;
   composerMenu.style.left = composerMenu.style.right = composerMenu.style.top = composerMenu.style.bottom = "";
 }
-const prState = (pr) => (pr.isDraft ? "draft" : (pr.state ?? "").toLowerCase());
+const prMenuState = (pr) => (pr.isDraft ? "draft" : (pr.state ?? "").toLowerCase());
 const PR_STATE_ICONS = { open: "git-pull-request", draft: "git-pull-request", merged: "git-merge", closed: "git-pull-request" };
 function prScore(pr, query) {
   if (!query) return 0;
@@ -1421,7 +1414,7 @@ function renderMirror() {
     if (!chip) continue;
     const at = m.index + m[1].length;
     html += esc(prompt.value.slice(last, at));
-    const mark = chip.kind === "mention" ? fileIcon(chip.value) : icon(CHIP_ICONS[chip.kind]);
+    const mark = chip.kind === "mention" ? fileTypeIcon(chip.value) : icon(CHIP_ICONS[chip.kind]);
     html += `<span class="chip ${chip.kind}"><span class="sigil">${esc(m[2][0])}${mark}</span>${esc(m[2].slice(1))}</span>`;
     last = at + m[2].length;
   }
@@ -1571,6 +1564,7 @@ async function setWorkspace(tab, worktree) {
     tab.view = { ...tab.view, cwd };
     Object.assign(t, { workspaceFor: null, gitFor: null });
     await fetchWorkspace(tab);
+    if (worktree === "new") runSetupScripts(tab);
   } catch (e) {
     showComposerNote(String(e), true);
   } finally {
@@ -1746,66 +1740,242 @@ document.getElementById("composer-footer").addEventListener("click", (e) => {
 });
 onGuiKey("g", () => document.querySelector("#composer-footer .branch")?.click(), { shift: true });
 
-/** The header's Git action asks claude to commit, push or open a pull request, picked as T3 Code
- * picks its quick action from the branch's state. */
-function quickAction(git, hasPr) {
-  if (!git) return null;
+/** The header's Git action, as T3 Code's: a quick action picked from the branch's state, which runs
+ * git and gh here, commits with a message a headless claude writes, and a menu of the rest. */
+function quickAction(git, workspace, hasPr) {
+  if (gitRun) return { label: "Commit", disabled: true, hint: "Git action in progress." };
+  if (!workspace?.repo) return { label: "Initialize Git", action: "init", icon: "git-branch-plus" };
+  if (!git) return { label: "Commit", disabled: true, hint: "Git status is unavailable." };
   const branch = git.refs.find((r) => r.current)?.name;
-  if (!branch) return null;
-  if (git.dirty) return hasPr || branch === git.default ? "commit_push" : "commit_push_pr";
-  if (git.behind > 0 && !git.ahead) return "pull";
-  if (git.ahead > 0) return hasPr ? "push" : "push_pr";
-  if (!git.upstream && branch !== git.default && !hasPr) return "push_pr";
-  if (!hasPr && branch !== git.default && git.upstream) return "create_pr";
-  return null;
+  const isDefault = branch === git.default;
+  if (!branch || git.detached) return { label: "Commit", disabled: true, hint: "Create and checkout a ref before pushing or opening a PR." };
+  const ahead = git.ahead > 0;
+  const behind = git.behind > 0;
+  if (git.dirty) {
+    if (!git.upstream && !git.remote) return { label: "Commit", action: "commit" };
+    if (hasPr || isDefault) return { label: "Commit & push", action: "commit_push" };
+    return { label: "Commit, push & PR", action: "commit_push_pr" };
+  }
+  if (!git.upstream) {
+    if (!git.remote) return { label: "Publish repository", action: "publish" };
+    if (!ahead && !(git.ahead_of_default > 0)) return hasPr ? { label: "Commit", disabled: true, hint: "Branch is up to date. No action needed." } : { label: "Push", disabled: true, hint: "No local commits to push." };
+    if (hasPr || isDefault) return { label: "Push", action: isDefault ? "commit_push" : "push" };
+    return { label: "Push & create PR", action: "create_pr" };
+  }
+  if (ahead && behind) return { label: "Sync ref", disabled: true, hint: "Branch has diverged from upstream. Rebase/merge first." };
+  if (behind) return { label: "Pull", action: "pull" };
+  if (ahead) return hasPr || isDefault ? { label: "Push", action: isDefault ? "commit_push" : "push" } : { label: "Push & create PR", action: "create_pr" };
+  if (hasPr) return { label: "Commit", disabled: true, hint: "Branch is up to date. No action needed." };
+  if ((git.ahead_of_default ?? 0) > 0 && !isDefault) return { label: "Create PR", action: "create_pr" };
+  return { label: "Commit", disabled: true, hint: "Branch is up to date. No action needed." };
 }
+const GIT_ICONS = { commit: "git-commit", commit_push: "cloud-upload", push: "cloud-upload", commit_push_pr: "github", create_pr: "github", pull: "cloud-download", publish: "cloud-upload", init: "git-branch-plus" };
+/** The steps an action runs, each with the label T3 Code shows while it does. */
+const GIT_STEPS = {
+  commit: ["message", "commit"],
+  commit_push: ["message", "commit", "push"],
+  commit_push_pr: ["message", "commit", "push", "create_pr"],
+  push: ["push"],
+  create_pr: ["push", "create_pr"],
+  pull: ["pull"],
+  init: ["init"],
+};
+const STEP_LABELS = { message: "Generating commit message...", commit: "Committing...", push: "Pushing...", create_pr: "Creating pull request...", pull: "Pulling latest changes...", init: "Initializing...", publish: "Publishing repository..." };
+let gitRun = null;
 const gitAction = document.getElementById("git-action");
 function renderGitAction(tab) {
   const t = tab && threadOf(tab);
-  gitAction.hidden = !t?.workspace?.repo;
+  gitAction.hidden = !t?.workspace;
   if (gitAction.hidden) return;
   const key = JSON.stringify([tab.key, tab.view.cwd, t.workspace.branch, statusOf(tab)]);
-  if (t.gitFor !== key) {
+  if (t.gitFor !== key && t.workspace.repo) {
     t.gitFor = key;
     callOn(tab.machine, { cmd: "branches", tab: tab.view.id }).then((git) => {
       t.git = git;
       if (tab === active) renderGitAction(tab);
     }, () => (t.git = null));
   }
-  const action = quickAction(t.git, !!prOf(tab));
-  const shown = GIT_ACTIONS[action ?? "commit"];
   const main = gitAction.querySelector(".main");
-  main.disabled = !action;
-  main.dataset.action = action ?? "";
-  main.title = action ? shown.prompt : t.git ? "Branch is up to date. No action needed." : "Reading the branch…";
-  main.innerHTML = `${icon(shown.icon)}<span>${esc(shown.label)}</span>`;
+  const more = gitAction.querySelector(".more");
+  if (gitRun?.tab === tab) {
+    main.disabled = true;
+    main.dataset.action = "";
+    main.title = gitRun.status;
+    main.innerHTML = `${icon("loader-circle", "spin")}<span class="progress">${esc(gitRun.status)}</span><span class="elapsed">${Math.floor((Date.now() - gitRun.at) / 1000)}s</span>`;
+    more.hidden = true;
+    return renderDetails(tab);
+  }
+  const quick = quickAction(t.git, t.workspace, !!prOf(tab));
+  main.disabled = !!quick.disabled;
+  main.dataset.action = quick.action ?? "";
+  main.title = quick.hint ?? quick.label;
+  main.innerHTML = `${icon(GIT_ICONS[quick.action] ?? "git-commit")}<span>${esc(quick.label)}</span>`;
+  more.hidden = !t.workspace.repo;
+  renderDetails(tab);
 }
-function askGit(action) {
+setInterval(() => gitRun && active === gitRun.tab && renderGitAction(active), 1000);
+function gitMenuEntries(tab) {
+  const git = threadOf(tab).git;
+  if (!git) return [{ note: "Reading the branch…" }];
+  const busy = !!gitRun;
+  const branch = git.refs.find((r) => r.current)?.name;
+  const hasPr = !!prOf(tab);
+  const canPush = !busy && branch && !git.behind && git.ahead > 0 && (git.upstream || git.remote);
+  const canPr = !busy && branch && !hasPr && (git.ahead_of_default ?? git.ahead) > 0 && !git.behind && (git.upstream || git.remote);
+  const entries = [{ label: "Commit", icon: "git-commit", disabled: busy || !git.dirty, title: !git.dirty ? "No changes to commit." : "", run: () => openCommitDialog(tab) }];
+  if (git.remote) {
+    entries.push({ label: "Push", icon: "cloud-upload", disabled: !canPush, title: canPush ? "" : git.behind ? "Behind upstream. Pull/rebase first." : "No local commits to push.", run: () => runGitAction(tab, "push") });
+    if (!hasPr) entries.push({ label: "Create PR", icon: "github", disabled: !canPr, title: canPr ? "" : "Push commits that the default branch lacks first.", run: () => runGitAction(tab, "create_pr") });
+  } else entries.push({ label: "Publish repository...", icon: "cloud-upload", run: () => openPublishDialog(tab) });
+  if (git.detached) entries.push({ note: "Detached HEAD: create and check out a branch to enable push and pull request actions." });
+  else if (git.behind > 0) entries.push({ note: "Behind upstream. Pull/rebase first." });
+  return entries;
+}
+gitAction.querySelector(".main").onclick = (e) => {
   const tab = active;
-  if (!tab || !GIT_ACTIONS[action]) return;
-  if (!sendSlash(tab, GIT_ACTIONS[action].prompt)) return;
-  showComposerNote(`Asked claude to ${GIT_ACTIONS[action].label.toLowerCase()}`);
-  setTimeout(() => showComposerNote(""), 2500);
-}
-gitAction.querySelector(".main").onclick = (e) => askGit(e.currentTarget.dataset.action);
+  const action = e.currentTarget.dataset.action;
+  if (!tab || !action) return;
+  if (action === "publish") return openPublishDialog(tab);
+  runGitAction(tab, action);
+};
 gitAction.querySelector(".more").onclick = (e) => {
   const tab = active;
   if (!tab) return;
-  const menu = document.getElementById("git-menu");
-  const hasPr = !!prOf(tab);
-  const entries = [["commit", "Commit"], ["push", "Push"], ...(hasPr ? [] : [["create_pr", "Create PR"]])];
-  menu.replaceChildren(...entries.map(([action, label]) => menuRow({ label, icon: GIT_ACTIONS[action].icon, run: () => askGit(action) }, menu)));
-  menu.hidden = !menu.hidden;
-  e.stopPropagation();
+  if (!headerMenu.hidden && headerMenu.dataset.kind === "git") return (headerMenu.hidden = true);
+  openHeaderMenu(e.currentTarget, gitMenuEntries(tab), "git");
 };
-window.addEventListener("mousedown", (e) => {
-  const menu = document.getElementById("git-menu");
-  if (!menu.hidden && !e.target.closest("#git-menu, #git-action .more")) menu.hidden = true;
-}, true);
+
+/** Runs the steps of `action` in order, showing each as T3 Code does, and says how it went. */
+async function runGitAction(tab, action, { message = "", files = [] } = {}) {
+  if (gitRun) return;
+  const git = threadOf(tab).git;
+  const branch = git?.refs.find((r) => r.current)?.name;
+  if (["push", "commit_push", "commit_push_pr", "create_pr"].includes(action) && branch && branch === git.default) {
+    const answer = await confirmDefault(action, branch);
+    if (!answer) return;
+    if (answer === "branch") {
+      try {
+        await callOn(tab.machine, { cmd: "checkout", tab: tab.view.id, branch: `pinned/feature-${Date.now().toString(36)}`, create: true });
+      } catch (e) {
+        return showComposerNote(String(e), true);
+      }
+    }
+  }
+  gitRun = { tab, status: "", at: Date.now() };
+  let url = null;
+  try {
+    for (const step of GIT_STEPS[action]) {
+      if (step === "message" && message) continue;
+      gitRun.status = STEP_LABELS[step];
+      if (tab === active) renderGitAction(tab);
+      const answer = await callOn(tab.machine, { cmd: "git", tab: tab.view.id, step: step === "message" ? { step, files } : step === "commit" ? { step, message, files } : { step } });
+      if (step === "message") message = answer;
+      if (step === "create_pr") url = answer;
+    }
+    showComposerNote(url ? `Opened ${url}` : { pull: "Pulled the latest changes.", init: "Initialized a git repository." }[action] ?? (action.includes("push") ? "Pushed." : "Committed."));
+    setTimeout(() => showComposerNote(""), 10_000);
+  } catch (e) {
+    showComposerNote(String(e), true);
+  } finally {
+    gitRun = null;
+    Object.assign(threadOf(tab), { gitFor: null, workspaceFor: null });
+    fetchWorkspace(tab);
+    if (tab === active) renderGitAction(tab);
+  }
+}
+/** T3 Code asks before it pushes to the default branch, and offers a feature ref instead. */
+function confirmDefault(action, branch) {
+  const commits = action.startsWith("commit");
+  const suffix = ` on "${branch}". You can continue on this ref or create a feature ref and run the same action there.`;
+  const copy = action === "push" || action === "commit_push"
+    ? commits ? ["Commit & push to default ref?", `This action will commit and push changes${suffix}`, `Commit & push to ${branch}`] : ["Push to default ref?", `This action will push local commits${suffix}`, `Push to ${branch}`]
+    : commits ? ["Commit, push & create PR from default ref?", `This action will commit, push, and create a pull request${suffix}`, "Commit, push & create PR"] : ["Create PR from default ref?", `This action will create a pull request${suffix}`, "Create PR"];
+  composerSheet.innerHTML = `<form class="sheet" role="alertdialog" aria-label="${esc(copy[0])}"><h2>${esc(copy[0])}</h2><p class="about">${esc(copy[1])}</p>
+    <footer><span class="spacer"></span><button type="button" class="outline" data-answer="">Cancel</button><button type="button" class="outline" data-answer="branch">Create feature ref</button><button type="button" class="primary" data-answer="continue">${esc(copy[2])}</button></footer></form>`;
+  composerSheet.hidden = false;
+  return new Promise((resolve) => {
+    composerSheet.querySelector("form").onclick = (e) => {
+      const b = e.target.closest("[data-answer]");
+      if (!b) return;
+      closeSheet();
+      resolve(b.dataset.answer || null);
+    };
+  });
+}
+
+/** T3 Code's commit dialog: the branch, the changed files to include, and an optional message. */
+function openCommitDialog(tab) {
+  const git = threadOf(tab).git;
+  if (!git) return;
+  const branch = git.refs.find((r) => r.current)?.name ?? "(detached)";
+  composerSheet.innerHTML = `<form class="sheet" role="dialog" aria-label="Commit changes"><h2>Commit changes</h2><p class="about">Review and confirm your commit. Leave the message blank to auto-generate one.</p>
+    <dl class="facts"><dt>Branch</dt><dd>${esc(branch)}${branch === git.default ? ` <span class="warn">Default branch</span>` : ""}</dd><dt>Files</dt><dd><ul class="files">${git.changed.map((f, i) => `<li><label><input type="checkbox" name="file" value="${i}" checked>${fileTypeIcon(f)}<span>${esc(f)}</span></label></li>`).join("") || "<li>none</li>"}</ul></dd></dl>
+    <label class="field"><span>Commit message (optional)</span><textarea name="message" rows="3" placeholder="Leave empty to auto-generate"></textarea></label>
+    <footer><span class="spacer"></span><button type="button" class="outline" data-cancel>Cancel</button><button type="button" class="outline" data-new-branch>Commit on new branch</button><button type="submit" class="primary">Commit</button></footer></form>`;
+  composerSheet.hidden = false;
+  const form = composerSheet.querySelector("form");
+  const chosen = () => [...form.querySelectorAll("[name=file]:checked")].map((b) => git.changed[b.value]);
+  const commit = async (onNewBranch) => {
+    const files = chosen();
+    if (!files.length) return;
+    closeSheet();
+    const message = form.elements.message.value.trim();
+    if (onNewBranch) {
+      const name = `pinned/${(message || "changes").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "changes"}`;
+      try {
+        await callOn(tab.machine, { cmd: "checkout", tab: tab.view.id, branch: name, create: true });
+      } catch (e) {
+        return showComposerNote(String(e), true);
+      }
+    }
+    runGitAction(tab, "commit", { message, files: files.length === git.changed.length ? [] : files });
+  };
+  form.onchange = () => {
+    const none = !chosen().length;
+    for (const b of form.querySelectorAll("[type=submit], [data-new-branch]")) b.disabled = none;
+  };
+  form.querySelector("[data-cancel]").onclick = closeSheet;
+  form.querySelector("[data-new-branch]").onclick = () => commit(true);
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    commit(false);
+  };
+  form.elements.message.focus();
+}
+/** T3 Code's Publish repository dialog: a GitHub repository made with gh, pushed as origin. */
+function openPublishDialog(tab) {
+  const name = projectName(tab);
+  composerSheet.innerHTML = `<form class="sheet" role="dialog" aria-label="Publish repository"><h2>Publish repository</h2><p class="about">Create a GitHub repository for this project and push it as origin.</p>
+    <label class="field"><span>Repository</span><input name="name" value="${esc(name)}" autocomplete="off"></label>
+    <label class="switch-row"><span>Public</span><input type="checkbox" role="switch" name="public"></label>
+    <p class="error" hidden></p>
+    <footer><span class="spacer"></span><button type="button" class="outline" data-cancel>Cancel</button><button type="submit" class="primary">Publish</button></footer></form>`;
+  composerSheet.hidden = false;
+  const form = composerSheet.querySelector("form");
+  form.querySelector("[data-cancel]").onclick = closeSheet;
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    closeSheet();
+    if (gitRun) return;
+    gitRun = { tab, status: STEP_LABELS.publish, at: Date.now() };
+    renderGitAction(tab);
+    try {
+      await callOn(tab.machine, { cmd: "git", tab: tab.view.id, step: { step: "publish", name: form.elements.name.value.trim(), public: form.elements.public.checked } });
+      showComposerNote("Published the repository.");
+    } catch (err) {
+      showComposerNote(String(err), true);
+    } finally {
+      gitRun = null;
+      threadOf(tab).gitFor = null;
+      renderGitAction(tab);
+    }
+  };
+}
 
 function toggleDrawer(open = !ui.drawer) {
   ui.drawer = open;
   document.body.dataset.drawer = open ? "open" : "closed";
+  renderDrawer();
   if (open && active) refit(active);
   focusInput();
 }
@@ -1839,3 +2009,448 @@ drawerResize.ondblclick = () => {
   save("gui-drawer-height", String(setDrawerHeight(280)));
   if (active) refit(active);
 };
+
+/** The header title opens the thread's menu half a second after a click, so a double-click can
+ * rename it instead, as T3 Code's does; its chevron shows on hover. */
+let titleClick;
+crumbEl.addEventListener("click", (e) => {
+  const title = crumbEl.querySelector(".title");
+  const onTitle = e.target.closest(".title") || (e.target === crumbEl && title && e.clientX > title.getBoundingClientRect().right);
+  clearTimeout(titleClick);
+  if (!active || !onTitle || e.target.closest("input") || e.detail > 1) return;
+  const at = title.getBoundingClientRect();
+  const tab = active;
+  titleClick = setTimeout(() => tab === active && openSideMenu(rowMenuItems(tab), { x: at.left, y: at.bottom + 4 }), narrow(768) ? 0 : 500);
+});
+crumbEl.addEventListener("dblclick", () => clearTimeout(titleClick));
+
+Object.assign(ICON_PATHS, {
+  play: `<polygon points="6 3 20 12 6 21 6 3"/>`,
+  "flask-conical": `<path d="M14 2v6a2 2 0 0 0 .245.96l5.51 10.08A2 2 0 0 1 18 22H6a2 2 0 0 1-1.755-2.96l5.51-10.08A2 2 0 0 0 10 8V2"/><path d="M6.453 15h11.094"/><path d="M8.5 2h7"/>`,
+  "list-checks": `<path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>`,
+  bug: `<path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/>`,
+  "square-menu": `<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 8h10"/><path d="M7 12h10"/><path d="M7 16h10"/>`,
+  "git-branch-plus": `<path d="M6 3v12"/><path d="M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M15 6a9 9 0 0 0-9 9"/><path d="M18 15v6"/><path d="M21 18h-6"/>`,
+  "triangle-alert": `<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>`,
+});
+
+/** T3 Code's project actions: scripts kept per project, run in a terminal of the drawer. */
+const SCRIPT_ICONS = { play: ["Play", "play"], test: ["Test", "flask-conical"], lint: ["Lint", "list-checks"], configure: ["Configure", "wrench"], build: ["Build", "hammer"], debug: ["Debug", "bug"] };
+const scriptIcon = (name) => icon(SCRIPT_ICONS[name]?.[1] ?? "play");
+const scriptLabel = (s) => {
+  const roles = [...(s.runOnWorktreeCreate ? ["setup"] : []), ...(s.runOnSettle ? ["on settle"] : [])];
+  return roles.length ? `${s.name} (${roles.join(", ")})` : s.name;
+};
+const scriptsOf = new Map();
+/** The scripts of the tab's project, `{ scripts, file }`, asked of its machine once and kept. */
+function projectScripts(tab, fresh = false) {
+  const key = `${tab.machine}:${threadOf(tab).workspace?.project ?? tab.view.cwd}`;
+  if (fresh || !scriptsOf.has(key)) {
+    scriptsOf.set(key, { scripts: [], file: [], loading: true });
+    callOn(tab.machine, { cmd: "project_scripts", tab: tab.view.id }).then((got) => {
+      scriptsOf.set(key, got);
+      if (active === tab) renderScripts(tab);
+    }, () => scriptsOf.set(key, { scripts: [], file: [] }));
+  }
+  return scriptsOf.get(key);
+}
+async function saveScripts(tab, scripts) {
+  await callOn(tab.machine, { cmd: "save_project_scripts", tab: tab.view.id, scripts });
+  scriptsOf.set(`${tab.machine}:${threadOf(tab).workspace?.project ?? tab.view.cwd}`, { ...projectScripts(tab), scripts });
+  renderScripts(tab);
+}
+const primaryScript = (scripts) => scripts.find((s) => !s.runOnWorktreeCreate && !s.runOnSettle) ?? scripts.find((s) => !s.runOnSettle) ?? null;
+const importable = ({ scripts, file }) => file.filter((f) => !scripts.some((s) => s.command === f.command || s.name.toLowerCase() === f.name.toLowerCase()));
+
+const scriptsControl = document.getElementById("scripts-control");
+function renderScripts(tab) {
+  const known = tab && guiOn() && tab.view.running && threadOf(tab).workspace && projectScripts(tab);
+  scriptsControl.hidden = !known || known.loading;
+  if (scriptsControl.hidden) return;
+  const primary = primaryScript(known.scripts);
+  const html = primary
+    ? `<button type="button" class="main outline" data-run="${esc(primary.id)}" title="Run ${esc(primary.name)}" aria-label="Run ${esc(primary.name)}">${scriptIcon(primary.icon)}<span class="label">${esc(primary.name)}</span></button><button type="button" class="pick outline" aria-label="Script actions" title="Script actions">${icon("chevron-down")}</button>`
+    : known.scripts.length || importable(known).length
+      ? `<button type="button" class="main outline solo" data-scripts-menu aria-label="Project actions" title="Project actions">${icon("wrench")}<span class="label">Actions</span>${icon("chevron-down")}</button>`
+      : `<button type="button" class="main outline solo" data-add-script aria-label="Add action" title="Add action">${icon("plus")}<span class="label">Add action</span></button>`;
+  if (scriptsControl.dataset.html !== html) {
+    scriptsControl.dataset.html = html;
+    scriptsControl.innerHTML = html;
+  }
+  renderDetails(tab);
+}
+/** The scripts menu, as T3 Code's: each script with its shortcut and a gear to edit it, the ones
+ * t3.json offers to import, then "Add action". */
+function scriptEntries(tab) {
+  const known = projectScripts(tab);
+  const rows = known.scripts.map((s) => ({ html: `${scriptIcon(s.icon)}<span class="label">${esc(scriptLabel(s))}</span>${s.keybinding ? `<kbd>${esc(shortcutLabel(s.keybinding))}</kbd>` : ""}<span role="button" class="gear" data-edit="${esc(s.id)}" aria-label="Edit ${esc(s.name)}" title="Edit ${esc(s.name)}">${icon("settings")}</span>`, run: () => runScript(tab, s) }));
+  const imports = importable(known);
+  if (imports.length) {
+    if (rows.length) rows.push({ rule: true });
+    rows.push({ heading: "From t3.json" }, ...imports.map((f) => ({ html: `${scriptIcon(f.icon)}<span class="label">${esc(f.name)}</span><span class="end">${icon("download")}</span>`, run: () => importScript(tab, f) })));
+  }
+  rows.push({ html: `${icon("plus")}<span class="label">Add action</span>`, run: () => openScriptEditor(tab) });
+  return rows;
+}
+function openScriptsMenu(anchor) {
+  const tab = active;
+  if (!tab) return;
+  const menu = document.getElementById("header-menu");
+  if (!menu.hidden && menu.dataset.kind === "scripts") return (menu.hidden = true);
+  openHeaderMenu(anchor, scriptEntries(tab), "scripts");
+}
+scriptsControl.addEventListener("click", (e) => {
+  const tab = active;
+  if (!tab) return;
+  const run = e.target.closest("[data-run]");
+  if (run) return runScript(tab, projectScripts(tab).scripts.find((s) => s.id === run.dataset.run));
+  if (e.target.closest("[data-add-script]")) return openScriptEditor(tab);
+  if (e.target.closest(".pick, [data-scripts-menu]")) openScriptsMenu(e.target.closest("button"));
+});
+async function importScript(tab, f) {
+  const known = projectScripts(tab);
+  await saveScripts(tab, [...known.scripts, { ...f, id: scriptId(f.name, known.scripts), icon: f.icon ?? "play" }]).catch((e) => showComposerNote(String(e), true));
+}
+function scriptId(name, scripts) {
+  const base = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "script";
+  let id = base;
+  for (let n = 2; scripts.some((s) => s.id === id); n++) id = `${base}-${n}`;
+  return id;
+}
+
+/** The header's own menus, opened under their button. */
+const headerMenu = document.getElementById("header-menu");
+function openHeaderMenu(anchor, entries, kind) {
+  headerMenu.dataset.kind = kind;
+  headerMenu.replaceChildren(...entries.map((entry) => {
+    if (entry.heading || entry.rule || entry.note) return Object.assign(document.createElement(entry.rule ? "hr" : "p"), { className: entry.heading ? "heading" : entry.note ? "note" : "rule", textContent: entry.heading ?? entry.note ?? "" });
+    const b = document.createElement("button");
+    b.type = "button";
+    b.disabled = !!entry.disabled;
+    if (entry.title) b.title = entry.title;
+    b.innerHTML = entry.html ?? `${entry.icon ? icon(entry.icon) : ""}<span class="label">${esc(entry.label)}</span>`;
+    b.onclick = (e) => {
+      const edit = e.target.closest("[data-edit]");
+      headerMenu.hidden = true;
+      if (edit) return openScriptEditor(active, projectScripts(active).scripts.find((s) => s.id === edit.dataset.edit));
+      entry.run();
+    };
+    return b;
+  }));
+  headerMenu.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  headerMenu.style.top = `${r.bottom + 4}px`;
+  headerMenu.style.left = `${Math.max(8, Math.min(r.right - headerMenu.offsetWidth, innerWidth - headerMenu.offsetWidth - 8))}px`;
+}
+window.addEventListener("mousedown", (e) => !headerMenu.hidden && !e.target.closest("#header-menu, #scripts-control, #git-action, #details-card") && (headerMenu.hidden = true), true);
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || headerMenu.hidden) return;
+  headerMenu.hidden = true;
+  e.stopPropagation();
+}, true);
+
+/** T3 Code's Add / Edit Action dialog, and the other dialogs of the header. */
+const composerSheet = Object.assign(document.createElement("div"), { id: "composer-dialog", hidden: true });
+document.body.append(composerSheet);
+const closeSheet = () => (composerSheet.hidden = true);
+composerSheet.addEventListener("mousedown", (e) => e.target === composerSheet && closeSheet());
+window.addEventListener("keydown", (e) => e.key === "Escape" && !composerSheet.hidden && (closeSheet(), e.stopPropagation()), true);
+function openScriptEditor(tab, script = null) {
+  if (!tab) return;
+  let chosenIcon = script?.icon ?? "play";
+  let keybinding = script?.keybinding ?? "";
+  const toggle = (name, label, on, off = false) => `<label class="switch-row${off ? " off" : ""}"><span>${label}</span><input type="checkbox" role="switch" name="${name}"${on ? " checked" : ""}${off ? " disabled" : ""}></label>`;
+  composerSheet.innerHTML = `<form class="sheet" role="dialog" aria-label="${script ? "Edit Action" : "Add Action"}">
+    <h2>${script ? "Edit Action" : "Add Action"}</h2><p class="about">Actions are project-scoped commands you can run from the top bar or keybindings.</p>
+    <label class="field"><span>Name</span><span class="row"><button type="button" class="icon-pick outline" aria-label="Choose icon">${scriptIcon(chosenIcon)}</button><input name="name" placeholder="Test" autocomplete="off" value="${esc(script?.name ?? "")}"></span></label>
+    <div class="icons" hidden>${Object.entries(SCRIPT_ICONS).map(([id, [label]]) => `<button type="button" data-icon="${id}"${id === chosenIcon ? ` class="on"` : ""}>${scriptIcon(id)}<span>${label}</span></button>`).join("")}</div>
+    <label class="field"><span>Keybinding</span><input name="keybinding" placeholder="Press shortcut" readonly value="${esc(keybinding ? shortcutLabel(keybinding) : "")}"><small>Press a shortcut. Use <code>Backspace</code> to clear. Shortcuts are environment-wide. Projects using the same action share its shortcut.</small></label>
+    <label class="field"><span>Command</span><textarea name="command" placeholder="bun test" rows="3">${esc(script?.command ?? "")}</textarea></label>
+    <label class="field"><span>Preview URL (optional)</span><input name="previewUrl" placeholder="http://localhost:5173" autocomplete="off" value="${esc(script?.previewUrl ?? "")}"><small>Open this URL in the in-app preview when this action runs.</small></label>
+    ${toggle("runOnWorktreeCreate", "Run automatically on worktree creation", script?.runOnWorktreeCreate)}
+    ${toggle("wait", "Wait for it to finish before the agent starts", script?.runOnWorktreeCreate && script?.async === false, !script?.runOnWorktreeCreate)}
+    ${toggle("runOnSettle", "Run in the thread's worktree when the thread settles", script?.runOnSettle)}
+    ${toggle("autoOpenPreview", "Open preview automatically when this action runs", script?.autoOpenPreview, !script?.previewUrl)}
+    <p class="error" hidden></p>
+    <footer>${script ? `<button type="button" class="danger-outline" data-delete>Delete</button>` : ""}<span class="spacer"></span><button type="button" class="outline" data-cancel>Cancel</button><button type="submit" class="primary">${script ? "Save changes" : "Save action"}</button></footer></form>`;
+  composerSheet.hidden = false;
+  const form = composerSheet.querySelector("form");
+  form.elements.name.focus();
+  const sync = () => {
+    form.elements.wait.disabled = !form.elements.runOnWorktreeCreate.checked;
+    form.elements.wait.closest(".switch-row").classList.toggle("off", form.elements.wait.disabled);
+    form.elements.autoOpenPreview.disabled = !form.elements.previewUrl.value.trim();
+    form.elements.autoOpenPreview.closest(".switch-row").classList.toggle("off", form.elements.autoOpenPreview.disabled);
+  };
+  form.oninput = sync;
+  form.querySelector(".icon-pick").onclick = () => (form.querySelector(".icons").hidden = !form.querySelector(".icons").hidden);
+  form.querySelector(".icons").onclick = (e) => {
+    const b = e.target.closest("[data-icon]");
+    if (!b) return;
+    chosenIcon = b.dataset.icon;
+    form.querySelector(".icon-pick").innerHTML = scriptIcon(chosenIcon);
+    for (const o of form.querySelectorAll("[data-icon]")) o.classList.toggle("on", o === b);
+    form.querySelector(".icons").hidden = true;
+  };
+  form.elements.keybinding.onkeydown = (e) => {
+    if (e.key === "Tab") return;
+    e.preventDefault();
+    if (e.key === "Backspace" || e.key === "Delete") keybinding = "";
+    else if (!["Meta", "Control", "Shift", "Alt"].includes(e.key)) keybinding = [(IS_MAC ? e.metaKey : e.ctrlKey) && "mod", e.shiftKey && "shift", e.altKey && "alt", (e.altKey ? e.code.replace(/^(Key|Digit)/, "") : e.key).toLowerCase()].filter(Boolean).join("+");
+    form.elements.keybinding.value = keybinding ? shortcutLabel(keybinding) : "";
+  };
+  form.querySelector("[data-cancel]").onclick = closeSheet;
+  form.querySelector("[data-delete]")?.addEventListener("click", (e) => {
+    const b = e.currentTarget;
+    if (!b.dataset.armed) {
+      b.dataset.armed = "true";
+      b.textContent = `Delete action "${script.name}"?`;
+      return;
+    }
+    closeSheet();
+    saveScripts(tab, projectScripts(tab).scripts.filter((s) => s.id !== script.id)).catch((err) => showComposerNote(String(err), true));
+  });
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const name = form.elements.name.value.trim();
+    const command = form.elements.command.value.trim();
+    const error = form.querySelector(".error");
+    error.hidden = !!(name && command);
+    if (!name || !command) return (error.textContent = !name ? "Name is required." : "Command is required.");
+    const previewUrl = form.elements.previewUrl.value.trim();
+    const scripts = projectScripts(tab).scripts;
+    const next = {
+      id: script?.id ?? scriptId(name, scripts),
+      name,
+      command,
+      icon: chosenIcon,
+      runOnWorktreeCreate: form.elements.runOnWorktreeCreate.checked,
+      ...(form.elements.runOnWorktreeCreate.checked && form.elements.wait.checked ? { async: false } : {}),
+      runOnSettle: form.elements.runOnSettle.checked,
+      ...(previewUrl ? { previewUrl, autoOpenPreview: form.elements.autoOpenPreview.checked } : {}),
+      ...(keybinding ? { keybinding } : {}),
+    };
+    // A script that takes over setup or settling releases it from the others, as in T3 Code.
+    const others = scripts.filter((s) => s.id !== next.id).map((s) => ({ ...s, ...(next.runOnWorktreeCreate ? { runOnWorktreeCreate: false } : {}), ...(next.runOnSettle ? { runOnSettle: false } : {}) }));
+    try {
+      await saveScripts(tab, script ? scripts.map((s) => (s.id === script.id ? next : others.find((o) => o.id === s.id))) : [...others, next]);
+      closeSheet();
+    } catch (err) {
+      error.hidden = false;
+      error.textContent = String(err);
+    }
+  };
+}
+const shortcutLabel = (binding) => binding.split("+").map((k) => ({ mod: IS_MAC ? "⌘" : "Ctrl+", shift: IS_MAC ? "⇧" : "Shift+", alt: IS_MAC ? "⌥" : "Alt+" })[k] ?? k.toUpperCase()).join("");
+// A script's own shortcut runs it in the active thread's project.
+window.addEventListener("keydown", (e) => {
+  const tab = active;
+  if (!guiOn() || !tab || !(IS_MAC ? e.metaKey : e.ctrlKey) || settingsOpen() || !composerSheet.hidden) return;
+  const pressed = ["mod", e.shiftKey && "shift", e.altKey && "alt", (e.altKey ? e.code.replace(/^(Key|Digit)/, "") : e.key).toLowerCase()].filter(Boolean).join("+");
+  const script = projectScripts(tab).scripts?.find((s) => s.keybinding === pressed);
+  if (!script) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  runScript(tab, script);
+}, true);
+
+/** The terminal drawer's tabs: claude's own session, and a shell for each script run, which T3
+ * Code opens for a project action. */
+const drawerTabs = Object.assign(document.createElement("nav"), { id: "drawer-tabs" });
+document.getElementById("terms").prepend(drawerTabs);
+const scriptShells = [];
+async function runScript(tab, script, cwd = null) {
+  if (!tab || !script) return;
+  if (script.previewUrl && script.autoOpenPreview && tab === active) {
+    setBrowserUrl(script.previewUrl);
+    openPanel("browser");
+  }
+  toggleDrawer(true);
+  const el = Object.assign(document.createElement("div"), { className: "term shell" });
+  document.getElementById("terms").append(el);
+  const term = new Terminal({ fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, cursorBlink: true, allowTransparency: true, theme: { background: "#00000000" } });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(el);
+  const shell = { tab, name: script.name, el, term, fit, id: null, done: null };
+  shell.done = new Promise((resolve) => (shell.exited = resolve));
+  scriptShells.push(shell);
+  showDrawerView(tab, shell);
+  fit.fit();
+  try {
+    shell.id = await callOn(tab.machine, { cmd: "open_shell", tab: tab.view.id, cols: term.cols, rows: term.rows });
+    await machines.get(tab.machine).transport.attach(shell.id, { write: (bytes) => term.write(bytes), reset: () => term.reset() });
+    term.onData((data) => callOn(tab.machine, { cmd: "write_input", tab: shell.id, data }));
+    // A shell drops what is typed before its prompt is up.
+    await until(() => term.buffer.active.getLine(term.buffer.active.cursorY + term.buffer.active.baseY)?.translateToString(true).trim(), 5000);
+    await callOn(tab.machine, { cmd: "write_input", tab: shell.id, data: `${cwd ? `cd ${escapePath(cwd)} && ` : ""}${script.command}\r` });
+  } catch (e) {
+    term.write(`\r\n\x1b[31m[could not run ${script.name}: ${e}]\x1b[0m\r\n`);
+  }
+  return shell;
+}
+function closeShell(shell) {
+  scriptShells.splice(scriptShells.indexOf(shell), 1);
+  shell.el.remove();
+  shell.term.dispose();
+  shell.exited();
+  if (shell.id) callOn(shell.tab.machine, { cmd: "close_shell", shell: shell.id }).catch(() => {});
+  if (threadOf(shell.tab).drawerShell === shell) threadOf(shell.tab).drawerShell = null;
+  renderDrawer();
+}
+/** Shows claude's terminal or a script's shell in the drawer, and the tabs to switch them. */
+function showDrawerView(tab, shell) {
+  threadOf(tab).drawerShell = shell;
+  renderDrawer();
+}
+function renderDrawer() {
+  const tab = active;
+  const own = scriptShells.filter((s) => s.tab === tab);
+  const shown = tab && document.body.dataset.drawer === "open" ? threadOf(tab).drawerShell : null;
+  for (const s of scriptShells) s.el.hidden = s !== shown;
+  if (tab && tab.el.hidden !== !!shown && guiOn()) {
+    tab.el.hidden = !!shown;
+    if (!shown) refit(tab);
+  }
+  if (shown) {
+    shown.fit.fit();
+    if (shown.id) callOn(tab.machine, { cmd: "resize_pty", tab: shown.id, cols: shown.term.cols, rows: shown.term.rows }).catch(() => {});
+  }
+  drawerTabs.hidden = !own.length;
+  drawerTabs.innerHTML = own.length ? `<button type="button" data-shell=""${shown ? "" : " aria-pressed=\"true\""}>${icon("claude")}<span>claude</span></button>${own.map((s, i) => `<span class="shell-tab"><button type="button" data-shell="${i}"${s === shown ? " aria-pressed=\"true\"" : ""}>${icon("terminal")}<span>${esc(s.name)}</span></button><button type="button" class="close" data-close-shell="${i}" aria-label="Close ${esc(s.name)}" title="Close ${esc(s.name)}">${icon("x")}</button></span>`).join("")}` : "";
+}
+drawerTabs.addEventListener("click", (e) => {
+  const tab = active;
+  const own = scriptShells.filter((s) => s.tab === tab);
+  const close = e.target.closest("[data-close-shell]");
+  if (close) return closeShell(own[close.dataset.closeShell]);
+  const pick = e.target.closest("[data-shell]");
+  if (pick) showDrawerView(tab, pick.dataset.shell === "" ? null : own[pick.dataset.shell]);
+});
+
+/** T3 Code runs a project's setup script in a worktree as it is made for a thread; one that must
+ * finish first holds Send, as T3 holds the agent. */
+async function runSetupScripts(tab) {
+  const setup = projectScripts(tab).scripts.find((s) => s.runOnWorktreeCreate);
+  if (!setup) return;
+  // The shell echoes what it is given, so the mark it prints when done is spelled differently there.
+  const shell = await runScript(tab, { ...setup, command: setup.async === false ? `${setup.command}; printf 'pinned%sdone\\n' -setup-` : setup.command });
+  if (setup.async !== false || !shell) return;
+  const t = threadOf(tab);
+  t.preparing = true;
+  renderComposer(tab);
+  await new Promise((resolve) => {
+    const seen = shell.term.onWriteParsed(() => {
+      const buffer = shell.term.buffer.active;
+      for (let y = 0; y < buffer.length; y++) if (buffer.getLine(y)?.translateToString(true).trim() === "pinned-setup-done") return (seen.dispose(), resolve());
+    });
+    shell.done.then(resolve);
+  });
+  t.preparing = false;
+  if (tab === active) renderComposer(tab);
+}
+// T3 Code runs a project's settle script in a thread's worktree when the thread settles.
+const settledSeen = new Set();
+let settleWatching = false;
+setInterval(() => {
+  if (!guiOn()) return;
+  for (const tab of tabs) {
+    const key = threadKey(tab);
+    const now = !!sideMarks.settled[key];
+    if (settleWatching && now && !settledSeen.has(key) && threadOf(tab).workspace?.worktree) {
+      const script = projectScripts(tab).scripts?.find((s) => s.runOnSettle);
+      if (script) runScript(tab, script, tab.view.cwd);
+    }
+    if (now) settledSeen.add(key);
+    else settledSeen.delete(key);
+  }
+  settleWatching = true;
+}, 1000);
+
+/** The header's Open button shows the chosen editor's own icon, and its menu each editor's, as
+ * T3 Code's picker does. */
+// gui-panel.js, which owns the Open button and its menu, runs after this file.
+addEventListener("DOMContentLoaded", () => {
+const openInMain = openIn.querySelector(".main");
+new MutationObserver(() => {
+  const id = openInMain.dataset.editor;
+  if (!id || openInMain.dataset.icon === id) return;
+  openInMain.dataset.icon = id;
+  openInMain.querySelector("svg")?.remove();
+  openInMain.insertAdjacentHTML("afterbegin", editorIcon(id) || icon("square-arrow-out-up-right"));
+}).observe(openInMain, { attributes: true, attributeFilter: ["data-editor"] });
+new MutationObserver(() => {
+  if (panelMenu.hidden || menuAnchor !== openIn.querySelector(".pick") || panelMenu.dataset.editors === "true") return;
+  panelMenu.dataset.editors = "true";
+  const list = active ? editorsOn(active.machine) : [];
+  for (const b of panelMenu.querySelectorAll("button[data-i]")) {
+    const editor = list.find((e) => e.name === b.querySelector(".label")?.textContent);
+    if (editor) b.querySelector(":scope > svg, :scope > .i")?.replaceWith(Object.assign(document.createElement("span"), { className: "editor-mark", innerHTML: editorIcon(editor.id) }));
+  }
+}).observe(panelMenu, { childList: true, attributes: true, attributeFilter: ["hidden"] });
+new MutationObserver(() => panelMenu.hidden && delete panelMenu.dataset.editors).observe(panelMenu, { attributes: true, attributeFilter: ["hidden"] });
+});
+
+/** T3 Code's thread details (⌘⇧B): the thread's workspace, editor and project actions, then its
+ * branch, Git action and pull requests, in a card under the header. */
+const detailsButton = document.getElementById("toggle-details");
+detailsButton.innerHTML = icon("square-menu");
+const detailsCard = Object.assign(document.createElement("aside"), { id: "details-card", ariaLabel: "Thread details", hidden: true });
+document.getElementById("chat").append(detailsCard);
+function toggleDetails(open = detailsCard.hidden) {
+  detailsCard.hidden = !open || !active;
+  detailsButton.setAttribute("aria-pressed", !detailsCard.hidden);
+  if (!detailsCard.hidden) renderDetails(active);
+}
+detailsButton.onclick = () => toggleDetails();
+onGuiKey("b", () => toggleDetails(), { shift: true });
+window.addEventListener("mousedown", (e) => !detailsCard.hidden && !e.target.closest("#details-card, #toggle-details, #header-menu, #composer-menu, #panel-menu, #composer-dialog") && toggleDetails(false), true);
+window.addEventListener("keydown", (e) => e.key === "Escape" && !detailsCard.hidden && headerMenu.hidden && composerSheet.hidden && (toggleDetails(false), e.stopPropagation()), true);
+function renderDetails(tab) {
+  if (detailsCard.hidden || !tab) return;
+  const t = threadOf(tab);
+  const ws = t.workspace;
+  const open = workspaceOpen(tab);
+  const where = workspaceLabel(tab, open);
+  const editor = editorFor(tab.machine);
+  const known = ws && projectScripts(tab);
+  const primary = known && primaryScript(known.scripts);
+  const quick = quickAction(t.git, ws, !!prOf(tab));
+  const prs = [...new Map(t.items.filter((i) => i.kind === "pr").map((p) => [p.url, p])).values()];
+  const row = (attrs, inner, chevron = false) => `<button type="button" class="row${/ class="more"/.test(attrs) ? " more" : ""}"${attrs.replace(' class="more"', "")}>${inner}${chevron ? icon("chevron-down", "chev") : ""}</button>`;
+  const split = (main, more) => `<div class="split-row">${main}<span class="seam"></span>${more}</div>`;
+  const html = `<section aria-label="Workspace">
+      ${row(` data-act="workspace"${open ? "" : " disabled"} title="${esc(tab.view.cwd)}"`, `${icon(tab.machine !== LOCAL ? "monitor" : where.icon)}<span class="label">${esc(tab.machine !== LOCAL ? `${machineName(tab.machine)} · ${where.label}` : where.label)}</span>`, open)}
+      ${editor ? split(row(` data-act="open-in"`, `<span class="editor-mark">${editorIcon(editor.id) || icon("square-arrow-out-up-right")}</span><span class="label">Open in ${esc(editor.name)}</span>`), row(` data-act="editors" class="more" aria-label="Choose the editor"`, icon("chevron-down"))) : ""}
+      ${known && !known.loading ? primary ? split(row(` data-act="run" title="Run ${esc(primary.name)}"`, `${scriptIcon(primary.icon)}<span class="label">${esc(primary.name)}</span>`), row(` data-act="scripts" class="more" aria-label="Script actions"`, icon("chevron-down")))
+        : known.scripts.length || importable(known).length ? row(` data-act="scripts" aria-label="Project actions"`, `${icon("wrench")}<span class="label">Actions</span>`, true)
+        : row(` data-act="add-script"`, `${icon("plus")}<span class="label">Add project script</span>`) : ""}
+    </section>
+    ${ws?.repo || ws ? `<section aria-label="Version Control">
+      ${ws.branch ? row(` data-act="branch"`, `${icon("git-branch")}<span class="label branch">${middle(ws.branch, 28)}</span>`, true) : ""}
+      ${split(row(` data-act="git"${quick.disabled || gitRun ? " disabled" : ""} title="${esc(quick.hint ?? quick.label)}"`, `${icon(gitRun ? "loader-circle" : GIT_ICONS[quick.action] ?? "git-commit", gitRun ? "spin" : "")}<span class="label">${esc(gitRun?.tab === tab ? gitRun.status : quick.label)}</span>`), ws.repo ? row(` data-act="git-menu" class="more" aria-label="Git actions"`, icon("chevron-down")) : "")}
+      ${prs.map((p) => row(` data-act="pr" data-url="${esc(p.url)}"`, `${icon("git-pull-request")}<span class="label">#${p.number}</span><span class="dim">${esc(p.repo)}</span>`)).join("")}
+    </section>` : ""}`;
+  // Each editor icon numbers its own ids, so the card compares what it shows without them.
+  const key = html.replace(/ed\d+-/g, "");
+  if (detailsCard.dataset.html !== key) {
+    detailsCard.dataset.html = key;
+    detailsCard.innerHTML = html;
+  }
+}
+detailsCard.addEventListener("click", (e) => {
+  const tab = active;
+  const b = e.target.closest("[data-act]");
+  if (!tab || !b || b.disabled) return;
+  const act = b.dataset.act;
+  if (act === "workspace") openWorkspace(document.querySelector("#composer-footer button.where") ?? b);
+  else if (act === "open-in") openInEditor();
+  else if (act === "editors") openHeaderMenu(b, editorsOn(tab.machine).map((ed) => ({ html: `<span class="editor-mark">${editorIcon(ed.id)}</span><span class="label">${esc(ed.name)}</span>${ed.id === editorFor(tab.machine)?.id ? icon("check", "end") : ""}`, run: () => (save(`gui-editor:${tab.machine}`, ed.id), renderOpenIn(tab), renderDetails(tab)) })), "editors");
+  else if (act === "run") runScript(tab, primaryScript(projectScripts(tab).scripts));
+  else if (act === "scripts") openHeaderMenu(b, scriptEntries(tab), "scripts");
+  else if (act === "add-script") openScriptEditor(tab);
+  else if (act === "branch") document.querySelector("#composer-footer .branch")?.click();
+  else if (act === "git") gitAction.querySelector(".main").click();
+  else if (act === "git-menu") openHeaderMenu(b, gitMenuEntries(tab), "git");
+  else if (act === "pr") openPr(tab, b.dataset.url);
+});
