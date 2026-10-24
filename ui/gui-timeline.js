@@ -3,7 +3,9 @@ Object.assign(ICON_PATHS, {
   hammer: `<path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/>`,
   "message-circle": `<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>`,
   download: `<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>`,
+  "chevrons-down-up": `<path d="m7 20 5-5 5 5"/><path d="m7 4 5 5 5-5"/>`,
   "chevron-up": `<path d="m18 15-6-6-6 6"/>`,
+  "folder-closed": `<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M2 10h20"/>`,
   file: `<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>`,
 });
 
@@ -79,6 +81,16 @@ function fullTime(at) {
   return `${clock.format(d)}, ${day}${suffix} ${monthName.format(d)} ${d.getFullYear()}`;
 }
 const whenHtml = (at, cls = "when") => (dateOf(at) ? `<span class="${cls}" title="${esc(fullTime(at))}">${esc(dayAware(at))}</span>` : "");
+
+/** 1234 reads 1.2k, as T3 Code's diff counts do. */
+function compact(n) {
+  for (const [size, unit] of [[1e9, "b"], [1e6, "m"], [1e3, "k"]]) {
+    if (n < size) continue;
+    const v = n / size;
+    return `${v < 10 ? v.toFixed(1).replace(/\.0$/, "") : Math.round(v)}${unit}`;
+  }
+  return String(n);
+}
 
 const WEB_URL = /^https?:\/\//i;
 const GITHUB_URL = /^https?:\/\/(www\.)?github\.com\//i;
@@ -318,13 +330,61 @@ function changesByTurn(history, turns) {
   return found;
 }
 
+/** Changed files as folders, a folder holding only one folder reading as one `a/b` row. */
+function fileTree(files) {
+  const root = { dirs: new Map(), files: [] };
+  for (const f of files) {
+    const parts = f.path.split("/").filter(Boolean);
+    let dir = root;
+    for (const [i, name] of parts.slice(0, -1).entries()) {
+      if (!dir.dirs.has(name)) dir.dirs.set(name, { name, path: parts.slice(0, i + 1).join("/"), dirs: new Map(), files: [], added: 0, removed: 0 });
+      dir = dir.dirs.get(name);
+      dir.added += Number(f.added);
+      dir.removed += Number(f.removed);
+    }
+    dir.files.push({ ...f, name: parts.at(-1) ?? f.path });
+  }
+  const nodes = (dir) => [
+    ...[...dir.dirs.values()].sort((a, b) => a.name.localeCompare(b.name)).map((d) => {
+      while (d.dirs.size === 1 && !d.files.length) {
+        const only = d.dirs.values().next().value;
+        d = { ...only, name: `${d.name}/${only.name}` };
+      }
+      return { ...d, children: nodes(d) };
+    }),
+    ...dir.files.sort((a, b) => a.name.localeCompare(b.name)),
+  ];
+  return nodes(root);
+}
+
+const stat = (added, removed) => `<span class="add">+${compact(Number(added))}</span><span class="del">−${compact(Number(removed))}</span>`;
+const middle = (name) => (name.length > 18 ? `<span class="head">${esc(name.slice(0, -8))}</span><span class="tail">${esc(name.slice(-8))}</span>` : `<span class="head">${esc(name)}</span>`);
+
 function changesHtml(change, open) {
   const n = change.files.length;
   const fold = `changes:${change.ended}`;
+  const tree = fileTree(change.files);
+  const hasDirs = tree.some((node) => node.children);
+  const allOpen = !open.has(`dirs-shut:${change.ended}`);
+  const rows = [];
+  const walk = (nodes, depth) => {
+    for (const node of nodes) {
+      const pad = `style="padding-left:${8 + depth * 14}px"`;
+      if (!node.children) {
+        rows.push(`<li data-ended="${change.ended}" data-file="${esc(node.path)}" title="${esc(node.path)}" ${pad}>${hasDirs || depth ? `<span class="indent"></span>` : ""}${icon("file", "file-icon")}<span class="path">${middle(node.name)}</span>${stat(node.added, node.removed)}</li>`);
+        continue;
+      }
+      const isOpen = open.has(`dir:${change.ended}:${node.path}`) ? !allOpen : allOpen;
+      rows.push(`<li class="dir" data-dir="${esc(node.path)}" data-ended="${change.ended}" ${pad} aria-expanded="${isOpen}">${icon("chevron-right", "chev")}${icon(isOpen ? "folder" : "folder-closed", "file-icon")}<span class="path">${esc(node.name)}</span>${stat(node.added, node.removed)}</li>`);
+      if (isOpen) walk(node.children, depth + 1);
+    }
+  };
+  walk(tree, 0);
   return `<details class="changes" data-fold="${fold}"${open.has(fold) ? " open" : ""}><summary>${icon("chevron-right", "chev")}<span class="count">${n} changed file${n === 1 ? "" : "s"}</span>
-      <span class="add">+${sum(change.files, "added")}</span><span class="del">−${sum(change.files, "removed")}</span><span class="show">Show files</span>
-      <button class="open-diff" data-ended="${change.ended}">${icon("file-diff")}Open diff</button></summary>
-    <ul>${change.files.map((f) => `<li data-ended="${change.ended}" data-file="${esc(f.path)}"><span class="path">${esc(f.path)}</span><span class="add">+${f.added}</span><span class="del">−${f.removed}</span></li>`).join("")}</ul></details>`;
+      ${stat(sum(change.files, "added"), sum(change.files, "removed"))}<span class="show">Show files</span><span class="spacer"></span>
+      ${hasDirs ? `<button type="button" class="xs all-dirs" data-all-dirs="${change.ended}" title="${allOpen ? "Collapse all folders" : "Expand all folders"}">${icon(allOpen ? "chevrons-down-up" : "chevrons-up-down")}</button>` : ""}
+      <button class="open-diff" data-ended="${change.ended}" title="Open the full diff">${icon("file-diff")}<span>Open diff</span></button></summary>
+    <ul>${rows.join("")}</ul></details>`;
 }
 
 function userHtml(user, t) {
@@ -496,6 +556,20 @@ threadView.addEventListener("click", (e) => {
   if (copy) return copied(copy, itemById(copy.dataset.copyItem)?.text ?? "");
   const zoom = e.target.closest("[data-zoom]");
   if (zoom) return zoomImage(zoom.querySelector("img").src);
+  const allDirs = e.target.closest("[data-all-dirs]");
+  if (allDirs) {
+    e.preventDefault();
+    const ended = allDirs.dataset.allDirs;
+    for (const k of [...t.open]) if (k.startsWith(`dir:${ended}:`)) t.open.delete(k);
+    if (!t.open.delete(`dirs-shut:${ended}`)) t.open.add(`dirs-shut:${ended}`);
+    return rerender();
+  }
+  const dir = e.target.closest("[data-dir]");
+  if (dir) {
+    const k = `dir:${dir.dataset.ended}:${dir.dataset.dir}`;
+    if (!t.open.delete(k)) t.open.add(k);
+    return rerender();
+  }
   const plan = e.target.closest("[data-plan]");
   if (plan) {
     const menu = plan.querySelector(".plan-menu");
@@ -506,7 +580,7 @@ threadView.addEventListener("click", (e) => {
     if (e.target.closest("[data-plan-download]")) downloadText(planFile(text), text);
     menu.hidden = true;
   }
-  const diff = e.target.closest(".open-diff, .changes li");
+  const diff = e.target.closest(".open-diff, .changes li[data-file]");
   if (diff) {
     e.preventDefault();
     ui.diffTurn = Number(diff.dataset.ended);

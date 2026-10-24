@@ -116,6 +116,23 @@ button.xs.copied { color: var(--g-success); }
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent); }
 .plan-foot { display: flex; justify-content: center; margin-top: 16px; }
 
+.changes > summary { position: sticky; top: 8px; z-index: 2; border-radius: 10px 10px 0 0;
+  background: linear-gradient(rgb(255 255 255 / 0.016), rgb(255 255 255 / 0.016)), #0a0a0a; }
+.changes:not([open]) > summary { border-radius: 10px; }
+.changes .all-dirs { display: none !important; }
+.changes[open] .all-dirs { display: inline-grid !important; }
+.changes li .indent { width: 14px; flex: none; }
+.changes .count, .changes .open-diff { white-space: nowrap; }
+@media (max-width: 600px) { .changes .open-diff span { display: none; } }
+.changes li .file-icon { width: 14px; height: 14px; color: rgb(129 129 129 / 0.75); flex: none; }
+.changes li .chev { width: 14px; height: 14px; color: rgb(129 129 129 / 0.7); transition: transform 0.12s; flex: none; }
+.changes li.dir[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.changes li.dir .path { font-size: 11px; color: rgb(129 129 129 / 0.9); }
+.changes li.dir:hover .path { color: rgb(245 245 245 / 0.9); }
+.changes li .path { display: flex; }
+.changes li .path .head { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.changes li .path .tail { flex: none; white-space: pre; }
+.changes li .add { margin-left: auto; }
 
 #thread .earlier { display: flex; align-items: center; gap: 12px; width: 100%; margin: 0 0 16px; color: var(--g-muted); font-size: 12px; }
 #thread .earlier::before, #thread .earlier::after { content: ""; flex: 1; height: 1px; background: rgb(25 25 25 / 0.7); background: rgb(255 255 255 / 0.06); }

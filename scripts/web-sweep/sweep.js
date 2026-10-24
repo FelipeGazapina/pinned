@@ -727,6 +727,28 @@ async function sweep(profileName) {
     await waitFor("the compacted note", async () => (await page.locator("#thread .note", { hasText: "The conversation was compacted." }).count()) > 0, 10000);
   });
 
+  await step("app view: changed files show as a folder tree with 1.2k counts", async () => {
+    await sendPrompt("tree");
+    await answered("Wrote the tree.");
+    await waitFor("the changed-files card", async () => (await page.locator("#thread .turn:last-of-type .changes").count()) > 0, 10000);
+    const card = lastTurn(".changes");
+    check(/\+1\.2k/.test(await card.locator("summary").textContent()), `the card reads ${await card.locator("summary").textContent()}`);
+    await press(card.locator("summary .show"));
+    await waitFor("the tree", async () => (await card.locator("li").count()) > 0);
+    const shifted = await page.evaluate(() => [...document.querySelectorAll("#expanded, #workspace")].map((el) => el.scrollLeft).join(","));
+    check(shifted === "0,0", `opening the card scrolled the view sideways: ${shifted}`);
+    const rows = async () => (await card.locator("li").allTextContents()).map((r) => r.replace(/[+−].*/, "").trim());
+    check((await rows()).join("|") === "docs|guide.md|src/app|lib.rs|main.rs|README.md", `rows: ${(await rows()).join("|")}`);
+    check((await card.locator("summary").evaluate((el) => getComputedStyle(el).position)) === "sticky", "the card's header doesn't stick");
+    await press(card.locator("[data-all-dirs]"));
+    await waitFor("folders to collapse", async () => (await rows()).join("|") === "docs|src/app|README.md");
+    await press(card.locator('li[data-dir="docs"]'));
+    await waitFor("docs to open", async () => (await rows()).join("|") === "docs|guide.md|src/app|README.md");
+    await press(card.locator("[data-all-dirs]"));
+    await waitFor("folders to expand", async () => (await card.locator("li[data-file]").count()) === 4);
+    return (await rows()).join(" | ");
+  });
+
   await step("app view: a long thread loads earlier turns, and a pill scrolls to the end", async () => {
     await sendPrompt("many");
     await answered("answer 45");

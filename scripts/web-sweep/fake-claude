@@ -128,6 +128,13 @@ function submit() {
     const paragraph = "Please read @src/app/main.rs and explain every line of it in detail, with examples.";
     said(Array.from({ length: 12 }, (_, i) => `${i + 1}. ${paragraph}`).join("\n"));
     wrote([{ type: "text", text: "Here is the walkthrough." }]);
+  } else if (line === "tree") {
+    for (const dir of ["src/app", "docs"]) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync("src/app/main.rs", "fn main() {}\n");
+    fs.writeFileSync("src/app/lib.rs", "pub fn lib() {}\n");
+    fs.writeFileSync("docs/guide.md", Array.from({ length: 1200 }, (_, i) => `line ${i}`).join("\n") + "\n");
+    fs.writeFileSync("README.md", "# beta\n");
+    wrote([{ type: "text", text: "Wrote the tree." }]);
   } else if (line === "many") {
     for (let i = 1; i <= 45; i++) {
       said(`question ${i}`);
