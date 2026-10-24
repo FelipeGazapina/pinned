@@ -3011,9 +3011,10 @@ async function sweep(profileName) {
     await rowMenu(rowSel(third));
     await menuPick("Archive thread");
     await waitFor("the archived thread gone", async () => (await rows()) === 2);
-    await sideSetting("days");
-    await waitFor("it under Archived threads", async () => /to archive/.test(await text("#side-settings .archived")));
-    await press(gui("#side-settings [data-unarchive]"));
+    await page.evaluate(() => document.body.dataset.page === "settings" || toggleSettings());
+    await tapOrClick('#settings-nav [data-page="archive"]');
+    await waitFor("it on the Archive page", async () => /to archive/.test(await text("#archive-settings .archived")));
+    await press(gui("#archive-settings [data-unarchive]"));
     await waitFor("Unarchive to bring it back", async () => (await rows()) === 3 && (await text("#chat-head .crumb .title")) === "to archive", 15000);
     await waitFor("its conversation", async () => (await page.locator("#thread .bubble", { hasText: "to archive" }).count()) > 0, 10000);
     await rowMenu("#thread-list .thread-row.active");
@@ -3021,8 +3022,9 @@ async function sweep(profileName) {
     await waitFor("the delete dialog", async () => (await text("#side-dialog h3")) === 'Delete thread "to archive"?');
     await press(gui("#side-dialog .destructive"));
     await waitFor("the deleted thread gone", async () => (await rows()) === 2);
-    await sideSetting("days");
-    check(/No archived threads/.test(await text("#side-settings")), "the archive isn't empty");
+    await page.evaluate(() => document.body.dataset.page === "settings" || toggleSettings());
+    await tapOrClick('#settings-nav [data-page="archive"]');
+    check(/No archived threads/.test(await text("#archive-settings")), "the archive isn't empty");
     await closeSettings();
     await openRow(alpha);
   });
@@ -3674,6 +3676,39 @@ async function sweep(profileName) {
       await other.close();
     }
     return full;
+  });
+
+  await step("follow: Archive is its own settings page, newest first, with when each thread was archived and created", async () => {
+    await page.evaluate(() => {
+      const base = { machine: active.machine, cwd: active.view.cwd, session: null, project: "alpha" };
+      archived.push({ ...base, name: "Older archive", at: nowS() - 7200, created: nowS() - 3 * 86400 }, { ...base, name: "Newer archive", at: nowS() - 120, created: nowS() - 7200 });
+      saveArchived();
+    });
+    if (touch) {
+      await page.evaluate(() => document.body.dataset.page === "settings" || toggleSettings());
+      await tapOrClick('#settings-nav [data-page="archive"]');
+    } else {
+      await page.keyboard.press("Meta+k");
+      await page.keyboard.type("archive");
+      await waitFor("the Archive settings item", async () => (await paletteItems())[0] === "Archive");
+      await page.keyboard.press("Enter");
+    }
+    await waitFor("the Archive page", async () => (await text("#settings-page h2")) === "Archive");
+    check(await page.locator('#settings-nav [data-page="archive"].active').isVisible(), "the nav doesn't mark Archive");
+    check((await page.locator("#archive-settings .archived label").allTextContents()).join() === "Newer archive,Older archive", "not newest first");
+    check((await text("#archive-settings .archived .meta")) === "Archived 2m ago · Created 2h ago", `meta: ${await text("#archive-settings .archived .meta")}`);
+    check(!(await page.locator("#side-settings .archived").count()), "General still lists archived threads");
+    for (const name of ["Newer archive", "Older archive"]) {
+      const row = page.locator("#archive-settings .archived", { hasText: name });
+      const box = await row.boundingBox();
+      await row.dispatchEvent("contextmenu", { clientX: box.x + 24, clientY: box.y + 12 });
+      await waitFor("the row's menu", async () => (await page.locator("#side-menu button .label").allTextContents()).join() === "Unarchive,Delete");
+      await press(page.locator("#side-menu button", { hasText: "Delete" }));
+    }
+    await waitFor("the empty archive", async () => /No archived threads/.test(await text("#archive-settings")));
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    await page.evaluate(() => document.body.dataset.page === "settings" && toggleSettings());
   });
 
   const openPulls = async () => {

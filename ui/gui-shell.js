@@ -124,6 +124,7 @@ const SETTINGS_PAGES = [
   ["connectors", "Workflows", "bot"],
   ["account", "Account", "user-round"],
   ["machines", "Machines", "monitor"],
+  ["archive", "Archive", "archive"],
 ];
 
 const normalize = (text) => String(text ?? "").normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
