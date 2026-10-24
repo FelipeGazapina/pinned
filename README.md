@@ -94,6 +94,22 @@ edits, Plan and Auto. The branch under the prompt (⌘⇧G) switches or creates 
 is between turns, and the Git button in the header asks Claude to commit, push or open a pull
 request, whichever the branch needs.
 
+⌘K opens the command palette: new threads, find in the thread, copy the thread ID, settings and
+the other actions, then your recent threads. Type to search actions, projects, settings and every
+thread; start with `>` for actions only. ⌘[ and ⌘] go back and forward through the threads and
+pages you visited. The buttons at the bottom of the sidebar open two pages in place of the thread:
+
+- **Pull requests.** The pull requests of every open project's GitHub repository, grouped into
+  yours, those awaiting your review, and others, with their checks, reviews, size and labels.
+  Filter by state and involvement, search GitHub, and sort by merge readiness or age. Click one to
+  open it in the side panel; hold Shift for Close, Merge, Ready for review or Reopen. It uses `gh`
+  on each machine.
+- **Usage** (⌘U). What Claude cost and how many tokens it used over the past day or 7, 30 or 90
+  days, read from Claude Code's transcripts on each machine and priced with LiteLLM's public
+  price list, by model and by day. Click a model for its details, or set your own price for one
+  under **Model prices**. **Limits** shows how much of the 5-hour and weekly limits is left. C, T
+  and L switch between cost, tokens and limits, and ⌘⇧1 to ⌘⇧4 pick the period.
+
 Other keys in the app view: ⌘N for a new thread (in the current project when only one is open,
 otherwise it asks where), ⌘⇧N for a new thread in the current project, ⌘⌥N for one in the home
 folder, ⌘⇧T to reopen the last thread you closed, ⌘⇧C to copy `claude --resume <session>`,

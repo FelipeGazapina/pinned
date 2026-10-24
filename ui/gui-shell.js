@@ -225,7 +225,7 @@ const PALETTE_VIEWS = {
         return [actions, { label: "Recent Threads", items: recent }].filter((g) => g.items.length);
       }
       const projects = paletteProjects().map((p) => ({
-        icon: "folder",
+        iconHtml: projectIcon(p.name),
         title: esc(p.name),
         sub: projectSub(p),
         terms: [p.name, p.path, p.machine === LOCAL ? "" : machineName(p.machine)],
@@ -244,7 +244,7 @@ const PALETTE_VIEWS = {
     groups(query) {
       const items = [
         { icon: "square-pen", title: "No project", terms: ["no project", "without"], run: () => newThreadWithoutProject() },
-        ...paletteProjects().map((p) => ({ icon: "folder", title: esc(p.name), sub: projectSub(p), terms: [p.name, p.path], run: () => openProjectIn(p.machine, p.path) })),
+        ...paletteProjects().map((p) => ({ iconHtml: projectIcon(p.name), title: esc(p.name), sub: projectSub(p), terms: [p.name, p.path], run: () => openProjectIn(p.machine, p.path) })),
       ];
       const [group] = filterGroups([{ label: "Projects", items }], query);
       group?.items.slice(0, 9).forEach((item, i) => (item.hint = chordLabel(String(i + 1))));
@@ -286,7 +286,7 @@ function renderPalette() {
     ? groups.map((g) => `<div class="group" role="group"><div class="label">${esc(g.label)}</div>${g.items.map((item) => {
         const i = n++;
         return `<div class="item${i === palette.hi ? " hi" : ""}" role="option" data-i="${i}"${item.disabled ? ` aria-disabled="true"` : ""}>
-          <span class="ic">${icon(item.icon)}</span>
+          <span class="ic">${item.iconHtml ?? icon(item.icon)}</span>
           <span class="text"><span class="title">${item.status ?? ""}<span class="name">${item.title}</span></span>${item.sub ? `<span class="sub">${esc(item.sub)}</span>` : ""}</span>
           ${item.time ? `<span class="time">${agoLong(item.time)}</span>` : ""}${item.hint ? `<span class="hint">${esc(item.hint)}</span>` : ""}${item.page ? icon("chevron-right", "chev") : ""}</div>`;
       }).join("")}</div>`).join("")
