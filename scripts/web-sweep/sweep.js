@@ -106,7 +106,12 @@ async function sweep(profileName) {
 
   let seen = [];
   page.on("console", (m) => ["error", "warning"].includes(m.type()) && seen.push(`console.${m.type()}: ${m.text()}`));
-  page.on("pageerror", (e) => seen.push(`pageerror: ${e.message}`));
+  page.on("pageerror", (e) => {
+    // The first frame in pinned's own code says where a page error came from, or the top frames when it has none.
+    const frames = (e.stack ?? "").split("\n").filter((l) => / at /.test(l)).map((l) => l.trim());
+    const at = frames.find((l) => !/\/vendor\//.test(l)) ?? frames.slice(0, 4).join(" < ");
+    seen.push(`pageerror: ${e.message}${at ? ` (${at})` : ""}`);
+  });
   page.on("requestfailed", (r) => seen.push(`requestfailed: ${r.method()} ${r.url()} ${r.failure()?.errorText}`));
   page.on("response", (r) => r.status() >= 400 && seen.push(`HTTP ${r.status()}: ${r.request().method()} ${r.url()}`));
 
@@ -1564,11 +1569,11 @@ async function sweep(profileName) {
     else await page.press("#panel-body [data-comment-text]", "Meta+Enter");
     await waitFor("the saved comment", () => page.locator("#panel-body .dcomment:not(.draft)").isVisible());
     check((await page.inputValue("#prompt")) === "", `the prompt holds ${JSON.stringify(await page.inputValue("#prompt"))}`);
-    check(/app\.js:L2 to L3 rename greet/.test(await text("#attachments .attachment")), `the composer's chip reads ${await text("#attachments")}`);
+    check(/app\.js:L2 to L3 rename greet/.test(await text("#attachments .file .name")), `the composer's chip reads ${await text("#attachments")}`);
     const sent = await page.evaluate(() => threadOf(active).attachments.map((a) => a.text).join("\n"));
     check(sent.startsWith('<review_comment filePath="app.js" lines="L2 to L3">\nrename greet\n```diff\n+function greet(name) {\n+  return "hi " + name;\n```\n</review_comment>'), `what goes out: ${JSON.stringify(sent)}`);
     await press(gui("#panel-body [data-comment-delete]"));
-    await waitFor("the comment to go", async () => !(await page.locator("#panel-body .dcomment").count()) && !(await page.locator("#attachments .attachment").count()));
+    await waitFor("the comment to go", async () => !(await page.locator("#panel-body .dcomment").count()) && !(await page.locator("#attachments .file").count()));
   });
 
   await step("app view: local servers come from the session's listening ports", async () => {

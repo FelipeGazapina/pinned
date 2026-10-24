@@ -46,9 +46,13 @@ function placeTabs() {
   save("tab-order", JSON.stringify(order.slice(-200)));
 }
 
+// Tabs closed here whose close the machine hasn't answered: a tabs event sent before it still lists them.
+const closing = new Set();
+
 function setTabs(machine, views, { forget = true } = {}) {
   const m = machines.get(machine);
   if (!m) return;
+  views = views.filter((v) => !closing.has(keyOf(machine, v.id)));
   m.tabs = views;
   const keep = new Set(views.map((v) => keyOf(machine, v.id)));
   for (const tab of tabs.filter((t) => t.machine === machine && !keep.has(t.key))) removeTab(tab, forget);
@@ -459,9 +463,10 @@ function closeTab(tab) {
   rememberClosed(tab);
   removeTab(tab, true);
   render();
+  closing.add(tab.key);
   // The app quits with its last tab while signed out, so the local close goes through its own command.
-  if (tab.machine === LOCAL) invoke("close_tab", { tab: tab.view.id });
-  else callOn(tab.machine, { cmd: "close_tab", tab: tab.view.id }).catch(console.warn);
+  const closed = tab.machine === LOCAL ? invoke("close_tab", { tab: tab.view.id }) : callOn(tab.machine, { cmd: "close_tab", tab: tab.view.id });
+  closed.catch(console.warn).finally(() => closing.delete(tab.key));
 }
 
 function removeTab(tab, forget) {

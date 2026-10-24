@@ -56,6 +56,9 @@ if (cmd === "pr" && sub === "view") {
     labels: [{ name: "documentation", color: "0075ca" }],
     reviewRequests: [{ __typename: "User", login: "monalisa" }],
   }));
+} else if (cmd === "pr" && sub === "list" && (flag("--base") || flag("--head"))) {
+  const above = flag("--base") === "sweep/notes-42" ? [{ number: 43, title: "Build on the notes", url: "https://github.com/example/alpha/pull/43", state: "OPEN", isDraft: false, headRefName: "sweep/more", baseRefName: "sweep/notes-42" }] : [];
+  process.stdout.write(JSON.stringify(above));
 } else if (cmd === "pr" && sub === "list") {
   process.stdout.write(JSON.stringify([41, 42].map((n) => ({ number: n, title: n === 41 ? "Draft the notes" : "Add notes", state: "OPEN", isDraft: n === 41, url: `https://github.com/example/alpha/pull/${n}`, headRefName: `sweep/notes-${n}` }))));
 } else if (cmd === "pr" && sub === "checkout") {
@@ -121,9 +124,6 @@ if (cmd === "pr" && sub === "view") {
   fs.writeFileSync(stateFile, sub === "close" ? "closed" : "open");
 } else if (cmd === "pr" && sub === "revert") {
   process.stdout.write(`https://github.com/example/alpha/pull/${number + 100}\n`);
-} else if (cmd === "pr" && sub === "list") {
-  const above = flag("--base") === "sweep/notes-42" ? [{ number: 43, title: "Build on the notes", url: "https://github.com/example/alpha/pull/43", state: "OPEN", isDraft: false, headRefName: "sweep/more", baseRefName: "sweep/notes-42" }] : [];
-  process.stdout.write(JSON.stringify(above));
 } else if (cmd === "api" && args.includes("graphql")) {
   const n = Number(field("number"));
   const threadFile = path.join(process.env.HOME, ".fake-gh-42.json");
