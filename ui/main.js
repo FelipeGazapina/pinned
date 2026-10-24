@@ -834,7 +834,7 @@ attachInput.onchange = () => {
 };
 
 TAURI?.webview.getCurrentWebview().onDragDropEvent(async ({ payload }) => {
-  if (payload.type !== "drop" || !active) return;
+  if (payload.type !== "drop" || !active || dialogOpen()) return;
   const tab = threadAt(payload.position) ?? active;
   if (tab.machine === LOCAL) return tab.view.running && pastePaths(tab, payload.paths);
   try {

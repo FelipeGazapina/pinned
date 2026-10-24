@@ -102,7 +102,7 @@ async function sweep(profileName) {
   const context = await browser.newContext({ ...profile, colorScheme: "dark", permissions: engine === "chromium" ? ["clipboard-read", "clipboard-write"] : [] });
   if (touch) await context.addInitScript(stubVisualViewport);
   await context.addInitScript(() => localStorage.getItem("mode") || localStorage.setItem("mode", "terminal"));
-  const page = await context.newPage();
+  let page = await context.newPage();
 
   let seen = [];
   page.on("console", (m) => ["error", "warning"].includes(m.type()) && seen.push(`console.${m.type()}: ${m.text()}`));
@@ -1246,6 +1246,277 @@ async function sweep(profileName) {
       }, panelWas);
       await page.emulateMedia({ colorScheme: "dark" });
       await resetTheme();
+    }
+  });
+
+  /** A paint as [luminance, alpha], through a canvas so oklab() and color-mix() results compare. */
+  const paintOf = (selector, prop) =>
+    page.evaluate(([selector, prop]) => {
+      const ctx = Object.assign(document.createElement("canvas"), { width: 1, height: 1 }).getContext("2d", { willReadFrequently: true });
+      ctx.fillStyle = getComputedStyle(document.querySelector(selector))[prop];
+      ctx.fillRect(0, 0, 1, 1);
+      const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+      const lin = (c) => ((c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+      return [+(0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)).toFixed(4), a];
+    }, [selector, prop]);
+
+  await step("app view: Settings' Contrast slider runs 50 to 200% by 5, sharpens or fades text and borders in both appearances, and resets, as appearanceContrast.ts", async () => {
+    await resetTheme();
+    await page.evaluate(() => toggleSettings());
+    await tapOrClick('#settings-nav [data-page="general"]');
+    const slider = page.locator("#appearance-contrast");
+    const shown = () => page.evaluate(() => [document.getElementById("appearance-contrast").value, document.querySelector("#contrast-row output").textContent, document.querySelector("[data-contrast-reset]").hidden, document.documentElement.dataset.contrast ?? "", localStorage.getItem("gui-contrast") ?? ""].join("|"));
+    const looks = async () => ({ side: (await paintOf("#sidebar", "color"))[0], meta: (await paintOf("#contrast-row .meta", "color"))[0], title: (await paintOf("#thread-list .thread-row .l2", "color"))[0], border: await paintOf("#theme-section .theme-card", "borderTopColor") });
+    try {
+      check((await text("#contrast-row label")) === "Contrast", `the row is ${await text("#contrast-row label")}`);
+      const range = await slider.evaluate((i) => [i.min, i.max, i.step].join("|"));
+      check(range === "50|200|5", `the range is ${range}`);
+      check((await shown()) === "100|100%|true||", `at rest: ${await shown()}`);
+      const base = await looks();
+      await slider.focus();
+      for (let i = 0; i < 12; i++) await page.keyboard.press("ArrowRight");
+      check((await shown()) === "160|160%|false|160|160", `after twelve steps up: ${await shown()}`);
+      const sharp = await looks();
+      check(sharp.side > base.side && sharp.meta > base.meta && sharp.title > base.title && sharp.border[1] > base.border[1], `160% in dark: ${JSON.stringify(sharp)} against ${JSON.stringify(base)}`);
+      await page.keyboard.press("Home");
+      check((await shown()) === "50|50%|false|50|50", `Home: ${await shown()}`);
+      const faint = await looks();
+      check(faint.side < base.side && faint.meta < base.meta && faint.title < base.title && faint.border[1] < base.border[1], `50% in dark: ${JSON.stringify(faint)} against ${JSON.stringify(base)}`);
+      await page.emulateMedia({ colorScheme: "light" });
+      await waitFor("the light appearance", async () => (await appearance()) === "light|");
+      await page.keyboard.press("End");
+      const lightSharp = await looks();
+      await press(page.locator("[data-contrast-reset]"));
+      check((await shown()) === "100|100%|true||", `after Reset: ${await shown()}`);
+      const lightBase = await looks();
+      check(lightSharp.side < lightBase.side && lightSharp.meta < lightBase.meta && lightSharp.title < lightBase.title && lightSharp.border[0] < lightBase.border[0], `200% in light: ${JSON.stringify(lightSharp)} against ${JSON.stringify(lightBase)}`);
+    } finally {
+      await page.emulateMedia({ colorScheme: "dark" });
+      await page.evaluate(() => setContrast(CONTRAST.standard));
+      await resetTheme();
+      await page.evaluate(() => settingsOpen() && toggleSettings());
+    }
+  });
+
+  await step("app view: a theme color's swatch opens T3's picker (plane, hue, HEX, RGB) that paints live, and its label spotlights every use with a count", async () => {
+    await resetTheme();
+    const sub = () => text("#theme-editor .te-title span");
+    const field = (role) => page.locator(`#theme-editor .te-value[data-role="${role}"]`);
+    try {
+      await themeKey("T", true);
+      await waitFor("the editor", () => page.locator("#theme-editor").isVisible());
+      const labels = await page.locator("#theme-editor .te-label").evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
+      check(labels.join(",") === "Show Background usage,Show Accent usage", `labels: ${labels.join(", ")}`);
+      await press(page.locator('#theme-editor [data-te-usage="canvas"]'));
+      const uses = await page.evaluate(() => [...document.querySelectorAll("[data-theme-inspector-match]")].map((e) => e.id));
+      check(uses.includes("expanded") && (await sub()) === `Background · ${uses.length} ${uses.length === 1 ? "use" : "uses"}`, `Background: ${await sub()}, marked ${uses.join(" ")}`);
+      check((await page.locator("#theme-inspector-spotlight mask rect").count()) > 1, "no spotlight cut out");
+      check((await page.locator('#theme-editor [data-te-usage="canvas"]').getAttribute("aria-pressed")) === "true", "the label isn't pressed");
+      await press(page.locator('#theme-editor [data-te-usage="canvas"]'));
+      check((await page.locator("#theme-inspector-spotlight, [data-theme-inspector-match]").count()) === 0 && (await sub()) === "Select a color below", `a second press leaves ${await sub()}`);
+      const before = await field("accent").inputValue();
+      await press(page.locator('#theme-editor [data-te-pick="accent"]'));
+      await waitFor("the picker", () => page.locator("#theme-color-picker").isVisible());
+      const head = [await text("#theme-color-picker .cp-title"), await text("#theme-color-picker .cp-sub"), await page.inputValue('#theme-color-picker [data-cp="hex"]'), await page.inputValue('#theme-color-picker [data-cp="rgb"]')];
+      const rgb = [1, 3, 5].map((i) => parseInt(before.slice(i, i + 2), 16)).join(", ");
+      check(head.join("|") === `Accent|Choose a color|${before.slice(0, 7)}|${rgb}`, `the picker opens as ${head.join(" | ")}`);
+      check(/^Accent · \d+ uses?$/.test(await sub()) && (await page.evaluate(() => document.querySelector("#send").hasAttribute("data-theme-inspector-match"))), `the swatch selects Accent: ${await sub()}`);
+      const plane = await rect("#theme-color-picker .cp-plane");
+      const corner = { x: plane.right - 2, y: plane.top + 2 };
+      if (touch) await page.touchscreen.tap(corner.x, corner.y);
+      else await page.mouse.click(corner.x, corner.y);
+      await sleep(100);
+      const vivid = await page.inputValue('#theme-color-picker [data-cp="hex"]');
+      const hsv = await page.evaluate(() => colorPicker.hsv);
+      check(hsv.s > 0.97 && hsv.v > 0.97 && vivid !== before.slice(0, 7), `the plane's corner gives ${vivid} (${JSON.stringify(hsv)})`);
+      check((await field("accent").inputValue()) === (await page.evaluate(() => colorHex(themeEditor.colors.dark.accent))) && (await field("accent").inputValue()) !== before, "the field didn't take the picked color");
+      await page.fill('#theme-color-picker [data-cp="rgb"]', "224, 86, 154");
+      check((await page.inputValue('#theme-color-picker [data-cp="hex"]')) === "#e0569a", `RGB 224, 86, 154 shows hex ${await page.inputValue('#theme-color-picker [data-cp="hex"]')}`);
+      const painted = await page.evaluate(() => [colorHex(themeEditor.colors.dark.accent), document.documentElement.dataset.themeId]);
+      check(painted[1] === "__preview" && painted[0] !== before, `the preview: ${painted.join(" ")}`);
+      await page.keyboard.press("Escape");
+      check((await page.locator("#theme-color-picker").count()) === 0 && (await page.locator("#theme-editor").isVisible()), "Escape didn't close just the picker");
+      await press(page.locator('#theme-editor [data-te="inspect"]'));
+      check((await page.locator("#theme-inspector-spotlight").count()) === 0, "inspecting kept the usage spotlight");
+    } finally {
+      await page.evaluate(() => themeEditor && closeThemeEditor());
+      await resetTheme();
+    }
+  });
+
+  /** An Open VSX extension served from page.route: a search hit, its details, manifest, checksum and
+   * a real .vsix (deflated zip) whose themes are a light and dark pair and a third that includes one. */
+  const openVsxFixture = () => {
+    const zlib = require("zlib");
+    const crypto = require("crypto");
+    const manifest = { publisher: "fixture", name: "aurora-themes", version: "1.0.0", license: "MIT", contributes: { themes: [{ label: "Aurora Light", uiTheme: "vs", path: "./themes/light.json" }, { label: "Aurora Dark", uiTheme: "vs-dark", path: "./themes/dark.json" }, { label: "Aurora Midnight", uiTheme: "vs-dark", path: "./themes/midnight.json" }] } };
+    const files = {
+      "extension/package.json": JSON.stringify(manifest),
+      "extension/themes/light.json": JSON.stringify({ colors: { "editor.background": "#fbf7f0", "editor.foreground": "#2b2b2b", "button.background": "#c2410c" } }),
+      "extension/themes/dark.json": JSON.stringify({ colors: { "editor.background": "#1a1b26", "editor.foreground": "#c0caf5", "focusBorder": "#7aa2f7", "sideBar.background": "#16161e" } }),
+      "extension/themes/midnight.json": '{\n  // darker\n  "include": "./dark.json",\n  "colors": { "editor.background": "#0b0c14", },\n}',
+    };
+    const locals = [];
+    const central = [];
+    let at = 0;
+    for (const [name, text] of Object.entries(files)) {
+      const raw = Buffer.from(text);
+      const data = zlib.deflateRawSync(raw);
+      const head = Buffer.alloc(30);
+      head.writeUInt32LE(0x04034b50, 0); head.writeUInt16LE(20, 4); head.writeUInt16LE(8, 8); head.writeUInt32LE(data.length, 18); head.writeUInt32LE(raw.length, 22); head.writeUInt16LE(name.length, 26);
+      const dir = Buffer.alloc(46);
+      dir.writeUInt32LE(0x02014b50, 0); dir.writeUInt16LE(20, 6); dir.writeUInt16LE(8, 10); dir.writeUInt32LE(data.length, 20); dir.writeUInt32LE(raw.length, 24); dir.writeUInt16LE(name.length, 28); dir.writeUInt32LE(at, 42);
+      locals.push(head, Buffer.from(name), data);
+      central.push(dir, Buffer.from(name));
+      at += 30 + name.length + data.length;
+    }
+    const dirBytes = Buffer.concat(central);
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(Object.keys(files).length, 8); end.writeUInt16LE(Object.keys(files).length, 10); end.writeUInt32LE(dirBytes.length, 12); end.writeUInt32LE(at, 16);
+    const vsix = Buffer.concat([...locals, dirBytes, end]);
+    const base = "https://open-vsx.org/api/fixture/aurora-themes/1.0.0/file";
+    const detail = { namespace: "fixture", name: "aurora-themes", displayName: "Aurora Themes", version: "1.0.0", license: "MIT", description: "Light, dark and midnight.", downloadCount: 1234, repository: "https://github.com/example/aurora-themes", files: { manifest: `${base}/package.json`, sha256: `${base}/fixture.aurora-themes-1.0.0.sha256`, download: `${base}/fixture.aurora-themes-1.0.0.vsix` } };
+    const closed = { ...detail, name: "closed-themes", displayName: "Closed Themes", license: "Proprietary" };
+    const routes = {
+      "/api/fixture/aurora-themes": JSON.stringify(detail),
+      "/api/fixture/closed-themes": JSON.stringify(closed),
+      "/api/fixture/aurora-themes/1.0.0/file/package.json": JSON.stringify(manifest),
+      "/api/fixture/aurora-themes/1.0.0/file/fixture.aurora-themes-1.0.0.sha256": `${crypto.createHash("sha256").update(vsix).digest("hex")}  fixture.aurora-themes-1.0.0.vsix\n`,
+      "/api/fixture/aurora-themes/1.0.0/file/fixture.aurora-themes-1.0.0.vsix": vsix,
+    };
+    const hits = [];
+    const handler = (route) => {
+      const url = new URL(route.request().url());
+      hits.push(`${route.request().method()} ${url.pathname}`);
+      const headers = { "access-control-allow-origin": "*" };
+      if (url.pathname === "/api/-/search") return route.fulfill({ headers, contentType: "application/json", body: JSON.stringify({ extensions: url.searchParams.get("query") === "aurora" ? [{ namespace: "fixture", name: "aurora-themes" }, { namespace: "fixture", name: "closed-themes" }] : [] }) });
+      const body = routes[url.pathname];
+      return body === undefined ? route.fulfill({ status: 404, headers, body: "" }) : route.fulfill({ headers: { ...headers, "content-length": String(body.length) }, body: route.request().method() === "HEAD" ? "" : body });
+    };
+    return { handler, hits };
+  };
+  /** WebKit sends a service-worker-controlled page's fetches past page.route, so a step that serves
+   * a site from the sweep runs in a second page of the same account with service workers blocked. */
+  const withRoutablePage = async (run) => {
+    const main = page;
+    const ctx = await browser.newContext({ ...profile, colorScheme: "dark", serviceWorkers: "block", storageState: await context.storageState() });
+    if (touch) await ctx.addInitScript(stubVisualViewport);
+    page = await ctx.newPage();
+    page.on("console", (m) => ["error", "warning"].includes(m.type()) && seen.push(`console.${m.type()}: ${m.text()}`));
+    page.on("pageerror", (e) => seen.push(`pageerror: ${e.message}`));
+    try {
+      await page.goto(HUB);
+      await page.waitForFunction(() => typeof hub !== "undefined" && document.body.dataset.mode === "gui", null, { timeout: 20000 });
+      return await run();
+    } finally {
+      page = main;
+      await ctx.close();
+    }
+  };
+  const openAddTheme = async () => {
+    if (!(await page.evaluate(() => settingsOpen()))) await page.evaluate(() => toggleSettings());
+    await tapOrClick('#settings-nav [data-page="general"]');
+    await press(page.locator('#theme-section [data-theme-action="import"]'));
+    await waitFor("the Add a theme dialog", async () => (await text("#shell-dialog .dialog-head h2")) === "Add a theme");
+  };
+
+  await step("app view: Add theme searches Open VSX, installs an extension as one collection card whose variants fan out per appearance, updates it, and removes picked variants", async () => {
+    await withRoutablePage(async () => {
+      await resetTheme();
+      const fixture = openVsxFixture();
+      await page.route("https://open-vsx.org/**", fixture.handler);
+      const collection = page.locator('#theme-section .theme-card.collection[data-theme-collection="open-vsx:fixture.aurora-themes"]');
+      try {
+        await openAddTheme();
+        check((await text("#theme-search-heading")) === "Search community themes", `the search reads ${await text("#theme-search-heading")}`);
+        const chips = await page.locator("#shell-dialog .ti-chip").allTextContents();
+        check(chips.join(",") === "Dracula,Catppuccin,Nord,Tokyo Night", `popular: ${chips.join(", ")}`);
+        await page.fill('#shell-dialog input[aria-label="Search Open VSX themes"]', "aurora");
+        await waitFor("the results", async () => (await page.locator("#shell-dialog .ti-card").count()) > 0, 10000);
+        const cards = await page.locator("#shell-dialog .ti-card h4").allTextContents();
+        check(cards.join(",") === "Aurora Themes", `results (the proprietary one left out): ${cards.join(", ")}`);
+        check(/^fixture · 1\.2K downloads$/i.test(await text("#shell-dialog .ti-card .muted")), `the byline is ${await text("#shell-dialog .ti-card .muted")}`);
+        check((await page.locator("#shell-dialog .ti-sort option").allTextContents()).join(",") === "Most downloaded,Best rated,Newest,Most relevant", "the Sort menu is missing");
+        check((await page.locator('#shell-dialog .ti-source[href="https://github.com/example/aurora-themes"] .github').count()) === 1, "no GitHub source link");
+        await press(page.locator('#shell-dialog [data-ti-install="fixture.aurora-themes"]'));
+        await waitFor("the install", async () => (await page.locator("#shell-dialog").isHidden()) && (await collection.count()) === 1, 10000);
+        check(/^2 themes added · Aurora, Aurora Midnight$/.test(await text("#panel-note span")), `the toast reads ${await text("#panel-note span")}`);
+        check(fixture.hits.some((h) => h.endsWith(".vsix") && h.startsWith("GET")) && fixture.hits.some((h) => h.endsWith(".sha256")), `fetched: ${fixture.hits.join(", ")}`);
+        const installed = await page.evaluate(() => customThemes.map((t) => `${t.label}:${modesOf(t).join("+")}:${colorHex(colorsFor(t, modesOf(t).at(-1)).canvas)}:${t.collection.label}`));
+        check(installed.join(" ") === "Aurora:light+dark:#1a1b26:Aurora Themes Aurora Midnight:dark:#0b0c14:Aurora Themes", `installed: ${installed.join(" ")}`);
+        check((await collection.locator(".name").textContent()) === "Aurora Themes", "the card isn't named for the extension");
+        const roots = await collection.locator(".pick.root").evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
+        check(roots.join(" | ") === "Use light variant, currently Aurora | Choose dark variant, 2 options, currently Aurora", `roots: ${roots.join(" | ")}`);
+        const dark = collection.locator('.variant-mode[data-mode="dark"]');
+        await dark.locator(".pick.root").focus();
+        await waitFor("the dark variants to fan out", async () => (await dark.locator(".variant-option").evaluateAll((els) => els.filter((e) => getComputedStyle(e).opacity === "1").length)) === 2);
+        await press(dark.locator('.variant-option[aria-label^="Use Aurora Midnight"]'));
+        const midnight = await page.evaluate(() => customThemes.find((t) => t.label === "Aurora Midnight").id);
+        await page.evaluate(() => setAppearanceMode("dark"));
+        check((await appearance()) === `dark|${midnight}`, `picking Midnight for dark gives ${await appearance()}`);
+        await press(collection.locator(".name"));
+        check((await page.evaluate(() => JSON.stringify(Object.values(themeState().halves).map((id) => themeById(id).label)))) === '["Aurora","Aurora"]', "the card's name didn't pick the first variants");
+        await openAddTheme();
+        await page.fill('#shell-dialog input[aria-label="Search Open VSX themes"]', "aurora");
+        await waitFor("the Update button", async () => (await page.locator('#shell-dialog [data-ti-install="fixture.aurora-themes"]').textContent().catch(() => "")) === "Update", 10000);
+        await press(page.locator('#shell-dialog [data-ti-install="fixture.aurora-themes"]'));
+        check((await text("#ti-update-title")) === "Update “Aurora Themes”?", `the confirm reads ${await text("#ti-update-title")}`);
+        await press(page.locator("#shell-dialog [data-ti-update]"));
+        await waitFor("the update", async () => /^2 themes updated/.test(await text("#panel-note span")), 10000);
+        await press(collection.locator('[data-theme-action="remove"]'));
+        check((await text("#shell-dialog .dialog-head h2")) === "Remove themes from “Aurora Themes”?", `the removal asks ${await text("#shell-dialog .dialog-head h2")}`);
+        const remove = page.locator("#shell-dialog [data-dialog-remove]");
+        check(await remove.isDisabled(), "Remove selected is enabled with nothing picked");
+        await press(page.locator('#shell-dialog .theme-remove-option', { hasText: "Aurora Midnight" }));
+        check((await remove.textContent()) === "Remove selected (1)", `the button reads ${await remove.textContent()}`);
+        await press(remove);
+        const left = await page.evaluate(() => customThemes.map((t) => t.label).join(","));
+        check(left === "Aurora" && (await collection.count()) === 0 && (await page.locator('#theme-section .theme-card[data-theme-card] .name', { hasText: /^Aurora$/ }).count()) === 1, `after removing Midnight: ${left}`);
+      } finally {
+        await page.unroute("https://open-vsx.org/**", fixture.handler);
+        await resetTheme();
+      }
+    });
+  });
+
+  await step("app view: Add theme's JSON box converts a pasted VS Code theme, offers Update or Keep both for one already installed, and pairs dropped Light and Dark files", async () => {
+    await resetTheme();
+    const owl = { name: "night-owl-test", type: "dark", colors: { "editor.background": "#011627", "editor.foreground": "#d6deeb", "button.background": "#7e57c2", "focusBorder": "#122d42", "sideBar.background": "#011627" }, tokenColors: [] };
+    try {
+      await openAddTheme();
+      const spill = await overflowing();
+      check(!spill.length, `the dialog is wider than the screen: ${spill.join(", ")}`);
+      await page.fill("#theme-json-editor", JSON.stringify(owl, null, 2));
+      check((await page.locator("#shell-dialog .ti-editor pre .key").count()) > 3, "the JSON isn't highlighted");
+      await press(page.locator("#shell-dialog [data-ti-add]"));
+      await waitFor("the pasted theme", async () => (await appearance()) === "dark|night-owl-test");
+      check((await text("#panel-note span")) === "Night Owl Test added · It’s now your dark theme.", `the toast reads ${await text("#panel-note span")}`);
+      const owlColors = await page.evaluate(() => ["canvas", "messageAction", "sidebar"].map((r) => colorHex(themeById("night-owl-test").colors[r])).join(" "));
+      check(owlColors === "#011627 #7e57c2 #011627", `converted: ${owlColors}`);
+      await openAddTheme();
+      await page.fill("#theme-json-editor", JSON.stringify(owl));
+      await press(page.locator("#shell-dialog [data-ti-add]"));
+      const conflict = (await page.locator("#shell-dialog .ti-conflict").innerText()).replace(/\s+/g, " ");
+      check(conflict === "Already installed Night Owl Test", `the conflict reads ${conflict}`);
+      await press(page.locator('#shell-dialog [data-ti-resolve="copy"]'));
+      await waitFor("the copy", async () => (await page.evaluate(() => customThemes.map((t) => t.label).join(","))) === "Night Owl Test,Night Owl Test (1)");
+      await openAddTheme();
+      await page.fill("#theme-json-editor", JSON.stringify({ version: 1, name: "Broken", appearance: "dark", colors: { canvas: "teal-ish" } }));
+      await press(page.locator("#shell-dialog [data-ti-add]"));
+      check(/^The color for "canvas" must be a literal CSS color/.test(await text("#shell-dialog .ti-error")), `the error reads ${await text("#shell-dialog .ti-error")}`);
+      const ayu = (type, bg) => ({ name: `Ayu ${type === "light" ? "Light" : "Dark"}`, type, colors: { "editor.background": bg, "editor.foreground": type === "light" ? "#5c6166" : "#bfbdb6" } });
+      await page.setInputFiles('#shell-dialog .ti-file input[type="file"]', [
+        { name: "ayu-light.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(ayu("light", "#fcfcfc"))) },
+        { name: "ayu-dark.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(ayu("dark", "#0d1017"))) },
+      ]);
+      await waitFor("the paired files", async () => (await page.locator("#shell-dialog").isHidden()) && (await page.evaluate(() => !!themeById("ayu"))));
+      const pair = await page.evaluate(() => `${modesOf(themeById("ayu")).join("+")} ${colorHex(colorsFor(themeById("ayu"), "light").canvas)} ${colorHex(colorsFor(themeById("ayu"), "dark").canvas)}`);
+      check(pair === "light+dark #fcfcfc #0d1017", `Ayu: ${pair}`);
+      check((await text("#panel-note span")) === "Ayu added · Ayu", `the toast reads ${await text("#panel-note span")}`);
+    } finally {
+      await page.evaluate(() => (themeImport ? endThemeImport() : dialogOpen() && closeDialog()));
+      await resetTheme();
+      await page.evaluate(() => settingsOpen() && toggleSettings());
     }
   });
 
