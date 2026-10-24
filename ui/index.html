@@ -58,6 +58,8 @@
           <button id="gui-minimize" class="icon" title="Shrink to pill"><i data-icon="minus"></i></button></span>
         </header>
         <div id="thread"></div>
+        <div id="thread-find" role="search" hidden><input type="search" placeholder="Find in thread" aria-label="Find in thread" maxlength="200" spellcheck="false" autocomplete="off"><span class="count" aria-live="polite"></span>
+          <button type="button" class="xs" data-find-step="-1" title="Previous match"></button><button type="button" class="xs" data-find-step="1" title="Next match"><i data-icon="chevron-down"></i></button><button type="button" class="xs" data-find-close title="Close find"><i data-icon="x"></i></button></div>
         <button type="button" id="scroll-end" hidden><i data-icon="chevron-down"></i>Scroll to end</button>
         <div id="image-zoom" hidden><img alt="Attached image"></div>
         <form id="composer" onsubmit="return false">

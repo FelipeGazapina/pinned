@@ -452,7 +452,7 @@ function renderThread() {
   if (pr) chip.querySelector("span").textContent = `#${pr.number}`;
 
   const working = turnLive(tab);
-  const limit = t.limit ?? TURNS_SHOWN;
+  const limit = finder.open ? Infinity : t.limit ?? TURNS_SHOWN;
   const key = JSON.stringify([tab.key, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit]);
   if (threadView.dataset.key === key) return renderComposer(tab);
   const turns = turnsOf(t.items);
@@ -472,6 +472,7 @@ function renderThread() {
     if (follow && rows.closest(".work.live")) rows.scrollTop = rows.scrollHeight;
   }
   if (stick) threadView.scrollTop = threadView.scrollHeight;
+  if (finder.open) findMatches();
   showScrollEnd();
   renderComposer(tab);
 }
@@ -659,3 +660,112 @@ scrollEnd.onclick = () => {
   scrollEnd.hidden = true;
 };
 
+/** ⌘F: find in the thread. Matches are painted with the CSS highlight API, so the markdown and copied
+ * text stay as they are; going to one opens the folds around it. */
+const finder = { open: false, ranges: [], index: 0, bar: document.getElementById("thread-find") };
+const findInput = finder.bar.querySelector("input");
+finder.bar.querySelector('[data-find-step="-1"]').innerHTML = icon("chevron-up");
+
+function findMatches() {
+  const query = findInput.value.trim().toLowerCase();
+  finder.ranges = [];
+  if (query) {
+    const walker = document.createTreeWalker(threadView, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement.closest(".code-head, .meta, svg, button.xs, .plan-menu, .live-tool") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = node.data.toLowerCase();
+      for (let i = text.indexOf(query); i >= 0; i = text.indexOf(query, i + query.length)) {
+        const range = new Range();
+        range.setStart(node, i);
+        range.setEnd(node, i + query.length);
+        finder.ranges.push(range);
+      }
+    }
+  }
+  finder.index = Math.min(finder.index, Math.max(0, finder.ranges.length - 1));
+  paintMatches();
+}
+
+function paintMatches() {
+  const n = finder.ranges.length;
+  const count = finder.bar.querySelector(".count");
+  count.textContent = findInput.value.trim() ? (n ? `${finder.index + 1}/${n}` : "0/0") : "";
+  count.classList.toggle("none", !!findInput.value.trim() && !n);
+  for (const b of finder.bar.querySelectorAll("[data-find-step]")) b.disabled = !n;
+  if (!window.CSS?.highlights || typeof Highlight === "undefined") return;
+  CSS.highlights.set("thread-find", new Highlight(...finder.ranges.filter((_, i) => i !== finder.index)));
+  CSS.highlights.set("thread-find-active", new Highlight(...(n ? [finder.ranges[finder.index]] : [])));
+}
+
+function goToMatch(step) {
+  const n = finder.ranges.length;
+  if (!n) return;
+  finder.index = (((finder.index + step) % n) + n) % n;
+  const t = threadOf(active);
+  const node = finder.ranges[finder.index].startContainer.parentElement;
+  let reopen = false;
+  for (let el = node.closest("details:not([open])"); el; el = el.parentElement?.closest("details:not([open])")) {
+    t.open.add(el.dataset.turn ?? el.dataset.fold);
+    reopen = true;
+  }
+  const clamp = node.closest(".clamped");
+  if (clamp) {
+    const toggle = clamp.parentElement.querySelector("[data-toggle]");
+    if (toggle) t.open.add(toggle.dataset.toggle);
+    reopen = true;
+  }
+  if (reopen) {
+    const at = finder.index;
+    rerender();
+    finder.index = at;
+    paintMatches();
+  }
+  const rect = finder.ranges[finder.index]?.getBoundingClientRect();
+  if (rect) {
+    const box = threadView.getBoundingClientRect();
+    if (rect.top < box.top + 48 || rect.bottom > box.bottom - composer.offsetHeight) threadView.scrollTop += rect.top - box.top - box.height / 3;
+  }
+  paintMatches();
+}
+
+function openFind() {
+  if (!active) return;
+  const reveal = !finder.open;
+  finder.open = true;
+  finder.bar.hidden = false;
+  if (reveal) rerender();
+  findInput.focus();
+  findInput.select();
+}
+
+function closeFind() {
+  finder.open = false;
+  finder.bar.hidden = true;
+  finder.ranges = [];
+  if (window.CSS?.highlights) {
+    CSS.highlights.delete("thread-find");
+    CSS.highlights.delete("thread-find-active");
+  }
+  rerender();
+}
+
+findInput.addEventListener("input", () => {
+  finder.index = 0;
+  findMatches();
+  if (finder.ranges.length) goToMatch(0);
+});
+findInput.addEventListener("keydown", (e) => {
+  if (e.isComposing) return;
+  if (e.key === "Enter") goToMatch(e.shiftKey ? -1 : 1);
+  else if (e.key === "Escape") closeFind();
+  else return;
+  e.preventDefault();
+  e.stopPropagation();
+});
+finder.bar.addEventListener("click", (e) => {
+  const step = e.target.closest("[data-find-step]");
+  if (step) goToMatch(Number(step.dataset.findStep));
+  if (e.target.closest("[data-find-close]")) closeFind();
+});
+onGuiKey("f", openFind);

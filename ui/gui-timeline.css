@@ -17,8 +17,8 @@
 /* A closed panel's content would spill past its empty column, and scrolling something into view would then shift the whole view. */
 body[data-mode="gui"][data-panel="closed"] #panel { overflow: hidden; border-width: 0; }
 
-#thread button.xs, #panel .codeblock button.xs { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 8px; color: var(--g-muted); }
-#thread button.xs:hover, #panel .codeblock button.xs:hover { background: var(--g-accent); color: var(--g-fg); }
+#thread button.xs, #thread-find button.xs, #panel .codeblock button.xs { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 8px; color: var(--g-muted); }
+#thread button.xs:hover, #thread-find button.xs:hover, #panel .codeblock button.xs:hover { background: var(--g-accent); color: var(--g-fg); }
 button.xs .i { width: 12px; height: 12px; }
 button.xs.copied { color: var(--g-success); }
 #thread .when { margin-left: auto; padding-left: 8px; font-size: 12px; color: var(--g-muted); font-variant-numeric: tabular-nums; white-space: nowrap; opacity: 0;
@@ -144,6 +144,17 @@ button.xs.copied { color: var(--g-success); }
 #scroll-end[hidden] { display: none; }
 #scroll-end .i { width: 14px; height: 14px; }
 
+#thread-find { position: absolute; top: calc(var(--topbar) + 12px); right: 12px; z-index: 40; width: min(280px, calc(100% - 24px)); display: flex; align-items: center;
+  gap: 2px; height: 36px; padding: 0 4px 0 10px; border-radius: 12px; background: rgb(17 17 17 / 0.92); backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px); border: 1px solid var(--g-border); box-shadow: 0 12px 28px -12px #000; }
+#thread-find[hidden] { display: none; }
+#thread-find input { flex: 1; min-width: 0; background: none; border: 0; outline: none; color: var(--g-fg); font: 13px -apple-system, system-ui, sans-serif; }
+#thread-find input::-webkit-search-cancel-button { display: none; }
+#thread-find .count { min-width: 40px; text-align: center; font-size: 12px; color: var(--g-muted); font-variant-numeric: tabular-nums; }
+#thread-find .count.none { color: var(--g-error); }
+#thread-find button:disabled { opacity: 0.4; pointer-events: none; }
+::highlight(thread-find) { color: #f8f8f8; background-color: #8a6a18; }
+::highlight(thread-find-active) { color: #1d1a12; background-color: #f1a92c; }
 
 #image-zoom { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 24px; background: rgb(0 0 0 / 0.8); cursor: zoom-out; }
 #image-zoom[hidden] { display: none; }
@@ -151,6 +162,6 @@ button.xs.copied { color: var(--g-success); }
 
 
 @media (pointer: coarse) {
-  #thread button.xs { min-width: 40px; min-height: 40px; }
+  #thread button.xs, #thread-find button.xs { min-width: 40px; min-height: 40px; }
   #scroll-end { height: 40px; padding: 0 14px; }
 }

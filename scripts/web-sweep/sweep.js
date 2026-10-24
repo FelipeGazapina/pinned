@@ -762,9 +762,28 @@ async function sweep(profileName) {
     await tapOrClick("#scroll-end");
     await waitFor("the end", () => page.evaluate(() => threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40), 3000);
     await waitFor("the pill to go", async () => !(await page.locator("#scroll-end").isVisible()), 2000);
+    return `${before} then ${await page.locator("#thread .turn").count()} turns`;
+  });
+
+  await step("app view: ⌘F finds text in the thread and opens the folds around it", async () => {
+    if (touch) await page.evaluate(() => openFind());
+    else await page.keyboard.press(`${(await page.evaluate(() => IS_MAC)) ? "Meta" : "Control"}+f`);
+    await waitFor("the find bar", () => page.locator("#thread-find").isVisible());
+    await page.fill("#thread-find input", "test result: ok");
+    await waitFor("one match", async () => (await text("#thread-find .count")) === "1/1");
+    check(await page.locator("#thread .tool[open] pre", { hasText: "test result: ok" }).isVisible(), "the match's tool output is still folded");
+    const painted = await page.evaluate(() => (window.CSS?.highlights ? CSS.highlights.get("thread-find-active")?.size : 1));
+    check(painted === 1, `${painted} active highlights`);
+    await page.fill("#thread-find input", "answer 4");
+    await waitFor("several matches", async () => /^1\/\d+$/.test(await text("#thread-find .count")));
+    const count = await text("#thread-find .count");
+    await page.press("#thread-find input", "Enter");
+    check((await text("#thread-find .count")).startsWith("2/"), `Enter moved to ${await text("#thread-find .count")}`);
+    await page.press("#thread-find input", "Escape");
+    await waitFor("the bar to close", async () => !(await page.locator("#thread-find").isVisible()));
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
     await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
-    return `${before} then ${await page.locator("#thread .turn").count()} turns`;
+    return count;
   });
 
   await step("app view: a prompt from the composer reaches the same session", async () => {
