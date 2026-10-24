@@ -650,6 +650,12 @@ async function sweep(profileName) {
     await sendPrompt("typed while claude asks");
     check(!/typed while claude asks/.test(await termText()), "the composer typed into claude's menu");
     await page.fill("#prompt", "");
+    const model = await text("#model-button");
+    await tapOrClick("#model-button");
+    await tapOrClick("#composer-menu button");
+    await sleep(300);
+    check(!/\/model/.test(await termText()), "picking a model typed into claude's menu");
+    check((await text("#model-button")) === model, `the model button changed to ${await text("#model-button")} with nothing sent`);
     await press(gui('#approval [data-option="2"]'));
     await waitTerm(/chose 2/);
     await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()), 1500);

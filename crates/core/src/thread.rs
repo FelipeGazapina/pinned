@@ -39,6 +39,9 @@ pub fn projects_dir(home: &Path) -> PathBuf {
 }
 
 pub fn find(projects: &Path, session: &str) -> Option<PathBuf> {
+    if session.is_empty() || !session.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return None;
+    }
     let name = format!("{session}.jsonl");
     std::fs::read_dir(projects).ok()?.flatten().map(|dir| dir.path().join(&name)).find(|path| path.is_file())
 }
@@ -332,6 +335,19 @@ mod tests {
                 Item::User { id: "g".into(), at: "".into(), text: "use the other folder".into(), images: 0 },
             ]
         );
+    }
+
+    #[test]
+    fn a_session_id_that_is_not_a_plain_name_finds_nothing() {
+        let projects = tempfile::tempdir().unwrap();
+        let dir = projects.path().join("proj");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("ab-12.jsonl"), "").unwrap();
+        std::fs::write(projects.path().join("outside.jsonl"), "").unwrap();
+        assert_eq!(find(projects.path(), "ab-12"), Some(dir.join("ab-12.jsonl")));
+        for session in ["../outside", "", "ab/../ab-12"] {
+            assert_eq!(find(projects.path(), session), None, "{session:?}");
+        }
     }
 
     #[test]

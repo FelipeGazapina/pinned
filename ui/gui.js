@@ -609,12 +609,18 @@ prompt.addEventListener("keydown", (e) => {
 document.getElementById("send").onclick = () => send();
 document.getElementById("stop").onclick = () => stop();
 
+// Typing into a menu would filter its options or pick one, so the prompt waits for an answer.
+function waitsOnMenu(tab) {
+  if (!tab.menu) return false;
+  approval.animate([{ transform: "translateX(-4px)" }, { transform: "translateX(4px)" }, { transform: "none" }], 180);
+  return true;
+}
+
 async function send() {
   const tab = active;
   if (!tab) return toggleProjects();
   if (!tab.view.running) return startTab(tab);
-  // Typing into a menu would filter its options or pick one, so the prompt waits for an answer.
-  if (tab.menu) return approval.animate([{ transform: "translateX(-4px)" }, { transform: "translateX(4px)" }, { transform: "none" }], 180);
+  if (waitsOnMenu(tab)) return;
   const text = prompt.value.trim();
   if (!text) return;
   prompt.value = "";
@@ -659,13 +665,19 @@ window.addEventListener("mousedown", (e) => {
   if (!composerMenu.hidden && !e.target.closest("#composer-menu, #model-button, #more-button")) composerMenu.hidden = true;
 }, true);
 
-const sendSlash = (text) => active && callOn(active.machine, { cmd: "prompt", tab: active.view.id, text }).then(() => setTimeout(() => fetchThread(active), 400));
-document.getElementById("model-button").onclick = (e) =>
+function sendSlash(tab, text) {
+  if (!tab || waitsOnMenu(tab)) return false;
+  callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text }).then(() => setTimeout(() => fetchThread(tab), 400));
+  return true;
+}
+document.getElementById("model-button").onclick = (e) => {
+  const tab = active;
   openMenu(e.currentTarget, MODELS_MENU.map(([id, label, hint]) => [label, hint, () => {
-    sendSlash(`/model ${id}`);
-    threadOf(active).picked = label;
-    renderComposer(active);
+    if (!sendSlash(tab, `/model ${id}`)) return;
+    threadOf(tab).picked = label;
+    renderComposer(tab);
   }]));
+};
 
 function modelName(tab) {
   const t = threadOf(tab);
@@ -679,7 +691,7 @@ document.getElementById("more-button").onclick = (e) => {
     tab.view.bypass
       ? ["Ask for permissions again", "Restarts claude and resumes this conversation", () => setBypass(tab, false)]
       : ["Full access", "Restarts claude with no permission checks and resumes", () => setBypass(tab, true), "danger"],
-    ["Compact the conversation", "/compact", () => sendSlash("/compact")],
+    ["Compact the conversation", "/compact", () => sendSlash(tab, "/compact")],
     ["Change folder…", "", () => document.getElementById("folder").click()],
     ["Show the terminal", "⌘J", () => toggleDrawer(true)],
     ["Close thread", "⌘W", () => closeTab(tab)],
