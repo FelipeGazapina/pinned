@@ -193,6 +193,8 @@ pub enum Call {
         #[serde(default = "pulls_limit")]
         limit: usize,
     },
+    /// `pulls::Stack` the pull request `number` of github.com's `repo` (`owner/name`) sits in, or `null`.
+    PullRequestStack { repo: String, number: u64 },
     /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since` on.
     /// `prices` are the user's, per model, which win over LiteLLM's list.
     TokenUsage {
@@ -321,6 +323,7 @@ impl Call {
                 | Call::Checkout { .. }
                 | Call::TokenUsage { .. }
                 | Call::PullRequests { .. }
+                | Call::PullRequestStack { .. }
                 | Call::PageMeta { .. }
                 | Call::Refs { .. }
                 | Call::ReadFile { .. }
@@ -626,6 +629,7 @@ mod tests {
             Call::SetBypass { tab: "tab-1".into(), on: true, cols: 120, rows: 32 },
             json!({ "cmd": "set_bypass", "tab": "tab-1", "on": true, "cols": 120, "rows": 32 }),
         );
+        round_trip(Call::PullRequestStack { repo: "o/r".into(), number: 7 }, json!({ "cmd": "pull_request_stack", "repo": "o/r", "number": 7 }));
         round_trip(Call::CreateProject { name: "My App".into() }, json!({ "cmd": "create_project", "name": "My App" }));
         round_trip(Call::PublishProject { path: "/p".into() }, json!({ "cmd": "publish_project", "path": "/p" }));
         round_trip(

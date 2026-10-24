@@ -3676,6 +3676,125 @@ async function sweep(profileName) {
     return full;
   });
 
+  const openPulls = async () => {
+    await showSidebar();
+    await tapOrClick('#sidebar footer [data-open-page="pull-requests"]');
+    await waitFor("the Pull requests page", () => page.locator("#page-view h1", { hasText: "Pull Requests" }).isVisible());
+  };
+  const leavePulls = async () => {
+    if (await page.evaluate(() => document.body.dataset.panel === "open")) await page.evaluate(() => closePanel());
+    if (touch) {
+      await pageSidebar();
+      await tapOrClick("#sidebar footer .back");
+    } else {
+      await page.evaluate(() => document.activeElement?.blur());
+      await page.keyboard.press("Escape");
+    }
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+  };
+  const prRow = (n) => `#page-view .pr-row[data-url$="/pull/${n}"]`;
+  await step("follow: Pull requests show a stacked pull request's stack, and a row matched only in its description says so", async () => {
+    await openPulls();
+    await waitFor("the rows", async () => (await prNumbers()).length === 3, 15000);
+    check((await text(`${prRow(42)} .stack`)) === "1/2" && (await text(`${prRow(41)} .stack`)) === "2/2", "the stack badges are wrong");
+    check((await page.getAttribute(`${prRow(42)} .stack`, "title")) === "View stack #7, layer 1 of 2", "the stack badge's tooltip is wrong");
+    check(!(await page.locator(`${prRow(43)} .stack`).count()), "#43 has a stack badge");
+    check((await page.locator(`${prRow(42)} [data-quick="merge"]`).getAttribute("title")) === "Open this pull request to merge its stack", "a stacked pull request merges from the list");
+    await press(page.locator(`${prRow(42)} .stack`));
+    await waitFor("the stack's layers", async () => (await page.locator("#side-menu button .label").allTextContents()).join() === "Stack #7,Draft the notes,Add notes,↳ main", 10000);
+    check((await text('#side-menu button:has-text("Draft the notes") .hint')) === "#41 · sweep/notes-41 · Draft", "the layer's line is wrong");
+    check((await page.locator('#side-menu button:has-text("Add notes") .i').count()) === 2, "the current layer isn't checked");
+    check(/stacks\?pull_request=42/.test(readLog("gh.log")) && /stacks\/7/.test(readLog("gh.log")), "gh never read the stack");
+    await press(page.locator('#side-menu button:has-text("Draft the notes")'));
+    await waitFor("#41 in the side panel", async () => /#41/.test(await text('#panel-tabs .ptab.active[data-panel="pr"]')), 10000);
+    await page.evaluate(() => closePanel());
+    await page.fill("#page-view .pr-search input", "flaky");
+    await waitFor("the description's match", async () => (await prNumbers()).join() === "#42");
+    check(await page.locator(`${prRow(42)} .matched`).isVisible(), "no matched in the description pill");
+    check((await page.getAttribute(`${prRow(42)} .matched`, "title")) === "Matched in the description", "the pill's tooltip is wrong");
+    await page.fill("#page-view .pr-search input", "add notes");
+    await waitFor("the title's match", async () => (await prNumbers()).join() === "#42");
+    await waitFor("no pill on a title match", async () => !(await page.locator(`${prRow(42)} .matched`).count()));
+    await page.fill("#page-view .pr-search input", "");
+    await waitFor("every row again", async () => (await prNumbers()).length === 3, 15000);
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    await leavePulls();
+  });
+
+  await step("follow: Pull requests: dragging Close across rows closes each open one, and Escape calls it off", async () => {
+    if (touch) return "touch: quick actions show while Shift is held";
+    fs.writeFileSync(path.join(HOME, "gh.log"), "");
+    await openPulls();
+    await page.fill("#page-view .pr-search input", "label:many");
+    await waitFor("the bulk rows", async () => (await prNumbers()).length >= 100, 15000);
+    const center = async (sel) => {
+      const box = await page.locator(sel).boundingBox();
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    };
+    await page.keyboard.down("Shift");
+    await page.hover(prRow(1000));
+    check((await page.getAttribute(`${prRow(1000)} [data-quick="close"]`, "title")) === "Close immediately, or drag across rows to close several", "Close doesn't say it drags");
+    const from = await center(`${prRow(1000)} [data-quick="close"]`);
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    const to = await center(prRow(1002));
+    await page.mouse.move(from.x, to.y, { steps: 8 });
+    await waitFor("three rows swept", async () => (await page.locator("#page-view .pr-row.sweeping").count()) === 3);
+    await page.mouse.up();
+    await waitFor("gh to close the three", () => [1000, 1001, 1002].every((n) => readLog("gh.log").includes(`pr close -- https://github.com/example/alpha/pull/${n}`)), 10000);
+    await waitFor("the notice", async () => (await text("#side-notice")) === "Closed 3 pull requests");
+    check(!/pull\/1003/.test(readLog("gh.log")), "a row past the sweep closed");
+    await page.hover(prRow(1004));
+    const again = await center(`${prRow(1004)} [data-quick="close"]`);
+    await page.mouse.move(again.x, again.y);
+    await page.mouse.down();
+    await page.mouse.move(again.x, (await center(prRow(1006))).y, { steps: 8 });
+    await waitFor("a second sweep", async () => (await page.locator("#page-view .pr-row.sweeping").count()) === 3);
+    await page.keyboard.press("Escape");
+    check(!(await page.locator("#page-view .pr-row.sweeping").count()), "Escape left rows swept");
+    await page.mouse.up();
+    await page.keyboard.up("Shift");
+    await sleep(500);
+    check(!/pull\/100[4-6]/.test(readLog("gh.log")), "a called-off sweep closed rows");
+    await page.fill("#page-view .pr-search input", "");
+    await waitFor("every row again", async () => (await prNumbers()).length === 3, 15000);
+    await leavePulls();
+    return "closed #1000-#1002";
+  });
+
+  await step("follow: Pull requests list an Enterprise Server's pull requests beside github.com's, with a Host filter", async () => {
+    const delta = path.join(HOME, "work", "delta");
+    if (!fs.existsSync(delta)) {
+      require("child_process").execFileSync("git", ["init", "-q", delta]);
+      require("child_process").execFileSync("git", ["-C", delta, "remote", "add", "origin", "https://ghe.example.test/example/delta.git"]);
+    }
+    fs.writeFileSync(path.join(HOME, "gh.log"), "");
+    const before = await page.evaluate(() => active.key);
+    await page.evaluate((p) => openTab(active.machine, p), delta);
+    await waitFor("a thread in delta", async () => (await page.evaluate(() => projectName(active))) === "delta", 10000);
+    try {
+      await openPulls();
+      await waitFor("both hosts' rows", async () => (await prNumbers()).length === 4, 15000);
+      check(/auth token --hostname ghe\.example\.test/.test(readLog("gh.log")) && /api graphql --hostname ghe\.example\.test /.test(readLog("gh.log")), "gh never searched the Enterprise Server");
+      check((await page.getAttribute(`${prRow(44)} .host`, "title")) === "ghe.example.test" && (await page.getAttribute(`${prRow(42)} .host`, "title")) === "github.com", "the rows don't name their hosts");
+      await tapOrClick('#page-view [data-pr="filters"]');
+      await press(page.locator("#side-menu button", { hasText: "Host" }));
+      check((await page.locator("#side-menu button .label").allTextContents()).join() === "All hosts,github.com,ghe.example.test", "the Host filter's choices");
+      await press(page.locator("#side-menu button", { hasText: "ghe.example.test" }));
+      await waitFor("ghe.example.test's only", async () => (await prNumbers()).join() === "#44");
+      check(/ghe\.example\.test/.test(await text('#page-view [data-pr="filters"]')), "the filter button doesn't show the host");
+      await tapOrClick('#page-view [data-pr="filters"]');
+      await press(page.locator("#side-menu button", { hasText: "Host" }));
+      await press(page.locator("#side-menu button", { hasText: "All hosts" }));
+      await waitFor("every host again", async () => (await prNumbers()).length === 4);
+      await leavePulls();
+    } finally {
+      await page.evaluate(() => closeTab(active));
+      await page.evaluate((k) => tabByKey(k) && activate(tabByKey(k)), before);
+    }
+  });
+
   await step("app view: back to the terminal", async () => {
     await showSidebar();
     await tapOrClick("#mode-terminal");

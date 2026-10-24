@@ -814,7 +814,7 @@ function openSideMenu(items, at) {
       const b = document.createElement("button");
       b.className = `${item.danger ? "danger" : ""}${item.children ? " sub" : ""}`;
       b.disabled = !!item.disabled;
-      b.innerHTML = `<span class="ic">${item.checked ? icon("check") : item.icon ? icon(item.icon) : ""}</span><span class="label">${esc(item.label)}</span>${item.hint ? `<span class="hint">${esc(item.hint)}</span>` : ""}${item.children ? icon("chevron-right") : ""}`;
+      b.innerHTML = `<span class="ic">${item.iconHtml ?? (item.checked ? icon("check") : item.icon ? icon(item.icon) : "")}</span><span class="label">${esc(item.label)}</span>${item.hint ? `<span class="hint">${esc(item.hint)}</span>` : ""}${item.trail ?? ""}${item.children ? icon("chevron-right") : ""}`;
       b.onclick = () => {
         if (item.children) return show(item.children(), item.label);
         closeSideMenu();

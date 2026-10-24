@@ -384,11 +384,15 @@ impl Machine {
                 json(branches::checkout(&cwd, &branch, create, self.launch.path_env.as_deref())?)
             }
             Call::PullRequests { paths, state, involvement, query, limit } => {
-                let mut repos: Vec<String> = paths.iter().filter_map(|p| git_remote(Path::new(p))).filter_map(|r| pulls::github_repo(&r)).collect();
-                repos.sort_by_key(|r| r.to_lowercase());
-                repos.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-                json(pulls::list(&home(), self.launch.path_env.as_deref(), repos, state, involvement, &query, limit)?)
+                let path = self.launch.path_env.as_deref();
+                let mut repos: Vec<pulls::Repo> = paths.iter().filter_map(|p| git_remote(Path::new(p))).filter_map(|r| pulls::remote_repo(&r)).collect();
+                repos.sort_by_key(|r| (r.host != pulls::GITHUB, r.host.clone(), r.name.to_lowercase()));
+                repos.dedup_by(|a, b| a.host == b.host && a.name.eq_ignore_ascii_case(&b.name));
+                let mut known = HashMap::new();
+                repos.retain(|r| *known.entry(r.host.clone()).or_insert_with(|| pulls::gh_knows(&home(), path, &r.host)));
+                json(pulls::list(&home(), path, repos, state, involvement, &query, limit)?)
             }
+            Call::PullRequestStack { repo, number } => json(pulls::stack(&home(), self.launch.path_env.as_deref(), &repo, number)?),
             Call::TokenUsage { since, prices } => json(usage::read(&thread::projects_dir(&home()), since, &usage::rates(self.rates_file.as_deref()), &prices)),
             Call::PageMeta { url } => json(panel::page_meta(&url)?),
             Call::Refs { tab } => json(panel::refs(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),

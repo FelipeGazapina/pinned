@@ -266,6 +266,25 @@ body[data-shift-held="true"] .pulls .pr-row:hover .quick { display: flex; }
 .pulls .quick button { height: 24px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--g-input); font-size: 12px; color: var(--g-fg); }
 .pulls .quick button:hover { background: var(--g-input); }
 .pulls .quick .danger { color: var(--g-error); }
+.pulls .quick button:disabled { opacity: 0.5; }
+.pulls .quick .spinner { margin-right: 4px; vertical-align: -2px; }
+.pulls[data-sweeping] * { pointer-events: none; }
+.pulls .pr-row.sweeping { background: rgb(var(--g-error-rgb) / 0.08); }
+.pulls .pr-row.sweeping .quick { display: flex; }
+.pulls .pr-row .stack { display: inline-flex; align-items: center; gap: 4px; color: var(--g-muted); font-size: 12px; cursor: pointer; }
+.pulls .pr-row .stack .i { width: 12px; height: 12px; }
+.pulls .pr-row .line2 { container-type: inline-size; }
+.pulls .pr-row .matched { display: inline-flex; align-items: center; gap: 4px; min-width: 24px; padding: 0 4px; border: 1px solid var(--g-border); border-radius: 999px; font-size: 10px; overflow: hidden; flex: none; }
+.pulls .pr-row .matched .i { width: 12px; height: 12px; flex: none; }
+.pulls .pr-row .matched .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+@container (max-width: 20rem) { .pulls .pr-row .matched .wide { display: none; } }
+.pulls .pr-row .host { display: inline-flex; flex: none; }
+.pulls .pr-row .host .i { width: 12px; height: 12px; }
+.pr-tone { display: inline-flex; }
+.pr-tone[data-state="open"] { color: var(--g-pr-open); }
+.pr-tone[data-state="draft"] { color: var(--g-pr-draft); }
+.pr-tone[data-state="closed"] { color: var(--g-pr-closed); }
+.pr-tone[data-state="merged"] { color: var(--g-pr-merged); }
 .pulls .ghost-row { flex-direction: column; cursor: default; }
 .pulls .ghost-row .ghost:first-child { width: 60%; height: 16px; }
 .pulls .ghost-row .ghost:last-child { width: 40%; height: 12px; }
