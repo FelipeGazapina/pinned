@@ -399,7 +399,95 @@ impl Machine {
                 Ok(Value::Null)
             }
             Call::DeviceHub { embed } => json(self.device_hub.url(embed.as_deref(), self.launch.path_env.as_deref())?),
+            Call::Subagent { tab, tool } => {
+                let file = thread::subagent(&self.transcript(&tab)?, &tool).ok_or("Claude Code kept no transcript of this subagent")?;
+                json(thread::read_subagent(&file).map_err(|e| format!("could not read the subagent's transcript: {e}"))?)
+            }
+            Call::Rewind { tab, before, files, cols, rows } => json(self.rewind(&tab, &before, files, cols, rows)?),
+            Call::Fork { tab, through } => json(self.fork(&tab, &through)?),
+            Call::SaveFile { tab, path, text } => json(save_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, &text)?),
         }
+    }
+
+    /// The tab's transcript file.
+    fn transcript(&self, tab: &str) -> Result<PathBuf, String> {
+        let session = self.tab(tab, |t| t.claude_session.clone())?.ok_or("this thread has no conversation yet")?;
+        thread::find(&thread::projects_dir(&home()), &session).ok_or_else(|| "Claude Code's transcript of this conversation is gone".into())
+    }
+
+    /// Copies the tab's conversation up to `cut` under a new session id, with the turns pinned saved for
+    /// it, so the copy keeps its changed files. Returns the new id, or none when the copy holds no message.
+    fn fork_session(&self, tab: &str, cut: thread::Cut) -> Result<Option<String>, String> {
+        let (cwd, session) = self.tab(tab, |t| (t.cwd.clone(), t.claude_session.clone()))?;
+        let session = session.ok_or("this thread has no conversation yet")?;
+        let new = new_session_id(&session);
+        let transcript = self.transcript(tab)?;
+        let forked = thread::fork(&transcript, cut, &new)?;
+        if !forked.said {
+            let _ = std::fs::remove_file(transcript.with_file_name(format!("{new}.jsonl")));
+            return Ok(None);
+        }
+        let at = chrono::DateTime::parse_from_rfc3339(&forked.until).map_or(u64::MAX, |t| t.timestamp().max(0) as u64 + 1);
+        if let Some(dir) = &self.history_dir {
+            let file = history::file_for(dir, &history::project_of(&cwd));
+            let mut kept: Vec<history::Turn> = history::load(&file).into_iter().filter(|t| t.session == session && t.ended < at).collect();
+            kept.reverse();
+            for turn in kept {
+                history::append(&file, &history::Turn { session: new.clone(), ..turn });
+            }
+        }
+        Ok(Some(new))
+    }
+
+    /// Restarts the tab's claude on its conversation as it was before the prompt `before`, as T3 Code's
+    /// "Edit from here" reverts to that prompt's checkpoint, and returns the tab's folder.
+    pub fn rewind(&self, tab: &str, before: &str, files: bool, cols: u16, rows: u16) -> Result<String, String> {
+        let (cwd, working) = self.tab(tab, |t| (t.cwd.clone(), t.status == Some(AgentStatus::Working)))?;
+        if working {
+            return Err("claude is working. Rewind when the turn ends.".into());
+        }
+        let checkpoint = if files { self.checkpoint(tab, &cwd, before)? } else { None };
+        let new = self.fork_session(tab, thread::Cut::Before(before))?;
+        if let Some(tree) = checkpoint {
+            history::restore(&cwd, &tree)?;
+        }
+        // Before the first prompt there is nothing to resume, so claude starts a new conversation.
+        self.tab(tab, |t| {
+            t.launch = new.iter().flat_map(|id| ["--resume".to_owned(), id.clone()]).collect();
+            t.claude_session = new.clone();
+        })?;
+        self.start_claude(tab, cols, rows)
+    }
+
+    /// The working tree as the prompt `before` began, from the first turn pinned saved from then on;
+    /// none when claude has changed nothing since.
+    fn checkpoint(&self, tab: &str, cwd: &Path, before: &str) -> Result<Option<String>, String> {
+        let session = self.tab(tab, |t| t.claude_session.clone())?.unwrap_or_default();
+        let text = std::fs::read_to_string(self.transcript(tab)?).unwrap_or_default();
+        let at = text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v["uuid"] == before)
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v["timestamp"].as_str()?).ok())
+            .ok_or("that prompt is not in this conversation")?
+            .timestamp()
+            .max(0) as u64;
+        let Some(dir) = &self.history_dir else { return Ok(None) };
+        let turns = history::load(&history::file_for(dir, &history::project_of(cwd)));
+        match turns.into_iter().rfind(|t| t.session == session && t.ended >= at) {
+            None => Ok(None),
+            Some(turn) => turn.before.map(Some).ok_or_else(|| "pinned saved no checkpoint for that turn, so its files can't be put back".into()),
+        }
+    }
+
+    /// Opens a tab beside `tab` whose claude resumes its conversation through the message `through`, as
+    /// T3 Code's "Fork from this response" does, and returns the new tab's id.
+    pub fn fork(&self, tab: &str, through: &str) -> Result<TabId, String> {
+        let (cwd, env, bypass) = self.tab(tab, |t| (t.cwd.clone(), t.env.clone(), t.bypass))?;
+        let new = self.fork_session(tab, thread::Cut::Through(through))?.ok_or("there is nothing to fork before this message")?;
+        let id = self.add_tab(cwd, vec!["--resume".into(), new.clone()], env, bypass, Some(new));
+        self.emit_tabs();
+        Ok(id)
     }
 
     /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
@@ -863,7 +951,7 @@ impl Machine {
                     return;
                 };
                 let (Some(dir), Some((files, patch, truncated))) = (&self.history_dir, history::diff(&cwd, &before, &tree)) else { return };
-                let turn = history::Turn { session, title: event.title.clone(), prompt, ended: unix_now(), files, patch, truncated, tree: Some(tree) };
+                let turn = history::Turn { session, title: event.title.clone(), prompt, ended: unix_now(), files, patch, truncated, tree: Some(tree), before: Some(before) };
                 history::append(&history::file_for(dir, &history::project_of(&cwd)), &turn);
             }
             NeedsInput => {}
@@ -1066,6 +1154,33 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// A version 4 UUID for a forked conversation, as Claude Code names sessions, drawn from the clock and
+/// the session it came from.
+fn new_session_id(from: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let mut b: [u8; 16] = Sha256::digest(format!("{from}:{nanos}:{}", std::process::id()))[..16].try_into().unwrap();
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+}
+
+/// Writes `text` to `path` inside `cwd`, creating its folders, and returns the path relative to `cwd`.
+/// A path that climbs out of the folder is refused.
+fn save_file(cwd: &Path, path: &str, text: &str) -> Result<String, String> {
+    let relative = Path::new(path.trim());
+    if path.trim().is_empty() || relative.is_absolute() || relative.components().any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) {
+        return Err("enter a path inside the workspace".into());
+    }
+    let target = cwd.join(relative);
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    }
+    std::fs::write(&target, text).map_err(|e| format!("could not write {path}: {e}"))?;
+    Ok(relative.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1145,6 +1260,23 @@ mod tests {
             cursor: "1792400090.000000".into(),
             mentioned: vec![],
         }
+    }
+
+    #[test]
+    fn a_saved_file_stays_inside_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(save_file(dir.path(), " plans/ship.md ", "# Ship\n").unwrap(), "plans/ship.md");
+        assert_eq!(std::fs::read_to_string(dir.path().join("plans/ship.md")).unwrap(), "# Ship\n");
+        for bad in ["", "../out.md", "/etc/x", "a/../../b"] {
+            assert!(save_file(dir.path(), bad, "x").is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn forked_sessions_get_fresh_version_4_ids() {
+        let (a, b) = (new_session_id("s"), new_session_id("s"));
+        assert_ne!(a, b);
+        assert!(a.len() == 36 && a.as_bytes()[14] == b'4' && "89ab".contains(a.as_bytes()[19] as char), "{a}");
     }
 
     #[test]

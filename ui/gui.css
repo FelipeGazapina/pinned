@@ -22,7 +22,8 @@
   --g-input-tone: #a5b4fc;
   --g-add: #5ecc71;
   --g-del: #ff6762;
-  --g-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --g-mono: "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  --g-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --sidebar-width: 256px;
   --panel-width: 540px;
   --lane: 736px;
@@ -167,8 +168,6 @@ body[data-shell="web"] #gui-minimize { display: none !important; }
 .turn .bubble { max-width: 80%; padding: 12px; border-radius: 16px; background: #141414; overflow-wrap: anywhere;
   line-height: 1.625; color: var(--g-fg); }
 .turn .bubble .images { display: block; margin-top: 6px; font-size: 12px; color: var(--g-muted); }
-.turn .note { margin: 0 0 12px; padding: 8px 12px; border-radius: 10px; background: var(--g-accent); color: var(--g-muted); font-size: 12px;
-  white-space: pre-wrap; font-family: var(--g-mono); }
 .work { margin-bottom: 8px; }
 .work > summary { list-style: none; display: flex; align-items: center; gap: 4px; padding: 4px 2px 8px; border-bottom: 1px solid rgb(255 255 255 / 0.036);
   color: var(--g-muted); cursor: pointer; font-variant-numeric: tabular-nums; line-height: 1.625; }
@@ -248,7 +247,7 @@ body[data-shell="web"] #gui-minimize { display: none !important; }
 #composer .box { position: relative; border-radius: 22px; background: rgb(17 17 17 / 0.8); backdrop-filter: blur(12px) saturate(1.14);
   -webkit-backdrop-filter: blur(12px) saturate(1.14); box-shadow: 0 0 0 1px rgb(255 255 255 / 0.05), inset 0 1px rgb(255 255 255 / 0.03); }
 #prompt { display: block; width: 100%; min-height: 78px; max-height: 208px; resize: none; border: 0; outline: none; background: none;
-  color: var(--g-fg); font: 14px/1.625 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; padding: 16px 16px 8px; }
+  color: var(--g-fg); font: 14px/1.625 var(--g-sans); padding: 16px 16px 8px; }
 #prompt::placeholder { color: rgb(129 129 129 / 0.75); }
 #composer .tools { display: flex; align-items: center; gap: 4px; padding: 0 12px 12px 16px; }
 #composer .pick { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; margin-left: -10px; border-radius: 8px;
@@ -325,7 +324,7 @@ body[data-panel-max="true"] #panel-resize { display: none; }
   background: var(--g-bg); overflow-x: auto; scrollbar-width: none; }
 .diff-bar > * { flex: none; }
 .diff-bar .scope { position: relative; display: flex; align-items: center; height: 24px; border-radius: 8px; background: var(--g-input); }
-.diff-bar .scope select { appearance: none; border: 0; background: none; color: var(--g-fg); font: 12px -apple-system, system-ui, sans-serif;
+.diff-bar .scope select { appearance: none; border: 0; background: none; color: var(--g-fg); font: 12px var(--g-sans);
   padding: 0 24px 0 9px; height: 24px; cursor: pointer; outline: none; }
 .diff-bar .scope select option { background: #111; }
 .diff-bar .scope .i { position: absolute; right: 6px; width: 14px; height: 14px; opacity: 0.7; pointer-events: none; }
@@ -336,7 +335,7 @@ body[data-panel-max="true"] #panel-resize { display: none; }
 .diff-bar .seg .icon { width: 30px; height: 24px; }
 .diff { font: 13px/20px var(--g-mono); padding-bottom: 24px; }
 .file > header { position: sticky; top: 40px; z-index: 5; display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px 0 8px;
-  background: var(--g-raised); font: 12px/1 -apple-system, system-ui, sans-serif; cursor: pointer; border-top: 1px solid var(--g-border); }
+  background: var(--g-raised); font: 12px/1 var(--g-sans); cursor: pointer; border-top: 1px solid var(--g-border); }
 .file > header:hover { box-shadow: inset 3px 0 rgb(245 245 245 / 0.24); }
 .file > header .fold { width: 16px; height: 16px; color: #69b1ff; }
 .file[data-status="added"] > header .fold { color: var(--g-add); }
@@ -352,7 +351,7 @@ body[data-panel-max="true"] #panel-resize { display: none; }
 .file > header .add { color: var(--g-add); font-size: 11px; }
 .hunks { padding-bottom: 8px; }
 .gap { height: 24px; line-height: 24px; padding-left: 12px; background: rgb(255 255 255 / 0.03); color: rgb(245 245 245 / 0.5);
-  font: 11px/24px -apple-system, system-ui, sans-serif; }
+  font: 11px/24px var(--g-sans); }
 .dl { display: grid; grid-template-columns: minmax(5ch, max-content) 1fr; min-width: 0; }
 .dl .no { position: relative; padding: 0 1ch 0 2ch; text-align: right; color: #a6a6a6; user-select: none; font-variant-numeric: tabular-nums; }
 .dl .code { padding: 0 12px 0 8px; white-space: pre; color: #e5e5e5; }
@@ -381,7 +380,7 @@ body[data-panel-max="true"] #panel-resize { display: none; }
 .url-bar .icon { width: 24px !important; height: 24px !important; }
 .url-bar .icon .i { width: 14px; height: 14px; }
 .url-bar input { flex: 1; min-width: 0; height: 28px; border: 0; border-radius: 8px; padding: 0 10px; background: rgb(255 255 255 / 0.04);
-  color: var(--g-fg); font: 12px -apple-system, system-ui, sans-serif; outline: none; }
+  color: var(--g-fg); font: 12px var(--g-sans); outline: none; }
 .url-bar input:focus { box-shadow: 0 0 0 1px rgb(52 107 241 / 0.5); }
 .browser iframe { flex: 1; width: 100%; border: 0; background: #fff; }
 .browser-empty { flex: 1; overflow: auto; padding: 48px 24px; text-align: center; color: var(--g-muted); font-size: 12px; }
@@ -441,10 +440,12 @@ body[data-panel-max="true"] #panel-resize { display: none; }
   body[data-mode="gui"] #sidebar { position: absolute; top: 0; bottom: 0; left: 0; z-index: 35; width: calc(100vw - 12px); max-width: 360px;
     box-shadow: 16px 0 40px -8px #000; }
   body[data-mode="gui"][data-sidebar="open"] #workspace::before { content: ""; position: absolute; inset: 0; z-index: 34; background: rgb(0 0 0 / 0.5); }
-  #thread { padding: 12px 12px 200px; }
-  #composer { padding: 6px 12px calc(12px + env(safe-area-inset-bottom)); }
   #chat-head { padding: 0 8px 0 12px; }
   #chat-head .crumb .project, #chat-head .crumb .sep { display: none; }
+}
+@media (max-width: 639px) {
+  #thread { padding: 12px 12px 200px; }
+  #composer { padding: 6px 12px calc(12px + env(safe-area-inset-bottom)); }
 }
 @media (max-width: 760px) {
   body[data-mode="gui"] #panel { width: min(88vw, 24rem); }

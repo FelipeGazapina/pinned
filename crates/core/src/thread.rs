@@ -23,6 +23,8 @@ pub enum Item {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         pictures: Vec<String>,
     },
+    /// A prompt typed while claude worked, which it took into the turn in progress.
+    Steer { id: String, at: String, text: String },
     /// Markdown the assistant wrote.
     Text { id: String, at: String, text: String },
     /// The assistant's reasoning before it answered or used a tool.
@@ -59,6 +61,72 @@ pub fn find(projects: &Path, session: &str) -> Option<PathBuf> {
     }
     let name = format!("{session}.jsonl");
     std::fs::read_dir(projects).ok()?.flatten().map(|dir| dir.path().join(&name)).find(|path| path.is_file())
+}
+
+/// The transcript of the subagent the `Agent` tool call `tool` started, which Claude Code keeps beside
+/// the session's own as `<session>/subagents/agent-<id>.jsonl`, named in the `.meta.json` next to it.
+pub fn subagent(session_file: &Path, tool: &str) -> Option<PathBuf> {
+    let dir = session_file.with_extension("").join("subagents");
+    std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|meta| {
+        meta.to_string_lossy().ends_with(".meta.json")
+            && std::fs::read(meta).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).is_some_and(|m| m["toolUseId"] == tool)
+    })
+    .map(|meta| PathBuf::from(meta.to_string_lossy().replace(".meta.json", ".jsonl")))
+    .filter(|file| file.is_file())
+}
+
+/// A subagent's whole conversation. Every line of its transcript is a sidechain, which a session's own
+/// transcript shows nothing of.
+pub fn read_subagent(file: &Path) -> std::io::Result<Vec<Item>> {
+    let mut bytes = vec![];
+    std::fs::File::open(file)?.take(READ_LIMIT).read_to_end(&mut bytes)?;
+    Ok(bytes.split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice::<Value>(line).ok()).flat_map(|mut v| {
+        v["isSidechain"] = Value::Bool(false);
+        items_of(&v)
+    }).collect())
+}
+
+/// Where a copy of a transcript stops: before the line with this uuid, or after it.
+pub enum Cut<'a> {
+    Before(&'a str),
+    Through(&'a str),
+}
+
+/// What `fork` copied.
+pub struct Forked {
+    /// The timestamp of the first line left out, empty when it took them all.
+    pub until: String,
+    /// The copy holds a message, so claude has a conversation to resume.
+    pub said: bool,
+}
+
+/// Copies `file`'s lines up to `cut` into a sibling transcript for `session`, as `claude --fork-session`
+/// would. Claude then resumes the copy as its own conversation, leaving the original whole.
+pub fn fork(file: &Path, cut: Cut, session: &str) -> Result<Forked, String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("could not read the transcript: {e}"))?;
+    let (uuid, keep) = match cut {
+        Cut::Before(uuid) => (uuid, false),
+        Cut::Through(uuid) => (uuid, true),
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let parsed = |line: &str| serde_json::from_str::<Value>(line).ok();
+    let at = lines.iter().position(|l| parsed(l).is_some_and(|v| v["uuid"] == uuid)).ok_or("that message is not in this conversation")?;
+    let end = at + usize::from(keep);
+    let timestamp = lines[end..].iter().find_map(|l| parsed(l).and_then(|v| v["timestamp"].as_str().map(str::to_owned))).unwrap_or_default();
+    let copied: Vec<String> = lines[..end]
+        .iter()
+        .map(|line| match parsed(line) {
+            Some(mut v) if v.get("sessionId").is_some() => {
+                v["sessionId"] = Value::String(session.to_owned());
+                v.to_string()
+            }
+            _ => line.to_string(),
+        })
+        .collect();
+    let said = lines[..end].iter().filter_map(|l| parsed(l)).any(|v| matches!(v["type"].as_str(), Some("user" | "assistant")));
+    let target = file.with_file_name(format!("{session}.jsonl"));
+    std::fs::write(&target, copied.iter().map(|l| format!("{l}\n")).collect::<String>()).map_err(|e| format!("could not write the copy: {e}"))?;
+    Ok(Forked { until: timestamp, said })
 }
 
 /// The items in the whole lines of `file` from byte `from` on.
@@ -112,6 +180,12 @@ fn items_of(line: &Value) -> Vec<Item> {
         },
         Some("user") if line["isCompactSummary"].as_bool() == Some(true) => vec![Item::Note { id, at, text: "The conversation was compacted.".into() }],
         Some("user") => user_items(&line["message"]["content"], id, at),
+        Some("attachment") if line["attachment"]["type"] == "queued_command" && line["attachment"]["origin"]["kind"] == "human" => {
+            match spoken(line["attachment"]["prompt"].as_str().unwrap_or_default()) {
+                Some(Spoken::Prompt(text)) => vec![Item::Steer { id, at, text }],
+                _ => vec![],
+            }
+        }
         Some("attachment") if line["attachment"]["type"] == "model" => match line["attachment"]["identity"]["marketingName"].as_str() {
             Some(name) => vec![Item::Model { name: name.to_owned() }],
             None => vec![],
@@ -323,6 +397,59 @@ mod tests {
                 Item::Model { name: "Haiku 5.5".into() },
             ]
         );
+    }
+
+    #[test]
+    fn a_subagent_reads_from_the_transcript_its_meta_file_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("s1.jsonl");
+        std::fs::write(&session, "").unwrap();
+        let agents = dir.path().join("s1/subagents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("agent-a1.meta.json"), r#"{"agentType":"general-purpose","description":"Look around","toolUseId":"toolu_1"}"#).unwrap();
+        std::fs::write(
+            agents.join("agent-a1.jsonl"),
+            [
+                r#"{"type":"user","isSidechain":true,"agentId":"a1","uuid":"u","timestamp":"t","message":{"role":"user","content":"Find the bug"}}"#,
+                r#"{"type":"assistant","isSidechain":true,"agentId":"a1","uuid":"a","timestamp":"t","message":{"content":[{"type":"text","text":"Found it."}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let file = subagent(&session, "toolu_1").unwrap();
+        assert_eq!(subagent(&session, "toolu_2"), None);
+        assert_eq!(
+            read_subagent(&file).unwrap(),
+            vec![
+                Item::User { id: "u".into(), at: "t".into(), text: "Find the bug".into(), images: 0, pictures: vec![] },
+                Item::Text { id: "a:0".into(), at: "t".into(), text: "Found it.".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fork_copies_the_lines_before_or_through_a_message_under_the_new_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("old.jsonl");
+        std::fs::write(&file, "{\"uuid\":\"a\",\"sessionId\":\"old\",\"timestamp\":\"t1\"}\nnot json\n{\"uuid\":\"b\",\"sessionId\":\"old\",\"timestamp\":\"t2\"}\n{\"uuid\":\"c\",\"sessionId\":\"old\"}\n").unwrap();
+        let forked = fork(&file, Cut::Before("b"), "new").unwrap();
+        assert_eq!((forked.until.as_str(), forked.said), ("t2", false));
+        assert_eq!(std::fs::read_to_string(dir.path().join("new.jsonl")).unwrap(), "{\"sessionId\":\"new\",\"timestamp\":\"t1\",\"uuid\":\"a\"}\nnot json\n");
+        assert_eq!(fork(&file, Cut::Through("b"), "new2").unwrap().until, "");
+        assert_eq!(std::fs::read_to_string(dir.path().join("new2.jsonl")).unwrap().lines().count(), 3);
+        assert!(fork(&file, Cut::Before("zzz"), "x").is_err());
+        assert!(std::fs::read_to_string(&file).unwrap().contains("\"c\""));
+    }
+
+    #[test]
+    fn a_prompt_queued_mid_turn_is_a_steer_and_automated_ones_are_hidden() {
+        let items = page(&[
+            r#"{"type":"attachment","uuid":"q1","timestamp":"t1","attachment":{"type":"queued_command","prompt":"use the other file","commandMode":"prompt","origin":{"kind":"human"},"humanTurn":true}}"#,
+            r#"{"type":"attachment","uuid":"q2","timestamp":"t2","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>b1</task-id>\n</task-notification>","commandMode":"task-notification","origin":{"kind":"task-notification"}}}"#,
+            r#"{"type":"attachment","uuid":"q3","timestamp":"t3","isMeta":true,"attachment":{"type":"queued_command","prompt":"[Subagent hand-back] done","commandMode":"prompt","origin":{"kind":"peer"}}}"#,
+        ])
+        .items;
+        assert_eq!(items, vec![Item::Steer { id: "q1".into(), at: "t1".into(), text: "use the other file".into() }]);
     }
 
     #[test]

@@ -614,7 +614,9 @@ async function sweep(profileName) {
     const thought = await text("#thread .turn:last-of-type .group .tool.thought .label");
     check(thought === "Planning the read", `the thinking row reads ${thought}`);
     check((await text("#thread .codeblock .lang")) === "rust", `the code block's language is ${await text("#thread .codeblock .lang")}`);
-    check((await page.locator("#thread .codeblock .hljs-keyword").count()) >= 2, "the code is not highlighted");
+    // Shiki with T3 Code's Pierre Dark theme colors `let` as storage, which highlight.js can't tell from a keyword.
+    const colors = () => page.evaluate(() => [...document.querySelectorAll("#thread .codeblock code.language-rust span")].filter((s) => ["fn", "main", "let", "42"].includes(s.textContent)).map((s) => `${s.textContent}=${s.style.color}`).join(" "));
+    await waitFor("Shiki's colors", async () => (await colors()) === "fn=rgb(255, 103, 141) main=rgb(157, 106, 251) let=rgb(213, 104, 234) 42=rgb(104, 205, 242)", 8000).catch(async () => check(false, `the code is colored ${await colors()}`));
     const block = gui("#thread .codeblock");
     check((await block.getAttribute("data-wrap")) === "true", "code doesn't wrap by default");
     await press(block.locator("[data-code-wrap]"));
@@ -757,16 +759,16 @@ async function sweep(profileName) {
     await sendPrompt("many");
     await answered("answer 45");
     await waitFor("the earlier button", () => gui("#thread [data-earlier]").isVisible());
-    const before = await page.locator("#thread .turn").count();
+    const before = Number(await page.evaluate(() => threadView.querySelector(".lane").dataset.turns));
     check(before === 40, `${before} turns shown`);
     await page.evaluate(() => (threadView.scrollTop = 0));
     await waitFor("the scroll pill", () => page.locator("#scroll-end").isVisible(), 2000);
     await press(gui("#thread [data-earlier]"));
-    await waitFor("more turns", async () => (await page.locator("#thread .turn").count()) > before);
+    await waitFor("more turns", async () => Number(await page.evaluate(() => threadView.querySelector(".lane").dataset.turns)) > before);
     await tapOrClick("#scroll-end");
     await waitFor("the end", () => page.evaluate(() => threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40), 3000);
     await waitFor("the pill to go", async () => !(await page.locator("#scroll-end").isVisible()), 2000);
-    return `${before} then ${await page.locator("#thread .turn").count()} turns`;
+    return `${before} then ${await page.evaluate(() => threadView.querySelector(".lane").dataset.turns)} turns`;
   });
 
   await step("app view: ⌘F finds text in the thread and opens the folds around it", async () => {
@@ -803,11 +805,14 @@ async function sweep(profileName) {
     await page.selectOption("#look-chat-width", "wide");
     await page.selectOption("#look-diff-colors", "blue-orange");
     await page.selectOption("#look-code-size", "16px");
-    const looks = await page.evaluate(() => [
-      getComputedStyle(document.documentElement).getPropertyValue("--lane").trim(),
-      getComputedStyle(document.querySelector("#thread .changes .add")).color,
-      getComputedStyle(document.querySelector("#thread .md pre code")).fontSize,
-    ]);
+    // The thread draws only the turns on screen, so a count and a code block are drawn here to read their styles.
+    const looks = await page.evaluate(() => {
+      const probe = Object.assign(document.createElement("div"), { innerHTML: '<span class="add">+1</span><div class="md"><pre><code>x</code></pre></div>' });
+      threadView.append(probe);
+      const read = [getComputedStyle(document.documentElement).getPropertyValue("--lane").trim(), getComputedStyle(probe.querySelector(".add")).color, getComputedStyle(probe.querySelector("code")).fontSize];
+      probe.remove();
+      return read;
+    });
     check(looks.join("|") === "1152px|rgb(81, 162, 255)|16px", `looks: ${looks.join(" | ")}`);
     await page.selectOption("#look-chat-width", "full");
     check((await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--lane").trim())) === "100%", "Full doesn't widen the lane");
@@ -818,6 +823,289 @@ async function sweep(profileName) {
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
     await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
     return looks.join(" | ");
+  });
+
+  // Read in one go: the thread re-renders as it polls, and a style read from a replaced node is empty in WebKit.
+  const styleOf = (selector, prop) => page.evaluate(([sel, p]) => [...document.querySelectorAll(sel)].filter((el) => el.checkVisibility()).map((el) => getComputedStyle(el)[p]).at(-1) ?? "", [selector, prop]);
+  const toThread = async (name) => {
+    await page.evaluate((n) => activate(tabs.find((t) => t.view.cwd.endsWith(`/${n}`))), name);
+    await waitFor(name, async () => new RegExp(name).test(await text("#chat-head .crumb")));
+  };
+
+  await step("app view: the live row counts whole seconds, shows the thought over the tool, and Thinking between tools", async () => {
+    await toThread("beta");
+    await sendPrompt("think");
+    await waitFor("the live thought", async () => (await text("#thread .live-tool .thought-line .label")) === "Weighing the options", 6000);
+    check((await text("#thread .live-tool .line:not(.thought-line) .label")) === "Thinking", `the live row reads ${await text("#thread .live-tool")}`);
+    check(/^\d+s$/.test(await text("#thread .work.live .ticker")), `the clock reads ${await text("#thread .work.live .ticker")}`);
+    await answered("Done thinking.");
+    await sendPrompt("build");
+    await waitFor("the running command", async () => (await text("#thread .live-tool .label")) === "Running npm", 6000);
+    check((await page.locator("#thread .live-tool").count()) === 1, "a Thinking row shows while a tool runs");
+    await answered("Built.");
+  });
+
+  await step("app view: a steer continues the turn under its own fold, and pinned's own prompts say who sent them", async () => {
+    await sendPrompt("steer");
+    await answered("Checked both.");
+    const steer = lastTurn(".user");
+    check((await steer.locator(".steer").textContent()).trim() === "Steer", "the steer has no marker");
+    check((await steer.locator(".bubble").textContent()).trim() === "also check the docs", `the steer reads ${await steer.locator(".bubble").textContent()}`);
+    const folds = await page.locator("#thread .turn .work > summary .label").allTextContents();
+    check(/^Continued( for |$)/.test(folds.at(-1)) && /^Worked( for |$)/.test(folds.at(-2)), `the folds read ${folds.slice(-2).join(" | ")}`);
+    await sendPrompt("Continue from where you left off.");
+    await answered("echo: Continue from where you left off.");
+    check((await text("#thread .turn:last-of-type .sent-by")) === "Sent by Pinned", "pinned's own prompt isn't marked");
+    check((await page.locator("#thread .turn:nth-last-of-type(2) .sent-by").count()) === 0, "a typed prompt is marked as pinned's");
+    await page.evaluate(() => {
+      active.view.connector = "sweep-workflow";
+      rerender();
+      threadView.scrollTop = 0;
+    });
+    const auto = gui("#thread .user.automation");
+    await waitFor("the automation fold", () => auto.isVisible());
+    check((await auto.locator(".who").textContent()) === "Automation" && (await auto.locator(".summary").textContent()) === "rich", `the fold reads ${await auto.textContent()}`);
+    await press(auto.locator(".fold-head"));
+    await waitFor("the automation's text", () => gui("#thread .user.automation .body").isVisible());
+    check(await gui("#thread .user.automation [data-open-automation]").isVisible(), "no Open automation link");
+    await page.evaluate(() => {
+      delete active.view.connector;
+      rerender();
+      threadView.scrollTop = threadView.scrollHeight;
+    });
+  });
+
+  await step("app view: notices are check rows, and a usage limit reads in the warning tone", async () => {
+    await sendPrompt("notice");
+    await waitFor("the notice", async () => (await page.locator("#thread .tool.info", { hasText: "Set model to Haiku 5.5" }).count()) > 0);
+    const notice = gui("#thread .turn:last-of-type .tool.info");
+    check((await notice.locator(".row .label").textContent()) === "Set model to Haiku 5.5", `the notice reads ${await notice.textContent()}`);
+    check((await notice.locator(".message").textContent()) === "for this session", "the notice's rest is missing");
+    check((await notice.locator(".row svg").first().innerHTML()).includes("M20 6 9 17l-5-5"), "the notice has no Check icon");
+    await sendPrompt("limit");
+    await waitFor("the limit row", async () => (await page.locator("#thread .error-row.limit").count()) > 0);
+    const limit = gui("#thread .error-row.limit");
+    const color = await styleOf("#thread .error-row.limit .label", "color");
+    check(color === "rgb(254, 154, 0)", `the limit reads in ${color}`);
+    check((await limit.locator(".label").textContent()).startsWith("You've hit your limit"), `the limit reads ${await limit.textContent()}`);
+    await sendPrompt("oops");
+    await waitFor("the API error", async () => (await page.locator("#thread .turn:last-of-type .error-row", { hasText: "API Error: 529" }).count()) === 1);
+    const error = await styleOf("#thread .turn:last-of-type .error-row .label", "color");
+    check(error === "rgb(251, 65, 74)", `an error reads in ${error}`);
+  });
+
+  await step("app view: wide tables cut cells until expanded and copy as Markdown, a shell block runs in the terminal, links show favicons", async () => {
+    await sendPrompt("table");
+    await answered("Open the app");
+    const table = gui("#thread .turn:last-of-type .md-table");
+    await waitFor("the clipped mark", async () => (await table.getAttribute("data-clipped")) === "true");
+    check((await table.getAttribute("data-expanded")) === "true", "a table doesn't wrap by default");
+    await press(table.locator("[data-table-expand]"));
+    check((await table.getAttribute("data-expanded")) === "false", "the toggle didn't collapse the cells");
+    const cell = await table.locator("td").nth(1).evaluate((el) => [el.scrollWidth > el.clientWidth, Math.round(el.getBoundingClientRect().height)]);
+    check(cell[0] && cell[1] < 40, `a collapsed cell is cut ${cell[0]}, ${cell[1]}px tall`);
+    await press(table.locator("[data-table-menu]"));
+    await press(table.locator('[data-copy-table="markdown"]'));
+    const copied = await clipboard();
+    check(copied === null || copied.startsWith("| Name | Notes |\n| --- | --- |\n| alpha | a long note"), `the clipboard holds ${copied?.slice(0, 60)}`);
+    const answer = gui("#thread .turn:last-of-type .answer");
+    check((await answer.locator('a[href^="https://example.com"] img.favicon').getAttribute("src")) === "https://www.google.com/s2/favicons?domain=example.com&sz=32", "the docs link has no favicon");
+    check((await answer.locator('a[href^="http://localhost"] img').count()) === 0 && (await answer.locator('a[href^="http://localhost"] svg').count()) === 1, "a local link asks Google for its favicon");
+    await press(answer.locator("[data-run-code]"));
+    await answered("echo: ! echo ran-from-thread");
+    check((await text("#thread .turn:last-of-type .bubble")) === "! echo ran-from-thread", `the run reads ${await text("#thread .turn:last-of-type .bubble")}`);
+    check(await page.evaluate(() => document.body.dataset.drawer === "open"), "the terminal drawer didn't open");
+    await page.evaluate(() => toggleDrawer(false));
+    check((await page.locator("#thread .codeblock .lang", { hasText: "rust" }).count()) === 0 || (await page.locator("#thread .codeblock:has(.lang:text-is('rust')) [data-run-code]").count()) === 0, "a Rust block offers to run");
+    await page.evaluate(() => wantLang("cobol"));
+    await waitFor("a rare language's grammar", () => page.evaluate(() => shikiLangs.has("cobol")), 8000);
+  });
+
+  await step("app view: typography sets the interface, prompt, code and terminal fonts, and the lane keeps 48px gutters down to 640px", async () => {
+    await page.evaluate(() => toggleSettings());
+    await tapOrClick('#settings-nav [data-page="general"]');
+    const resetTypography = () =>
+      page.evaluate(() => {
+        for (const name of ["ui-size", "prompt-size", "terminal-size", "sans-font", "mono-font", "advanced", "smoothing", "word-wrap"]) save(`look-${name}`, "");
+        applyLooks();
+        if (settingsOpen()) toggleSettings();
+      });
+    try {
+      check((await page.locator("#look-terminal-size").count()) === 0, "the terminal row shows without Advanced");
+      check((await text('label[for="look-mono-font"]')) === "Monospace font", `the simple code row reads ${await text('label[for="look-mono-font"]')}`);
+      await page.selectOption("#look-ui-size", "18px");
+      const zoom = await page.evaluate(() => getComputedStyle(document.getElementById("chat")).zoom);
+      check(zoom === "1.125", `the interface zooms ${zoom}`);
+      await page.fill("#look-sans-font", "Georgia");
+      await page.press("#look-sans-font", "Enter");
+      await page.fill("#look-mono-font", "Courier New");
+      await page.press("#look-mono-font", "Enter");
+      const fonts = await page.evaluate(() => [getComputedStyle(document.body).fontFamily, getComputedStyle(document.querySelector("#thread .md pre code")).fontFamily, active.term.options.fontFamily, active.term.options.fontSize].map((f) => String(f).split(",")[0].replaceAll('"', "")));
+      check(fonts.join("|") === "Georgia|Courier New|Courier New|12", `fonts: ${fonts.join(" | ")}`);
+      await page.locator("#look-advanced").setChecked(true);
+      await waitFor("the advanced rows", () => page.locator("#look-terminal-size").isVisible());
+      await page.selectOption("#look-terminal-size", "15px");
+      await page.selectOption("#look-prompt-size", "18px");
+      const sizes = await page.evaluate(() => [active.term.options.fontSize, getComputedStyle(prompt).fontSize, active.term.options.fontFamily.split(",")[0]]);
+      check(sizes.join("|") === "15|18px|ui-monospace", `advanced sizes: ${sizes.join(" | ")}`);
+      if (await page.evaluate(() => IS_MAC)) {
+        check((await page.evaluate(() => getComputedStyle(document.body).webkitFontSmoothing)) === "antialiased" || engine !== "chromium", "text isn't antialiased by default");
+        await page.locator("#look-smoothing").setChecked(false);
+        check((await page.evaluate(() => document.documentElement.dataset.smoothing)) === "false", "smoothing didn't turn off");
+        await page.locator("#look-smoothing").setChecked(true);
+      }
+      await page.locator("#look-word-wrap").setChecked(false);
+      check((await page.evaluate(() => document.querySelector("#thread .codeblock:has([data-run-code])")?.dataset.wrap)) === "false", "Word wrap off still wraps code");
+      await page.locator("#look-word-wrap").setChecked(true);
+      for (const id of ["#look-terminal-size", "#look-prompt-size", "#look-ui-size"]) await page.selectOption(id, "");
+      for (const id of ["#look-sans-font", "#look-mono-font"]) {
+        await page.fill(id, "");
+        await page.press(id, "Enter");
+      }
+      await page.locator("#look-advanced").setChecked(false);
+      const reset = await page.evaluate(() => [getComputedStyle(document.getElementById("chat")).zoom, active.term.options.fontSize, getComputedStyle(document.body).fontFamily.split(",")[0]]);
+      check(reset.join("|") === "1|12|-apple-system", `after a reset: ${reset.join(" | ")}`);
+    } finally {
+      await resetTypography();
+    }
+    if (!touch) {
+      const gutter = async (width) => {
+        await page.setViewportSize({ width, height: 800 });
+        await sleep(150);
+        return page.evaluate(() => getComputedStyle(threadView).paddingLeft);
+      };
+      const gutters = [await gutter(700), await gutter(600)];
+      await page.setViewportSize(profile.viewport);
+      check(gutters.join("|") === "48px|12px", `gutters at 700 and 600px: ${gutters.join(" | ")}`);
+    }
+  });
+
+  await step("app view: changed files and mentions carry T3 Code's file-type icons", async () => {
+    await sendPrompt("icons");
+    await answered("Wrote two files.");
+    await waitFor("the changed-files card", async () => (await page.locator("#thread .turn:last-of-type .changes").count()) > 0, 10000);
+    const card = lastTurn(".changes");
+    await press(card.locator("summary .show"));
+    await waitFor("the tree", async () => (await card.locator("li[data-file]").count()) === 2);
+    const icons = await card.locator("li[data-file]").evaluateAll((rows) => rows.map((r) => `${r.dataset.file}=${r.querySelector("svg.pierre use")?.getAttribute("href")}`));
+    check(icons.join(" ") === "web/app.ts=#file-tree-builtin-typescript Cargo.toml=#t3-file-icon-toml", `icons: ${icons.join(" ")}`);
+    const drawn = await card.locator('li[data-file="web/app.ts"] svg.pierre').evaluate((el) => [getComputedStyle(el).color, Math.round(el.getBoundingClientRect().width)]);
+    check(drawn.join("|") === "rgb(105, 177, 255)|14", `the TypeScript icon draws as ${drawn.join(" ")}`);
+    check(await page.evaluate(() => markdown("@web/app.ts", promptMarked).includes("#file-tree-builtin-typescript")), "a mention chip has no file-type icon");
+  });
+
+  await step("app view: an Agent row opens its subagent's own thread, and back", async () => {
+    await sendPrompt("agent");
+    await answered("The agent reported back.");
+    await press(lastTurn(".work > summary"));
+    const open = gui('#thread .turn:last-of-type [data-subagent]');
+    check((await open.textContent()) === "Open subagent", `the link reads ${await open.textContent()}`);
+    await press(open);
+    await waitFor("the subagent's answer", async () => (await page.locator("#thread .assistant", { hasText: "The subagent found it in src/parse.rs." }).count()) === 1);
+    check((await text("#thread .bubble")) === "Find where the parser drops the last line.", `the subagent's prompt reads ${await text("#thread .bubble")}`);
+    check((await text("#chat-head .crumb .title:last-of-type")) === "Look for the bug", `the header reads ${await text("#chat-head .crumb")}`);
+    check(!(await page.locator("#composer").isVisible()), "the composer shows over a subagent");
+    await press(gui("#chat-head [data-subagent-back]"));
+    await waitFor("the thread again", async () => (await page.locator("#thread .assistant", { hasText: "The agent reported back." }).count()) === 1);
+    check(await page.locator("#composer").isVisible(), "the composer didn't come back");
+  });
+
+  await step("app view: Save to workspace writes the plan into the thread's folder", async () => {
+    await sendPrompt("plan");
+    await answered("Plan approved.");
+    const card = lastTurn(".plan-card");
+    await press(card.locator("[data-plan-menu]"));
+    await press(card.locator("[data-plan-save]"));
+    const field = page.locator(".tl-dialog input");
+    await waitFor("the save dialog", () => field.isVisible());
+    check((await field.inputValue()) === "ship-the-fix.md", `the path starts as ${await field.inputValue()}`);
+    await field.fill("plans/ship.md");
+    await press(page.locator('.tl-dialog button[value="save"]'));
+    const file = path.join(HOME, "work", "beta", "plans", "ship.md");
+    await waitFor("the saved plan", async () => fs.existsSync(file), 5000);
+    check(fs.readFileSync(file, "utf8").startsWith("# Ship the fix"), "the saved file isn't the plan");
+    await waitFor("the saved note", async () => /Plan saved to workspace: plans\/ship\.md/.test(await text("#composer-note")));
+  });
+
+  await step("app view: Edit from here rewinds claude to before a prompt, puts its files back, and returns it to the composer", async () => {
+    const file = path.join(HOME, "work", "beta", "revert.txt");
+    await sendPrompt("revertme");
+    await answered("Wrote revert.txt.");
+    check(fs.existsSync(file), "the fake didn't write revert.txt");
+    await waitFor("the turn's changes", async () => (await page.locator("#thread .turn:last-of-type .changes").count()) > 0, 10000);
+    const before = await page.evaluate(() => threadOf(active).session);
+    const user = lastTurn(".user");
+    if (!touch) await user.hover();
+    await press(user.locator("[data-rewind]"));
+    await waitFor("the dialog", () => page.locator(".tl-dialog").isVisible());
+    check((await text(".tl-dialog h2")) === "Edit from here?", `the dialog reads ${await text(".tl-dialog h2")}`);
+    await press(page.locator('.tl-dialog button[value="files"]'));
+    await waitFor("the rewound session", async () => (await page.evaluate(() => threadOf(active).session)) !== before, 10000);
+    await waitFor("the composer to hold the prompt", async () => (await page.inputValue("#prompt")) === "revertme");
+    check(!fs.existsSync(file), "revert.txt is still there");
+    await waitFor("the thread without the prompt", async () => (await page.locator("#thread .assistant", { hasText: "Wrote revert.txt." }).count()) === 0 && (await page.locator("#thread .assistant", { hasText: "Plan approved." }).count()) > 0, 10000);
+    await waitFor("claude resumed", async () => /resumed [0-9a-f-]{36}/.test(await termText()), 8000);
+    await page.fill("#prompt", "");
+  });
+
+  await step("app view: Fork from this response opens a thread that carries on from that answer", async () => {
+    const tabs = await tabCount();
+    const answer = lastTurn(".answer");
+    if (!touch) await answer.hover();
+    await press(answer.locator("[data-fork]"));
+    await waitFor("the forked thread", async () => (await tabCount()) === tabs + 1 && (await page.evaluate(() => threadOf(active).items.length)) > 0, 10000);
+    await waitFor("the fork's last answer", async () => (await page.locator("#thread .turn:last-of-type .assistant", { hasText: "Plan approved." }).count()) === 1, 10000);
+    check((await page.evaluate(() => active.view.cwd)).endsWith("/beta"), "the fork isn't in beta's folder");
+    await waitFor("claude resumed in the fork", async () => /resumed [0-9a-f-]{36}/.test(await termText()), 8000);
+    await page.evaluate(() => closeTab(active));
+    await waitFor("the fork to close", async () => (await tabCount()) === tabs);
+    await toThread("beta");
+  });
+
+  await step("app view: a long thread draws only the turns near the viewport, and the minimap jumps between prompts", async () => {
+    await sendPrompt("many");
+    await answered("answer 45");
+    const drawn = await page.evaluate(() => [threadView.querySelector(".lane").dataset.turns, threadView.querySelectorAll(".lane > .turn").length]);
+    check(Number(drawn[0]) >= 40 && drawn[1] < 20, `drew ${drawn[1]} of ${drawn[0]} turns`);
+    const [firstId, top] = await page.evaluate(() => {
+      const shown = turnsOf(threadOf(active).items).slice(-Number(threadView.querySelector(".lane").dataset.turns));
+      return [shown[0].id, shown.find((x) => x.user).user.text.split("\n")[0]];
+    });
+    await page.evaluate(() => (threadView.scrollTop = 0));
+    await waitFor("the top turns", () => page.evaluate((id) => threadView.querySelector(".lane > .turn")?.dataset.turnId === id, firstId), 3000);
+    await page.evaluate(() => (threadView.scrollTop = threadView.scrollHeight));
+    await waitFor("the last turn", async () => (await page.locator("#thread .turn .bubble", { hasText: /^question 45$/ }).count()) === 1, 3000);
+    if (touch) return `drew ${drawn[1]} of ${drawn[0]}; the minimap needs a fine pointer`;
+    const ticks = await page.locator("#minimap .tick").count();
+    check(ticks === Number(drawn[0]) && (await page.locator("#minimap").isVisible()), `the minimap shows ${ticks} ticks`);
+    const r = await rect("#minimap .rail");
+    await page.mouse.move(r.left + 6, r.top + 1);
+    await waitFor("the preview", () => page.locator("#minimap .preview").isVisible());
+    check((await text("#minimap .preview b")) === top, `the preview reads ${await text("#minimap .preview b")}, not ${top}`);
+    await page.mouse.click(r.left + 6, r.top + 1);
+    await waitFor("the first prompt on top", () => page.evaluate((top) => {
+      const el = [...document.querySelectorAll("#thread .turn")].find((t) => t.querySelector(".bubble")?.textContent.trim() === top);
+      return !!el && Math.abs(el.getBoundingClientRect().top - threadView.getBoundingClientRect().top - 24) < 4;
+    }, top), 3000);
+    await page.mouse.move(0, 400);
+    await page.evaluate(() => (threadView.scrollTop = threadView.scrollHeight));
+    return `drew ${drawn[1]} of ${drawn[0]}, ${ticks} ticks`;
+  });
+
+  await step("app view: resting on a PR link previews the pull request", async () => {
+    await sendPrompt("prlink");
+    await answered("Opened the pull request");
+    if (!touch) {
+      await gui('#thread .turn:last-of-type a[data-pr]').hover();
+      await waitFor("the preview card", () => page.locator("#pr-card").isVisible(), 8000);
+      const card = await page.evaluate(() => [...document.querySelectorAll("#pr-card .head > *, #pr-card .title, #pr-card .who > *")].map((el) => el.textContent.trim()).filter(Boolean).join(" | "));
+      check(/^example\/alpha \| #42 \| · \| Open \| Add notes \| sweeper \| · \| opened .+ ago$/.test(card), `the card reads ${card}`);
+      await page.mouse.move(5, 5);
+      await waitFor("the card to close", async () => !(await page.locator("#pr-card").isVisible()), 2000);
+    }
+    // The steps after this block expect alpha.
+    await toThread("alpha");
+    if (touch) return "a touch screen has no hover";
   });
 
   await step("app view: a prompt from the composer reaches the same session", async () => {
