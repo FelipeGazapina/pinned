@@ -116,6 +116,12 @@ folder, ⌘⇧T to reopen the last thread you closed, ⌘⇧C to copy `claude --
 ⌘⇧[ and ⌘⇧] for the previous or next thread, and ⌘⌥B to show or hide the side panel. On Windows and Linux these keys use Ctrl, they do nothing
 while the terminal has the focus, and Ctrl+Shift+E switches views, since a shell needs Ctrl+E.
 
+The app view has T3 Code's light and dark themes and its palettes (T3 Chat, Grove, Ocean, Ember and
+Iris). Appearance follows the system until you pick Light or Dark: ⌘⌥⇧A cycles System, Light and
+Dark, ⌘⌥A picks a theme, and **Settings > General** shows them all, a palette per appearance if you
+like. ⌘⌥⇧T opens the theme editor, which builds a theme from a background and an accent, or color by
+color under Advanced, and previews it on the app as you go. The terminal view stays dark.
+
 ## Tabs
 
 The **＋** button in the tab bar (or ⌘T) lists your projects, most recent first: every folder

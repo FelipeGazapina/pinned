@@ -67,7 +67,7 @@ const langOf = (path) => {
   return LANG_BY_NAME[name] ?? LANG_BY_EXT[name.split(".").pop().toLowerCase()] ?? null;
 };
 
-/** Shiki with T3's pierre-dark theme, loaded on first use; hljs colors lines until it is ready. */
+/** Shiki with T3's pierre-dark or pierre-light theme, loaded on first use; hljs colors lines until it is ready. */
 let shiki = null;
 let shikiLoading = null;
 const shikiLangs = new Set();
@@ -106,7 +106,7 @@ function highlightLines(texts, lang) {
   if (!lang) return texts.map((t) => esc(t));
   wantLang(lang);
   const source = texts.join("\n");
-  const key = `${lang}\n${source}`;
+  const key = `${codeTheme()}\n${lang}\n${source}`;
   if (highlighted.has(key)) return highlighted.get(key);
   if (highlighted.size > 2000) highlighted.clear();
   const lines = shikiLangs.has(lang) ? shikiLines(source, lang) : hljsLines(source, HLJS_NAMES[lang] ?? lang);
@@ -117,7 +117,7 @@ function highlightLines(texts, lang) {
 
 function shikiLines(source, lang) {
   try {
-    const { tokens } = shiki.codeToTokens(source, { lang, theme: "pierre-dark" });
+    const { tokens } = shiki.codeToTokens(source, { lang, theme: codeTheme() });
     return tokens.map((line) => line.map((t) => {
       const style = `${t.color ? `color:${t.color}` : ""}${t.fontStyle & 1 ? ";font-style:italic" : ""}${t.fontStyle & 2 ? ";font-weight:600" : ""}`;
       return style ? `<span style="${style}">${esc(t.content)}</span>` : esc(t.content);

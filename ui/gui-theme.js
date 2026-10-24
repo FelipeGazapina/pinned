@@ -1,0 +1,777 @@
+/** T3 Code's themes for the app view (themePalette.ts, hooks/useTheme.ts): a light and a dark
+ * appearance, System following prefers-color-scheme, the built-in palettes and the user's own, a
+ * palette per appearance ("halves"), and the keys, ⌘K items, Settings section and editor that pick
+ * them. gui-theme.css maps what this sets on <html> onto the app view's color tokens. */
+Object.assign(ICON_PATHS, {
+  sun: `<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>`,
+  moon: `<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>`,
+  palette: `<circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>`,
+  paintbrush: `<path d="m14.622 17.897-10.68-2.913"/><path d="M18.376 2.622a1 1 0 1 1 3.002 3.002L17.36 9.643a.5.5 0 0 0 0 .707l.944.944a2.41 2.41 0 0 1 0 3.408l-.944.944a.5.5 0 0 1-.707 0L8.354 7.348a.5.5 0 0 1 0-.707l.944-.944a2.41 2.41 0 0 1 3.408 0l.944.944a.5.5 0 0 0 .707 0z"/><path d="M9 8c-1.804 2.71-3.97 3.46-6.583 3.948a.507.507 0 0 0-.302.819l7.32 8.883a1 1 0 0 0 1.185.204C12.735 20.405 16 16.792 16 15"/>`,
+  upload: `<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>`,
+});
+
+const THEME_KEY = "gui-theme";
+const THEME_MODE_KEY = "gui-theme-mode";
+const THEME_HALVES_KEY = "gui-theme-halves";
+const CUSTOM_THEMES_KEY = "gui-themes";
+const THEME_PREVIEW_ID = "__preview";
+const APPEARANCE_OPTIONS = [
+  ["system", "System", "monitor"],
+  ["light", "Light", "sun"],
+  ["dark", "Dark", "moon"],
+];
+const RESERVED_THEME_IDS = new Set(["system", "light", "dark", "default", THEME_PREVIEW_ID, ...THEME_PALETTES.builtIn.map((t) => t.id)]);
+const STANDARD_PREVIEW = { light: { canvas: "#fcfcfc", accent: "#f4f4f5", messageAction: "#4f46e5" }, dark: { canvas: "#0a0a0a", accent: "#1c1c1f", messageAction: "#8b9cff" } };
+const TERMINAL_ANSI = {
+  light: ["#000000", "#cd3131", "#107c10", "#949800", "#0451a5", "#bc05bc", "#0598bc", "#555555", "#666666", "#cd3131", "#14ce14", "#b5ba00", "#0451a5", "#bc05bc", "#0598bc", "#a5a5a5"],
+  dark: ["#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5", "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#e5e5e5"],
+};
+const ANSI_NAMES = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
+const systemDark = matchMedia("(prefers-color-scheme: dark)");
+const themeRoot = document.documentElement;
+
+/** The roles the app view also reads as channels, for translucent uses (gui-theme.css). */
+const CHANNEL_ROLES = ["canvas", "surface", "surfaceOverlay", "text", "mutedForeground", "sidebarForeground", "sidebarMutedForeground", "messageAction", "error", "warning", "accent"];
+const themeVar = (role) => `--app-theme-${role.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}${role === "terminalSelection" ? "-background" : ""}`;
+const colorsFor = (theme, mode) => (theme.appearance === mode ? theme.colors : theme.variants?.[mode] ?? null);
+const modesOf = (theme) => ["light", "dark"].filter((m) => colorsFor(theme, m));
+const standardColors = (mode) => THEME_PALETTES.standard[mode];
+const chatColors = (mode) => colorsFor(THEME_PALETTES.builtIn.find((t) => t.id === "t3-chat"), mode);
+
+function readThemeJson(key) {
+  try {
+    return JSON.parse(load(key) ?? "null");
+  } catch {
+    return null;
+  }
+}
+let customThemes = (readThemeJson(CUSTOM_THEMES_KEY) ?? []).filter((t) => t && typeof t.id === "string" && typeof t.label === "string" && t.colors && ["light", "dark"].includes(t.appearance));
+const saveCustomThemes = () => save(CUSTOM_THEMES_KEY, JSON.stringify(customThemes));
+const themeById = (id) => (id ? THEME_PALETTES.builtIn.find((t) => t.id === id) ?? customThemes.find((t) => t.id === id) ?? null : null);
+
+/** The stored choice, as T3 keeps it: a base theme ("system", "light", "dark" or a palette id), the
+ * appearance mode, and optional per-appearance palettes that override the base. */
+function themeState() {
+  let theme = load(THEME_KEY) || "system";
+  if (!["system", "light", "dark"].includes(theme) && !themeById(theme)) theme = "system";
+  const stored = load(THEME_MODE_KEY);
+  const mode = ["system", "light", "dark"].includes(stored) ? stored : ["light", "dark"].includes(theme) ? theme : "system";
+  const raw = readThemeJson(THEME_HALVES_KEY) ?? {};
+  const halves = {};
+  for (const m of ["light", "dark"]) {
+    const t = themeById(raw[m]);
+    if (t && colorsFor(t, m)) halves[m] = t.id;
+  }
+  return { theme, mode, halves };
+}
+
+/** T3's resolveThemeAppearance: the mode, or the system's under System, unless the palette lacks it. */
+function resolvedAppearance(s = themeState()) {
+  const want = s.mode === "system" ? (systemDark.matches ? "dark" : "light") : s.mode;
+  if (s.halves[want]) return want;
+  const t = themeById(s.theme);
+  return t && !colorsFor(t, want) ? t.appearance : want;
+}
+const activeThemeId = (appearance, s = themeState()) => s.halves[appearance] ?? themeById(s.theme)?.id ?? null;
+
+function paintTheme(appearance, colors, id) {
+  themeRoot.dataset.appearance = appearance;
+  if (colors) {
+    themeRoot.dataset.themeId = id;
+    for (const role of THEME_PALETTES.roles) if (colors[role]) themeRoot.style.setProperty(themeVar(role), colors[role]);
+    for (const role of CHANNEL_ROLES) {
+      const p = parseColor(colors[role]);
+      if (p) themeRoot.style.setProperty(`${themeVar(role)}-rgb`, Object.values(oklchToRgb(p.color)).join(" "));
+    }
+  } else {
+    delete themeRoot.dataset.themeId;
+    for (const role of THEME_PALETTES.roles) themeRoot.style.removeProperty(themeVar(role));
+    for (const role of CHANNEL_ROLES) themeRoot.style.removeProperty(`${themeVar(role)}-rgb`);
+  }
+  themeSurroundings();
+}
+
+function applyTheme() {
+  if (themeRoot.dataset.themeId === THEME_PREVIEW_ID) return;
+  const s = themeState();
+  const appearance = resolvedAppearance(s);
+  const t = themeById(activeThemeId(appearance, s));
+  const was = themeRoot.dataset.appearance;
+  paintTheme(appearance, t ? colorsFor(t, appearance) ?? t.colors : null, t?.id);
+  if (was && was !== appearance) rehighlight();
+  if (settingsOpen() && document.getElementById("theme-section")) renderThemeSection();
+}
+
+const codeTheme = () => (themeRoot.dataset.appearance === "light" ? "pierre-light" : "pierre-dark");
+/** Shiki writes its colors inline, so code shown in the old theme is drawn again. */
+function rehighlight() {
+  if (!guiOn()) return;
+  rendered.clear();
+  rerender();
+  renderPanel();
+}
+
+/** T3 themes its terminal drawer: the drawer's xterm takes the theme's terminal colors in the app
+ * view, and the terminal view keeps its own dark look. */
+function terminalTheme() {
+  if (!guiOn()) return { background: "#00000000" };
+  const css = getComputedStyle(themeRoot);
+  const v = (name) => css.getPropertyValue(name).trim();
+  const ansi = TERMINAL_ANSI[themeRoot.dataset.appearance === "light" ? "light" : "dark"];
+  const named = Object.fromEntries(ANSI_NAMES.flatMap((n, i) => [[n, ansi[i]], [`bright${n[0].toUpperCase()}${n.slice(1)}`, ansi[i + 8]]]));
+  return { background: "#00000000", foreground: v("--g-term-fg"), cursor: v("--g-term-cursor"), cursorAccent: v("--g-term-bg"), selectionBackground: v("--g-term-selection"), ...named };
+}
+function themeSurroundings() {
+  const theme = terminalTheme();
+  for (const t of tabs) t.term.options.theme = theme;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = guiOn() ? getComputedStyle(themeRoot).getPropertyValue("--g-canvas").trim() : "#0f1115";
+}
+new MutationObserver(themeSurroundings).observe(document.body, { attributes: true, attributeFilter: ["data-mode"] });
+new MutationObserver(themeSurroundings).observe(document.getElementById("terms"), { childList: true });
+systemDark.addEventListener("change", () => themeState().mode === "system" && applyTheme());
+window.addEventListener("storage", (e) => {
+  if (![THEME_KEY, THEME_MODE_KEY, THEME_HALVES_KEY, CUSTOM_THEMES_KEY, null].includes(e.key)) return;
+  if (e.key === CUSTOM_THEMES_KEY || e.key === null) customThemes = (readThemeJson(CUSTOM_THEMES_KEY) ?? []).filter((t) => t?.id && t.colors);
+  applyTheme();
+});
+
+/** T3's setTheme: keeps the mode, clears the halves, stores the base. */
+function setTheme(next) {
+  save(THEME_MODE_KEY, themeState().mode);
+  localStorage.removeItem(THEME_HALVES_KEY);
+  save(THEME_KEY, next);
+  applyTheme();
+}
+function setAppearanceMode(mode) {
+  save(THEME_MODE_KEY, mode);
+  applyTheme();
+}
+function setThemeHalf(appearance, id) {
+  const halves = readThemeJson(THEME_HALVES_KEY) ?? {};
+  if (id) halves[appearance] = id;
+  else delete halves[appearance];
+  if (halves.light || halves.dark) save(THEME_HALVES_KEY, JSON.stringify(halves));
+  else localStorage.removeItem(THEME_HALVES_KEY);
+  applyTheme();
+}
+
+function cycleAppearance() {
+  const next = { system: "light", light: "dark", dark: "system" }[themeState().mode];
+  setAppearanceMode(next);
+  flash(`Appearance: ${APPEARANCE_OPTIONS.find(([m]) => m === next)[1]}`);
+}
+
+/** The cards Settings and ⌘K offer: T3 Code (the standard light and dark), then each palette. */
+function themeCards() {
+  const standard = { id: null, label: "T3 Code", previews: ["light", "dark"].map((mode) => ({ mode, colors: { ...standardColors(mode), ...STANDARD_PREVIEW[mode] } })) };
+  const seen = new Set();
+  return [standard, ...[...THEME_PALETTES.builtIn, ...customThemes].filter((t) => !seen.has(t.id) && seen.add(t.id)).map((t) => ({ id: t.id, label: t.label, custom: !RESERVED_THEME_IDS.has(t.id), previews: modesOf(t).map((mode) => ({ mode, colors: colorsFor(t, mode) })) }))];
+}
+function chooseCard(card) {
+  if (card.previews.length === 1 && card.id) setThemeHalf(card.previews[0].mode, card.id);
+  else setTheme(card.id ?? themeState().mode);
+}
+
+function previewCircle({ mode, colors }, cls = "") {
+  const c = (role) => esc(colors[role]);
+  const bg = mode === "light"
+    ? `background-color: color-mix(in oklab, ${c("canvas")} 80%, #ffffff); background-image: radial-gradient(circle at 72% 22% in oklab, ${c("accent")} 0%, color-mix(in oklab, ${c("accent")} 72%, transparent) 28%, transparent 58%), radial-gradient(circle at 18% 82% in oklab, color-mix(in oklab, ${c("messageAction")} 45%, transparent) 0%, transparent 55%)`
+    : `background-color: color-mix(in oklab, ${c("canvas")} 80%, #09090b); background-image: radial-gradient(circle at 28% 78% in oklab, ${c("accent")} 0%, color-mix(in oklab, ${c("accent")} 62%, transparent) 28%, transparent 58%), radial-gradient(circle at 82% 18% in oklab, color-mix(in oklab, ${c("messageAction")} 45%, transparent) 0%, transparent 55%)`;
+  return `<span class="theme-circle ${mode} ${cls}"><span style="${bg}"></span></span>`;
+}
+
+PALETTE_VIEWS.themes = {
+  placeholder: "Search themes...",
+  groups(query) {
+    const s = themeState();
+    const current = s.halves[resolvedAppearance(s)] ?? themeById(s.theme)?.id ?? null;
+    const items = themeCards().map((card) => ({
+      icon: "palette",
+      title: esc(card.label),
+      sub: card.previews.length === 1 ? `For ${card.previews[0].mode} mode` : "",
+      trail: `<span class="theme-trail">${card.id === current ? `<span class="current">Current</span>` : ""}${card.previews.map((p) => previewCircle(p, "dot")).join("")}</span>`,
+      terms: [card.label, "theme", "appearance"],
+      run: () => chooseCard(card),
+    }));
+    return filterGroups([{ label: "Change theme", items }], query);
+  },
+};
+PALETTE_VIEWS.appearance = {
+  placeholder: "Search appearance...",
+  groups(query) {
+    const { mode } = themeState();
+    const items = APPEARANCE_OPTIONS.map(([m, label, ic]) => ({ icon: ic, title: label, trail: m === mode ? `<span class="theme-trail"><span class="current">Current</span></span>` : "", terms: [label, "appearance", "mode"], run: () => setAppearanceMode(m) }));
+    return filterGroups([{ label: "Change appearance", items }], query);
+  },
+};
+/** CommandPaletteThemeItems.tsx: Change theme, Change appearance, Toggle theme editor. */
+function themeActionItems() {
+  return [
+    { icon: "palette", title: "Change theme", page: "themes", hint: chordLabel("A", { alt: true }), terms: ["change theme", "appearance", "colors", "palette"] },
+    { icon: "monitor", title: "Change appearance", page: "appearance", hint: chordLabel("A", { alt: true, shift: true }), terms: ["change appearance", "light", "dark", "system", "mode", "toggle"] },
+    { icon: "palette", title: "Toggle theme editor", hint: chordLabel("T", { alt: true, shift: true }), terms: ["toggle theme editor", "appearance", "colors", "palette", "customize"], run: () => toggleThemeEditor() },
+  ];
+}
+function openThemePicker() {
+  openPalette();
+  palette.views.push({ view: "themes", query: "" });
+  renderPalette();
+}
+
+onGuiKey("a", () => openThemePicker(), { alt: true });
+onGuiKey("a", () => cycleAppearance(), { alt: true, shift: true });
+onGuiKey("t", () => toggleThemeEditor(), { alt: true, shift: true });
+
+/** ThemeSettings.tsx: the Color scheme tiles, then the theme library. */
+function themeSettingsHtml() {
+  return `<section id="theme-section" aria-label="Colors &amp; themes"></section>`;
+}
+function bindThemeSettings() {
+  renderThemeSection();
+}
+
+const WIREFRAME_LINE = "rgb(127 127 127 / 0.25)";
+function wireframePane(colors, half = "") {
+  const c = (role) => esc(colors[role]);
+  return `<span class="wire-pane ${half}" style="--w-canvas:${c("canvas")};--w-sidebar:${c("sidebar")};--w-surface:${c("surface")};--w-accent-surface:${c("accentSurface")};--w-message:${c("messageSurface")};--w-action:${c("messageAction")};--w-line:${WIREFRAME_LINE}">
+    <i class="w-side"></i><i class="w-row r1"></i><i class="w-row r2"></i><i class="w-row r3"></i><i class="w-row r4"></i>
+    <i class="w-bubble"></i><i class="w-text t1"></i><i class="w-text t2"></i>
+    <i class="w-composer"><b></b><s></s></i>
+    <i class="w-panel"><b><u style="background:#34d399"></u><em></em></b><b><u></u><em></em></b><b><u style="background:#fbbf24"></u><em></em></b></i></span>`;
+}
+
+function renderThemeSection() {
+  const section = document.getElementById("theme-section");
+  if (!section) return;
+  const s = themeState();
+  const owners = { light: activeThemeId("light", s), dark: activeThemeId("dark", s) };
+  const ownerColors = (mode) => {
+    const t = themeById(owners[mode]);
+    return (t && colorsFor(t, mode)) ?? (t && t.colors) ?? standardColors(mode);
+  };
+  const tiles = APPEARANCE_OPTIONS.map(([mode, label]) => {
+    const frame = mode === "system" ? wireframePane(ownerColors("light"), "left") + wireframePane(ownerColors("dark"), "right") : wireframePane(ownerColors(mode));
+    const aria = { system: "Follow the system appearance", light: "Use light mode", dark: "Use dark mode" }[mode];
+    return `<button type="button" class="mode-tile${s.mode === mode ? " on" : ""}" data-theme-mode="${mode}" aria-pressed="${s.mode === mode}" aria-label="${aria}"><span class="wireframe">${frame}</span><span class="label">${label}</span></button>`;
+  }).join("");
+  const cards = themeCards().map((card) => {
+    const tip = card.previews.length === 1 ? `Use for ${card.previews[0].mode} mode only` : "Use for both light and dark";
+    const circles = card.previews.map((p) => {
+      const picked = owners[p.mode] === card.id;
+      return `<button type="button" class="pick${picked ? " picked" : ""}" data-theme-half="${p.mode}" data-theme-card="${esc(card.id ?? "")}" aria-label="Use ${esc(card.label)} ${p.mode} mode" title="Use for ${p.mode} mode only">${previewCircle(p)}${picked ? `<span class="badge">${icon(p.mode === "light" ? "sun" : "moon")}</span>` : ""}</button>`;
+    }).join("");
+    const action = (name, ic, label, aria) => `<button type="button" class="icon${name === "remove" ? " danger" : ""}" data-theme-action="${name}" data-theme-card="${esc(card.id ?? "")}" title="${label}" aria-label="${aria} ${esc(card.label)}">${icon(ic)}</button>`;
+    return `<div class="theme-card" data-theme-card="${esc(card.id ?? "")}" title="${tip}">
+      <div class="circles">${circles}</div>
+      <div class="foot"><button type="button" class="name" data-theme-choose="${esc(card.id ?? "")}">${esc(card.label)}</button>
+        ${action("duplicate", "copy", "Duplicate theme", "Duplicate")}${card.custom ? action("edit", "pencil", "Edit theme", "Edit") + action("export", "upload", "Export theme file", "Export") + action("remove", "trash-2", "Remove theme", "Remove") : ""}</div></div>`;
+  }).join("");
+  section.innerHTML = `<h3 class="theme-head">Color scheme</h3>
+    <div class="mode-tiles" role="group" aria-label="Appearance mode">${tiles}</div>
+    <div class="themes-head"><h3>Themes</h3><span class="actions">
+      <button type="button" class="outline" data-theme-action="create">${icon("paintbrush")}Create theme</button>
+      <button type="button" class="outline" data-theme-action="import">${icon("plus")}Add theme</button>
+      <input type="file" accept=".json,application/json" multiple hidden id="theme-file"></span></div>
+    <div class="theme-cards">${cards}</div>`;
+}
+
+document.addEventListener("click", (e) => {
+  const section = e.target.closest?.("#theme-section");
+  if (!section) return;
+  const card = (id) => themeCards().find((c) => (c.id ?? "") === id);
+  const el = e.target.closest("[data-theme-mode], [data-theme-half], [data-theme-action], [data-theme-choose], .theme-card");
+  if (!el) return;
+  if (el.dataset.themeMode) return setAppearanceMode(el.dataset.themeMode);
+  if (el.dataset.themeHalf) return chooseHalf(el.dataset.themeHalf, el.dataset.themeCard || null);
+  const action = el.dataset.themeAction;
+  if (action === "create") return openThemeEditor({ seedId: activeThemeId(resolvedAppearance()) });
+  if (action === "import") return document.getElementById("theme-file").click();
+  const target = card(el.dataset.themeCard ?? el.dataset.themeChoose ?? "");
+  if (!target) return;
+  if (action === "duplicate") return openThemeEditor({ seedId: target.id, seedName: `${target.label} copy` });
+  if (action === "edit") return openThemeEditor({ editingId: target.id });
+  if (action === "export") return exportTheme(themeById(target.id));
+  if (action === "remove") return confirmRemoveTheme(themeById(target.id));
+  chooseCard(target);
+});
+document.addEventListener("change", async (e) => {
+  if (e.target.id !== "theme-file") return;
+  for (const file of e.target.files) {
+    try {
+      const theme = parseThemeFile(JSON.parse(await file.text()));
+      const had = customThemes.some((t) => t.id === theme.id);
+      customThemes = [...customThemes.filter((t) => t.id !== theme.id), theme];
+      saveCustomThemes();
+      if (modesOf(theme).length === 1) setThemeHalf(theme.appearance, theme.id);
+      else setTheme(theme.id);
+      flash(had ? `${theme.label} updated` : `${theme.label} added`);
+    } catch (err) {
+      flash(`Couldn't add ${file.name}: ${err.message}`);
+    }
+  }
+  e.target.value = "";
+});
+
+/** Picking one circle: T3's assignHalf, with its case for the standard theme under a palette base. */
+function chooseHalf(mode, id) {
+  const s = themeState();
+  if (!id && themeById(s.theme)) {
+    const other = mode === "light" ? "dark" : "light";
+    const keep = activeThemeId(other, s);
+    setTheme(s.mode === "system" ? "system" : s.mode);
+    if (keep) setThemeHalf(other, keep);
+    return;
+  }
+  setThemeHalf(mode, id);
+}
+
+function confirmRemoveTheme(theme) {
+  showDialog(`<div class="dialog-head"><h2>Remove “${esc(theme.label)}”?</h2><p class="muted">You can bring it back anytime by importing its JSON file.</p></div>
+    <div class="theme-dialog-actions"><button type="button" class="outline" data-dialog-cancel>Cancel</button><button type="button" class="danger" data-dialog-remove>Remove theme</button></div>`);
+  shellDialog.querySelector("[data-dialog-cancel]").onclick = closeDialog;
+  shellDialog.querySelector("[data-dialog-remove]").onclick = () => {
+    closeDialog();
+    removeTheme(theme.id);
+  };
+}
+function removeTheme(id) {
+  const s = themeState();
+  if (s.theme === id) setTheme(s.mode === "system" ? "system" : s.mode);
+  for (const m of ["light", "dark"]) if (themeState().halves[m] === id) setThemeHalf(m, null);
+  customThemes = customThemes.filter((t) => t.id !== id);
+  saveCustomThemes();
+  applyTheme();
+}
+
+function themeFile(theme) {
+  const canon = (colors) => Object.fromEntries(Object.entries(colors).map(([k, v]) => [k, canonicalColor(v) ?? v]));
+  const file = { version: 1, id: theme.id, name: theme.label, appearance: theme.appearance, colors: canon(theme.colors) };
+  if (theme.variants) file.variants = Object.fromEntries(Object.entries(theme.variants).map(([m, c]) => [m, canon(c)]));
+  if (theme.managed) file.managed = true;
+  return `${JSON.stringify(file, null, 2)}\n`;
+}
+async function exportTheme(theme) {
+  const blob = new Blob([themeFile(theme)], { type: "application/json" });
+  if (TAURI) return saveCapture(`${theme.id}.json`, blob, "Theme");
+  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: `${theme.id}.json` });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+}
+
+const themeIdFromName = (name) => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48).replace(/-+$/, "") || "custom-theme";
+/** T3's parseThemeFile: version 1, a name, an appearance, and every role a literal color. */
+function parseThemeFile(file) {
+  if (file?.version !== 1) throw new Error("The file isn't a version 1 theme.");
+  const name = typeof file.name === "string" ? file.name.trim() : "";
+  if (!name || name.length > 48) throw new Error("The theme needs a name of 1 to 48 characters.");
+  if (!["light", "dark"].includes(file.appearance)) throw new Error('The appearance must be "light" or "dark".');
+  const id = file.id ?? themeIdFromName(name);
+  if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(id) || RESERVED_THEME_IDS.has(id)) throw new Error(`The id "${id}" can't be used.`);
+  const colorsOf = (colors, mode) => {
+    if (!colors || typeof colors !== "object") throw new Error("The colors must be an object.");
+    for (const [role, value] of Object.entries(colors)) {
+      if (!THEME_PALETTES.roles.includes(role)) throw new Error(`"${role}" isn't a theme color.`);
+      if (!parseColor(value)) throw new Error(`The color for "${role}" must be a literal CSS color such as oklch(0.62 0.2 280).`);
+    }
+    return { ...chatColors(mode), ...colors };
+  };
+  const theme = { id, label: name, appearance: file.appearance, colors: colorsOf(file.colors, file.appearance) };
+  const other = file.appearance === "light" ? "dark" : "light";
+  if (file.variants?.[other]) theme.variants = { [other]: colorsOf(file.variants[other], other) };
+  if (file.managed) theme.managed = true;
+  return theme;
+}
+
+/** ThemeEditorPanel.tsx: a floating panel that edits a palette with a live preview of the app. */
+const THEME_FAMILIES = [
+  ["Foundation", [["canvas", "Background"], ["surface", "Surface"], ["surfaceRaised", "Raised surface"], ["surfaceOverlay", "Overlay"], ["text", "Text"], ["mutedForeground", "Muted text"], ["border", "Border"], ["input", "Input"]]],
+  ["Brand & content", [["secondary", "Subtle surface"], ["accentSurface", "Highlight surface"], ["accent", "Accent"], ["messageAction", "Action"], ["messageSurface", "Message surface"], ["codeBackground", "Code surface"]]],
+  ["Search", [["searchMatchBackground", "Search matches"], ["searchMatchActiveBackground", "Current match"]]],
+  ["Context", [["sidebar", "Sidebar background"], ["sidebarControlSurface", "Sidebar controls"], ["sidebarRowSelected", "Sidebar selection"], ["terminalBackground", "Terminal background"]]],
+  ["Status", [["error", "Error"], ["warning", "Warning"]]],
+];
+let themeEditor = null;
+
+function toggleThemeEditor() {
+  if (themeEditor) return closeThemeEditor();
+  const appearance = resolvedAppearance();
+  openThemeEditor({ seedId: activeThemeId(appearance), appearance });
+}
+
+function openThemeEditor({ editingId = null, seedId = null, seedName = "", appearance = resolvedAppearance() }) {
+  closeThemeEditor();
+  const source = themeById(editingId ?? seedId);
+  const colors = { light: { ...standardColors("light") }, dark: { ...standardColors("dark") } };
+  if (source) for (const m of modesOf(source)) colors[m] = { ...colorsFor(source, m) };
+  themeEditor = {
+    editingId,
+    name: editingId ? source.label : seedName,
+    appearance: source && !colorsFor(source, appearance) ? source.appearance : appearance,
+    colors,
+    advanced: !!source && !source.managed,
+    regenerate: false,
+    filter: "",
+    error: "",
+    minimized: false,
+  };
+  const panel = document.createElement("div");
+  panel.id = "theme-editor";
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-label", editingId ? "Edit theme" : "Create theme");
+  document.body.append(panel);
+  bindThemeEditor(panel);
+  renderThemeEditor();
+  previewThemeEditor();
+  panel.querySelector("#theme-name")?.focus();
+}
+
+function closeThemeEditor() {
+  clearInspectHover();
+  document.getElementById("theme-editor")?.remove();
+  themeEditor = null;
+  if (themeRoot.dataset.themeId === THEME_PREVIEW_ID) delete themeRoot.dataset.themeId;
+  applyTheme();
+}
+
+const editingTheme = () => themeById(themeEditor?.editingId);
+/** Another custom theme the name lands on, which saving merges into, as T3's mergeTarget. */
+function mergeTarget() {
+  const id = themeIdFromName(themeEditor.name);
+  const label = themeEditor.name.trim().toLowerCase();
+  return customThemes.find((t) => t.id !== themeEditor.editingId && (t.id === id || t.label.toLowerCase() === label)) ?? null;
+}
+function lockedReason(mode) {
+  const editing = editingTheme();
+  if (editing && !colorsFor(editing, mode)) return `“${editing.label}” has no ${mode} palette. Create a theme with the same name to add one.`;
+  const target = !editing && mergeTarget();
+  if (target && colorsFor(target, mode)) return `“${target.label}” already has a ${mode} palette.`;
+  return "";
+}
+
+function previewThemeEditor() {
+  const was = themeRoot.dataset.appearance;
+  paintTheme(themeEditor.appearance, themeEditor.colors[themeEditor.appearance], THEME_PREVIEW_ID);
+  if (was !== themeEditor.appearance) rehighlight();
+}
+
+function themeField(role, label) {
+  const value = themeEditor.colors[themeEditor.appearance][role];
+  const hex = colorHex(value) ?? "#000000";
+  return `<div class="te-field${themeEditor.selected === role ? " selected" : ""}" data-theme-color-role="${role}"><span class="te-label">${esc(label)}</span>
+    <label class="te-swatch" style="background:${esc(value)}" title="Choose ${esc(label)} color"><input type="color" value="${hex.slice(0, 7)}" data-role="${role}" aria-label="Choose ${esc(label)} color"></label>
+    <input class="te-value" value="${esc(hex)}" data-role="${role}" spellcheck="false" autocomplete="off" aria-label="${esc(label)}"></div>`;
+}
+
+function renderThemeEditor() {
+  const panel = document.getElementById("theme-editor");
+  const ed = themeEditor;
+  if (!panel || !ed) return;
+  const editing = editingTheme();
+  const filter = ed.filter.trim().toLowerCase();
+  const groups = ed.advanced
+    ? THEME_FAMILIES.map(([group, fields]) => [group, fields.filter(([, label]) => !filter || label.toLowerCase().includes(filter) || group.toLowerCase().includes(filter))]).filter(([, f]) => f.length)
+    : [["", [["canvas", "Background"], ["accent", "Accent"]]]];
+  const fields = groups.length
+    ? groups.map(([group, f]) => `<div class="te-group">${group ? `<h4>${esc(group)}</h4>` : ""}${f.map(([role, label]) => themeField(role, label)).join("")}</div>`).join("")
+    : `<p class="te-empty">No matches.</p>`;
+  const sub = ed.inspecting ? "Select an element · Esc to cancel" : ed.selected ? familyLabel(ed.selected) : "Select a color below";
+  panel.dataset.minimized = ed.minimized;
+  panel.innerHTML = `<header class="te-head"><div class="te-title"><b>${editing ? "Edit theme" : "Create theme"}</b>${ed.minimized ? "" : `<span>${sub}</span>`}</div>
+      <button type="button" class="te-inspect${ed.inspecting ? " on" : ""}" data-te="inspect" aria-label="${ed.inspecting ? "Cancel inspecting app colors" : "Inspect app colors"}" title="${ed.inspecting ? "Cancel and clear the selection" : "Pick a color from the app"}">${ed.inspecting ? "Cancel" : "Inspect"}</button>
+      <button type="button" class="icon" data-te="minimize" aria-label="${ed.minimized ? "Expand the theme editor" : "Minimize the theme editor"}">${icon(ed.minimized ? "chevron-up" : "chevron-down")}</button>
+      <button type="button" class="icon" data-te="close" aria-label="Close the theme editor">${icon("x")}</button></header>
+    <div class="te-body">
+      <div class="te-row"><label for="theme-name">Theme name</label><input id="theme-name" value="${esc(ed.name)}" placeholder="${editing ? "Theme name" : "e.g. Aurora"}" maxlength="48" autocomplete="off" spellcheck="false"></div>
+      ${ed.error ? `<p class="te-error" aria-live="polite">${esc(ed.error)}</p>` : ""}
+      <div class="te-row"><span>Appearance</span><span class="te-seg" role="group" aria-label="Theme appearance">${["light", "dark"].map((m) => `<button type="button" data-te-mode="${m}" class="${ed.appearance === m ? "on" : ""}">${m === "light" ? "Light" : "Dark"}</button>`).join("")}</span></div>
+      <div class="te-colors-head"><div><b>Colors</b>${ed.advanced ? "" : `<span>Two colors, rest derived</span>`}</div>
+        ${ed.advanced ? `<input class="te-filter" placeholder="Filter colors" aria-label="Filter colors" value="${esc(ed.filter)}">` : ""}
+        <label class="te-advanced">Advanced <span class="switch"><input type="checkbox" data-te="advanced"${ed.advanced ? " checked" : ""} aria-label="Use advanced theme colors"><span></span></span></label></div>
+      ${fields}
+    </div>
+    <footer class="te-foot"><button type="button" class="ghost" data-te="cancel">Cancel</button><button type="button" class="primary" data-te="save"></button></footer>
+    <span class="te-grip" aria-hidden="true"></span>`;
+  refreshThemeEditorControls();
+}
+
+/** What the name decides, kept in place while typing: the save label and the locked appearances. */
+function refreshThemeEditorControls() {
+  const panel = document.getElementById("theme-editor");
+  const ed = themeEditor;
+  const editing = editingTheme();
+  const target = mergeTarget();
+  const save = panel.querySelector('[data-te="save"]');
+  save.innerHTML = editing ? (target ? `Merge into “${esc(target.label)}”` : "Save changes") : target ? `${icon("plus")}Add ${ed.appearance} palette` : `${icon("paintbrush")}Create theme`;
+  save.disabled = !ed.name.trim();
+  for (const b of panel.querySelectorAll("[data-te-mode]")) {
+    const locked = lockedReason(b.dataset.teMode);
+    if (locked) Object.assign(b, { title: locked }).setAttribute("aria-disabled", "true");
+    else b.removeAttribute("aria-disabled"), b.removeAttribute("title");
+  }
+}
+
+function setThemeEditorColor(role, value) {
+  const ed = themeEditor;
+  if (!parseColor(value)) return;
+  const mode = ed.appearance;
+  if (ed.advanced) {
+    ed.colors[mode] = updateColorFamily(ed.colors[mode], role, value, mode);
+    ed.regenerate = true;
+  } else {
+    const colors = { ...ed.colors[mode], [role]: value };
+    ed.colors[mode] = vividThemeColors(chatColors(mode), colors.canvas, colors.accent, mode);
+  }
+  ed.changed = new Set([...(ed.changed ?? []), mode]);
+  previewThemeEditor();
+}
+
+function bindThemeEditor(panel) {
+  panel.addEventListener("click", (e) => {
+    const ed = themeEditor;
+    const mode = e.target.closest("[data-te-mode]");
+    if (mode) {
+      if (mode.hasAttribute("aria-disabled")) return;
+      ed.appearance = mode.dataset.teMode;
+      previewThemeEditor();
+      return renderThemeEditor();
+    }
+    const act = e.target.closest("[data-te]")?.dataset.te;
+    if (act === "close" || act === "cancel") return closeThemeEditor();
+    if (act === "minimize") {
+      ed.minimized = !ed.minimized;
+      return renderThemeEditor();
+    }
+    if (act === "save") return saveThemeEditor();
+    if (act === "inspect") return setInspecting(!ed.inspecting);
+  });
+  panel.addEventListener("focusin", (e) => {
+    const field = e.target.closest("[data-theme-color-role]");
+    if (!field) return;
+    themeEditor.selected = field.dataset.themeColorRole;
+    for (const f of panel.querySelectorAll(".te-field")) f.classList.toggle("selected", f === field);
+    panel.querySelector(".te-title span").textContent = familyLabel(themeEditor.selected);
+  });
+  panel.addEventListener("input", (e) => {
+    const ed = themeEditor;
+    if (e.target.id === "theme-name") {
+      ed.name = e.target.value;
+      ed.error = "";
+      panel.querySelector(".te-error")?.remove();
+      return refreshThemeEditorControls();
+    }
+    if (e.target.classList.contains("te-filter")) {
+      ed.filter = e.target.value;
+      renderThemeEditor();
+      const input = panel.querySelector(".te-filter");
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      return;
+    }
+    const role = e.target.dataset.role;
+    if (!role) return;
+    setThemeEditorColor(role, e.target.value);
+    const field = e.target.closest(".te-field");
+    field.querySelector(".te-swatch").style.background = themeEditor.colors[ed.appearance][role];
+    if (e.target.type === "color") field.querySelector(".te-value").value = e.target.value;
+    else if (parseColor(e.target.value)) field.querySelector('input[type="color"]').value = (colorHex(e.target.value) ?? "#000000").slice(0, 7);
+  });
+  panel.addEventListener("change", (e) => {
+    const ed = themeEditor;
+    if (e.target.dataset.te === "advanced") {
+      ed.advanced = e.target.checked;
+      if (!ed.advanced && ed.regenerate) {
+        for (const m of ["light", "dark"]) ed.colors[m] = vividThemeColors(chatColors(m), ed.colors[m].canvas, ed.colors[m].accent, m);
+        ed.regenerate = false;
+        previewThemeEditor();
+      }
+      return renderThemeEditor();
+    }
+  });
+  panel.addEventListener("pointerdown", (e) => {
+    if (!e.target.closest(".te-grip")) return;
+    e.preventDefault();
+    const r = panel.getBoundingClientRect();
+    const move = (ev) => {
+      const width = Math.min(Math.max(280, ev.clientX - r.left), innerWidth - r.left - 8);
+      const height = Math.min(Math.max(220, ev.clientY - r.top), innerHeight - r.top - 8);
+      Object.assign(panel.style, { left: `${r.left}px`, top: `${r.top}px`, right: "auto", bottom: "auto", width: `${width}px`, height: `${height}px`, maxHeight: "none" });
+    };
+    const up = () => removeEventListener("pointermove", move) || removeEventListener("pointerup", up);
+    addEventListener("pointermove", move);
+    addEventListener("pointerup", up);
+  });
+  panel.addEventListener("pointerdown", (e) => {
+    if (!e.target.closest(".te-head") || e.target.closest("button, input, a")) return;
+    const r = panel.getBoundingClientRect();
+    const dx = e.clientX - r.left;
+    const dy = e.clientY - r.top;
+    const move = (ev) => {
+      const left = Math.min(Math.max(8, ev.clientX - dx), innerWidth - r.width - 8);
+      const top = Math.min(Math.max(8, ev.clientY - dy), innerHeight - 48);
+      Object.assign(panel.style, { left: `${left}px`, top: `${top}px`, right: "auto", bottom: "auto" });
+    };
+    const up = () => removeEventListener("pointermove", move) || removeEventListener("pointerup", up);
+    addEventListener("pointermove", move);
+    addEventListener("pointerup", up);
+  });
+}
+
+function saveThemeEditor() {
+  const ed = themeEditor;
+  const name = ed.name.trim();
+  if (!name) {
+    ed.error = "Name your theme first.";
+    return renderThemeEditor();
+  }
+  const mode = ed.appearance;
+  const editing = editingTheme();
+  const target = mergeTarget();
+  const managed = !ed.advanced;
+  try {
+    if (target) {
+      if (colorsFor(target, mode)) throw new Error(`“${target.label}” already has ${modesOf(target).length === 2 ? "light and dark palettes" : `a ${mode} palette`}. Pick another name.`);
+      const merged = { ...target, variants: { ...target.variants, [mode]: ed.colors[mode] } };
+      customThemes = customThemes.filter((t) => t.id !== editing?.id).map((t) => (t.id === target.id ? merged : t));
+      saveCustomThemes();
+      closeThemeEditor();
+      setTheme(target.id);
+      flash(`${target.label} updated · Its ${mode} palette was added.`);
+      return;
+    }
+    if (editing) {
+      const updated = { ...editing, label: name, colors: ed.colors[editing.appearance], managed };
+      const other = editing.appearance === "light" ? "dark" : "light";
+      if (editing.variants?.[other]) updated.variants = { [other]: ed.colors[other] };
+      customThemes = customThemes.map((t) => (t.id === editing.id ? updated : t));
+      saveCustomThemes();
+      const s = themeState();
+      const active = s.theme === editing.id || s.halves.light === editing.id || s.halves.dark === editing.id;
+      closeThemeEditor();
+      flash(`${name} saved · ${active ? "Your changes are now active." : "Your changes are saved."}`);
+      return;
+    }
+    const id = themeIdFromName(name);
+    if (RESERVED_THEME_IDS.has(id) || customThemes.some((t) => t.id === id)) throw new Error(`A theme named "${name}" is already installed.`);
+    customThemes = [...customThemes, { id, label: name, appearance: mode, colors: ed.colors[mode], ...(managed ? { managed } : {}) }];
+    saveCustomThemes();
+    closeThemeEditor();
+    setTheme(id);
+    flash(`${name} created · It’s now active.`);
+  } catch (err) {
+    ed.error = err.message || (editing ? "Could not save the theme." : "Could not create the theme.");
+    renderThemeEditor();
+  }
+}
+
+/** themeInspector.ts: the family that paints an element, found by swapping each family's colors for a
+ * probe color and seeing which of the element's paints change. A fill wins over a border, a border over
+ * text, as T3 orders them. */
+const FAMILY_PROBES = {
+  canvas: ["canvas"], surface: ["surface"], surfaceRaised: ["surfaceRaised"], surfaceOverlay: ["surfaceOverlay"], text: ["text"],
+  mutedForeground: ["mutedForeground", "sidebarMutedForeground"], border: ["border", "sidebarBorder"], input: ["input"],
+  accentSurface: ["accentSurface"], accent: ["accent"], messageAction: ["messageAction", "messageActionForeground"],
+  messageSurface: ["messageSurface"], codeBackground: ["codeBackground", "codeForeground"],
+  searchMatchBackground: ["searchMatchBackground", "searchMatchForeground"], searchMatchActiveBackground: ["searchMatchActiveBackground", "searchMatchActiveForeground"],
+  sidebar: ["sidebar", "sidebarForeground"], sidebarControlSurface: ["sidebarControlSurface"], sidebarRowSelected: ["sidebarRowHover", "sidebarRowActive", "sidebarRowSelected"],
+  terminalBackground: ["terminalBackground", "terminalForeground"], error: ["error"], warning: ["warning", "warningForeground"],
+};
+const PROBE_PAINTS = [["backgroundColor", "backgroundImage"], ["borderTopColor", "borderRightColor", "borderBottomColor", "borderLeftColor", "outlineColor", "boxShadow"], ["color", "fill", "stroke"]];
+function familyAt(el) {
+  const paints = () => {
+    const s = getComputedStyle(el);
+    return PROBE_PAINTS.map((props) => props.map((p) => s[p]).join("|"));
+  };
+  const before = paints();
+  const found = [null, null, null];
+  themeRoot.dataset.themeTokenProbe = "";
+  for (const [family, roles] of Object.entries(FAMILY_PROBES)) {
+    const vars = roles.map(themeVar);
+    const channels = roles.filter((r) => CHANNEL_ROLES.includes(r)).map((r) => `${themeVar(r)}-rgb`);
+    const saved = vars.map((v) => themeRoot.style.getPropertyValue(v));
+    const savedChannels = channels.map((v) => themeRoot.style.getPropertyValue(v));
+    for (const v of vars) themeRoot.style.setProperty(v, "#01fea7");
+    for (const v of channels) themeRoot.style.setProperty(v, "1 254 167");
+    paints().forEach((p, i) => (found[i] ??= p !== before[i] ? family : null));
+    vars.forEach((v, i) => themeRoot.style.setProperty(v, saved[i]));
+    channels.forEach((v, i) => themeRoot.style.setProperty(v, savedChannels[i]));
+  }
+  delete themeRoot.dataset.themeTokenProbe;
+  return found.find(Boolean) ?? null;
+}
+const familyLabel = (role) => THEME_FAMILIES.flatMap(([, f]) => f).find(([r]) => r === role)?.[1] ?? role;
+
+let inspectHover = null;
+let inspectTimer = 0;
+function showInspectHover(el, family) {
+  let box = document.getElementById("theme-inspector-hover");
+  if (!box) {
+    box = Object.assign(document.createElement("div"), { id: "theme-inspector-hover" });
+    box.innerHTML = `<span class="label"></span>`;
+    document.body.append(box);
+  }
+  const r = el.getBoundingClientRect();
+  Object.assign(box.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+  box.dataset.placement = r.top < 32 ? "below" : "above";
+  box.querySelector(".label").textContent = familyLabel(family);
+  box.hidden = false;
+}
+function clearInspectHover() {
+  clearTimeout(inspectTimer);
+  inspectHover = null;
+  const box = document.getElementById("theme-inspector-hover");
+  if (box) box.hidden = true;
+}
+const outsideEditor = (e) => e.target instanceof Element && !e.target.closest("#theme-editor");
+const inspecting = () => themeEditor?.inspecting;
+document.addEventListener("pointerover", (e) => {
+  if (!inspecting() || !outsideEditor(e)) return;
+  clearTimeout(inspectTimer);
+  inspectTimer = setTimeout(() => {
+    const family = familyAt(e.target);
+    if (!family) return clearInspectHover();
+    inspectHover = { el: e.target, family };
+    showInspectHover(e.target, family);
+  }, 140);
+}, true);
+document.addEventListener("pointerdown", (e) => {
+  if (!inspecting() || !outsideEditor(e)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const family = inspectHover?.el === e.target ? inspectHover.family : familyAt(e.target);
+  clearInspectHover();
+  if (family) selectThemeFamily(family);
+}, true);
+document.addEventListener("click", (e) => {
+  if (!themeEditor?.disarming || !outsideEditor(e)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  themeEditor.disarming = false;
+}, true);
+document.addEventListener("keydown", (e) => {
+  if (!inspecting() || e.key !== "Escape") return;
+  e.preventDefault();
+  e.stopPropagation();
+  setInspecting(false);
+}, true);
+
+function setInspecting(on) {
+  themeEditor.inspecting = on;
+  if (!on) clearInspectHover();
+  renderThemeEditor();
+}
+/** A pick ends inspecting on the family's field, in Advanced unless it is Background or Accent. */
+function selectThemeFamily(role) {
+  const ed = themeEditor;
+  ed.inspecting = false;
+  ed.disarming = true;
+  ed.selected = role;
+  ed.filter = "";
+  if (!["canvas", "accent"].includes(role)) ed.advanced = true;
+  renderThemeEditor();
+  const field = document.querySelector(`#theme-editor [data-theme-color-role="${role}"]`);
+  field?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  field?.querySelector(".te-value")?.focus({ preventScroll: true });
+}
+
+applyTheme();

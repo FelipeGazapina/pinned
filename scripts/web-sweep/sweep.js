@@ -981,9 +981,272 @@ async function sweep(profileName) {
   });
 
 
+  // T3 Code's themes: light and dark, System following prefers-color-scheme, the palettes, and
+  // the keys, ⌘K items, Settings section and editor that pick them.
+  const themeKey = async (key, shift = false) => {
+    const mod = (await page.evaluate(() => IS_MAC)) ? "Meta" : "Control";
+    await page.keyboard.press(`${mod}+Alt+${shift ? "Shift+" : ""}${key}`);
+  };
+  const appearance = () => page.evaluate(() => [document.documentElement.dataset.appearance, document.documentElement.dataset.themeId ?? ""].join("|"));
+  const resetTheme = () =>
+    page.evaluate(() => {
+      for (const key of [THEME_KEY, THEME_MODE_KEY, THEME_HALVES_KEY, CUSTOM_THEMES_KEY]) localStorage.removeItem(key);
+      customThemes = [];
+      if (themeEditor) closeThemeEditor();
+      applyTheme();
+    });
+  /** Visible text whose contrast with what is painted behind it is under 2:1, compositing translucent
+   * fills and opacity up the tree onto the canvas. T3's own faint labels (muted at 60-70%, the
+   * warning orange) sit between 2 and 3 in its light theme; text the theme missed sits near 1.
+   * Syntax tokens keep pierre-light's own colors, as T3's do, so code is left out. */
+  const unreadable = (scope) =>
+    page.evaluate((scope) => {
+      const ctx = Object.assign(document.createElement("canvas"), { width: 1, height: 1 }).getContext("2d", { willReadFrequently: true });
+      const rgba = (css) => {
+        ctx.clearRect(0, 0, 1, 1);
+        ctx.fillStyle = "#000";
+        ctx.fillStyle = css;
+        ctx.fillRect(0, 0, 1, 1);
+        const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+        return [r, g, b, a / 255];
+      };
+      const over = (top, under) => top.slice(0, 3).map((c, i) => c * top[3] + under[i] * (1 - top[3])).concat(1);
+      const lum = ([r, g, b]) => [r, g, b].map((c) => ((c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)).reduce((s, c, i) => s + c * [0.2126, 0.7152, 0.0722][i], 0);
+      const ratio = (x, y) => (Math.max(lum(x), lum(y)) + 0.05) / (Math.min(lum(x), lum(y)) + 0.05);
+      const canvas = rgba(getComputedStyle(document.documentElement).getPropertyValue("--g-canvas"));
+      const bad = [];
+      for (const el of document.querySelectorAll(`${scope} *`)) {
+        if (![...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) continue;
+        if (!el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) || el.closest("[aria-hidden=true], [disabled], [aria-disabled=true], .xterm, iframe, .wireframe, pre code, .dl .code, .fl .code")) continue;
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue;
+        const fills = [];
+        let opacity = 1;
+        for (let p = el; p; p = p.parentElement) {
+          const s = getComputedStyle(p);
+          opacity *= Number(s.opacity);
+          const fill = rgba(s.backgroundColor);
+          if (fill[3] > 0) fills.push(fill);
+          if (fill[3] >= 1) break;
+        }
+        const behind = fills.reverse().reduce((under, fill) => over(fill, under), canvas);
+        const text = rgba(getComputedStyle(el).color);
+        const shown = over([...text.slice(0, 3), text[3] * opacity], behind);
+        const c = ratio(shown, behind);
+        if (c < 2) bad.push(`${el.id || el.className || el.tagName} "${el.textContent.trim().slice(0, 24)}" ${c.toFixed(2)}`);
+      }
+      return [...new Set(bad)];
+    }, scope);
+
   await step("theme: no literal colors left in the app view's css, by scripts/theme-tokens.mjs --check", async () => {
     const run = require("child_process").spawnSync(process.execPath, [path.join(__dirname, "../theme-tokens.mjs"), "--check"], { encoding: "utf8" });
     check(run.status === 0, (run.stdout + run.stderr).trim().split("\n").slice(0, 3).join("; "));
+  });
+
+  await step("app view: System follows prefers-color-scheme into T3's light and dark tokens, and the drawer's terminal and code follow", async () => {
+    await resetTheme();
+    try {
+      check((await appearance()) === "dark|", `under a dark system the app is ${await appearance()}`);
+      await page.emulateMedia({ colorScheme: "light" });
+      await waitFor("the light appearance", async () => (await appearance()) === "light|");
+      const look = await page.evaluate(() => {
+        const css = (sel, p) => getComputedStyle(document.querySelector(sel))[p];
+        return [css("#sidebar", "color"), getComputedStyle(document.documentElement).getPropertyValue("--g-canvas").trim(), active.term.options.theme.foreground, codeTheme(), document.querySelector('meta[name="theme-color"]').content];
+      });
+      check(look.join("|") === "rgb(39, 39, 42)|rgb(252 252 252)|#27272a|pierre-light|rgb(252 252 252)", `light: ${look.join(" | ")}`);
+      await page.emulateMedia({ colorScheme: "dark" });
+      await waitFor("the dark appearance", async () => (await appearance()) === "dark|");
+      const dark = await page.evaluate(() => [getComputedStyle(document.querySelector("#sidebar")).color, active.term.options.theme.foreground, codeTheme()]);
+      check(dark.join("|") === "rgb(241, 243, 247)|#f5f5f5|pierre-dark", `dark: ${dark.join(" | ")}`);
+      await page.evaluate(() => setMode("terminal"));
+      check((await page.evaluate(() => JSON.stringify(active.term.options.theme))) === '{"background":"#00000000"}', "the terminal view's xterm took the app view's colors");
+      await page.evaluate(() => setMode("gui"));
+    } finally {
+      await page.emulateMedia({ colorScheme: "dark" });
+      await resetTheme();
+    }
+  });
+
+  await step("app view: ⌘⌥⇧A cycles System, Light, Dark with a toast, and ⌘⌥A opens Change theme, whose pick paints the palette", async () => {
+    await resetTheme();
+    try {
+      const seen = [];
+      for (let i = 0; i < 3; i++) {
+        await themeKey("A", true);
+        seen.push(`${await page.evaluate(() => themeState().mode)}:${await appearance()}:${await text("#panel-note span")}`);
+      }
+      check(seen.join(" ") === "light:light|:Appearance: Light dark:dark|:Appearance: Dark system:dark|:Appearance: System", `cycle: ${seen.join(" ")}`);
+      await themeKey("A");
+      await waitFor("the Change theme list", async () => (await page.locator("#palette .group .label").first().textContent()) === "Change theme");
+      const names = await page.locator("#palette .item .name").allTextContents();
+      check(names.join(",") === "T3 Code,T3 Chat,Grove,Ocean,Ember,Iris", `themes: ${names.join(", ")}`);
+      check((await page.locator("#palette .item").first().locator(".current").textContent()) === "Current", "T3 Code isn't marked current");
+      await press(page.locator("#palette .item", { hasText: "Grove" }));
+      await waitFor("Grove", async () => (await appearance()) === "dark|grove");
+      const canvas = await page.evaluate(() => [colorHex(getComputedStyle(document.querySelector("#composer .box")).backgroundColor), colorHex(colorsFor(themeById("grove"), "dark").surface)]);
+      check(canvas[0] === `${canvas[1]}cc`, `the composer is ${canvas[0]}, Grove's dark surface ${canvas[1]}`);
+      await themeKey("A", true);
+      check((await appearance()) === "light|grove", `Grove in light is ${await appearance()}`);
+    } finally {
+      await page.evaluate(() => closePalette());
+      await resetTheme();
+    }
+  });
+
+  await step("app view: ⌘K has Change theme, Change appearance and Toggle theme editor, as T3's palette does", async () => {
+    await resetTheme();
+    try {
+      await page.evaluate(() => openPalette());
+      await page.fill("#palette input", "theme");
+      const found = await page.locator("#palette .item .name").allTextContents();
+      check(["Change theme", "Toggle theme editor"].every((n) => found.includes(n)), `"theme" finds ${found.join(", ")}`);
+      await page.fill("#palette input", "appearance");
+      await press(page.locator("#palette .item", { hasText: "Change appearance" }));
+      const modes = await page.locator("#palette .item .name").allTextContents();
+      check(modes.join(",") === "System,Light,Dark", `appearance: ${modes.join(", ")}`);
+      check((await page.locator("#palette .item", { hasText: "System" }).locator(".current").count()) === 1, "System isn't current");
+      await press(page.locator("#palette .item", { hasText: "Light" }));
+      check((await appearance()) === "light|", `after Light: ${await appearance()}`);
+      await page.evaluate(() => openPalette());
+      await page.fill("#palette input", "toggle theme editor");
+      await press(page.locator("#palette .item", { hasText: "Toggle theme editor" }));
+      await waitFor("the editor", () => page.locator("#theme-editor").isVisible());
+    } finally {
+      await page.evaluate(() => closePalette());
+      await resetTheme();
+    }
+  });
+
+  await step("app view: Settings' Color scheme tiles and theme cards pick the appearance, a palette, and one half", async () => {
+    await resetTheme();
+    await page.evaluate(() => toggleSettings());
+    await tapOrClick('#settings-nav [data-page="general"]');
+    try {
+      const tiles = await page.locator("#theme-section .mode-tile .label").allTextContents();
+      check(tiles.join(",") === "System,Light,Dark", `tiles: ${tiles.join(", ")}`);
+      check((await page.locator('#theme-section [data-theme-mode="system"]').getAttribute("aria-pressed")) === "true", "System isn't pressed");
+      await press(page.locator('#theme-section [data-theme-mode="light"]'));
+      check((await appearance()) === "light|", `the Light tile gives ${await appearance()}`);
+      const settingsText = await page.evaluate(() => getComputedStyle(document.querySelector("#settings-page h2")).color);
+      check(settingsText === "rgb(39, 39, 42)", `Settings' heading reads in ${settingsText}`);
+      const cards = await page.locator("#theme-section .theme-card .name").allTextContents();
+      check(cards.join(",") === "T3 Code,T3 Chat,Grove,Ocean,Ember,Iris", `cards: ${cards.join(", ")}`);
+      await press(page.locator('#theme-section .theme-card[data-theme-card="ocean"] .name'));
+      check((await appearance()) === "light|ocean", `Ocean gives ${await appearance()}`);
+      await press(page.locator('#theme-section .theme-card[data-theme-card="ember"] [data-theme-half="dark"]'));
+      const halves = await page.evaluate(() => JSON.stringify(themeState().halves));
+      check(halves === '{"dark":"ember"}', `halves: ${halves}`);
+      await press(page.locator('#theme-section [data-theme-mode="dark"]'));
+      check((await appearance()) === "dark|ember", `dark with an Ember half is ${await appearance()}`);
+      check((await page.locator('#theme-section .theme-card[data-theme-card="ember"] .pick.picked').count()) === 1, "Ember's dark circle isn't picked");
+      const bad = await unreadable("#settings");
+      check(!bad.length, `unreadable in Settings under Ember: ${bad.slice(0, 4).join("; ")}`);
+    } finally {
+      await resetTheme();
+      await page.evaluate(() => settingsOpen() && toggleSettings());
+    }
+  });
+
+  await step("app view: ⌘⌥⇧T's theme editor derives a palette from Background and Accent live, creates it, edits, exports and removes it", async () => {
+    await resetTheme();
+    try {
+      await themeKey("T", true);
+      await waitFor("the editor", () => page.locator("#theme-editor").isVisible());
+      check((await text("#theme-editor .te-title b")) === "Create theme", `the editor is ${await text("#theme-editor .te-title b")}`);
+      const simple = await page.locator("#theme-editor .te-label").allTextContents();
+      check(simple.join(",") === "Background,Accent", `simple fields: ${simple.join(", ")}`);
+      await page.fill('#theme-editor .te-value[data-role="canvas"]', "#102030");
+      await page.fill('#theme-editor .te-value[data-role="accent"]', "#e0569a");
+      const preview = await page.evaluate(() => [document.documentElement.dataset.themeId, document.documentElement.dataset.appearance, colorHex(getComputedStyle(document.documentElement).getPropertyValue("--g-canvas").trim()), colorHex(getComputedStyle(document.documentElement).getPropertyValue("--g-primary").trim()) !== "#346bf1"]);
+      check(preview.join("|") === "__preview|dark|#102030|true", `the preview: ${preview.join(" | ")}`);
+      check(await page.locator('#theme-editor [data-te="save"]').isDisabled(), "an unnamed theme can be saved");
+      await page.fill("#theme-name", "Harbor");
+      await press(page.locator('#theme-editor [data-te="save"]'));
+      await waitFor("the saved theme", async () => (await appearance()) === "dark|harbor");
+      check((await page.locator("#theme-editor").count()) === 0, "the editor stayed open");
+      check(/Harbor created/.test(await text("#panel-note span")), `the toast reads ${await text("#panel-note span")}`);
+      await page.evaluate(() => toggleSettings());
+      await tapOrClick('#settings-nav [data-page="general"]');
+      const card = page.locator('#theme-section .theme-card[data-theme-card="harbor"]');
+      check((await card.locator("[data-theme-action]").count()) === 4, "Harbor's card lacks Duplicate, Edit, Export, Remove");
+      await press(card.locator('[data-theme-action="edit"]'));
+      await waitFor("the edit panel", async () => (await text("#theme-editor .te-title b")) === "Edit theme");
+      await page.locator('#theme-editor [data-te="advanced"]').setChecked(true);
+      check((await page.locator("#theme-editor .te-group h4").allTextContents()).join(",") === "Foundation,Brand & content,Search,Context,Status", "advanced lacks T3's families");
+      await press(page.locator('#theme-editor [data-te="inspect"]'));
+      check((await text("#theme-editor .te-title span")) === "Select an element · Esc to cancel", `inspecting reads ${await text("#theme-editor .te-title span")}`);
+      const bubble = gui("#thread .turn .bubble");
+      const edge = { position: { x: 14, y: 3 } };
+      if (!touch) {
+        await bubble.hover(edge);
+        await waitFor("the inspector's label", async () => (await page.locator("#theme-inspector-hover:not([hidden]) .label").textContent().catch(() => "")) === "Message surface");
+      }
+      await (touch ? bubble.tap(edge) : bubble.click(edge));
+      await waitFor("the picked family", async () => (await page.locator("#theme-editor .te-field.selected").getAttribute("data-theme-color-role").catch(() => "")) === "messageSurface");
+      check((await page.evaluate(() => document.activeElement?.dataset.role)) === "messageSurface", "the picked field isn't focused");
+      await page.fill("#theme-editor .te-filter", "sidebar");
+      check((await page.locator("#theme-editor .te-label").allTextContents()).join(",") === "Sidebar background,Sidebar controls,Sidebar selection", "the filter doesn't narrow to the sidebar");
+      await page.fill('#theme-editor .te-value[data-role="sidebar"]', "#000000");
+      await press(page.locator('#theme-editor [data-te="save"]'));
+      await waitFor("the saved edit", async () => (await page.evaluate(() => colorHex(customThemes[0].colors.sidebar))) === "#000000");
+      check((await appearance()) === "dark|harbor", `after the edit: ${await appearance()}`);
+      const file = await page.evaluate(() => JSON.parse(themeFile(customThemes[0])));
+      check(file.version === 1 && file.name === "Harbor" && file.appearance === "dark" && /^oklch\(/.test(file.colors.canvas), `the export: ${JSON.stringify(file).slice(0, 80)}`);
+      await press(card.locator('[data-theme-action="remove"]'));
+      await press(page.locator("#shell-dialog [data-dialog-remove]"));
+      await waitFor("the removal", async () => (await page.locator('#theme-section .theme-card[data-theme-card="harbor"]').count()) === 0);
+      check((await appearance()) === "dark|", `after removing it: ${await appearance()}`);
+    } finally {
+      await resetTheme();
+      await page.evaluate(() => settingsOpen() && toggleSettings());
+    }
+  });
+
+  await step("app view: in light mode the sidebar, thread, composer, diff, PR, browser, settings and ⌘K have no unreadable text", async () => {
+    await resetTheme();
+    await page.emulateMedia({ colorScheme: "light" });
+    const shot = (name) => page.screenshot({ path: path.join(shots, `light-${name}.png`) });
+    const bad = [];
+    const panelWas = await page.evaluate(() => ({ panel: JSON.stringify(panelOf(active)), diff: threadOf(active).diff ? JSON.stringify(threadOf(active).diff) : null, saved: [`gui-panel:${threadKey(active)}`, `gui-diff:${threadKey(active)}`].map((k) => [k, localStorage.getItem(k)]) }));
+    const audit = async (name, scope) => {
+      await sleep(400);
+      await shot(name);
+      bad.push(...(await unreadable(scope)).map((b) => `${name}: ${b}`));
+    };
+    try {
+      await waitFor("the light appearance", async () => (await appearance()) === "light|");
+      if (touch) await page.evaluate(() => toggleSidebar(true));
+      await audit("sidebar", "#sidebar");
+      if (touch) await page.evaluate(() => toggleSidebar(false));
+      await audit("thread", "#chat");
+      await page.evaluate(() => openPanel("diff"));
+      await audit("diff", "#panel");
+      if (await page.evaluate(() => !!shownPr(active))) {
+        await page.evaluate(() => openSurface("pr"));
+        await audit("pr", "#panel");
+      }
+      await page.evaluate(() => openSurface("browser"));
+      await audit("browser", "#panel");
+      await page.evaluate(() => closePanel());
+      await page.evaluate(() => openPalette());
+      await audit("palette", "#palette");
+      await page.evaluate(() => closePalette());
+      await page.evaluate(() => toggleSettings());
+      await tapOrClick('#settings-nav [data-page="general"]');
+      await audit("settings", "#settings");
+      await page.evaluate(() => toggleSettings());
+      check(!bad.length, bad.slice(0, 5).join("; "));
+    } finally {
+      await page.evaluate(() => settingsOpen() && toggleSettings());
+      await page.evaluate((was) => {
+        panelStates.set(active.key, JSON.parse(was.panel));
+        threadOf(active).diff = was.diff ? JSON.parse(was.diff) : undefined;
+        for (const [key, value] of was.saved) value === null ? localStorage.removeItem(key) : localStorage.setItem(key, value);
+        renderPanel();
+      }, panelWas);
+      await page.emulateMedia({ colorScheme: "dark" });
+      await resetTheme();
+    }
   });
 
   await step("app view: changed files and mentions carry T3 Code's file-type icons", async () => {

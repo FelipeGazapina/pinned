@@ -203,6 +203,7 @@ function actionItems() {
     { icon: "folder-plus", title: "Add project", terms: ["add project", "open folder"], run: () => addProject() },
     { icon: "git-pull-request", title: "Open pull requests", terms: ["open pull requests", "prs reviews"], run: () => openPage("pull-requests") },
     { icon: "chart-column", title: "Open usage", hint: chordLabel("U"), terms: ["open usage", "cost tokens limits"], run: () => openPage("usage") },
+    ...themeActionItems(),
     { icon: "square-terminal", title: "Switch to terminal view", hint: chordLabel("E"), terms: ["switch to terminal view", "mode"], run: () => setMode("terminal") },
     { icon: "settings", title: "Open settings", hint: chordLabel(","), terms: ["open settings", "settings preferences configuration"], run: () => openSettings() },
     tab && { icon: "folder", title: "Project settings", sub: project, terms: ["project settings", project], run: () => openSettings("projects") },
@@ -288,7 +289,7 @@ function renderPalette() {
         return `<div class="item${i === palette.hi ? " hi" : ""}" role="option" data-i="${i}"${item.disabled ? ` aria-disabled="true"` : ""}>
           <span class="ic">${item.iconHtml ?? icon(item.icon)}</span>
           <span class="text"><span class="title">${item.status ?? ""}<span class="name">${item.title}</span></span>${item.sub ? `<span class="sub">${esc(item.sub)}</span>` : ""}</span>
-          ${item.time ? `<span class="time">${agoLong(item.time)}</span>` : ""}${item.hint ? `<span class="hint">${esc(item.hint)}</span>` : ""}${item.page ? icon("chevron-right", "chev") : ""}</div>`;
+          ${item.time ? `<span class="time">${agoLong(item.time)}</span>` : ""}${item.trail ?? ""}${item.hint ? `<span class="hint">${esc(item.hint)}</span>` : ""}${item.page ? icon("chevron-right", "chev") : ""}</div>`;
       }).join("")}</div>`).join("")
     : `<p class="empty">${query.startsWith(">") ? "No matching actions." : "No matching commands, projects, or threads."}</p>`;
   paletteResults.querySelector(".item.hi")?.scrollIntoView({ block: "nearest" });

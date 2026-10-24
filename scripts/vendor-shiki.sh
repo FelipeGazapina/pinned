@@ -1,7 +1,7 @@
 #!/bin/sh
-# Rebuilds ui/vendor/shiki: Shiki 4.2.0 with its Oniguruma WASM engine and T3 Code's pierre-dark
-# theme (@pierre/theme 2.0.0), as ES modules the diff and file views and the thread's code blocks
-# import on first use, one chunk per language Shiki bundles. Needs npm and network.
+# Rebuilds ui/vendor/shiki: Shiki 4.2.0 with its Oniguruma WASM engine and T3 Code's pierre-dark and
+# pierre-light themes (@pierre/theme 2.0.0), as ES modules the diff and file views and the thread's
+# code blocks import on first use, one chunk per language Shiki bundles. Needs npm and network.
 set -eu
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 WORK=$(mktemp -d)
@@ -14,12 +14,13 @@ import { createHighlighterCore } from "shiki/core";
 import { createOnigurumaEngine } from "shiki/engine/oniguruma";
 import { bundledLanguages } from "shiki/langs";
 import pierreDark from "@pierre/theme/pierre-dark";
+import pierreLight from "@pierre/theme/pierre-light";
 
 // Every grammar Shiki bundles, by id and alias, as T3 Code highlights code blocks in any of them.
 const LANGS = bundledLanguages;
 
 export async function highlighter() {
-  const core = await createHighlighterCore({ themes: [pierreDark], langs: [], engine: createOnigurumaEngine(import("shiki/wasm")) });
+  const core = await createHighlighterCore({ themes: [pierreDark, pierreLight], langs: [], engine: createOnigurumaEngine(import("shiki/wasm")) });
   return {
     async loadLanguage(lang) {
       if (!LANGS[lang]) throw new Error(`no grammar for ${lang}`);
