@@ -836,7 +836,7 @@ new ResizeObserver(layoutMinimap).observe(threadView);
 const prCard = Object.assign(document.createElement("div"), { id: "pr-card", hidden: true });
 document.body.append(prCard);
 const prDetails = new Map();
-const PR_STATES = { open: ["Open", "git-pull-request"], draft: ["Draft", "git-pull-request-draft"], closed: ["Closed", "git-pull-request-closed"], merged: ["Merged", "git-merge"] };
+const PR_CARD_STATES = { open: ["Open", "git-pull-request"], draft: ["Draft", "git-pull-request-draft"], closed: ["Closed", "git-pull-request-closed"], merged: ["Merged", "git-merge"] };
 const relativeTime = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
 function openedAgo(at) {
   const seconds = (Date.parse(at) - Date.now()) / 1000;
@@ -849,7 +849,7 @@ let prHover = { link: null, timer: 0, close: 0 };
 
 function prCardHtml(d) {
   const state = d.isDraft && d.state === "OPEN" ? "draft" : (d.state ?? "open").toLowerCase();
-  const [label, glyph] = PR_STATES[state] ?? PR_STATES.open;
+  const [label, glyph] = PR_CARD_STATES[state] ?? PR_CARD_STATES.open;
   const repo = /github\.com\/([^/]+\/[^/]+)\/pull/.exec(d.url ?? "")?.[1] ?? "";
   const login = d.author?.login ?? "ghost";
   const who = d.author?.name && d.author.name !== login ? `${d.author.name} (@${login})` : login;
@@ -900,7 +900,7 @@ threadView.addEventListener("scroll", () => {
 
 /** T3 Code's alert dialog: a title, a description, an optional field, and buttons; resolves to the
  * chosen button's value and the field's text, or null when dismissed. */
-function askDialog({ title, about, field, buttons }) {
+function alertDialog({ title, about, field, buttons }) {
   const dialog = document.createElement("dialog");
   dialog.className = "tl-dialog";
   dialog.innerHTML = `<form method="dialog"><h2>${esc(title)}</h2><p class="about">${about}</p>
@@ -923,7 +923,7 @@ async function editFromHere(id) {
   const tab = active;
   const user = threadOf(tab).items.find((i) => i.id === id);
   if (!user || turnLive(tab) || waitsOnMenu(tab)) return;
-  const answer = await askDialog({
+  const answer = await alertDialog({
     title: "Edit from here?",
     about: "Rewind chat to before this message. Your prompt returns to the composer. “Revert files too” also undoes the changes made since, your own included.",
     buttons: [{ value: "", label: "Cancel" }, { value: "files", label: "Revert files too", kind: "danger-outline" }, { value: "chat", label: "Revert and keep changes", kind: "primary" }],
@@ -961,7 +961,7 @@ async function savePlan(text) {
   const tab = active;
   let path = threadOf(tab).planPath || planFile(text);
   for (;;) {
-    const answer = await askDialog({
+    const answer = await alertDialog({
       title: "Save plan to workspace",
       about: `Enter a path relative to <code>${esc(tilde(tab.view.cwd))}</code>.`,
       field: { label: "Workspace path", value: path, placeholder: planFile(text) },

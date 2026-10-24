@@ -882,7 +882,7 @@ function setPulls(change) {
   fetchPulls();
 }
 
-const sizeOf = (r) => r.additions + r.deletions;
+const prSize = (r) => r.additions + r.deletions;
 const PR_SORT_RANK = {
   ready: (r) => (r.conflicting ? 4 : r.state === "merged" || r.state === "closed" ? 3 : r.state === "draft" ? 2 : r.checks === "passing" && r.review === "approved" ? 0 : r.checks === "passing" ? 1 : 2),
   author: (r) => (r.state === "merged" || r.state === "closed" ? 6 : r.conflicting ? 0 : r.review === "changes_requested" ? 1 : r.checks === "failing" ? 2 : r.state === "draft" ? 3 : r.checks === "passing" && r.review === "approved" ? 5 : 4),
@@ -892,8 +892,8 @@ const PR_SORT_RANK = {
 function sortPulls(list, group) {
   const { sort } = pulls;
   const recent = (a, b) => b.updated_at.localeCompare(a.updated_at);
-  const bySize = (a, b) => Number(sizeOf(b) > 0) - Number(sizeOf(a) > 0);
-  if (sort === "ready") return pulls.q.trim() ? list : [...list].sort((a, b) => PR_SORT_RANK.ready(a) - PR_SORT_RANK.ready(b) || bySize(a, b) || sizeOf(a) - sizeOf(b) || recent(a, b));
+  const bySize = (a, b) => Number(prSize(b) > 0) - Number(prSize(a) > 0);
+  if (sort === "ready") return pulls.q.trim() ? list : [...list].sort((a, b) => PR_SORT_RANK.ready(a) - PR_SORT_RANK.ready(b) || bySize(a, b) || prSize(a) - prSize(b) || recent(a, b));
   if (sort === "blocked") {
     const role = group === "others" ? pulls.involvement : group;
     if (pulls.q.trim() || role === "all") return list;
@@ -901,7 +901,7 @@ function sortPulls(list, group) {
     return [...list].sort((a, b) => rank(a) - rank(b) || recent(a, b));
   }
   if (sort === "newest" || sort === "oldest") return [...list].sort((a, b) => (sort === "newest" ? -1 : 1) * a.created_at.localeCompare(b.created_at) || recent(a, b));
-  if (sort === "largest" || sort === "smallest") return [...list].sort((a, b) => bySize(a, b) || (sort === "largest" ? -1 : 1) * (sizeOf(a) - sizeOf(b)) || recent(a, b));
+  if (sort === "largest" || sort === "smallest") return [...list].sort((a, b) => bySize(a, b) || (sort === "largest" ? -1 : 1) * (prSize(a) - prSize(b)) || recent(a, b));
   return list;
 }
 
@@ -922,7 +922,7 @@ function pullRowHtml(r) {
   return `<div class="pr-row${active && threadOf(active).prUrl === r.url ? " selected" : ""}" role="button" tabindex="0" data-url="${esc(r.url)}">
     <span class="state" title="${stateLabel}" style="color:${stateColor}">${icon(stateIcon)}${open && r.state === "open" && r.conflicting ? `<span class="conflict" title="Conflicts with ${esc(r.base)}">${icon("triangle-alert")}</span>` : ""}</span>
     <span class="body"><span class="line1"><span class="num">#${r.number}</span><span class="title">${esc(r.title)}</span>${checks ? mark(checks, "checks") : ""}${review ? mark(review, "review") : ""}
-      <span class="right">${sizeOf(r) ? `<span class="stat"><span class="add">+${r.additions}</span> <span class="del">-${r.deletions}</span></span>` : ""}</span></span>
+      <span class="right">${prSize(r) ? `<span class="stat"><span class="add">+${r.additions}</span> <span class="del">-${r.deletions}</span></span>` : ""}</span></span>
     <span class="line2">${/^https:\/\/avatars\.githubusercontent\.com\//.test(r.avatar) ? `<img src="${esc(r.avatar)}" alt="" referrerpolicy="no-referrer">` : ""}<span class="login">${esc(r.author)}</span><span class="repo">${esc(r.repo)}</span>${labels}<span class="when">${agoLong(unixOfIso(r.updated_at))}</span></span></span>
     ${quick ? `<span class="quick">${quick}</span>` : ""}</div>`;
 }
