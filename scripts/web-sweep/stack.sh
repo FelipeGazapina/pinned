@@ -59,10 +59,11 @@ start() {
   cp "$REPO/scripts/web-sweep/fake-claude" "$DIR/bin/claude"
   printf '#!/bin/sh\nshift\nexec /bin/sh -c "$1"\n' >"$DIR/bin/shell"
   chmod +x "$DIR/bin/claude" "$DIR/bin/shell"
-  for p in alpha beta; do
+  for p in alpha beta gamma; do
     git -C "$DIR/home/work" init -q "$p"
     git -C "$DIR/home/work/$p" remote add origin "https://github.com/example/$p.git"
   done
+  touch "$DIR/home/work/gamma/.untrusted"
   env HOME="$DIR/home" PINNED_PASSWORD="$PASSWORD" "$SERVER" login "$HUB" "$EMAIL" --name sweep-node --config-dir "$DIR/node" >/dev/null
   env HOME="$DIR/home" SHELL="$DIR/bin/shell" PATH="$DIR/bin:$PATH" "$SERVER" node --config-dir "$DIR/node" >"$DIR/node.log" 2>&1 &
   echo $! >"$DIR/node.pid"

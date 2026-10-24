@@ -178,7 +178,11 @@ document.getElementById("project-filter").onchange = (e) => {
   save("gui-project", ui.project);
   renderSidebar();
 };
-document.getElementById("new-thread").onclick = () => toggleProjects();
+// On a phone the sheet would cover the thread the picker opens.
+document.getElementById("new-thread").onclick = () => {
+  if (narrow(768)) toggleSidebar(false);
+  toggleProjects();
+};
 
 function toggleSidebar(open = !ui.sidebarOpen) {
   ui.sidebarOpen = open;
@@ -509,34 +513,42 @@ function renderComposer(tab) {
 }
 
 /** The menu claude shows in its terminal, if one is up: the folder trust check, a permission
- * request, or any other choice. It is the numbered options, one marked ❯, at the bottom of the
- * screen, and the text above them up to the rule claude draws. */
+ * request, or any other choice. It is a column of options at the bottom of the screen, one marked
+ * ❯, numbered or not, under the text it asks, which starts after the rule claude draws above. */
 function terminalMenu(tab) {
   const buffer = tab.term.buffer.active;
   const bottom = buffer.baseY + tab.term.rows;
-  // A narrow terminal wraps a long option onto more rows; they join back into one line.
+  // A narrow terminal wraps a long line onto more rows; they join back into one.
   const lines = [];
-  for (let i = Math.max(0, bottom - 40); i < bottom; i++) {
+  for (let i = buffer.baseY; i < bottom; i++) {
     const row = buffer.getLine(i);
     const text = row?.translateToString(true) ?? "";
     if (row?.isWrapped && lines.length) lines[lines.length - 1] += text;
     else lines.push(text);
   }
-  const footer = (l) => !l.trim() || /\b(Esc|Enter|Tab)\b/.test(l);
-  let i = lines.length - 1;
-  while (i >= 0 && footer(lines[i]) && !OPTION.test(lines[i])) i--;
+  let end = lines.length - 1;
+  while (end >= 0 && (!lines[end].trim() || /\b(Esc|Enter|Tab)\b/.test(lines[end])) && !CURSOR.test(lines[end])) end--;
+  let cursor = end;
+  while (cursor >= Math.max(0, end - 12) && !CURSOR.test(lines[cursor])) cursor--;
+  if (cursor < Math.max(0, end - 12)) return null;
+  const at = lines[cursor].search(CURSOR) + 2;
+  const option = (l) => l.length > at && !l.slice(0, at).replace(CURSOR, "").trim() && l[at] !== " ";
+  const continued = (l) => l.length > at && !l.slice(0, at + 1).trim();
+  let first = cursor;
+  while (first > 0 && (option(lines[first - 1]) || continued(lines[first - 1]))) first--;
+  while (!option(lines[first])) first++;
   const options = [];
-  for (; i >= 0; i--) {
-    const m = lines[i].match(OPTION);
-    if (m) options.unshift({ n: Number(m[2]), label: m[3], chosen: !!m[1] });
-    else if (!/^\s{4,}\S/.test(lines[i]) || !options.length) break;
+  for (let k = first; k <= end; k++) {
+    if (option(lines[k])) options.push({ n: options.length + 1, label: lines[k].slice(at).trim().replace(/^\d+\.\s+/, ""), chosen: CURSOR.test(lines[k]) });
+    else if (continued(lines[k]) && options.length) options.at(-1).label += ` ${lines[k].trim()}`;
+    else return null;
   }
-  if (options.length < 2 || options.some((o, k) => o.n !== k + 1) || !options.some((o) => o.chosen)) return null;
-  const rule = lines.slice(0, i + 1).findLastIndex((l) => /^\s*[─━]{8,}/.test(l));
-  const question = lines.slice(rule + 1, i + 1).map((l) => l.trim()).filter(Boolean).join("\n");
+  if (options.length < 2) return null;
+  const rule = lines.slice(0, first).findLastIndex((l) => /^\s*[─━]{8,}/.test(l));
+  const question = lines.slice(rule + 1, first).map((l) => l.trim()).filter(Boolean).join("\n");
   return { question, options };
 }
-const OPTION = /^\s*(❯|›)?\s*(\d)\.\s+(.+?)\s*$/;
+const CURSOR = /[❯›](?= )/;
 
 /** Re-reads the active terminal's menu after claude draws, so the banner follows it. */
 function watchMenu(tab) {
@@ -560,6 +572,7 @@ function chooseOption(tab, n) {
   const from = tab.menu.options.find((o) => o.chosen)?.n ?? 1;
   const keys = (n > from ? "\x1b[B" : "\x1b[A").repeat(Math.abs(n - from)) + "\r";
   tab.menu = null;
+  renderComposer(tab);
   return callOn(tab.machine, { cmd: "write_input", tab: tab.view.id, data: keys });
 }
 
@@ -578,7 +591,7 @@ function renderApproval(tab) {
   approval.dataset.kind = permission ? "approval" : "input";
   const kind = !permission ? "Claude is asking" : pending?.name === "Bash" ? "Command approval" : /^(Edit|Write|MultiEdit)$/.test(pending?.name) ? "File change approval" : "Permission approval";
   const options = menu
-    ? menu.options.map((o) => `<button type="button" data-option="${o.n}" class="${o.n === 1 ? "primary" : "outline"}">${esc(o.label)}</button>`)
+    ? menu.options.map((o) => `<button type="button" data-option="${o.n}" class="${o.chosen ? "primary" : "outline"}">${esc(o.label)}</button>`)
     : [`<button type="button" data-key="1" class="primary">Approve</button>`, `<button type="button" data-key="2" class="outline" title="Don't ask again for this in this session">Always allow</button>`, `<button type="button" data-key="\u001b" class="outline">Decline</button>`];
   approval.innerHTML = `${icon(permission ? "shield" : "circle-alert", "lead")}<div class="body"><p class="kind">${esc(kind)}</p>
       <p class="what">${esc(menu?.question || tab.view.message || "")}</p>${pending && permission ? `<pre>${esc(pending.detail || pending.summary)}</pre>` : ""}

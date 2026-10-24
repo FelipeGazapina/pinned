@@ -56,8 +56,11 @@ body[data-mode="gui"] #sidebar { display: flex; grid-column: 1; grid-row: 1 / -1
 body[data-mode="gui"] #chat { display: flex; grid-column: 2; grid-row: 1; }
 body[data-mode="gui"] #panel { display: flex; grid-column: 3; grid-row: 1 / -1; }
 body[data-mode="gui"] #terms { grid-column: 2; grid-row: 2; border-top: 1px solid var(--g-border); overflow: hidden; }
-body[data-mode="gui"][data-drawer="closed"] #terms .term { visibility: hidden; }
-body[data-mode="gui"] #projects { position: fixed; top: 60px; z-index: 40; width: min(440px, calc(100% - 24px)); font-size: 13px; }
+/* Closed, the drawer's terminal stays full size behind the thread: fitting it to nothing would
+   shrink claude's screen to one row and garble the menus the app view reads off it. */
+body[data-mode="gui"][data-drawer="closed"] #terms { grid-row: 1; visibility: hidden; pointer-events: none; border: 0; }
+body[data-mode="gui"] #chat { z-index: 1; }
+body[data-mode="gui"] #projects { visibility: visible; pointer-events: auto; position: fixed; top: 60px; z-index: 40; width: min(440px, calc(100% - 24px)); font-size: 13px; }
 body[data-mode="gui"][data-sidebar="closed"] #sidebar, body[data-mode="gui"][data-panel="closed"] #panel { visibility: hidden; }
 body.resizing, body.resizing iframe { cursor: col-resize; user-select: none; }
 body.resizing iframe { pointer-events: none; }
@@ -464,5 +467,5 @@ body[data-panel-max="true"] #panel-resize { display: none; }
   #sidebar .icon, #chat .icon, #panel .icon, #composer .round, #composer .pick, body[data-mode="terminal"] #mode-gui { min-width: 40px; min-height: 40px; }
   .diff-bar { height: 48px; }
   .file > header { top: 48px; }
-  #composer-footer > *, #panel-tabs [data-panel], .diff-bar .scope, #approval button { min-height: 40px; }
+  #composer-footer > *, #panel-tabs [data-panel], .diff-bar .scope, #approval .options button, #approval .actions button { min-height: 40px; }
 }

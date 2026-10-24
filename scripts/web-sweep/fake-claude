@@ -40,7 +40,17 @@ if (settings.statusLine?.command) {
 
 const KEYS = { "\x1b": "[esc]", "\t": "[tab]", "\x1b[Z": "[shift-tab]", "\x1b[A": "[up]", "\x1b[B": "[down]", "\x1bOA": "[up]", "\x1bOB": "[down]", "\x03": "[ctrl-c]" };
 const out = (text) => process.stdout.write(text);
-out(`fake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}\r\n> `);
+// A folder holding .untrusted asks first, as claude does in a folder it hasn't seen: unnumbered, "No" chosen.
+let trusting = fs.existsSync(".untrusted") ? 1 : 0;
+const TRUST = ["No, exit", "Yes, I trust this folder"];
+function drawTrust() {
+  out(`${"─".repeat(40)}\r\n Accessing workspace:\r\n\r\n ${process.cwd()}\r\n\r\n Quick safety check: is this a project you trust?\r\n\r\n`);
+  TRUST.forEach((c, i) => out(`${i + 1 === trusting ? " ❯" : "  "} ${c}\r\n`));
+  out("\r\n Enter to confirm · Esc to cancel\r\n");
+}
+const greet = () => out(`fake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}\r\n> `);
+if (trusting) drawTrust();
+else greet();
 
 let line = "";
 function submit() {
@@ -97,6 +107,19 @@ process.stdin.setRawMode?.(true);
 process.stdin.on("data", (chunk) => {
   // A prompt pinned types arrives as a bracketed paste, which claude reads as plain text.
   const text = chunk.toString("utf8").replace(/\x1b\[20[01]~/g, "");
+  if (trusting) {
+    for (const key of text.match(/\x1b\[[AB]|[\s\S]/g)) {
+      if (key === "\x1b[B" || key === "\x1b[A") {
+        trusting = key === "\x1b[B" ? 2 : 1;
+        drawTrust();
+      } else if (key === "\r") {
+        if (trusting === 1) process.exit(0);
+        trusting = 0;
+        greet();
+      }
+    }
+    return;
+  }
   if (asking) {
     for (const key of text.match(/\x1b\[[AB]|[\s\S]/g)) answerMenu(key);
     return;

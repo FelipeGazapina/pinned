@@ -643,6 +643,27 @@ async function sweep(profileName) {
     return options.join(" | ");
   });
 
+  await step("app view: claude's folder trust menu, answered from the banner", async () => {
+    await showSidebar();
+    await tapOrClick("#new-thread");
+    await page.waitForSelector("#projects .choices button");
+    await press(page.locator("#projects .choices button", { hasText: "Browse folders…" }));
+    await page.fill("#projects .browse input", `${HOME}/work/gamma/`);
+    await waitFor("the folder listing", async () => (await text("#projects .folders button")).startsWith("Open "));
+    await press(page.locator("#projects .folders button").first());
+    await waitFor("the trust banner", () => page.locator("#approval .options button").first().isVisible());
+    const options = await page.locator("#approval .options button").allTextContents();
+    check(options.join("|") === "No, exit|Yes, I trust this folder", `options: ${options.join(" | ")}`);
+    check(/No, exit/.test(await text("#approval .primary")), "the banner doesn't mark claude's own default");
+    await press(gui('#approval [data-option="2"]'));
+    await waitTerm(/fake claude in .*work\/gamma/);
+    await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
+    await page.evaluate(() => closeTab(active));
+    await waitFor("two threads again", async () => (await page.locator("#thread-list .thread-row").count()) === 2);
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+    return options.join(" | ");
+  });
+
   await step("app view: the terminal drawer shows the same session", async () => {
     await tapOrClick("#toggle-terminal");
     await waitFor("the drawer", () => page.locator(".term:not([hidden])").evaluate((el) => getComputedStyle(el).visibility === "visible" && el.getBoundingClientRect().height > 60));
