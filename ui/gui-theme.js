@@ -169,6 +169,33 @@ function themeSurroundings() {
   for (const t of tabs) t.term.options.theme = theme;
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = guiOn() ? getComputedStyle(themeRoot).getPropertyValue("--g-canvas").trim() : "#0f1115";
+  syncWindowTheme();
+}
+
+/** T3's resolveDesktopTheme: the appearance the window itself should take, or null to follow the
+ * system. Under System that is still the palette's own appearance when it has only one. */
+function desktopTheme(s = themeState()) {
+  if (s.mode === "system") {
+    const t = themeById(s.theme);
+    const has = (m) => !!s.halves[m] || !!(t && colorsFor(t, m));
+    return t && !(has("light") && has("dark")) ? t.appearance : null;
+  }
+  if (s.halves[s.mode]) return s.mode;
+  const t = themeById(s.theme);
+  return t && !colorsFor(t, s.mode) ? t.appearance : s.mode;
+}
+/** T3's desktop shell sets nativeTheme.themeSource, so the window's own chrome, menus, scrollbars and
+ * the browser panel's page follow the app's appearance. The terminal view leaves it to the system. */
+let windowTheme;
+function syncWindowTheme() {
+  if (!TAURI || themeRoot.dataset.themeId === THEME_PREVIEW_ID) return;
+  const want = guiOn() ? desktopTheme() : null;
+  if (want === windowTheme) return;
+  windowTheme = want;
+  TAURI.window.getCurrentWindow().setTheme(want).catch((err) => {
+    console.error("Couldn't set the window's appearance", err);
+    if (windowTheme === want) windowTheme = undefined;
+  });
 }
 new MutationObserver(themeSurroundings).observe(document.body, { attributes: true, attributeFilter: ["data-mode"] });
 new MutationObserver(themeSurroundings).observe(document.getElementById("terms"), { childList: true });
