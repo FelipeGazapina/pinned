@@ -44,6 +44,12 @@ fn machine_call(machine: State<Arc<Machine>>, call: Call) -> Result<serde_json::
     machine.call(call)
 }
 
+#[tauri::command]
+async fn machine_call_slow(machine: State<'_, Arc<Machine>>, call: Call) -> Result<serde_json::Value, String> {
+    let machine = machine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || machine.call(call)).await.map_err(|e| e.to_string())?
+}
+
 /// A dropped file's bytes, for a tab on another machine, which can't read this Mac's paths.
 #[tauri::command]
 async fn read_dropped(path: String) -> Result<tauri::ipc::Response, String> {
@@ -196,6 +202,18 @@ fn notify(message: &str) {
     let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
 }
 
+/// Debug builds run the script `PINNED_PROBE` names in the main window once it has loaded, so
+/// scripts/native-probe can check what only the native window does.
+#[cfg(debug_assertions)]
+fn run_probe(app: &tauri::App) {
+    let Some(script) = std::env::var_os("PINNED_PROBE").and_then(|path| std::fs::read_to_string(path).ok()) else { return };
+    let Some(window) = app.get_webview_window("main") else { return };
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        drop(window.eval(&script));
+    });
+}
+
 fn add_tray(app: &tauri::App) -> tauri::Result<()> {
     let current = app.state::<Panel>().opacity.load(Ordering::Relaxed);
     let levels = OPACITIES
@@ -250,6 +268,7 @@ fn main() {
     builder
         .invoke_handler(tauri::generate_handler![
             machine_call,
+            machine_call_slow,
             read_dropped,
             attach_tab,
             detach_tab,
@@ -272,6 +291,7 @@ fn main() {
             commands::disconnect_slack,
             commands::slack_suggestions,
             commands::open_github_tokens,
+            commands::open_url,
             commands::connect_github,
             commands::disconnect_github,
             commands::github_repos,
@@ -306,6 +326,8 @@ fn main() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             add_tray(app)?;
+            #[cfg(debug_assertions)]
+            run_probe(app);
             let handle = app.handle().clone();
             machine.listen(move |message| match message {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),

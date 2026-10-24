@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
-use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, EXE_PLACEHOLDER};
-use crate::{github, history, hooks, plugin, projects, pty, reminders, sessions, sync, uploads};
+use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
+use crate::{branches, commands, files, github, history, hooks, plugin, projects, pty, reminders, sessions, sync, thread, uploads, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -177,6 +177,7 @@ struct Tab {
     /// Working tree and prompt as the running turn began, to diff against when it ends.
     turn: Option<(String, Option<String>)>,
     status: Option<AgentStatus>,
+    updated: Option<u64>,
     title: Option<String>,
     message: Option<String>,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
@@ -185,6 +186,18 @@ struct Tab {
 }
 
 impl Tab {
+    /// What reopens the tab's conversation, once claude has reported one.
+    fn saved(&self) -> Option<sessions::Saved> {
+        Some(sessions::Saved {
+            cwd: self.cwd.clone(),
+            session: self.claude_session.clone()?,
+            env: self.env.clone(),
+            bypass: self.bypass,
+            interrupted: self.interrupted,
+            resume_at: self.resume_at,
+        })
+    }
+
     fn view(&self, id: &str) -> TabView {
         TabView {
             id: id.to_owned(),
@@ -198,6 +211,8 @@ impl Tab {
             connector: self.env.iter().find(|(k, _)| k == CONNECTOR_ENV).map(|(_, v)| v.clone()),
             subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
+            updated: self.updated,
+            session: self.claude_session.clone(),
         }
     }
 }
@@ -293,6 +308,7 @@ impl Machine {
             Call::Tabs => json(self.tabs()),
             Call::OpenTab { path, bypass } => json(self.open_tab(path, bypass)),
             Call::StartClaude { tab, cols, rows } => json(self.start_claude(&tab, cols, rows)?),
+            Call::SetBypass { tab, on, cols, rows } => json(self.set_bypass(&tab, on, cols, rows)?),
             Call::WriteInput { tab, data } => json(self.write_input(&tab, data.as_bytes())?),
             Call::ResizePty { tab, cols, rows } => json(self.resize_pty(&tab, cols, rows)?),
             Call::CloseTab { tab } => {
@@ -301,7 +317,13 @@ impl Machine {
             }
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
-            Call::ProjectHistory { path } => json(self.project_history(&path)),
+            Call::ProjectHistory { path, session } => {
+                let mut turns = self.project_history(&path);
+                if let Some(session) = session {
+                    turns.retain(|t| t.session == session);
+                }
+                json(turns)
+            }
             Call::GitRemote { path } => json(git_remote(Path::new(&path))),
             Call::Browse { path } => json(projects::browse(&path, &home())?),
             Call::Clone { repo, token } => json(self.find_folder("", Some(&repo), token.as_deref())?),
@@ -311,6 +333,45 @@ impl Machine {
                 let dir = self.uploads.as_ref().ok_or("this machine keeps no files")?;
                 json(uploads::save(dir, &name, &data.0)?.display().to_string())
             }
+            Call::Thread { tab, from } => json(self.thread(&tab, from)?),
+            Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
+            Call::Workspace { tab } => json(workspace::of(&self.tab(&tab, |t| t.cwd.clone())?)),
+            Call::PullRequest { tab, pr } => json(workspace::pull_request(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
+            Call::PrAction { tab, pr, action } => json(workspace::pr_action(&self.tab(&tab, |t| t.cwd.clone())?, &pr, action, self.launch.path_env.as_deref())?),
+            Call::Diff { tab, scope, ignore_whitespace } => json(workspace::diff(&self.tab(&tab, |t| t.cwd.clone())?, scope, ignore_whitespace)?),
+            Call::Ports { tab } => {
+                let pid = self.tab(&tab, |t| t.session.as_ref().and_then(|s| s.pid()))?;
+                json(workspace::listeners(pid, self.launch.path_env.as_deref()))
+            }
+            Call::Editors => json(workspace::editors(&home(), self.launch.path_env.as_deref())),
+            Call::OpenIn { tab, editor, path } => {
+                let cwd = self.tab(&tab, |t| t.cwd.clone())?;
+                json(workspace::open_in(&cwd, &editor, path.as_deref(), &home(), self.launch.path_env.as_deref())?)
+            }
+            Call::Commands { tab } => json(commands::list(&home(), &self.tab(&tab, |t| t.cwd.clone())?)),
+            Call::Files { tab } => json(files::list(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())),
+            Call::Branches { tab } => json(branches::of(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
+            Call::Checkout { tab, branch, create } => {
+                // A permission prompt mid-turn reports NeedsInput with the turn still open.
+                let (cwd, working) = self.tab(&tab, |t| (t.cwd.clone(), t.status == Some(AgentStatus::Working) || (t.status == Some(AgentStatus::NeedsInput) && t.interrupted)))?;
+                if working {
+                    return Err("claude is working in this folder. Switch branches when the turn ends.".into());
+                }
+                json(branches::checkout(&cwd, &branch, create, self.launch.path_env.as_deref())?)
+            }
+        }
+    }
+
+    /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
+    pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
+        let session = self.tab(tab, |t| t.claude_session.clone())?;
+        let page = session.as_deref().and_then(|s| thread::find(&thread::projects_dir(&home()), s)).map(|file| thread::read(&file, from));
+        match page {
+            Some(page) => {
+                let page = page.map_err(|e| format!("could not read the transcript: {e}"))?;
+                Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset })
+            }
+            None => Ok(ThreadPage { session, items: vec![], next: 0, reset: false }),
         }
     }
 
@@ -343,7 +404,9 @@ impl Machine {
         let cwd = self.find_folder(&run.folder, run.repo.as_deref(), run.token.as_deref())?;
         let exe = self.launch.exe.display().to_string();
         let args = run.args.iter().map(|a| a.replace(EXE_PLACEHOLDER, &exe)).collect();
-        let id = self.add_tab(cwd, args, run.env.clone(), false, None);
+        // A run resuming a conversation shows its transcript before claude's first hook names it.
+        let resumed = run.args.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone());
+        let id = self.add_tab(cwd, args, run.env.clone(), false, resumed);
         self.emit_tabs();
         Ok(id)
     }
@@ -382,6 +445,25 @@ impl Machine {
         self.continue_when_limit_lifts(tab);
         self.emit_tabs();
         Ok(cwd.display().to_string())
+    }
+
+    /// Turns the tab's permission skipping on or off and returns its folder. Claude reads the flag
+    /// only at launch, so the tab restarts on its own conversation.
+    pub fn set_bypass(&self, tab: &str, on: bool, cols: u16, rows: u16) -> Result<String, String> {
+        let unchanged = self.tab(tab, |t| {
+            let unchanged = t.bypass == on && t.session.is_some();
+            if !unchanged {
+                t.bypass = on;
+                if let Some(saved) = t.saved() {
+                    (t.launch, t.resume_at) = saved.reopen(unix_now());
+                }
+            }
+            unchanged.then(|| t.cwd.display().to_string())
+        })?;
+        match unchanged {
+            Some(cwd) => Ok(cwd),
+            None => self.start_claude(tab, cols, rows),
+        }
     }
 
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
@@ -547,14 +629,9 @@ impl Machine {
             .into_iter()
             .filter(|s| s.cwd.is_dir())
             .map(|s| {
-                let launch = s.launch_args(now);
-                let waiting = s.interrupted && launch.len() == 2;
+                let (launch, resume_at) = s.reopen(now);
                 let id = self.add_tab(s.cwd, launch, s.env, s.bypass, Some(s.session));
-                // A limit that already lifted continues through the launch prompt; one still in force waits.
-                let _ = self.tab(&id, |t| {
-                    t.interrupted = s.interrupted;
-                    t.resume_at = s.resume_at.filter(|_| waiting);
-                });
+                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at) = (s.interrupted, resume_at));
                 id
             })
             .collect();
@@ -628,6 +705,7 @@ impl Machine {
             resume_at: None,
             turn: None,
             status: None,
+            updated: None,
             title: None,
             message: None,
             screen: Arc::default(),
@@ -664,22 +742,9 @@ impl Machine {
         let Some(file) = &self.sessions_file else { return };
         let saved: Vec<sessions::Saved> = {
             let tabs = self.tabs.lock().unwrap();
-            let mut open: Vec<(u32, &Tab)> = tabs
-                .iter()
-                .filter(|(_, t)| t.claude_session.is_some())
-                .map(|(id, t)| (tab_number(id), t))
-                .collect();
+            let mut open: Vec<(u32, sessions::Saved)> = tabs.iter().filter_map(|(id, t)| Some((tab_number(id), t.saved()?))).collect();
             open.sort_by_key(|(n, _)| *n);
-            open.into_iter()
-                .map(|(_, t)| sessions::Saved {
-                    cwd: t.cwd.clone(),
-                    session: t.claude_session.clone().unwrap(),
-                    env: t.env.clone(),
-                    bypass: t.bypass,
-                    interrupted: t.interrupted,
-                    resume_at: t.resume_at,
-                })
-                .collect()
+            open.into_iter().map(|(_, s)| s).collect()
         };
         sessions::save(file, &saved);
     }
@@ -713,6 +778,10 @@ impl Machine {
                     t.resume_at = event.resume_at;
                 }
                 AgentStatus::NeedsInput => {}
+            }
+            let idle_notice = event.status == AgentStatus::NeedsInput && t.status == Some(AgentStatus::Done);
+            if !idle_notice {
+                t.updated = Some(unix_now());
             }
             t.status = Some(event.status);
             if event.title.is_some() {
@@ -1170,6 +1239,26 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_switch_waits_for_claude_to_finish_the_turn() {
+        let dir = temp("checkout");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(&dir, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        git(&dir, &["branch", "other"]);
+        let m = machine();
+        let tab = m.add_tab(dir.clone(), vec![], vec![], false, None);
+        let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None };
+        m.record_event(working.clone());
+        let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false };
+        assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"));
+        m.record_event(AgentEvent { status: AgentStatus::NeedsInput, ..working.clone() });
+        assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"), "a permission prompt mid-turn let the branch switch");
+        m.record_event(AgentEvent { status: AgentStatus::Done, ..working.clone() });
+        m.record_event(AgentEvent { status: AgentStatus::NeedsInput, ..working });
+        assert_eq!(m.call(checkout), Ok(Value::Null));
+        assert_eq!(m.call(Call::Workspace { tab }).unwrap()["branch"], "other");
+    }
+
+    #[test]
     fn calls_answer_with_the_json_a_client_reads() {
         let m = machine();
         assert_eq!(m.call(Call::OpenTab { path: None, bypass: true }), Ok(json!("tab-1")));
@@ -1190,6 +1279,32 @@ mod tests {
     }
 
     #[test]
+    fn skipping_permissions_restarts_the_tab_on_its_conversation_and_continues_the_turn() {
+        let dir = temp("bypass");
+        let claude = dir.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { claude, ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let tab = m.add_tab(dir.clone(), vec![], vec![], false, Some("s1".into()));
+        m.spawn(&tab, sh("sleep 30"), pty::size(80, 24)).unwrap();
+        m.tab(&tab, |t| t.interrupted = true).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+
+        let set = |on| m.call(Call::SetBypass { tab: tab.clone(), on, cols: 80, rows: 24 });
+        assert_eq!(set(true), Ok(json!(dir.display().to_string())));
+        wait_for("claude's arguments", || text(&seen).ends_with("\r\n"));
+        assert_eq!(text(&seen), "--settings|s|--plugin-dir|p|--dangerously-skip-permissions|--resume|s1|Continue from where you left off.|\r\n");
+        assert!(m.view(&tab).unwrap().bypass);
+        assert!(sessions::load(&dir.join("sessions.json"))[0].bypass, "a relaunch keeps skipping permissions");
+
+        let session = m.tab(&tab, |t| t.screen.clone()).unwrap().lock().unwrap().session;
+        assert_eq!(set(true), Ok(json!(dir.display().to_string())));
+        assert_eq!(m.tab(&tab, |t| t.screen.clone()).unwrap().lock().unwrap().session, session, "a session already skipping permissions keeps running");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_run_opens_in_its_folder_with_this_machines_binary() {
         let dir = temp("run-folder");
         let m = machine();
@@ -1206,6 +1321,21 @@ mod tests {
         assert_eq!(m.tab(&id, |t| t.launch.clone()).unwrap(), ["--name", "ENG-7", "Run `'/opt/pinned/bin/pinned' stage coding` first"]);
         let elsewhere = RunSpec { folder: "/nonexistent/acme".into(), repo: None, ..run };
         assert_eq!(m.open_run(&elsewhere), Err("/nonexistent/acme does not exist on this machine".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_resuming_a_session_reads_its_transcript_from_the_start() {
+        let dir = temp("run-resume");
+        let m = machine();
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec!["--resume".into(), "s1".into()], env: vec![], token: None };
+        let id = m.open_run(&run).unwrap();
+        assert_eq!(m.tab(&id, |t| t.claude_session.clone()).unwrap().as_deref(), Some("s1"));
+        assert_eq!(m.thread(&id, 0).unwrap().session.as_deref(), Some("s1"));
+        assert_eq!(m.view(&id).unwrap().session.as_deref(), Some("s1"), "the tab's view lacks the session clients key it by");
+        let fresh = m.open_run(&RunSpec { args: vec![], ..run }).unwrap();
+        assert_eq!(m.tab(&fresh, |t| t.claude_session.clone()).unwrap(), None);
+        assert_eq!(m.view(&fresh).unwrap().session, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 

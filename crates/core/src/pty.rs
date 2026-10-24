@@ -48,6 +48,10 @@ impl Session {
         self.writer.flush()
     }
 
+    pub fn pid(&self) -> Option<u32> {
+        self.child.as_ref()?.process_id()
+    }
+
     pub fn resize(&self, size: PtySize) -> Result<(), String> {
         self.master.resize(size).map_err(|e| e.to_string())
     }
