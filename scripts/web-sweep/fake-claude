@@ -8,7 +8,9 @@ const path = require("path");
 const args = process.argv.slice(2);
 const settingsFile = args[args.indexOf("--settings") + 1];
 const settings = settingsFile ? JSON.parse(fs.readFileSync(settingsFile, "utf8")) : {};
-const session = `fake-${process.pid}`;
+// --resume carries on the named session, so its transcript grows where it left off, as claude's does.
+const resumed = args.includes("--resume") ? args[args.indexOf("--resume") + 1] : null;
+const session = resumed ?? `fake-${process.pid}`;
 
 function run(command, input) {
   try {
@@ -48,6 +50,7 @@ function drawTrust() {
   out("\r\n Enter to confirm · Esc to cancel\r\n");
 }
 const greet = () => out(`fake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}\r\n> `);
+if (resumed) out(`resumed ${resumed}\r\n`);
 if (trusting) drawTrust();
 else greet();
 

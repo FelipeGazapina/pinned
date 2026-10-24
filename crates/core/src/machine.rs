@@ -381,7 +381,9 @@ impl Machine {
         let cwd = self.find_folder(&run.folder, run.repo.as_deref(), run.token.as_deref())?;
         let exe = self.launch.exe.display().to_string();
         let args = run.args.iter().map(|a| a.replace(EXE_PLACEHOLDER, &exe)).collect();
-        let id = self.add_tab(cwd, args, run.env.clone(), false, None);
+        // A run resuming a conversation shows its transcript before claude's first hook names it.
+        let resumed = run.args.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone());
+        let id = self.add_tab(cwd, args, run.env.clone(), false, resumed);
         self.emit_tabs();
         Ok(id)
     }
@@ -1276,6 +1278,19 @@ mod tests {
         assert_eq!(m.tab(&id, |t| t.launch.clone()).unwrap(), ["--name", "ENG-7", "Run `'/opt/pinned/bin/pinned' stage coding` first"]);
         let elsewhere = RunSpec { folder: "/nonexistent/acme".into(), repo: None, ..run };
         assert_eq!(m.open_run(&elsewhere), Err("/nonexistent/acme does not exist on this machine".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_resuming_a_session_reads_its_transcript_from_the_start() {
+        let dir = temp("run-resume");
+        let m = machine();
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec!["--resume".into(), "s1".into()], env: vec![], token: None };
+        let id = m.open_run(&run).unwrap();
+        assert_eq!(m.tab(&id, |t| t.claude_session.clone()).unwrap().as_deref(), Some("s1"));
+        assert_eq!(m.thread(&id, 0).unwrap().session.as_deref(), Some("s1"));
+        let fresh = m.open_run(&RunSpec { args: vec![], ..run }).unwrap();
+        assert_eq!(m.tab(&fresh, |t| t.claude_session.clone()).unwrap(), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
