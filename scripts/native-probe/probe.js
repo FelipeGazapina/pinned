@@ -54,7 +54,7 @@
   await step("the browser panel shows a localhost page", async () => {
     openPanel("browser");
     setBrowserUrl(`${base}/frame`);
-    renderBrowser();
+    renderPanel();
     let ran = false;
     for (let i = 0; i < 20 && !ran; i++) {
       await sleep(250);
@@ -85,6 +85,17 @@
     const slow = await pr;
     const ok = slow.v?.number === 4 && fast < 150 && slow.ms > fast * 3;
     return [ok, { prNumber: slow.v?.number, prTitle: slow.v?.title, error: slow.e, prMs: Math.round(slow.ms), fastCallMs: Math.round(fast) }];
+  });
+
+  await step("the app view's slow calls answer in the window", async () => {
+    const tab = active;
+    const call = (c) => callOn(tab.machine, { tab: tab.view.id, ...c }).catch((e) => ({ error: String(e) }));
+    const [diff, ports, editors, commands, files, branches] = await Promise.all(
+      [{ cmd: "diff", scope: "base" }, { cmd: "ports" }, { cmd: "editors" }, { cmd: "commands" }, { cmd: "files" }, { cmd: "branches" }].map(call),
+    );
+    const seen = { diff: diff.error ?? Object.keys(diff), ports: ports.error ?? ports.length, editors: editors.error ?? editors.length, commands: commands.error ?? commands.length, files: files.error ?? files.length, branches: branches.error ?? branches.refs?.map((r) => r.name) };
+    const ok = !diff.error && Array.isArray(ports) && Array.isArray(editors) && Array.isArray(commands) && files.includes?.("README.md") && branches.refs?.length > 0;
+    return [ok, seen];
   });
 
   await fetch(`${base}/done`, { method: "POST" });

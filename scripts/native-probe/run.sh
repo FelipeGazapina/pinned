@@ -2,7 +2,8 @@
 # Usage: scripts/native-probe/run.sh [dir]
 # Builds a debug app under a test identifier and HOME, runs probe.js inside its real window,
 # and prints one line per check. Checks what a browser sweep can't: the window resizing on a
-# view switch, a localhost page inside the app's webview, open_url, and machine_call_slow.
+# view switch, a localhost page inside the app's webview, open_url, and machine_call_slow with the
+# app view's calls.
 # The window shows on screen for about half a minute, and the system browser opens one
 # localhost tab. Needs gh signed in: the slow-call check reads pull request #4.
 set -euo pipefail
@@ -44,6 +45,6 @@ probe 2 $gui
 node -e '
   const lines = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
   for (const r of lines) console.log(`${r.ok ? "PASS" : "FAIL"}  ${r.check}  ${JSON.stringify(r.seen)}`);
-  if (lines.length < 6) console.log(`only ${lines.length} of 6 checks reported; see ${process.argv[2]}`);
-  process.exit(lines.length === 6 && lines.every((r) => r.ok) ? 0 : 1);
+  if (lines.length < 7) console.log(`only ${lines.length} of 7 checks reported; see ${process.argv[2]}`);
+  process.exit(lines.length === 7 && lines.every((r) => r.ok) ? 0 : 1);
 ' "$DIR/reports.jsonl" "$DIR/app.log"
