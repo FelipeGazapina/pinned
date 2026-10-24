@@ -223,6 +223,18 @@ async function sweep(profileName) {
     return `${owners.size} names`;
   });
 
+  await step("scripts: the menu parser reads recorded claude screens", async () => {
+    const screen = (name) => fs.readFileSync(path.join(__dirname, "screens", name), "utf8").split("\n");
+    const idle = await page.evaluate((lines) => menuOn(lines), screen("claude-2.1.310-idle.txt"));
+    check(idle === null, `an idle screen parsed as ${JSON.stringify(idle)}`);
+    const menu = await page.evaluate((lines) => menuOn(lines), screen("claude-2.1.310-permission.txt"));
+    check(menu?.box === "touch made-by-bash-2.txt", `the command box is ${JSON.stringify(menu?.box)}`);
+    check(menu.question.split("\n").at(-1) === "Do you want to proceed?" && menu.question.startsWith("Bash command"), `the question is ${JSON.stringify(menu.question)}`);
+    const labels = menu.options.map((o) => o.label);
+    check(labels.length === 4 && labels[1] === "Yes, and always allow access to /Users/me/work/app from this project" && menu.options[0].chosen, `options: ${labels.join(" | ")}`);
+    return labels.join(" | ");
+  });
+
   await step("login: wrong password shows an error", async () => {
     await page.fill("#login [name=email]", EMAIL);
     await page.fill("#login [name=password]", "not the password");
