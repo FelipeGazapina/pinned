@@ -40,7 +40,7 @@ const GIT_ACTIONS = {
 
 let drafts = {};
 try {
-  drafts = JSON.parse(load("gui-drafts")) ?? {};
+  drafts = sessionsOnly(JSON.parse(load("gui-drafts")));
 } catch {}
 let stash = [];
 try {
@@ -50,10 +50,16 @@ const STASH_MAX = 20;
 let sendWithMod = load("gui-send-mod") === "true";
 
 /** The thread has text or files in its composer that weren't sent. */
-const hasDraft = (tab) => !!(drafts[tab.key]?.trim() || threadOf(tab).attachments?.length);
+const hasDraft = (tab) => !!(drafts[threadKey(tab)]?.trim() || threadOf(tab).attachments?.length);
+onRekey((from, to) => {
+  if (!(from in drafts)) return;
+  drafts[to] = drafts[from];
+  delete drafts[from];
+  save("gui-drafts", JSON.stringify(drafts));
+});
 function saveDraft(tab, text) {
-  if (text.trim()) drafts[tab.key] = text;
-  else delete drafts[tab.key];
+  if (text.trim()) drafts[threadKey(tab)] = text;
+  else delete drafts[threadKey(tab)];
   save("gui-drafts", JSON.stringify(drafts));
 }
 
@@ -102,8 +108,8 @@ function renderComposer(tab) {
   send.innerHTML = icon(composer.dataset.sending === "true" ? "loader-circle" : working && !empty ? "list-plus" : "arrow-up");
   const keys = sendWithMod ? "⌘Enter" : "Enter";
   send.title = composer.dataset.sending === "true" ? "Submitting message" : working ? `Queue message (${keys})` : `Send (${keys})`;
-  rest();
   renderApproval(tab);
+  rest();
   renderAttachments(t);
   renderStash();
   renderModeButton(tab);
@@ -123,7 +129,7 @@ function renderComposer(tab) {
 
 function switchDraft(tab) {
   composer.dataset.tab = tab?.key ?? "";
-  prompt.value = (tab && drafts[tab.key]) ?? "";
+  prompt.value = (tab && drafts[threadKey(tab)]) ?? "";
   if (tab) threadOf(tab).recall = null;
   if (tab?.view.running) fetchList(tab, "commands");
   composerMenu.hidden = true;
@@ -203,7 +209,11 @@ async function answerWith(tab, text) {
       await writeTo(tab, "\r");
     } else {
       await writeTo(tab, "\r");
-      await until(() => !terminalMenu(tab), 4000);
+      // Keys typed into a menu that stayed up could pick one of its options.
+      if (!(await until(() => !terminalMenu(tab), 4000))) {
+        showComposerNote("Claude's menu didn't close. Your message is still here.", true);
+        return false;
+      }
       await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });
     }
   } finally {
@@ -341,6 +351,7 @@ async function send() {
   const tab = active;
   if (!tab) return toggleProjects();
   if (!tab.view.running) return startTab(tab);
+  if (tab.answering || composer.dataset.sending === "true") return;
   const t = threadOf(tab);
   const files = t.attachments ?? [];
   const text = [prompt.value.trim(), ...files.map((f) => escapePath(f.path))].filter(Boolean).join(" ");
@@ -351,7 +362,7 @@ async function send() {
     if (!text || files.length || !(await answerWith(tab, text))) return waitsOnMenu(tab);
     return clearComposer(tab);
   }
-  if (!text || composer.dataset.sending === "true") return;
+  if (!text) return;
   const draft = prompt.value;
   composer.dataset.sending = "true";
   clearComposer(tab, false);

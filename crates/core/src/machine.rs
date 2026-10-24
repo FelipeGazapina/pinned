@@ -212,6 +212,7 @@ impl Tab {
             subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
             updated: self.updated,
+            session: self.claude_session.clone(),
         }
     }
 }
@@ -351,7 +352,8 @@ impl Machine {
             Call::Files { tab } => json(files::list(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())),
             Call::Branches { tab } => json(branches::of(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
             Call::Checkout { tab, branch, create } => {
-                let (cwd, working) = self.tab(&tab, |t| (t.cwd.clone(), t.status == Some(AgentStatus::Working)))?;
+                // A permission prompt mid-turn reports NeedsInput with the turn still open.
+                let (cwd, working) = self.tab(&tab, |t| (t.cwd.clone(), t.status == Some(AgentStatus::Working) || (t.status == Some(AgentStatus::NeedsInput) && t.interrupted)))?;
                 if working {
                     return Err("claude is working in this folder. Switch branches when the turn ends.".into());
                 }
@@ -1248,7 +1250,10 @@ mod tests {
         m.record_event(working.clone());
         let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false };
         assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"));
-        m.record_event(AgentEvent { status: AgentStatus::Done, ..working });
+        m.record_event(AgentEvent { status: AgentStatus::NeedsInput, ..working.clone() });
+        assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"), "a permission prompt mid-turn let the branch switch");
+        m.record_event(AgentEvent { status: AgentStatus::Done, ..working.clone() });
+        m.record_event(AgentEvent { status: AgentStatus::NeedsInput, ..working });
         assert_eq!(m.call(checkout), Ok(Value::Null));
         assert_eq!(m.call(Call::Workspace { tab }).unwrap()["branch"], "other");
     }
@@ -1327,8 +1332,10 @@ mod tests {
         let id = m.open_run(&run).unwrap();
         assert_eq!(m.tab(&id, |t| t.claude_session.clone()).unwrap().as_deref(), Some("s1"));
         assert_eq!(m.thread(&id, 0).unwrap().session.as_deref(), Some("s1"));
+        assert_eq!(m.view(&id).unwrap().session.as_deref(), Some("s1"), "the tab's view lacks the session clients key it by");
         let fresh = m.open_run(&RunSpec { args: vec![], ..run }).unwrap();
         assert_eq!(m.tab(&fresh, |t| t.claude_session.clone()).unwrap(), None);
+        assert_eq!(m.view(&fresh).unwrap().session, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 

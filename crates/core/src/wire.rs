@@ -57,6 +57,9 @@ pub struct TabView {
     /// Unix time the session last reported a status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated: Option<u64>,
+    /// Claude Code's id for the conversation, which outlives the tab's id across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -455,6 +458,7 @@ mod tests {
             subject: Some(Subject::LinearIssue { issue: "uuid".into() }),
             opened: 3,
             updated: Some(1792400000),
+            session: Some("s1".into()),
         }
     }
 
@@ -527,7 +531,7 @@ mod tests {
             json!({ "kind": "tabs", "tabs": [{
                 "id": "tab-3", "cwd": "/repo", "bypass": false, "running": true, "status": "needs-input",
                 "title": "Fix the build", "message": "Claude needs your permission to use Bash",
-                "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3, "updated": 1792400000,
+                "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3, "updated": 1792400000, "session": "s1",
             }] }),
         );
         round_trip(

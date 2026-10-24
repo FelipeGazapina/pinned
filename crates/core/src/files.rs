@@ -8,8 +8,8 @@ const SKIP: &[&str] = &["node_modules", "target", "dist", "build", "vendor"];
 /// The folder's files and the folders holding them, relative to it, folders ending in `/`: what git
 /// tracks or would track, or in a folder outside git, what a walk four folders deep finds.
 pub fn list(cwd: &Path, path: Option<&str>) -> Vec<String> {
-    let files: Vec<String> = match run(cwd, path, "git", &["ls-files", "-co", "--exclude-standard"]) {
-        Ok(out) => out.lines().take(LIMIT).map(str::to_owned).collect(),
+    let files: Vec<String> = match run(cwd, path, "git", &["ls-files", "-z", "-co", "--exclude-standard"]) {
+        Ok(out) => out.split('\0').filter(|f| !f.is_empty()).take(LIMIT).map(str::to_owned).collect(),
         Err(_) => {
             let mut found = vec![];
             walk(cwd, "", 4, &mut found);
@@ -54,11 +54,11 @@ mod tests {
     fn lists_what_git_would_track_with_the_folders() {
         let dir = tempfile::tempdir().unwrap();
         assert!(Command::new("git").args(["init", "-q"]).current_dir(dir.path()).stdout(Stdio::null()).status().unwrap().success());
-        for rel in ["src/main.rs", "src/ui/app.js", "README.md", "target/debug/out", "notes.log"] {
+        for rel in ["src/main.rs", "src/ui/app.js", "README.md", "café.md", "target/debug/out", "notes.log"] {
             write(dir.path(), rel);
         }
         std::fs::write(dir.path().join(".gitignore"), "target/\n*.log\n").unwrap();
-        assert_eq!(list(dir.path(), None), ["src/", "src/ui/", ".gitignore", "README.md", "src/main.rs", "src/ui/app.js"]);
+        assert_eq!(list(dir.path(), None), ["src/", "src/ui/", ".gitignore", "README.md", "café.md", "src/main.rs", "src/ui/app.js"]);
     }
 
     #[test]

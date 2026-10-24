@@ -30,13 +30,22 @@ function panelOf(tab) {
   if (!panelStates.has(tab.key)) {
     let saved = null;
     try {
-      saved = JSON.parse(load(`gui-panel:${tab.key}`));
+      saved = JSON.parse(load(`gui-panel:${threadKey(tab)}`));
     } catch {}
     panelStates.set(tab.key, { ...noPanel, surfaces: [], ...saved });
   }
   return panelStates.get(tab.key);
 }
-const savePanel = (tab) => tab && save(`gui-panel:${tab.key}`, JSON.stringify(panelOf(tab)));
+try {
+  for (const key of Object.keys(localStorage)) if (key.startsWith("gui-panel:") && !key.startsWith("gui-panel:session:")) localStorage.removeItem(key);
+} catch {}
+onRekey((from, to) => {
+  const saved = load(`gui-panel:${from}`);
+  if (saved === null || saved === undefined) return;
+  save(`gui-panel:${to}`, saved);
+  save(`gui-panel:${from}`, null);
+});
+const savePanel = (tab) => tab && save(`gui-panel:${threadKey(tab)}`, JSON.stringify(panelOf(tab)));
 const shownSurface = (tab) => {
   const p = panelOf(tab);
   return p.surfaces.find((s) => s.id === p.active) ?? null;
@@ -359,9 +368,10 @@ const copyText = (text, note = "Copied") => {
   navigator.clipboard?.writeText(text).then(() => flash(note), () => flash("Couldn't reach the clipboard"));
 };
 
-/** Appends a review comment on `path:line` to the composer's prompt, which sends it with the next message. */
-function addReviewComment(path, line, text) {
-  const entry = `${path}:${line}: ${text.trim().replace(/\s*\n\s*/g, " ")}`;
+/** Appends a review comment on `path:line` to the composer's prompt, which sends it with the next
+ * message. A removed line's number is the old file's, so the entry says so. */
+function addReviewComment(path, line, text, side = "new") {
+  const entry = `${path}:${line}${side === "old" ? " (removed line)" : ""}: ${text.trim().replace(/\s*\n\s*/g, " ")}`;
   const head = prompt.value.replace(/\s+$/, "");
   prompt.value = `${head}${head ? "\n" : ""}${entry}\n`;
   prompt.dispatchEvent(new Event("input"));
@@ -519,7 +529,7 @@ function saveComment() {
   const text = panelBody.querySelector("[data-comment-text]")?.value.trim();
   if (!at || !text) return;
   const t = threadOf(active);
-  const entry = addReviewComment(at.path, at.line, text);
+  const entry = addReviewComment(at.path, at.line, text, at.side);
   t.comments = [...(t.comments ?? []), { id: `c${Date.now()}`, path: at.path, line: at.line, side: at.side, text, entry }];
   ui.commentAt = null;
   renderPanel();
@@ -608,7 +618,7 @@ panelBody.addEventListener("click", (e) => {
 
 function seenUrls(tab) {
   const found = new Set();
-  const pattern = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?:\/[^\s"'`)<>\]]*)?/g;
+  const pattern = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?![\w:-]|\.\w)(?:\/[^\s"'`)<>\]]*)?/g;
   for (const item of [...threadOf(tab).items].reverse()) {
     for (const m of `${item.text ?? ""} ${item.detail ?? ""}`.matchAll(pattern)) found.add(m[0].replace(/[.,;:]+$/, ""));
     if (found.size >= 8) break;
@@ -993,8 +1003,11 @@ function renderPrPanel(s) {
       ${checks.length ? `<details class="checks-fold"><summary><h4>Checks (${checks.length})</h4>${icon("chevron-right")}</summary><ul class="checks">${checks.map((c) => `<li class="${checkState(c)}">${icon(CHECK_ICONS[checkState(c)])}<span>${esc(c.name || c.context || "check")}</span><span class="muted">${esc(took(c) || (c.conclusion || c.status || c.state || "").toLowerCase())}</span>${WEB_URL.test(c.detailsUrl || c.targetUrl || "") ? `<a href="${esc(c.detailsUrl || c.targetUrl)}">Details</a>` : ""}</li>`).join("")}</ul></details>` : ""}
       ${(d.reviews ?? []).length ? `<h4>Reviews</h4><ul class="reviews">${d.reviews.map((r) => `<li><b>${esc(login(r.author))}</b> <span class="muted">${esc((r.state ?? "").toLowerCase().replace(/_/g, " "))}</span>${r.body ? `<div class="md">${markdown(r.body)}</div>` : ""}</li>`).join("")}</ul>` : ""}
       ${(d.comments ?? []).length ? `<h4>Comments (${d.comments.length})</h4><ul class="reviews">${d.comments.map((c) => `<li><b>${esc(login(c.author))}</b> <span class="muted">${esc(agoText(c.createdAt))}</span><div class="md">${markdown(c.body ?? "")}</div></li>`).join("")}</ul>` : ""}</div>`;
-  const code = () => `${diffToolbar(d.additions, d.deletions, `<span class="muted">${d.changedFiles} file${d.changedFiles === 1 ? "" : "s"}</span>`)}
-    <div class="diff ${ui.diffView}${ui.diffWrap ? " wrap" : ""}" data-key="pr:${esc(s.url)}">${filesHtml(files, `pr:${s.url}`, { viewed: viewedOf(s.url, parseDiff(d.diff ?? "")) })}${d.truncated ? `<p class="panel-empty">This diff exceeds the size limit, so its end is cut.</p>` : ""}</div>`;
+  const code = () => {
+    const diff = `<div class="diff ${ui.diffView}${ui.diffWrap ? " wrap" : ""}" data-key="pr:${esc(s.url)}">${filesHtml(files, `pr:${s.url}`, { viewed: viewedOf(s.url, parseDiff(d.diff ?? "")) })}${d.truncated ? `<p class="panel-empty">This diff exceeds the size limit, so its end is cut.</p>` : ""}</div>`;
+    return `${diffToolbar(sum(files, "added"), sum(files, "removed"), `<span class="muted">${d.changedFiles} file${d.changedFiles === 1 ? "" : "s"}</span>`)}
+    ${ui.diffTree && files.length ? `<div class="diff-split">${diff}${fileTreeHtml(files)}</div>` : diff}`;
+  };
   showPanel(`<div class="pr">${head}${prTab === "code" ? code() : prTab === "timeline" ? prTimeline(d) : summary}</div>`);
 }
 const sum = (files, key) => files.reduce((n, f) => n + Number(f[key]), 0);

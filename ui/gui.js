@@ -15,10 +15,26 @@ const threadOf = (tab) => {
   return threads.get(tab.key);
 };
 
+/** What the page saves about a thread goes under its claude session once the machine reports one,
+ * since tab ids start over when the app does. */
+const threadKey = (tab) => (tab.view.session ? `session:${tab.view.session}` : tab.key);
+const rekeys = [];
+const onRekey = (move) => rekeys.push(move);
+/** A tab's session changed, so what was saved under its old key moves to the new one. */
+const rekeyThread = (from, to) => rekeys.forEach((move) => move(from, to));
+/** Saved entries of a past run under a tab id would land on whichever thread gets that id next. */
+const sessionsOnly = (saved) => Object.fromEntries(Object.entries(saved ?? {}).filter(([k]) => k.startsWith("session:")));
+
 let seenAt = {};
 try {
-  seenAt = JSON.parse(load("gui-seen")) ?? {};
+  seenAt = sessionsOnly(JSON.parse(load("gui-seen")));
 } catch {}
+onRekey((from, to) => {
+  if (!(from in seenAt)) return;
+  seenAt[to] = seenAt[from];
+  delete seenAt[from];
+  save("gui-seen", JSON.stringify(seenAt));
+});
 
 const ui = {
   get panel() {
@@ -78,7 +94,7 @@ const ago = (unix) => {
 };
 const projectName = (tab) => (threadOf(tab).workspace?.project ?? tab.view.cwd).split("/").filter(Boolean).pop() || "/";
 const firstPrompt = (tab) => threadOf(tab).items.find((i) => i.kind === "user")?.text.split("\n")[0];
-const threadTitle = (tab) => sideMarks.titles[tab.key] || tab.view.title || firstPrompt(tab) || "New thread";
+const threadTitle = (tab) => sideMarks.titles[threadKey(tab)] || tab.view.title || firstPrompt(tab) || "New thread";
 /** `text` as a head that CSS truncates and its last 8 characters, once it is longer than `over`. */
 const middle = (text, over = 14) => (text.length > over ? `<span class="head">${esc(text.slice(0, -8))}</span><span class="tail">${esc(text.slice(-8))}</span>` : `<span class="head">${esc(text)}</span>`);
 const prOf = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kind === "pr");
@@ -93,7 +109,7 @@ function phaseOf(tab) {
   return /waiting for your input/i.test(message) ? "done" : "input";
 }
 const turnLive = (tab) => ["working", "asking", "input"].includes(phaseOf(tab));
-const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && (tab.view.updated ?? 0) > (seenAt[tab.key] ?? 0);
+const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && (tab.view.updated ?? 0) > (seenAt[threadKey(tab)] ?? 0);
 
 async function fetchThread(tab) {
   const t = threadOf(tab);

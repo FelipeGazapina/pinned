@@ -25,13 +25,24 @@ const MOD_LABEL = IS_MAC ? "⌘" : "Ctrl+";
 const MONOGRAM_COLORS = ["#9ca3af", "#f87171", "#fb923c", "#fbbf24", "#facc15", "#a3e635", "#4ade80", "#34d399", "#2dd4bf",
   "#22d3ee", "#38bdf8", "#60a5fa", "#818cf8", "#a78bfa", "#c084fc", "#e879f9", "#f472b6", "#fb7185"];
 
-/** What the user did to threads, by tab key: pins in order, manual settles and un-settles, snoozes,
+/** What the user did to threads, by `threadKey`: pins in order, manual settles and un-settles, snoozes,
  * renames, and threads kept out of auto-settle. */
 const sideMarks = { pins: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, noAutoSettle: {} };
 try {
-  Object.assign(sideMarks, JSON.parse(load("gui-marks")) ?? {});
+  const saved = JSON.parse(load("gui-marks")) ?? {};
+  for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) sideMarks[m] = sessionsOnly(saved[m]);
+  sideMarks.pins = (saved.pins ?? []).filter((k) => k.startsWith("session:"));
 } catch {}
 const saveMarks = () => save("gui-marks", JSON.stringify(sideMarks));
+onRekey((from, to) => {
+  sideMarks.pins = sideMarks.pins.map((k) => (k === from ? to : k));
+  for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) {
+    if (!(from in sideMarks[m])) continue;
+    sideMarks[m][to] = sideMarks[m][from];
+    delete sideMarks[m][from];
+  }
+  saveMarks();
+});
 Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
 /** When this page first saw each tab, which orders the active rows newest first. */
 const firstSeen = new Map();
@@ -42,28 +53,28 @@ const nowS = () => Date.now() / 1000;
 const unixOf = (iso) => Date.parse(iso) / 1000 || 0;
 const lastPrompt = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kind === "user");
 const latestUserAt = (tab) => unixOf(lastPrompt(tab)?.at) || tab.view.updated || 0;
-const isPinned = (tab) => sideMarks.pins.includes(tab.key);
+const isPinned = (tab) => sideMarks.pins.includes(threadKey(tab));
 const canSnooze = (tab) => !["asking", "input"].includes(phaseOf(tab));
-const raisedHand = (tab) => !canSnooze(tab) || (phaseOf(tab) === "failed" && (tab.view.updated ?? 0) > (sideMarks.snoozed[tab.key]?.at ?? 0));
-const snoozedNow = (tab) => !!sideMarks.snoozed[tab.key] && sideMarks.snoozed[tab.key].until > nowS() && !raisedHand(tab);
-const wokeNow = (tab) => !!sideMarks.snoozed[tab.key] && !snoozedNow(tab);
+const raisedHand = (tab) => !canSnooze(tab) || (phaseOf(tab) === "failed" && (tab.view.updated ?? 0) > (sideMarks.snoozed[threadKey(tab)]?.at ?? 0));
+const snoozedNow = (tab) => !!sideMarks.snoozed[threadKey(tab)] && sideMarks.snoozed[threadKey(tab)].until > nowS() && !raisedHand(tab);
+const wokeNow = (tab) => !!sideMarks.snoozed[threadKey(tab)] && !snoozedNow(tab);
 /** A manual settle holds until the next prompt. Auto-settle takes threads idle for 3 days, but not
  * pinned or running ones, nor one un-settled since. */
 function settled(tab) {
-  const at = sideMarks.settled[tab.key];
+  const at = sideMarks.settled[threadKey(tab)];
   if (at) return at >= unixOf(lastPrompt(tab)?.at);
-  if (isPinned(tab) || sideMarks.noAutoSettle[tab.key] || !tab.view.updated || !["idle", "done"].includes(statusOf(tab))) return false;
-  return nowS() - Math.max(tab.view.updated, sideMarks.unsettled[tab.key] ?? 0) > SETTLE_AFTER_S;
+  if (isPinned(tab) || sideMarks.noAutoSettle[threadKey(tab)] || !tab.view.updated || !["idle", "done"].includes(statusOf(tab))) return false;
+  return nowS() - Math.max(tab.view.updated, sideMarks.unsettled[threadKey(tab)] ?? 0) > SETTLE_AFTER_S;
 }
 const sectionOf = (tab) => (snoozedNow(tab) ? "snoozed" : settled(tab) ? "settled" : isPinned(tab) ? "pinned" : "active");
 const rowTabs = () => [...threadList.querySelectorAll(".thread-row")].map((r) => tabByKey(r.dataset.tab)).filter(Boolean);
 
 function markThreadSeen(tab) {
   if (!tab || !guiOn() || document.hidden) return;
-  seenAt[tab.key] = tab.view.updated ?? 0;
+  seenAt[threadKey(tab)] = tab.view.updated ?? 0;
   save("gui-seen", JSON.stringify(seenAt));
   if (wokeNow(tab)) {
-    delete sideMarks.snoozed[tab.key];
+    delete sideMarks.snoozed[threadKey(tab)];
     saveMarks();
   }
 }
@@ -120,11 +131,11 @@ function renderSidebar() {
 function shelfRows(list) {
   const by = { pinned: [], active: [], snoozed: [], settled: [] };
   for (const tab of list) by[sectionOf(tab)].push(tab);
-  const anchor = (t) => Math.max(firstSeen.get(t.key) ?? 0, sideMarks.unsettled[t.key] ?? 0);
-  by.pinned.sort((a, b) => sideMarks.pins.indexOf(a.key) - sideMarks.pins.indexOf(b.key));
+  const anchor = (t) => Math.max(firstSeen.get(t.key) ?? 0, sideMarks.unsettled[threadKey(t)] ?? 0);
+  by.pinned.sort((a, b) => sideMarks.pins.indexOf(threadKey(a)) - sideMarks.pins.indexOf(threadKey(b)));
   by.active.sort((a, b) => anchor(b) - anchor(a) || b.view.opened - a.view.opened);
-  by.snoozed.sort((a, b) => sideMarks.snoozed[a.key].until - sideMarks.snoozed[b.key].until);
-  const settledAt = (t) => sideMarks.settled[t.key] || latestUserAt(t);
+  by.snoozed.sort((a, b) => sideMarks.snoozed[threadKey(a)].until - sideMarks.snoozed[threadKey(b)].until);
+  const settledAt = (t) => sideMarks.settled[threadKey(t)] || latestUserAt(t);
   by.settled.sort((a, b) => settledAt(b) - settledAt(a));
   const rows = [...by.pinned, ...by.active].map(cardRow);
   let sink = true;
@@ -199,8 +210,8 @@ function cardRow(tab) {
 
 function slimRow(tab, action) {
   const row = rowShell(tab, "slim");
-  const snooze = sideMarks.snoozed[tab.key];
-  const time = action === "wake" ? `<span class="stamp wake-at">${esc(wakeLabel(snooze.until))}</span>` : `<span class="stamp when">${esc(ago(sideMarks.settled[tab.key] || latestUserAt(tab)))}</span>`;
+  const snooze = sideMarks.snoozed[threadKey(tab)];
+  const time = action === "wake" ? `<span class="stamp wake-at">${esc(wakeLabel(snooze.until))}</span>` : `<span class="stamp when">${esc(ago(sideMarks.settled[threadKey(tab)] || latestUserAt(tab)))}</span>`;
   const act = action === "wake"
     ? `<span role="button" data-act="wake" title="Wake thread now">${icon("alarm-clock-off")}</span>`
     : `<span role="button" data-act="unsettle" title="Un-settle thread">${icon("undo-2")}</span>`;
@@ -320,34 +331,34 @@ function changeMarks(key, change) {
 function settle(tab) {
   if (settled(tab)) return;
   parkActive(tab);
-  noteUndo("Settled", changeMarks(tab.key, () => {
-    sideMarks.settled[tab.key] = nowS();
-    delete sideMarks.snoozed[tab.key];
+  noteUndo("Settled", changeMarks(threadKey(tab), () => {
+    sideMarks.settled[threadKey(tab)] = nowS();
+    delete sideMarks.snoozed[threadKey(tab)];
   }));
 }
 function unsettle(tab) {
-  changeMarks(tab.key, () => {
-    delete sideMarks.settled[tab.key];
-    sideMarks.unsettled[tab.key] = nowS();
+  changeMarks(threadKey(tab), () => {
+    delete sideMarks.settled[threadKey(tab)];
+    sideMarks.unsettled[threadKey(tab)] = nowS();
   });
 }
 function pin(tab) {
   if (isPinned(tab)) {
-    noteUndo("Unpinned", changeMarks(tab.key, () => (sideMarks.pins = sideMarks.pins.filter((k) => k !== tab.key))));
+    noteUndo("Unpinned", changeMarks(threadKey(tab), () => (sideMarks.pins = sideMarks.pins.filter((k) => k !== threadKey(tab)))));
     return;
   }
-  changeMarks(tab.key, () => {
-    sideMarks.pins = [...sideMarks.pins, tab.key];
+  changeMarks(threadKey(tab), () => {
+    sideMarks.pins = [...sideMarks.pins, threadKey(tab)];
     if (settled(tab)) unsettle(tab);
   });
 }
 function snooze(tab, until) {
   parkActive(tab);
-  noteUndo("Snoozed", changeMarks(tab.key, () => (sideMarks.snoozed[tab.key] = { until, at: nowS() })));
+  noteUndo("Snoozed", changeMarks(threadKey(tab), () => (sideMarks.snoozed[threadKey(tab)] = { until, at: nowS() })));
 }
-const wake = (tab) => changeMarks(tab.key, () => delete sideMarks.snoozed[tab.key]);
+const wake = (tab) => changeMarks(threadKey(tab), () => delete sideMarks.snoozed[threadKey(tab)]);
 function markUnread(tab) {
-  seenAt[tab.key] = 0;
+  seenAt[threadKey(tab)] = 0;
   save("gui-seen", JSON.stringify(seenAt));
   renderSidebar();
 }
@@ -407,15 +418,15 @@ function rowMenuItems(tab) {
     { label: ws?.branch ? `New thread on ${ws.branch}` : `New thread in ${project}`, icon: "message-square-plus", run: () => newThreadIn(tab) },
     isPinned(tab) ? { label: "Unpin thread", icon: "pin-off", hint: `${MOD_LABEL}⇧P`, run: () => pin(tab) } : { label: "Pin thread", icon: "pin", hint: `${MOD_LABEL}⇧P`, run: () => pin(tab) },
     settled(tab) ? { label: "Un-settle thread", icon: "circle-check", run: () => unsettle(tab) } : { label: "Settle thread", icon: "circle-check", hint: `${MOD_LABEL}⇧S`, run: () => settle(tab) },
-    sideMarks.snoozed[tab.key] && snoozedNow(tab)
+    sideMarks.snoozed[threadKey(tab)] && snoozedNow(tab)
       ? { label: "Wake thread", icon: "clock", run: () => wake(tab) }
       : { label: "Snooze", icon: "clock", disabled: !canSnooze(tab), children: () => snoozeItems(tab) },
     { label: "Rename thread", icon: "pencil", sep: true, run: () => startRename(tab) },
     { label: "Mark unread", icon: "mail-open", disabled: phaseOf(tab) !== "done", run: () => markUnread(tab) },
     { label: ui.project === project ? "Show all projects" : `Filter by ${project}`, icon: "folder", run: () => setProjectFilter(ui.project === project ? "" : project) },
     { label: "Auto-settle behavior", icon: "timer", children: () => [
-      { label: "Enabled", checked: !sideMarks.noAutoSettle[tab.key], run: () => changeMarks(tab.key, () => delete sideMarks.noAutoSettle[tab.key]) },
-      { label: "Disabled", checked: !!sideMarks.noAutoSettle[tab.key], run: () => changeMarks(tab.key, () => (sideMarks.noAutoSettle[tab.key] = true)) },
+      { label: "Enabled", checked: !sideMarks.noAutoSettle[threadKey(tab)], run: () => changeMarks(threadKey(tab), () => delete sideMarks.noAutoSettle[threadKey(tab)]) },
+      { label: "Disabled", checked: !!sideMarks.noAutoSettle[threadKey(tab)], run: () => changeMarks(threadKey(tab), () => (sideMarks.noAutoSettle[threadKey(tab)] = true)) },
     ] },
     { label: "Copy", icon: "copy", sep: true, children: () => [
       { label: "Path", icon: "folder", run: () => copyAndTell(tab.view.cwd, "path") },
@@ -509,9 +520,9 @@ function editTitle(tab, input) {
     input.onblur = null;
     input.blur();
     if (keep && title && title !== threadTitle(tab)) {
-      changeMarks(tab.key, () => {
-        if (title === (tab.view.title || firstPrompt(tab))) delete sideMarks.titles[tab.key];
-        else sideMarks.titles[tab.key] = title;
+      changeMarks(threadKey(tab), () => {
+        if (title === (tab.view.title || firstPrompt(tab))) delete sideMarks.titles[threadKey(tab)];
+        else sideMarks.titles[threadKey(tab)] = title;
       });
     }
     renderSidebar();
@@ -684,10 +695,10 @@ document.getElementById("add-project").onclick = () => addProject();
 /** Called as a tab closes, so ⌘⇧T can bring its conversation back. */
 function rememberClosed(tab) {
   const t = threadOf(tab);
-  closedThreads.push({ machine: tab.machine, cwd: tab.view.cwd, session: t.session, title: sideMarks.titles[tab.key], pinned: isPinned(tab) });
+  closedThreads.push({ machine: tab.machine, cwd: tab.view.cwd, session: t.session, title: sideMarks.titles[threadKey(tab)], pinned: isPinned(tab) });
   closedThreads.splice(0, closedThreads.length - 20);
-  for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) delete sideMarks[m][tab.key];
-  sideMarks.pins = sideMarks.pins.filter((k) => k !== tab.key);
+  for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) delete sideMarks[m][threadKey(tab)];
+  sideMarks.pins = sideMarks.pins.filter((k) => k !== threadKey(tab));
   saveMarks();
 }
 
@@ -701,8 +712,8 @@ async function reopenClosed() {
     const id = await callOn(last.machine, { cmd: "run", run: { folder: last.cwd, args, env: [] } });
     await refreshTabs(last.machine);
     const tab = tabByKey(keyOf(last.machine, id));
-    if (last.title) sideMarks.titles[tab.key] = last.title;
-    if (last.pinned) sideMarks.pins.push(tab.key);
+    if (last.title) sideMarks.titles[threadKey(tab)] = last.title;
+    if (last.pinned) sideMarks.pins.push(threadKey(tab));
     saveMarks();
     activate(tab);
   } catch (e) {
@@ -746,6 +757,8 @@ document.getElementById("workspace").addEventListener("click", (e) => {
 
 // ⌘Z undoes the notice's action, even from the composer, until another key or an edit there.
 window.addEventListener("keydown", (e) => {
+  // Chrome's autofill sends a keydown with no key.
+  if (!e.key) return;
   if (!["Meta", "Control", "Shift", "Alt"].includes(e.key) && !(e.key.toLowerCase() === "z" && (IS_MAC ? e.metaKey : e.ctrlKey))) undoClaimed = false;
   if (!guiOn() || !undoNotice || e.repeat || e.shiftKey || e.altKey || e.key.toLowerCase() !== "z") return;
   if (!(IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) || e.target.closest?.("#terms")) return;

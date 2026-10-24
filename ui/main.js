@@ -65,7 +65,9 @@ const refreshTabs = async (machine) => setTabs(machine, await callOn(machine, { 
 
 function updateView(tab, view) {
   const before = statusOf(tab);
+  const key = threadKey(tab);
   tab.view = view;
+  if (threadKey(tab) !== key) rekeyThread(key, threadKey(tab));
   const after = statusOf(tab);
   if (after === before) return;
   if (!TAURI) return attend(tab, ALERTS.includes(after));
