@@ -91,7 +91,7 @@ onGuiKey("[", () => goBack(-1));
 onGuiKey("]", () => goBack(1));
 
 window.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape" || !shellPage() || !paletteEl.hidden || !sideMenu.hidden || !shellDialog.hidden || e.target.closest?.("input, textarea, select, #panel")) return;
+  if (e.key !== "Escape" || !guiOn() || !shellPage() || !paletteEl.hidden || !sideMenu.hidden || !shellDialog.hidden || e.target.closest?.("input, textarea, select, #panel")) return;
   e.preventDefault();
   goBack(-1) || closePage();
 });
@@ -363,7 +363,7 @@ const USAGE_METRICS = [
   ["limits", "Limits", "l"],
 ];
 const CLAUDE_COLOR = "#d97757";
-const usageState = { metric: "limits", days: 30, breakdown: "model", machine: "", rows: [], loaded: false, loading: false, now: 0 };
+const usageState = { metric: "limits", days: 30, breakdown: "model", machine: "", rows: [], error: "", loaded: false, loading: false, now: 0, seq: 0 };
 try {
   const saved = JSON.parse(load("gui-usage-page"));
   if (USAGE_METRICS.some(([m]) => m === saved?.metric)) usageState.metric = saved.metric;
@@ -394,8 +394,13 @@ const localDay = (unix) => {
 /** The window's buckets, oldest first: the last 24 hours by hour, or the last `days` calendar days. */
 function usageBuckets(days, now = Date.now() / 1000) {
   if (days === 1) {
-    const hour = Math.floor(now / 3600) * 3600;
-    return Array.from({ length: 24 }, (_, i) => hour - (23 - i) * 3600);
+    const hour = new Date(now * 1000);
+    hour.setMinutes(0, 0, 0);
+    return Array.from({ length: 24 }, (_, i) => {
+      const h = new Date(hour);
+      h.setHours(h.getHours() - (23 - i));
+      return h.getTime() / 1000;
+    });
   }
   const day = new Date(now * 1000);
   day.setHours(0, 0, 0, 0);
@@ -405,14 +410,20 @@ function usageBuckets(days, now = Date.now() / 1000) {
     return d.getTime() / 1000;
   });
 }
-const bucketOf = (days, hour) => (days === 1 ? hour : localDay(hour));
+const localHour = (unix) => {
+  const d = new Date(unix * 1000);
+  d.setMinutes(0, 0, 0);
+  return d.getTime() / 1000;
+};
+/** Rows come in quarter hours, so each falls whole into a local hour or day. */
+const bucketOf = (days, at) => (days === 1 ? localHour(at) : localDay(at));
 
 /** The window's totals, series and models, of one `model` when given. */
 function summarize(model) {
   const { days, machine } = usageState;
   const buckets = usageBuckets(days, usageState.now);
   const index = new Map(buckets.map((b, i) => [b, i]));
-  const rows = usageState.rows.filter((r) => (!machine || r.machine === machine) && (!model || r.model === model) && index.has(bucketOf(days, r.hour)));
+  const rows = usageState.rows.filter((r) => (!machine || r.machine === machine) && (!model || r.model === model) && index.has(bucketOf(days, r.at)));
   const s = { buckets, rows, cost: 0, tokens: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, savings: 0, premium: 0, unpriced: 0, unpricedTokens: 0, sessions: new Set(),
     byType: { input: 0, cache_read: 0, cache_write: 0, output: 0 }, series: buckets.map(() => ({ cost: 0, tokens: 0 })), models: new Map() };
   for (const r of rows) {
@@ -425,7 +436,7 @@ function summarize(model) {
     }
     for (const k in s.byType) s.byType[k] += r.cost?.[k] ?? 0;
     s.sessions.add(`${r.machine}:${r.session}`);
-    const point = s.series[index.get(bucketOf(days, r.hour))];
+    const point = s.series[index.get(bucketOf(days, r.at))];
     point.cost += cost;
     point.tokens += tokens;
     const m = s.models.get(r.model) ?? { model: r.model, cost: 0, priced: false, tokens: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, sessions: new Set() };
@@ -437,12 +448,14 @@ function summarize(model) {
 }
 
 async function fetchUsage() {
+  const seq = ++usageState.seq;
   usageState.loading = true;
   renderUsagePage();
   const since = usageBuckets(90)[0];
-  const machinesOnline = onlineMachines();
-  const lists = await Promise.all(machinesOnline.map((m) => callOn(m, { cmd: "token_usage", since, prices: usagePrices }).then((rows) => rows.map((r) => ({ ...r, machine: m })), () => [])));
-  Object.assign(usageState, { rows: lists.flat(), loaded: true, loading: false, now: Date.now() / 1000 });
+  const answers = await Promise.allSettled(onlineMachines().map((m) => callOn(m, { cmd: "token_usage", since, prices: usagePrices }).then((rows) => rows.map((r) => ({ ...r, machine: m })), (e) => Promise.reject(`${machineName(m)}: ${e}`))));
+  if (seq !== usageState.seq) return;
+  const error = answers.filter((a) => a.status === "rejected").map((a) => a.reason).join("; ");
+  Object.assign(usageState, { rows: answers.flatMap((a) => (a.status === "fulfilled" ? a.value : [])), error, loaded: true, loading: false, now: Date.now() / 1000 });
   if (shellPage() === "usage") renderUsagePage();
 }
 
@@ -475,7 +488,7 @@ function renderUsagePage() {
       ${segmented("metric", USAGE_METRICS.map(([v, l]) => [v, l]), metric)}${segmented("days", USAGE_PERIODS, days, metric === "limits")}
       <button type="button" class="icon refresh" title="Refresh">${icon("refresh-cw")}</button>`)}
     <div class="page-body"><div class="page-wrap usage" data-metric="${metric}"${usageState.loading && usageState.loaded ? ` data-refreshing` : ""}>${
-      metric === "limits" ? limitsHtml() : !usageState.loaded ? usageSkeleton() : spendHtml(s)
+      metric === "limits" ? limitsHtml() : !usageState.loaded ? usageSkeleton() : (usageState.error ? `<p class="usage-warn">${icon("triangle-alert")}<span>Couldn't read usage on ${esc(usageState.error)}</span></p>` : "") + spendHtml(s)
     }</div></div>`);
   if (metric !== "limits" && usageState.loaded) drawChart(pageView.querySelector(".chart"), s, metric);
 }
@@ -608,7 +621,7 @@ function drawChart(holder, s, metric) {
   const fmt = (v) => (cost ? usd(v) : tokensText(v));
   const label = (b) => (usageState.days === 1 ? `${hourText(b)}` : monthDay(b)).toUpperCase();
   const mid = Math.floor((s.buckets.length - 1) / 2);
-  holder.innerHTML = `<div class="y-axis">${ticks.slice().reverse().map((t) => `<span>${t === 0 ? "0" : cost ? `$${tokensText(t)}` : tokensText(t)}</span>`).join("")}</div>
+  holder.innerHTML = `<div class="y-axis">${ticks.slice().reverse().map((t) => `<span>${t === 0 ? "0" : cost ? (t < 1000 ? usd(t).replace(/\.00$/, "") : `$${tokensText(t)}`) : tokensText(t)}</span>`).join("")}</div>
     <div class="plot"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="${esc(usageState.days === 1 ? "Hourly" : "Daily")} ${cost ? "cost" : "tokens"}">
       ${ticks.map((t) => `<line class="grid" x1="0" x2="${W}" y1="${y(t)}" y2="${y(t)}"/>`).join("")}
       <path class="area" d="${line}L${x(values.length - 1)},${H}L${x(0)},${H}Z" fill="${CLAUDE_COLOR}"/>
@@ -619,10 +632,12 @@ function drawChart(holder, s, metric) {
   const cursor = plot.querySelector(".cursor");
   const tip = plot.querySelector(".tip");
   const today = localDay(Date.now() / 1000);
+  const yesterday = new Date(today * 1000);
+  yesterday.setDate(yesterday.getDate() - 1);
   const when = (b) => {
     if (usageState.days !== 1) return monthDay(b);
     const day = localDay(b);
-    return day === today ? `${hourText(b)} today` : day === today - 86400 ? `${hourText(b)} yesterday` : `${monthDay(b)}, ${hourText(b)}`;
+    return day === today ? `${hourText(b)} today` : day === yesterday.getTime() / 1000 ? `${hourText(b)} yesterday` : `${monthDay(b)}, ${hourText(b)}`;
   };
   plot.onpointermove = (e) => {
     const r = plot.getBoundingClientRect();
@@ -669,15 +684,18 @@ pageView.addEventListener("change", (e) => {
   if (seg) setUsage({ [seg.dataset.seg]: seg.dataset.seg === "days" ? Number(seg.value) : seg.value });
 });
 window.addEventListener("keydown", (e) => {
-  if (shellPage() !== "usage" || e.repeat || e.metaKey || e.ctrlKey || e.altKey || !paletteEl.hidden || !shellDialog.hidden || e.target.closest?.("input, textarea, select, [contenteditable]")) return;
+  if (!guiOn() || shellPage() !== "usage" || e.repeat || e.metaKey || e.ctrlKey || e.altKey || !paletteEl.hidden || !shellDialog.hidden || e.target.closest?.("input, textarea, select, [contenteditable]")) return;
   const metric = USAGE_METRICS.find(([, , key]) => key === e.key)?.[0];
   if (metric) setUsage({ metric });
 });
-onGuiKey(["1", "!", "2", "@", "3", "#", "4", "$"], (e) => {
-  if (usageState.metric === "limits") return;
-  const i = ["1!", "2@", "3#", "4$"].findIndex((k) => k.includes(e.key));
-  setUsage({ days: USAGE_PERIODS[i][0] });
-}, { shift: true, when: () => shellPage() === "usage" });
+// ⌘⇧1-4 by key position, since Shift turns the digits into other characters on each layout.
+window.addEventListener("keydown", (e) => {
+  const mod = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  const i = ["Digit1", "Digit2", "Digit3", "Digit4"].indexOf(e.code);
+  if (!guiOn() || shellPage() !== "usage" || !mod || !e.shiftKey || e.altKey || i < 0 || settingsOpen()) return;
+  e.preventDefault();
+  if (usageState.metric !== "limits") setUsage({ days: USAGE_PERIODS[i][0] });
+});
 
 /** A model's own numbers, as T3 Code's model dialog shows them, and the prices the user sets per model,
  * which the machines apply in place of LiteLLM's list. */
@@ -760,9 +778,10 @@ function openPrices(initial) {
       const value = (f) => tr.querySelector(`[data-field="${f}"]`).value.trim();
       const model = value("model");
       if (!model && PRICE_FIELDS.every(([k]) => !value(k))) continue;
+      const valid = (f) => value(f) === "" || (Number.isFinite(Number(value(f))) && Number(value(f)) >= 0);
       const [input, output] = [Number(value("input")), Number(value("output"))];
-      if (!model || !value("input") || !value("output") || !(input >= 0) || !(output >= 0)) {
-        error.textContent = `${model || "A new row"} needs a model ID and its input and output prices.`;
+      if (!model || !value("input") || !value("output") || !PRICE_FIELDS.every(([k]) => valid(k))) {
+        error.textContent = `${model || "A new row"} needs a model ID, input and output prices, and prices of 0 or more.`;
         error.hidden = false;
         return;
       }
@@ -843,11 +862,13 @@ async function fetchPulls() {
   const seq = ++pulls.seq;
   Object.assign(pulls, { loading: true, error: "" });
   renderPullsPage();
-  const asks = [...openProjects()].map(([m, paths]) => callOn(m, { cmd: "pull_requests", paths: [...paths], state: pulls.state, involvement: pulls.involvement, query: pulls.q, limit: pulls.limit }));
+  const asks = [...openProjects()].map(([m, paths]) =>
+    callOn(m, { cmd: "pull_requests", paths: [...paths], state: pulls.state, involvement: pulls.involvement, query: pulls.q, limit: pulls.limit }).then((found) => ({ ...found, rows: found.rows.map((r) => ({ ...r, machine: m })) })));
   const answers = await Promise.allSettled(asks);
   if (seq !== pulls.seq) return;
   const seen = new Set();
   const rows = answers.flatMap((a) => (a.status === "fulfilled" ? a.value.rows : [])).filter((r) => !seen.has(r.url) && seen.add(r.url));
+  if (answers.length > 1) rows.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   const failed = answers.find((a) => a.status === "rejected");
   const more = answers.some((a) => a.status === "fulfilled" && a.value.more);
   Object.assign(pulls, { rows: failed && !rows.length && pulls.rows === null ? null : rows, more, error: failed ? String(failed.reason) : "", loading: false, fetchedAt: Date.now() });
@@ -992,7 +1013,7 @@ pageView.addEventListener("click", (e) => {
 });
 pageView.addEventListener("keydown", (e) => {
   const row = e.target.closest?.(".pr-row[data-url]");
-  if (row && (e.key === "Enter" || e.key === " ") && shellPage() === "pull-requests") {
+  if (row && e.target === row && (e.key === "Enter" || e.key === " ") && shellPage() === "pull-requests") {
     e.preventDefault();
     openPull(row.dataset.url);
   }
@@ -1014,10 +1035,16 @@ pageView.addEventListener("scroll", (e) => {
   pageView.dataset.condensed = !!toolbar && e.target.scrollTop > toolbar.offsetTop + toolbar.offsetHeight;
 }, true);
 /** The pull request's checks, from gh, as T3 Code's checks popover lists them. */
+/** A tab on the machine that found the pull request, whose gh can reach it. */
+const pullTab = (url) => {
+  const machine = pulls.rows?.find((r) => r.url === url)?.machine;
+  return machine === active?.machine ? active : tabs.find((t) => t.machine === machine);
+};
 async function showChecks(url, at) {
-  if (!active) return openOutside(`${url}/checks`);
+  const tab = pullTab(url);
+  if (!tab) return openOutside(`${url}/checks`);
   try {
-    const pr = await callOn(active.machine, { cmd: "pull_request", tab: active.view.id, pr: url });
+    const pr = await callOn(tab.machine, { cmd: "pull_request", tab: tab.view.id, pr: url });
     const checks = (pr.statusCheckRollup ?? []).map((c) => {
       const result = (c.conclusion || c.state || c.status || "").toLowerCase();
       const ic = /success|neutral|skipped/.test(result) ? "circle-check" : /failure|error|cancel|timed_out|action_required/.test(result) ? "circle-x" : "circle-dot";
@@ -1034,9 +1061,10 @@ function openPull(url) {
   renderPullsPage();
 }
 async function quickPull(url, action) {
-  if (!active) return openOutside(url);
+  const tab = pullTab(url);
+  if (!tab) return openOutside(url);
   try {
-    await callOn(active.machine, { cmd: "pr_action", tab: active.view.id, pr: url, action });
+    await callOn(tab.machine, { cmd: "pr_action", tab: tab.view.id, pr: url, action });
     fetchPulls();
   } catch (e) {
     tell(`Couldn't ${action === "ready" ? "mark it ready" : action} the pull request: ${esc(e)}`, 6000);

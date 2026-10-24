@@ -10,6 +10,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PRICES_URL: &str = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 const PRICES_FRESH: Duration = Duration::from_secs(24 * 3600);
+/// Rows are this long, so every time zone's hours and days, quarter-hour offsets included, are whole rows.
+const SLICE: u64 = 15 * 60;
+/// After a failed download of the price list, the next waits this long, so an offline machine doesn't wait out the timeout on every call.
+const RETRY_AFTER: Duration = Duration::from_secs(60);
+static FAILED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 /// A transcript last written this long before the window opens can't hold a line inside it.
 const MTIME_SLACK: u64 = 36 * 3600;
 /// Bare family names span generations, and `<synthetic>` lines were never billed.
@@ -22,11 +27,11 @@ pub enum Speed {
     Fast,
 }
 
-/// One hour's use of one model in one session.
+/// A quarter hour's use of one model in one session.
 #[derive(Serialize, Debug, PartialEq)]
 pub struct Row {
-    /// Unix time the hour starts.
-    pub hour: u64,
+    /// Unix time the quarter hour starts.
+    pub at: u64,
     pub model: String,
     /// Tells the report's sessions apart, which the page counts.
     pub session: u32,
@@ -118,8 +123,8 @@ struct Tokens {
     speed: Option<String>,
 }
 
-/// Every transcript under `projects` with a line at or after `since`, summed per hour, model,
-/// session and speed. Claude Code repeats a message's usage on each of its content blocks and
+/// Every transcript under `projects` with a line at or after `since`, summed per quarter hour,
+/// model, session and speed. Claude Code repeats a message's usage on each of its content blocks and
 /// copies messages into resumed and forked sessions, so a message counts once, by id and request.
 pub fn read(projects: &Path, since: u64, rates: &RateTable, prices: &HashMap<String, Price>) -> Vec<Row> {
     let mut files = vec![];
@@ -144,7 +149,7 @@ pub fn read(projects: &Path, since: u64, rates: &RateTable, prices: &HashMap<Str
             let next = sessions.len() as u32;
             let session = *sessions.entry(line.session).or_insert(next);
             let speed = if tokens.speed.as_deref() == Some("fast") { Speed::Fast } else { Speed::Standard };
-            let sum = sums.entry((at - at % 3600, model, session, speed)).or_default();
+            let sum = sums.entry((at - at % SLICE, model, session, speed)).or_default();
             for (total, n) in sum.iter_mut().zip([tokens.input_tokens, tokens.cache_read_input_tokens, tokens.cache_creation_input_tokens, tokens.output_tokens]) {
                 *total += n;
             }
@@ -152,13 +157,13 @@ pub fn read(projects: &Path, since: u64, rates: &RateTable, prices: &HashMap<Str
     }
     let mut rows: Vec<Row> = sums
         .into_iter()
-        .map(|((hour, model, session, speed), [input, cached, cache_write, output])| {
-            let mut row = Row { hour, model, session, speed, input, cached, cache_write, output, cost: None, premium: 0.0, savings: 0.0 };
+        .map(|((at, model, session, speed), [input, cached, cache_write, output])| {
+            let mut row = Row { at, model, session, speed, input, cached, cache_write, output, cost: None, premium: 0.0, savings: 0.0 };
             price(&mut row, rates, prices);
             row
         })
         .collect();
-    rows.sort_by(|a, b| (a.hour, &a.model, a.session).cmp(&(b.hour, &b.model, b.session)));
+    rows.sort_by(|a, b| (a.at, &a.model, a.session).cmp(&(b.at, &b.model, b.session)));
     rows
 }
 
@@ -265,8 +270,12 @@ pub fn rates(cache: Option<&Path>) -> RateTable {
         std::fs::read(path).ok()
     };
     let body = cache.and_then(fresh).or_else(|| {
-        let body = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10)).build().ok()?.get(PRICES_URL).send().ok()?.error_for_status().ok()?.bytes().ok()?.to_vec();
-        serde_json::from_slice::<Value>(&body).ok()?;
+        if FAILED_AT.lock().unwrap().is_some_and(|at| at.elapsed() < RETRY_AFTER) {
+            return None;
+        }
+        let body = download();
+        *FAILED_AT.lock().unwrap() = body.is_none().then(std::time::Instant::now);
+        let body = body?;
         if let Some(path) = cache {
             let _ = std::fs::write(path, &body);
         }
@@ -274,6 +283,12 @@ pub fn rates(cache: Option<&Path>) -> RateTable {
     });
     let body = body.or_else(|| std::fs::read(cache?).ok());
     body.and_then(|b| serde_json::from_slice::<Value>(&b).ok()).map(|doc| parse_rates(&doc)).unwrap_or_default()
+}
+
+fn download() -> Option<Vec<u8>> {
+    let body = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10)).build().ok()?.get(PRICES_URL).send().ok()?.error_for_status().ok()?.bytes().ok()?.to_vec();
+    serde_json::from_slice::<Value>(&body).ok()?;
+    Some(body)
 }
 
 #[cfg(test)]
@@ -320,19 +335,24 @@ mod tests {
 
         let since = unix_of("2026-10-24T00:00:00Z").unwrap();
         let rows = read(dir.path(), since, &table(), &HashMap::new());
-        let hour = unix_of("2026-10-24T10:00:00Z").unwrap();
-        let summary: Vec<_> = rows.iter().map(|r| (r.hour, r.model.as_str(), r.speed, r.input, r.cached, r.cache_write, r.output)).collect();
-        assert_eq!(summary.len(), 2);
-        assert!(summary.contains(&(hour, "claude-opus-5-5", Speed::Standard, 6, 3000, 300, 150)));
-        assert!(summary.contains(&(hour, "claude-haiku-5", Speed::Fast, 10, 0, 0, 20)));
-        let opus = rows.iter().find(|r| r.model == "claude-opus-5-5").unwrap();
-        let cost = opus.cost.unwrap();
-        assert!((cost.input - 6.0 * 5e-6).abs() < 1e-12);
-        assert!((cost.cache_read - 3000.0 * 0.5e-6).abs() < 1e-12);
-        assert!((cost.cache_write - 300.0 * 6.25e-6).abs() < 1e-12);
-        assert!((cost.output - 150.0 * 25e-6).abs() < 1e-12);
-        assert!((opus.savings - 3000.0 * 4.5e-6).abs() < 1e-12);
+        let quarters: Vec<_> = rows.iter().map(|r| (r.at, r.model.as_str())).collect();
+        let at = |iso| unix_of(iso).unwrap();
+        assert_eq!(
+            quarters,
+            [(at("2026-10-24T10:00:00Z"), "claude-opus-5-5"), (at("2026-10-24T10:30:00Z"), "claude-haiku-5"), (at("2026-10-24T10:30:00Z"), "claude-opus-5-5"), (at("2026-10-24T10:45:00Z"), "claude-opus-5-5")]
+        );
+        let sum = |model: &str, f: fn(&Row) -> f64| rows.iter().filter(|r| r.model == model).map(f).sum::<f64>();
+        let opus_tokens = [sum("claude-opus-5-5", |r| r.input as f64), sum("claude-opus-5-5", |r| r.cached as f64), sum("claude-opus-5-5", |r| r.cache_write as f64), sum("claude-opus-5-5", |r| r.output as f64)];
+        assert_eq!(opus_tokens, [6.0, 3000.0, 300.0, 150.0], "m1 once, m2 once though resumed into s2, and the subagent's m6");
         let haiku = rows.iter().find(|r| r.model == "claude-haiku-5").unwrap();
+        assert_eq!((haiku.speed, haiku.input, haiku.output), (Speed::Fast, 10, 20));
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(close(sum("claude-opus-5-5", |r| r.cost.unwrap().input), 6.0 * 5e-6));
+        assert!(close(sum("claude-opus-5-5", |r| r.cost.unwrap().cache_read), 3000.0 * 0.5e-6));
+        assert!(close(sum("claude-opus-5-5", |r| r.cost.unwrap().cache_write), 300.0 * 6.25e-6));
+        assert!(close(sum("claude-opus-5-5", |r| r.cost.unwrap().output), 150.0 * 25e-6));
+        assert!(close(sum("claude-opus-5-5", |r| r.savings), 3000.0 * 4.5e-6));
+        let opus = rows.iter().find(|r| r.model == "claude-opus-5-5").unwrap();
         assert_ne!(haiku.session, opus.session);
         assert_eq!(haiku.premium, 0.0, "haiku has no fast tier, so fast is priced as standard");
     }
@@ -341,7 +361,7 @@ mod tests {
     fn prices_fast_mode_and_leaves_unknown_models_unpriced() {
         let rates = table();
         let priced = |model: &str, speed| {
-            let mut row = Row { hour: 0, model: model.into(), session: 0, speed, input: 1_000_000, cached: 0, cache_write: 0, output: 0, cost: None, premium: 0.0, savings: 0.0 };
+            let mut row = Row { at: 0, model: model.into(), session: 0, speed, input: 1_000_000, cached: 0, cache_write: 0, output: 0, cost: None, premium: 0.0, savings: 0.0 };
             price(&mut row, &rates, &HashMap::from([("opus".to_owned(), Price { input: 2.0, output: 10.0, cache_read: None, cache_write: Some(4.0) })]));
             row
         };

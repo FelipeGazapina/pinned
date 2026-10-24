@@ -263,8 +263,9 @@ body[data-shift-held="true"] .pulls .pr-row:hover .quick { display: flex; }
 .pulls .pr-empty h2 { font-size: 14px; }
 .pulls .pr-empty p { margin: 0; max-width: 360px; color: var(--g-muted); font-size: 13px; }
 .pulls .pr-empty .buttons { display: flex; gap: 8px; margin-top: 4px; }
-.pulls .pr-warn { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 12px; border-radius: 8px; background: rgb(254 154 0 / 0.08); color: var(--g-warning-fg); font-size: 13px; }
-.pulls .pr-warn span { flex: 1; }
+.usage .usage-warn, .pulls .pr-warn { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 12px; border-radius: 8px; background: rgb(254 154 0 / 0.08); color: var(--g-warning-fg); font-size: 13px; }
+.usage .usage-warn span, .pulls .pr-warn span { flex: 1; }
+.usage .usage-warn .i, .pulls .pr-warn .i { flex: none; }
 @media (pointer: coarse) {
   .pulls .pr-search, .pulls .pr-toolbar button.outline { height: 40px; }
   .pulls .pr-toolbar .icon-only { width: 40px; }
