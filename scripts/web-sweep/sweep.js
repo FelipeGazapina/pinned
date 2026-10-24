@@ -3527,6 +3527,155 @@ async function sweep(profileName) {
     return "100, then 150 rows";
   });
 
+  const runFromPalette = async (query, title) => {
+    await page.keyboard.press("Meta+k");
+    await waitFor("the palette", () => page.locator("#palette").isVisible());
+    await page.keyboard.type(query);
+    await waitFor(`“${title}” in the palette`, async () => (await paletteItems())[0] === title);
+    await page.keyboard.press("Enter");
+  };
+  await step("follow: ⌘K's Go to file and Search project contents open the panel's searches, and Escape comes back to the palette", async () => {
+    if (touch) return "touch: no keyboard";
+    await openRow(await keyFor("alpha"));
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type("go to file");
+    await waitFor("Go to file", async () => (await paletteItems())[0] === "Go to file");
+    check((await text("#palette .item[data-i='0'] .hint")) === "⌘P", `its hint: ${await text("#palette .item[data-i='0'] .hint")}`);
+    await page.keyboard.press("Enter");
+    await waitFor("the file picker", async () => (await page.getAttribute("#file-picker .query", "placeholder")) === "Search files…" && (await page.locator("#file-picker .query").isVisible()));
+    check(!(await page.locator("#palette").isVisible()), "the palette stayed over the file picker");
+    await page.keyboard.press("Escape");
+    await waitFor("the palette again", () => page.locator("#palette").isVisible());
+    check(!(await page.locator("#file-picker .query").isVisible()), "the file picker stayed open");
+    check((await page.inputValue("#palette input")) === "go to file", `the palette's query came back as “${await page.inputValue("#palette input")}”`);
+    await page.fill("#palette input", "search project contents");
+    await waitFor("Search project contents", async () => (await paletteItems())[0] === "Search project contents");
+    check((await text("#palette .item[data-i='0'] .hint")) === "⌘⇧F", `its hint: ${await text("#palette .item[data-i='0'] .hint")}`);
+    await page.keyboard.press("Enter");
+    await waitFor("the content search", async () => (await page.getAttribute("#file-picker .query", "placeholder")) === "Search project contents…");
+    await page.keyboard.press("Escape");
+    await waitFor("the palette after the content search", async () => (await page.inputValue("#palette input")) === "search project contents");
+    await page.keyboard.press("Escape");
+    check(!(await page.locator("#palette").isVisible()), "Escape left the palette open");
+  });
+
+  await step("follow: ⌘K links a pull request to the thread, then shows the thread's linked pull requests", async () => {
+    if (touch) return "touch: no keyboard";
+    await runFromPalette("link pull request", "Link pull request to thread");
+    await waitFor("the Link pull request dialog", () => page.locator("#link-pr input").isVisible());
+    await page.fill("#link-pr input", "https://github.com/example/alpha/pull/43");
+    await page.press("#link-pr input", "Enter");
+    await waitFor("the dialog to close", async () => !(await page.locator("#link-pr").count()), 10000);
+    await runFromPalette("show linked pull requests", "Show linked pull requests");
+    await waitFor("the Pull requests tab", () => gui('#panel-tabs .ptab.active[data-panel="prs"]').isVisible());
+    await waitFor("#43 among them", () => gui('#panel-body .pr-row[data-prs-open$="/pull/43"]').isVisible(), 10000);
+    await page.evaluate(() => unlinkPr(active, "https://github.com/example/alpha/pull/43"));
+    await page.evaluate(() => closePanel());
+  });
+
+  await step("follow: ⌘K restarts the agent session on the thread's conversation", async () => {
+    if (touch) return "touch: no keyboard";
+    const session = await page.evaluate(() => active.view.session);
+    check(!!session, "alpha has no conversation to resume");
+    fs.writeFileSync(path.join(HOME, "claude-launch.log"), "");
+    await runFromPalette("restart agent", "Restart agent session");
+    await waitFor("claude to start again on the conversation", () => readLog("claude-launch.log").includes(`--resume ${session}`), 10000);
+    await waitFor("the notice", async () => (await text("#side-notice")) === "Agent session restarted. Skills, plugins and MCP servers load again.");
+    await waitFor("the session running again", () => page.evaluate((s) => active.view.running && active.view.session === s, session), 10000);
+    return readLog("claude-launch.log").trim();
+  });
+
+  await step("follow: ⌘K's New project makes a repository with a first commit, opens a thread in it, and publishes it", async () => {
+    if (touch) return "touch: no keyboard";
+    const gitconfig = path.join(HOME, ".gitconfig");
+    const hadConfig = fs.existsSync(gitconfig);
+    if (!hadConfig) fs.writeFileSync(gitconfig, "[user]\n\tname = Sweep\n\temail = sweep@example.test\n");
+    fs.writeFileSync(path.join(HOME, "gh.log"), "");
+    try {
+      await runFromPalette("new project", "New project");
+      await waitFor("the name field", async () => (await page.getAttribute("#palette input", "placeholder")) === "Project name");
+      check((await text("#palette .summary .sub")) === "Goes in ~/pinned/", `summary: ${await text("#palette .summary .sub")}`);
+      check(await page.locator("#palette .accessory [data-submit]").isDisabled(), "Create works without a name");
+      check((await paletteGroups()).join() === "Options,", `groups: ${(await paletteGroups()).join()}`);
+      await page.keyboard.type("Sweep Café");
+      await waitFor("the path preview", async () => (await text("#palette .summary .sub")) === "Creates ~/pinned/sweep-cafe");
+      check(!(await page.locator("#palette .item.hi").count()), "a row is highlighted, so Enter would run it");
+      await page.click("#palette .item:has-text('Create private repository on GitHub')");
+      await waitFor("the checked box", () => page.locator("#palette .checkbox.on").isVisible());
+      check((await text("#palette .item:has-text('Create private repository') .sub")) === "sweep-cafe", "the repository's name isn't shown");
+      await page.keyboard.press("Meta+Enter");
+      await waitFor("a thread in the new project", async () => (await crumbProject()) === "sweep-cafe", 15000);
+      const dir = path.join(HOME, "pinned", "sweep-cafe");
+      const log = require("child_process").execFileSync("git", ["log", "--format=%s"], { cwd: dir, encoding: "utf8" }).trim();
+      check(log === "Initial commit", `git log: ${log}`);
+      check(fs.readFileSync(path.join(dir, "README.md"), "utf8").includes("# Sweep Café") && fs.existsSync(path.join(dir, "assets", "icon.svg")), "README.md or the icon is missing");
+      await waitFor("gh to publish it", () => /^repo create sweep-cafe --private --source \. --remote origin --push$/m.test(readLog("gh.log")), 10000);
+      await waitFor("the published notice", async () => (await text("#side-notice")) === "Published to GitHub: sweeper/sweep-cafe");
+      await page.evaluate(() => closeTab(active));
+      return log;
+    } finally {
+      if (!hadConfig) fs.rmSync(gitconfig, { force: true });
+    }
+  });
+
+  await step("follow: ⌘K's Open WSL folder browses the folders of a machine running under WSL", async () => {
+    if (touch) return "touch: no keyboard";
+    await openRow(await keyFor("alpha"));
+    const machine = await page.evaluate(() => active.machine);
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type("open wsl");
+    await waitFor("no WSL item off WSL", async () => !(await paletteItems()).includes("Open WSL folder"));
+    await page.keyboard.press("Escape");
+    await page.evaluate((m) => (machines.get(m).view.os = "wsl"), machine);
+    try {
+      await runFromPalette("open wsl", "Open WSL folder");
+      await waitFor("the folder browser", () => page.locator("#projects .browse input").isVisible());
+      check((await page.inputValue("#projects .browse input")) === "~/", "the browser doesn't start at ~/");
+      await page.evaluate(() => closeProjects());
+    } finally {
+      await page.evaluate((m) => (machines.get(m).view.os = "macos"), machine);
+    }
+  });
+
+  await step("follow: ⌘K copies a prompt link, and the link opens a thread in its repository with the prompt in the composer", async () => {
+    if (touch) return "touch: no keyboard";
+    await openRow(await keyFor("alpha"));
+    await page.evaluate(() => {
+      window.copiedLinks = [];
+      navigator.clipboard.writeText = async (t) => void window.copiedLinks.push(t);
+    });
+    await page.fill("#prompt", "Fix the flaky test");
+    await runFromPalette("copy prompt link", "Copy prompt link");
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type("copy prompt link with repo");
+    await waitFor("the link with repo and model", async () => (await paletteItems())[0] === "Copy prompt link with repo and model");
+    await page.keyboard.press("Enter");
+    const [plain, full] = await page.evaluate(() => (delete navigator.clipboard.writeText, window.copiedLinks));
+    check(plain === `${HUB}/new?prompt=Fix+the+flaky+test`, `copied ${plain}`);
+    check(new URL(full).searchParams.get("repo") === "example/alpha" && new URL(full).searchParams.get("provider") === "claude", `copied ${full}`);
+    await page.fill("#prompt", "");
+    await page.dispatchEvent("#prompt", "input");
+    const other = await context.newPage();
+    try {
+      await other.goto(full);
+      await other.waitForFunction(() => document.querySelector("#prompt")?.value === "Fix the flaky test" && location.pathname === "/", null, { timeout: 20000 });
+      const opened = await other.evaluate(() => [projectName(active), document.querySelector("#side-notice").textContent.trim()]);
+      check(opened[0] === "alpha", `the link opened in ${opened[0]}`);
+      check(opened[1].startsWith("Prompt added from a link. Read it before you send."), `notice: ${opened[1]}`);
+      await other.evaluate(() => closeTab(active));
+      await other.goto(`${HUB}/new?prompt=hi&repo=example/nowhere`);
+      await other.waitForFunction(() => document.querySelector("#page-view h2")?.textContent === "You don't have example/nowhere", null, { timeout: 20000 });
+      check((await other.locator("#page-view [data-link]").allTextContents()).join() === "Clone example/nowhere,Use without project", "the missing repository's buttons");
+      await other.goto(`${HUB}/new?prompt=${"x".repeat(8001)}`);
+      await other.waitForFunction(() => document.querySelector("#page-view p")?.textContent === "This prompt is longer than 8,000 characters, so Pinned did not open it.", null, { timeout: 20000 });
+      await other.goto(`${HUB}/new?prompt=%E2%80%8B%E2%80%8B`);
+      await other.waitForFunction(() => /only hidden characters/.test(document.querySelector("#page-view p")?.textContent ?? ""), null, { timeout: 20000 });
+    } finally {
+      await other.close();
+    }
+    return full;
+  });
+
   await step("app view: back to the terminal", async () => {
     await showSidebar();
     await tapOrClick("#mode-terminal");

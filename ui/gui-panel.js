@@ -1532,6 +1532,7 @@ pickerQuery.addEventListener("keydown", (e) => {
     e.preventDefault();
     e.stopPropagation();
     closePicker();
+    backToPalette();
   }
 });
 filePicker.addEventListener("click", (e) => {

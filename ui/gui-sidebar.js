@@ -1267,9 +1267,9 @@ function newThreadWithoutProject() {
   if (pickerOpen()) closeProjects();
   openTab(machine, null).catch((e) => tell(`Couldn't open a thread: ${esc(e)}`, 6000));
 }
-async function addProject() {
+async function addProject(machine = active?.machine) {
   if (narrow(768)) toggleSidebar(false);
-  await showProjects({ machine: active?.machine });
+  await showProjects({ machine });
   if (pickerOpen() && picker.querySelector(".choices")) browseFolders();
 }
 document.getElementById("new-thread").onclick = (e) => newThread(e.shiftKey);

@@ -136,6 +136,8 @@ if (cmd === "pr" && sub === "view") {
   kept.reviews = [...(kept.reviews ?? []), { author: { login: "sweeper" }, state: review.event === "APPROVE" ? "APPROVED" : review.event === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "COMMENTED", body: review.body, submittedAt: at(55), comments: review.comments }];
   fs.writeFileSync(reviewFile, JSON.stringify(kept));
   fs.appendFileSync(path.join(process.env.HOME, "gh.log"), `review ${JSON.stringify(review)}\n`);
+} else if (cmd === "repo" && sub === "create") {
+  process.stdout.write(`https://github.com/sweeper/${args[2]}\n`);
 } else if ((cmd === "api" && args.includes("DELETE")) || (cmd === "run" && sub === "rerun")) {
   process.stdout.write("");
 } else {

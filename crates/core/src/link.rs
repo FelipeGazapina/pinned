@@ -222,7 +222,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     let auth = MachineFrame::Auth {
         token: creds.machine_token.clone(),
         name: crate::account::hostname(),
-        os: std::env::consts::OS.into(),
+        os: crate::account::os(),
         version: version.into(),
     };
     sink.send(text(&auth)).await.map_err(|e| e.to_string())?;

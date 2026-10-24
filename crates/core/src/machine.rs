@@ -1,7 +1,7 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, projects, pty, pulls, reminders, sessions, sync, thread, titles, uploads, usage, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, projects, pty, pulls, reminders, scaffold, sessions, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -320,6 +320,7 @@ impl Machine {
             Call::OpenTab { path, bypass } => json(self.open_tab(path, bypass)),
             Call::StartClaude { tab, cols, rows } => json(self.start_claude(&tab, cols, rows)?),
             Call::SetBypass { tab, on, cols, rows } => json(self.set_bypass(&tab, on, cols, rows)?),
+            Call::RestartClaude { tab, cols, rows } => json(self.restart_claude(&tab, cols, rows)?),
             Call::WriteInput { tab, data } => json(self.write_input(&tab, data.as_bytes())?),
             Call::ResizePty { tab, cols, rows } => json(self.resize_pty(&tab, cols, rows)?),
             Call::CloseTab { tab } => {
@@ -337,6 +338,12 @@ impl Machine {
             }
             Call::GitRemote { path } => json(git_remote(Path::new(&path))),
             Call::Browse { path } => json(projects::browse(&path, &home())?),
+            Call::CreateProject { name } => {
+                let mut created = scaffold::create(&self.clones, &name, self.launch.path_env.as_deref())?;
+                created.path = self.open_project(created.path.into()).display().to_string();
+                json(created)
+            }
+            Call::PublishProject { path } => json(scaffold::publish(Path::new(&path), self.launch.path_env.as_deref())?),
             Call::Clone { repo, token } => json(self.find_folder("", Some(&repo), token.as_deref())?),
             Call::Run { run } => json(self.run(&run)?),
             Call::Deliver { env, text } => json(self.deliver(&env, &text)),
@@ -580,18 +587,24 @@ impl Machine {
     pub fn set_bypass(&self, tab: &str, on: bool, cols: u16, rows: u16) -> Result<String, String> {
         let unchanged = self.tab(tab, |t| {
             let unchanged = t.bypass == on && t.session.is_some();
-            if !unchanged {
-                t.bypass = on;
-                if let Some(saved) = t.saved() {
-                    (t.launch, t.resume_at) = saved.reopen(unix_now());
-                }
-            }
+            t.bypass = on;
             unchanged.then(|| t.cwd.display().to_string())
         })?;
         match unchanged {
             Some(cwd) => Ok(cwd),
-            None => self.start_claude(tab, cols, rows),
+            None => self.restart_claude(tab, cols, rows),
         }
+    }
+
+    /// Starts claude again on the tab's conversation and returns its folder; a tab with no
+    /// conversation yet starts a fresh one.
+    pub fn restart_claude(&self, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
+        self.tab(tab, |t| {
+            if let Some(saved) = t.saved() {
+                (t.launch, t.resume_at) = saved.reopen(unix_now());
+            }
+        })?;
+        self.start_claude(tab, cols, rows)
     }
 
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
@@ -1486,6 +1499,25 @@ mod tests {
         let session = m.tab(&tab, |t| t.screen.clone()).unwrap().lock().unwrap().session;
         assert_eq!(set(true), Ok(json!(dir.display().to_string())));
         assert_eq!(m.tab(&tab, |t| t.screen.clone()).unwrap().lock().unwrap().session, session, "a session already skipping permissions keeps running");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restarting_claude_resumes_the_tabs_conversation() {
+        let dir = temp("restart");
+        let claude = dir.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { claude, ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let tab = m.add_tab(dir.clone(), vec![], vec![], false, Some("s1".into()));
+        m.spawn(&tab, sh("sleep 30"), pty::size(80, 24)).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+
+        assert_eq!(m.call(Call::RestartClaude { tab: tab.clone(), cols: 80, rows: 24 }), Ok(json!(dir.display().to_string())));
+        wait_for("claude's arguments", || text(&seen).ends_with("\r\n"));
+        assert_eq!(text(&seen), "--settings|s|--plugin-dir|p|--resume|s1|\r\n");
+        assert!(!m.view(&tab).unwrap().bypass);
         let _ = std::fs::remove_dir_all(dir);
     }
 
