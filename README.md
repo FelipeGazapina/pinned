@@ -96,8 +96,8 @@ the project from then on run under that account, and a resumed session reopens u
 account it started with. A tab that runs under an account other than the built-in Claude Code
 one shows that account's name in the tab bar.
 
-A connector runs under its project's account unless its **Run a session** step picks one
-under **Account**. Only Claude Code accounts can run a connector. A machine where that account
+A workflow runs under its project's account unless its **Run a session** step picks one
+under **Account**. Only Claude Code accounts can run a workflow. A machine where that account
 is missing or signed out refuses the run, so it goes to the next online machine where it is
 signed in.
 
