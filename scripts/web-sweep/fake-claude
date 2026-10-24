@@ -171,6 +171,24 @@ function submit() {
     fs.writeFileSync("web/app.ts", "export const app = 1;\n");
     fs.writeFileSync("Cargo.toml", "[package]\nname = \"beta\"\n");
     wrote([{ type: "text", text: "Wrote two files." }]);
+  } else if (line === "agent") {
+    const id = `agent-tool-${lines}`;
+    wrote([{ type: "tool_use", id, name: "Agent", input: { description: "Look for the bug", subagent_type: "general-purpose", prompt: "Find where the parser drops the last line." } }]);
+    const agents = path.join(path.dirname(transcript), session, "subagents");
+    fs.mkdirSync(agents, { recursive: true });
+    fs.writeFileSync(path.join(agents, "agent-a1b2.meta.json"), JSON.stringify({ agentType: "general-purpose", description: "Look for the bug", toolUseId: id }));
+    const side = (entry) => JSON.stringify({ isSidechain: true, agentId: "a1b2", sessionId: session, timestamp: new Date().toISOString(), ...entry });
+    fs.writeFileSync(path.join(agents, "agent-a1b2.jsonl"), [
+      side({ type: "user", uuid: "sub-1", message: { role: "user", content: "Find where the parser drops the last line." } }),
+      side({ type: "assistant", uuid: "sub-2", message: { role: "assistant", content: [{ type: "tool_use", id: "sub-tool", name: "Grep", input: { pattern: "lines()" } }] } }),
+      side({ type: "user", uuid: "sub-3", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "sub-tool", content: "src/parse.rs:12" }] } }),
+      side({ type: "assistant", uuid: "sub-4", message: { role: "assistant", content: [{ type: "text", text: "The subagent found it in src/parse.rs." }] } }),
+    ].join("\n") + "\n");
+    said([{ type: "tool_result", tool_use_id: id, content: "The parser drops the last line in src/parse.rs:12." }]);
+    wrote([{ type: "text", text: "The agent reported back." }]);
+  } else if (line === "revertme") {
+    fs.writeFileSync("revert.txt", "made by claude\n");
+    wrote([{ type: "text", text: "Wrote revert.txt." }]);
   } else if (line === "notice") {
     said("<local-command-stdout>Set model to Haiku 5.5\nfor this session</local-command-stdout>");
   } else if (line === "limit") {

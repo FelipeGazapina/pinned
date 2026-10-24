@@ -760,16 +760,16 @@ async function sweep(profileName) {
     await sendPrompt("many");
     await answered("answer 45");
     await waitFor("the earlier button", () => gui("#thread [data-earlier]").isVisible());
-    const before = await page.locator("#thread .turn").count();
+    const before = Number(await page.evaluate(() => threadView.querySelector(".lane").dataset.turns));
     check(before === 40, `${before} turns shown`);
     await page.evaluate(() => (threadView.scrollTop = 0));
     await waitFor("the scroll pill", () => page.locator("#scroll-end").isVisible(), 2000);
     await press(gui("#thread [data-earlier]"));
-    await waitFor("more turns", async () => (await page.locator("#thread .turn").count()) > before);
+    await waitFor("more turns", async () => Number(await page.evaluate(() => threadView.querySelector(".lane").dataset.turns)) > before);
     await tapOrClick("#scroll-end");
     await waitFor("the end", () => page.evaluate(() => threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40), 3000);
     await waitFor("the pill to go", async () => !(await page.locator("#scroll-end").isVisible()), 2000);
-    return `${before} then ${await page.locator("#thread .turn").count()} turns`;
+    return `${before} then ${await page.evaluate(() => threadView.querySelector(".lane").dataset.turns)} turns`;
   });
 
   await step("app view: ⌘F finds text in the thread and opens the folds around it", async () => {
@@ -806,11 +806,14 @@ async function sweep(profileName) {
     await page.selectOption("#look-chat-width", "wide");
     await page.selectOption("#look-diff-colors", "blue-orange");
     await page.selectOption("#look-code-size", "16px");
-    const looks = await page.evaluate(() => [
-      getComputedStyle(document.documentElement).getPropertyValue("--lane").trim(),
-      getComputedStyle(document.querySelector("#thread .changes .add")).color,
-      getComputedStyle(document.querySelector("#thread .md pre code")).fontSize,
-    ]);
+    // The thread draws only the turns on screen, so a count and a code block are drawn here to read their styles.
+    const looks = await page.evaluate(() => {
+      const probe = Object.assign(document.createElement("div"), { innerHTML: '<span class="add">+1</span><div class="md"><pre><code>x</code></pre></div>' });
+      threadView.append(probe);
+      const read = [getComputedStyle(document.documentElement).getPropertyValue("--lane").trim(), getComputedStyle(probe.querySelector(".add")).color, getComputedStyle(probe.querySelector("code")).fontSize];
+      probe.remove();
+      return read;
+    });
     check(looks.join("|") === "1152px|rgb(81, 162, 255)|16px", `looks: ${looks.join(" | ")}`);
     await page.selectOption("#look-chat-width", "full");
     check((await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--lane").trim())) === "100%", "Full doesn't widen the lane");
@@ -988,6 +991,104 @@ async function sweep(profileName) {
     const drawn = await card.locator('li[data-file="web/app.ts"] svg.pierre').evaluate((el) => [getComputedStyle(el).color, Math.round(el.getBoundingClientRect().width)]);
     check(drawn.join("|") === "rgb(105, 177, 255)|14", `the TypeScript icon draws as ${drawn.join(" ")}`);
     check(await page.evaluate(() => markdown("@web/app.ts", promptMarked).includes("#file-tree-builtin-typescript")), "a mention chip has no file-type icon");
+  });
+
+  await step("app view: an Agent row opens its subagent's own thread, and back", async () => {
+    await sendPrompt("agent");
+    await answered("The agent reported back.");
+    await press(lastTurn(".work > summary"));
+    const open = gui('#thread .turn:last-of-type [data-subagent]');
+    check((await open.textContent()) === "Open subagent", `the link reads ${await open.textContent()}`);
+    await press(open);
+    await waitFor("the subagent's answer", async () => (await page.locator("#thread .assistant", { hasText: "The subagent found it in src/parse.rs." }).count()) === 1);
+    check((await text("#thread .bubble")) === "Find where the parser drops the last line.", `the subagent's prompt reads ${await text("#thread .bubble")}`);
+    check((await text("#chat-head .crumb .title:last-of-type")) === "Look for the bug", `the header reads ${await text("#chat-head .crumb")}`);
+    check(!(await page.locator("#composer").isVisible()), "the composer shows over a subagent");
+    await press(gui("#chat-head [data-subagent-back]"));
+    await waitFor("the thread again", async () => (await page.locator("#thread .assistant", { hasText: "The agent reported back." }).count()) === 1);
+    check(await page.locator("#composer").isVisible(), "the composer didn't come back");
+  });
+
+  await step("app view: Save to workspace writes the plan into the thread's folder", async () => {
+    await sendPrompt("plan");
+    await answered("Plan approved.");
+    const card = lastTurn(".plan-card");
+    await press(card.locator("[data-plan-menu]"));
+    await press(card.locator("[data-plan-save]"));
+    const field = page.locator(".tl-dialog input");
+    await waitFor("the save dialog", () => field.isVisible());
+    check((await field.inputValue()) === "ship-the-fix.md", `the path starts as ${await field.inputValue()}`);
+    await field.fill("plans/ship.md");
+    await press(page.locator('.tl-dialog button[value="save"]'));
+    const file = path.join(HOME, "work", "beta", "plans", "ship.md");
+    await waitFor("the saved plan", async () => fs.existsSync(file), 5000);
+    check(fs.readFileSync(file, "utf8").startsWith("# Ship the fix"), "the saved file isn't the plan");
+    await waitFor("the saved note", async () => /Plan saved to workspace: plans\/ship\.md/.test(await text("#composer-note")));
+  });
+
+  await step("app view: Edit from here rewinds claude to before a prompt, puts its files back, and returns it to the composer", async () => {
+    const file = path.join(HOME, "work", "beta", "revert.txt");
+    await sendPrompt("revertme");
+    await answered("Wrote revert.txt.");
+    check(fs.existsSync(file), "the fake didn't write revert.txt");
+    await waitFor("the turn's changes", async () => (await page.locator("#thread .turn:last-of-type .changes").count()) > 0, 10000);
+    const before = await page.evaluate(() => threadOf(active).session);
+    const user = lastTurn(".user");
+    if (!touch) await user.hover();
+    await press(user.locator("[data-rewind]"));
+    await waitFor("the dialog", () => page.locator(".tl-dialog").isVisible());
+    check((await text(".tl-dialog h2")) === "Edit from here?", `the dialog reads ${await text(".tl-dialog h2")}`);
+    await press(page.locator('.tl-dialog button[value="files"]'));
+    await waitFor("the rewound session", async () => (await page.evaluate(() => threadOf(active).session)) !== before, 10000);
+    await waitFor("the composer to hold the prompt", async () => (await page.inputValue("#prompt")) === "revertme");
+    check(!fs.existsSync(file), "revert.txt is still there");
+    await waitFor("the thread without the prompt", async () => (await page.locator("#thread .assistant", { hasText: "Wrote revert.txt." }).count()) === 0 && (await page.locator("#thread .assistant", { hasText: "Plan approved." }).count()) > 0, 10000);
+    await waitFor("claude resumed", async () => /resumed [0-9a-f-]{36}/.test(await termText()), 8000);
+    await page.fill("#prompt", "");
+  });
+
+  await step("app view: Fork from this response opens a thread that carries on from that answer", async () => {
+    const tabs = await tabCount();
+    const answer = lastTurn(".answer");
+    if (!touch) await answer.hover();
+    await press(answer.locator("[data-fork]"));
+    await waitFor("the forked thread", async () => (await tabCount()) === tabs + 1 && (await page.evaluate(() => threadOf(active).items.length)) > 0, 10000);
+    await waitFor("the fork's last answer", async () => (await page.locator("#thread .turn:last-of-type .assistant", { hasText: "Plan approved." }).count()) === 1, 10000);
+    check((await page.evaluate(() => active.view.cwd)).endsWith("/beta"), "the fork isn't in beta's folder");
+    await waitFor("claude resumed in the fork", async () => /resumed [0-9a-f-]{36}/.test(await termText()), 8000);
+    await page.evaluate(() => closeTab(active));
+    await waitFor("the fork to close", async () => (await tabCount()) === tabs);
+    await toThread("beta");
+  });
+
+  await step("app view: a long thread draws only the turns near the viewport, and the minimap jumps between prompts", async () => {
+    await sendPrompt("many");
+    await answered("answer 45");
+    const drawn = await page.evaluate(() => [threadView.querySelector(".lane").dataset.turns, threadView.querySelectorAll(".lane > .turn").length]);
+    check(Number(drawn[0]) >= 40 && drawn[1] < 20, `drew ${drawn[1]} of ${drawn[0]} turns`);
+    const [firstId, top] = await page.evaluate(() => {
+      const shown = turnsOf(threadOf(active).items).slice(-Number(threadView.querySelector(".lane").dataset.turns));
+      return [shown[0].id, shown.find((x) => x.user).user.text.split("\n")[0]];
+    });
+    await page.evaluate(() => (threadView.scrollTop = 0));
+    await waitFor("the top turns", () => page.evaluate((id) => threadView.querySelector(".lane > .turn")?.dataset.turnId === id, firstId), 3000);
+    await page.evaluate(() => (threadView.scrollTop = threadView.scrollHeight));
+    await waitFor("the last turn", async () => (await page.locator("#thread .turn .bubble", { hasText: /^question 45$/ }).count()) === 1, 3000);
+    if (touch) return `drew ${drawn[1]} of ${drawn[0]}; the minimap needs a fine pointer`;
+    const ticks = await page.locator("#minimap .tick").count();
+    check(ticks === Number(drawn[0]) && (await page.locator("#minimap").isVisible()), `the minimap shows ${ticks} ticks`);
+    const r = await rect("#minimap .rail");
+    await page.mouse.move(r.left + 6, r.top + 1);
+    await waitFor("the preview", () => page.locator("#minimap .preview").isVisible());
+    check((await text("#minimap .preview b")) === top, `the preview reads ${await text("#minimap .preview b")}, not ${top}`);
+    await page.mouse.click(r.left + 6, r.top + 1);
+    await waitFor("the first prompt on top", () => page.evaluate((top) => {
+      const el = [...document.querySelectorAll("#thread .turn")].find((t) => t.querySelector(".bubble")?.textContent.trim() === top);
+      return !!el && Math.abs(el.getBoundingClientRect().top - threadView.getBoundingClientRect().top - 24) < 4;
+    }, top), 3000);
+    await page.mouse.move(0, 400);
+    await page.evaluate(() => (threadView.scrollTop = threadView.scrollHeight));
+    return `drew ${drawn[1]} of ${drawn[0]}, ${ticks} ticks`;
   });
 
   await step("app view: back on alpha after the timeline's own threads", async () => {

@@ -304,8 +304,9 @@ function workRowHtml(step, cwd, open) {
   }
   const state = !step.result ? "running" : step.result.error ? "error" : "ok";
   const body = [step.detail && `<pre class="input">${esc(step.detail)}</pre>`, step.result?.text && `<pre>${esc(step.result.text)}</pre>`].filter(Boolean).join("");
+  const subagent = /^(Agent|Task)$/.test(step.name) ? `<button type="button" class="inline" data-subagent="${esc(step.id)}" data-title="${esc(step.summary || "Subagent")}" aria-label="Open subagent thread">Open subagent</button>` : "";
   return `<details class="tool" data-fold="${esc(step.id)}" data-state="${state}"${body ? "" : " data-empty"}${open.has(step.id) ? " open" : ""}><summary>${icon(toolIcon(step), "kind")}<span class="label">${esc(toolLabel(step, cwd))}</span>
-    ${state === "error" ? icon("x", "failed") : ""}${whenHtml(step.result?.at ?? step.at)}${body ? icon("chevron-right", "chev") : ""}</summary>${body}</details>`;
+    ${subagent}${state === "error" ? icon("x", "failed") : ""}${whenHtml(step.result?.at ?? step.at)}${body ? icon("chevron-right", "chev") : ""}</summary>${body}</details>`;
 }
 
 /** Consecutive tools fold under one summary row. Anything else in between breaks the run, though only
@@ -404,18 +405,18 @@ function planHtml(step, t) {
   const clamped = long && !t.open.has(key);
   return `<div class="plan-card" data-plan="${esc(step.id)}"><div class="plan-head"><span class="badge">Plan</span><h3>${esc(planTitle(plan) ?? "Proposed plan")}</h3>
       <span class="plan-actions"><button type="button" class="xs outline" data-plan-menu title="Plan actions">${icon("ellipsis")}</button>
-      <span class="plan-menu" hidden><button type="button" data-plan-copy>Copy to clipboard</button><button type="button" data-plan-download>Download as markdown</button></span></span></div>
+      <span class="plan-menu" hidden><button type="button" data-plan-copy>Copy to clipboard</button><button type="button" data-plan-download>Download as markdown</button><button type="button" data-plan-save>Save to workspace</button></span></span></div>
     <div class="plan-body md${clamped ? " clamped" : ""}">${markdown(stripPlan(plan))}</div>
     ${long ? `<div class="plan-foot"><button type="button" class="outline" data-toggle="${esc(key)}">${clamped ? "Expand plan" : "Collapse plan"}</button></div>` : ""}</div>`;
 }
 
-function shownHtml(step, cwd, t, answer) {
+function shownHtml(step, cwd, t, answer, forkable) {
   if (step.kind === "error" || (step.kind === "tool" && step.result?.error && step.name !== QUESTION_TOOL && step.name !== PLAN_TOOL)) return errorHtml(step, cwd);
   if (step.name === PLAN_TOOL) return planHtml(step, t);
   if (step.name === QUESTION_TOOL) return questionHtml(step);
   if (step !== answer) return `<div class="assistant md">${markdown(step.text)}</div>`;
   return `<div class="answer"><div class="assistant md">${markdown(step.text)}</div>
-    <div class="meta"><button type="button" class="xs" data-copy-item="${esc(step.id)}" title="Copy">${icon("copy")}</button>${whenHtml(step.at)}</div></div>`;
+    <div class="meta"><button type="button" class="xs" data-copy-item="${esc(step.id)}" title="Copy">${icon("copy")}</button>${forkable ? `<button type="button" class="xs" data-fork="${esc(step.id)}" title="Fork from this response">${icon("git-fork")}</button>` : ""}${whenHtml(step.at)}</div></div>`;
 }
 
 const endOfSecond = (seconds) => seconds * 1000 + 999;
@@ -530,11 +531,10 @@ function userHtml(user, t, tab, first) {
     user.steer && `<span class="steer" title="Steered the active turn">${icon("redo-2")}Steer</span>`,
   ];
   return `<div class="user">${above.filter(Boolean).join("")}<div class="bubble">${bubble.filter(Boolean).join("")}</div>
-    <div class="meta">${whenHtml(user.at)}${user.text ? `<button type="button" class="xs" data-copy-item="${esc(user.id)}" title="Copy">${icon("copy")}</button>` : ""}</div></div>`;
+    <div class="meta">${whenHtml(user.at)}${t.editable ? `<button type="button" class="xs" data-rewind="${esc(user.id)}" title="Edit from here"${t.editable === "busy" ? " disabled" : ""}>${icon("undo-2")}</button>` : ""}${user.text ? `<button type="button" class="xs" data-copy-item="${esc(user.id)}" title="Copy">${icon("copy")}</button>` : ""}</div></div>`;
 }
 
-function turnHtml(tab, turn, change, live, first) {
-  const t = threadOf(tab);
+function turnHtml(tab, turn, change, live, first, t) {
   const cwd = tab.view.cwd;
   const work = live ? turn.work : turn.work.filter((s) => !turn.failed.has(s));
   const shown = live ? turn.shown : turn.steps.filter((s) => turn.shown.includes(s) || turn.failed.has(s));
@@ -561,12 +561,54 @@ function turnHtml(tab, turn, change, live, first) {
   }
   const notes = turn.notes.filter((n) => !(fold && !live && turn.interrupted && n.text === "Interrupted."));
   return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${fold}
-    ${shown.map((s) => shownHtml(s, cwd, t, live ? null : turn.answer)).join("")}
+    ${shown.map((s) => shownHtml(s, cwd, t, live ? null : turn.answer, t.editable === true)).join("")}
     ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}
     ${change ? changesHtml(change, t.open) : ""}</section>`;
 }
 
 const TURNS_SHOWN = 40;
+/** A turn's height before it is drawn: about two of T3 Code's 90px row estimates. */
+const TURN_ESTIMATE = 180;
+
+/** The subagent thread open over the active one, as T3 Code opens a subagent's own thread. */
+let subagentView = null;
+function subagentShown() {
+  if (subagentView?.tab !== active) subagentView = null;
+  return subagentView;
+}
+/** The conversation the timeline shows: the active thread's, or a subagent's opened from it. */
+const shownThread = () => subagentShown() ?? threadOf(active);
+
+/** The first turn on screen and how far its top sits from the viewport's, to keep in place as turns
+ * above it are drawn or measured. */
+function anchorOf() {
+  const view = threadView.getBoundingClientRect();
+  for (const el of threadView.querySelectorAll(".lane > .turn")) {
+    const r = el.getBoundingClientRect();
+    if (r.bottom > view.top && r.top < view.bottom) return { id: el.dataset.turnId, delta: r.top - view.top };
+  }
+  return null;
+}
+
+/** The turns near the viewport, as T3 Code's virtualized list draws them: one screen above and below,
+ * with spacers at the other turns' measured or estimated heights. */
+function windowOf(t, ids, anchor, scrolled) {
+  const heights = (t.heights ??= new Map());
+  const known = [...heights.values()];
+  const estimate = known.length ? known.reduce((a, b) => a + b, 0) / known.length : TURN_ESTIMATE;
+  const h = ids.map((id) => heights.get(id) ?? estimate);
+  const sum = (from, to) => h.slice(from, to).reduce((a, b) => a + b, 0);
+  const view = threadView.clientHeight || 800;
+  const at = anchor ? ids.indexOf(anchor.id) : -1;
+  const top = at >= 0 ? sum(0, at) - anchor.delta : scrolled ?? sum(0, ids.length) - view;
+  let [lo, hi, y] = [ids.length, 0, 0];
+  for (let i = 0; i < ids.length; i++) {
+    if (y + h[i] > top - view && y < top + 2 * view) [lo, hi] = [Math.min(lo, i), i + 1];
+    y += h[i];
+  }
+  if (lo >= hi) [lo, hi] = [Math.max(0, ids.length - 1), ids.length];
+  return { lo, hi, above: Math.round(sum(0, lo)), below: Math.round(sum(hi, ids.length)) };
+}
 
 function renderThread() {
   const tab = active;
@@ -578,38 +620,55 @@ function renderThread() {
     renderComposer(null);
     return;
   }
-  const t = threadOf(tab);
-  if (!crumb.querySelector("input.rename:focus")) crumb.innerHTML = crumbHtml(tab);
+  const sub = subagentShown();
+  const t = sub ?? threadOf(tab);
+  document.body.toggleAttribute("data-subagent", !!sub);
+  if (!crumb.querySelector("input.rename:focus")) crumb.innerHTML = sub ? subagentCrumbHtml(tab, sub) : crumbHtml(tab);
   const pr = prOf(tab);
   const chip = document.getElementById("pr-chip");
   chip.hidden = !pr;
   if (pr) chip.querySelector("span").textContent = `#${pr.number}`;
 
-  const working = turnLive(tab);
+  const working = !sub && turnLive(tab);
+  t.editable = !sub && (working ? "busy" : true);
   const limit = finder.open ? Infinity : t.limit ?? TURNS_SHOWN;
-  const key = JSON.stringify([tab.key, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit]);
-  if (threadView.dataset.key === key) return renderComposer(tab);
   const turns = turnsOf(t.items);
-  const changes = changesByTurn(t.history, turns);
-  const opening = turns.find((x) => x.user);
   const first = Math.max(0, turns.length - limit);
+  const shown = turns.slice(first);
+  const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
+  const stick = threadView.dataset.tab !== place || threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
+  const anchor = stick ? null : anchorOf();
+  const spacer = !stick && threadView.querySelector(".lane > .spacer");
+  const scrolled = spacer ? threadView.getBoundingClientRect().top - spacer.getBoundingClientRect().top : null;
+  const win = finder.open ? { lo: 0, hi: shown.length, above: 0, below: 0 } : windowOf(t, shown.map((x) => x.id), anchor, scrolled);
+  const key = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit, win.lo, win.hi]);
+  if (threadView.dataset.key === key) return renderComposer(tab);
+  const changes = sub ? new Map() : changesByTurn(t.history, turns);
+  const opening = turns.find((x) => x.user);
+  const blank = sub ? (t.error ? `This subagent couldn't be read: ${esc(t.error)}` : "Loading…") : t.loaded ? "Send a message to start the conversation." : t.error ? `This thread couldn't be read: ${esc(t.error)}` : "Loading…";
   const body = turns.length
-    ? `${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}${turns.slice(first).map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + i === turns.length - 1, turn === opening)).join("")}`
-    : `<div class="blank"><p>${t.loaded ? "Send a message to start the conversation." : t.error ? `This thread couldn't be read: ${esc(t.error)}` : "Loading…"}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
-  const stick = threadView.dataset.tab !== tab.key || threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
+    ? `${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}<div class="spacer" style="height:${win.above}px"></div>${shown
+        .slice(win.lo, win.hi)
+        .map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + win.lo + i === turns.length - 1, turn === opening, t))
+        .join("")}<div class="spacer" style="height:${win.below}px"></div>`
+    : `<div class="blank"><p>${blank}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
   const liveRows = threadView.querySelector(".work.live .group[open] > .rows");
   const follow = !liveRows || liveRows.scrollHeight - liveRows.scrollTop - liveRows.clientHeight < 24;
-  threadView.innerHTML = `<div class="lane">${body}</div>`;
+  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${body}</div>`;
   threadView.dataset.key = key;
-  threadView.dataset.tab = tab.key;
+  threadView.dataset.tab = place;
   markClippedTables(threadView);
   for (const rows of threadView.querySelectorAll(".group > .rows")) {
     rows.classList.toggle("scrolls", rows.scrollHeight > rows.clientHeight + 1);
     if (follow && rows.closest(".work.live")) rows.scrollTop = rows.scrollHeight;
   }
+  for (const el of threadView.querySelectorAll(".lane > .turn")) t.heights?.set(el.dataset.turnId, el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().top);
+  const kept = anchor && threadView.querySelector(`.lane > .turn[data-turn-id="${CSS.escape(anchor.id)}"]`);
   if (stick) threadView.scrollTop = threadView.scrollHeight;
+  else if (kept) threadView.scrollTop += kept.getBoundingClientRect().top - threadView.getBoundingClientRect().top - anchor.delta;
   if (finder.open) findMatches();
   showScrollEnd();
+  renderMinimap(shown, t);
   renderComposer(tab);
 }
 
@@ -618,11 +677,264 @@ const rerender = () => {
   renderThread();
 };
 
+/** Sending a prompt brings the thread back to its end, as T3 Code anchors the turn the send starts. */
+new MutationObserver(() => {
+  if (composer.dataset.sending !== "true" || !active || subagentShown()) return;
+  threadView.scrollTop = threadView.scrollHeight;
+  rerender();
+}).observe(composer, { attributes: true, attributeFilter: ["data-sending"] });
+
+/** Whether scrolling has brought a spacer within half a screen of the viewport, so more turns must be drawn. */
+function windowStale() {
+  const view = threadView.getBoundingClientRect();
+  const [above, below] = threadView.querySelectorAll(".lane > .spacer");
+  const near = (r) => r.bottom > view.top - view.height / 2 && r.top < view.bottom + view.height / 2;
+  return [above, below].some((el) => el && el.offsetHeight > 0 && near(el.getBoundingClientRect()));
+}
+let windowFrame = 0;
+threadView.addEventListener("scroll", () => {
+  if (windowFrame) return;
+  windowFrame = requestAnimationFrame(() => {
+    windowFrame = 0;
+    if (active && windowStale()) renderThread();
+  });
+}, { passive: true });
+
 setInterval(() => {
   for (const ticker of threadView.querySelectorAll(".ticker")) ticker.textContent = ticking(Date.now() - Number(ticker.dataset.since));
 }, 1000);
 
-const itemById = (id) => threadOf(active).items.find((i) => i.id === id);
+const subagentCrumbHtml = (tab, sub) =>
+  `<button class="sub-back" data-subagent-back title="Back to ${esc(threadTitle(tab))}">${icon("corner-left-up")}</button>${crumbHtml(tab)}<span class="sep">/</span>${icon("bot", "sub-icon")}<span class="title" title="${esc(sub.title)}">${esc(sub.title)}</span>`;
+
+async function openSubagent(tool, title) {
+  const tab = active;
+  subagentView = { tab, tool, title, items: [], loaded: false, error: null, open: new Set(), heights: new Map() };
+  rerender();
+  await loadSubagent();
+}
+
+async function loadSubagent() {
+  const sub = subagentShown();
+  if (!sub || sub.fetching) return;
+  sub.fetching = true;
+  try {
+    const items = await callOn(sub.tab.machine, { cmd: "subagent", tab: sub.tab.view.id, tool: sub.tool });
+    Object.assign(sub, { error: null, loaded: true });
+    if (items.length !== sub.items.length) sub.items = items;
+  } catch (e) {
+    sub.error = String(e);
+  } finally {
+    sub.fetching = false;
+  }
+  if (sub === subagentShown()) renderThread();
+}
+
+function closeSubagent() {
+  subagentView = null;
+  rerender();
+}
+document.querySelector("#chat-head .crumb").addEventListener("click", (e) => e.target.closest("[data-subagent-back]") && closeSubagent());
+setInterval(() => guiOn() && !document.hidden && subagentShown() && loadSubagent(), POLL_MS);
+
+/** T3 Code's minimap: a strip on the lane's left with a tick per prompt, which previews the prompt and
+ * its answer on hover and scrolls to it on click. Only with a fine pointer and two prompts or more. */
+const minimap = Object.assign(document.createElement("div"), { id: "minimap", hidden: true });
+minimap.innerHTML = `<div class="strip"><button type="button" class="nav prev" title="Previous turn" aria-label="Previous turn">${icon("chevron-up")}</button>
+  <button type="button" class="rail" aria-label="Jump to message"><span class="line"></span><span class="ticks"></span><span class="preview" data-minimap-preview hidden><b></b><span></span></span></button>
+  <button type="button" class="nav next" title="Next turn" aria-label="Next turn">${icon("chevron-down")}</button></div>`;
+threadView.after(minimap);
+const mini = { items: [], heights: [], hovered: null, current: null };
+
+function renderMinimap(shown, t) {
+  const turns = shown.filter((x) => x.user);
+  mini.items = turns.map((x) => ({ id: x.id, user: x.user.text.split("\n")[0] || "User message", answer: (x.answer?.text ?? "").replace(/\s+/g, " ").slice(0, 400) }));
+  mini.offsets = new Map();
+  let y = 0;
+  for (const x of shown) {
+    mini.offsets.set(x.id, y);
+    y += t.heights?.get(x.id) ?? TURN_ESTIMATE;
+  }
+  minimap.hidden = mini.items.length < 2 || !!finder.open;
+  if (minimap.hidden) return;
+  const ticks = minimap.querySelector(".ticks");
+  ticks.innerHTML = mini.items.map((item, i) => `<span class="tick" data-i="${i}" style="top:${mini.items.length > 1 ? (i / (mini.items.length - 1)) * 100 : 0}%"></span>`).join("");
+  layoutMinimap();
+}
+
+/** The lane's free side: the minimap stays shown when it is 48px or more, and its hit strip is that wide less 12px, up to 40px. */
+function layoutMinimap() {
+  if (minimap.hidden) return;
+  const lane = threadView.querySelector(".lane");
+  const gutter = lane ? lane.getBoundingClientRect().left - threadView.getBoundingClientRect().left : 0;
+  minimap.toggleAttribute("data-persistent", gutter >= 48);
+  const strip = minimap.querySelector(".strip");
+  strip.style.height = `min(${Math.max(1, (mini.items.length - 1) * 8)}px, calc(100vh - 18rem))`;
+  strip.style.width = mini.hovered !== null ? "22rem" : `${Math.max(0, Math.min(40, Math.floor(gutter) - 12))}px`;
+  markMinimapInView();
+}
+
+function markMinimapInView() {
+  if (minimap.hidden) return;
+  const view = threadView.getBoundingClientRect();
+  const seen = new Set([...threadView.querySelectorAll(".lane > .turn")].filter((el) => {
+    const r = el.getBoundingClientRect();
+    return r.bottom > view.top && r.top < view.bottom;
+  }).map((el) => el.dataset.turnId));
+  const first = mini.items.findIndex((item) => seen.has(item.id));
+  const top = threadView.scrollTop;
+  mini.current = first >= 0 ? first : Math.max(0, mini.items.findLastIndex((item) => (mini.offsets.get(item.id) ?? 0) <= top));
+  for (const tick of minimap.querySelectorAll(".tick")) tick.toggleAttribute("data-in-view", seen.has(mini.items[tick.dataset.i]?.id));
+  minimap.querySelector(".prev").disabled = mini.current <= 0;
+  minimap.querySelector(".next").disabled = mini.current >= mini.items.length - 1;
+}
+
+function hoverMinimap(index) {
+  mini.hovered = index;
+  for (const tick of minimap.querySelectorAll(".tick")) {
+    const d = index === null ? null : Math.abs(Number(tick.dataset.i) - index);
+    tick.dataset.distance = d === null ? "" : String(Math.min(d, 3));
+  }
+  const preview = minimap.querySelector(".preview");
+  const item = index === null ? null : mini.items[index];
+  preview.hidden = !item;
+  if (item) {
+    preview.querySelector("b").textContent = item.user;
+    preview.querySelector("span").textContent = item.answer;
+    preview.querySelector("span").hidden = !item.answer;
+    preview.style.top = `${mini.items.length > 1 ? (index / (mini.items.length - 1)) * 100 : 0}%`;
+    preview.style.transform = `translateY(${index === 0 ? "0%" : index === mini.items.length - 1 ? "-100%" : "-50%"})`;
+  }
+  layoutMinimap();
+}
+
+/** Scrolls so the prompt's turn starts 24px below the top, drawing the turns around it first. */
+function scrollToTurn(id) {
+  const spacer = threadView.querySelector(".lane > .spacer");
+  if (!spacer) return;
+  const top = () => threadView.getBoundingClientRect().top;
+  threadView.scrollTop += spacer.getBoundingClientRect().top - top() + (mini.offsets.get(id) ?? 0) - 24;
+  renderThread();
+  const el = threadView.querySelector(`.lane > .turn[data-turn-id="${CSS.escape(id)}"]`);
+  if (el) threadView.scrollTop += el.getBoundingClientRect().top - top() - 24;
+  markMinimapInView();
+}
+
+const rail = minimap.querySelector(".rail");
+const indexAt = (y) => {
+  const r = rail.getBoundingClientRect();
+  if (mini.items.length < 2 || r.height <= 0) return 0;
+  return Math.max(0, Math.min(mini.items.length - 1, Math.round(((y - r.top) / r.height) * (mini.items.length - 1))));
+};
+rail.addEventListener("mousemove", (e) => !e.target.closest("[data-minimap-preview]") && hoverMinimap(indexAt(e.clientY)));
+rail.addEventListener("mouseleave", () => hoverMinimap(null));
+rail.addEventListener("blur", () => hoverMinimap(null));
+rail.addEventListener("mousedown", (e) => !e.target.closest("[data-minimap-preview]") && e.preventDefault());
+rail.addEventListener("click", (e) => {
+  if (e.target.closest("[data-minimap-preview]")) return;
+  const item = mini.items[indexAt(e.clientY)];
+  if (item) scrollToTurn(item.id);
+  rail.blur();
+});
+rail.addEventListener("keydown", (e) => {
+  const at = mini.hovered ?? mini.current ?? 0;
+  const next = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: mini.items.length - 1 }[e.key];
+  if (next !== undefined) hoverMinimap(Math.max(0, Math.min(mini.items.length - 1, next)));
+  else if ((e.key === "Enter" || e.key === " ") && mini.items[at]) scrollToTurn(mini.items[at].id);
+  else return;
+  e.preventDefault();
+});
+minimap.querySelector(".prev").onclick = () => mini.items[mini.current - 1] && scrollToTurn(mini.items[mini.current - 1].id);
+minimap.querySelector(".next").onclick = () => mini.items[mini.current + 1] && scrollToTurn(mini.items[mini.current + 1].id);
+minimap.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  threadView.scrollTop += e.deltaY;
+}, { passive: false });
+threadView.addEventListener("scroll", markMinimapInView, { passive: true });
+new ResizeObserver(layoutMinimap).observe(threadView);
+
+/** T3 Code's alert dialog: a title, a description, an optional field, and buttons; resolves to the
+ * chosen button's value and the field's text, or null when dismissed. */
+function askDialog({ title, about, field, buttons }) {
+  const dialog = document.createElement("dialog");
+  dialog.className = "tl-dialog";
+  dialog.innerHTML = `<form method="dialog"><h2>${esc(title)}</h2><p class="about">${about}</p>
+    ${field ? `<label class="field"><span>${esc(field.label)}</span><input name="field" value="${esc(field.value ?? "")}" placeholder="${esc(field.placeholder ?? "")}" spellcheck="false" autocomplete="off"></label>` : ""}
+    <div class="actions">${buttons.map((b) => `<button value="${esc(b.value)}" class="${b.kind ?? "outline"}"${b.value ? "" : " formnovalidate"}>${esc(b.label)}</button>`).join("")}</div></form>`;
+  document.body.append(dialog);
+  dialog.showModal();
+  dialog.querySelector("input")?.select();
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => {
+      resolve(dialog.returnValue ? { value: dialog.returnValue, field: dialog.querySelector("input")?.value ?? "" } : null);
+      dialog.remove();
+    });
+  });
+}
+
+/** T3 Code's "Edit from here": claude goes back to before this prompt, the prompt returns to the composer,
+ * and with "Revert files too" the folder's files go back to how they were then. */
+async function editFromHere(id) {
+  const tab = active;
+  const user = threadOf(tab).items.find((i) => i.id === id);
+  if (!user || turnLive(tab) || waitsOnMenu(tab)) return;
+  const answer = await askDialog({
+    title: "Edit from here?",
+    about: "Rewind chat to before this message. Your prompt returns to the composer. “Revert files too” also undoes the changes made since, your own included.",
+    buttons: [{ value: "", label: "Cancel" }, { value: "files", label: "Revert files too", kind: "danger-outline" }, { value: "chat", label: "Revert and keep changes", kind: "primary" }],
+  });
+  if (!answer) return;
+  try {
+    await callOn(tab.machine, { cmd: "rewind", tab: tab.view.id, before: id, files: answer.value === "files", cols: tab.term.cols, rows: tab.term.rows });
+  } catch (e) {
+    return showComposerNote(String(e), true);
+  }
+  await refreshTabs(tab.machine);
+  prompt.value = user.text;
+  prompt.dispatchEvent(new Event("input", { bubbles: true }));
+  prompt.focus();
+}
+
+/** T3 Code's "Fork from this response": a new thread beside this one whose claude carries on from here. */
+async function forkFrom(id) {
+  const tab = active;
+  const line = id.replace(/:\d+$/, "");
+  try {
+    const created = await callOn(tab.machine, { cmd: "fork", tab: tab.view.id, through: line });
+    await refreshTabs(tab.machine);
+    const fork = tabByKey(keyOf(tab.machine, created));
+    if (!fork) return;
+    activate(fork);
+    await startTab(fork);
+  } catch (e) {
+    showComposerNote(String(e), true);
+  }
+}
+
+/** T3 Code's "Save to workspace": the plan goes to a file in the thread's folder. */
+async function savePlan(text) {
+  const tab = active;
+  let path = threadOf(tab).planPath || planFile(text);
+  for (;;) {
+    const answer = await askDialog({
+      title: "Save plan to workspace",
+      about: `Enter a path relative to <code>${esc(tilde(tab.view.cwd))}</code>.`,
+      field: { label: "Workspace path", value: path, placeholder: planFile(text) },
+      buttons: [{ value: "", label: "Cancel" }, { value: "save", label: "Save", kind: "primary" }],
+    });
+    if (!answer) return;
+    path = answer.field.trim();
+    threadOf(tab).planPath = path;
+    try {
+      const saved = await callOn(tab.machine, { cmd: "save_file", tab: tab.view.id, path, text: text.trimEnd() + "\n" });
+      return showComposerNote(`Plan saved to workspace: ${saved}`);
+    } catch (e) {
+      showComposerNote(`Could not save plan: ${e}`, true);
+    }
+  }
+}
+
+const itemById = (id) => shownThread().items.find((i) => i.id === id);
 
 /** A pull request link someone wrote in the thread, shaped like the session's own `pr` items. */
 function prOfUrl(url) {
@@ -716,7 +1028,7 @@ threadView.addEventListener("click", (e) => {
   if (e.target.closest("[data-new-thread]")) return toggleProjects();
   if (e.target.closest("[data-mode-terminal]")) return setMode("terminal");
   if (!active) return;
-  const t = threadOf(active);
+  const t = shownThread();
   const toggle = e.target.closest("[data-toggle]");
   if (toggle) {
     const key = toggle.dataset.toggle;
@@ -724,12 +1036,18 @@ threadView.addEventListener("click", (e) => {
     return rerender();
   }
   if (e.target.closest("[data-earlier]")) {
-    const height = threadView.scrollHeight;
     t.limit = (t.limit ?? TURNS_SHOWN) + TURNS_SHOWN;
-    rerender();
-    threadView.scrollTop += threadView.scrollHeight - height;
-    return;
+    return rerender();
   }
+  const subagent = e.target.closest("[data-subagent]");
+  if (subagent) {
+    e.preventDefault();
+    return openSubagent(subagent.dataset.subagent, subagent.dataset.title);
+  }
+  const rewind = e.target.closest("[data-rewind]");
+  if (rewind) return editFromHere(rewind.dataset.rewind);
+  const fork = e.target.closest("[data-fork]");
+  if (fork) return forkFrom(fork.dataset.fork);
   const live = e.target.closest("[data-open-turn]");
   if (live) {
     t.open.add(live.dataset.openTurn);
@@ -765,6 +1083,7 @@ threadView.addEventListener("click", (e) => {
     const text = planText({ ...itemById(plan.dataset.plan), result });
     if (e.target.closest("[data-plan-copy]")) copied(e.target.closest("[data-plan-copy]"), text);
     if (e.target.closest("[data-plan-download]")) downloadText(planFile(text), text);
+    if (e.target.closest("[data-plan-save]")) savePlan(text);
     menu.hidden = true;
   }
   const diff = e.target.closest(".open-diff, .changes li[data-file]");
@@ -788,7 +1107,7 @@ threadView.addEventListener("click", (e) => {
 threadView.addEventListener("toggle", (e) => {
   const fold = e.target.dataset?.turn ?? e.target.dataset?.fold;
   if (!fold || !active) return;
-  const open = threadOf(active).open;
+  const open = shownThread().open;
   if ("auto" in e.target.dataset) {
     if (e.target.open) open.delete(`shut:${fold}`);
     else open.add(`shut:${fold}`);
@@ -844,6 +1163,12 @@ scrollEnd.addEventListener("pointerdown", (e) => e.preventDefault());
 scrollEnd.onclick = () => {
   threadView.scrollTo({ top: threadView.scrollHeight, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   scrollEnd.hidden = true;
+  // Turns drawn on the way replace estimated heights, so the end may have moved by the time the scroll stops.
+  setTimeout(() => {
+    if (threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40) return;
+    threadView.scrollTop = threadView.scrollHeight;
+    rerender();
+  }, 450);
 };
 
 /** ⌘F: find in the thread. Matches are painted with the CSS highlight API, so the markdown and copied
@@ -888,7 +1213,7 @@ function goToMatch(step) {
   const n = finder.ranges.length;
   if (!n) return;
   finder.index = (((finder.index + step) % n) + n) % n;
-  const t = threadOf(active);
+  const t = shownThread();
   const node = finder.ranges[finder.index].startContainer.parentElement;
   let reopen = false;
   for (let el = node.closest("details:not([open])"); el; el = el.parentElement?.closest("details:not([open])")) {
