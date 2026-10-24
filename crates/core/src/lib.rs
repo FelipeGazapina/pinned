@@ -16,6 +16,7 @@ pub mod plugin;
 pub mod projects;
 pub mod pty;
 pub mod reminders;
+pub mod scripts;
 pub mod sessions;
 pub mod slack;
 pub mod sync;

@@ -3,6 +3,8 @@
 
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
+use crate::branches::GitStep;
+use crate::scripts::Script;
 use crate::workspace::{DiffScope, PrAction};
 use crate::{sync, thread};
 use base64::Engine;
@@ -87,6 +89,9 @@ pub enum Call {
     /// The folder claude runs in. Restarts claude with `bypass` turned `on` or off, resuming the
     /// tab's conversation; a session already running that way is left alone.
     SetBypass { tab: TabId, on: bool, cols: u16, rows: u16 },
+    /// The folder claude runs in. Restarts claude on the tab's conversation with `--model model`,
+    /// which picks it for that conversation alone.
+    SetModel { tab: TabId, model: String, cols: u16, rows: u16 },
     /// `null`. Keystrokes as xterm reports them.
     WriteInput { tab: TabId, data: String },
     /// `null`.
@@ -130,6 +135,8 @@ pub enum Call {
     Workspace { tab: TabId },
     /// What `gh pr view` answers for `pr`, a number or URL, run in the tab's folder, plus `diff`.
     PullRequest { tab: TabId, pr: String },
+    /// What `gh pr list` answers in the tab's folder: number, title, state, isDraft, url, headRefName.
+    PullRequests { tab: TabId },
     /// `null`. Merges `pr`, or marks it ready, through gh in the tab's folder.
     PrAction { tab: TabId, pr: String, action: PrAction },
     /// `workspace::Diff`: the tab's working tree against HEAD or the default branch.
@@ -162,6 +169,28 @@ pub enum Call {
         branch: String,
         #[serde(default)]
         create: bool,
+        /// Makes or resets `branch` at this ref instead, fetched first when it is `origin/…`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+    },
+    /// What a step of the header's Git action answers: a commit message, a pull request URL, or
+    /// `null`. Refused while claude works in the tab's folder.
+    Git { tab: TabId, step: GitStep },
+    /// `scripts::ProjectScripts` of the tab's project.
+    ProjectScripts { tab: TabId },
+    /// `null`. Replaces the scripts of the tab's project.
+    SaveProjectScripts { tab: TabId, scripts: Vec<Script> },
+    /// `null`. Checks out the pull request `pr`, a number or URL, in the tab's folder with gh. Refused while claude works there.
+    CheckoutPr { tab: TabId, pr: String },
+    /// The tab's new folder. Moves a tab whose conversation hasn't begun to a worktree of its
+    /// project, `"new"` for one made from what it has checked out, or a path, or back to the
+    /// project's own checkout with `null`, and restarts claude there. Refused while claude works.
+    SetWorkspace {
+        tab: TabId,
+        #[serde(default)]
+        worktree: Option<String>,
+        cols: u16,
+        rows: u16,
     },
 }
 
@@ -173,6 +202,7 @@ impl Call {
             self,
             Call::Run { .. }
                 | Call::PullRequest { .. }
+                | Call::PullRequests { .. }
                 | Call::PrAction { .. }
                 | Call::Thread { .. }
                 | Call::Workspace { .. }
@@ -185,6 +215,9 @@ impl Call {
                 | Call::Files { .. }
                 | Call::Branches { .. }
                 | Call::Checkout { .. }
+                | Call::CheckoutPr { .. }
+                | Call::Git { .. }
+                | Call::SetWorkspace { .. }
         )
     }
 }
@@ -197,6 +230,8 @@ pub struct ThreadPage {
     pub items: Vec<thread::Item>,
     pub next: u64,
     pub reset: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<thread::Context>,
 }
 
 /// A connector's session, the same on any machine.

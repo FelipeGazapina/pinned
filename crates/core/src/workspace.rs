@@ -45,6 +45,20 @@ pub fn pull_request(cwd: &Path, pr: &str, path: Option<&str>) -> Result<Value, S
     Ok(view)
 }
 
+/// Checks out the pull request `pr`, a number or URL, in `cwd` with gh.
+pub fn checkout_pr(cwd: &Path, pr: &str, path: Option<&str>) -> Result<(), String> {
+    check_pr(pr)?;
+    gh(cwd, path, &["pr", "checkout", "--", pr]).map(|_| ())
+}
+
+/// The repository's pull requests, open ones first and then the newest, for the composer's `#` menu.
+pub fn pull_requests(cwd: &Path, path: Option<&str>) -> Result<Value, String> {
+    let list = gh(cwd, path, &["pr", "list", "--state", "all", "--limit", "50", "--json", "number,title,state,isDraft,url,headRefName"])?;
+    let mut list: Vec<Value> = serde_json::from_str(&list).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+    list.sort_by_key(|pr| (pr["state"] != "OPEN", std::cmp::Reverse(pr["number"].as_u64())));
+    Ok(Value::Array(list))
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PrAction {
@@ -388,6 +402,21 @@ mod tests {
         assert_eq!((main.repo, main.branch.as_deref(), main.worktree), (true, Some("main"), false));
         let wt = of(&tree);
         assert_eq!((wt.branch.as_deref(), wt.worktree, wt.project), (Some("fix-it"), true, repo.display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pull_requests_list_open_ones_first_then_the_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        let list = r#"[{"number":3,"state":"MERGED"},{"number":5,"state":"CLOSED"},{"number":2,"state":"OPEN"},{"number":4,"state":"OPEN"}]"#;
+        std::fs::write(&gh, format!("#!/bin/sh\necho \"$@\" > args\necho '{list}'\n")).unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path = format!("{}:/usr/bin:/bin", dir.path().display());
+        let prs = pull_requests(dir.path(), Some(&path)).unwrap();
+        let order: Vec<u64> = prs.as_array().unwrap().iter().map(|p| p["number"].as_u64().unwrap()).collect();
+        assert_eq!(order, [4, 2, 5, 3]);
+        assert_eq!(std::fs::read_to_string(dir.path().join("args")).unwrap().trim(), "pr list --state all --limit 50 --json number,title,state,isDraft,url,headRefName");
     }
 
     #[test]

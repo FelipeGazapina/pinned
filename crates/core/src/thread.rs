@@ -47,6 +47,14 @@ pub struct Page {
     pub next: u64,
     /// The transcript was replaced, so these items start it over rather than follow the last read.
     pub reset: bool,
+    /// How full the context window was after the last answer in these lines.
+    pub context: Option<Context>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Context {
+    pub tokens: u64,
+    pub at: String,
 }
 
 pub fn projects_dir(home: &Path) -> PathBuf {
@@ -71,7 +79,9 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
     let mut bytes = vec![];
     (&mut f).take(READ_LIMIT).read_to_end(&mut bytes)?;
     let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-    let mut items: Vec<Item> = bytes[..whole].split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice::<Value>(line).ok()).flat_map(|v| items_of(&v)).collect();
+    let lines: Vec<Value> = bytes[..whole].split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice(line).ok()).collect();
+    let mut items: Vec<Item> = lines.iter().flat_map(items_of).collect();
+    let context = lines.iter().rev().find_map(context_of);
     let mut next = from + whole as u64;
     if whole == 0 && bytes.len() as u64 == READ_LIMIT {
         if let Some(rest) = rest_of_line(&mut f)? {
@@ -79,7 +89,21 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
             items.push(Item::Note { id: format!("skipped:{from}"), at: String::new(), text: "An entry too large to show was left out.".into() });
         }
     }
-    Ok(Page { items, next, reset: replaced })
+    Ok(Page { items, next, reset: replaced, context })
+}
+
+/// What an answer's usage says the next request starts from: the prompt it read, cached or not, and what it wrote.
+fn context_of(line: &Value) -> Option<Context> {
+    let at = line["timestamp"].as_str().unwrap_or_default().to_owned();
+    if line["isCompactSummary"].as_bool() == Some(true) {
+        return Some(Context { tokens: 0, at });
+    }
+    let usage = &line["message"]["usage"];
+    if line["type"] != "assistant" || line["isSidechain"].as_bool() == Some(true) || !usage.is_object() {
+        return None;
+    }
+    let tokens = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"].iter().filter_map(|k| usage[k].as_u64()).sum();
+    Some(Context { tokens, at })
 }
 
 /// How many more bytes the current line runs through its newline, or none while it is still being written.
@@ -301,6 +325,23 @@ mod tests {
     }
 
     #[test]
+    fn the_context_is_the_last_answers_prompt_and_output() {
+        let read = page(&[
+            r#"{"type":"assistant","uuid":"a1","timestamp":"t1","message":{"content":[],"usage":{"input_tokens":5,"cache_read_input_tokens":100,"output_tokens":7}}}"#,
+            r#"{"type":"assistant","uuid":"a2","timestamp":"t2","message":{"content":[],"usage":{"input_tokens":3,"cache_creation_input_tokens":40,"cache_read_input_tokens":1200,"output_tokens":9}}}"#,
+            r#"{"type":"assistant","uuid":"s","isSidechain":true,"timestamp":"t3","message":{"content":[],"usage":{"input_tokens":99999}}}"#,
+            r#"{"type":"user","uuid":"u","timestamp":"t4","message":{"content":"next"}}"#,
+        ]);
+        assert_eq!(read.context, Some(Context { tokens: 1252, at: "t2".into() }));
+        assert_eq!(page(&[r#"{"type":"user","uuid":"u","message":{"content":"hi"}}"#]).context, None);
+        let compacted = page(&[
+            r#"{"type":"assistant","uuid":"a1","timestamp":"t1","message":{"content":[],"usage":{"input_tokens":500000}}}"#,
+            r#"{"type":"user","uuid":"c","timestamp":"t2","isCompactSummary":true,"message":{"content":"This session is being continued."}}"#,
+        ]);
+        assert_eq!(compacted.context, Some(Context { tokens: 0, at: "t2".into() }), "a compaction empties the window");
+    }
+
+    #[test]
     fn a_turn_reads_as_prompt_tool_result_and_answer() {
         let items = page(&[
             r#"{"type":"user","uuid":"u1","timestamp":"2026-10-23T10:00:00Z","message":{"role":"user","content":"fix the bug"}}"#,
@@ -436,7 +477,7 @@ mod tests {
 
         let mut growing = tempfile::NamedTempFile::new().unwrap();
         write!(growing, "{}", &huge[..huge.len() - 2]).unwrap();
-        assert_eq!(read(growing.path(), 0).unwrap(), Page { items: vec![], next: 0, reset: false }, "a line still being written waits");
+        assert_eq!(read(growing.path(), 0).unwrap(), Page { items: vec![], next: 0, reset: false, context: None }, "a line still being written waits");
     }
 
     #[test]
