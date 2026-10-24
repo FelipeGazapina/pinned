@@ -314,7 +314,8 @@ fn main() {
             browser::browser_snapshot,
             browser::browser_window,
             browser::save_capture,
-            browser::reveal_file
+            browser::reveal_file,
+            browser::browser_debug_key
         ])
         .setup(move |app| {
             let config = app.path().app_config_dir().ok();

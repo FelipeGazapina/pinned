@@ -135,7 +135,12 @@
     await act({ do: "reload" });
     await until(async () => !page().loading && (await run("document.readyState")) === "complete");
     const cookies = await run("document.cookie");
-    await act({ do: "mute", on: true });
+    toggleMute(page());
+    await sleep(300);
+    const muted = document.querySelector('#panel-tabs .ptab.active .audio')?.title === "Unmute tab";
+    toggleMute(page());
+    await act({ do: "hard-reload" });
+    await act({ do: "clear-cache" });
     await invoke("browser_window", { url: `${base}/frame` });
     await sleep(1500);
     const windows = (await TAURI.webviewWindow.getAllWebviewWindows()).map((w) => w.label);
@@ -148,7 +153,21 @@
     togglePip(page());
     await sleep(500);
     const returned = placedPage === page().id && !!document.querySelector("#panel .viewport .page");
-    return [dark && light && cookies === "" && windows.some((l) => l.startsWith("preview-window-")) && floating && returned, { dark, light, cookies, windows, floating, returned }];
+    return [dark && light && cookies === "" && muted && windows.some((l) => l.startsWith("preview-window-")) && floating && returned, { dark, light, cookies, muted, windows, floating, returned }];
+  });
+
+  await step("⌘L, ⌘= and the app's own shortcuts work while the page has focus", async () => {
+    const s = page();
+    await invoke("browser_debug_key", { id: s.id, key: "l" });
+    const focused = await until(() => !!document.activeElement?.matches?.(".url-bar input"), 3000);
+    await invoke("browser_debug_key", { id: s.id, key: "=" });
+    const zoomed = await until(() => s.zoom === 1.1, 3000);
+    zoomBrowser(s, 0);
+    const sidebar = document.body.dataset.sidebar;
+    await invoke("browser_debug_key", { id: s.id, key: "b" });
+    const toggled = await until(() => document.body.dataset.sidebar !== sidebar, 3000);
+    if (toggled) toggleSidebar();
+    return [focused && zoomed && toggled, { focused, zoomed, toggled }];
   });
 
   await step("an annotation picks an element into the prompt with its picture", async () => {

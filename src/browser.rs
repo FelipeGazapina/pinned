@@ -274,9 +274,21 @@ pub fn save_capture(app: AppHandle, name: String, bytes: Vec<u8>) -> Result<Stri
 pub fn reveal_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let opened = std::process::Command::new("open").arg("-R").arg(&path).spawn();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     let opened = std::process::Command::new("explorer").arg(format!("/select,{path}")).spawn();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let opened = std::process::Command::new("xdg-open").arg(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/"))).spawn();
     opened.map(drop).map_err(|e| e.to_string())
+}
+
+/// Debug builds: presses ⌘`key` in the page the way the window server delivers a key, so the
+/// native probe can check the chords the page hands to the panel.
+#[tauri::command]
+pub fn browser_debug_key(app: AppHandle, id: String, key: String) -> Result<(), String> {
+    if !cfg!(debug_assertions) {
+        return Err("only debug builds type into pages".into());
+    }
+    page(&app, &id)?.with_webview(move |pw| native::debug_key(&pw, &key)).map_err(|e| e.to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -286,7 +298,7 @@ mod native {
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2::{msg_send, sel, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSStatusWindowLevel, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBitmapImageFileType, NSBitmapImageRep, NSEvent, NSEventMask, NSEventModifierFlags, NSImage, NSView};
+    use objc2_app_kit::{NSApplication, NSEventType, NSStatusWindowLevel, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBitmapImageFileType, NSBitmapImageRep, NSEvent, NSEventMask, NSEventModifierFlags, NSImage, NSView};
     use objc2_foundation::{NSDate, NSDictionary, NSError, NSObjectProtocol, NSSet, NSString};
     use objc2_web_kit::{WKWebView, WKWebsiteDataTypeCookies, WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeFetchCache, WKWebsiteDataTypeMemoryCache};
     use std::ptr::NonNull;
@@ -425,6 +437,36 @@ mod native {
         false
     }
 
+    pub fn debug_key(pw: &PlatformWebview, key: &str) {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let web = view(pw);
+        let Some(window) = web.window() else { return };
+        window.makeFirstResponder(Some(web));
+        let code = match key {
+            "r" => 15,
+            "l" => 37,
+            "=" => 24,
+            "b" => 11,
+            _ => 0,
+        };
+        let chars = NSString::from_str(key);
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            NSEventType::KeyDown,
+            objc2_foundation::NSPoint::new(0.0, 0.0),
+            NSEventModifierFlags::Command,
+            0.0,
+            window.windowNumber(),
+            None,
+            &chars,
+            &chars,
+            false,
+            code,
+        );
+        if let Some(event) = event {
+            NSApplication::sharedApplication(mtm).postEvent_atStart(&event, false);
+        }
+    }
+
     /// The page webviews, by address, so a key chord in one can be told from one in the panel.
     static PAGES: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
@@ -453,6 +495,7 @@ mod native {
         let _ = tx.send(Err("screenshots need macOS".into()));
     }
     pub fn watch_keys(_: &AppHandle) {}
+    pub fn debug_key(_: &PlatformWebview, _: &str) {}
     pub fn detach_inspector(_: &PlatformWebview) {}
     pub fn raise_inspectors() {}
 }
