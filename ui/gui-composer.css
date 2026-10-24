@@ -12,7 +12,7 @@
 
 #attachments { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 16px 0; }
 #attachments .attachment { display: flex; align-items: center; gap: 6px; max-width: 220px; height: 40px; padding: 0 4px 0 4px; border-radius: 10px;
-  background: rgb(255 255 255 / 0.04); border: 1px solid var(--g-border); font-size: 12px; color: var(--g-text); }
+  background: var(--g-accent); border: 1px solid var(--g-border); font-size: 12px; color: var(--g-text); }
 #attachments img { width: 32px; height: 32px; border-radius: 7px; object-fit: cover; flex: none; }
 #attachments .attachment > .i { width: 16px; height: 16px; margin: 0 4px; color: var(--g-muted); }
 #attachments .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -21,7 +21,7 @@
 #attachments .remove .i { width: 12px; height: 12px; }
 
 #stash { display: flex; align-items: center; gap: 6px; width: max-content; margin: 0 max(22px, calc((100% - var(--lane)) / 2 + 22px)) -17px auto;
-  padding: 6px 10px 23px; border-radius: 14px 14px 0 0; border: 1px solid rgb(255 255 255 / 0.07); background: rgb(17 17 17 / 0.8);
+  padding: 6px 10px 23px; border-radius: 14px 14px 0 0; border: 1px solid rgb(var(--g-ink-rgb) / 0.07); background: rgb(var(--g-raised-rgb) / 0.8);
   backdrop-filter: blur(12px); font-size: 12px; color: var(--g-muted); }
 #stash:hover, #stash.pulse { color: var(--g-fg); }
 #stash .i { width: 12px; height: 12px; }
@@ -64,8 +64,8 @@
 #approval .choices { flex-direction: column; flex-wrap: nowrap; gap: 4px; }
 #approval .choices .choice { display: flex; flex-direction: column; align-items: flex-start; position: relative; width: 100%; padding: 8px 40px 8px 10px;
   border-radius: 8px; text-align: left; }
-#approval .choices .choice:hover { background: rgb(255 255 255 / 0.04); }
-#approval .choices .choice[data-chosen] { background: rgb(255 255 255 / 0.07); }
+#approval .choices .choice:hover { background: var(--g-accent); }
+#approval .choices .choice[data-chosen] { background: rgb(var(--g-ink-rgb) / 0.07); }
 #approval .choices .label { font-size: 13px; font-weight: 500; }
 #approval .choices .about { font-size: 11px; color: var(--g-muted); }
 #approval .choices .choice[data-key]::after { content: attr(data-key); position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
@@ -75,7 +75,7 @@
 
 #git-action { position: relative; display: flex; }
 #git-action[hidden] { display: none; }
-#git-action > button { display: flex; align-items: center; gap: 4px; height: 24px; border: 1px solid var(--g-input); background: rgb(255 255 255 / 0.03);
+#git-action > button { display: flex; align-items: center; gap: 4px; height: 24px; border: 1px solid var(--g-input); background: rgb(var(--g-ink-rgb) / 0.03);
   color: var(--g-fg); font-size: 12px; }
 #git-action > button:hover:not(:disabled) { background: var(--g-input); }
 #git-action > button:disabled { color: var(--g-muted); cursor: default; }
@@ -84,7 +84,7 @@
 #git-action .i { width: 14px; height: 14px; }
 #git-action .more .i { width: 12px; height: 12px; opacity: 0.7; }
 #git-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 40; min-width: 180px; padding: 4px; border-radius: 12px;
-  background: rgb(17 17 17 / 0.92); backdrop-filter: blur(16px); border: 1px solid var(--g-border); box-shadow: 0 12px 28px -12px #000; }
+  background: rgb(var(--g-raised-rgb) / 0.92); backdrop-filter: blur(16px); border: 1px solid var(--g-border); box-shadow: 0 12px 28px -12px var(--g-shadow); }
 #git-menu[hidden] { display: none; }
 #git-menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border-radius: 8px; text-align: left; }
 #git-menu button:hover { background: var(--g-hover); }
@@ -97,8 +97,8 @@ body[data-mode="gui"][data-drawer="open"] #drawer-resize { display: block; posit
 body.resizing-rows { cursor: row-resize; user-select: none; }
 #drawer-resize { display: none; }
 
-.thread-row.draft:not(.active) { background: rgb(254 154 0 / 0.04); }
-.thread-row.draft:not(.active):hover { background: rgb(254 154 0 / 0.08); }
+.thread-row.draft:not(.active) { background: rgb(var(--g-warning-rgb) / 0.04); }
+.thread-row.draft:not(.active):hover { background: rgb(var(--g-warning-rgb) / 0.08); }
 .thread-row .draft-pen { display: inline-flex; vertical-align: -1px; margin-right: 5px; color: var(--g-warning-fg); }
 .thread-row .draft-pen .i { width: 12px; height: 12px; }
 

@@ -99,7 +99,7 @@ async function sweep(profileName) {
   const shots = path.join(DIR, "shots", profileName);
   fs.mkdirSync(shots, { recursive: true });
   const browser = await playwright[engine].launch({ headless: true });
-  const context = await browser.newContext({ ...profile, permissions: engine === "chromium" ? ["clipboard-read", "clipboard-write"] : [] });
+  const context = await browser.newContext({ ...profile, colorScheme: "dark", permissions: engine === "chromium" ? ["clipboard-read", "clipboard-write"] : [] });
   if (touch) await context.addInitScript(stubVisualViewport);
   await context.addInitScript(() => localStorage.getItem("mode") || localStorage.setItem("mode", "terminal"));
   const page = await context.newPage();
@@ -978,6 +978,12 @@ async function sweep(profileName) {
       await page.setViewportSize(profile.viewport);
       check(gutters.join("|") === "48px|12px", `gutters at 700 and 600px: ${gutters.join(" | ")}`);
     }
+  });
+
+
+  await step("theme: no literal colors left in the app view's css, by scripts/theme-tokens.mjs --check", async () => {
+    const run = require("child_process").spawnSync(process.execPath, [path.join(__dirname, "../theme-tokens.mjs"), "--check"], { encoding: "utf8" });
+    check(run.status === 0, (run.stdout + run.stderr).trim().split("\n").slice(0, 3).join("; "));
   });
 
   await step("app view: changed files and mentions carry T3 Code's file-type icons", async () => {
