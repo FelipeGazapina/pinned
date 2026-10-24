@@ -159,7 +159,11 @@ function renderGui() {
   for (const tab of tabs) {
     const finished = statusBeforeRender.get(tab.key) === "working" && statusOf(tab) !== "working";
     statusBeforeRender.set(tab.key, statusOf(tab));
-    if (finished) Object.assign(threadOf(tab), { history: null, workspaceFor: null });
+    // The turn's last lines are in the transcript by now; read them before its changes, which attach to the newest turn.
+    if (finished) {
+      Object.assign(threadOf(tab), { history: null, workspaceFor: null });
+      fetchThread(tab);
+    }
   }
   for (const key of statusBeforeRender.keys()) if (!tabByKey(key)) statusBeforeRender.delete(key);
   if (!guiOn()) return;
