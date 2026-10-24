@@ -7,6 +7,13 @@ Object.assign(ICON_PATHS, {
   "chevron-up": `<path d="m18 15-6-6-6 6"/>`,
   "folder-closed": `<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M2 10h20"/>`,
   file: `<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>`,
+  "redo-2": `<path d="m15 14 5-5-5-5"/><path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5A5.5 5.5 0 0 0 9.5 20H13"/>`,
+  "undo-2": `<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"/>`,
+  "calendar-clock": `<path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h5"/><path d="M17.5 17.5 16 16.3V14"/><circle cx="16" cy="16" r="6"/>`,
+  "git-fork": `<circle cx="12" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9"/><path d="M12 12v3"/>`,
+  play: `<polygon points="6 3 20 12 6 21 6 3"/>`,
+  "minimize-2": `<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" x2="21" y1="10" y2="3"/><line x1="3" x2="10" y1="21" y2="14"/>`,
+  "corner-left-up": `<polyline points="14 9 9 4 4 9"/><path d="M20 20h-7a4 4 0 0 1-4-4V4"/>`,
 });
 
 const PLAN_TOOL = "ExitPlanMode";
@@ -19,10 +26,11 @@ function turnsOf(items) {
   let turn = null;
   for (const item of items) {
     if (item.kind === "result" || item.kind === "model") continue;
-    if (item.kind === "user" || !turn) {
-      turn = { id: item.id ?? `t${turns.length}`, user: item.kind === "user" ? item : null, steps: [], prs: [], notes: [] };
+    if (item.kind === "user" || item.kind === "steer" || !turn) {
+      const user = item.kind === "user" ? item : item.kind === "steer" ? { ...item, kind: "user", images: 0, steer: true } : null;
+      turn = { id: item.id ?? `t${turns.length}`, user, steps: [], prs: [], notes: [] };
       turns.push(turn);
-      if (item.kind === "user") continue;
+      if (user) continue;
     }
     if (item.kind === "pr") turn.prs.push(item);
     else if (item.kind === "note") turn.notes.push(item);
@@ -44,6 +52,13 @@ function turnsOf(items) {
     t.start = times.length ? Math.min(...times) : 0;
     t.end = times.length ? Math.max(...times) : 0;
   }
+  // A turn's own fold counts the work its steers continued, as T3 Code's top row does.
+  let runEnd = 0;
+  for (const t of [...turns].reverse()) {
+    runEnd = Math.max(runEnd, t.end);
+    t.runEnd = runEnd;
+    if (!t.user?.steer) runEnd = 0;
+  }
   return turns;
 }
 
@@ -55,6 +70,8 @@ function duration(ms) {
   const [h, m, s] = [Math.floor(total / 3600), Math.floor((total % 3600) / 60), total % 60];
   return [h && `${h}h`, m && `${m}m`, s && `${s}s`].filter(Boolean).join(" ");
 }
+/** A running turn's clock counts whole seconds, as T3 Code's does. */
+const ticking = (ms) => (ms < 60_000 ? `${Math.max(0, Math.floor(ms / 1000))}s` : duration(Math.floor(ms / 1000) * 1000));
 
 const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
 const shortDate = new Intl.DateTimeFormat(undefined, { month: "numeric", day: "numeric" });
@@ -173,6 +190,7 @@ function thoughtLine(text) {
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/^[ \t]*(?:#{1,6}|[-*+]|\d+\.)[ \t]+/gm, "")
     .replace(/`+|\*\*|~~/g, "")
+    .replace(/(^|[^\w*])[*_]([^*_\n]+)[*_](?![\w*])/g, "$1$2")
     .replace(/\s+/g, " ")
     .trim();
   if (heading !== undefined) return line;
@@ -258,12 +276,20 @@ function workHtml(steps, work, cwd, t, live) {
   return out.join("");
 }
 
-function liveHtml(turn, step, cwd) {
+/** The running turn's latest work: its last thought above its last tool, and "Thinking" while no tool runs,
+ * since claude writes a thought to the transcript only once it is done. */
+function liveHtml(turn, active, cwd) {
+  const thought = active.findLast((s) => s.kind === "thinking");
+  const tool = active.findLast((s) => s.kind === "tool");
+  const open = `data-open-turn="${esc(turn.id)}"`;
+  const thinking = (above = "") => `<button type="button" class="live-tool" ${open}>${above}<span class="line">${icon("brain", "kind")}<span class="label shimmer">Thinking</span></span></button>`;
+  const line = thought ? `<span class="line thought-line">${icon("brain", "kind")}<span class="label">${esc(thoughtLine(thought.text) || "Thought")}</span></span>` : "";
+  if (!tool || active.at(-1) === thought) return thinking(line);
   const label =
-    step.kind === "thinking" ? thoughtLine(step.text) || "Thinking"
-    : step.name === "Bash" ? `${!step.result ? "Running" : interruption(step) ? "Stopped" : step.result.error ? "Failed" : "Ran"} ${programOf(step.detail || step.summary)}`
-    : toolLabel(step, cwd);
-  return `<button type="button" class="live-tool" data-open-turn="${esc(turn.id)}">${icon(toolIcon(step), "kind")}<span class="label">${esc(label)}</span></button>`;
+    tool.name === "Bash" ? `${!tool.result ? "Running" : interruption(tool) ? "Stopped" : tool.result.error ? "Failed" : "Ran"} ${programOf(tool.detail || tool.summary)}`
+    : toolLabel(tool, cwd);
+  const row = `<button type="button" class="live-tool" ${open}>${line}<span class="line${tool.result ? " done" : ""}">${icon(toolIcon(tool), "kind")}<span class="label">${esc(label)}</span>${tool.result?.error ? icon("x", "failed") : ""}</span></button>`;
+  return tool.result ? row + thinking() : row;
 }
 
 const ANSWER = /"([^"]*)"="([^"]*)"/g;
@@ -273,11 +299,21 @@ function questionHtml(step) {
     <p class="message">${esc(answers.join(", ") || step.result?.text || "")}</p></div>`;
 }
 
+/** Claude Code's words when a plan's usage or spend limit stops the turn, such as "You've hit your limit · resets 5pm". */
+const USAGE_LIMIT = /^(You've hit your\b.*\blimit|Claude AI usage limit reached)/i;
+
 function errorHtml(step, cwd) {
   const label = step.kind === "error" ? step.text.split("\n")[0] : toolLabel(step, cwd);
-  const message = step.kind === "error" ? step.text.split("\n").slice(1).join("\n") : step.result.text;
-  return `<div class="tool error-row"><div class="row">${icon("circle-alert", "kind")}<span class="label">${esc(label)}</span>${whenHtml(step.result?.at ?? step.at, "when on")}</div>
+  const limit = step.kind === "error" && USAGE_LIMIT.test(label);
+  const message = limit ? "" : step.kind === "error" ? step.text.split("\n").slice(1).join("\n") : step.result.text;
+  return `<div class="tool error-row${limit ? " limit" : ""}"><div class="row">${icon("circle-alert", "kind")}<span class="label">${esc(label)}</span>${whenHtml(step.result?.at ?? step.at, "when on")}</div>
     ${message.trim() ? `<p class="message">${esc(message.trim())}</p>` : ""}</div>`;
+}
+
+function noteHtml(note) {
+  const [label, ...rest] = note.text.split("\n");
+  return `<div class="tool info note"><div class="row">${icon("check", "kind")}<span class="label">${esc(label)}</span>${whenHtml(note.at)}</div>
+    ${rest.join("\n").trim() ? `<p class="message">${esc(rest.join("\n").trim())}</p>` : ""}</div>`;
 }
 
 const planTitle = (plan) => plan.match(/^\s{0,3}#{1,6}\s+(.+)$/m)?.[1]?.trim() || null;
@@ -386,7 +422,25 @@ function changesHtml(change, open) {
     <ul>${rows.join("")}</ul></details>`;
 }
 
-function userHtml(user, t) {
+/** A prompt pinned typed rather than the user: a workflow's opening task, a Slack reply it relayed, or
+ * the nudge that carries on after a usage limit lifts. */
+function sentBy(tab, user, first) {
+  if (first && tab.view.connector) return "automation";
+  return user.text === "Continue from where you left off." || user.text.startsWith("[Slack reply from ") ? "pinned" : null;
+}
+
+function automationHtml(user, t) {
+  const key = `auto:${user.id}`;
+  const open = t.open.has(key);
+  return `<div class="user automation"><div class="bubble folded${open ? " open" : ""}"><button type="button" class="fold-head" data-toggle="${esc(key)}" aria-expanded="${open}">${icon("calendar-clock")}
+      <span class="who">Automation</span><span class="summary">${esc(user.text.trim().split("\n")[0])}</span>${icon("chevron-down", "chev")}</button>
+      ${open ? `<div class="body md">${markdown(user.text, promptMarked)}</div>` : ""}</div>
+    ${open ? `<div class="meta"><button type="button" class="link" data-open-automation>Open automation</button>${whenHtml(user.at)}<button type="button" class="xs" data-copy-item="${esc(user.id)}" title="Copy">${icon("copy")}</button></div>` : ""}</div>`;
+}
+
+function userHtml(user, t, tab, first) {
+  const by = sentBy(tab, user, first);
+  if (by === "automation") return automationHtml(user, t);
   const key = `full:${user.id}`;
   const long = user.text.length > 600 || user.text.split("\n").length > 8;
   const clamped = long && !t.open.has(key);
@@ -398,11 +452,15 @@ function userHtml(user, t) {
     missing > 0 && `<span class="images">${missing} image${missing > 1 ? "s" : ""}</span>`,
     long && `<button type="button" class="show-full" data-toggle="${esc(key)}">${clamped ? "Show full message" : "Show less"}</button>`,
   ];
-  return `<div class="user"><div class="bubble">${bubble.filter(Boolean).join("")}</div>
+  const above = [
+    by === "pinned" && `<p class="sent-by">Sent by Pinned</p>`,
+    user.steer && `<span class="steer" title="Steered the active turn">${icon("redo-2")}Steer</span>`,
+  ];
+  return `<div class="user">${above.filter(Boolean).join("")}<div class="bubble">${bubble.filter(Boolean).join("")}</div>
     <div class="meta">${whenHtml(user.at)}${user.text ? `<button type="button" class="xs" data-copy-item="${esc(user.id)}" title="Copy">${icon("copy")}</button>` : ""}</div></div>`;
 }
 
-function turnHtml(tab, turn, change, live) {
+function turnHtml(tab, turn, change, live, first) {
   const t = threadOf(tab);
   const cwd = tab.view.cwd;
   const work = live ? turn.work : turn.work.filter((s) => !turn.failed.has(s));
@@ -411,21 +469,25 @@ function turnHtml(tab, turn, change, live) {
   let fold = "";
   if (live) {
     const compacting = /^\/compact\b/.test(turn.user?.text ?? "") && !turn.notes.some((n) => /compacted/.test(n.text));
-    const latest = [...turn.steps].reverse().find((s) => s.kind === "tool" || s.kind === "thinking");
-    const label = compacting ? `<span class="shimmer">Compacting…</span>` : `Working for <span class="ticker" data-since="${turn.start || Date.now()}">${duration(turn.start ? Date.now() - turn.start : 0)}</span>`;
+    const active = turn.steps.slice(turn.steps.findLastIndex((s) => s.kind === "text") + 1).filter((s) => (s.kind === "tool" || s.kind === "thinking") && !shown.includes(s));
+    const label = compacting ? `<span class="shimmer">Compacting…</span>` : `Working for <span class="ticker" data-since="${turn.start || Date.now()}">${ticking(turn.start ? Date.now() - turn.start : 0)}</span>`;
     fold = `<details class="work live" data-turn="${esc(turn.id)}"${t.open.has(turn.id) ? " open" : ""}>
         <summary><span class="label">${label}</span></summary>
         <div class="steps">${steps}</div></details>
-      ${latest && !t.open.has(turn.id) && !shown.includes(latest) ? liveHtml(turn, latest, cwd) : ""}`;
+      ${!t.open.has(turn.id) && !compacting ? liveHtml(turn, active, cwd) : ""}`;
   } else if (work.length) {
-    const took = turn.end > turn.start ? duration(turn.end - turn.start) : "";
-    const label = turn.interrupted ? (took ? `You stopped after ${took}` : "You stopped this response") : took ? `Worked for ${took}` : "Worked";
+    const end = turn.user?.steer ? turn.end : turn.runEnd;
+    const took = end > turn.start ? duration(end - turn.start) : "";
+    const label =
+      turn.interrupted ? (took ? `You stopped after ${took}` : "You stopped this response")
+      : turn.user?.steer ? (took ? `Continued for ${took}` : "Continued")
+      : took ? `Worked for ${took}` : "Worked";
     fold = `<details class="work" data-turn="${esc(turn.id)}"${t.open.has(turn.id) ? " open" : ""}>
         <summary><span class="label">${label}</span>${icon("chevron-right", "chev")}${whenHtml(turn.end && new Date(turn.end).toISOString())}</summary>
         <div class="steps">${steps}</div></details>`;
   }
   const notes = turn.notes.filter((n) => !(fold && !live && turn.interrupted && n.text === "Interrupted."));
-  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t) : ""}${notes.map((n) => `<p class="note">${esc(n.text)}</p>`).join("")}${fold}
+  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${fold}
     ${shown.map((s) => shownHtml(s, cwd, t, live ? null : turn.answer)).join("")}
     ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}
     ${change ? changesHtml(change, t.open) : ""}</section>`;
@@ -456,9 +518,10 @@ function renderThread() {
   if (threadView.dataset.key === key) return renderComposer(tab);
   const turns = turnsOf(t.items);
   const changes = changesByTurn(t.history, turns);
+  const opening = turns.find((x) => x.user);
   const first = Math.max(0, turns.length - limit);
   const body = turns.length
-    ? `${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}${turns.slice(first).map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + i === turns.length - 1)).join("")}`
+    ? `${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}${turns.slice(first).map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + i === turns.length - 1, turn === opening)).join("")}`
     : `<div class="blank"><p>${t.loaded ? "Send a message to start the conversation." : t.error ? `This thread couldn't be read: ${esc(t.error)}` : "Loading…"}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
   const stick = threadView.dataset.tab !== tab.key || threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
   const liveRows = threadView.querySelector(".work.live .group[open] > .rows");
@@ -482,7 +545,7 @@ const rerender = () => {
 };
 
 setInterval(() => {
-  for (const ticker of threadView.querySelectorAll(".ticker")) ticker.textContent = duration(Date.now() - Number(ticker.dataset.since));
+  for (const ticker of threadView.querySelectorAll(".ticker")) ticker.textContent = ticking(Date.now() - Number(ticker.dataset.since));
 }, 1000);
 
 const itemById = (id) => threadOf(active).items.find((i) => i.id === id);
@@ -551,6 +614,10 @@ threadView.addEventListener("click", (e) => {
   if (live) {
     t.open.add(live.dataset.openTurn);
     return rerender();
+  }
+  if (e.target.closest("[data-open-automation]")) {
+    page = "connectors";
+    return toggleSettings();
   }
   const copy = e.target.closest("[data-copy-item]");
   if (copy) return copied(copy, itemById(copy.dataset.copyItem)?.text ?? "");

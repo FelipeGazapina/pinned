@@ -820,6 +820,79 @@ async function sweep(profileName) {
     return looks.join(" | ");
   });
 
+  // Read in one go: the thread re-renders as it polls, and a style read from a replaced node is empty in WebKit.
+  const styleOf = (selector, prop) => page.evaluate(([sel, p]) => [...document.querySelectorAll(sel)].filter((el) => el.checkVisibility()).map((el) => getComputedStyle(el)[p]).at(-1) ?? "", [selector, prop]);
+  const toThread = async (name) => {
+    await page.evaluate((n) => activate(tabs.find((t) => t.view.cwd.endsWith(`/${n}`))), name);
+    await waitFor(name, async () => new RegExp(name).test(await text("#chat-head .crumb")));
+  };
+
+  await step("app view: the live row counts whole seconds, shows the thought over the tool, and Thinking between tools", async () => {
+    await toThread("beta");
+    await sendPrompt("think");
+    await waitFor("the live thought", async () => (await text("#thread .live-tool .thought-line .label")) === "Weighing the options", 6000);
+    check((await text("#thread .live-tool .line:not(.thought-line) .label")) === "Thinking", `the live row reads ${await text("#thread .live-tool")}`);
+    check(/^\d+s$/.test(await text("#thread .work.live .ticker")), `the clock reads ${await text("#thread .work.live .ticker")}`);
+    await answered("Done thinking.");
+    await sendPrompt("build");
+    await waitFor("the running command", async () => (await text("#thread .live-tool .label")) === "Running npm", 6000);
+    check((await page.locator("#thread .live-tool").count()) === 1, "a Thinking row shows while a tool runs");
+    await answered("Built.");
+  });
+
+  await step("app view: a steer continues the turn under its own fold, and pinned's own prompts say who sent them", async () => {
+    await sendPrompt("steer");
+    await answered("Checked both.");
+    const steer = lastTurn(".user");
+    check((await steer.locator(".steer").textContent()).trim() === "Steer", "the steer has no marker");
+    check((await steer.locator(".bubble").textContent()).trim() === "also check the docs", `the steer reads ${await steer.locator(".bubble").textContent()}`);
+    const folds = await page.locator("#thread .turn .work > summary .label").allTextContents();
+    check(/^Continued( for |$)/.test(folds.at(-1)) && /^Worked( for |$)/.test(folds.at(-2)), `the folds read ${folds.slice(-2).join(" | ")}`);
+    await sendPrompt("Continue from where you left off.");
+    await answered("echo: Continue from where you left off.");
+    check((await text("#thread .turn:last-of-type .sent-by")) === "Sent by Pinned", "pinned's own prompt isn't marked");
+    check((await page.locator("#thread .turn:nth-last-of-type(2) .sent-by").count()) === 0, "a typed prompt is marked as pinned's");
+    await page.evaluate(() => {
+      active.view.connector = "sweep-workflow";
+      rerender();
+      threadView.scrollTop = 0;
+    });
+    const auto = gui("#thread .user.automation");
+    await waitFor("the automation fold", () => auto.isVisible());
+    check((await auto.locator(".who").textContent()) === "Automation" && (await auto.locator(".summary").textContent()) === "rich", `the fold reads ${await auto.textContent()}`);
+    await press(auto.locator(".fold-head"));
+    await waitFor("the automation's text", () => gui("#thread .user.automation .body").isVisible());
+    check(await gui("#thread .user.automation [data-open-automation]").isVisible(), "no Open automation link");
+    await page.evaluate(() => {
+      delete active.view.connector;
+      rerender();
+      threadView.scrollTop = threadView.scrollHeight;
+    });
+  });
+
+  await step("app view: notices are check rows, and a usage limit reads in the warning tone", async () => {
+    await sendPrompt("notice");
+    await waitFor("the notice", async () => (await page.locator("#thread .tool.info", { hasText: "Set model to Haiku 5.5" }).count()) > 0);
+    const notice = gui("#thread .turn:last-of-type .tool.info");
+    check((await notice.locator(".row .label").textContent()) === "Set model to Haiku 5.5", `the notice reads ${await notice.textContent()}`);
+    check((await notice.locator(".message").textContent()) === "for this session", "the notice's rest is missing");
+    check((await notice.locator(".row svg").first().innerHTML()).includes("M20 6 9 17l-5-5"), "the notice has no Check icon");
+    await sendPrompt("limit");
+    await waitFor("the limit row", async () => (await page.locator("#thread .error-row.limit").count()) > 0);
+    const limit = gui("#thread .error-row.limit");
+    const color = await styleOf("#thread .error-row.limit .label", "color");
+    check(color === "rgb(254, 154, 0)", `the limit reads in ${color}`);
+    check((await limit.locator(".label").textContent()).startsWith("You've hit your limit"), `the limit reads ${await limit.textContent()}`);
+    await sendPrompt("oops");
+    await waitFor("the API error", async () => (await page.locator("#thread .turn:last-of-type .error-row", { hasText: "API Error: 529" }).count()) === 1);
+    const error = await styleOf("#thread .turn:last-of-type .error-row .label", "color");
+    check(error === "rgb(251, 65, 74)", `an error reads in ${error}`);
+  });
+
+  await step("app view: back on alpha after the timeline's own threads", async () => {
+    await toThread("alpha");
+  });
+
   await step("app view: a prompt from the composer reaches the same session", async () => {
     await sendPrompt("hello from the app");
     await waitFor("the answer", async () => (await page.locator("#thread .assistant", { hasText: "echo: hello from the app" }).count()) > 0);

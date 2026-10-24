@@ -158,6 +158,16 @@ function submit() {
       wrote([{ type: "text", text: `answer ${i}` }]);
     }
   }
+  else if (line === "steer") {
+    used("Read", { file_path: path.join(process.cwd(), "a.md") }, "alpha");
+    record({ type: "attachment", attachment: { type: "queued_command", prompt: "also check the docs", commandMode: "prompt", origin: { kind: "human" }, humanTurn: true } });
+    used("Read", { file_path: path.join(process.cwd(), "docs.md") }, "docs");
+    wrote([{ type: "text", text: "Checked both." }]);
+  } else if (line === "notice") {
+    said("<local-command-stdout>Set model to Haiku 5.5\nfor this session</local-command-stdout>");
+  } else if (line === "limit") {
+    record({ type: "assistant", isApiErrorMessage: true, error: "rate_limit", message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "You've hit your limit · resets 5pm (UTC)" }] } });
+  }
   else if (line === "edit") {
     const id = `tool-${lines}`;
     wrote([{ type: "tool_use", id, name: "Edit", input: { file_path: path.join(process.cwd(), "notes.md"), old_string: "", new_string: "hello" } }]);

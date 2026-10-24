@@ -58,6 +58,20 @@ button.xs.copied { color: var(--g-success); }
 .answer .assistant { padding-bottom: 0; }
 .answer .meta { margin-top: 6px; padding-left: 0; }
 @media (pointer: coarse) { .turn .user .meta, .answer .meta { opacity: 1; } }
+.turn .user .sent-by { margin: 0 4px 0 0; font-size: 11px; color: rgb(129 129 129 / 0.7); }
+.turn .user .steer { display: flex; align-items: center; gap: 4px; margin-right: 4px; font-size: 12px; line-height: 1; color: var(--g-muted); }
+.turn .user .steer .i { width: 12px; height: 12px; }
+.turn .bubble.folded { padding: 0; min-width: 0; }
+.turn .bubble.folded.open { width: 100%; }
+.turn .bubble .fold-head { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; padding: 8px 12px; border-radius: 16px; text-align: left; font-size: 14px; }
+.turn .bubble .fold-head .i { width: 16px; height: 16px; flex: none; color: var(--g-muted); }
+.turn .bubble .fold-head .who { flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--g-muted); }
+.turn .bubble .fold-head .summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn .bubble .fold-head .chev { width: 14px; height: 14px; transition: transform 0.15s; }
+.turn .bubble.open .fold-head .chev { transform: rotate(180deg); }
+.turn .bubble.folded .body { padding: 0 12px 12px; max-height: 384px; overflow: auto; }
+.turn .user .meta .link { font-size: 12px; color: var(--g-muted); }
+.turn .user .meta .link:hover { color: var(--g-fg); text-decoration: underline; }
 .mention { display: inline-flex; align-items: center; gap: 0.3em; height: 1.41em; padding: 0 0.5em; border-radius: 0.5em; vertical-align: -0.2em;
   font-size: 0.86em; font-weight: 500; color: var(--g-info); background: rgb(81 162 255 / 0.11); border: 1px solid rgb(81 162 255 / 0.34); }
 .mention .i { width: 1em; height: 1em; }
@@ -102,6 +116,13 @@ button.xs.copied { color: var(--g-success); }
   mask-image: linear-gradient(transparent, #000 12px, #000 calc(100% - 12px), transparent); }
 .tool.thought .thought-body { margin: 4px 0 8px 28px; max-height: 384px; overflow: auto; color: var(--g-muted); font-size: 13px; }
 .live-tool .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-tool { flex-direction: column; align-items: stretch; gap: 0; }
+.live-tool .line { display: flex; align-items: center; gap: 6px; min-height: 24px; min-width: 0; }
+.live-tool .thought-line { align-items: flex-start; }
+.live-tool .thought-line .kind { margin-top: 4px; }
+.live-tool :is(.thought-line, .done) .label { animation: none; background: none; color: var(--g-muted); }
+.live-tool .thought-line .label { white-space: normal; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.live-tool .failed { width: 12px; height: 12px; color: rgb(239 68 68 / 0.4); flex: none; }
 .live-tool:hover .label { animation-play-state: paused; }
 .shimmer { background: linear-gradient(90deg, var(--g-muted) 0%, var(--g-fg) 50%, var(--g-muted) 100%) 0 0 / 200% 100%;
   -webkit-background-clip: text; background-clip: text; color: transparent; animation: shine 2.2s linear infinite; }
@@ -109,10 +130,12 @@ button.xs.copied { color: var(--g-success); }
 .tool .row { display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 2px; line-height: 1.625; color: var(--g-muted); }
 .tool .message { margin: 0 0 6px 28px; color: rgb(245 245 245 / 0.8); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto;
   font-size: 13px; line-height: 1.5; }
-.tool.answered, .tool.error-row { margin-bottom: 8px; }
-.tool.error-row .row { color: var(--g-fg); }
+.tool.answered, .tool.error-row, .tool.info { margin-bottom: 8px; }
+.tool.error-row .row { color: var(--g-error); }
 .tool.error-row .row .label { font-weight: 500; }
-.tool.error-row .row .kind { color: var(--g-error); opacity: 1; }
+.tool.error-row .row .kind { opacity: 1; }
+.tool.error-row.limit .row { color: var(--g-warning); }
+.tool.info .message { color: var(--g-muted); }
 
 .plan-card { margin: 4px 0 16px; padding: 16px; border-radius: 22px; border: 1px solid rgb(255 255 255 / 0.05); background: rgb(17 17 17 / 0.7); }
 @media (min-width: 640px) { .plan-card { padding: 20px; } }

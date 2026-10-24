@@ -23,6 +23,8 @@ pub enum Item {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         pictures: Vec<String>,
     },
+    /// A prompt typed while claude worked, which it took into the turn in progress.
+    Steer { id: String, at: String, text: String },
     /// Markdown the assistant wrote.
     Text { id: String, at: String, text: String },
     /// The assistant's reasoning before it answered or used a tool.
@@ -112,6 +114,12 @@ fn items_of(line: &Value) -> Vec<Item> {
         },
         Some("user") if line["isCompactSummary"].as_bool() == Some(true) => vec![Item::Note { id, at, text: "The conversation was compacted.".into() }],
         Some("user") => user_items(&line["message"]["content"], id, at),
+        Some("attachment") if line["attachment"]["type"] == "queued_command" && line["attachment"]["origin"]["kind"] == "human" => {
+            match spoken(line["attachment"]["prompt"].as_str().unwrap_or_default()) {
+                Some(Spoken::Prompt(text)) => vec![Item::Steer { id, at, text }],
+                _ => vec![],
+            }
+        }
         Some("attachment") if line["attachment"]["type"] == "model" => match line["attachment"]["identity"]["marketingName"].as_str() {
             Some(name) => vec![Item::Model { name: name.to_owned() }],
             None => vec![],
@@ -323,6 +331,17 @@ mod tests {
                 Item::Model { name: "Haiku 5.5".into() },
             ]
         );
+    }
+
+    #[test]
+    fn a_prompt_queued_mid_turn_is_a_steer_and_automated_ones_are_hidden() {
+        let items = page(&[
+            r#"{"type":"attachment","uuid":"q1","timestamp":"t1","attachment":{"type":"queued_command","prompt":"use the other file","commandMode":"prompt","origin":{"kind":"human"},"humanTurn":true}}"#,
+            r#"{"type":"attachment","uuid":"q2","timestamp":"t2","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>b1</task-id>\n</task-notification>","commandMode":"task-notification","origin":{"kind":"task-notification"}}}"#,
+            r#"{"type":"attachment","uuid":"q3","timestamp":"t3","isMeta":true,"attachment":{"type":"queued_command","prompt":"[Subagent hand-back] done","commandMode":"prompt","origin":{"kind":"peer"}}}"#,
+        ])
+        .items;
+        assert_eq!(items, vec![Item::Steer { id: "q1".into(), at: "t1".into(), text: "use the other file".into() }]);
     }
 
     #[test]
