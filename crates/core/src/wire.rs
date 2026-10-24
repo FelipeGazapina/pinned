@@ -163,6 +163,16 @@ pub enum Call {
         #[serde(default)]
         create: bool,
     },
+    /// `Vec<thread::Item>`: the conversation of the subagent the tab's `Agent` tool call `tool` started.
+    Subagent { tab: TabId, tool: String },
+    /// The folder claude runs in. Restarts the tab's claude on a copy of its conversation that stops before
+    /// the prompt `before`, after putting the folder's files back as they were then when `files`.
+    Rewind { tab: TabId, before: String, files: bool, cols: u16, rows: u16 },
+    /// The new tab's id, not yet started: its claude resumes a copy of the tab's conversation through
+    /// the message `through`.
+    Fork { tab: TabId, through: String },
+    /// The path saved, relative to the tab's folder. Writes `text` to `path` inside that folder.
+    SaveFile { tab: TabId, path: String, text: String },
 }
 
 impl Call {
@@ -185,6 +195,10 @@ impl Call {
                 | Call::Files { .. }
                 | Call::Branches { .. }
                 | Call::Checkout { .. }
+                | Call::Subagent { .. }
+                | Call::Rewind { .. }
+                | Call::Fork { .. }
+                | Call::SaveFile { .. }
         )
     }
 }

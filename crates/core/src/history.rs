@@ -41,6 +41,9 @@ pub struct Turn {
     /// The patch hit `PATCH_LIMIT` and lost its tail.
     #[serde(default)]
     pub truncated: bool,
+    /// The snapshot taken as the turn began, which rewinding to its prompt restores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
 }
 
 /// The project a folder belongs to: a `claude --worktree` session's checkout reports to the repo
@@ -136,6 +139,37 @@ pub fn diff(cwd: &Path, before: &str, after: &str) -> Option<(Vec<FileChange>, S
     Some((files, String::from_utf8_lossy(&patch).into_owned(), truncated))
 }
 
+/// Puts the working tree back as it was in `snapshot`: files made since are deleted and the rest get
+/// that content back. The index and branches are left alone, as `snapshot` leaves them.
+pub fn restore(cwd: &Path, snapshot: &str) -> Result<(), String> {
+    let top = git(cwd, &["rev-parse", "--show-toplevel"], None).ok_or("this folder is not in a git repository")?;
+    let top = PathBuf::from(String::from_utf8_lossy(&top).trim());
+    let now = self::snapshot(&top).ok_or("could not read the working tree")?;
+    git(&top, &["cat-file", "-e", &format!("{snapshot}^{{tree}}")], None).ok_or("that checkpoint is gone from the repository")?;
+    let names = |filter: &str| -> Result<Vec<String>, String> {
+        let out = git(&top, &["diff", "--name-only", "-z", "--no-renames", &format!("--diff-filter={filter}"), snapshot, &now], None).ok_or("could not compare with the checkpoint")?;
+        Ok(String::from_utf8_lossy(&out).split('\0').filter(|p| !p.is_empty()).map(str::to_owned).collect())
+    };
+    for added in names("A")? {
+        std::fs::remove_file(top.join(&added)).map_err(|e| format!("could not remove {added}: {e}"))?;
+    }
+    let changed = names("DMT")?;
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let index = std::env::temp_dir().join(format!("pinned-restore-{}-{:x}", std::process::id(), nanos()));
+    let restored = (|| {
+        git(&top, &["read-tree", snapshot], Some(&index)).ok_or("could not read the checkpoint")?;
+        let mut cmd = Command::new("git");
+        cmd.args(["checkout-index", "-f", "-z", "--stdin"]).current_dir(&top).env("GIT_INDEX_FILE", &index).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+        child.stdin.take().unwrap().write_all(changed.join("\0").as_bytes()).map_err(|e| e.to_string())?;
+        child.wait().map_err(|e| e.to_string())?.success().then_some(()).ok_or_else(|| "could not write the checkpoint's files".to_owned())
+    })();
+    let _ = std::fs::remove_file(index);
+    restored
+}
+
 /// Parses `git diff --numstat -z` with `--no-renames`: `added\tremoved\tpath\0` per file.
 /// Binary files report `-` for both counts and count as zero.
 fn parse_numstat(out: &str) -> Vec<FileChange> {
@@ -210,6 +244,31 @@ mod tests {
     }
 
     #[test]
+    fn restoring_a_snapshot_undoes_edits_additions_and_deletions_but_not_the_index() {
+        let dir = repo("restore");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/kept.txt"), "one\n").unwrap();
+        std::fs::write(dir.join("gone.txt"), "bye\n").unwrap();
+        run(&dir, &["add", "."]);
+        run(&dir, &["commit", "-qm", "init"]);
+        std::fs::write(dir.join("dirty.txt"), "mine\n").unwrap();
+        let before = snapshot(&dir).unwrap();
+
+        std::fs::write(dir.join("src/kept.txt"), "two\n").unwrap();
+        std::fs::remove_file(dir.join("gone.txt")).unwrap();
+        std::fs::write(dir.join("src/new.txt"), "new\n").unwrap();
+        std::fs::write(dir.join("dirty.txt"), "changed\n").unwrap();
+        restore(&dir.join("src"), &before).unwrap();
+
+        let read = |p: &str| std::fs::read_to_string(dir.join(p)).ok();
+        assert_eq!([read("src/kept.txt"), read("gone.txt"), read("src/new.txt"), read("dirty.txt")], [Some("one\n".into()), Some("bye\n".into()), None, Some("mine\n".into())]);
+        let staged = Command::new("git").args(["diff", "--cached", "--name-only"]).current_dir(&dir).output().unwrap().stdout;
+        assert!(staged.is_empty());
+        assert!(restore(&dir, "0123456789abcdef0123456789abcdef01234567").is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn snapshots_work_before_the_first_commit_and_leave_the_index_alone() {
         let dir = repo("unborn");
         std::fs::write(dir.join("a.txt"), "x\n").unwrap();
@@ -244,7 +303,7 @@ mod tests {
     fn turns_append_and_load_newest_first() {
         let file = temp("turns.jsonl");
         let _ = std::fs::remove_file(&file);
-        let turn = |session: &str, ended| Turn { session: session.into(), title: None, prompt: Some("p".into()), ended, files: vec![], patch: String::new(), truncated: false };
+        let turn = |session: &str, ended| Turn { session: session.into(), title: None, prompt: Some("p".into()), ended, files: vec![], patch: String::new(), truncated: false, before: None };
         append(&file, &turn("s1", 1));
         append(&file, &turn("s2", 2));
         std::fs::OpenOptions::new().append(true).open(&file).unwrap().write_all(b"{broken\n{\"session\":\"s3\"}\n").unwrap();

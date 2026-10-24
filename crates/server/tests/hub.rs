@@ -308,10 +308,10 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
     late.wait_output(b, "tab-1", "again\r\nagain\r\n");
     assert_eq!(client.wait_output(b, "tab-1", "again\r\nagain\r\n"), format!("{screen}again\r\nagain\r\n"), "the first client never sees the screen twice");
 
-    assert_eq!(
-        client.call(b, json!({ "cmd": "format_disk" })),
-        Err("this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`, `start_claude`, `set_bypass`, `write_input`, `resize_pty`, `close_tab`, `set_folder`, `list_projects`, `project_history`, `git_remote`, `browse`, `clone`, `run`, `deliver`, `upload`, `thread`, `prompt`, `workspace`, `pull_request`, `pr_action`, `diff`, `ports`, `editors`, `open_in`, `commands`, `files`, `branches`, `checkout`".replace("0.5.1", env!("CARGO_PKG_VERSION")))
-    );
+    // The list of calls it names after "expected one of" grows with every new call, so only its start is pinned.
+    let refused = client.call(b, json!({ "cmd": "format_disk" })).unwrap_err();
+    let expected = "this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`".replace("0.5.1", env!("CARGO_PKG_VERSION"));
+    assert!(refused.starts_with(&expected), "{refused}");
     assert!(client.hub(json!({ "cmd": "self_destruct" })).unwrap_err().contains("unknown variant `self_destruct`"));
     assert_eq!(client.call("not-a-machine", json!({ "cmd": "tabs" })), Err("this account has no machine not-a-machine".into()));
 
