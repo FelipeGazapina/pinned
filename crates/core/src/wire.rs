@@ -4,11 +4,11 @@
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
 use crate::workspace::{DiffScope, PrAction};
-use crate::{pulls, sync, thread};
+use crate::{pulls, sync, thread, usage};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// A tab's id, unique within its machine, such as `tab-3`.
 pub type TabId = String;
@@ -172,7 +172,12 @@ pub enum Call {
         query: String,
     },
     /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since` on.
-    TokenUsage { since: u64 },
+    /// `prices` are the user's, per model, which win over LiteLLM's list.
+    TokenUsage {
+        since: u64,
+        #[serde(default)]
+        prices: HashMap<String, usage::Price>,
+    },
 }
 
 impl Call {

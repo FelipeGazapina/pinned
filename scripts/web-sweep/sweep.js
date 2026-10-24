@@ -1946,6 +1946,48 @@ async function sweep(profileName) {
     return before;
   });
 
+  await step("shell: a model's details on Usage, and a price set for an unpriced one", async () => {
+    await showSidebar();
+    await tapOrClick('#sidebar footer [data-open-page="usage"]');
+    await waitFor("the Usage page", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
+    await usagePick("metric", "cost");
+    await usagePick("days", "30");
+    await usagePick("breakdown", "model");
+    await waitFor("the 30-day cost", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    await press(page.locator('#page-view tr[data-model="claude-mystery-1"]'));
+    await waitFor("the model's details", () => page.locator("#shell-dialog .dialog-head", { hasText: "claude-mystery-1" }).isVisible());
+    const stat = (label) => text(`#shell-dialog .stats div:has(dt:text-is("${label}")) dd`);
+    check((await stat("Cost")) === "Unpriced" && (await stat("Tokens")) === "1K", `stats: ${await stat("Cost")} ${await stat("Tokens")}`);
+    check((await text("#shell-dialog .dialog-foot .muted")) === "1K tokens have no known price", "no unpriced note");
+    await press(page.locator("#shell-dialog [data-set-price]"));
+    await waitFor("the prices dialog", () => page.locator("#shell-dialog table.prices").isVisible());
+    check((await page.inputValue('#shell-dialog tbody tr:last-child [data-field="model"]')) === "claude-mystery-1", "the model isn't filled in");
+    await page.fill('#shell-dialog tbody tr:last-child [data-field="input"]', "2");
+    await page.fill('#shell-dialog tbody tr:last-child [data-field="output"]', "10");
+    await press(page.locator("#shell-dialog [data-save]"));
+    await waitFor("the priced total", async () => (await text("#page-view .total")) === "$3.14", 15000);
+    check(!(await page.locator("#page-view .info").count()), "the unpriced note stayed");
+    await press(page.locator('#page-view tr[data-model="claude-mystery-1"]'));
+    await waitFor("the priced model", async () => (await stat("Cost")) === "$0.01");
+    if (touch) await press(page.locator("#shell-dialog .close"));
+    else await page.keyboard.press("Escape");
+    check(!(await page.locator("#shell-dialog").isVisible()), "the details stayed open");
+    check(await page.locator("#page-view h1", { hasText: "Usage" }).isVisible(), "closing the details left Usage");
+    await press(page.locator("#page-view .machine-filter"));
+    await press(page.locator("#side-menu button", { hasText: "Model prices" }));
+    await press(page.locator("#shell-dialog tbody tr:first-child [data-remove]"));
+    await press(page.locator("#shell-dialog [data-save]"));
+    await waitFor("the list price again", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    if (touch) {
+      await pageSidebar();
+      await tapOrClick("#sidebar footer .back");
+    } else await page.keyboard.press("Escape");
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+    return "Unpriced, then $0.01 at $2/$10 per 1M";
+  });
+
   const prNumbers = (group) => page.locator(`#page-view ${group ? `.pr-group[data-group="${group}"] ` : ""}.pr-row[data-url] .num`).allTextContents();
   const prFilter = async (kind, label) => {
     await tapOrClick('#page-view [data-pr="filters"]');

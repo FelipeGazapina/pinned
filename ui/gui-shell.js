@@ -19,6 +19,7 @@ Object.assign(ICON_PATHS, {
   "trending-up": `<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>`,
   "trending-down": `<polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/>`,
   gauge: `<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>`,
+  "sliders-horizontal": `<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>`,
   "arrow-down-up": `<path d="m3 16 4 4 4-4"/><path d="M7 20V4"/><path d="m21 8-4-4-4 4"/><path d="M17 4v16"/>`,
   "folder-plus": `<path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>`,
 });
@@ -63,6 +64,7 @@ const sameVisit = (a, b) => a?.page === b?.page && a?.tab === b?.tab;
 function noteVisit() {
   const here = shellPage() ? { page: shellPage() } : active ? { tab: active.key } : null;
   if (!here || sameVisit(here, visits.at)) return;
+  closeDialog();
   if (visits.at) visits.back.push(visits.at);
   visits.back.splice(0, visits.back.length - 50);
   visits.forward.length = 0;
@@ -87,7 +89,7 @@ onGuiKey("[", () => goBack(-1));
 onGuiKey("]", () => goBack(1));
 
 window.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape" || !shellPage() || !paletteEl.hidden || !sideMenu.hidden || e.target.closest?.("input, textarea, select, #panel")) return;
+  if (e.key !== "Escape" || !shellPage() || !paletteEl.hidden || !sideMenu.hidden || !shellDialog.hidden || e.target.closest?.("input, textarea, select, #panel")) return;
   e.preventDefault();
   goBack(-1) || closePage();
 });
@@ -403,18 +405,22 @@ function usageBuckets(days, now = Date.now() / 1000) {
 }
 const bucketOf = (days, hour) => (days === 1 ? hour : localDay(hour));
 
-function summarize() {
+/** The window's totals, series and models, of one `model` when given. */
+function summarize(model) {
   const { days, machine } = usageState;
   const buckets = usageBuckets(days, usageState.now);
   const index = new Map(buckets.map((b, i) => [b, i]));
-  const rows = usageState.rows.filter((r) => (!machine || r.machine === machine) && index.has(bucketOf(days, r.hour)));
-  const s = { buckets, rows, cost: 0, tokens: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, savings: 0, premium: 0, unpriced: 0, sessions: new Set(),
+  const rows = usageState.rows.filter((r) => (!machine || r.machine === machine) && (!model || r.model === model) && index.has(bucketOf(days, r.hour)));
+  const s = { buckets, rows, cost: 0, tokens: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, savings: 0, premium: 0, unpriced: 0, unpricedTokens: 0, sessions: new Set(),
     byType: { input: 0, cache_read: 0, cache_write: 0, output: 0 }, series: buckets.map(() => ({ cost: 0, tokens: 0 })), models: new Map() };
   for (const r of rows) {
     const cost = rowCost(r);
     const tokens = rowTokens(r);
     Object.assign(s, { cost: s.cost + cost, tokens: s.tokens + tokens, input: s.input + r.input, cached: s.cached + r.cached, cacheWrite: s.cacheWrite + r.cache_write, output: s.output + r.output, savings: s.savings + r.savings, premium: s.premium + r.premium });
-    if (!r.cost) s.unpriced++;
+    if (!r.cost) {
+      s.unpriced++;
+      s.unpricedTokens += tokens;
+    }
     for (const k in s.byType) s.byType[k] += r.cost?.[k] ?? 0;
     s.sessions.add(`${r.machine}:${r.session}`);
     const point = s.series[index.get(bucketOf(days, r.hour))];
@@ -433,7 +439,7 @@ async function fetchUsage() {
   renderUsagePage();
   const since = usageBuckets(90)[0];
   const machinesOnline = onlineMachines();
-  const lists = await Promise.all(machinesOnline.map((m) => callOn(m, { cmd: "token_usage", since }).then((rows) => rows.map((r) => ({ ...r, machine: m })), () => [])));
+  const lists = await Promise.all(machinesOnline.map((m) => callOn(m, { cmd: "token_usage", since, prices: usagePrices }).then((rows) => rows.map((r) => ({ ...r, machine: m })), () => [])));
   Object.assign(usageState, { rows: lists.flat(), loaded: true, loading: false, now: Date.now() / 1000 });
   if (shellPage() === "usage") renderUsagePage();
 }
@@ -454,10 +460,7 @@ function usageRange(buckets, days) {
 function renderUsagePage() {
   const { metric, days } = usageState;
   const s = summarize();
-  const remote = [...machines.keys()].length > 1;
-  const machineFilter = remote
-    ? `<span class="crumb-sep">›</span><select class="machine-filter" aria-label="Machine"><option value="">All machines</option>${[...machines.keys()].map((m) => `<option value="${esc(m)}"${m === usageState.machine ? " selected" : ""}>${esc(machineName(m))}</option>`).join("")}</select>`
-    : "";
+  const machineFilter = `<span class="crumb-sep">›</span><button type="button" class="crumb-menu machine-filter" title="Machines and model prices">${esc(usageState.machine ? machineName(usageState.machine) : machines.size > 1 ? "All machines" : machineName([...machines.keys()][0] ?? LOCAL))}${icon("chevron-down")}</button>`;
   pageView.innerHTML = `${headHtml("Usage", `${machineFilter}<span class="crumb-sep">›</span><span class="provider">${icon("claude")}Claude Code</span>
       <span class="range">${metric === "limits" ? "" : usageRange(s.buckets, days)}</span><span class="spacer"></span>
       ${segmented("metric", USAGE_METRICS.map(([v, l]) => [v, l]), metric)}${segmented("days", USAGE_PERIODS, days, metric === "limits")}
@@ -465,7 +468,7 @@ function renderUsagePage() {
     <div class="page-body"><div class="page-wrap usage" data-metric="${metric}"${usageState.loading && usageState.loaded ? ` data-refreshing` : ""}>${
       metric === "limits" ? limitsHtml() : !usageState.loaded ? usageSkeleton() : spendHtml(s)
     }</div></div>`;
-  if (metric !== "limits" && usageState.loaded) drawChart(s);
+  if (metric !== "limits" && usageState.loaded) drawChart(pageView.querySelector(".chart"), s, metric);
 }
 
 function spendHtml(s) {
@@ -475,17 +478,7 @@ function spendHtml(s) {
   const sessions = `${s.sessions.size} session${s.sessions.size === 1 ? "" : "s"}`;
   const unpricedShare = s.rows.length ? s.unpriced / s.rows.length : 0;
   const unit = days === 1 ? "Hourly" : "Daily";
-  const shares = (title, parts) => {
-    const sum = parts.reduce((a, [, v]) => a + v, 0);
-    if (!sum) return "";
-    const fmt = (v) => (cost ? usd(v) : tokensText(v));
-    return `<section class="share"><h2>${title}</h2><div class="share-bar">${parts.filter(([, v]) => v > 0).map(([label, v, mix]) =>
-      `<span style="flex-grow:${v};background:color-mix(in srgb, var(--g-fg) ${mix}%, var(--g-bg))" title="${label} · ${fmt(v)} · ${percentText(v / sum)}"></span>`).join("")}</div>
-      <div class="legend">${parts.map(([label, v, mix]) => `<span><i style="background:color-mix(in srgb, var(--g-fg) ${mix}%, var(--g-bg))"></i>${label}<b>${fmt(v)}</b></span>`).join("")}</div></section>`;
-  };
-  const byType = cost
-    ? [["Input", s.byType.input, 60], ["Cache read", s.byType.cache_read, 30], ["Cache write", s.byType.cache_write, 72], ["Output", s.byType.output, 100]]
-    : [["Input", s.input, 60], ["Cache read", s.cached, 30], ["Cache write", s.cacheWrite, 72], ["Output", s.output, 100]];
+  const shares = (title, parts) => sharesHtml(title, parts, cost ? usd : tokensText);
   const models = [...s.models.values()].sort((a, b) => (cost ? b.cost - a.cost : 0) || b.tokens - a.tokens);
   const top = Math.max(1e-9, ...models.map((m) => (cost ? m.cost : m.tokens)));
   const modelRows = models.map((m, i) => `<tr data-model="${esc(m.model)}"><td class="n">${i + 1}</td><td class="model"><span>${esc(m.model)}</span><i style="width:min(100%, ${(((cost ? m.cost : m.tokens) / top) * 192).toFixed(1)}px)"></i></td>
@@ -505,10 +498,22 @@ function spendHtml(s) {
       <div><dt>Processed tokens</dt><dd>${tokensText(s.tokens)}</dd></div><div><dt>Cached input</dt><dd>${tokensText(s.cached)}</dd></div>
       <div><dt>Uncached input</dt><dd>${tokensText(s.input)}</dd></div><div><dt>Output</dt><dd>${tokensText(s.output)}</dd></div>
       <div><dt>Cache savings</dt><dd>${usd(s.savings)}</dd></div></dl></section>
-    ${s.tokens > 0 ? shares(cost ? "Cost by type" : "Tokens by type", byType) : ""}
+    ${s.tokens > 0 ? shares(cost ? "Cost by type" : "Tokens by type", cost ? costByType(s) : tokensByType(s)) : ""}
     ${cost && s.premium > 0 ? shares("Cost by speed", [["Standard", s.cost - s.premium, 34], ["Fast", s.premium, 66]]) : ""}
     <section class="breakdown"><div class="breakdown-head"><h2>Breakdown</h2>${segmented("breakdown", [["model", "Model"], ["day", days === 1 ? "Hour" : "Day"]], usageState.breakdown)}</div>
       ${s.rows.length ? table : `<p class="muted empty">No activity in this window.</p>`}</section>`;
+}
+
+const costByType = (s) => [["Input", s.byType.input, 60], ["Cache read", s.byType.cache_read, 30], ["Cache write", s.byType.cache_write, 72], ["Output", s.byType.output, 100]];
+const tokensByType = (s) => [["Input", s.input, 60], ["Cache read", s.cached, 30], ["Cache write", s.cacheWrite, 72], ["Output", s.output, 100]];
+/** T3 Code's share bar: segments in proportion, each a mix of the text color into the background. */
+function sharesHtml(title, parts, fmt) {
+  const sum = parts.reduce((a, [, v]) => a + v, 0);
+  if (!sum) return "";
+  const ink = (mix) => `color-mix(in srgb, var(--g-fg) ${mix}%, var(--g-bg))`;
+  return `<section class="share"><h2>${title}</h2><div class="share-bar">${parts.filter(([, v]) => v > 0).map(([label, v, mix]) =>
+    `<span style="flex-grow:${v};background:${ink(mix)}" title="${label} · ${fmt(v)} · ${percentText(v / sum)}"></span>`).join("")}</div>
+    <div class="legend">${parts.map(([label, v, mix]) => `<span><i style="background:${ink(mix)}"></i>${label}<b>${fmt(v)}</b></span>`).join("")}</div></section>`;
 }
 
 const usageSkeleton = () => `<section class="overview"><div class="lead"><i class="ghost" style="width:144px;height:40px"></i><i class="ghost" style="width:128px;height:16px"></i></div>
@@ -580,10 +585,9 @@ function niceTicks(max) {
   const step = [1, 2, 5, 10].map((m) => m * pow).find((s) => s >= raw);
   return [0, step, step * 2, step * 3];
 }
-function drawChart(s) {
-  const holder = pageView.querySelector(".chart");
+function drawChart(holder, s, metric) {
   if (!holder) return;
-  const cost = usageState.metric === "cost";
+  const cost = metric === "cost";
   const values = s.series.map((p) => (cost ? p.cost : p.tokens));
   const ticks = niceTicks(Math.max(...values));
   const top = ticks.at(-1);
@@ -639,15 +643,24 @@ pageView.addEventListener("click", (e) => {
     return setUsage({ [name]: name === "days" ? Number(seg.dataset.value) : seg.dataset.value });
   }
   if (e.target.closest(".refresh")) return fetchUsage();
+  if (e.target.closest(".machine-filter")) {
+    const only = (m) => ({ label: machineName(m), checked: usageState.machine === m, run: () => setUsage({ machine: m }) });
+    return openSideMenu([
+      ...(machines.size > 1 ? [{ label: "All machines", checked: !usageState.machine, run: () => setUsage({ machine: "" }) }] : []),
+      ...[...machines.keys()].map(only),
+      { label: "Model prices", icon: "sliders-horizontal", sep: true, run: () => openPrices() },
+    ], e.target.closest("button"));
+  }
+  const model = e.target.closest("tr[data-model]");
+  if (model) openModel(model.dataset.model);
 });
 pageView.addEventListener("change", (e) => {
   if (shellPage() !== "usage") return;
-  if (e.target.matches(".machine-filter")) return setUsage({ machine: e.target.value });
   const seg = e.target.closest("select.seg-select");
   if (seg) setUsage({ [seg.dataset.seg]: seg.dataset.seg === "days" ? Number(seg.value) : seg.value });
 });
 window.addEventListener("keydown", (e) => {
-  if (shellPage() !== "usage" || e.repeat || e.metaKey || e.ctrlKey || e.altKey || !paletteEl.hidden || e.target.closest?.("input, textarea, select, [contenteditable]")) return;
+  if (shellPage() !== "usage" || e.repeat || e.metaKey || e.ctrlKey || e.altKey || !paletteEl.hidden || !shellDialog.hidden || e.target.closest?.("input, textarea, select, [contenteditable]")) return;
   const metric = USAGE_METRICS.find(([, , key]) => key === e.key)?.[0];
   if (metric) setUsage({ metric });
 });
@@ -656,6 +669,103 @@ onGuiKey(["1", "!", "2", "@", "3", "#", "4", "$"], (e) => {
   const i = ["1!", "2@", "3#", "4$"].findIndex((k) => k.includes(e.key));
   setUsage({ days: USAGE_PERIODS[i][0] });
 }, { shift: true, when: () => shellPage() === "usage" });
+
+/** A model's own numbers, as T3 Code's model dialog shows them, and the prices the user sets per model,
+ * which the machines apply in place of LiteLLM's list. */
+let usagePrices = {};
+try {
+  usagePrices = JSON.parse(load("gui-usage-prices")) ?? {};
+} catch {}
+const PRICE_FIELDS = [
+  ["input", "Input"],
+  ["output", "Output"],
+  ["cache_read", "Cache read"],
+  ["cache_write", "Cache write"],
+];
+
+const shellDialog = document.createElement("div");
+shellDialog.id = "shell-dialog";
+shellDialog.hidden = true;
+document.body.append(shellDialog);
+const dialogOpen = () => !shellDialog.hidden;
+function showDialog(html) {
+  shellDialog.innerHTML = `<div class="backdrop"></div><div class="popup" role="dialog" aria-modal="true">${html}<button type="button" class="icon close" title="Close" aria-label="Close">${icon("x")}</button></div>`;
+  shellDialog.hidden = false;
+  shellDialog.querySelector(".backdrop").onclick = shellDialog.querySelector(".close").onclick = closeDialog;
+}
+function closeDialog() {
+  shellDialog.hidden = true;
+  shellDialog.replaceChildren();
+}
+window.addEventListener("keydown", (e) => {
+  if (!dialogOpen() || e.key !== "Escape") return;
+  e.preventDefault();
+  e.stopPropagation();
+  closeDialog();
+}, true);
+
+function openModel(model) {
+  const metric = usageState.metric === "limits" ? "cost" : usageState.metric;
+  const all = summarize();
+  const s = summarize(model);
+  const priced = s.unpriced < s.rows.length;
+  const pricedTokens = s.tokens - s.unpricedTokens;
+  const inputs = s.input + s.cached + s.cacheWrite;
+  const stats = [
+    ["Cost", priced ? usd(s.cost) : "Unpriced"],
+    ["Tokens", tokensText(s.tokens)],
+    priced && pricedTokens > 0 && ["Per 1M tokens", usd((s.cost / pricedTokens) * 1e6)],
+    inputs > 0 && ["Cache hit", percentText(s.cached / inputs)],
+  ].filter(Boolean);
+  showDialog(`<div class="dialog-head"><h2>${icon("claude")}<span>${esc(model)}</span></h2><p class="muted">Claude Code${priced && all.cost ? ` · ${percentText(s.cost / all.cost)} of cost` : ""}</p></div>
+    <div class="dialog-body usage"><dl class="stats">${stats.map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join("")}</dl>
+      <div class="chart"></div>
+      <div class="dialog-shares">${priced ? sharesHtml("Cost by type", costByType(s), usd) : ""}${sharesHtml("Tokens by type", tokensByType(s), tokensText)}${
+        s.premium > 0 ? sharesHtml("Cost by speed", [["Standard", s.cost - s.premium, 34], ["Fast", s.premium, 66]], usd) : ""}</div></div>
+    ${s.unpricedTokens > 0 ? `<div class="dialog-foot"><span class="muted">${tokensText(s.unpricedTokens)} tokens have no known price</span><button type="button" class="primary" data-set-price>Set price</button></div>` : ""}`);
+  shellDialog.dataset.kind = "model";
+  drawChart(shellDialog.querySelector(".chart"), s, priced ? metric : "tokens");
+  shellDialog.querySelector("[data-set-price]")?.addEventListener("click", () => openPrices(model));
+}
+
+function openPrices(initial) {
+  const models = [...new Set([...Object.keys(usagePrices), ...(initial ? [initial] : [])])];
+  const cell = (model, key) => `<input type="number" min="0" step="any" inputmode="decimal" data-field="${key}" aria-label="${PRICE_FIELDS.find(([k]) => k === key)[1]} price for ${esc(model || "new model")}" value="${usagePrices[model]?.[key] ?? ""}" placeholder="${key.startsWith("cache") ? "Input's" : ""}">`;
+  const row = (model) => `<tr><td><input type="text" data-field="model" aria-label="Model ID" placeholder="Model ID" value="${esc(model)}" spellcheck="false"></td>${PRICE_FIELDS.map(([k]) => `<td>${cell(model, k)}</td>`).join("")}
+    <td><button type="button" class="icon" data-remove title="Remove">${icon("x")}</button></td></tr>`;
+  showDialog(`<div class="dialog-head"><h2><span>Custom model prices</span></h2><p class="muted">Prices are in USD per million tokens and apply to all past and future usage, on every machine this browser reads.</p></div>
+    <div class="dialog-body"><div class="table-scroll"><table class="prices" aria-label="Custom model prices"><thead><tr><th>Model</th>${PRICE_FIELDS.map(([, l]) => `<th>${l}</th>`).join("")}
+      <th><button type="button" class="icon" data-add title="Add model price" aria-label="Add model price">${icon("plus")}</button></th></tr></thead><tbody>${models.map(row).join("")}</tbody></table></div>
+      <p class="error" hidden></p></div>
+    <div class="dialog-foot"><span class="spacer"></span><button type="button" class="outline" data-cancel>Cancel</button><button type="button" class="primary" data-save>Save prices</button></div>`);
+  shellDialog.dataset.kind = "prices";
+  const body = shellDialog.querySelector("tbody");
+  if (!models.length) body.insertAdjacentHTML("beforeend", row(""));
+  shellDialog.querySelector("[data-add]").onclick = () => body.insertAdjacentHTML("beforeend", row(""));
+  body.onclick = (e) => e.target.closest("[data-remove]")?.closest("tr").remove();
+  shellDialog.querySelector("[data-cancel]").onclick = closeDialog;
+  shellDialog.querySelector("[data-save]").onclick = () => {
+    const next = {};
+    const error = shellDialog.querySelector(".error");
+    for (const tr of body.querySelectorAll("tr")) {
+      const value = (f) => tr.querySelector(`[data-field="${f}"]`).value.trim();
+      const model = value("model");
+      if (!model && PRICE_FIELDS.every(([k]) => !value(k))) continue;
+      const [input, output] = [Number(value("input")), Number(value("output"))];
+      if (!model || !value("input") || !value("output") || !(input >= 0) || !(output >= 0)) {
+        error.textContent = `${model || "A new row"} needs a model ID and its input and output prices.`;
+        error.hidden = false;
+        return;
+      }
+      next[model] = { input, output, ...Object.fromEntries(["cache_read", "cache_write"].filter((k) => value(k)).map((k) => [k, Number(value(k))])) };
+    }
+    usagePrices = next;
+    save("gui-usage-prices", Object.keys(next).length ? JSON.stringify(next) : null);
+    closeDialog();
+    fetchUsage();
+  };
+  shellDialog.querySelector(initial ? `tbody tr:last-child [data-field="input"]` : `tbody tr:last-child [data-field="model"]`)?.focus();
+}
 
 SHELL_PAGES.usage = {
   show() {

@@ -368,7 +368,7 @@ impl Machine {
                 repos.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
                 json(pulls::list(&home(), self.launch.path_env.as_deref(), repos, state, involvement, &query)?)
             }
-            Call::TokenUsage { since } => json(usage::read(&thread::projects_dir(&home()), since, &usage::rates(self.rates_file.as_deref()))),
+            Call::TokenUsage { since, prices } => json(usage::read(&thread::projects_dir(&home()), since, &usage::rates(self.rates_file.as_deref()), &prices)),
         }
     }
 

@@ -67,6 +67,25 @@ pub struct ModelRate {
 
 pub type RateTable = HashMap<String, ModelRate>;
 
+/// A price the user set for a model, in USD per million tokens; cache prices left out are input's.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: Option<f64>,
+    #[serde(default)]
+    pub cache_write: Option<f64>,
+}
+
+impl Price {
+    fn rate(&self) -> ModelRate {
+        let m = 1e-6;
+        let standard = Rates { input: self.input * m, output: self.output * m, cache_read: self.cache_read.unwrap_or(self.input) * m, cache_write: self.cache_write.unwrap_or(self.input) * m };
+        ModelRate { standard, fast: None }
+    }
+}
+
 #[derive(Deserialize)]
 struct Line {
     #[serde(rename = "type")]
@@ -102,7 +121,7 @@ struct Tokens {
 /// Every transcript under `projects` with a line at or after `since`, summed per hour, model,
 /// session and speed. Claude Code repeats a message's usage on each of its content blocks and
 /// copies messages into resumed and forked sessions, so a message counts once, by id and request.
-pub fn read(projects: &Path, since: u64, rates: &RateTable) -> Vec<Row> {
+pub fn read(projects: &Path, since: u64, rates: &RateTable, prices: &HashMap<String, Price>) -> Vec<Row> {
     let mut files = vec![];
     walk(projects, since.saturating_sub(MTIME_SLACK), &mut files);
     files.sort();
@@ -135,7 +154,7 @@ pub fn read(projects: &Path, since: u64, rates: &RateTable) -> Vec<Row> {
         .into_iter()
         .map(|((hour, model, session, speed), [input, cached, cache_write, output])| {
             let mut row = Row { hour, model, session, speed, input, cached, cache_write, output, cost: None, premium: 0.0, savings: 0.0 };
-            price(&mut row, rates);
+            price(&mut row, rates, prices);
             row
         })
         .collect();
@@ -160,8 +179,9 @@ fn unix_of(iso: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(iso).ok().and_then(|t| u64::try_from(t.timestamp()).ok())
 }
 
-fn price(row: &mut Row, table: &RateTable) {
-    let Some(rate) = lookup(table, &row.model) else { return };
+/// A price the user set for the model wins over the list's, even for a name the list can't price.
+fn price(row: &mut Row, table: &RateTable, prices: &HashMap<String, Price>) {
+    let Some(rate) = prices.get(row.model.trim()).map(Price::rate).or_else(|| lookup(table, &row.model)) else { return };
     let rates = match row.speed {
         Speed::Fast => rate.fast.unwrap_or(rate.standard),
         Speed::Standard => rate.standard,
@@ -299,7 +319,7 @@ mod tests {
         std::fs::write(project.join("s1/subagents/agent-a.jsonl"), assistant("m6", "r6", "s1", "2026-10-24T10:40:00Z", "claude-opus-5-5", usage.clone())).unwrap();
 
         let since = unix_of("2026-10-24T00:00:00Z").unwrap();
-        let rows = read(dir.path(), since, &table());
+        let rows = read(dir.path(), since, &table(), &HashMap::new());
         let hour = unix_of("2026-10-24T10:00:00Z").unwrap();
         let summary: Vec<_> = rows.iter().map(|r| (r.hour, r.model.as_str(), r.speed, r.input, r.cached, r.cache_write, r.output)).collect();
         assert_eq!(summary.len(), 2);
@@ -322,13 +342,15 @@ mod tests {
         let rates = table();
         let priced = |model: &str, speed| {
             let mut row = Row { hour: 0, model: model.into(), session: 0, speed, input: 1_000_000, cached: 0, cache_write: 0, output: 0, cost: None, premium: 0.0, savings: 0.0 };
-            price(&mut row, &rates);
+            price(&mut row, &rates, &HashMap::from([("opus".to_owned(), Price { input: 2.0, output: 10.0, cache_read: None, cache_write: Some(4.0) })]));
             row
         };
         let fast = priced("claude-opus-5-5[1m]", Speed::Fast);
         assert_eq!(fast.cost.map(|c| c.input), Some(10.0));
         assert_eq!(fast.premium, 5.0);
-        for model in ["opus", "half-priced", "claude-unknown-1"] {
+        let set = priced("opus", Speed::Standard);
+        assert_eq!(set.cost.map(|c| c.input), Some(2.0), "the user's price for a bare family name");
+        for model in ["half-priced", "claude-unknown-1", "sonnet"] {
             assert_eq!(priced(model, Speed::Standard).cost, None, "{model}");
         }
         assert_eq!(lookup(&rates, "claude-haiku-5").map(|r| r.standard.cache_read), Some(1e-6), "an alias, with cache priced as input");
