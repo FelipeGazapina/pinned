@@ -769,3 +769,34 @@ finder.bar.addEventListener("click", (e) => {
   if (e.target.closest("[data-find-close]")) closeFind();
 });
 onGuiKey("f", openFind);
+
+/** Appearance settings: how wide the thread grows, diff colors and code and prompt sizes. */
+const LOOKS = {
+  "chat-width": { label: "Chat width", about: "Set how wide messages and the composer can grow on large screens.", options: [["", "Comfortable"], ["wide", "Wide"], ["full", "Full"]] },
+  "diff-colors": { label: "Diff colors", about: "Choose colors for additions and deletions, including change counts.", options: [["", "Red & green"], ["blue-orange", "Blue & orange"]] },
+  "prompt-size": { label: "Prompt font size", about: "The size of the text you type in the composer.", options: [["", "14px"], ...[12, 13, 15, 16, 18].map((n) => [`${n}px`, `${n}px`])] },
+  "code-size": { label: "Code font size", about: "The size of code in messages, tool output and diffs.", options: [["", "13px"], ...[11, 12, 14, 15, 16].map((n) => [`${n}px`, `${n}px`])] },
+};
+function applyLooks() {
+  const root = document.documentElement;
+  for (const name of Object.keys(LOOKS)) {
+    const value = load(`look-${name}`) ?? "";
+    if (name.endsWith("-size")) root.style.setProperty(`--${name}`, value || null);
+    else if (value) root.dataset[name.replace(/-(\w)/g, (_, c) => c.toUpperCase())] = value;
+    else delete root.dataset[name.replace(/-(\w)/g, (_, c) => c.toUpperCase())];
+  }
+}
+const appearanceHtml = () =>
+  `<h2 class="looks-title">Appearance</h2>${Object.entries(LOOKS)
+    .map(([name, look]) => `<div class="look"><label for="look-${name}">${look.label}</label><p class="meta">${look.about}</p>
+      <select id="look-${name}" data-look="${name}">${look.options.map(([v, l]) => `<option value="${v}"${(load(`look-${name}`) ?? "") === v ? " selected" : ""}>${l}</option>`).join("")}</select></div>`)
+    .join("")}`;
+function bindAppearance() {
+  for (const select of settingsPage.querySelectorAll("[data-look]")) {
+    select.onchange = () => {
+      save(`look-${select.dataset.look}`, select.value);
+      applyLooks();
+    };
+  }
+}
+applyLooks();

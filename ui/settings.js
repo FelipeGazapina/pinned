@@ -46,7 +46,7 @@ const GITHUB_TOKENS = "https://github.com/settings/tokens/new?scopes=repo&descri
 /** Mirrors the backend's `get_settings`. Unsaved connectors carry an empty id. */
 let settings = { linear: null, slack: null, connectors: [], checked: null };
 const PAGES = ["general", "integrations", "projects", "connectors", "account", "machines"];
-let page = PAGES.includes(load("settings-page")) && (TAURI || load("settings-page") !== "general") ? load("settings-page") : "integrations";
+let page = PAGES.includes(load("settings-page")) ? load("settings-page") : "integrations";
 /** Names from the connected Linear workspace and Slack channels, for the connector form's suggestions. */
 let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [] };
 

@@ -781,9 +781,39 @@ async function sweep(profileName) {
     check((await text("#thread-find .count")).startsWith("2/"), `Enter moved to ${await text("#thread-find .count")}`);
     await page.press("#thread-find input", "Escape");
     await waitFor("the bar to close", async () => !(await page.locator("#thread-find").isVisible()));
+    return count;
+  });
+
+  await step("app view: appearance: grain, pressed buttons, chat width, diff colors, code size", async () => {
+    check(/svg/.test(await page.evaluate(() => getComputedStyle(document.getElementById("expanded")).backgroundImage)), "the app view has no grain");
+    const r = await rect("#toggle-panel");
+    await page.mouse.move(r.left + r.width / 2, r.top + r.height / 2);
+    await page.mouse.down();
+    await sleep(200);
+    const pressed = await page.evaluate(() => getComputedStyle(document.getElementById("toggle-panel")).scale);
+    await page.mouse.move(0, 0);
+    await page.mouse.up();
+    check(pressed === "0.97", `a pressed button scales to ${pressed}`);
+    await page.evaluate(() => toggleSettings());
+    await tapOrClick('#settings-nav [data-page="general"]');
+    await page.selectOption("#look-chat-width", "wide");
+    await page.selectOption("#look-diff-colors", "blue-orange");
+    await page.selectOption("#look-code-size", "16px");
+    const looks = await page.evaluate(() => [
+      getComputedStyle(document.documentElement).getPropertyValue("--lane").trim(),
+      getComputedStyle(document.querySelector("#thread .changes .add")).color,
+      getComputedStyle(document.querySelector("#thread .md pre code")).fontSize,
+    ]);
+    check(looks.join("|") === "1152px|rgb(81, 162, 255)|16px", `looks: ${looks.join(" | ")}`);
+    await page.selectOption("#look-chat-width", "full");
+    check((await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--lane").trim())) === "100%", "Full doesn't widen the lane");
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    for (const name of ["chat-width", "diff-colors", "code-size"]) await page.selectOption(`#look-${name}`, "");
+    await page.evaluate(() => toggleSettings());
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
     await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
-    return count;
+    return looks.join(" | ");
   });
 
   await step("app view: a prompt from the composer reaches the same session", async () => {
