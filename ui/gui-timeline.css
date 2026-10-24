@@ -187,6 +187,8 @@ button.xs.copied { color: var(--g-success); }
 .changes li .indent { width: 14px; flex: none; }
 .changes .count, .changes .open-diff { white-space: nowrap; }
 @media (max-width: 600px) { .changes .open-diff span { display: none; } }
+svg.pierre { color-scheme: dark; }
+#pierre-sprite { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
 .changes li .file-icon { width: 14px; height: 14px; color: rgb(129 129 129 / 0.75); flex: none; }
 .changes li .chev { width: 14px; height: 14px; color: rgb(129 129 129 / 0.7); transition: transform 0.12s; flex: none; }
 .changes li.dir[aria-expanded="true"] .chev { transform: rotate(90deg); }

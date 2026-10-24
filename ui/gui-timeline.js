@@ -185,7 +185,7 @@ const MENTION = {
     const m = /^@((?:[\w.~-]+\/)*[\w.-]*[\w/])/.exec(src);
     if (m && /[/.]/.test(m[1])) return { type: "mention", raw: m[0], path: m[1] };
   },
-  renderer: ({ path }) => `<span class="mention" title="${esc(path)}">${icon(path.endsWith("/") ? "folder" : "file")}${esc(path.replace(/\/$/, "").split("/").pop() || path)}</span>`,
+  renderer: ({ path }) => `<span class="mention" title="${esc(path)}">${path.endsWith("/") ? icon("folder") : fileIconHtml(path)}${esc(path.replace(/\/$/, "").split("/").pop() || path)}</span>`,
 };
 const promptMarked = new marked.Marked({ gfm: true, breaks: true, renderer: RENDERER }, { extensions: [MENTION] });
 
@@ -422,6 +422,16 @@ function fileTree(files) {
   return nodes(root);
 }
 
+/** A path's file-type icon from T3 Code's Pierre set, its sprite added to the page on first use. */
+function fileIconHtml(path, cls = "") {
+  const icons = window.PIERRE_ICONS;
+  if (!icons) return icon("file", cls);
+  if (!document.getElementById("pierre-sprite")) document.body.insertAdjacentHTML("afterbegin", `<div id="pierre-sprite" aria-hidden="true">${icons.sprite}</div>`);
+  const { name, token } = icons.resolve(path);
+  const color = (icons.colors[token ?? "default"] ?? icons.colors.default)[1];
+  return `<svg class="i pierre ${cls}" viewBox="0 0 16 16" style="color: ${color}" aria-hidden="true"><use href="#${esc(name)}"/></svg>`;
+}
+
 const stat = (added, removed) => `<span class="add">+${compact(Number(added))}</span><span class="del">−${compact(Number(removed))}</span>`;
 
 function changesHtml(change, open) {
@@ -435,7 +445,7 @@ function changesHtml(change, open) {
     for (const node of nodes) {
       const pad = `style="padding-left:${8 + depth * 14}px"`;
       if (!node.children) {
-        rows.push(`<li data-ended="${change.ended}" data-file="${esc(node.path)}" title="${esc(node.path)}" ${pad}>${hasDirs || depth ? `<span class="indent"></span>` : ""}${icon("file", "file-icon")}<span class="path">${middle(node.name, 18)}</span>${stat(node.added, node.removed)}</li>`);
+        rows.push(`<li data-ended="${change.ended}" data-file="${esc(node.path)}" title="${esc(node.path)}" ${pad}>${hasDirs || depth ? `<span class="indent"></span>` : ""}${fileIconHtml(node.path, "file-icon")}<span class="path">${middle(node.name, 18)}</span>${stat(node.added, node.removed)}</li>`);
         continue;
       }
       const isOpen = open.has(`dir:${change.ended}:${node.path}`) ? !allOpen : allOpen;

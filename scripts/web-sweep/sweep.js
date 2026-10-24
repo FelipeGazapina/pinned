@@ -973,6 +973,20 @@ async function sweep(profileName) {
     }
   });
 
+  await step("app view: changed files and mentions carry T3 Code's file-type icons", async () => {
+    await sendPrompt("icons");
+    await answered("Wrote two files.");
+    await waitFor("the changed-files card", async () => (await page.locator("#thread .turn:last-of-type .changes").count()) > 0, 10000);
+    const card = lastTurn(".changes");
+    await press(card.locator("summary .show"));
+    await waitFor("the tree", async () => (await card.locator("li[data-file]").count()) === 2);
+    const icons = await card.locator("li[data-file]").evaluateAll((rows) => rows.map((r) => `${r.dataset.file}=${r.querySelector("svg.pierre use")?.getAttribute("href")}`));
+    check(icons.join(" ") === "web/app.ts=#file-tree-builtin-typescript Cargo.toml=#t3-file-icon-toml", `icons: ${icons.join(" ")}`);
+    const drawn = await card.locator('li[data-file="web/app.ts"] svg.pierre').evaluate((el) => [getComputedStyle(el).color, Math.round(el.getBoundingClientRect().width)]);
+    check(drawn.join("|") === "rgb(105, 177, 255)|14", `the TypeScript icon draws as ${drawn.join(" ")}`);
+    check(await page.evaluate(() => markdown("@web/app.ts", promptMarked).includes("#file-tree-builtin-typescript")), "a mention chip has no file-type icon");
+  });
+
   await step("app view: back on alpha after the timeline's own threads", async () => {
     await toThread("alpha");
   });

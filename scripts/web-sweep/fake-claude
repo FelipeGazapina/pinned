@@ -166,6 +166,11 @@ function submit() {
   } else if (line === "table") {
     const note = "a long note that keeps going ".repeat(30).trim();
     wrote([{ type: "text", text: `| Name | Notes |\n|---|---|\n| alpha | ${note} |\n| beta | short |\n\n\`\`\`bash\necho ran-from-thread\n\`\`\`\n\nOpen [the app](http://localhost:3000/) or [the docs](https://example.com/docs).` }]);
+  } else if (line === "icons") {
+    fs.mkdirSync("web", { recursive: true });
+    fs.writeFileSync("web/app.ts", "export const app = 1;\n");
+    fs.writeFileSync("Cargo.toml", "[package]\nname = \"beta\"\n");
+    wrote([{ type: "text", text: "Wrote two files." }]);
   } else if (line === "notice") {
     said("<local-command-stdout>Set model to Haiku 5.5\nfor this session</local-command-stdout>");
   } else if (line === "limit") {
