@@ -24,7 +24,11 @@ html[data-diff-colors="blue-orange"] .dl.add .no, html[data-diff-colors="blue-or
 html[data-diff-colors="blue-orange"] .dl.del, html[data-diff-colors="blue-orange"] .dl.split .code.del { background: #1c1209; }
 html[data-diff-colors="blue-orange"] .dl.del .no, html[data-diff-colors="blue-orange"] .dl.split .no.del { background: #22150a; }
 .md pre code, .tool pre, .diff { font-size: var(--code-size, 13px); }
-#prompt { font-size: var(--prompt-size, 14px); }
+#prompt { font-size: var(--prompt-size, 14px); font-family: var(--prompt-font, var(--g-sans)); }
+body { font-family: var(--g-sans); }
+html[data-smoothing="true"] body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+/* The interface size scales the app view as T3 Code's root font size scales its rems; the drawer's terminal keeps its own size. */
+html[data-zoom] body[data-mode="gui"] :is(#sidebar, #chat, #panel), html[data-zoom] #settings { zoom: var(--ui-zoom); }
 
 /* A closed panel's content would spill past its empty column, and scrolling something into view would then shift the whole view. */
 body[data-mode="gui"][data-panel="closed"] #panel { overflow: hidden; border-width: 0; }
@@ -207,7 +211,7 @@ button.xs.copied { color: var(--g-success); }
   gap: 2px; height: 36px; padding: 0 4px 0 10px; border-radius: 12px; background: rgb(17 17 17 / 0.92); backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px); border: 1px solid var(--g-border); box-shadow: 0 12px 28px -12px #000; }
 #thread-find[hidden] { display: none; }
-#thread-find input { flex: 1; min-width: 0; background: none; border: 0; outline: none; color: var(--g-fg); font: 13px -apple-system, system-ui, sans-serif; }
+#thread-find input { flex: 1; min-width: 0; background: none; border: 0; outline: none; color: var(--g-fg); font: 13px var(--g-sans); }
 #thread-find input::-webkit-search-cancel-button { display: none; }
 #thread-find .count { min-width: 40px; text-align: center; font-size: 12px; color: var(--g-muted); font-variant-numeric: tabular-nums; }
 #thread-find .count.none { color: var(--g-error); }
@@ -223,6 +227,14 @@ button.xs.copied { color: var(--g-success); }
 #settings-page .look { margin: 14px 0; max-width: 420px; }
 #settings-page .look label { display: block; font-weight: 500; }
 #settings-page .look .meta { margin: 2px 0 6px; color: var(--muted); font-size: 12px; }
+#settings-page .looks-head { display: flex; align-items: center; justify-content: space-between; max-width: 420px; margin-top: 22px; }
+#settings-page .looks-head h3 { margin: 0; font-size: 13px; }
+#settings-page .looks-head .advanced { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
+#settings-page .look .pair { display: flex; gap: 8px; }
+#settings-page .look .pair input { flex: 1; min-width: 0; }
+#settings-page .look .pair select { width: 88px; flex: none; }
+#settings-page .switch-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+#settings-page .switch-row .switch { margin-top: 2px; }
 
 @media (pointer: coarse) {
   #thread button.xs, #thread-find button.xs { min-width: 40px; min-height: 40px; }

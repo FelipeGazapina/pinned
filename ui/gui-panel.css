@@ -77,7 +77,7 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 .diff[data-comments] .dl .no[data-line]:hover { color: var(--g-fg); box-shadow: inset -2px 0 var(--g-primary); }
 .dcomment { position: sticky; left: 0; box-sizing: border-box; width: min(100%, calc(var(--panel-width) - 2px)); display: flex; align-items: flex-start; gap: 8px;
   margin: 4px 0; padding: 8px 10px; border-inline-start: 2px solid rgb(52 107 241 / 0.55); background: rgb(52 107 241 / 0.045);
-  font: 13px/1.45 -apple-system, system-ui, sans-serif; color: var(--g-text); }
+  font: 13px/1.45 var(--g-sans); color: var(--g-text); }
 .dcomment > .i { width: 14px; height: 14px; margin-top: 2px; color: var(--g-info); }
 .dcomment p { flex: 1; min-width: 0; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dcomment .icon { width: 24px !important; height: 24px !important; opacity: 0; }
@@ -85,7 +85,7 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 .dcomment .icon .i { width: 14px; height: 14px; }
 .dcomment.draft { flex-direction: column; align-items: stretch; }
 .dcomment textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 64px; padding: 8px; border-radius: 8px; border: 1px solid var(--g-input);
-  background: rgb(0 0 0 / 0.3); color: var(--g-fg); font: 13px/1.45 -apple-system, system-ui, sans-serif; outline: none; }
+  background: rgb(0 0 0 / 0.3); color: var(--g-fg); font: 13px/1.45 var(--g-sans); outline: none; }
 .dcomment textarea:focus { box-shadow: 0 0 0 1px rgb(52 107 241 / 0.5); }
 .dcomment .row { display: flex; align-items: center; gap: 6px; }
 .dcomment .hint { font-size: 10px; color: var(--g-muted); }
@@ -103,7 +103,7 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 .diff-split { display: flex; align-items: flex-start; }
 .diff-split > .diff { flex: 1; min-width: 0; }
 .file-tree { position: sticky; top: 40px; flex: none; width: min(16rem, 40%); min-width: 160px; max-height: calc(100dvh - var(--topbar) - 40px); overflow: auto;
-  box-sizing: border-box; border-left: 1px solid rgb(255 255 255 / 0.036); padding: 0 4px 16px; font: 12px -apple-system, system-ui, sans-serif; scrollbar-width: thin; }
+  box-sizing: border-box; border-left: 1px solid rgb(255 255 255 / 0.036); padding: 0 4px 16px; font: 12px var(--g-sans); scrollbar-width: thin; }
 .file-tree header { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 6px; font-weight: 500; }
 .file-tree button { display: flex; align-items: center; gap: 4px; width: 100%; height: 24px; padding: 0 6px 0 calc(8px + var(--depth) * 14px); border-radius: 6px;
   color: var(--g-text); text-align: left; white-space: nowrap; }
@@ -127,7 +127,7 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 .device-bar { flex: none; display: flex; align-items: center; gap: 6px; height: 36px; padding: 0 8px; border-bottom: 1px solid rgb(255 255 255 / 0.036);
   overflow-x: auto; scrollbar-width: none; font-size: 12px; }
 .device-bar .scope { position: relative; display: flex; align-items: center; height: 24px; border-radius: 8px; background: var(--g-input); flex: none; }
-.device-bar .scope select { appearance: none; border: 0; background: none; color: var(--g-fg); font: 12px -apple-system, system-ui, sans-serif; padding: 0 24px 0 9px; height: 24px; outline: none; }
+.device-bar .scope select { appearance: none; border: 0; background: none; color: var(--g-fg); font: 12px var(--g-sans); padding: 0 24px 0 9px; height: 24px; outline: none; }
 .device-bar .scope select option { background: #111; }
 .device-bar .scope .i { position: absolute; right: 6px; width: 14px; height: 14px; opacity: 0.7; pointer-events: none; }
 .device-bar input { width: 56px; height: 24px; border: 0; border-radius: 6px; padding: 0 6px; background: rgb(255 255 255 / 0.04); color: var(--g-fg);

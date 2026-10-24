@@ -391,6 +391,7 @@ function addTab(machine, view) {
   const term = new Terminal({
     fontFamily: "ui-monospace, Menlo, monospace",
     fontSize: 12,
+    ...(typeof terminalLook === "function" ? terminalLook() : {}),
     cursorBlink: true,
     allowTransparency: true,
     theme: { background: "#00000000" },

@@ -914,6 +914,65 @@ async function sweep(profileName) {
     check((await page.locator("#thread .codeblock .lang", { hasText: "rust" }).count()) === 0 || (await page.locator("#thread .codeblock:has(.lang:text-is('rust')) [data-run-code]").count()) === 0, "a Rust block offers to run");
   });
 
+  await step("app view: typography sets the interface, prompt, code and terminal fonts, and the lane keeps 48px gutters down to 640px", async () => {
+    await page.evaluate(() => toggleSettings());
+    await tapOrClick('#settings-nav [data-page="general"]');
+    const resetTypography = () =>
+      page.evaluate(() => {
+        for (const name of ["ui-size", "prompt-size", "terminal-size", "sans-font", "mono-font", "advanced", "smoothing", "word-wrap"]) save(`look-${name}`, "");
+        applyLooks();
+        if (settingsOpen()) toggleSettings();
+      });
+    try {
+      check((await page.locator("#look-terminal-size").count()) === 0, "the terminal row shows without Advanced");
+      check((await text('label[for="look-mono-font"]')) === "Monospace font", `the simple code row reads ${await text('label[for="look-mono-font"]')}`);
+      await page.selectOption("#look-ui-size", "18px");
+      const zoom = await page.evaluate(() => getComputedStyle(document.getElementById("chat")).zoom);
+      check(zoom === "1.125", `the interface zooms ${zoom}`);
+      await page.fill("#look-sans-font", "Georgia");
+      await page.press("#look-sans-font", "Enter");
+      await page.fill("#look-mono-font", "Courier New");
+      await page.press("#look-mono-font", "Enter");
+      const fonts = await page.evaluate(() => [getComputedStyle(document.body).fontFamily, getComputedStyle(document.querySelector("#thread .md pre code")).fontFamily, active.term.options.fontFamily, active.term.options.fontSize].map((f) => String(f).split(",")[0].replaceAll('"', "")));
+      check(fonts.join("|") === "Georgia|Courier New|Courier New|12", `fonts: ${fonts.join(" | ")}`);
+      await page.locator("#look-advanced").setChecked(true);
+      await waitFor("the advanced rows", () => page.locator("#look-terminal-size").isVisible());
+      await page.selectOption("#look-terminal-size", "15px");
+      await page.selectOption("#look-prompt-size", "18px");
+      const sizes = await page.evaluate(() => [active.term.options.fontSize, getComputedStyle(prompt).fontSize, active.term.options.fontFamily.split(",")[0]]);
+      check(sizes.join("|") === "15|18px|ui-monospace", `advanced sizes: ${sizes.join(" | ")}`);
+      if (await page.evaluate(() => IS_MAC)) {
+        check((await page.evaluate(() => getComputedStyle(document.body).webkitFontSmoothing)) === "antialiased" || engine !== "chromium", "text isn't antialiased by default");
+        await page.locator("#look-smoothing").setChecked(false);
+        check((await page.evaluate(() => document.documentElement.dataset.smoothing)) === "false", "smoothing didn't turn off");
+        await page.locator("#look-smoothing").setChecked(true);
+      }
+      await page.locator("#look-word-wrap").setChecked(false);
+      check((await page.evaluate(() => document.querySelector("#thread .codeblock:has([data-run-code])")?.dataset.wrap)) === "false", "Word wrap off still wraps code");
+      await page.locator("#look-word-wrap").setChecked(true);
+      for (const id of ["#look-terminal-size", "#look-prompt-size", "#look-ui-size"]) await page.selectOption(id, "");
+      for (const id of ["#look-sans-font", "#look-mono-font"]) {
+        await page.fill(id, "");
+        await page.press(id, "Enter");
+      }
+      await page.locator("#look-advanced").setChecked(false);
+      const reset = await page.evaluate(() => [getComputedStyle(document.getElementById("chat")).zoom, active.term.options.fontSize, getComputedStyle(document.body).fontFamily.split(",")[0]]);
+      check(reset.join("|") === "1|12|-apple-system", `after a reset: ${reset.join(" | ")}`);
+    } finally {
+      await resetTypography();
+    }
+    if (!touch) {
+      const gutter = async (width) => {
+        await page.setViewportSize({ width, height: 800 });
+        await sleep(150);
+        return page.evaluate(() => getComputedStyle(threadView).paddingLeft);
+      };
+      const gutters = [await gutter(700), await gutter(600)];
+      await page.setViewportSize(profile.viewport);
+      check(gutters.join("|") === "48px|12px", `gutters at 700 and 600px: ${gutters.join(" | ")}`);
+    }
+  });
+
   await step("app view: back on alpha after the timeline's own threads", async () => {
     await toThread("alpha");
   });
