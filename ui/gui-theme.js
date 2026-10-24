@@ -47,6 +47,49 @@ function readThemeJson(key) {
 }
 let customThemes = (readThemeJson(CUSTOM_THEMES_KEY) ?? []).filter((t) => t && typeof t.id === "string" && typeof t.label === "string" && t.colors && ["light", "dark"].includes(t.appearance));
 const saveCustomThemes = () => save(CUSTOM_THEMES_KEY, JSON.stringify(customThemes));
+function installCustomTheme(theme) {
+  if (RESERVED_THEME_IDS.has(theme.id) || customThemes.some((t) => t.id === theme.id)) throw new Error(`A theme named "${theme.label}" is already installed.`);
+  customThemes = [...customThemes, theme];
+  saveCustomThemes();
+  applyTheme();
+  return theme;
+}
+function updateCustomTheme(theme) {
+  if (!customThemes.some((t) => t.id === theme.id)) throw new Error(`The theme "${theme.label}" is not installed.`);
+  customThemes = customThemes.map((t) => (t.id === theme.id ? theme : t));
+  saveCustomThemes();
+  applyTheme();
+  return theme;
+}
+/** An Open VSX install or update: the collection's themes replace the ones installed, in place. */
+function replaceThemeCollection(collectionId, themes, expected) {
+  const inCollection = (t) => t.collection?.id === collectionId;
+  if (JSON.stringify(customThemes.filter(inCollection)) !== JSON.stringify(expected)) throw new Error("Your installed themes changed while this package was downloading. Try again.");
+  const taken = themes.find((t) => RESERVED_THEME_IDS.has(t.id) || customThemes.some((c) => c.id === t.id && !inCollection(c)));
+  if (taken) throw new Error(`A theme named "${taken.label}" is already installed.`);
+  const at = customThemes.findIndex(inCollection);
+  const rest = customThemes.filter((t) => !inCollection(t));
+  customThemes = at < 0 ? [...rest, ...themes] : [...rest.slice(0, at), ...themes, ...rest.slice(at)];
+  saveCustomThemes();
+  applyTheme();
+  return themes;
+}
+/** The toast T3 shows after an import: one theme by name, or how many, then their names. */
+function themesImported(themes, updated) {
+  const verb = updated ? "updated" : "added";
+  flash(`${themes.length === 1 ? `${themes[0].label} ${verb}` : `${themes.length} themes ${verb}`} · ${themes.map((t) => t.label).join(", ")}`);
+}
+/** A pasted or single file theme is put to use: its one appearance, or the whole theme. */
+function useImportedTheme(theme) {
+  const modes = modesOf(theme);
+  if (modes.length === 1) {
+    setThemeHalf(modes[0], theme.id);
+    flash(`${theme.label} added · It’s now your ${modes[0]} theme.`);
+  } else {
+    setTheme(theme.id);
+    flash(`${theme.label} added · It’s now active.`);
+  }
+}
 const themeById = (id) => (id ? THEME_PALETTES.builtIn.find((t) => t.id === id) ?? customThemes.find((t) => t.id === id) ?? null : null);
 
 /** The stored choice, as T3 keeps it: a base theme ("system", "light", "dark" or a palette id), the
@@ -310,7 +353,7 @@ function renderThemeSection() {
     const aria = { system: "Follow the system appearance", light: "Use light mode", dark: "Use dark mode" }[mode];
     return `<button type="button" class="mode-tile${s.mode === mode ? " on" : ""}" data-theme-mode="${mode}" aria-pressed="${s.mode === mode}" aria-label="${aria}"><span class="wireframe">${frame}</span><span class="label">${label}</span></button>`;
   }).join("");
-  const cards = themeCards().map((card) => {
+  const cardHtml = (card) => {
     const tip = card.previews.length === 1 ? `Use for ${card.previews[0].mode} mode only` : "Use for both light and dark";
     const circles = card.previews.map((p) => {
       const picked = owners[p.mode] === card.id;
@@ -321,13 +364,13 @@ function renderThemeSection() {
       <div class="circles">${circles}</div>
       <div class="foot"><button type="button" class="name" data-theme-choose="${esc(card.id ?? "")}">${esc(card.label)}</button>
         ${action("duplicate", "copy", "Duplicate theme", "Duplicate")}${card.custom ? action("edit", "pencil", "Edit theme", "Edit") + action("export", "upload", "Export theme file", "Export") + action("remove", "trash-2", "Remove theme", "Remove") : ""}</div></div>`;
-  }).join("");
+  };
+  const cards = themeGroups().map((g) => (g.length > 1 ? collectionCardHtml(g, owners) : cardHtml(g[0]))).join("");
   section.innerHTML = `<h3 class="theme-head">Color scheme</h3>
     <div class="mode-tiles" role="group" aria-label="Appearance mode">${tiles}</div>
     <div class="themes-head"><h3>Themes</h3><span class="actions">
       <button type="button" class="outline" data-theme-action="create">${icon("paintbrush")}Create theme</button>
-      <button type="button" class="outline" data-theme-action="import">${icon("plus")}Add theme</button>
-      <input type="file" accept=".json,application/json" multiple hidden id="theme-file"></span></div>
+      <button type="button" class="outline" data-theme-action="import">${icon("plus")}Add theme</button></span></div>
     <div class="theme-cards">${cards}</div>`;
 }
 
@@ -335,13 +378,21 @@ document.addEventListener("click", (e) => {
   const section = e.target.closest?.("#theme-section");
   if (!section) return;
   const card = (id) => themeCards().find((c) => (c.id ?? "") === id);
+  const variant = e.target.closest("[data-theme-variant]");
+  const collection = e.target.closest(".theme-card.collection")?.dataset.themeCollection;
+  if (variant) {
+    const theme = collectionOf(collection)[Number(variant.dataset.themeVariant)];
+    collectionVariant.set(collection, Number(variant.dataset.themeVariant));
+    return chooseHalf(variant.dataset.themeVariantMode, theme.id);
+  }
+  if (collection && !e.target.closest("[data-theme-action]")) return useCollectionDefaults(collection);
   const el = e.target.closest("[data-theme-mode], [data-theme-half], [data-theme-action], [data-theme-choose], .theme-card");
   if (!el) return;
   if (el.dataset.themeMode) return setAppearanceMode(el.dataset.themeMode);
   if (el.dataset.themeHalf) return chooseHalf(el.dataset.themeHalf, el.dataset.themeCard || null);
   const action = el.dataset.themeAction;
   if (action === "create") return openThemeEditor({ seedId: activeThemeId(resolvedAppearance()) });
-  if (action === "import") return document.getElementById("theme-file").click();
+  if (action === "import") return openThemeImport();
   const target = card(el.dataset.themeCard ?? el.dataset.themeChoose ?? "");
   if (!target) return;
   if (action === "duplicate") return openThemeEditor({ seedId: target.id, seedName: `${target.label} copy` });
@@ -350,23 +401,63 @@ document.addEventListener("click", (e) => {
   if (action === "remove") return confirmRemoveTheme(themeById(target.id));
   chooseCard(target);
 });
-document.addEventListener("change", async (e) => {
-  if (e.target.id !== "theme-file") return;
-  for (const file of e.target.files) {
-    try {
-      const theme = parseThemeFile(JSON.parse(await file.text()));
-      const had = customThemes.some((t) => t.id === theme.id);
-      customThemes = [...customThemes.filter((t) => t.id !== theme.id), theme];
-      saveCustomThemes();
-      if (modesOf(theme).length === 1) setThemeHalf(theme.appearance, theme.id);
-      else setTheme(theme.id);
-      flash(had ? `${theme.label} updated` : `${theme.label} added`);
-    } catch (err) {
-      flash(`Couldn't add ${file.name}: ${err.message}`);
-    }
+/** The library's cards, with an Open VSX extension's themes on one card (T3's customThemeCollections). */
+function themeGroups() {
+  const groups = new Map();
+  for (const card of themeCards()) {
+    const key = card.custom && themeById(card.id).collection ? `collection:${themeById(card.id).collection.id}` : `card:${card.id}`;
+    groups.set(key, [...(groups.get(key) ?? []), card]);
   }
-  e.target.value = "";
-});
+  return [...groups.values()];
+}
+/** The words every variant's name shares are dropped: "Catppuccin Latte" shows as "Latte". */
+function variantLabels(labels) {
+  const words = labels.map((l) => l.trim().split(/\s+/));
+  const shared = words[0].findIndex((w, i) => words.some((ws) => ws[i]?.toLowerCase() !== w.toLowerCase()));
+  const prefix = shared === -1 ? words[0].length - 1 : shared;
+  return labels.map((l, i) => words[i].slice(Math.max(0, prefix)).join(" ").trim() || l);
+}
+const collectionVariant = new Map();
+/** CustomThemeCollectionCard: per appearance, the variant in use (or the first) as a circle that fans
+ * out the others on hover or focus; the footer acts on the variant last picked. */
+function collectionCardHtml(cards, owners) {
+  const themes = cards.map((c) => themeById(c.id));
+  const cid = themes[0].collection.id;
+  const label = themes[0].collection.label;
+  const names = variantLabels(themes.map((t) => t.label));
+  const active = themes.findIndex((t) => owners.light === t.id || owners.dark === t.id);
+  const index = Math.min(collectionVariant.get(cid) ?? (active < 0 ? 0 : active), themes.length - 1);
+  const current = cards[index];
+  const modes = ["light", "dark"].map((mode) => {
+    const options = cards.flatMap((card, i) => card.previews.filter((p) => p.mode === mode).map((preview) => ({ i, preview, name: names[i], on: owners[mode] === card.id })));
+    if (!options.length) return "";
+    const sel = options.find((o) => o.on) ?? options[0];
+    const x = mode === "light" ? -52 : 52;
+    const fan = options.length > 1 ? options.map((o, n) => {
+      const t = n / (options.length - 1) - 0.5;
+      return `<button type="button" class="variant-option${o.on ? " picked" : ""}" style="--x:${x}px;--cx:${x + t * 68}px;--cy:${Math.abs(t) * 10}px;--d:${n * 35}ms" data-theme-variant="${o.i}" data-theme-variant-mode="${mode}" aria-label="Use ${esc(o.name)} for ${mode} mode${o.on ? ", currently active" : ""}" aria-pressed="${o.on}" title="Use ${esc(o.name)} for ${mode} mode">${previewCircle(o.preview, "mini")}</button>`;
+    }).join("") : "";
+    const aria = options.length > 1 ? `Choose ${mode} variant, ${options.length} options, currently ${esc(sel.name)}` : `Use ${mode} variant, currently ${esc(sel.name)}`;
+    return `<div class="variant-mode" data-mode="${mode}" style="--x:${x}px">
+      <button type="button" class="pick root${sel.on ? " picked" : ""}" data-theme-variant="${sel.i}" data-theme-variant-mode="${mode}" aria-label="${aria}" aria-pressed="${sel.on}" title="${mode === "light" ? "Light" : "Dark"}: ${esc(sel.name)}">${previewCircle(sel.preview)}${sel.on ? `<span class="badge">${icon(mode === "light" ? "sun" : "moon")}</span>` : ""}</button>
+      <span class="variant-label"><span>${esc(sel.name)}</span>${options.length > 1 ? `<span class="more">+${options.length - 1}</span>` : ""}</span>${fan}</div>`;
+  }).join("");
+  const action = (name, ic, tip, aria) => `<button type="button" class="icon${name === "remove" ? " danger" : ""}" data-theme-action="${name}" data-theme-card="${esc(current.id)}" title="${tip}" aria-label="${aria}">${icon(ic)}</button>`;
+  return `<div class="theme-card collection" data-theme-collection="${esc(cid)}" title="Use the first variants for light and dark">
+    <div class="circles variants" role="group" aria-label="Light and dark theme variants">${modes}</div>
+    <div class="foot"><button type="button" class="name" data-theme-collection-use aria-label="Use ${esc(label)}, ${esc(current.label)} variant">${esc(label)}</button>
+      ${action("duplicate", "copy", "Duplicate theme", `Duplicate ${esc(current.label)}`)}${action("edit", "pencil", "Edit theme", `Edit ${esc(current.label)}`)}${action("export", "upload", "Export theme file", `Export ${esc(current.label)}`)}${action("remove", "trash-2", "Remove themes", `Remove themes from ${esc(label)}`)}</div></div>`;
+}
+const collectionOf = (cid) => customThemes.filter((t) => t.collection?.id === cid);
+function useCollectionDefaults(cid) {
+  const themes = collectionOf(cid);
+  if (themes.length === 1) return chooseCard(themeCards().find((c) => c.id === themes[0].id));
+  const light = themes.find((t) => colorsFor(t, "light"));
+  const dark = themes.find((t) => colorsFor(t, "dark"));
+  collectionVariant.set(cid, 0);
+  if (light) chooseHalf("light", light.id);
+  if (dark) chooseHalf("dark", dark.id);
+}
 
 /** Picking one circle: T3's assignHalf, with its case for the standard theme under a palette base. */
 function chooseHalf(mode, id) {
@@ -382,19 +473,42 @@ function chooseHalf(mode, id) {
 }
 
 function confirmRemoveTheme(theme) {
-  showDialog(`<div class="dialog-head"><h2>Remove “${esc(theme.label)}”?</h2><p class="muted">You can bring it back anytime by importing its JSON file.</p></div>
-    <div class="theme-dialog-actions"><button type="button" class="outline" data-dialog-cancel>Cancel</button><button type="button" class="danger" data-dialog-remove>Remove theme</button></div>`);
+  const collection = theme.collection ? collectionOf(theme.collection.id) : [];
+  if (collection.length < 2) {
+    showDialog(`<div class="dialog-head"><h2>Remove “${esc(theme.label)}”?</h2><p class="muted">You can bring it back anytime by importing its JSON file.</p></div>
+      <div class="theme-dialog-actions"><button type="button" class="outline" data-dialog-cancel>Cancel</button><button type="button" class="danger" data-dialog-remove>Remove theme</button></div>`);
+  } else {
+    showDialog(`<div class="dialog-head"><h2>Remove themes from “${esc(theme.collection.label)}”?</h2><p class="muted">Select the variants you want to remove. You can restore them by importing the extension again.</p></div>
+      <div class="theme-remove-grid">${collection.map((t) => `<label class="theme-remove-option"><input type="checkbox" value="${esc(t.id)}" aria-label="${esc(t.label)}">
+        <span class="previews">${modesOf(t).map((mode) => previewCircle({ mode, colors: colorsFor(t, mode) }, "small")).join("")}</span><span class="label">${esc(t.label)}</span></label>`).join("")}</div>
+      <div class="theme-dialog-actions"><button type="button" class="outline" data-dialog-cancel>Cancel</button><button type="button" class="danger" data-dialog-remove disabled>Remove selected</button></div>`);
+    const remove = shellDialog.querySelector("[data-dialog-remove]");
+    shellDialog.querySelector(".theme-remove-grid").onchange = () => {
+      const n = shellDialog.querySelectorAll(".theme-remove-grid input:checked").length;
+      remove.disabled = !n;
+      remove.textContent = `Remove selected${n ? ` (${n})` : ""}`;
+    };
+  }
   shellDialog.querySelector("[data-dialog-cancel]").onclick = closeDialog;
   shellDialog.querySelector("[data-dialog-remove]").onclick = () => {
+    const ids = collection.length < 2 ? [theme.id] : [...shellDialog.querySelectorAll(".theme-remove-grid input:checked")].map((i) => i.value);
     closeDialog();
-    removeTheme(theme.id);
+    removeThemes(ids);
   };
 }
-function removeTheme(id) {
+/** T3's handleConfirmRemoveTheme: a removed base falls back to the mode, keeping the other halves. */
+function removeThemes(ids) {
+  const removed = new Set(ids);
   const s = themeState();
-  if (s.theme === id) setTheme(s.mode === "system" ? "system" : s.mode);
-  for (const m of ["light", "dark"]) if (themeState().halves[m] === id) setThemeHalf(m, null);
-  customThemes = customThemes.filter((t) => t.id !== id);
+  const halves = readThemeJson(THEME_HALVES_KEY) ?? {};
+  const removesBase = removed.has(s.theme);
+  if (removesBase) setTheme(s.mode === "system" ? "system" : s.mode);
+  for (const m of ["light", "dark"]) {
+    if (halves[m] === undefined) continue;
+    if (removed.has(halves[m])) setThemeHalf(m, null);
+    else if (removesBase) setThemeHalf(m, halves[m]);
+  }
+  customThemes = customThemes.filter((t) => !removed.has(t.id));
   saveCustomThemes();
   applyTheme();
 }
@@ -403,6 +517,7 @@ function themeFile(theme) {
   const canon = (colors) => Object.fromEntries(Object.entries(colors).map(([k, v]) => [k, canonicalColor(v) ?? v]));
   const file = { version: 1, id: theme.id, name: theme.label, appearance: theme.appearance, colors: canon(theme.colors) };
   if (theme.variants) file.variants = Object.fromEntries(Object.entries(theme.variants).map(([m, c]) => [m, canon(c)]));
+  if (theme.collection) file.collection = theme.collection;
   if (theme.managed) file.managed = true;
   return `${JSON.stringify(file, null, 2)}\n`;
 }
@@ -434,6 +549,11 @@ function parseThemeFile(file) {
   const theme = { id, label: name, appearance: file.appearance, colors: colorsOf(file.colors, file.appearance) };
   const other = file.appearance === "light" ? "dark" : "light";
   if (file.variants?.[other]) theme.variants = { [other]: colorsOf(file.variants[other], other) };
+  if (file.collection !== undefined) {
+    const c = file.collection;
+    if (!c || typeof c.id !== "string" || !/^[a-z0-9][a-z0-9.:-]{0,127}$/i.test(c.id) || typeof c.label !== "string" || !c.label.trim() || c.label.trim().length > 48) throw new Error("Theme collections need a valid id and label.");
+    theme.collection = { id: c.id, label: c.label.trim() };
+  }
   if (file.managed) theme.managed = true;
   return theme;
 }
