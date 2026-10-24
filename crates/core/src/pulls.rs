@@ -9,9 +9,12 @@ use std::path::Path;
 
 /// GitHub rejects a search query past 256 characters.
 const QUERY_LIMIT: usize = 250;
-const SEARCH: &str = r#"query($q: String!) {
+/// T3 Code loads at most this many rows.
+pub const MAX_ROWS: usize = 500;
+const SEARCH: &str = r#"query($q: String!, $after: String) {
   viewer { login }
-  search(query: $q, type: ISSUE, first: 100) {
+  search(query: $q, type: ISSUE, first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest {
       number title url isDraft state mergeable reviewDecision additions deletions createdAt updatedAt headRefName baseRefName
       author { login avatarUrl }
@@ -47,6 +50,8 @@ pub struct PullRequests {
     /// `owner/name` of each GitHub repository searched.
     pub repos: Vec<String>,
     pub rows: Vec<Row>,
+    /// GitHub has more past the `limit` asked for.
+    pub more: bool,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -150,8 +155,14 @@ pub fn github_repo(remote: &str) -> Option<String> {
     (host.eq_ignore_ascii_case("github.com") && !owner.is_empty() && !name.is_empty() && parts.next().is_none()).then(|| format!("{owner}/{name}"))
 }
 
-fn search(cwd: &Path, path: Option<&str>, q: &str) -> Result<Value, String> {
-    let out = run(cwd, path, "gh", &["api", "graphql", "-f", &format!("query={SEARCH}"), "-F", &format!("q={q}")]).map_err(|e| match e {
+fn search(cwd: &Path, path: Option<&str>, q: &str, after: Option<&str>) -> Result<Value, String> {
+    let (query, q) = (format!("query={SEARCH}"), format!("q={q}"));
+    let after = after.map(|a| format!("after={a}"));
+    let mut args = vec!["api", "graphql", "-f", &query, "-f", &q];
+    if let Some(after) = &after {
+        args.extend(["-f", after]);
+    }
+    let out = run(cwd, path, "gh", &args).map_err(|e| match e {
         Failure::Missing => "Install the GitHub command-line tool (`gh`) via https://cli.github.com/ or your package manager (for example `brew install gh`).".to_owned(),
         Failure::Said(said) if said.contains("auth login") || said.contains("not logged") => "GitHub is not authenticated. Run `gh auth login` (or set GH_TOKEN) and retry.".to_owned(),
         Failure::Said(said) => format!("gh: {said}"),
@@ -215,27 +226,43 @@ fn row(node: &Value, viewer: &str, reviewing: &HashSet<String>) -> Option<Row> {
     })
 }
 
-/// The pull requests of `repos` that match, newest update first. With every involvement, a second
-/// search finds the ones awaiting the viewer's review, a team's request included.
-pub fn list(cwd: &Path, path: Option<&str>, repos: Vec<String>, state: ListState, involvement: Involvement, text: &str) -> Result<PullRequests, String> {
-    let mut viewer = String::new();
-    let mut nodes = vec![];
-    for q in queries(&terms(state, involvement, text), &repos) {
-        let data = search(cwd, path, &q)?;
-        viewer = data["viewer"]["login"].as_str().unwrap_or_default().to_owned();
+/// Up to `limit` nodes of the search `q`, a page of 100 at a time, the viewer's login, and whether more remain.
+fn pages(cwd: &Path, path: Option<&str>, q: &str, limit: usize) -> Result<(Vec<Value>, String, bool), String> {
+    let (mut nodes, mut after) = (vec![], None::<String>);
+    loop {
+        let data = search(cwd, path, q, after.as_deref())?;
         nodes.extend(data["search"]["nodes"].as_array().cloned().unwrap_or_default());
+        let viewer = data["viewer"]["login"].as_str().unwrap_or_default().to_owned();
+        let info = &data["search"]["pageInfo"];
+        let more = info["hasNextPage"].as_bool() == Some(true);
+        if !more || nodes.len() >= limit {
+            nodes.truncate(limit);
+            return Ok((nodes, viewer, more));
+        }
+        after = info["endCursor"].as_str().map(str::to_owned);
+    }
+}
+
+/// The pull requests of `repos` that match, newest update first, `limit` per search at most. With
+/// every involvement, a second search finds the ones awaiting the viewer's review, a team's request included.
+pub fn list(cwd: &Path, path: Option<&str>, repos: Vec<String>, state: ListState, involvement: Involvement, text: &str, limit: usize) -> Result<PullRequests, String> {
+    let limit = limit.clamp(1, MAX_ROWS);
+    let (mut viewer, mut nodes, mut more) = (String::new(), vec![], false);
+    for q in queries(&terms(state, involvement, text), &repos) {
+        let (found, login, left) = pages(cwd, path, &q, limit)?;
+        (viewer, more) = (login, more || left);
+        nodes.extend(found);
     }
     let mut reviewing = HashSet::new();
     if involvement == Involvement::All {
         for q in queries(&terms(state, Involvement::Reviewing, text), &repos) {
-            let data = search(cwd, path, &q)?;
-            reviewing.extend(data["search"]["nodes"].as_array().into_iter().flatten().filter_map(|n| n["url"].as_str().map(str::to_owned)));
+            reviewing.extend(pages(cwd, path, &q, limit)?.0.iter().filter_map(|n| n["url"].as_str().map(str::to_owned)));
         }
     }
     let mut seen = HashSet::new();
     let mut rows: Vec<Row> = nodes.iter().filter_map(|n| row(n, &viewer, &reviewing)).filter(|r| seen.insert(r.url.clone())).collect();
     rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    Ok(PullRequests { viewer, repos, rows })
+    Ok(PullRequests { viewer, repos, rows, more })
 }
 
 #[cfg(test)]

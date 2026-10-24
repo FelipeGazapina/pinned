@@ -67,6 +67,13 @@ if (cmd === "pr" && sub === "view") {
       commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] } }),
     pr(40, "example/alpha", "Seed the notes", "sweeper", { state: "MERGED" }),
   ];
+  // "label:many" finds 150, two pages of GitHub's 100.
+  if (q.includes("label:many")) {
+    const after = args.find((a) => a.startsWith("after="))?.slice(6);
+    const many = Array.from({ length: after ? 50 : 100 }, (_, i) => pr(1000 + i + (after ? 100 : 0), "example/alpha", `Bulk change ${i + (after ? 100 : 0)}`, "hubot"));
+    process.stdout.write(JSON.stringify({ data: { viewer: { login: "sweeper" }, search: { pageInfo: { hasNextPage: !after, endCursor: after ? null : "page-2" }, nodes: many } } }));
+    process.exit(0);
+  }
   const words = q.split(" ").filter((w) => w && !w.includes(":")).map((w) => w.toLowerCase());
   const repos = [...q.matchAll(/repo:(\S+)/g)].map((m) => m[1]);
   const nodes = all.filter((n) =>
@@ -75,7 +82,7 @@ if (cmd === "pr" && sub === "view") {
     (!q.includes("author:@me") || n.author.login === "sweeper") &&
     (!q.includes("review-requested:@me") || n.reviewRequests.nodes.some((r) => r.requestedReviewer.login === "sweeper")) &&
     words.every((w) => n.title.toLowerCase().includes(w)));
-  process.stdout.write(JSON.stringify({ data: { viewer: { login: "sweeper" }, search: { nodes } } }));
+  process.stdout.write(JSON.stringify({ data: { viewer: { login: "sweeper" }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } }));
 } else {
   process.stderr.write(`fake gh can't ${args.join(" ")}\n`);
   process.exit(1);

@@ -47,6 +47,8 @@ function openPage(name) {
   picker.hidden = true;
   if (!pageView.contains(document.activeElement)) document.activeElement?.blur();
   document.body.dataset.page = name;
+  pageView.replaceChildren();
+  delete pageView.dataset.condensed;
   SHELL_PAGES[name].show();
   noteVisit();
 }
@@ -447,6 +449,13 @@ async function fetchUsage() {
 const segmented = (name, options, current, disabled = false) =>
   `<span class="seg" role="radiogroup" data-seg="${name}">${options.map(([value, label]) => `<button type="button" role="radio" aria-checked="${value === current}" data-value="${value}"${disabled ? " disabled" : ""}>${label}</button>`).join("")}</span>
    <select class="seg-select" data-seg="${name}"${disabled ? " disabled" : ""}>${options.map(([value, label]) => `<option value="${value}"${value === current ? " selected" : ""}>${label}</option>`).join("")}</select>`;
+/** Draws the page, keeping where its body was scrolled. */
+function setPage(html) {
+  const top = pageView.querySelector(".page-body")?.scrollTop ?? 0;
+  pageView.innerHTML = html;
+  const body = pageView.querySelector(".page-body");
+  if (body) body.scrollTop = top;
+}
 const headHtml = (title, rest = "") =>
   `<header class="page-head" data-tauri-drag-region><button type="button" class="icon side-toggle" title="Toggle sidebar (⌘B)">${icon("panel-left")}</button><h1>${title}</h1>${rest}</header>`;
 
@@ -461,13 +470,13 @@ function renderUsagePage() {
   const { metric, days } = usageState;
   const s = summarize();
   const machineFilter = `<span class="crumb-sep">›</span><button type="button" class="crumb-menu machine-filter" title="Machines and model prices">${esc(usageState.machine ? machineName(usageState.machine) : machines.size > 1 ? "All machines" : machineName([...machines.keys()][0] ?? LOCAL))}${icon("chevron-down")}</button>`;
-  pageView.innerHTML = `${headHtml("Usage", `${machineFilter}<span class="crumb-sep">›</span><span class="provider">${icon("claude")}Claude Code</span>
+  setPage(`${headHtml("Usage", `${machineFilter}<span class="crumb-sep">›</span><span class="provider">${icon("claude")}Claude Code</span>
       <span class="range">${metric === "limits" ? "" : usageRange(s.buckets, days)}</span><span class="spacer"></span>
       ${segmented("metric", USAGE_METRICS.map(([v, l]) => [v, l]), metric)}${segmented("days", USAGE_PERIODS, days, metric === "limits")}
       <button type="button" class="icon refresh" title="Refresh">${icon("refresh-cw")}</button>`)}
     <div class="page-body"><div class="page-wrap usage" data-metric="${metric}"${usageState.loading && usageState.loaded ? ` data-refreshing` : ""}>${
       metric === "limits" ? limitsHtml() : !usageState.loaded ? usageSkeleton() : spendHtml(s)
-    }</div></div>`;
+    }</div></div>`);
   if (metric !== "limits" && usageState.loaded) drawChart(pageView.querySelector(".chart"), s, metric);
 }
 
@@ -811,7 +820,9 @@ const PR_STATE_ICON = {
 };
 const PR_CHECKS = { passing: ["circle-check", "#059669", "Checks passing"], failing: ["circle-x", "#dc2626", "Checks failing"], pending: ["circle-dot", "#d97706", "Checks pending"] };
 const PR_REVIEW = { approved: ["user-check", "#059669", "Approved"], changes_requested: ["user-round-x", "#d97706", "Changes requested"], review_required: ["user-round", "", "Awaiting review"] };
-const pulls = { state: "open", involvement: "all", sort: "ready", q: "", rows: null, error: "", loading: false, fetchedAt: 0, seq: 0 };
+const PR_PAGE = 100;
+const PR_MAX = 500;
+const pulls = { state: "open", involvement: "all", sort: "ready", q: "", limit: PR_PAGE, rows: null, more: false, error: "", loading: false, fetchedAt: 0, seq: 0 };
 try {
   const saved = JSON.parse(load("gui-pr-page"));
   for (const [key, list] of [["state", PR_STATES], ["involvement", PR_INVOLVEMENTS], ["sort", PR_SORTS]]) if (list.some(([v]) => v === saved?.[key])) pulls[key] = saved[key];
@@ -832,19 +843,20 @@ async function fetchPulls() {
   const seq = ++pulls.seq;
   Object.assign(pulls, { loading: true, error: "" });
   renderPullsPage();
-  const asks = [...openProjects()].map(([m, paths]) => callOn(m, { cmd: "pull_requests", paths: [...paths], state: pulls.state, involvement: pulls.involvement, query: pulls.q }));
+  const asks = [...openProjects()].map(([m, paths]) => callOn(m, { cmd: "pull_requests", paths: [...paths], state: pulls.state, involvement: pulls.involvement, query: pulls.q, limit: pulls.limit }));
   const answers = await Promise.allSettled(asks);
   if (seq !== pulls.seq) return;
   const seen = new Set();
   const rows = answers.flatMap((a) => (a.status === "fulfilled" ? a.value.rows : [])).filter((r) => !seen.has(r.url) && seen.add(r.url));
   const failed = answers.find((a) => a.status === "rejected");
-  Object.assign(pulls, { rows: failed && !rows.length && pulls.rows === null ? null : rows, error: failed ? String(failed.reason) : "", loading: false, fetchedAt: Date.now() });
+  const more = answers.some((a) => a.status === "fulfilled" && a.value.more);
+  Object.assign(pulls, { rows: failed && !rows.length && pulls.rows === null ? null : rows, more, error: failed ? String(failed.reason) : "", loading: false, fetchedAt: Date.now() });
   if (shellPage() === "pull-requests") renderPullsPage();
 }
 
 const savePulls = () => save("gui-pr-page", JSON.stringify({ state: pulls.state, involvement: pulls.involvement, sort: pulls.sort }));
 function setPulls(change) {
-  Object.assign(pulls, change);
+  Object.assign(pulls, { limit: PR_PAGE }, change);
   savePulls();
   fetchPulls();
 }
@@ -910,12 +922,15 @@ function pullsListHtml() {
   }
   const warn = pulls.error ? `<p class="pr-warn">${icon("triangle-alert")}<span>${esc(pulls.error)} Showing the last pull requests loaded.</span><button type="button" class="outline" data-pr="refresh">Retry</button></p>` : "";
   if (!pulls.rows.length) return warn + pullsEmptyHtml();
-  if (pulls.involvement !== "all") return `${warn}<div class="pr-list">${sortPulls(pulls.rows, pulls.involvement).map(pullRowHtml).join("")}</div>`;
+  const foot = !pulls.more ? ""
+    : pulls.limit >= PR_MAX ? `<p class="pr-foot muted">Narrow your search to find more pull requests.</p>`
+    : `<p class="pr-foot"><button type="button" class="outline" data-pr="more"${pulls.loading ? " disabled" : ""}>${pulls.loading ? "Loading more" : "Load more pull requests"}</button></p>`;
+  if (pulls.involvement !== "all") return `${warn}<div class="pr-list">${sortPulls(pulls.rows, pulls.involvement).map(pullRowHtml).join("")}</div>${foot}`;
   return warn + PR_GROUPS.map(([key, label, ic]) => {
     const list = pulls.rows.filter((r) => r.group === key);
     if (!list.length) return "";
     return `<section class="pr-group" data-group="${key}"><h3>${icon(ic)}<span>${label}</span><span class="count">${list.length}</span><span class="rule"></span></h3><div class="pr-list">${sortPulls(list, key).map(pullRowHtml).join("")}</div></section>`;
-  }).join("");
+  }).join("") + foot;
 }
 
 function renderPullsPage() {
@@ -923,12 +938,14 @@ function renderPullsPage() {
   const caret = focused ? document.activeElement.selectionStart : null;
   const stateLabel = PR_STATES.find(([v]) => v === pulls.state)[1];
   const involvementLabel = PR_INVOLVEMENTS.find(([v]) => v === pulls.involvement)[1];
-  pageView.innerHTML = `${headHtml("Pull Requests")}<div class="page-body"><div class="page-wrap pulls"${pulls.loading && pulls.rows ? " data-refreshing" : ""}>
+  const compact = `<span class="condensed"><button type="button" class="crumb-menu" data-pr="state">${stateLabel}${icon("chevron-down")}</button><button type="button" class="crumb-menu" data-pr="involvement">${involvementLabel}${icon("chevron-down")}</button>
+    <span class="spacer"></span><button type="button" class="icon" data-pr="search-top" title="Search pull requests" aria-label="Search pull requests">${icon("search")}</button><button type="button" class="icon" data-pr="refresh" title="Refresh pull requests" aria-label="Refresh pull requests">${icon("refresh-cw")}</button></span>`;
+  setPage(`${headHtml("Pull Requests", compact)}<div class="page-body"><div class="page-wrap pulls"${pulls.loading && pulls.rows ? " data-refreshing" : ""}>
     <div class="pr-toolbar"><label class="pr-search">${icon("search")}<input type="search" placeholder="Search pull requests, or label:bug" aria-label="Search pull requests" value="${esc(pulls.q)}" spellcheck="false" autocomplete="off"></label>
       <button type="button" class="outline" data-pr="sort" title="Sort">${icon("arrow-down-up")}<span>Sort</span></button>
       <button type="button" class="outline" data-pr="filters" title="Filters">${icon("list-filter")}<span>${stateLabel} · ${involvementLabel}</span></button>
       <button type="button" class="outline icon-only" data-pr="refresh" title="Refresh pull requests" aria-label="Refresh pull requests">${icon("refresh-cw")}</button></div>
-    ${pullsListHtml()}</div></div>`;
+    ${pullsListHtml()}</div></div>`);
   if (focused) {
     const input = pageView.querySelector(".pr-search input");
     input.focus();
@@ -950,15 +967,27 @@ pageView.addEventListener("click", (e) => {
   if (act === "add-project") return addProject();
   if (act === "clear") return setPulls({ q: "" });
   if (act === "sort") return openSideMenu(PR_SORTS.map(([value, label]) => ({ label, checked: pulls.sort === value, run: () => (Object.assign(pulls, { sort: value }), savePulls(), renderPullsPage()) })), e.target.closest("button"));
+  const pick = (key, list) => () => list.map(([value, label]) => ({ label, checked: pulls[key] === value, run: () => setPulls({ [key]: value }) }));
   if (act === "filters") {
     return openSideMenu([
-      { label: "State", icon: "git-pull-request", children: () => PR_STATES.map(([value, label]) => ({ label, checked: pulls.state === value, run: () => setPulls({ state: value }) })) },
-      { label: "Involvement", icon: "users", children: () => PR_INVOLVEMENTS.map(([value, label]) => ({ label, checked: pulls.involvement === value, run: () => setPulls({ involvement: value }) })) },
+      { label: "State", icon: "git-pull-request", children: pick("state", PR_STATES) },
+      { label: "Involvement", icon: "users", children: pick("involvement", PR_INVOLVEMENTS) },
     ], e.target.closest("button"));
+  }
+  if (act === "state") return openSideMenu(pick("state", PR_STATES)(), e.target.closest("button"));
+  if (act === "involvement") return openSideMenu(pick("involvement", PR_INVOLVEMENTS)(), e.target.closest("button"));
+  if (act === "more") {
+    pulls.limit = Math.min(PR_MAX, pulls.limit + PR_PAGE);
+    return fetchPulls();
+  }
+  if (act === "search-top") {
+    pageView.querySelector(".page-body").scrollTop = 0;
+    return pageView.querySelector(".pr-search input").focus();
   }
   const quick = e.target.closest("[data-quick]");
   const row = e.target.closest(".pr-row[data-url]");
   if (quick && row) return quickPull(row.dataset.url, quick.dataset.quick);
+  if (row && e.target.closest(".checks")) return showChecks(row.dataset.url, e.target.closest(".checks"));
   if (row) openPull(row.dataset.url);
 });
 pageView.addEventListener("keydown", (e) => {
@@ -968,6 +997,37 @@ pageView.addEventListener("keydown", (e) => {
     openPull(row.dataset.url);
   }
 });
+pageView.addEventListener("contextmenu", (e) => {
+  const num = e.target.closest(".pr-row[data-url] .num");
+  if (!num || shellPage() !== "pull-requests") return;
+  e.preventDefault();
+  const url = num.closest(".pr-row").dataset.url;
+  openSideMenu([
+    { label: "Copy link", icon: "copy", run: () => copyAndTell(url, "PR link") },
+    { label: "Copy number", icon: "copy", run: () => copyAndTell(num.textContent, `PR ${num.textContent} number`) },
+    { label: "Open on GitHub", icon: "external-link", run: () => openOutside(url) },
+  ], { x: e.clientX, y: e.clientY });
+});
+pageView.addEventListener("scroll", (e) => {
+  if (!e.target.matches?.(".page-body")) return;
+  const toolbar = pageView.querySelector(".pr-toolbar");
+  pageView.dataset.condensed = !!toolbar && e.target.scrollTop > toolbar.offsetTop + toolbar.offsetHeight;
+}, true);
+/** The pull request's checks, from gh, as T3 Code's checks popover lists them. */
+async function showChecks(url, at) {
+  if (!active) return openOutside(`${url}/checks`);
+  try {
+    const pr = await callOn(active.machine, { cmd: "pull_request", tab: active.view.id, pr: url });
+    const checks = (pr.statusCheckRollup ?? []).map((c) => {
+      const result = (c.conclusion || c.state || c.status || "").toLowerCase();
+      const ic = /success|neutral|skipped/.test(result) ? "circle-check" : /failure|error|cancel|timed_out|action_required/.test(result) ? "circle-x" : "circle-dot";
+      return { label: c.name || c.context || "Check", icon: ic, hint: result.replace(/_/g, " "), run: () => openOutside(c.detailsUrl || c.targetUrl || `${url}/checks`) };
+    });
+    openSideMenu(checks.length ? checks : [{ label: "No checks", disabled: true, run() {} }], at);
+  } catch (e) {
+    tell(`Couldn't read the checks: ${esc(e)}`, 6000);
+  }
+}
 function openPull(url) {
   if (!active) return openOutside(url);
   openPr(active, url);
@@ -985,6 +1045,7 @@ async function quickPull(url, action) {
 for (const type of ["keydown", "keyup"]) window.addEventListener(type, (e) => e.key === "Shift" && (document.body.dataset.shiftHeld = e.type === "keydown"));
 window.addEventListener("blur", () => delete document.body.dataset.shiftHeld);
 onGuiKey("f", () => pageView.querySelector(".pr-search input")?.focus(), { when: () => shellPage() === "pull-requests" });
+onGuiKey("c", () => copyAndTell(threadOf(active).prUrl, "PR link"), { shift: true, when: () => shellPage() === "pull-requests" && !!active && !!pulls.rows?.some((r) => r.url === threadOf(active).prUrl) });
 setInterval(() => shellPage() === "pull-requests" && !document.hidden && fetchPulls(), 5 * 60 * 1000);
 document.addEventListener("visibilitychange", () => shellPage() === "pull-requests" && !document.hidden && Date.now() - pulls.fetchedAt > 10000 && fetchPulls());
 

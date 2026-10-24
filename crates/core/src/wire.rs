@@ -170,6 +170,9 @@ pub enum Call {
         involvement: pulls::Involvement,
         #[serde(default)]
         query: String,
+        /// Rows per search at most; the page asks for more 100 at a time.
+        #[serde(default = "pulls_limit")]
+        limit: usize,
     },
     /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since` on.
     /// `prices` are the user's, per model, which win over LiteLLM's list.
@@ -178,6 +181,10 @@ pub enum Call {
         #[serde(default)]
         prices: HashMap<String, usage::Price>,
     },
+}
+
+fn pulls_limit() -> usize {
+    100
 }
 
 impl Call {

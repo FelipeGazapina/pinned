@@ -362,11 +362,11 @@ impl Machine {
                 }
                 json(branches::checkout(&cwd, &branch, create, self.launch.path_env.as_deref())?)
             }
-            Call::PullRequests { paths, state, involvement, query } => {
+            Call::PullRequests { paths, state, involvement, query, limit } => {
                 let mut repos: Vec<String> = paths.iter().filter_map(|p| git_remote(Path::new(p))).filter_map(|r| pulls::github_repo(&r)).collect();
                 repos.sort_by_key(|r| r.to_lowercase());
                 repos.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-                json(pulls::list(&home(), self.launch.path_env.as_deref(), repos, state, involvement, &query)?)
+                json(pulls::list(&home(), self.launch.path_env.as_deref(), repos, state, involvement, &query, limit)?)
             }
             Call::TokenUsage { since, prices } => json(usage::read(&thread::projects_dir(&home()), since, &usage::rates(self.rates_file.as_deref()), &prices)),
         }

@@ -2004,7 +2004,7 @@ async function sweep(profileName) {
     check(groups.join() === "Authored,Review requested,Others", `groups: ${groups.join()}`);
     const rows = [await prNumbers("authored"), await prNumbers("reviewing"), await prNumbers("others")].map((n) => n.join());
     check(rows.join(" | ") === "#42 | #41 | #43", `rows: ${rows.join(" | ")}`);
-    const search = readLog("gh.log").match(/ -F (q=.*)$/m)?.[1];
+    const search = readLog("gh.log").match(/ -f (q=.*)$/m)?.[1];
     check(/^q=is:pr is:open sort:updated-desc repo:example\/\w+ repo:example\/\w+$/.test(search ?? ""), `gh searched: ${search}`);
     const busy = '#page-view .pr-row[data-url$="/pull/43"]';
     check(await page.locator(`${busy} .conflict`).isVisible(), "#43's conflict isn't marked");
@@ -2064,6 +2064,57 @@ async function sweep(profileName) {
     await waitFor("back on Pull requests", () => page.locator("#page-view h1", { hasText: "Pull Requests" }).isVisible());
     await page.keyboard.press("Escape");
     await waitFor("the thread again", () => page.locator("#chat").isVisible());
+  });
+
+  await step("shell: Pull requests load more, condense the header, copy a link and list checks", async () => {
+    fs.writeFileSync(path.join(HOME, "gh.log"), "");
+    await showSidebar();
+    await tapOrClick('#sidebar footer [data-open-page="pull-requests"]');
+    await waitFor("the rows", async () => (await prNumbers()).length === 3, 15000);
+    await page.fill("#page-view .pr-search input", "label:many");
+    await waitFor("GitHub's first page", async () => (await prNumbers()).length === 100, 15000);
+    await press(page.locator('#page-view [data-pr="more"]'));
+    await waitFor("the second page", async () => (await prNumbers()).length === 150, 15000);
+    check(!(await page.locator('#page-view [data-pr="more"]').count()), "Load more stayed after the last page");
+    check(/-f after=page-2/.test(readLog("gh.log")), "gh never asked for the second page");
+    await page.locator("#page-view .page-body").evaluate((el) => (el.scrollTop = 2000));
+    await waitFor("the condensed header", () => page.locator("#page-view .page-head .condensed").isVisible());
+    check((await page.locator("#page-view .page-head .condensed .crumb-menu").allTextContents()).join() === "Open,All", "the condensed filters are wrong");
+    await press(page.locator('#page-view .page-head [data-pr="search-top"]'));
+    await waitFor("the search, scrolled back", async () => (await page.evaluate(() => document.activeElement?.closest?.(".pr-search") !== null)) && !(await page.locator("#page-view .page-head .condensed").isVisible()));
+    await page.fill("#page-view .pr-search input", "");
+    await waitFor("every row again", async () => (await prNumbers()).length === 3, 15000);
+    const num = page.locator('#page-view .pr-row[data-url$="/pull/42"] .num');
+    if (touch) {
+      const box = await num.boundingBox();
+      await num.dispatchEvent("contextmenu", { clientX: box.x + 4, clientY: box.y + 4 });
+    } else await num.click({ button: "right" });
+    await waitFor("the number's menu", () => page.locator("#side-menu").isVisible());
+    const items = await page.locator("#side-menu button .label").allTextContents();
+    check(items.join() === "Copy link,Copy number,Open on GitHub", `menu: ${items.join()}`);
+    await press(page.locator("#side-menu button", { hasText: "Copy link" }));
+    const copied = await clipboard();
+    check(copied === null || copied === "https://github.com/example/alpha/pull/42", `copied ${copied}`);
+    await press(page.locator('#page-view .pr-row[data-url$="/pull/43"] .checks'));
+    await waitFor("the checks", () => page.locator("#side-menu button", { hasText: "build" }).isVisible(), 10000);
+    check((await text('#side-menu button:has-text("build") .hint')) === "success", "the check's result is missing");
+    if (touch) await page.evaluate(() => closeSideMenu());
+    else await page.keyboard.press("Escape");
+    if (!touch) {
+      await press(page.locator('#page-view .pr-row[data-url$="/pull/42"]'));
+      await waitFor("#42 selected", () => page.locator('#page-view .pr-row.selected[data-url$="/pull/42"]').isVisible());
+      await page.evaluate(() => navigator.clipboard?.writeText("").catch(() => {}));
+      await page.keyboard.press("Meta+Shift+c");
+      const link = await clipboard();
+      check(link === null || link === "https://github.com/example/alpha/pull/42", `⌘⇧C copied ${link}`);
+      await page.evaluate(() => closePanel());
+      await page.keyboard.press("Escape");
+    } else {
+      await pageSidebar();
+      await tapOrClick("#sidebar footer .back");
+    }
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+    return "100, then 150 rows";
   });
 
   await step("app view: back to the terminal", async () => {

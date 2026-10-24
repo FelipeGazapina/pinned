@@ -270,3 +270,8 @@ body[data-shift-held="true"] .pulls .pr-row:hover .quick { display: flex; }
   .pulls .pr-toolbar .icon-only { width: 40px; }
   .pulls .pr-row { min-height: 48px; }
 }
+#page-view .page-head .condensed { display: none; flex: 1; align-items: center; gap: 4px; min-width: 0; }
+#page-view[data-condensed="true"] .page-head .condensed { display: flex; }
+.pulls .pr-foot { display: flex; justify-content: center; margin: 4px 0 0; font-size: 13px; }
+.pulls .line1 .checks { cursor: pointer; border-radius: 4px; }
+.pulls .line1 .checks:hover { background: var(--g-hover); }
