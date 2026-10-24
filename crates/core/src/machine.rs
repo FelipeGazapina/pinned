@@ -335,7 +335,7 @@ impl Machine {
             Call::Thread { tab, from } => json(self.thread(&tab, from)?),
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
             Call::Workspace { tab } => json(workspace::of(&self.tab(&tab, |t| t.cwd.clone())?)),
-            Call::PullRequest { tab, pr } => json(workspace::pull_request(&self.tab(&tab, |t| t.cwd.clone())?, &pr)?),
+            Call::PullRequest { tab, pr } => json(workspace::pull_request(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
         }
     }
 
@@ -346,9 +346,9 @@ impl Machine {
         match page {
             Some(page) => {
                 let page = page.map_err(|e| format!("could not read the transcript: {e}"))?;
-                Ok(ThreadPage { session, items: page.items, next: page.next })
+                Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset })
             }
-            None => Ok(ThreadPage { session, items: vec![], next: 0 }),
+            None => Ok(ThreadPage { session, items: vec![], next: 0, reset: false }),
         }
     }
 
@@ -754,8 +754,11 @@ impl Machine {
                 }
                 AgentStatus::NeedsInput => {}
             }
+            let idle_notice = event.status == AgentStatus::NeedsInput && t.status == Some(AgentStatus::Done);
+            if !idle_notice {
+                t.updated = Some(unix_now());
+            }
             t.status = Some(event.status);
-            t.updated = Some(unix_now());
             if event.title.is_some() {
                 t.title = event.title.clone();
             }

@@ -75,26 +75,32 @@ const projectName = (tab) => (threadOf(tab).workspace?.project ?? tab.view.cwd).
 const firstPrompt = (tab) => threadOf(tab).items.find((i) => i.kind === "user")?.text.split("\n")[0];
 const threadTitle = (tab) => tab.view.title || firstPrompt(tab) || "New thread";
 const prOf = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kind === "pr");
-const asksPermission = (tab) => statusOf(tab) === "needs-input" && /permission/i.test(tab.view.message ?? "");
-/** claude sends "waiting for your input" a while after a turn ends: the turn is over, nothing is asked. */
-const idleNotice = (tab) => statusOf(tab) === "needs-input" && !asksPermission(tab) && !tab.menu && /waiting for your input/i.test(tab.view.message ?? "");
-const turnLive = (tab) => statusOf(tab) === "working" || (statusOf(tab) === "needs-input" && !idleNotice(tab));
-const unseenDone = (tab) => (statusOf(tab) === "done" || idleNotice(tab)) && tab !== active && (tab.view.updated ?? 0) > (seenAt[tab.key] ?? 0);
+/** claude's hooks report no answer to a permission menu, so a permission notice with no menu on
+ * screen means the turn went on. It sends "waiting for your input" a while after a turn ends. */
+function phaseOf(tab) {
+  if (tab.menu) return "asking";
+  const status = statusOf(tab);
+  const message = tab.view.message ?? "";
+  if (status !== "needs-input") return status;
+  if (/permission/i.test(message)) return "working";
+  return /waiting for your input/i.test(message) ? "done" : "input";
+}
+const turnLive = (tab) => ["working", "asking", "input"].includes(phaseOf(tab));
+const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && (tab.view.updated ?? 0) > (seenAt[tab.key] ?? 0);
 const settled = (tab) => !!tab.view.updated && ["idle", "done"].includes(statusOf(tab)) && tab !== active && Date.now() / 1000 - tab.view.updated > SETTLE_AFTER_S;
 
 function markThreadSeen(tab) {
   if (!tab || !guiOn() || document.hidden) return;
-  seenAt[tab.key] = Date.now() / 1000;
+  seenAt[tab.key] = tab.view.updated ?? 0;
   save("gui-seen", JSON.stringify(seenAt));
 }
 
 function statusSlot(tab) {
-  const status = statusOf(tab);
-  if (tab.menu) return { icon: "shield-question", text: "Approval", tone: "warning" };
-  if (status === "working") return { icon: "circle-dashed", text: "Working", tone: "info" };
-  if (asksPermission(tab)) return { icon: "shield-question", text: "Approval", tone: "warning" };
-  if (status === "needs-input" && !idleNotice(tab)) return { icon: "circle-alert", text: "Input", tone: "input" };
-  if (status === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "warning" } : { icon: "circle-alert", text: "Failed", tone: "error" };
+  const phase = phaseOf(tab);
+  if (phase === "asking") return { icon: "shield-question", text: "Approval", tone: "warning" };
+  if (phase === "working") return { icon: "circle-dashed", text: "Working", tone: "info" };
+  if (phase === "input") return { icon: "circle-alert", text: "Input", tone: "input" };
+  if (phase === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "warning" } : { icon: "circle-alert", text: "Failed", tone: "error" };
   if (unseenDone(tab)) return { icon: "circle-check", text: "Done", tone: "success" };
   return null;
 }
@@ -136,8 +142,8 @@ function threadRow(tab) {
   row.className = "thread-row";
   row.classList.toggle("active", tab === active);
   const slot = statusSlot(tab);
-  row.classList.toggle("receded", tab !== active && !slot && statusOf(tab) !== "needs-input");
-  row.classList.toggle("working", statusOf(tab) === "working" && tab !== active);
+  row.classList.toggle("receded", tab !== active && !slot);
+  row.classList.toggle("working", phaseOf(tab) === "working" && tab !== active);
   row.dataset.tab = tab.key;
   const pr = prOf(tab);
   const ws = t.workspace;
@@ -154,7 +160,6 @@ function threadRow(tab) {
     if (e.target.closest(".pr")) openPanel("pr");
     if (narrow(768)) toggleSidebar(false);
   };
-  row.onauxclick = (e) => e.button === 1 && closeTab(tab);
   return row;
 }
 
@@ -223,8 +228,30 @@ function duration(ms) {
   return [h && `${h}h`, m && `${m}m`, s && `${s}s`].filter(Boolean).join(" ");
 }
 
-marked.use({ gfm: true, renderer: { html: ({ text }) => esc(text) } });
-const markdown = (text) => marked.parse(text);
+const WEB_URL = /^https?:\/\//i;
+/** Assistant text and pull request comments come from others, so only web links render, and an image
+ * is a link to it rather than a request made on sight. */
+marked.use({
+  gfm: true,
+  renderer: {
+    html: ({ text }) => esc(text),
+    link({ href, tokens }) {
+      const text = this.parser.parseInline(tokens);
+      return WEB_URL.test(href) ? `<a href="${esc(href)}">${text}</a>` : text;
+    },
+    image: ({ href, text }) => (WEB_URL.test(href) ? `<a href="${esc(href)}">${esc(text || href)}</a>` : esc(text)),
+  },
+});
+const rendered = new Map();
+function markdown(text) {
+  let html = rendered.get(text);
+  if (html === undefined) {
+    if (rendered.size > 4000) rendered.clear();
+    html = marked.parse(text);
+    rendered.set(text, html);
+  }
+  return html;
+}
 
 const TOOL_ICONS = { Bash: "terminal", Read: "eye", Edit: "square-pen", MultiEdit: "square-pen", Write: "square-pen", NotebookEdit: "square-pen", Grep: "search", Glob: "search", WebFetch: "globe", WebSearch: "globe", Agent: "bot", Task: "bot" };
 const shortPath = (path, cwd) => (cwd && path.startsWith(`${cwd}/`) ? path.slice(cwd.length + 1) : tilde(path));
@@ -236,11 +263,11 @@ function toolLabel(step, cwd) {
   return verb ? `${verb} ${what}` : `${step.name.replace(/^mcp__([^_]+)__/, "$1 · ")}${what ? ` ${what}` : ""}`;
 }
 
-function toolHtml(step, cwd) {
+function toolHtml(step, cwd, open) {
   const name = /^mcp__/.test(step.name) ? "wrench" : TOOL_ICONS[step.name] ?? "zap";
   const state = !step.result ? "running" : step.result.error ? "error" : "ok";
   const body = [step.detail && `<pre class="input">${esc(step.detail)}</pre>`, step.result?.text && `<pre>${esc(step.result.text)}</pre>`].filter(Boolean).join("");
-  return `<details class="tool" data-state="${state}"${body ? "" : " data-empty"}><summary>${icon(name, "kind")}<span class="label">${esc(toolLabel(step, cwd))}</span>
+  return `<details class="tool" data-fold="${esc(step.id)}" data-state="${state}"${body ? "" : " data-empty"}${open.has(step.id) ? " open" : ""}><summary>${icon(name, "kind")}<span class="label">${esc(toolLabel(step, cwd))}</span>
     ${state === "error" ? icon("x", "failed") : ""}${body ? icon("chevron-right", "chev") : ""}</summary>${body}</details>`;
 }
 
@@ -257,9 +284,10 @@ function changesByTurn(history, turns) {
 
 const sum = (files, key) => files.reduce((n, f) => n + Number(f[key]), 0);
 
-function changesHtml(change) {
+function changesHtml(change, open) {
   const n = change.files.length;
-  return `<details class="changes"><summary>${icon("chevron-right", "chev")}<span class="count">${n} changed file${n === 1 ? "" : "s"}</span>
+  const fold = `changes:${change.ended}`;
+  return `<details class="changes" data-fold="${fold}"${open.has(fold) ? " open" : ""}><summary>${icon("chevron-right", "chev")}<span class="count">${n} changed file${n === 1 ? "" : "s"}</span>
       <span class="add">+${sum(change.files, "added")}</span><span class="del">−${sum(change.files, "removed")}</span><span class="show">Show files</span>
       <button class="open-diff" data-ended="${change.ended}">${icon("file-diff")}Open diff</button></summary>
     <ul>${change.files.map((f) => `<li data-ended="${change.ended}" data-file="${esc(f.path)}"><span class="path">${esc(f.path)}</span><span class="add">+${f.added}</span><span class="del">−${f.removed}</span></li>`).join("")}</ul></details>`;
@@ -270,14 +298,14 @@ function turnHtml(tab, turn, change, live) {
   const user = turn.user
     ? `<div class="user"><div class="bubble">${esc(turn.user.text)}${turn.user.images ? `<span class="images">${turn.user.images} image${turn.user.images > 1 ? "s" : ""}</span>` : ""}</div></div>`
     : "";
-  const steps = turn.work.map((s) => (s.kind === "tool" ? toolHtml(s, tab.view.cwd) : `<div class="narration md">${markdown(s.text)}</div>`)).join("");
+  const steps = turn.work.map((s) => (s.kind === "tool" ? toolHtml(s, tab.view.cwd, t.open) : `<div class="narration md">${markdown(s.text)}</div>`)).join("");
   let fold = "";
   if (live) {
     const running = [...turn.steps].reverse().find((s) => s.kind === "tool");
     fold = `<details class="work live" data-turn="${esc(turn.id)}"${t.open.has(turn.id) ? " open" : ""}>
-        <summary><span class="label">Working for <span class="ticker" data-since="${turn.start}">${duration(Date.now() - turn.start)}</span></span></summary>
+        <summary><span class="label">Working for <span class="ticker" data-since="${turn.start || Date.now()}">${duration(turn.start ? Date.now() - turn.start : 0)}</span></span></summary>
         <div class="steps">${steps}</div></details>
-      ${running && !t.open.has(turn.id) ? `<div class="live-tool">${toolHtml(running, tab.view.cwd)}</div>` : ""}`;
+      ${running && !t.open.has(turn.id) ? `<div class="live-tool">${toolHtml(running, tab.view.cwd, t.open)}</div>` : ""}`;
   } else if (turn.work.length) {
     fold = `<details class="work" data-turn="${esc(turn.id)}"${t.open.has(turn.id) ? " open" : ""}>
         <summary><span class="label">Worked for ${duration(turn.end - turn.start)}</span>${icon("chevron-right", "chev")}</summary>
@@ -286,7 +314,7 @@ function turnHtml(tab, turn, change, live) {
   const said = (s) => (s ? `<div class="assistant md">${markdown(s.text)}</div>` : "");
   return `<section class="turn">${user}${turn.notes.map((n) => `<p class="note">${esc(n.text)}</p>`).join("")}${fold}${said(turn.lead)}${said(turn.answer)}
     ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}
-    ${change ? changesHtml(change) : ""}</section>`;
+    ${change ? changesHtml(change, t.open) : ""}</section>`;
 }
 
 function renderThread() {
@@ -311,8 +339,8 @@ function renderThread() {
   const changes = changesByTurn(t.history, turns);
   const body = turns.length
     ? turns.map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && i === turns.length - 1)).join("")
-    : `<div class="blank"><p>${t.loaded ? "Send a message to start the conversation." : "Loading…"}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
-  const key = JSON.stringify([tab.key, tab.view.cwd, t.loaded, t.session, working, t.items.length, !!t.history, [...t.open]]);
+    : `<div class="blank"><p>${t.loaded ? "Send a message to start the conversation." : t.error ? `This thread couldn't be read: ${esc(t.error)}` : "Loading…"}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
+  const key = JSON.stringify([tab.key, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open]]);
   if (threadView.dataset.key === key) return renderComposer(tab);
   const stick = threadView.dataset.tab !== tab.key || threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
   threadView.innerHTML = `<div class="lane">${body}</div>`;
@@ -345,15 +373,15 @@ threadView.addEventListener("click", (e) => {
   }
 });
 threadView.addEventListener("toggle", (e) => {
-  const turn = e.target.dataset?.turn;
-  if (!turn || !active) return;
+  const fold = e.target.dataset?.turn ?? e.target.dataset?.fold;
+  if (!fold || !active) return;
   const open = threadOf(active).open;
-  if (e.target.open) open.add(turn);
-  else open.delete(turn);
-  threadView.dataset.key = "";
+  if (e.target.open) open.add(fold);
+  else open.delete(fold);
+  if (e.target.dataset.turn) threadView.dataset.key = "";
 }, true);
 
-const openOutside = (url) => (TAURI ? invoke("open_url", { url }).catch(console.warn) : window.open(url, "_blank", "noopener"));
+const openOutside = (url) => WEB_URL.test(url) && (TAURI ? invoke("open_url", { url }).catch(console.warn) : window.open(url, "_blank", "noopener"));
 
 function openLink(url, outside = false) {
   if (!outside && /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?/.test(url)) {
@@ -369,6 +397,9 @@ async function fetchThread(tab) {
   t.fetching = true;
   try {
     let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: t.next });
+    t.error = null;
+    if (!page.session && t.session) return;
+    if (page.reset) t.items = [];
     if (page.session !== t.session) {
       const restart = t.next > 0;
       Object.assign(t, { session: page.session, items: [], next: 0, history: null });
@@ -386,9 +417,10 @@ async function fetchThread(tab) {
     }
     if (grew && t.session && !t.history && tab === active) fetchHistory(tab);
   } catch (e) {
-    t.loaded = true;
     t.unsupported = /unknown variant|can't answer/.test(String(e));
-    if (t.unsupported && tab === active && guiOn()) renderUnsupported();
+    t.loaded = t.unsupported;
+    t.error = String(e);
+    if (tab === active && guiOn()) t.unsupported ? renderUnsupported() : renderThread();
   } finally {
     t.fetching = false;
   }
@@ -405,6 +437,7 @@ async function fetchWorkspace(tab) {
   if (t.workspaceFor === tab.view.cwd) return;
   t.workspaceFor = tab.view.cwd;
   t.workspace = await callOn(tab.machine, { cmd: "workspace", tab: tab.view.id }).catch(() => null);
+  if (!t.workspace) t.workspaceFor = null;
   if (!guiOn()) return;
   renderSidebar();
   if (tab === active) {
@@ -418,10 +451,10 @@ async function fetchHistory(tab) {
   if (!t.session || !t.workspace || t.fetchingHistory) return;
   t.fetchingHistory = true;
   const session = t.session;
-  const turns = await callOn(tab.machine, { cmd: "project_history", path: t.workspace.project, session }).catch(() => []);
+  const turns = await callOn(tab.machine, { cmd: "project_history", path: t.workspace.project, session }).catch(() => null);
   t.fetchingHistory = false;
-  if (t.session !== session) return;
-  t.history = turns.filter((h) => h.session === session).reverse();
+  if (t.session !== session || !turns) return;
+  t.history = turns.reverse();
   if (tab === active && guiOn()) {
     renderThread();
     if (ui.panelOpen && ui.panel === "diff") renderPanel();
@@ -431,6 +464,12 @@ async function fetchHistory(tab) {
 const statusBeforeRender = new Map();
 
 function renderGui() {
+  for (const tab of tabs) {
+    const finished = statusBeforeRender.get(tab.key) === "working" && statusOf(tab) !== "working";
+    statusBeforeRender.set(tab.key, statusOf(tab));
+    if (finished) Object.assign(threadOf(tab), { history: null, workspaceFor: null });
+  }
+  for (const key of statusBeforeRender.keys()) if (!tabByKey(key)) statusBeforeRender.delete(key);
   if (!guiOn()) return;
   document.body.dataset.sidebar = ui.sidebarOpen ? "open" : "closed";
   for (const tab of tabs) {
@@ -439,18 +478,13 @@ function renderGui() {
       t.watching = true;
       watchMenu(tab);
     }
+    tab.menu = terminalMenu(tab);
     if (!t.loaded) fetchThread(tab);
     fetchWorkspace(tab);
-    const finished = statusBeforeRender.get(tab.key) === "working" && statusOf(tab) !== "working";
-    statusBeforeRender.set(tab.key, statusOf(tab));
-    if (finished) {
-      t.history = null;
-      fetchThread(tab).then(() => fetchHistory(tab));
-    }
+    if (tab === active && !t.history) fetchHistory(tab);
   }
   for (const key of threads.keys()) if (!tabByKey(key)) threads.delete(key);
   markThreadSeen(active);
-  if (active) active.menu = terminalMenu(active);
   renderSidebar();
   if (active && threadOf(active).unsupported) renderUnsupported();
   else renderThread();
@@ -460,7 +494,7 @@ function renderGui() {
 
 setInterval(() => {
   if (!guiOn() || document.hidden) return;
-  for (const tab of tabs) if (tab === active || statusOf(tab) === "working") fetchThread(tab);
+  for (const tab of tabs) if (tab === active || turnLive(tab)) fetchThread(tab);
 }, POLL_MS);
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
 document.addEventListener("visibilitychange", () => markThreadSeen(active));
@@ -473,7 +507,7 @@ const MODELS_MENU = [
 ];
 
 function renderComposer(tab) {
-  const working = !!tab && statusOf(tab) === "working";
+  const working = !!tab && phaseOf(tab) === "working";
   composer.dataset.working = working;
   composer.dataset.empty = !prompt.value.trim();
   document.querySelector("#send").innerHTML = icon(working && prompt.value.trim() ? "list-plus" : "arrow-up");
@@ -527,22 +561,28 @@ function terminalMenu(tab) {
   }
   if (options.length < 2) return null;
   const rule = lines.slice(0, first).findLastIndex((l) => /^\s*[─━]{8,}/.test(l));
-  const question = lines.slice(rule + 1, first).map((l) => l.trim()).filter((l) => l && !/^[─━╌┄┈═-]+$/.test(l)).join("\n");
-  return { question, options };
+  const above = lines.slice(rule + 1, first).map((l) => l.trim()).filter(Boolean);
+  const dashed = (l) => /^[─━╌┄┈═-]+$/.test(l);
+  const boxStart = above.findIndex(dashed);
+  const boxEnd = above.findLastIndex(dashed);
+  const boxed = (i) => boxStart >= 0 && i > boxStart && i < boxEnd;
+  const box = above.filter((l, i) => boxed(i)).join("\n");
+  const question = above.filter((l, i) => !dashed(l) && !boxed(i)).join("\n");
+  return { question, box, options };
 }
 const CURSOR = /[❯›](?= )/;
 
 function watchMenu(tab) {
   let queued = false;
   tab.term.onWriteParsed(() => {
-    if (queued || tab !== active || !guiOn()) return;
+    if (queued || !guiOn()) return;
     queued = true;
     requestAnimationFrame(() => {
       queued = false;
       const menu = terminalMenu(tab);
       if (JSON.stringify(menu) === JSON.stringify(tab.menu ?? null)) return;
       tab.menu = menu;
-      renderComposer(tab);
+      if (tab === active) renderComposer(tab);
       renderSidebar();
     });
   });
@@ -551,40 +591,48 @@ function watchMenu(tab) {
 const ARROW_DOWN = "\x1b[B";
 const ARROW_UP = "\x1b[A";
 
-function chooseOption(tab, n) {
-  const from = tab.menu.options.find((o) => o.chosen)?.n ?? 1;
+function chooseOption(tab, n, label) {
+  const menu = terminalMenu(tab);
+  if (menu?.options[n - 1]?.label !== label) {
+    tab.menu = menu;
+    return renderComposer(tab);
+  }
+  const from = menu.options.find((o) => o.chosen)?.n ?? 1;
   const keys = (n > from ? ARROW_DOWN : ARROW_UP).repeat(Math.abs(n - from)) + "\r";
   tab.menu = null;
   renderComposer(tab);
+  renderSidebar();
   return callOn(tab.machine, { cmd: "write_input", tab: tab.view.id, data: keys });
 }
 
+/** claude heads a permission menu with what it wants to run, such as "Bash command", then a
+ * description and its own tips, the command in a dashed box, and the question last, such as "Do you
+ * want to proceed?". */
 function renderApproval(tab) {
   const menu = tab?.menu;
-  const asking = !!tab && (!!menu || asksPermission(tab));
-  approval.hidden = !asking;
-  if (!asking) return (approval.dataset.key = "");
-  const pending = turnsOf(threadOf(tab).items).at(-1)?.steps.findLast?.((s) => s.kind === "tool" && !s.result);
-  const key = JSON.stringify([tab.key, menu, tab.view.message, pending?.id]);
+  approval.hidden = !menu;
+  if (!menu) return (approval.dataset.key = "");
+  const key = JSON.stringify([tab.key, menu]);
   if (approval.dataset.key === key) return;
   approval.dataset.key = key;
-  const permission = asksPermission(tab) || /permission|proceed|allow/i.test(menu?.question ?? "");
+  const lines = menu.question.split("\n");
+  const permission = lines.length > 1 && /proceed|allow|make this edit|permission/i.test(lines.at(-1));
   approval.dataset.kind = permission ? "approval" : "input";
-  const kind = !permission ? "Claude is asking" : pending?.name === "Bash" ? "Command approval" : /^(Edit|Write|MultiEdit)$/.test(pending?.name) ? "File change approval" : "Permission approval";
-  const options = menu
-    ? menu.options.map((o) => `<button type="button" data-option="${o.n}" class="${o.chosen ? "primary" : "outline"}">${esc(o.label)}</button>`)
-    : [`<button type="button" data-key="1" class="primary">Approve</button>`, `<button type="button" data-key="2" class="outline" title="Don't ask again for this in this session">Always allow</button>`, `<button type="button" data-key="\u001b" class="outline">Decline</button>`];
+  const kind = !permission ? "Claude is asking" : /command/i.test(lines[0]) ? "Command approval" : /file|edit/i.test(lines[0]) ? "File change approval" : "Permission approval";
+  const what = permission ? lines.at(-1) : menu.question;
+  const middle = permission ? lines.slice(1, -1).filter((l) => !/^Tip:/.test(l)) : [];
+  const detail = menu.box || middle.join("\n");
+  const about = menu.box ? middle.join("\n") : "";
+  const options = menu.options.map((o) => `<button type="button" data-option="${o.n}" class="${o.chosen ? "primary" : "outline"}">${esc(o.label)}</button>`);
   approval.innerHTML = `${icon(permission ? "shield" : "circle-alert", "lead")}<div class="body"><p class="kind">${esc(kind)}</p>
-      <p class="what">${esc(menu?.question || tab.view.message || "")}</p>${pending && permission ? `<pre>${esc(pending.detail || pending.summary)}</pre>` : ""}
+      <p class="what">${esc(what)}</p>${about ? `<p class="about">${esc(about)}</p>` : ""}${detail ? `<pre>${esc(detail)}</pre>` : ""}
       <div class="options">${options.join("")}</div></div>
     <div class="actions"><button type="button" data-show-terminal class="outline">Terminal</button></div>`;
 }
 
 approval.addEventListener("click", (e) => {
-  const option = e.target.closest("[data-option]")?.dataset.option;
-  if (option && active?.menu) return chooseOption(active, Number(option));
-  const key = e.target.closest("[data-key]")?.dataset.key;
-  if (key && active) return callOn(active.machine, { cmd: "write_input", tab: active.view.id, data: key });
+  const option = e.target.closest("[data-option]");
+  if (option && active) return chooseOption(active, Number(option.dataset.option), option.textContent);
   if (e.target.closest("[data-show-terminal]")) toggleDrawer(true);
 });
 
@@ -598,7 +646,7 @@ prompt.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     send();
-  } else if (e.key === "Escape" && active && statusOf(active) === "working" && !prompt.value) {
+  } else if (e.key === "Escape" && active && phaseOf(active) === "working" && !prompt.value) {
     e.preventDefault();
     stop();
   }
@@ -731,6 +779,14 @@ document.getElementById("panel-resize").onmousedown = (down) => {
   addEventListener("mouseup", () => document.body.classList.remove("resizing"), { once: true });
 };
 
+let shownPanel = "";
+/** Sets the panel's HTML only when it changed, so a render that changes nothing keeps its scroll. */
+function showPanel(html) {
+  if (html === shownPanel && panelBody.isConnected) return;
+  shownPanel = html;
+  panelBody.innerHTML = html;
+}
+
 function renderPanel() {
   document.body.dataset.panel = ui.panelOpen ? "open" : "closed";
   if (!guiOn() || !ui.panelOpen) return;
@@ -831,21 +887,21 @@ function diffToolbar(added, removed, scope) {
 function renderDiffPanel() {
   const tab = active;
   const history = tab && threadOf(tab).history;
-  if (!tab) return (panelBody.innerHTML = `<p class="panel-empty">Select a thread to inspect turn diffs.</p>`);
+  if (!tab) return showPanel(`<p class="panel-empty">Select a thread to inspect turn diffs.</p>`);
   if (threadOf(tab).workspace?.repo === false) {
-    return (panelBody.innerHTML = `<p class="panel-empty">Turn diffs are unavailable because this folder is not a git repository.</p>`);
+    return showPanel(`<p class="panel-empty">Turn diffs are unavailable because this folder is not a git repository.</p>`);
   }
   if (!history) {
-    panelBody.innerHTML = `<p class="panel-empty">Loading changes…</p>`;
+    showPanel(`<p class="panel-empty">Loading changes…</p>`);
     return fetchHistory(tab);
   }
-  if (!history.length) return (panelBody.innerHTML = `<p class="panel-empty">No completed turns with changes yet.</p>`);
+  if (!history.length) return showPanel(`<p class="panel-empty">No completed turns with changes yet.</p>`);
   const chosen = history.find((h) => h.ended === ui.diffTurn) ?? history.at(-1);
   const scope = `<label class="scope"><select id="diff-turn">${history.map((h, i) => `<option value="${h.ended}"${h === chosen ? " selected" : ""}>Turn ${i + 1}</option>`).join("")}</select>${icon("chevron-down")}</label>`;
   const files = parseDiff(chosen.patch);
-  panelBody.innerHTML = `${diffToolbar(sum(files, "added"), sum(files, "removed"), scope)}
+  showPanel(`${diffToolbar(sum(files, "added"), sum(files, "removed"), scope)}
     <div class="diff ${ui.diffView}${ui.diffWrap ? " wrap" : ""}">${filesHtml(files, chosen.ended)}
-    ${chosen.truncated ? `<p class="panel-empty">This diff exceeds the size limit, so its end is cut.</p>` : ""}</div>`;
+    ${chosen.truncated ? `<p class="panel-empty">This diff exceeds the size limit, so its end is cut.</p>` : ""}</div>`);
   document.getElementById("diff-turn").onchange = (e) => {
     ui.diffTurn = Number(e.target.value);
     renderDiffPanel();
@@ -907,16 +963,16 @@ function renderBrowser() {
   panelBody.dataset.url = ui.browserUrl;
   const urls = active ? seenUrls(active) : [];
   const remote = active && active.machine !== LOCAL;
-  panelBody.innerHTML = `<div class="browser"><form class="url-bar">
+  showPanel(`<div class="browser"><form class="url-bar">
       <button type="button" class="icon" data-nav="back" title="Back">${icon("arrow-left")}</button><button type="button" class="icon" data-nav="forward" title="Forward">${icon("arrow-right")}</button>
       <button type="button" class="icon" data-nav="reload" title="Reload">${icon("rotate-cw")}</button>
       <input name="url" value="${esc(ui.browserUrl)}" placeholder="Search or enter URL" spellcheck="false" autocomplete="off">
       <button type="button" class="icon" data-nav="external" title="Open in system browser">${icon("external-link")}</button></form>
     ${ui.browserUrl
-      ? `<iframe src="${esc(ui.browserUrl)}" title="Preview"></iframe>`
+      ? `<iframe src="${esc(ui.browserUrl)}" title="Preview" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"></iframe>`
       : `<div class="browser-empty">${icon("globe", "big")}<p class="title">No preview yet</p><p>Type a URL above, or start a dev server in this thread.</p>
         ${urls.length ? `<p class="group">Local servers</p><div class="servers">${urls.map((u) => `<button type="button" data-url="${esc(u)}">${icon("radio-tower")}<span><b>Listening</b><span>${esc(u.replace(/^https?:\/\//, ""))}</span></span></button>`).join("")}</div>` : ""}
-        ${remote ? `<p class="hint">This thread runs on ${esc(machineName(active.machine))}, so its local servers are that machine's, not this device's.</p>` : ""}</div>`}</div>`;
+        ${remote ? `<p class="hint">This thread runs on ${esc(machineName(active.machine))}, so its local servers are that machine's, not this device's.</p>` : ""}</div>`}</div>`);
   const form = panelBody.querySelector(".url-bar");
   form.onsubmit = (e) => {
     e.preventDefault();
@@ -958,9 +1014,8 @@ async function loadPr(tab, pr) {
   const key = `${tab.key}:${pr.url}`;
   ui.pr = { key, loading: true };
   renderPrPanel();
-  const call = { cmd: "pull_request", tab: tab.view.id, pr: pr.url };
   try {
-    const data = tab.machine === LOCAL ? await invoke("machine_call_slow", { call }) : await callOn(tab.machine, call);
+    const data = await callOn(tab.machine, { cmd: "pull_request", tab: tab.view.id, pr: pr.url });
     ui.pr = { key, data, at: Date.now() };
   } catch (e) {
     ui.pr = { key, error: String(e) };
@@ -972,14 +1027,14 @@ function renderPrPanel() {
   const tab = active;
   const pr = tab && prOf(tab);
   if (!pr) {
-    panelBody.innerHTML = `<p class="panel-empty">No pull request in this thread yet. When the session opens one with <code>gh pr create</code>, it shows here.</p>`;
+    showPanel(`<p class="panel-empty">No pull request in this thread yet. When the session opens one with <code>gh pr create</code>, it shows here.</p>`);
     return;
   }
   const key = `${tab.key}:${pr.url}`;
   if (ui.pr?.key !== key) return loadPr(tab, pr);
-  if (ui.pr.loading) return (panelBody.innerHTML = `<p class="panel-empty">Loading #${pr.number}…</p>`);
+  if (ui.pr.loading) return showPanel(`<p class="panel-empty">Loading #${pr.number}…</p>`);
   if (ui.pr.error) {
-    panelBody.innerHTML = `<div class="panel-empty"><p>${esc(ui.pr.error)}</p><button class="outline" data-open-url="${esc(pr.url)}">${icon("external-link")}Open #${pr.number} on GitHub</button></div>`;
+    showPanel(`<div class="panel-empty"><p>${esc(ui.pr.error)}</p><button class="outline" data-open-url="${esc(pr.url)}">${icon("external-link")}Open #${pr.number} on GitHub</button></div>`);
     return;
   }
   const d = ui.pr.data;
@@ -1004,7 +1059,7 @@ function renderPrPanel() {
       ${(d.comments ?? []).length ? `<h4>Comments (${d.comments.length})</h4><ul class="reviews">${d.comments.map((c) => `<li><b>${esc(c.author?.login ?? "")}</b><div class="md">${markdown(c.body ?? "")}</div></li>`).join("")}</ul>` : ""}</div>`;
   const code = `${diffToolbar(d.additions, d.deletions, `<span class="muted">${d.changedFiles} file${d.changedFiles === 1 ? "" : "s"}</span>`)}
     <div class="diff ${ui.diffView}${ui.diffWrap ? " wrap" : ""}">${filesHtml(files, `pr${d.number}`)}${d.truncated ? `<p class="panel-empty">This diff exceeds the size limit, so its end is cut.</p>` : ""}</div>`;
-  panelBody.innerHTML = `<div class="pr">${head}${ui.prTab === "code" ? code : summary}</div>`;
+  showPanel(`<div class="pr">${head}${ui.prTab === "code" ? code : summary}</div>`);
 }
 
 function renderGuiUsage() {
@@ -1019,27 +1074,25 @@ function stepThread(step) {
   if (order.length > 1) activate(order[(i + step + order.length) % order.length]);
 }
 
+/** Off the Mac the chords are Ctrl ones, which a shell in the terminal needs: Ctrl+E ends the line.
+ * With Option a key goes by position, since Option turns B into ∫ on a Mac. */
 window.addEventListener("keydown", (e) => {
-  if (!guiOn() || settingsOpen() || pickerOpen()) return;
+  if (settingsOpen() || pickerOpen()) return;
   const mod = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
   if (!mod) return;
-  const key = e.key.toLowerCase();
-  if (key === "b" && e.altKey) togglePanel();
+  const key = (e.altKey ? e.code.replace(/^Key/, "") : e.key).toLowerCase();
+  const switchView = key === "e" && !e.altKey && e.shiftKey === !IS_MAC;
+  if (switchView) setMode(guiOn() ? "terminal" : "gui");
+  else if (!guiOn() || (!IS_MAC && e.target.closest?.("#terms"))) return;
+  else if (key === "b" && e.altKey) togglePanel();
   else if (e.altKey) return;
   else if (key === "j" && !e.shiftKey) toggleDrawer();
   else if (key === "b" && !e.shiftKey) toggleSidebar();
   else if (key === "d" && !e.shiftKey) ui.panelOpen && ui.panel === "diff" ? closePanel() : openPanel("diff");
   else if (key === "n" && !e.shiftKey) toggleProjects();
-  else if (key === "e" && !e.shiftKey) setMode("terminal");
   else if (e.shiftKey && (e.key === "[" || e.key === "{")) stepThread(-1);
   else if (e.shiftKey && (e.key === "]" || e.key === "}")) stepThread(1);
   else return;
-  e.preventDefault();
-  e.stopPropagation();
-}, true);
-window.addEventListener("keydown", (e) => {
-  if (guiOn() || !(IS_MAC ? e.metaKey : e.ctrlKey) || e.key.toLowerCase() !== "e" || e.shiftKey || e.altKey) return;
-  setMode("gui");
   e.preventDefault();
   e.stopPropagation();
 }, true);

@@ -630,7 +630,9 @@ async function sweep(profileName) {
     await sendPrompt("/ask");
     await waitFor("the banner", () => page.locator("#approval").isVisible());
     check(/Command approval/.test(await text("#approval .kind")), `banner says ${await text("#approval .kind")}`);
-    check(/rm -rf build/.test(await text("#approval pre")), "the banner doesn't show the command");
+    check((await text("#approval pre")) === "rm -rf build", `the banner shows the command as ${await text("#approval pre")}`);
+    check((await text("#approval .about")) === "Remove the build folder", `the banner describes it as ${await text("#approval .about")}`);
+    check(/Do you want to proceed/.test(await text("#approval .what")), `the banner asks ${await text("#approval .what")}`);
     const options = await page.locator("#approval .options button").allTextContents();
     check(options.length === 3 && options[1].startsWith("Yes, and don't ask again"), `options: ${options.join(" | ")}`);
     await sendPrompt("typed while claude asks");
@@ -638,7 +640,11 @@ async function sweep(profileName) {
     await page.fill("#prompt", "");
     await press(gui('#approval [data-option="2"]'));
     await waitTerm(/chose 2/);
-    await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
+    await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()), 1500);
+    const row = await text("#thread-list .thread-row.active");
+    check(!/ran it/.test(await termText()), "claude finished before the banner was checked");
+    check(!/Approval/.test(row), `after the answer, while claude still works: ${JSON.stringify(row)}`);
+    await waitTerm(/ran it/);
     return options.join(" | ");
   });
 
@@ -691,6 +697,18 @@ async function sweep(profileName) {
     await waitFor("the tab bar", () => page.locator("#tab-bar").isVisible());
     check(!(await page.locator("#chat").isVisible()), "the app view still shows");
     await waitTerm(/work\/alpha/);
+    if (!touch) {
+      await page.keyboard.press("Meta+e");
+      await waitFor("⌘E to open the app view", () => page.locator("#chat").isVisible());
+      const panelOpen = () => page.evaluate(() => document.body.dataset.panel === "open");
+      const before = await panelOpen();
+      await page.keyboard.press("Meta+Alt+KeyB");
+      check((await panelOpen()) !== before, "⌘⌥B didn't toggle the side panel");
+      await page.keyboard.press("Meta+Alt+KeyB");
+      await page.keyboard.press("Meta+e");
+      await waitFor("⌘E to go back to the terminal", () => page.locator("#tab-bar").isVisible());
+      check(!(await page.locator("#chat").isVisible()), "⌘E left the app view up");
+    }
   });
 
   await step("session actions: skip permissions mid-session, then ask again", async () => {

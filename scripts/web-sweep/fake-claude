@@ -85,7 +85,8 @@ function submit() {
 const CHOICES = ["Yes", "Yes, and don't ask again for rm commands", "No, and tell Claude what to do differently (esc)"];
 let asking = 0;
 function drawMenu() {
-  out(`${"─".repeat(40)}\r\n Bash command\r\n   rm -rf build\r\n Do you want to proceed?\r\n`);
+  const box = "╌".repeat(40);
+  out(`${"─".repeat(40)}\r\n Bash command\r\n Tip: auto mode handles these prompts for you\r\n Remove the build folder\r\n${box}\r\n rm -rf build\r\n${box}\r\n Do you want to proceed?\r\n`);
   CHOICES.forEach((c, i) => out(`${i + 1 === asking ? " ❯" : "  "} ${i + 1}. ${c}\r\n`));
   out(" Esc to cancel\r\n");
 }
@@ -97,8 +98,11 @@ function answerMenu(key) {
   if (key !== "\r" && key !== "\x1b") return;
   out(`chose ${key === "\x1b" ? "esc" : asking}\r\n`);
   asking = 0;
-  hook("Stop");
-  out("> ");
+  setTimeout(() => {
+    out("ran it\r\n");
+    hook("Stop");
+    out("> ");
+  }, 4000);
 }
 
 process.stdin.setRawMode?.(true);

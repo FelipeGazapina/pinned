@@ -129,18 +129,21 @@ pub enum Call {
 }
 
 impl Call {
-    /// Runs off the machine's call queue: a run may clone a repository for minutes and gh may wait on GitHub.
+    /// Runs off the machine's call queue, which carries keystrokes in order: a run may clone a
+    /// repository for minutes, gh waits on GitHub, and the others read files or run git.
     pub fn may_wait(&self) -> bool {
-        matches!(self, Call::Run { .. } | Call::PullRequest { .. })
+        matches!(self, Call::Run { .. } | Call::PullRequest { .. } | Call::Thread { .. } | Call::Workspace { .. } | Call::ProjectHistory { .. })
     }
 }
 
-/// A step of a tab's conversation. A client holding items of another `session` starts over.
+/// A step of a tab's conversation. A client holding items of another `session`, or getting a
+/// `reset` page, starts over.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct ThreadPage {
     pub session: Option<String>,
     pub items: Vec<thread::Item>,
     pub next: u64,
+    pub reset: bool,
 }
 
 /// A connector's session, the same on any machine.

@@ -68,7 +68,8 @@ command, the app view shows the question above the prompt with Claude's own opti
 or click **Terminal** to answer there. ⌘J opens the terminal under the thread at any time.
 
 Other keys in the app view: ⌘N for a new thread, ⌘⇧[ and ⌘⇧] for the previous or next thread,
-and ⌘⌥B to show or hide the side panel.
+and ⌘⌥B to show or hide the side panel. On Windows and Linux these keys use Ctrl, they do nothing
+while the terminal has the focus, and Ctrl+Shift+E switches views, since a shell needs Ctrl+E.
 
 ## Tabs
 

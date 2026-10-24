@@ -18,7 +18,7 @@ pub struct Workspace {
 }
 
 pub fn of(cwd: &Path) -> Workspace {
-    let git = |args: &[&str]| run(cwd, "git", args).map(|out| out.trim().to_owned()).filter(|out| !out.is_empty());
+    let git = |args: &[&str]| run(cwd, None, "git", args).ok().map(|out| out.trim().to_owned()).filter(|out| !out.is_empty());
     // symbolic-ref names the branch of a repository with no commit yet too; a detached HEAD has none.
     let branch = git(&["symbolic-ref", "--short", "-q", "HEAD"]);
     let dir = git(&["rev-parse", "--git-dir"]);
@@ -26,12 +26,22 @@ pub fn of(cwd: &Path) -> Workspace {
     Workspace { project: history::project_of(cwd).display().to_string(), repo: dir.is_some(), branch, worktree }
 }
 
-/// What `gh` knows of the pull request `pr`, a number or URL, with its diff under `diff`.
-pub fn pull_request(cwd: &Path, pr: &str) -> Result<Value, String> {
-    let view = run(cwd, "gh", &["pr", "view", pr, "--json", PR_FIELDS])
-        .ok_or("the GitHub CLI couldn't read this pull request. Install gh and run `gh auth login` on this machine.")?;
+/// What `gh` knows of the pull request `pr`, a number or URL, with its diff under `diff`. `path` is
+/// the PATH to find gh on.
+pub fn pull_request(cwd: &Path, pr: &str, path: Option<&str>) -> Result<Value, String> {
+    let is_number = !pr.is_empty() && pr.bytes().all(|b| b.is_ascii_digit());
+    if !is_number && !(pr.starts_with("https://") && pr.contains("/pull/")) {
+        return Err(format!("{pr:?} is not a pull request number or URL"));
+    }
+    let gh = |args: &[&str]| {
+        run(cwd, path, "gh", args).map_err(|e| match e {
+            Failure::Missing => "the GitHub CLI isn't installed on this machine. Install gh and run `gh auth login`.".to_owned(),
+            Failure::Said(said) => format!("gh: {said}"),
+        })
+    };
+    let view = gh(&["pr", "view", "--json", PR_FIELDS, "--", pr])?;
     let mut view: Value = serde_json::from_str(&view).map_err(|e| format!("gh sent a bad answer: {e}"))?;
-    let mut diff = run(cwd, "gh", &["pr", "diff", pr]).unwrap_or_default();
+    let mut diff = gh(&["pr", "diff", "--", pr])?;
     if diff.len() > DIFF_LIMIT {
         let cut = (0..=DIFF_LIMIT).rev().find(|i| diff.is_char_boundary(*i)).unwrap_or(0);
         diff.truncate(cut);
@@ -41,9 +51,23 @@ pub fn pull_request(cwd: &Path, pr: &str) -> Result<Value, String> {
     Ok(view)
 }
 
-fn run(cwd: &Path, program: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(program).args(args).current_dir(cwd).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+enum Failure {
+    Missing,
+    Said(String),
+}
+
+fn run(cwd: &Path, path: Option<&str>, program: &str, args: &[&str]) -> Result<String, Failure> {
+    let mut command = Command::new(program);
+    command.args(args).current_dir(cwd).stdin(Stdio::null());
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    let out = command.output().map_err(|_| Failure::Missing)?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(Failure::Said(String::from_utf8_lossy(&out.stderr).trim().to_owned()))
+    }
 }
 
 #[cfg(test)]
@@ -73,6 +97,16 @@ mod tests {
         assert_eq!((main.repo, main.branch.as_deref(), main.worktree), (true, Some("main"), false));
         let wt = of(&tree);
         assert_eq!((wt.branch.as_deref(), wt.worktree, wt.project), (Some("fix-it"), true, repo.display().to_string()));
+    }
+
+    #[test]
+    fn a_pull_request_must_be_a_number_or_url() {
+        let dir = tempfile::tempdir().unwrap();
+        for pr in ["--web", "-R other/repo", "", "12a", "http://github.com/o/r/pull/1"] {
+            assert!(pull_request(dir.path(), pr, None).unwrap_err().contains("is not a pull request"), "{pr:?}");
+        }
+        let missing = pull_request(dir.path(), "7", Some(dir.path().to_str().unwrap())).unwrap_err();
+        assert!(missing.contains("isn't installed"), "{missing}");
     }
 
     #[test]

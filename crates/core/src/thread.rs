@@ -30,6 +30,8 @@ pub struct Page {
     pub items: Vec<Item>,
     /// Where the next read starts.
     pub next: u64,
+    /// The transcript was replaced, so these items start it over rather than follow the last read.
+    pub reset: bool,
 }
 
 pub fn projects_dir(home: &Path) -> PathBuf {
@@ -49,10 +51,33 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
     let from = if replaced { 0 } else { from };
     f.seek(SeekFrom::Start(from))?;
     let mut bytes = vec![];
-    f.take(READ_LIMIT).read_to_end(&mut bytes)?;
+    (&mut f).take(READ_LIMIT).read_to_end(&mut bytes)?;
     let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-    let items = bytes[..whole].split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice::<Value>(line).ok()).flat_map(|v| items_of(&v)).collect();
-    Ok(Page { items, next: from + whole as u64 })
+    let mut items: Vec<Item> = bytes[..whole].split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice::<Value>(line).ok()).flat_map(|v| items_of(&v)).collect();
+    let mut next = from + whole as u64;
+    if whole == 0 && bytes.len() as u64 == READ_LIMIT {
+        if let Some(rest) = rest_of_line(&mut f)? {
+            next = from + READ_LIMIT + rest;
+            items.push(Item::Note { id: format!("skipped:{from}"), at: String::new(), text: "An entry too large to show was left out.".into() });
+        }
+    }
+    Ok(Page { items, next, reset: replaced })
+}
+
+/// How many more bytes the current line runs through its newline, or none while it is still being written.
+fn rest_of_line(f: &mut impl Read) -> std::io::Result<Option<u64>> {
+    let mut chunk = vec![0; 1 << 16];
+    let mut skipped = 0;
+    loop {
+        let n = f.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        if let Some(i) = chunk[..n].iter().position(|b| *b == b'\n') {
+            return Ok(Some(skipped + i as u64 + 1));
+        }
+        skipped += n as u64;
+    }
 }
 
 fn items_of(line: &Value) -> Vec<Item> {
@@ -67,6 +92,7 @@ fn items_of(line: &Value) -> Vec<Item> {
             Some(number) => vec![Item::Pr { number, url: str_of(&line["prUrl"]), repo: str_of(&line["prRepository"]) }],
             None => vec![],
         },
+        Some("user") if line["isCompactSummary"].as_bool() == Some(true) => vec![Item::Note { id, at, text: "The conversation was compacted.".into() }],
         Some("user") => user_items(&line["message"]["content"], id, at),
         Some("attachment") if line["attachment"]["type"] == "model" => match line["attachment"]["identity"]["marketingName"].as_str() {
             Some(name) => vec![Item::Model { name: name.to_owned() }],
@@ -117,17 +143,15 @@ fn user_items(content: &Value, id: String, at: String) -> Vec<Item> {
             text: clip(&result_text(&b["content"]), PREVIEW_CHARS),
         })
         .collect();
-    if !results.is_empty() {
-        return results;
-    }
     let text = blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n");
     let images = blocks.iter().filter(|b| b["type"] == "image").count() as u32;
-    match spoken(&text) {
-        Some(Spoken::Prompt(text)) => vec![Item::User { id, at, text, images }],
-        Some(Spoken::Note(text)) => vec![Item::Note { id, at, text }],
-        None if images > 0 => vec![Item::User { id, at, text: String::new(), images }],
-        None => vec![],
-    }
+    let said = match spoken(&text) {
+        Some(Spoken::Prompt(text)) => Some(Item::User { id, at, text, images }),
+        Some(Spoken::Note(text)) => Some(Item::Note { id, at, text }),
+        None if images > 0 && results.is_empty() => Some(Item::User { id, at, text: String::new(), images }),
+        None => None,
+    };
+    results.into_iter().chain(said).collect()
 }
 
 enum Spoken {
@@ -135,8 +159,9 @@ enum Spoken {
     Note(String),
 }
 
-/// Claude Code wraps the slash commands it runs and the messages it injects in tags; only the
-/// commands and their output are shown.
+/// Claude Code wraps the slash commands it runs and the messages it injects in tags, and so do the
+/// apps around it: `<system-reminder>`, `<task-notification>` and more. A paste stays wrapped in
+/// `<pasted_content>`, whose text is the user's.
 fn spoken(text: &str) -> Option<Spoken> {
     let text = text.trim();
     if let Some(name) = tag(text, "command-name") {
@@ -146,10 +171,33 @@ fn spoken(text: &str) -> Option<Spoken> {
     if let Some(out) = tag(text, "local-command-stdout") {
         return (!out.trim().is_empty()).then(|| Spoken::Note(out.trim().to_owned()));
     }
-    if text.is_empty() || text.starts_with('<') {
-        return None;
+    if let Some(command) = tag(text, "bash-input") {
+        return Some(Spoken::Prompt(format!("! {command}")));
     }
-    Some(Spoken::Prompt(text.to_owned()))
+    if text.starts_with("[Request interrupted by user") {
+        return Some(Spoken::Note("Interrupted.".into()));
+    }
+    let mut said = vec![];
+    let mut rest = text;
+    while let Some((name, inner, after)) = leading_element(rest) {
+        if name == "pasted_content" {
+            said.push(inner.trim());
+        }
+        rest = after.trim_start();
+    }
+    said.push(rest);
+    let said = said.join("\n").trim().to_owned();
+    (!said.is_empty()).then_some(Spoken::Prompt(said))
+}
+
+/// The tag name, inner text and remainder of the `<name …>…</name>` element `text` starts with.
+fn leading_element(text: &str) -> Option<(&str, &str, &str)> {
+    let name_len = text.strip_prefix('<')?.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))?;
+    let name = &text[1..=name_len];
+    let open_end = text.find('>')? + 1;
+    let close = format!("</{name}>");
+    let close_at = text[open_end..].find(&close)? + open_end;
+    (!name.is_empty()).then(|| (name, &text[open_end..close_at], &text[close_at + close.len()..]))
 }
 
 fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
@@ -261,6 +309,48 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_that_starts_with_markup_shows_and_injected_tags_do_not() {
+        let items = page(&[
+            r#"{"type":"user","uuid":"a","message":{"content":"<Button> doesn't re-render"}}"#,
+            r#"{"type":"user","uuid":"b","message":{"content":"<system-reminder>be brief</system-reminder>\n<ci-monitor-event kind=\"x\">red</ci-monitor-event>"}}"#,
+            r#"{"type":"user","uuid":"c","message":{"content":"<pasted_content id=\"1\">\nlog line\n</pasted_content>\nwhy does this fail?"}}"#,
+            r#"{"type":"user","uuid":"d","message":{"content":"<bash-input>ls</bash-input>"}}"#,
+            r#"{"type":"user","uuid":"e","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#,
+            r#"{"type":"user","uuid":"f","isCompactSummary":true,"message":{"content":"This session is being continued from a previous conversation."}}"#,
+            r#"{"type":"user","uuid":"g","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"denied"},{"type":"text","text":"use the other folder"}]}}"#,
+        ])
+        .items;
+        assert_eq!(
+            items,
+            vec![
+                Item::User { id: "a".into(), at: "".into(), text: "<Button> doesn't re-render".into(), images: 0 },
+                Item::User { id: "c".into(), at: "".into(), text: "log line\nwhy does this fail?".into(), images: 0 },
+                Item::User { id: "d".into(), at: "".into(), text: "! ls".into(), images: 0 },
+                Item::Note { id: "e".into(), at: "".into(), text: "Interrupted.".into() },
+                Item::Note { id: "f".into(), at: "".into(), text: "The conversation was compacted.".into() },
+                Item::Result { tool: "t1".into(), at: "".into(), error: false, text: "denied".into() },
+                Item::User { id: "g".into(), at: "".into(), text: "use the other folder".into(), images: 0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_past_the_read_limit_is_skipped_not_stuck_on() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let huge = format!(r#"{{"type":"user","uuid":"big","message":{{"content":"{}"}}}}"#, "x".repeat(READ_LIMIT as usize + 10));
+        writeln!(file, "{huge}").unwrap();
+        writeln!(file, r#"{{"type":"user","uuid":"after","message":{{"content":"after"}}}}"#).unwrap();
+        let first = read(file.path(), 0).unwrap();
+        assert_eq!(first.next, huge.len() as u64 + 1);
+        assert!(matches!(first.items[..], [Item::Note { .. }]));
+        assert_eq!(read(file.path(), first.next).unwrap().items, vec![Item::User { id: "after".into(), at: "".into(), text: "after".into(), images: 0 }]);
+
+        let mut growing = tempfile::NamedTempFile::new().unwrap();
+        write!(growing, "{}", &huge[..huge.len() - 2]).unwrap();
+        assert_eq!(read(growing.path(), 0).unwrap(), Page { items: vec![], next: 0, reset: false }, "a line still being written waits");
+    }
+
+    #[test]
     fn reads_resume_after_the_last_whole_line() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         let first = r#"{"type":"user","uuid":"u1","message":{"content":"one"}}"#;
@@ -273,7 +363,9 @@ mod tests {
         let rest = read(file.path(), page.next).unwrap();
         assert_eq!(rest.items, vec![Item::User { id: "u2".into(), at: "".into(), text: "two".into(), images: 0 }]);
         assert_eq!(read(file.path(), rest.next).unwrap().items, vec![]);
-        assert_eq!(read(file.path(), 1 << 30).unwrap().items.len(), 2, "an offset past the end starts over");
+        let over = read(file.path(), 1 << 30).unwrap();
+        assert_eq!((over.items.len(), over.reset), (2, true), "an offset past the end starts over");
+        assert!(!rest.reset);
     }
 
     #[test]
