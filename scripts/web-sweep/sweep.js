@@ -1533,6 +1533,7 @@ async function sweep(profileName) {
   // The sidebar's organization, as T3 Code's: rows by project with icons, pins, shelves, the row
   // menu, search, new-thread shortcuts, reopen and resize. Every step leaves alpha open.
   const keyFor = (name) => page.evaluate((n) => tabs.find((t) => projectName(t) === n)?.key, name);
+  const tone = (selector) => page.locator(selector).first().evaluate((el) => getComputedStyle(el).color);
   const rowSel = (key) => `#thread-list .thread-row[data-tab="${key}"]`;
   const sideOrder = () => page.evaluate(() => [...document.querySelectorAll("#thread-list .thread-row")].map((r) => projectName(tabByKey(r.dataset.tab))));
   const crumbProject = () => text("#chat-head .crumb .project > span");
@@ -1636,7 +1637,7 @@ async function sweep(profileName) {
     const beta = await keyFor("beta");
     await rowMenu(rowSel(alpha));
     const labels = await page.locator("#side-menu button .label").allTextContents();
-    const want = ["Pin thread", "Settle thread", "Snooze", "Rename thread", "Mark unread", "Filter by alpha", "Copy", "Close thread"];
+    const want = ["Pin thread", "Settle thread", "Snooze", "Rename thread", "Regenerate title", "Mark unread", "Filter by alpha", "Auto-settle behavior", "Copy", "Project settings", "Archive thread", "Delete"];
     check(want.every((l) => labels.includes(l)), `menu: ${labels.join(" | ")}`);
     await menuPick("Rename thread");
     await page.fill(`${rowSel(alpha)} input.rename`, "Renamed in the sidebar");
@@ -1673,7 +1674,8 @@ async function sweep(profileName) {
     await openRow(beta);
     await rowMenu(rowSel(alpha));
     await menuPick("Mark unread");
-    await waitFor("alpha marked Done again", async () => /Done/.test(await text(`${rowSel(alpha)} .stamp`)));
+    await waitFor("alpha's time marked unread", () => page.locator(`${rowSel(alpha)} .stamp.when.unread`).count());
+    check((await tone(`${rowSel(alpha)} .stamp.when`)) === "rgb(254, 154, 0)", `the unread time is ${await tone(`${rowSel(alpha)} .stamp.when`)}`);
     await rowMenu(rowSel(alpha));
     await menuPick("Copy");
     await menuPick("Path");
@@ -1683,9 +1685,14 @@ async function sweep(profileName) {
     await openRow(alpha);
     if (!touch) {
       await page.keyboard.press("Meta+Shift+C");
-      await waitFor("the resume notice", async () => /claude --resume/.test(await text("#side-notice")));
+      await waitFor("the PR link notice", async () => /Copied PR link/.test(await text("#side-notice")));
+      if (engine === "chromium") check((await page.evaluate(() => navigator.clipboard.readText())) === "https://github.com/example/alpha/pull/42", "⌘⇧C didn't copy the thread's PR link");
+      await openRow(beta);
+      await page.keyboard.press("Meta+Shift+C");
+      await waitFor("the thread ID notice", async () => /Copied thread ID/.test(await text("#side-notice")));
       const session = await page.evaluate(() => threadOf(active).session);
-      if (engine === "chromium") check((await page.evaluate(() => navigator.clipboard.readText())) === `claude --resume ${session}`, "⌘⇧C copied something else");
+      if (engine === "chromium") check((await page.evaluate(() => navigator.clipboard.readText())) === session, "⌘⇧C didn't copy beta's thread ID");
+      await openRow(alpha);
     }
     return `snoozed for ${wakeAt}`;
   });
@@ -1727,7 +1734,8 @@ async function sweep(profileName) {
     const session = await page.evaluate(() => threadOf(active).session);
     if (touch) {
       await rowMenu("#thread-list .thread-row.active");
-      await menuPick("Close thread");
+      await menuPick("Delete");
+      await press(gui("#side-dialog .destructive"));
     } else await page.keyboard.press("Meta+w");
     await waitFor("two threads", async () => (await rows()) === 2);
     if (touch) return "touch: ⌘⇧T and the header's project need a keyboard and a wide screen";
@@ -1741,6 +1749,7 @@ async function sweep(profileName) {
     await openRow(await keyFor("alpha"));
     await page.click("#chat-head .crumb [data-new-here]");
     await waitFor("a thread from the header", async () => (await rows()) === 3, 10000);
+    await waitFor("the header's new thread to open", async () => (await text("#chat-head .crumb .title")) === "New thread", 10000);
     check((await crumbProject()) === "alpha", `the header opened a thread in ${await crumbProject()}`);
     await page.keyboard.press("Meta+w");
     await waitFor("two threads", async () => (await rows()) === 2);
@@ -1782,6 +1791,352 @@ async function sweep(profileName) {
     await page.dblclick("#sidebar-resize");
     check(Math.round((await rect("#sidebar")).width) === 256, "double-click didn't reset the width");
     return `${want}px, then 256px`;
+  });
+
+  // T3 Code's sidebar, round 2: PR state everywhere, auto-settle and its settings, the Working shelf.
+  const attr = (selector, name) => page.evaluate(([sel, n]) => document.querySelector(sel)?.getAttribute(n) ?? null, [selector, name]);
+  const prState = (selector) => attr(selector, "data-state");
+  const sideSetting = async (id, on) => {
+    await page.evaluate(() => document.body.dataset.page === "settings" || toggleSettings());
+    await tapOrClick('#settings-nav [data-page="general"]');
+    if (on !== undefined) await page.locator(`#side-${id}`).setChecked(on);
+  };
+  const closeSettings = () => page.evaluate(() => document.body.dataset.page === "settings" && toggleSettings());
+  const sectionIn = (key, days) =>
+    page.evaluate(([k, d]) => {
+      const real = Date.now;
+      Date.now = () => real() + d * 86400e3;
+      try {
+        return sectionOf(tabByKey(k));
+      } finally {
+        Date.now = real;
+      }
+    }, [key, days]);
+
+  await step("app view: PR badges take their state's color, with T3's hover cards", async () => {
+    const alpha = await keyFor("alpha");
+    await openRow(alpha);
+    await showSidebar();
+    const badge = `${rowSel(alpha)} .pr`;
+    await waitFor("alpha's badge to read merged", async () => (await prState(badge)) === "merged", 10000);
+    check((await tone(badge)) === "rgba(196, 181, 253, 0.9)", `the merged badge is ${await tone(badge)}`);
+    check((await attr(badge, "aria-label")) === "PR #42 merged", `aria-label: ${await attr(badge, "aria-label")}`);
+    await waitFor("the composer's badge to read merged", async () => (await prState("#composer-footer .pr")) === "merged");
+    check((await tone("#composer-footer .pr")) === "rgba(196, 181, 253, 0.9)", `the composer's badge is ${await tone("#composer-footer .pr")}`);
+    check((await attr(rowSel(alpha), "title")) === null, "the row still has a native tooltip");
+    if (touch) return "touch: hover cards need a pointer";
+    await page.hover(`${rowSel(alpha)} .l2`);
+    await waitFor("the row's hover card", () => page.locator("#hover-card").isVisible(), 3000);
+    const card = await text("#hover-card");
+    const title = await text(`${rowSel(alpha)} .l2`);
+    check(card.startsWith(title) && /alpha/.test(card) && /sweep-node/.test(card) && /#42/.test(card), `row card: ${card}`);
+    const [row, box] = [await rect(rowSel(alpha)), await rect("#hover-card")];
+    check(Math.round(box.left) === Math.round(row.right + 4) && box.width <= 320, `the card sits at ${box.left},${box.top} (${box.width}px), the row ends at ${row.right}`);
+    await page.hover(badge);
+    await waitFor("the PR's hover card", async () => /#42\s*Add notes/.test(await text("#hover-card")), 3000);
+    check((await rect("#hover-card")).width === 320, "the PR card isn't 320px wide");
+    await page.click('#hover-card [data-card-pr$="/pull/42"]');
+    await waitFor("#42 in the PR panel", async () => /#42/.test(await text('#panel-tabs [data-panel="pr"].active')), 15000);
+    check(!(await page.locator("#hover-card").isVisible()), "the card stayed after its link was clicked");
+    await tapOrClick("#toggle-panel");
+    await page.hover("#composer-footer .pr");
+    await waitFor("the composer badge's card", async () => /#42\s*Add notes/.test(await text("#hover-card")), 3000);
+    await page.mouse.move(0, 0);
+    await waitFor("the card to close", async () => !(await page.locator("#hover-card").isVisible()), 2000);
+    return card;
+  });
+
+  await step("app view: a draft's pen leads its row and Discard draft clears it; the empty search state", async () => {
+    const alpha = await keyFor("alpha");
+    const beta = await keyFor("beta");
+    await openRow(alpha);
+    await page.fill("#prompt", "unsent words");
+    await openRow(beta);
+    await showSidebar();
+    const lead = await page.locator(`${rowSel(alpha)} .l1 > *`).first().getAttribute("class");
+    check(lead === "draft-pen", `line 1 starts with ${lead}`);
+    check(!(await page.locator(`${rowSel(alpha)} .l2 .draft-pen`).count()), "the pen is still on the title line");
+    if (!touch) {
+      await rowAct(alpha, "discard");
+      await waitFor("the draft gone", async () => !(await page.locator(`${rowSel(alpha)} .draft-pen`).count()));
+      await openRow(alpha);
+      check((await page.inputValue("#prompt")) === "", `the discarded draft came back: ${await page.inputValue("#prompt")}`);
+    } else {
+      await openRow(alpha);
+      await page.fill("#prompt", "");
+    }
+    await showSidebar();
+    await page.fill("#thread-search", "nothing matches this");
+    const empty = await page.locator("#thread-list .empty").evaluate((el) => [el.textContent, getComputedStyle(el).fontSize, getComputedStyle(el).textAlign, getComputedStyle(el).paddingTop].join("|"));
+    check(empty === "No threads found|12px|center|24px", `empty state: ${empty}`);
+    await page.fill("#thread-search", "");
+    await openRow(alpha);
+  });
+
+  await step("app view: a project's favicon replaces its monogram, found where T3 looks", async () => {
+    const beta = await keyFor("beta");
+    const file = path.join(HOME, "work/beta/favicon.svg");
+    fs.writeFileSync(file, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="#e11d48"/></svg>');
+    await page.evaluate(() => dispatchEvent(new Event("focus")));
+    await showSidebar();
+    await waitFor("beta's favicon", async () => ((await attr(`${rowSel(beta)} img.favicon`, "src")) ?? "").startsWith("data:image/svg+xml;base64,"), 10000);
+    check(!(await page.locator(`${rowSel(beta)} .monogram`).count()), "beta kept its monogram");
+    check((await page.locator(`${rowSel(await keyFor("alpha"))} .monogram`).count()) === 1, "alpha, with no favicon, lost its monogram");
+    const size = await page.locator(`${rowSel(beta)} img.favicon`).evaluate((el) => `${el.getBoundingClientRect().width}x${el.getBoundingClientRect().height}`);
+    check(size === "16x16", `the favicon is ${size}`);
+    fs.unlinkSync(file);
+    await page.evaluate(() => dispatchEvent(new Event("focus")));
+    await waitFor("the monogram back", async () => (await page.locator(`${rowSel(beta)} .monogram`).count()) === 1, 10000);
+  });
+
+  await step("app view: the project filter is T3's searchable combobox, each project with its settings gear", async () => {
+    await showSidebar();
+    check((await text("#project-filter .label")) === "All projects", `the filter reads ${await text("#project-filter .label")}`);
+    await tapOrClick("#project-filter");
+    await waitFor("the project menu", () => page.locator("#project-menu").isVisible());
+    check((await attr("#project-menu input", "placeholder")) === "Search projects...", "the menu has no project search");
+    const items = await page.locator("#project-menu .item .label").allTextContents();
+    check(items.join("|") === "All projects|alpha|beta", `items: ${items.join("|")}`);
+    const [menu, search] = [await rect("#project-menu"), await rect("#sidebar .search")];
+    check(Math.round(menu.left) === Math.round(search.left) && menu.width <= 288, `the menu sits at ${menu.left} (${menu.width}px), the search at ${search.left}`);
+    await page.fill("#project-menu input", "nothing like it");
+    check((await text("#project-menu .empty")) === "No matching projects.", `empty: ${await text("#project-menu .empty")}`);
+    await page.fill("#project-menu input", "bet");
+    if (touch) await press(gui('#project-menu .item[data-project="beta"]'));
+    else await page.press("#project-menu input", "Enter");
+    await waitFor("only beta's rows", async () => (await sideOrder()).every((p) => p === "beta") && (await text("#project-filter .label")) === "beta");
+    check((await page.evaluate(() => load("gui-project"))) === "beta", "the filter wasn't saved");
+    await tapOrClick("#project-filter");
+    await press(gui('#project-menu [data-gear="beta"]'));
+    await waitFor("beta's project page", async () => (await text("#settings-page h2")) === "beta", 10000);
+    await closeSettings();
+    await showSidebar();
+    await tapOrClick("#project-filter");
+    await press(gui('#project-menu .item[data-project=""]'));
+    await waitFor("all projects again", async () => (await sideOrder()).length === 2 && (await text("#project-filter .label")) === "All projects");
+    await openRow(await keyFor("alpha"));
+  });
+
+  await step("app view: the row menu regenerates a title, snoozes for a duration, opens project settings, archives and deletes", async () => {
+    const alpha = await keyFor("alpha");
+    const beta = await keyFor("beta");
+    const rows = () => page.locator("#thread-list .thread-row").count();
+    await rowMenu(rowSel(alpha));
+    await menuPick("Regenerate title");
+    await waitFor("claude's new title", async () => /^Titled /.test(await text(`${rowSel(alpha)} .l2`)), 10000);
+
+    await rowMenu(rowSel(beta));
+    await menuPick("Snooze");
+    await menuPick("Custom…");
+    await waitFor("the custom snooze dialog", () => page.locator("#side-dialog").isVisible());
+    check((await text("#side-dialog h3")) === "Custom snooze", `dialog: ${await text("#side-dialog h3")}`);
+    await press(gui('#side-dialog [data-mode="duration"]'));
+    await page.fill('#side-dialog [name="amount"]', "0");
+    await press(gui("#side-dialog .primary"));
+    check((await text("#side-dialog .error")) === "Enter a positive duration.", `error: ${await text("#side-dialog .error")}`);
+    await page.fill('#side-dialog [name="amount"]', "3");
+    await press(gui("#side-dialog .primary"));
+    await waitFor("beta snoozed for 3 hours", async () => (await text(`${rowSel(beta)} .wake-at`)) === "3h");
+    await rowMenu(rowSel(beta));
+    await menuPick("Wake thread");
+    await waitFor("beta awake", async () => !(await page.locator(`${rowSel(beta)} .wake-at`).count()));
+
+    await rowMenu(rowSel(alpha));
+    await menuPick("Project settings");
+    await waitFor("alpha's project page", async () => (await text("#settings-page h2")) === "alpha", 10000);
+    await closeSettings();
+
+    await rowMenu(rowSel(alpha));
+    await menuPick("New thread on");
+    await waitFor("a third thread", async () => (await rows()) === 3, 10000);
+    await waitFor("it to open", async () => (await text("#chat-head .crumb .title")) === "New thread", 10000);
+    const third = await page.evaluate(() => active.key);
+    await sendPrompt("to archive");
+    await answered("echo: to archive");
+    await rowMenu(rowSel(third));
+    await menuPick("Archive thread");
+    await waitFor("the archived thread gone", async () => (await rows()) === 2);
+    await sideSetting("days");
+    await waitFor("it under Archived threads", async () => /to archive/.test(await text("#side-settings .archived")));
+    await press(gui("#side-settings [data-unarchive]"));
+    await waitFor("Unarchive to bring it back", async () => (await rows()) === 3 && (await text("#chat-head .crumb .title")) === "to archive", 15000);
+    await waitFor("its conversation", async () => (await page.locator("#thread .bubble", { hasText: "to archive" }).count()) > 0, 10000);
+    await rowMenu("#thread-list .thread-row.active");
+    await menuPick("Delete");
+    await waitFor("the delete dialog", async () => (await text("#side-dialog h3")) === 'Delete thread "to archive"?');
+    await press(gui("#side-dialog .destructive"));
+    await waitFor("the deleted thread gone", async () => (await rows()) === 2);
+    await sideSetting("days");
+    check(/No archived threads/.test(await text("#side-settings")), "the archive isn't empty");
+    await closeSettings();
+    await openRow(alpha);
+  });
+
+  await step("app view: ⌘-click and Shift-click select rows for T3's bulk menu", async () => {
+    if (touch) return "touch: selecting takes a modifier key";
+    const alpha = await keyFor("alpha");
+    const beta = await keyFor("beta");
+    await openRow(alpha);
+    await showSidebar();
+    const picked = () => page.locator("#thread-list .thread-row.selected").count();
+    await page.click(`${rowSel(beta)} .l2`, { modifiers: ["Meta"] });
+    await page.click(`${rowSel(alpha)} .l2`, { modifiers: ["Meta"] });
+    check((await picked()) === 2 && (await crumbProject()) === "alpha", `${await picked()} selected, ${await crumbProject()} open`);
+    await page.click(rowSel(alpha), { button: "right" });
+    const labels = await page.locator("#side-menu button .label").allTextContents();
+    for (const want of ["Settle (2)", "Snooze (2)", "Regenerate titles (2)", "Mark unread (2)", "Delete (2)"]) check(labels.includes(want), `bulk menu: ${labels.join(" | ")}`);
+    await menuPick("Settle (2)");
+    await waitFor("both settled", async () => (await page.locator("#thread-list .thread-row.slim").count()) === 2);
+    check((await picked()) === 0, "the selection stayed after the bulk action");
+    check(/Settled 2 threads/.test(await text("#side-notice")), `notice: ${await text("#side-notice")}`);
+    await page.keyboard.press("Meta+z");
+    await waitFor("both back", async () => (await page.locator("#thread-list .thread-row.tall").count()) === 2);
+    await page.click(`${rowSel(alpha)} .l2`);
+    await page.click(`${rowSel(beta)} .l2`, { modifiers: ["Shift"] });
+    check((await picked()) === 2, `Shift-click selected ${await picked()}`);
+    await page.keyboard.press("Escape");
+    await waitFor("Esc to clear the selection", async () => (await picked()) === 0);
+    return labels.join(" | ");
+  });
+
+  await step("app view: ⌘⇧T reopens a closed panel tab, as T3's closed views", async () => {
+    if (touch) return "touch: ⌘⇧T needs a keyboard";
+    await openRow(await keyFor("alpha"));
+    await tapOrClick("#pr-chip");
+    await waitFor("the PR tab", () => page.locator('#panel-tabs [data-panel="pr"].active').isVisible(), 10000);
+    const label = await text('#panel-tabs [data-panel="pr"].active');
+    await page.keyboard.press("Meta+w");
+    await waitFor("the PR tab closed", async () => !(await page.locator('#panel-tabs [data-panel="pr"]', { hasText: label }).filter({ visible: true }).count()));
+    await page.keyboard.press("Meta+Shift+T");
+    await waitFor("⌘⇧T to bring it back", async () => (await page.locator('#panel-tabs [data-panel="pr"].active').isVisible()) && (await text('#panel-tabs [data-panel="pr"].active')) === label, 5000);
+    await tapOrClick("#toggle-panel");
+    return label;
+  });
+
+  await step("app view: settings: auto-settle inactive threads after the set days, the Working section", async () => {
+    const beta = await keyFor("beta");
+    await sideSetting("days");
+    check((await page.inputValue("#side-days")) === "3", `days: ${await page.inputValue("#side-days")}`);
+    check((await sectionIn(beta, 2)) === "active" && (await sectionIn(beta, 4)) === "settled", "3 days don't settle beta after 4");
+    await page.fill("#side-days", "5");
+    check((await sectionIn(beta, 4)) === "active" && (await sectionIn(beta, 6)) === "settled", "5 days still settle beta after 4");
+    await page.fill("#side-days", "91");
+    check(JSON.parse(await page.evaluate(() => load("gui-sidebar-settings"))).days === 5, "91 days was taken");
+    await page.locator("#side-inactive").setChecked(false);
+    await waitFor("the days row to go", async () => !(await page.locator("#side-days").count()) && !(await page.locator("#side-keepPrs").count()));
+    check((await sectionIn(beta, 100)) === "active", "inactivity still settles with the switch off");
+    await page.locator("#side-inactive").setChecked(true);
+    await waitFor("3 days again", async () => (await page.locator("#side-days").count()) && (await page.inputValue("#side-days")) === "3");
+
+    await page.locator("#side-working").setChecked(true);
+    await closeSettings();
+    const alpha = await keyFor("alpha");
+    await openRow(alpha);
+    await sendPrompt("think");
+    await waitFor("the Working shelf", async () => (await text('#thread-list .settled-head[data-shelf="working"]')) === "Working (1)", 8000);
+    await showSidebar();
+    check(await page.locator(`#thread-list .settled-head[data-shelf="working"] ~ .thread-row[data-tab="${alpha}"].tall`).isVisible(), "the open thread isn't under the Working shelf");
+    await answered("Done thinking.");
+    await waitFor("alpha back on top of the inbox", async () => (await sideOrder())[0] === "alpha" && !(await page.locator('.settled-head[data-shelf="working"]').count()), 10000);
+    await sideSetting("working", false);
+    await closeSettings();
+  });
+
+  await step("app view: a thread settles when its pull request closes, or merges with on-merge on", async () => {
+    const beta = await keyFor("beta");
+    await openRow(beta);
+    await sendPrompt("open-pr");
+    await answered("I opened a pull request.");
+    const badge = `${rowSel(beta)} .pr`;
+    await waitFor("beta's open #43", async () => (await prState(badge)) === "open", 10000);
+    check((await tone(badge)) === "rgba(110, 231, 183, 0.9)", `the open badge is ${await tone(badge)}`);
+    check((await sectionIn(beta, 30)) === "active", "an open PR let inactivity settle beta");
+    fs.writeFileSync(path.join(HOME, ".fake-gh-43"), `closed ${new Date().toISOString()}`);
+    await page.evaluate(() => dispatchEvent(new Event("focus")));
+    await showSidebar();
+    await waitFor("beta settled by the closed PR", () => page.locator(`${rowSel(beta)}.slim`).isVisible(), 10000);
+    check((await prState(badge)) === "closed", "the settled row's badge isn't closed");
+    check((await crumbProject()) === "beta", "auto-settle moved off the open thread");
+    await rowMenu(rowSel(beta));
+    await menuPick("Un-settle thread");
+    await waitFor("beta back among the cards", () => page.locator(`${rowSel(beta)}.tall`).isVisible());
+
+    await sideSetting("onMerge", false);
+    await closeSettings();
+    fs.writeFileSync(path.join(HOME, ".fake-gh-43"), `merged ${new Date().toISOString()}`);
+    await page.evaluate(() => dispatchEvent(new Event("focus")));
+    await waitFor("beta's merged badge", async () => (await prState(badge)) === "merged", 10000);
+    await showSidebar();
+    check(await page.locator(`${rowSel(beta)}.tall`).isVisible(), "a merge settled beta with on-merge off");
+    await sideSetting("keepPrs", true);
+    check((await sectionIn(beta, 10)) === "active", "Keep threads with a PR let inactivity settle beta");
+    await page.locator("#side-keepPrs").setChecked(false);
+    check((await sectionIn(beta, 10)) === "settled", "inactivity didn't settle beta without Keep threads with a PR");
+    await page.locator("#side-onMerge").setChecked(true);
+    await closeSettings();
+    await showSidebar();
+    await waitFor("on-merge to settle beta", () => page.locator(`${rowSel(beta)}.slim`).isVisible(), 5000);
+    await rowMenu(rowSel(beta));
+    await menuPick("Un-settle thread");
+    await waitFor("beta back among the cards", () => page.locator(`${rowSel(beta)}.tall`).isVisible());
+    await openRow(await keyFor("alpha"));
+  });
+
+  await step("app view: dragging rows reorders, pins, unpins, settles and un-settles, and Settle sweeps over rows", async () => {
+    if (touch) return "touch: dragging rows takes a mouse";
+    await openRow(await keyFor("alpha"));
+    await showSidebar();
+    const read = (selector) => page.evaluate((sel) => document.querySelector(sel)?.textContent.trim() ?? "", selector);
+    const mid = async (selector) => {
+      const r = await rect(selector);
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2, top: r.top, bottom: r.bottom };
+    };
+    const drag = async (selector, targetY) => {
+      const from = await mid(selector);
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      await page.mouse.move(from.x, from.y - 8, { steps: 2 });
+      await page.mouse.move(from.x, await targetY(), { steps: 6 });
+      const verb = await read("#thread-list .thread-row.dragging .drop-verb");
+      await page.mouse.up();
+      return verb;
+    };
+    const keys = () => page.evaluate(() => [...document.querySelectorAll("#thread-list .thread-row")].map((r) => r.dataset.tab));
+    const pinned = (key) => page.locator(`${rowSel(key)} .pin`).count();
+    const [first, second] = await keys();
+    let verb = await drag(rowSel(second), async () => (await mid('.drag-mark[data-mark="pinned"]')).y + 4);
+    check(verb === "Pin", `dragging onto Pinned reads ${verb}`);
+    await waitFor("the dragged row pinned on top", async () => (await pinned(second)) === 1 && (await keys())[0] === second);
+    verb = await drag(rowSel(second), async () => (await mid(rowSel(first))).bottom - 4);
+    check(verb === "Unpin", `dragging below Active reads ${verb}`);
+    await waitFor("unpinned below", async () => !(await pinned(second)) && (await keys()).join() === [first, second].join());
+    verb = await drag(rowSel(first), async () => (await mid(rowSel(second))).bottom - 4);
+    check(verb === "", `a reorder shows ${verb}`);
+    await waitFor("the rows reordered", async () => (await keys()).join() === [second, first].join());
+    verb = await drag(rowSel(first), async () => (await mid('.drag-hint[data-mark="settled"]')).y);
+    check(verb === "Settle", `dragging onto Settled reads ${verb}`);
+    await waitFor("the dragged row settled", () => page.evaluate((k) => sectionOf(tabByKey(k)) === "settled", first));
+    if (!(await page.locator(`${rowSel(first)}.slim`).count())) await press(gui('#thread-list .settled-head[data-shelf="settled"]'));
+    verb = await drag(rowSel(first), async () => (await mid(rowSel(second))).top + 4);
+    check(verb === "Un-settle", `dragging a settled row up reads ${verb}`);
+    await waitFor("it back among the cards", () => page.locator(`${rowSel(first)}.tall`).isVisible());
+
+    const [top, below] = await keys();
+    await page.hover(`${rowSel(top)} .l2`);
+    const settleButton = await mid(`${rowSel(top)} [data-act="settle"]`);
+    await page.mouse.move(settleButton.x, settleButton.y);
+    await page.mouse.down();
+    await page.mouse.move(settleButton.x, settleButton.y + 12, { steps: 2 });
+    await page.mouse.move(settleButton.x, (await mid(rowSel(below))).y, { steps: 6 });
+    const swept = await page.locator("#thread-list .thread-row.swept .drop-verb").allTextContents();
+    await page.mouse.up();
+    check(swept.join() === "Settle,Settle", `the sweep marked ${swept.join() || "nothing"}`);
+    await waitFor("both settled", async () => (await page.locator("#thread-list .thread-row.slim").count()) === 2);
+    // The drag's settle a moment ago joins the same undo, as repeats of one action do.
+    check(/Settled [23] threads/.test(await text("#side-notice")), `notice: ${await text("#side-notice")}`);
+    await page.keyboard.press("Meta+z");
+    await waitFor("the sweep undone", async () => (await page.locator("#thread-list .thread-row.tall").count()) === 2);
+    await openRow(await keyFor("alpha"));
   });
 
   await step("app view: controls are big enough to tap", async () => {

@@ -122,7 +122,7 @@ function renderComposer(tab) {
   footer.innerHTML = `<span class="where" title="${esc(tab.view.cwd)}">${icon(ws?.worktree ? "folder-git" : "folder")}${ws?.worktree ? "Worktree" : "Local checkout"}</span>
     ${tab.machine !== LOCAL ? `<span class="machine">${icon("monitor")}${esc(machineName(tab.machine))}</span>` : ""}
     <span class="spacer"></span>
-    ${pr ? `<button type="button" class="pr" data-pr="${esc(pr.url)}" title="Open pull request #${pr.number}">${icon("git-pull-request")}#${pr.number}</button>` : ""}
+    ${prBadge(tab, "button", pr)}
     ${ws?.branch ? `<button type="button" class="branch" title="${esc(ws.branch)} · ⌘⇧G">${icon("git-branch")}<span>${esc(ws.branch)}</span>${icon("chevron-down", "chev")}</button>` : ""}`;
   prompt.placeholder = placeholderFor(tab, t);
 }

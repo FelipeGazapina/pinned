@@ -101,7 +101,7 @@ function closeSurface(id = panelOf(active).active) {
   const p = panelOf(tab);
   const i = p.surfaces.findIndex((s) => s.id === id);
   if (i < 0) return closePanel();
-  p.surfaces.splice(i, 1);
+  rememberClosedSurface(tab, p.surfaces.splice(i, 1)[0]);
   if (p.active === id) p.active = (p.surfaces[i] ?? p.surfaces[i - 1])?.id ?? null;
   if (!p.surfaces.length) p.open = false;
   savePanel(tab);
@@ -109,6 +109,7 @@ function closeSurface(id = panelOf(active).active) {
 }
 function keepSurfaces(keep) {
   const p = panelOf(active);
+  p.surfaces.filter((s) => !keep(s)).forEach((s) => rememberClosedSurface(active, s));
   p.surfaces = p.surfaces.filter(keep);
   if (!p.surfaces.some((s) => s.id === p.active)) p.active = p.surfaces.at(-1)?.id ?? null;
   if (!p.surfaces.length) p.open = false;
@@ -853,6 +854,7 @@ async function loadPr(tab, url) {
   if (!prCache.get(key).data) renderPanel();
   try {
     prCache.set(key, { data: await callOn(tab.machine, { cmd: "pull_request", tab: tab.view.id, pr: url }), at: Date.now() });
+    notePrView(url, prCache.get(key).data);
   } catch (e) {
     prCache.set(key, { error: String(e) });
   }
