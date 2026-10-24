@@ -57,6 +57,20 @@ function submit() {
   if (line === "/exit") process.exit(0);
   hook("UserPromptSubmit", { prompt: line });
   said(line);
+  if (line === "/modes") {
+    mode = "manual";
+    line = "";
+    hook("Stop");
+    return prompt();
+  }
+  if (CHOICES_MENUS[line]) {
+    choosing = CHOICES_MENUS[line];
+    wrote([{ type: "tool_use", id: `question-${lines}`, ...choosing.tool }]);
+    hook("Notification", { message: "Claude needs your input" });
+    questioning = 1;
+    line = "";
+    return drawQuestion();
+  }
   if (line === "/ask") {
     wrote([{ type: "tool_use", id: `ask-${lines}`, name: "Bash", input: { command: "rm -rf build", description: "Remove the build folder" } }]);
     hook("Notification", { message: "Claude needs your permission to use Bash" });
@@ -80,18 +94,97 @@ function submit() {
   }
   if (line !== "/ask") hook("Stop");
   line = "";
+  prompt();
+}
+
+// After /modes, the prompt has claude 2.1's mode line under it, and Shift+Tab cycles the mode.
+const MODES = { manual: "⏸ manual mode on · ? for shortcuts", accept: "⏵⏵ accept edits on (shift+tab to cycle)", plan: "⏸ plan mode on (shift+tab to cycle)", auto: "⏵⏵ auto mode on (shift+tab to cycle)" };
+let mode = null;
+function prompt() {
+  if (mode) out(`  ${MODES[mode]}\r\n`);
   out("> ");
 }
 
-const CHOICES = ["Yes", "Yes, and don't ask again for rm commands", "No, and tell Claude what to do differently (esc)"];
+// Choices as claude 2.1 draws them: AskUserQuestion's numbered options with descriptions, a
+// free-text one and one past a rule, and the plan approval with its own free-text option.
+const CHOICES_MENUS = {
+  "/question": {
+    head: ` ☐ Color\r\n\r\nWhich color do you prefer?\r\n\r\n`,
+    options: [["Red", "warm and bold"], ["Blue", "calm and cool"], ["Type something.", ""], ["Chat about this", ""]],
+    free: 3, rule: 4, indent: "", footer: "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    tool: { name: "AskUserQuestion", input: { questions: [{ question: "Which color do you prefer?", header: "Color" }] } },
+  },
+  "/plan-ready": {
+    head: ` Ready to code?\r\n Here is Claude's plan:\r\n${"╌".repeat(40)}\r\n 1. Add a hello comment to a.py.\r\n${"╌".repeat(40)}\r\n${"─".repeat(40)}\r\n Claude has written up a plan and is ready to execute. Would you like to proceed?\r\n`,
+    options: [["Yes, and use auto mode", ""], ["Yes, manually approve edits", ""], ["Tell Claude what to change", "shift+tab to approve with this feedback"]],
+    free: 3, indent: " ", footer: " ctrl+g to edit in Vim · ~/.claude/plans/hello.md",
+    tool: { name: "ExitPlanMode", input: { plan: "1. Add a hello comment to a.py." } },
+  },
+};
+let choosing = null;
+let questioning = 0;
+let typed = "";
+function drawQuestion() {
+  const { head, options, free, rule, indent, footer } = choosing;
+  out(`${"─".repeat(40)}\r\n${head}`);
+  options.forEach(([label, about], i) => {
+    if (i + 1 === rule) out(`${"─".repeat(40)}\r\n`);
+    const at = `${indent}${i + 1 === questioning ? "❯" : " "} ${i + 1}. `;
+    out(`${at}${i + 1 === free && typed ? typed : label}\r\n${about ? `${" ".repeat(at.length)}${about}\r\n` : ""}`);
+  });
+  out(`\r\n${footer}\r\n`);
+}
+function answerQuestion(key) {
+  const { options, free } = choosing;
+  if (key === "\x1b[B" || key === "\x1b[A") {
+    questioning = Math.min(options.length, Math.max(1, questioning + (key === "\x1b[B" ? 1 : -1)));
+    return drawQuestion();
+  }
+  if (key !== "\r" && key !== "\x1b") {
+    if (questioning !== free) return;
+    typed = key === "\x7f" ? typed.slice(0, -1) : typed + key;
+    return drawQuestion();
+  }
+  const answer = key === "\x1b" ? "esc" : questioning === free ? typed : options[questioning - 1][0];
+  out(`answered: ${answer}\r\n`);
+  said([{ type: "tool_result", tool_use_id: `question-${lines - 1}`, content: `The user answered: ${answer}` }]);
+  choosing = null;
+  questioning = 0;
+  typed = "";
+  hook("Stop");
+  prompt();
+}
+
+// As claude 2.1 asks: Tab on "No" opens a line for telling Claude what to do instead.
+const CHOICES = ["Yes", "Yes, and don't ask again for rm commands", "No"];
 let asking = 0;
+let amending = null;
 function drawMenu() {
   const box = "╌".repeat(40);
   out(`${"─".repeat(40)}\r\n Bash command\r\n Tip: auto mode handles these prompts for you\r\n Remove the build folder\r\n${box}\r\n rm -rf build\r\n${box}\r\n Do you want to proceed?\r\n`);
-  CHOICES.forEach((c, i) => out(`${i + 1 === asking ? " ❯" : "  "} ${i + 1}. ${c}\r\n`));
-  out(" Esc to cancel\r\n");
+  const no = amending === null ? "No" : amending ? `No, ${amending}` : "No, and tell Claude what to do differently";
+  [...CHOICES.slice(0, -1), no].forEach((c, i) => out(`${i + 1 === asking ? " ❯" : "  "} ${i + 1}. ${c}\r\n`));
+  out(amending === null ? " Esc to cancel · Tab to amend\r\n" : " Esc to cancel\r\n");
 }
 function answerMenu(key) {
+  if (key === "\t" && asking === CHOICES.length && amending === null) {
+    amending = "";
+    return drawMenu();
+  }
+  if (amending !== null && key !== "\r" && key !== "\x1b" && !/^\x1b\[[AB]$/.test(key)) {
+    amending = key === "\x7f" ? amending.slice(0, -1) : amending + key;
+    return drawMenu();
+  }
+  if (amending !== null && key === "\r") {
+    const feedback = amending;
+    amending = null;
+    asking = 0;
+    out(`declined: ${feedback}\r\n`);
+    said([{ type: "tool_result", tool_use_id: `ask-${lines - 1}`, content: `The user doesn't want to proceed with this tool use. The user said:\n${feedback}`, is_error: true }]);
+    wrote([{ type: "text", text: `Understood: ${feedback}` }]);
+    hook("Stop");
+    return prompt();
+  }
   if (key === "\x1b[B" || key === "\x1b[A") {
     asking = Math.min(CHOICES.length, Math.max(1, asking + (key === "\x1b[B" ? 1 : -1)));
     return drawMenu();
@@ -99,10 +192,11 @@ function answerMenu(key) {
   if (key !== "\r" && key !== "\x1b") return;
   out(`chose ${key === "\x1b" ? "esc" : asking}\r\n`);
   asking = 0;
+  amending = null;
   setTimeout(() => {
     out("ran it\r\n");
     hook("Stop");
-    out("> ");
+    prompt();
   }, 4000);
 }
 
@@ -126,6 +220,17 @@ process.stdin.on("data", (chunk) => {
   if (asking) {
     for (const key of text.match(/\x1b\[[AB]|[\s\S]/g)) answerMenu(key);
     return;
+  }
+  if (questioning) {
+    for (const key of text.match(/\x1b\[[AB]|[\s\S]/g)) answerQuestion(key);
+    return;
+  }
+  if (text === "\x1b[Z" && mode) {
+    const order = Object.keys(MODES);
+    mode = order[(order.indexOf(mode) + 1) % order.length];
+    out("\r\n");
+    prompt();
+    return out(line);
   }
   if (KEYS[text]) return out(KEYS[text]);
   for (const c of text) {
