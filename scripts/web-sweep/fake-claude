@@ -51,6 +51,10 @@ function submit() {
   if (line === "/ask") {
     wrote([{ type: "tool_use", id: `ask-${lines}`, name: "Bash", input: { command: "rm -rf build", description: "Remove the build folder" } }]);
     hook("Notification", { message: "Claude needs your permission to use Bash" });
+    asking = 1;
+    drawMenu();
+    line = "";
+    return;
   } else if (line === "long") for (let i = 1; i <= 120; i++) out(`line ${i} of a long answer\r\n`);
   else if (line === "edit") {
     const id = `tool-${lines}`;
@@ -69,10 +73,34 @@ function submit() {
   out("> ");
 }
 
+// A permission menu drawn the way claude draws one, answered with the arrows and Enter.
+const CHOICES = ["Yes", "Yes, and don't ask again for rm commands", "No, and tell Claude what to do differently (esc)"];
+let asking = 0;
+function drawMenu() {
+  out(`${"─".repeat(40)}\r\n Bash command\r\n   rm -rf build\r\n Do you want to proceed?\r\n`);
+  CHOICES.forEach((c, i) => out(`${i + 1 === asking ? " ❯" : "  "} ${i + 1}. ${c}\r\n`));
+  out(" Esc to cancel\r\n");
+}
+function answerMenu(key) {
+  if (key === "\x1b[B" || key === "\x1b[A") {
+    asking = Math.min(CHOICES.length, Math.max(1, asking + (key === "\x1b[B" ? 1 : -1)));
+    return drawMenu();
+  }
+  if (key !== "\r" && key !== "\x1b") return;
+  out(`chose ${key === "\x1b" ? "esc" : asking}\r\n`);
+  asking = 0;
+  hook("Stop");
+  out("> ");
+}
+
 process.stdin.setRawMode?.(true);
 process.stdin.on("data", (chunk) => {
   // A prompt pinned types arrives as a bracketed paste, which claude reads as plain text.
   const text = chunk.toString("utf8").replace(/\x1b\[20[01]~/g, "");
+  if (asking) {
+    for (const key of text.match(/\x1b\[[AB]|[\s\S]/g)) answerMenu(key);
+    return;
+  }
   if (KEYS[text]) return out(KEYS[text]);
   for (const c of text) {
     if (c === "\r") submit();

@@ -302,6 +302,9 @@ body[data-shell="web"] #gui-minimize { display: none !important; }
 #approval[data-kind="input"] .kind { color: var(--g-info); }
 #approval .what { margin: 2px 0 0; font-size: 13px; }
 #approval pre { margin: 6px 0 0; max-height: 160px; overflow: auto; font: 12px/1.5 var(--g-mono); white-space: pre-wrap; color: rgb(245 245 245 / 0.8); }
+#approval .options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+#approval .options button { height: auto; min-height: 26px; padding: 3px 10px; font-size: 12px; text-align: left; white-space: normal; }
+#approval .what { white-space: pre-wrap; max-height: 120px; overflow: auto; }
 #approval .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-self: center; }
 #approval .actions button { height: 24px; font-size: 12px; padding: 0 9px; }
 
@@ -461,5 +464,5 @@ body[data-panel-max="true"] #panel-resize { display: none; }
   #sidebar .icon, #chat .icon, #panel .icon, #composer .round, #composer .pick, body[data-mode="terminal"] #mode-gui { min-width: 40px; min-height: 40px; }
   .diff-bar { height: 48px; }
   .file > header { top: 48px; }
-  #composer-footer > *, #panel-tabs [data-panel], .diff-bar .scope { min-height: 40px; }
+  #composer-footer > *, #panel-tabs [data-panel], .diff-bar .scope, #approval button { min-height: 40px; }
 }

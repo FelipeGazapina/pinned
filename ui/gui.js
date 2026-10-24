@@ -96,6 +96,7 @@ function markThreadSeen(tab) {
 /** The row's status slot: a label while the session needs attention, otherwise how long ago it last moved. */
 function statusSlot(tab) {
   const status = statusOf(tab);
+  if (tab.menu) return { icon: "shield-question", text: "Approval", tone: "warning" };
   if (status === "working") return { icon: "circle-dashed", text: "Working", tone: "info" };
   if (asksPermission(tab)) return { icon: "shield-question", text: "Approval", tone: "warning" };
   if (status === "needs-input") return { icon: "circle-alert", text: "Input", tone: "input" };
@@ -321,7 +322,7 @@ function renderThread() {
   const body = turns.length
     ? turns.map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && i === turns.length - 1)).join("")
     : `<div class="blank"><p>${t.loaded ? "Send a message to start the conversation." : "Loading…"}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
-  const key = `${tab.key}|${working}|${t.items.length}|${!!t.history}|${[...t.open].join(",")}`;
+  const key = JSON.stringify([tab.key, tab.view.cwd, t.loaded, t.session, working, t.items.length, !!t.history, [...t.open]]);
   if (threadView.dataset.key === key) return renderComposer(tab);
   const stick = threadView.dataset.tab !== tab.key || threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
   threadView.innerHTML = `<div class="lane">${body}</div>`;
@@ -446,6 +447,10 @@ function renderGui() {
   document.body.dataset.sidebar = ui.sidebarOpen ? "open" : "closed";
   for (const tab of tabs) {
     const t = threadOf(tab);
+    if (!t.watching) {
+      t.watching = true;
+      watchMenu(tab);
+    }
     if (!t.loaded) fetchThread(tab);
     fetchWorkspace(tab);
     const before = lastStatus.get(tab.key);
@@ -457,6 +462,7 @@ function renderGui() {
   }
   for (const key of threads.keys()) if (!tabByKey(key)) threads.delete(key);
   markThreadSeen(active);
+  if (active) active.menu = terminalMenu(active);
   renderSidebar();
   if (active && threadOf(active).unsupported) renderUnsupported();
   else renderThread();
@@ -502,26 +508,87 @@ function renderComposer(tab) {
     : t.items.length ? "Ask for changes, send follow-ups, or attach images" : "Ask anything, or / for commands";
 }
 
-/** Claude asks for permission in its terminal; the banner answers with the keys that prompt takes. */
+/** The menu claude shows in its terminal, if one is up: the folder trust check, a permission
+ * request, or any other choice. It is the numbered options, one marked ❯, at the bottom of the
+ * screen, and the text above them up to the rule claude draws. */
+function terminalMenu(tab) {
+  const buffer = tab.term.buffer.active;
+  const bottom = buffer.baseY + tab.term.rows;
+  // A narrow terminal wraps a long option onto more rows; they join back into one line.
+  const lines = [];
+  for (let i = Math.max(0, bottom - 40); i < bottom; i++) {
+    const row = buffer.getLine(i);
+    const text = row?.translateToString(true) ?? "";
+    if (row?.isWrapped && lines.length) lines[lines.length - 1] += text;
+    else lines.push(text);
+  }
+  const footer = (l) => !l.trim() || /\b(Esc|Enter|Tab)\b/.test(l);
+  let i = lines.length - 1;
+  while (i >= 0 && footer(lines[i]) && !OPTION.test(lines[i])) i--;
+  const options = [];
+  for (; i >= 0; i--) {
+    const m = lines[i].match(OPTION);
+    if (m) options.unshift({ n: Number(m[2]), label: m[3], chosen: !!m[1] });
+    else if (!/^\s{4,}\S/.test(lines[i]) || !options.length) break;
+  }
+  if (options.length < 2 || options.some((o, k) => o.n !== k + 1) || !options.some((o) => o.chosen)) return null;
+  const rule = lines.slice(0, i + 1).findLastIndex((l) => /^\s*[─━]{8,}/.test(l));
+  const question = lines.slice(rule + 1, i + 1).map((l) => l.trim()).filter(Boolean).join("\n");
+  return { question, options };
+}
+const OPTION = /^\s*(❯|›)?\s*(\d)\.\s+(.+?)\s*$/;
+
+/** Re-reads the active terminal's menu after claude draws, so the banner follows it. */
+function watchMenu(tab) {
+  let queued = false;
+  tab.term.onWriteParsed(() => {
+    if (queued || tab !== active || !guiOn()) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      const menu = terminalMenu(tab);
+      if (JSON.stringify(menu) === JSON.stringify(tab.menu ?? null)) return;
+      tab.menu = menu;
+      renderComposer(tab);
+      renderSidebar();
+    });
+  });
+}
+
+/** Picks a menu option the way a person does in the terminal: arrows to it, then Enter. */
+function chooseOption(tab, n) {
+  const from = tab.menu.options.find((o) => o.chosen)?.n ?? 1;
+  const keys = (n > from ? "\x1b[B" : "\x1b[A").repeat(Math.abs(n - from)) + "\r";
+  tab.menu = null;
+  return callOn(tab.machine, { cmd: "write_input", tab: tab.view.id, data: keys });
+}
+
+/** Claude asks in its terminal. The banner offers its menu's own options, or, before the menu
+ * reaches this screen, the keys a permission prompt takes. */
 function renderApproval(tab) {
-  const asking = !!tab && statusOf(tab) === "needs-input";
+  const menu = tab?.menu;
+  const asking = !!tab && (!!menu || asksPermission(tab));
   approval.hidden = !asking;
   if (!asking) return (approval.dataset.key = "");
-  const permission = asksPermission(tab);
   const pending = turnsOf(threadOf(tab).items).at(-1)?.steps.findLast?.((s) => s.kind === "tool" && !s.result);
-  const key = `${tab.key}|${tab.view.message}|${pending?.id}`;
+  const key = JSON.stringify([tab.key, menu, tab.view.message, pending?.id]);
   if (approval.dataset.key === key) return;
   approval.dataset.key = key;
+  const permission = asksPermission(tab) || /permission|proceed|allow/i.test(menu?.question ?? "");
   approval.dataset.kind = permission ? "approval" : "input";
-  const kind = !permission ? "Claude needs you" : pending?.name === "Bash" ? "Command approval" : /^(Edit|Write|MultiEdit)$/.test(pending?.name) ? "File change approval" : "Permission approval";
+  const kind = !permission ? "Claude is asking" : pending?.name === "Bash" ? "Command approval" : /^(Edit|Write|MultiEdit)$/.test(pending?.name) ? "File change approval" : "Permission approval";
+  const options = menu
+    ? menu.options.map((o) => `<button type="button" data-option="${o.n}" class="${o.n === 1 ? "primary" : "outline"}">${esc(o.label)}</button>`)
+    : [`<button type="button" data-key="1" class="primary">Approve</button>`, `<button type="button" data-key="2" class="outline" title="Don't ask again for this in this session">Always allow</button>`, `<button type="button" data-key="\u001b" class="outline">Decline</button>`];
   approval.innerHTML = `${icon(permission ? "shield" : "circle-alert", "lead")}<div class="body"><p class="kind">${esc(kind)}</p>
-      <p class="what">${esc(tab.view.message || "")}</p>${pending && permission ? `<pre>${esc(pending.detail || pending.summary)}</pre>` : ""}</div>
-    <div class="actions">${permission
-      ? `<button type="button" data-key="\u001b" class="outline">Decline</button><button type="button" data-key="2" class="outline" title="Don't ask again for this in this session">Always allow</button><button type="button" data-key="1" class="primary">Approve</button>`
-      : ""}<button type="button" data-show-terminal class="outline">Terminal</button></div>`;
+      <p class="what">${esc(menu?.question || tab.view.message || "")}</p>${pending && permission ? `<pre>${esc(pending.detail || pending.summary)}</pre>` : ""}
+      <div class="options">${options.join("")}</div></div>
+    <div class="actions"><button type="button" data-show-terminal class="outline">Terminal</button></div>`;
 }
 
 approval.addEventListener("click", (e) => {
+  const option = e.target.closest("[data-option]")?.dataset.option;
+  if (option && active?.menu) return chooseOption(active, Number(option));
   const key = e.target.closest("[data-key]")?.dataset.key;
   if (key && active) return callOn(active.machine, { cmd: "write_input", tab: active.view.id, data: key });
   if (e.target.closest("[data-show-terminal]")) toggleDrawer(true);
@@ -549,6 +616,8 @@ async function send() {
   const tab = active;
   if (!tab) return toggleProjects();
   if (!tab.view.running) return startTab(tab);
+  // Typing into a menu would filter its options or pick one, so the prompt waits for an answer.
+  if (tab.menu) return approval.animate([{ transform: "translateX(-4px)" }, { transform: "translateX(4px)" }, { transform: "none" }], 180);
   const text = prompt.value.trim();
   if (!text) return;
   prompt.value = "";

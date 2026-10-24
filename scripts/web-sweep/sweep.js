@@ -201,12 +201,27 @@ async function sweep(profileName) {
       verdict = e instanceof TouchUnusable ? "unusable on touch" : "broken";
       note = e.message.split("\n")[0];
     }
+    // An uncaught exception breaks the page even when the step's own checks pass.
+    const thrown = seen.find((s) => s.startsWith("pageerror"));
+    if (verdict === "works" && thrown) [verdict, note] = ["broken", thrown];
     await page.screenshot({ path: path.join(shots, `${String(results.length + 1).padStart(2, "0")}-${name.replace(/\W+/g, "-")}.png`) }).catch(() => {});
     results.push({ step: name, verdict, note, seen: [...new Set(seen)] });
     console.log(`${profileName.padEnd(7)} ${verdict.padEnd(17)} ${name}${note ? `: ${note}` : ""}`);
   }
 
   await page.goto(HUB);
+
+  // The page's scripts share one global scope, where a second function of the same name silently wins.
+  await step("scripts: no global name declared twice", async () => {
+    const owners = new Map();
+    for (const file of fs.readdirSync(path.join(__dirname, "../../ui")).filter((f) => f.endsWith(".js"))) {
+      const source = fs.readFileSync(path.join(__dirname, "../../ui", file), "utf8");
+      for (const [, name] of source.matchAll(/^(?:async )?(?:function|const|let|var|class) ([\w$]+)/gm)) owners.set(name, [...(owners.get(name) ?? []), file]);
+    }
+    const twice = [...owners].filter(([, files]) => files.length > 1).map(([name, files]) => `${name} in ${files.join(", ")}`);
+    check(!twice.length, twice.join("; "));
+    return `${owners.size} names`;
+  });
 
   await step("login: wrong password shows an error", async () => {
     await page.fill("#login [name=email]", EMAIL);
@@ -477,7 +492,10 @@ async function sweep(profileName) {
     await typeInTerm("/ask");
     await page.keyboard.press("Enter");
     await waitFor("needs-input", async () => (await page.getAttribute("header", "data-status")) === "needs-input");
-    return text("#status-text");
+    const said = await text("#status-text");
+    await page.keyboard.press("Escape");
+    await waitTerm(/chose esc/);
+    return said;
   });
 
   await step("claude exits, Enter restarts it", async () => {
@@ -614,9 +632,15 @@ async function sweep(profileName) {
     await waitFor("the banner", () => page.locator("#approval").isVisible());
     check(/Command approval/.test(await text("#approval .kind")), `banner says ${await text("#approval .kind")}`);
     check(/rm -rf build/.test(await text("#approval pre")), "the banner doesn't show the command");
-    await press(gui('#approval [data-key="1"]'));
-    await waitTerm(/\/ask\r?\n> 1/);
-    await page.evaluate(() => callOn(active.machine, { cmd: "write_input", tab: active.view.id, data: "\x7f\r" }));
+    const options = await page.locator("#approval .options button").allTextContents();
+    check(options.length === 3 && options[1].startsWith("Yes, and don't ask again"), `options: ${options.join(" | ")}`);
+    await sendPrompt("typed while claude asks");
+    check(!/typed while claude asks/.test(await termText()), "the composer typed into claude's menu");
+    await page.fill("#prompt", "");
+    await press(gui('#approval [data-option="2"]'));
+    await waitTerm(/chose 2/);
+    await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
+    return options.join(" | ");
   });
 
   await step("app view: the terminal drawer shows the same session", async () => {
