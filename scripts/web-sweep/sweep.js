@@ -637,7 +637,7 @@ async function sweep(profileName) {
     check((await docs.locator("svg").count()) === 0, "a non-GitHub link got the glyph");
     await press(pr);
     await waitFor("#7 in the PR tab", async () => /#7\b/.test(await text('#panel-tabs [data-panel="pr"]')), 15000);
-    await tapOrClick("#panel-close");
+    await tapOrClick("#toggle-panel");
     await waitFor("the panel to close", async () => !(await page.locator("#panel").isVisible()));
   });
 
@@ -1423,6 +1423,10 @@ async function sweep(profileName) {
     await showSidebar();
     await press(page.locator("#thread-list .thread-row", { hasText: "beta" }).first());
     await waitFor("beta", async () => /beta/.test(await text("#chat-head .crumb")));
+    // The timeline's steps filled beta's thread, so this step and the next run in a new one.
+    await page.evaluate(() => newThread(true));
+    await waitFor("a new thread in beta", async () => (await page.locator("#thread-list .thread-row").count()) === 3, 10000);
+    await waitTerm(/fake claude in .*work\/beta/);
     await waitFor("the centered composer", () => page.evaluate(() => document.getElementById("chat").dataset.hero === "true"));
     const [box, chat] = [await rect("#composer .box"), await rect("#chat")];
     check(Math.abs(box.top + box.height / 2 - (chat.top + chat.height / 2)) < chat.height / 5, `the composer sits at ${Math.round(box.top)} in a ${Math.round(chat.height)}px column`);
@@ -1445,6 +1449,7 @@ async function sweep(profileName) {
 
   await step("composer: the branch picker switches branches, ⌘⇧G, and the Git action asks claude", async () => {
     const git = (...args) => require("child_process").execFileSync("git", ["-C", path.join(HOME, "work/beta"), "-c", "user.email=s@example.test", "-c", "user.name=s", ...args]).toString().trim();
+    git("add", "-A");
     git("commit", "-q", "--allow-empty", "-m", "first");
     git("branch", "feature-x");
     const start = git("symbolic-ref", "--short", "HEAD");
@@ -1469,6 +1474,8 @@ async function sweep(profileName) {
     const actions = await page.locator("#git-menu .label").allTextContents();
     check(actions.join("|") === "Commit|Push|Create PR", `Git menu: ${actions.join("|")}`);
     await tapOrClick("#git-action .more");
+    await page.evaluate(() => closeTab(active));
+    await waitFor("two threads", async () => (await page.locator("#thread-list .thread-row").count()) === 2);
     await showSidebar();
     await press(page.locator("#thread-list .thread-row", { hasText: "alpha" }).first());
     await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
@@ -1752,8 +1759,8 @@ async function sweep(profileName) {
       for (const type of ["dragover", "drop"]) row.dispatchEvent(new DragEvent(type, { dataTransfer: data, bubbles: true, cancelable: true }));
     }, beta);
     await waitFor("beta to open", async () => (await crumbProject()) === "beta");
-    await waitFor("the file's path in the composer", async () => /dropped-on-row\.txt/.test(await page.inputValue("#prompt")), 10000);
-    await page.fill("#prompt", "");
+    await waitFor("the file's chip in the composer", async () => (await page.locator("#attachments .name", { hasText: "dropped-on-row.txt" }).count()) === 1, 10000);
+    await press(page.locator("#attachments .remove"));
     await openRow(await keyFor("alpha"));
     if (touch) return "touch: the sidebar is a full-width sheet";
     await showSidebar();
