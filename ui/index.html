@@ -18,6 +18,7 @@
 <link rel="stylesheet" href="gui-timeline.css">
 <link rel="stylesheet" href="gui-composer.css">
 <link rel="stylesheet" href="gui-panel.css">
+<link rel="stylesheet" href="gui-shell.css">
 </head>
 <body data-view="expanded" data-tabs="top">
   <main id="expanded">
@@ -48,7 +49,8 @@
         <span id="sidebar-resize" title="Drag to resize, double-click to reset"></span>
         <footer><button id="gui-settings" class="icon" title="Settings (⌘,)"><i data-icon="settings"></i></button>
           <button id="mode-terminal" class="icon" title="Terminal view (⌘E)"><i data-icon="square-terminal"></i></button>
-          <span id="gui-usage"></span></footer>
+          <span id="gui-usage"></span>
+          <button class="back" title="Back (Esc)"><i data-icon="arrow-left"></i>Back</button></footer>
       </aside>
       <section id="chat">
         <header id="chat-head" data-tauri-drag-region>
@@ -88,6 +90,7 @@
           <div id="composer-footer"></div>
         </form>
       </section>
+      <section id="page-view"></section>
       <aside id="panel">
         <span id="panel-resize" title="Drag to resize"></span>
         <nav id="panel-tabs"><div class="strip" role="tablist"></div><button id="panel-add" class="icon" title="Open a surface (⌘T)"><i data-icon="plus"></i></button><span class="spacer"></span></nav>
@@ -153,6 +156,7 @@
 <script src="gui-timeline.js"></script>
 <script src="gui-composer.js"></script>
 <script src="gui-panel.js"></script>
+<script src="gui-shell.js"></script>
 <script src="account.js"></script>
 </body>
 </html>

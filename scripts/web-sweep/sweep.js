@@ -1790,6 +1790,72 @@ async function sweep(profileName) {
     touchCheck(!small.length, `small: ${small.join(", ")}`);
   });
 
+  const paletteGroups = () => page.locator("#palette .group .label").allTextContents();
+  const paletteItems = () => page.locator("#palette .item .name").allTextContents();
+  await step("shell: ⌘K opens the command palette, finds threads, nests pages", async () => {
+    if (touch) return "touch: no keyboard";
+    const alpha = await keyFor("alpha");
+    await openRow(alpha);
+    await page.keyboard.press("Meta+k");
+    await waitFor("the palette", () => page.locator("#palette").isVisible());
+    check(await page.evaluate(() => document.activeElement === paletteInput), "the palette's input has no focus");
+    check((await page.getAttribute("#palette input", "placeholder")) === "Search commands, projects, and threads...", "wrong placeholder");
+    const groups = await paletteGroups();
+    check(groups.join() === "Actions,Recent Threads", `groups: ${groups.join()}`);
+    const items = await paletteItems();
+    check(items[0] === "New thread in alpha", `first item: ${items[0]}`);
+    check(items.includes("Open settings") && items.includes("Find in current thread"), `actions: ${items.join(" | ")}`);
+    check(await page.locator("#palette .item.hi").first().evaluate((el) => el.dataset.i === "0"), "the first row isn't highlighted");
+    const pop = await rect("#palette .popup");
+    check(pop.width <= 576 && pop.height <= 420, `the palette is ${pop.width}x${pop.height}`);
+    await page.keyboard.type("beta");
+    await waitFor("the Threads group", async () => (await paletteGroups()).includes("Threads"));
+    check(!(await paletteGroups()).includes("Recent Threads"), "a query still shows Recent Threads");
+    await page.keyboard.press("Enter");
+    await waitFor("beta to open from the palette", async () => (await crumbProject()) === "beta");
+    check(!(await page.locator("#palette").isVisible()), "the palette stayed open");
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type(">sett");
+    await waitFor("actions only", async () => (await paletteGroups()).join() === "Actions");
+    check((await paletteItems()).join() === "Open settings,Project settings", `> results: ${(await paletteItems()).join(" | ")}`);
+    await page.fill("#palette input", "new thread in");
+    await waitFor("the sub-page item", async () => (await paletteItems())[0] === "New thread in...");
+    await page.keyboard.press("Enter");
+    await waitFor("the projects sub-page", async () => (await page.getAttribute("#palette input", "placeholder")) === "Search...");
+    const nested = await paletteItems();
+    check(nested[0] === "No project" && nested.includes("alpha") && nested.includes("beta"), `sub-page: ${nested.join(" | ")}`);
+    check((await text("#palette .item[data-i='1'] .hint")) === "⌘2", "the second row has no ⌘2 hint");
+    await page.keyboard.press("Backspace");
+    await waitFor("the root again", async () => (await page.inputValue("#palette input")) === "new thread in");
+    await page.fill("#palette input", "zzqx");
+    await waitFor("the empty state", async () => (await text("#palette .empty")) === "No matching commands, projects, or threads.");
+    await page.keyboard.press("Escape");
+    check(!(await page.locator("#palette").isVisible()), "Escape left the palette open");
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type("find in current");
+    await page.keyboard.press("Enter");
+    await waitFor("⌘K's Find in current thread", () => page.locator("#thread-find").isVisible());
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.press("Meta+k");
+    check(!(await page.locator("#palette").isVisible()), "a second ⌘K didn't close the palette");
+    return `${items.length} actions and threads`;
+  });
+
+  await step("shell: ⌘[ and ⌘] go back and forward between threads", async () => {
+    if (touch) return "touch: no keyboard";
+    const [alpha, beta] = [await keyFor("alpha"), await keyFor("beta")];
+    await openRow(alpha);
+    await openRow(beta);
+    await page.keyboard.press("Meta+[");
+    await waitFor("⌘[ to go back to alpha", async () => (await crumbProject()) === "alpha");
+    await page.keyboard.press("Meta+]");
+    await waitFor("⌘] to go forward to beta", async () => (await crumbProject()) === "beta");
+    await page.keyboard.press("Meta+[");
+    await waitFor("alpha again", async () => (await crumbProject()) === "alpha");
+    return "alpha, beta, alpha";
+  });
+
   await step("app view: back to the terminal", async () => {
     await showSidebar();
     await tapOrClick("#mode-terminal");
