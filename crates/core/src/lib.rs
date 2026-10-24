@@ -1,8 +1,11 @@
 pub mod account;
 pub mod agent;
+pub mod branches;
 pub mod cli;
+pub mod commands;
 pub mod connectors;
 pub mod evidence;
+pub mod files;
 pub mod github;
 pub mod history;
 pub mod hooks;

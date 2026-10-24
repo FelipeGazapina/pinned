@@ -80,7 +80,19 @@ The app view has three columns:
 
 When Claude asks something in its terminal, such as whether to trust a new folder or to allow a
 command, the app view shows the question above the prompt with Claude's own options. Pick one,
-or click **Terminal** to answer there. ⌘J opens the terminal under the thread at any time.
+or click **Terminal** to answer there. Typing instead answers it too: on a permission it declines
+and tells Claude what to do instead, on a question it is your own answer, and on a plan it is
+feedback that refines it. A question's options also take the keys 1 to 9. ⌘J opens the terminal
+under the thread at any time; drag its top edge to resize it.
+
+The composer keeps a draft per thread, and the sidebar marks threads with one. ⌘S sets a draft
+aside in the **Stash** above the prompt. ↑ and ↓ in an empty prompt bring back the thread's
+earlier prompts, and `/` lists Claude's commands with your own and your project's commands and
+skills. Attached files show above the prompt and go out with it. Next to the model menu (⌘⇧M),
+the mode menu (⌘⇧A, or ⇧Tab in the prompt) switches Claude between Supervised, Auto-accept
+edits, Plan and Auto. The branch under the prompt (⌘⇧G) switches or creates branches once Claude
+is between turns, and the Git button in the header asks Claude to commit, push or open a pull
+request, whichever the branch needs.
 
 Other keys in the app view: ⌘N for a new thread (in the current project when only one is open,
 otherwise it asks where), ⌘⇧N for a new thread in the current project, ⌘⌥N for one in the home

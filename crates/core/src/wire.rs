@@ -147,6 +147,19 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    /// `Vec<commands::Command>`, the slash commands claude offers in the tab's folder.
+    Commands { tab: TabId },
+    /// `Vec<String>`: the tab's folder's files and folders, relative, for `@` mentions.
+    Files { tab: TabId },
+    /// `branches::Branches` of the tab's folder.
+    Branches { tab: TabId },
+    /// `null`. Switches the tab's folder to `branch`, a new one when `create`. Refused while claude works there.
+    Checkout {
+        tab: TabId,
+        branch: String,
+        #[serde(default)]
+        create: bool,
+    },
 }
 
 impl Call {
@@ -165,6 +178,10 @@ impl Call {
                 | Call::Ports { .. }
                 | Call::Editors
                 | Call::OpenIn { .. }
+                | Call::Commands { .. }
+                | Call::Files { .. }
+                | Call::Branches { .. }
+                | Call::Checkout { .. }
         )
     }
 }

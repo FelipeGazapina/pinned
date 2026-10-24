@@ -342,12 +342,12 @@ pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, home: &Path, path: Opti
     Ok(())
 }
 
-enum Failure {
+pub(crate) enum Failure {
     Missing,
     Said(String),
 }
 
-fn run(cwd: &Path, path: Option<&str>, program: &str, args: &[&str]) -> Result<String, Failure> {
+pub(crate) fn run(cwd: &Path, path: Option<&str>, program: &str, args: &[&str]) -> Result<String, Failure> {
     let mut command = Command::new(program);
     command.args(args).current_dir(cwd).stdin(Stdio::null());
     if let Some(path) = path {

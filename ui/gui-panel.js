@@ -342,7 +342,7 @@ addEventListener("pointerdown", (e) => {
   if (!panelMenu.hidden && !panelMenu.contains(e.target) && !menuAnchor?.contains(e.target)) closeMenu();
 }, true);
 
-let noteTimer;
+let panelNoteTimer;
 /** A short note at the bottom of the window, such as what a copy put on the clipboard. */
 function flash(text) {
   let note = document.getElementById("panel-note");
@@ -352,8 +352,8 @@ function flash(text) {
   }
   note.textContent = text;
   note.hidden = false;
-  clearTimeout(noteTimer);
-  noteTimer = setTimeout(() => (note.hidden = true), 2000);
+  clearTimeout(panelNoteTimer);
+  panelNoteTimer = setTimeout(() => (note.hidden = true), 2000);
 }
 const copyText = (text, note = "Copied") => {
   navigator.clipboard?.writeText(text).then(() => flash(note), () => flash("Couldn't reach the clipboard"));

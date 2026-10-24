@@ -769,8 +769,8 @@ window.addEventListener("keydown", (e) => {
 const UPLOAD_LIMIT = 25 << 20;
 
 // Claude Code attaches an image when a file path is pasted, so an attached file becomes a paste of its escaped path.
-function pastePaths(tab, paths) {
-  if (guiOn() && tab === active) return insertPaths(paths);
+function pastePaths(tab, paths, files) {
+  if (guiOn() && tab === active) return insertPaths(paths, files);
   tab.term.paste(paths.map((p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&")).join(" ") + " ");
   tab.term.focus();
 }
@@ -781,6 +781,7 @@ attachNote.hidden = true;
 terms.append(attachNote);
 let attachNoteTimer;
 function showAttachNote(text, error = false) {
+  if (guiOn()) return showComposerNote(text, error);
   clearTimeout(attachNoteTimer);
   attachNote.textContent = text;
   attachNote.toggleAttribute("data-error", error);
@@ -811,7 +812,7 @@ async function attachFiles(tab, files) {
   } catch (e) {
     showAttachNote(String(e), true);
   }
-  if (paths.length && tabs.includes(tab)) pastePaths(tab, paths);
+  if (paths.length && tabs.includes(tab)) pastePaths(tab, paths, files);
 }
 
 const attachInput = document.getElementById("attach-input");

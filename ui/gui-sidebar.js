@@ -180,6 +180,8 @@ function cardRow(tab) {
   row.classList.toggle("receded", tab !== active && (phase === "working" || (["asking", "done", "idle"].includes(phase) && !unseenDone(tab) && !woke)));
   row.classList.toggle("bright", unseenDone(tab) || woke || phase === "input");
   row.classList.toggle("working", phase === "working" && tab !== active);
+  const draft = tab !== active && hasDraft(tab);
+  row.classList.toggle("draft", draft);
   const ws = threadOf(tab).workspace;
   const where = ws?.branch
     ? `${ws.worktree ? icon("folder-git", "dim") : ""}<span class="branch" title="${esc(ws.branch)}">${middle(ws.branch)}</span>`
@@ -190,7 +192,7 @@ function cardRow(tab) {
     : `<span class="stamp when">${esc(ago(latestUserAt(tab)))}</span>`;
   const acts = `<span class="acts">${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${MOD_LABEL}⇧S)">${icon("check")}Settle</span></span>`;
   row.innerHTML = `<span class="l1">${projectIcon(projectName(tab))}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>
-    <span class="l2">${titleHtml(tab)}</span>
+    <span class="l2">${draft ? `<span class="draft-pen" title="Unsent draft">${icon("square-pen")}</span>` : ""}${titleHtml(tab)}</span>
     <span class="l3">${where}${prBadge(prOf(tab))}<span class="right">${remote}<span class="provider">${icon("claude")}</span></span></span>`;
   return row;
 }
