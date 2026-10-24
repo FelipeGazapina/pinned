@@ -7,9 +7,23 @@ const path = require("path");
 
 const args = process.argv.slice(2);
 // `claude -p`, which pinned runs to title a conversation: the title names the thread's first prompt.
-if (args.includes("-p")) {
+if (args.includes("-p") && /USER: /.test(args.at(-1) ?? "")) {
   process.stdout.write(`${JSON.stringify({ title: `Titled ${args.at(-1).match(/USER: (.*)/)?.[1] ?? "nothing"}` })}\n`);
   process.exit(0);
+}
+// Any other `claude -p`, as the pull request guide runs it: the prompt on stdin, one JSON answer, then exit.
+if (args.includes("-p")) {
+  const asked = fs.readFileSync(0, "utf8");
+  fs.appendFileSync(path.join(process.env.HOME, "claude-p.log"), `${args.filter((a) => !a.startsWith("{")).join(" ")}\n${asked.split("\n")[0]}\n`);
+  const stops = [
+    { title: "The notes file arrives", summary: "A new **notes.md** holds two lines.", attention: { kind: "product", note: "Should notes live at the root?" }, excerpts: [{ path: "notes.md", side: "new", start: 1, end: 2, caption: "The new notes" }], files: [], notes: [{ path: "notes.md", line: 2, title: "Second line", body: "Kept short on purpose." }], questions: ["Why a separate file?"] },
+    { title: "Nothing else changes", summary: "No other file moves.", attention: null, excerpts: [], files: [{ path: "notes.md", note: "the only file" }], notes: [], questions: [] },
+  ];
+  setTimeout(() => {
+    process.stdout.write(JSON.stringify({ type: "result", is_error: false, result: "", structured_output: { stops } }));
+    process.exit(0);
+  }, 1500);
+  return;
 }
 const settingsFile = args[args.indexOf("--settings") + 1];
 const settings = settingsFile ? JSON.parse(fs.readFileSync(settingsFile, "utf8")) : {};
@@ -185,6 +199,9 @@ function submit() {
     said([{ type: "tool_result", tool_use_id: id, content: "File created." }]);
     wrote([{ type: "text", text: "I wrote app.js and indented notes.md." }]);
     out("wrote app.js\r\n");
+  } else if (line === "paths") {
+    wrote([{ type: "text", text: "Look at `app.js:2` and [the notes](notes.md), not `v1.2.3`, `example.com/a.js` or `npm`." }]);
+    out("paths\r\n");
   } else if (line === "serve") {
     // The address stays out of the transcript, so only port discovery can find the server.
     const server = require("http").createServer((req, res) => {
@@ -192,6 +209,14 @@ function submit() {
         res.setHeader("content-type", "text/html; charset=utf-8");
         res.end("<!doctype html><title>Sweep server</title><p>served by fake claude</p>");
       };
+      if (req.url === "/a") {
+        res.setHeader("content-type", "text/html; charset=utf-8");
+        return res.end('<!doctype html><title>Page A</title><link rel="icon" href="/dot.png"><p>page a</p><a href="/">home</a>');
+      }
+      if (req.url === "/dot.png") {
+        res.setHeader("content-type", "image/png");
+        return res.end(Buffer.from(DOT_PNG, "base64"));
+      }
       req.url === "/slow" ? setTimeout(send, 2500) : send();
     });
     server.listen(0, "127.0.0.1", () => {

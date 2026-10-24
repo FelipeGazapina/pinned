@@ -13,6 +13,7 @@ pub mod hooks;
 pub mod linear;
 pub mod link;
 pub mod machine;
+pub mod panel;
 pub mod plugin;
 pub mod projects;
 pub mod pty;

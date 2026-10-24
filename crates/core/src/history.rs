@@ -41,6 +41,9 @@ pub struct Turn {
     /// The patch hit `PATCH_LIMIT` and lost its tail.
     #[serde(default)]
     pub truncated: bool,
+    /// The snapshot the turn ended on, a git tree, to read its files as they were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
 }
 
 /// The project a folder belongs to: a `claude --worktree` session's checkout reports to the repo
@@ -244,7 +247,7 @@ mod tests {
     fn turns_append_and_load_newest_first() {
         let file = temp("turns.jsonl");
         let _ = std::fs::remove_file(&file);
-        let turn = |session: &str, ended| Turn { session: session.into(), title: None, prompt: Some("p".into()), ended, files: vec![], patch: String::new(), truncated: false };
+        let turn = |session: &str, ended| Turn { session: session.into(), title: None, prompt: Some("p".into()), ended, files: vec![], patch: String::new(), truncated: false, tree: None };
         append(&file, &turn("s1", 1));
         append(&file, &turn("s2", 2));
         std::fs::OpenOptions::new().append(true).open(&file).unwrap().write_all(b"{broken\n{\"session\":\"s3\"}\n").unwrap();

@@ -1,6 +1,7 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
-use crate::{branches, commands, favicon, files, github, history, hooks, plugin, projects, pty, pulls, reminders, sessions, sync, thread, titles, uploads, usage, workspace};
+use crate::panel::{DeviceHub, Shells};
+use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, projects, pty, pulls, reminders, sessions, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -232,6 +233,10 @@ pub struct Machine {
     uploads: Option<PathBuf>,
     /// LiteLLM's price list, downloaded at most daily for the usage page.
     rates_file: Option<PathBuf>,
+    /// The review guides claude wrote for pull requests.
+    guides: PathBuf,
+    shells: Shells,
+    device_hub: DeviceHub,
     clones: PathBuf,
     quitting: AtomicBool,
     usage: Mutex<Usage>,
@@ -278,6 +283,9 @@ impl Machine {
             history_dir: dir.as_ref().map(|d| d.join("history")),
             uploads,
             rates_file: dir.as_ref().map(|d| d.join("usage-model-rates.json")),
+            guides: dir.as_ref().map(|d| d.join("guides")).unwrap_or_else(|| std::env::temp_dir().join("pinned-guides")),
+            shells: Shells::default(),
+            device_hub: DeviceHub::default(),
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
             usage: Mutex::new(Usage::default()),
@@ -347,7 +355,7 @@ impl Machine {
             Call::PrStatus { tab, pr } => json(workspace::pr_status(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
             Call::PullRequest { tab, pr } => json(workspace::pull_request(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
             Call::PrAction { tab, pr, action } => json(workspace::pr_action(&self.tab(&tab, |t| t.cwd.clone())?, &pr, action, self.launch.path_env.as_deref())?),
-            Call::Diff { tab, scope, ignore_whitespace } => json(workspace::diff(&self.tab(&tab, |t| t.cwd.clone())?, scope, ignore_whitespace)?),
+            Call::Diff { tab, scope, ignore_whitespace, base } => json(workspace::diff(&self.tab(&tab, |t| t.cwd.clone())?, scope, ignore_whitespace, base.as_deref())?),
             Call::Ports { tab } => {
                 let pid = self.tab(&tab, |t| t.session.as_ref().and_then(|s| s.pid()))?;
                 json(workspace::listeners(pid, self.launch.path_env.as_deref()))
@@ -375,6 +383,22 @@ impl Machine {
                 json(pulls::list(&home(), self.launch.path_env.as_deref(), repos, state, involvement, &query, limit)?)
             }
             Call::TokenUsage { since, prices } => json(usage::read(&thread::projects_dir(&home()), since, &usage::rates(self.rates_file.as_deref()), &prices)),
+            Call::PageMeta { url } => json(panel::page_meta(&url)?),
+            Call::Refs { tab } => json(panel::refs(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
+            Call::ReadFile { tab, path, root, rev } => json(panel::read_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, root, rev.as_deref())?),
+            Call::WriteFile { tab, path, root, text, since } => json(panel::write_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, root, &text, since.as_deref())?),
+            Call::Search { tab, query, case, regex } => json(panel::search(&self.tab(&tab, |t| t.cwd.clone())?, &query, case, regex, self.launch.path_env.as_deref())?),
+            Call::PrEdit { tab, pr, title, body } => json(panel::pr_edit(&self.tab(&tab, |t| t.cwd.clone())?, &pr, title.as_deref(), body.as_deref(), self.launch.path_env.as_deref())?),
+            Call::PrComment { tab, pr, body, reply_to } => json(panel::pr_comment(&self.tab(&tab, |t| t.cwd.clone())?, &pr, &body, reply_to.as_deref(), self.launch.path_env.as_deref())?),
+            Call::PrReview { tab, pr, event, body, comments } => json(panel::pr_review(&self.tab(&tab, |t| t.cwd.clone())?, &pr, event, &body, &comments, self.launch.path_env.as_deref())?),
+            Call::PrRerun { tab, check } => json(panel::pr_rerun(&self.tab(&tab, |t| t.cwd.clone())?, &check, self.launch.path_env.as_deref())?),
+            Call::PrGuide { tab, pr, write } => json(panel::guide(&self.tab(&tab, |t| t.cwd.clone())?, &pr, write, &self.guides, &self.launch.claude, self.launch.path_env.as_deref())?),
+            Call::OpenShell { tab, cols, rows } => json(self.shells.open(&self.tab(&tab, |t| t.cwd.clone())?, cols, rows, self.launch.path_env.as_deref())?),
+            Call::CloseShell { shell } => {
+                self.shells.close(&shell);
+                Ok(Value::Null)
+            }
+            Call::DeviceHub { embed } => json(self.device_hub.url(embed.as_deref(), self.launch.path_env.as_deref())?),
         }
     }
 
@@ -508,18 +532,27 @@ impl Machine {
 
     /// Replays the tab's screen to `sink`, then streams its output there until `detach`.
     pub fn attach(&self, tab: &str, viewer: ViewerId, sink: Sink) -> Result<(), String> {
+        if Shells::owns(tab) {
+            return self.shells.attach(tab, viewer, sink);
+        }
         let screen = self.tab(tab, |t| t.screen.clone())?;
         screen.lock().unwrap().attach(viewer, sink);
         Ok(())
     }
 
     pub fn detach(&self, tab: &str, viewer: &str) {
+        if Shells::owns(tab) {
+            return self.shells.detach(tab, viewer);
+        }
         if let Ok(screen) = self.tab(tab, |t| t.screen.clone()) {
             screen.lock().unwrap().detach(viewer);
         }
     }
 
     pub fn write_input(&self, tab: &str, data: &[u8]) -> Result<(), String> {
+        if Shells::owns(tab) {
+            return self.shells.write(tab, data);
+        }
         self.tab(tab, |t| match t.session.as_mut() {
             Some(s) => s.write(data).map_err(|e| e.to_string()),
             None => Ok(()),
@@ -527,6 +560,9 @@ impl Machine {
     }
 
     pub fn resize_pty(&self, tab: &str, cols: u16, rows: u16) -> Result<(), String> {
+        if Shells::owns(tab) {
+            return self.shells.resize(tab, cols, rows);
+        }
         self.tab(tab, |t| match t.session.as_ref() {
             Some(s) => s.resize(pty::size(cols, rows)),
             None => Ok(()),
@@ -688,6 +724,7 @@ impl Machine {
     pub fn quit(&self) {
         self.quitting.store(true, Ordering::SeqCst);
         self.tabs.lock().unwrap().clear();
+        self.device_hub.stop();
     }
 
     fn record_event(&self, event: AgentEvent) {
@@ -826,7 +863,7 @@ impl Machine {
                     return;
                 };
                 let (Some(dir), Some((files, patch, truncated))) = (&self.history_dir, history::diff(&cwd, &before, &tree)) else { return };
-                let turn = history::Turn { session, title: event.title.clone(), prompt, ended: unix_now(), files, patch, truncated };
+                let turn = history::Turn { session, title: event.title.clone(), prompt, ended: unix_now(), files, patch, truncated, tree: Some(tree) };
                 history::append(&history::file_for(dir, &history::project_of(&cwd)), &turn);
             }
             NeedsInput => {}

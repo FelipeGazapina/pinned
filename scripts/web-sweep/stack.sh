@@ -58,11 +58,12 @@ start() {
   # The node asks the login shell for PATH; this shell answers with the sweep's, fake claude first.
   cp "$REPO/scripts/web-sweep/fake-claude" "$DIR/bin/claude"
   cp "$REPO/scripts/web-sweep/fake-gh" "$DIR/bin/gh"
+  cp "$REPO/scripts/web-sweep/fake-npx" "$DIR/bin/npx"
   printf '#!/bin/sh\nshift\nexec /bin/sh -c "$1"\n' >"$DIR/bin/shell"
   # Opening an editor logs what it would open, and a Zed.app gives the node an editor to list.
   printf '#!/bin/sh\necho "$@" >>"$HOME/open.log"\n' >"$DIR/bin/open"
   mkdir -p "$DIR/home/Applications/Zed.app"
-  chmod +x "$DIR/bin/claude" "$DIR/bin/gh" "$DIR/bin/shell" "$DIR/bin/open"
+  chmod +x "$DIR/bin/claude" "$DIR/bin/gh" "$DIR/bin/npx" "$DIR/bin/shell" "$DIR/bin/open"
   for p in alpha beta gamma; do
     git -C "$DIR/home/work" init -q "$p"
     git -C "$DIR/home/work/$p" remote add origin "https://github.com/example/$p.git"

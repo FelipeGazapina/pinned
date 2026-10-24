@@ -354,7 +354,7 @@ async function send() {
   if (tab.answering || composer.dataset.sending === "true") return;
   const t = threadOf(tab);
   const files = t.attachments ?? [];
-  const text = [prompt.value.trim(), ...files.map((f) => escapePath(f.path))].filter(Boolean).join(" ");
+  const text = [prompt.value.trim(), ...files.map((f) => f.text ?? escapePath(f.path))].filter(Boolean).join(" ");
   if (tab.menu) {
     const menu = tab.menu;
     const chosen = menu.options.find((o) => o.chosen);
@@ -419,7 +419,7 @@ function renderAttachments(t) {
   const key = JSON.stringify(files.map((f) => f.path));
   if (attachmentsRow.dataset.key === key) return;
   attachmentsRow.dataset.key = key;
-  attachmentsRow.innerHTML = files.map((f, i) => `<span class="attachment" title="${esc(f.path)}">${f.url ? `<img src="${esc(f.url)}" alt="">` : icon("file")}<span class="name">${esc(f.name)}</span>
+  attachmentsRow.innerHTML = files.map((f, i) => `<span class="attachment" title="${esc(f.path)}">${f.url ? `<img src="${esc(f.url)}" alt="">` : icon(f.icon ?? "file")}<span class="name">${esc(f.name)}</span>
     <button type="button" class="remove" data-remove="${i}" title="Remove ${esc(f.name)}">${icon("x")}</button></span>`).join("");
 }
 attachmentsRow.addEventListener("click", (e) => {

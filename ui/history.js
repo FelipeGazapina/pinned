@@ -5,9 +5,10 @@ async function showGeneral() {
     ${TAURI ? `<p><label class="toggle"><input type="checkbox" id="keep-awake"${awake ? " checked" : ""}> Keep this Mac awake</label></p>
     <p class="meta">While this is on, the Mac and its display don't go to sleep, so sessions keep working when you step away. It turns off when you switch it off or quit pinned.</p>
     <p class="error" id="awake-error"></p>` : ""}${appearanceHtml()}
-    ${sidebarSettingsHtml()}`;
+    ${sidebarSettingsHtml()}${panelSettingsHtml()}`;
   bindAppearance();
   bindSidebarSettings();
+  bindPanelSettings();
   if (!TAURI) return;
   document.getElementById("keep-awake").onchange = async (e) => {
     try {
