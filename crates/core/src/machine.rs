@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
-use crate::{branches, commands, files, github, history, hooks, plugin, projects, pty, reminders, sessions, sync, thread, uploads, workspace};
+use crate::{branches, commands, files, github, history, hooks, plugin, projects, pty, reminders, sessions, sync, thread, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -230,6 +230,8 @@ pub struct Machine {
     history_dir: Option<PathBuf>,
     /// Files clients attached, saved for sessions to read.
     uploads: Option<PathBuf>,
+    /// LiteLLM's price list, downloaded at most daily for the usage page.
+    rates_file: Option<PathBuf>,
     clones: PathBuf,
     quitting: AtomicBool,
     usage: Mutex<Usage>,
@@ -275,6 +277,7 @@ impl Machine {
             projects_file,
             history_dir: dir.as_ref().map(|d| d.join("history")),
             uploads,
+            rates_file: dir.as_ref().map(|d| d.join("usage-model-rates.json")),
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
             usage: Mutex::new(Usage::default()),
@@ -359,6 +362,7 @@ impl Machine {
                 }
                 json(branches::checkout(&cwd, &branch, create, self.launch.path_env.as_deref())?)
             }
+            Call::TokenUsage { since } => json(usage::read(&thread::projects_dir(&home()), since, &usage::rates(self.rates_file.as_deref()))),
         }
     }
 

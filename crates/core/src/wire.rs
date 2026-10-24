@@ -163,6 +163,8 @@ pub enum Call {
         #[serde(default)]
         create: bool,
     },
+    /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since` on.
+    TokenUsage { since: u64 },
 }
 
 impl Call {
@@ -185,6 +187,7 @@ impl Call {
                 | Call::Files { .. }
                 | Call::Branches { .. }
                 | Call::Checkout { .. }
+                | Call::TokenUsage { .. }
         )
     }
 }

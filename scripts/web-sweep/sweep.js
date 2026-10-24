@@ -1856,6 +1856,96 @@ async function sweep(profileName) {
     return "alpha, beta, alpha";
   });
 
+  // Priced usage the transcripts recorded: opus today and three days ago, and a model the price list lacks.
+  const seedUsage = () => {
+    const at = (hoursAgo) => new Date(Date.now() - hoursAgo * 3600 * 1000).toISOString();
+    const line = (id, session, hoursAgo, model, usage) => JSON.stringify({ type: "assistant", timestamp: at(hoursAgo), sessionId: session, requestId: `req-${id}`, message: { id, model, role: "assistant", content: [{ type: "text", text: "spent" }], usage } });
+    const dir = path.join(HOME, ".claude", "projects", "-sweep-usage");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "u1.jsonl"), [
+      line("m1", "u1", 2, "claude-opus-5-5", { input_tokens: 1000, cache_read_input_tokens: 2000000, cache_creation_input_tokens: 100000, output_tokens: 50000, speed: "standard" }),
+      line("m1", "u1", 2, "claude-opus-5-5", { input_tokens: 1000, cache_read_input_tokens: 2000000, cache_creation_input_tokens: 100000, output_tokens: 50000, speed: "standard" }),
+      line("m2", "u1", 2, "claude-mystery-1", { input_tokens: 0, output_tokens: 1000 }),
+    ].join("\n") + "\n");
+    fs.writeFileSync(path.join(dir, "u2.jsonl"), line("m3", "u2", 72, "claude-opus-5-5", { input_tokens: 500, output_tokens: 10000 }) + "\n");
+    fs.writeFileSync(path.join(DIR, "node", "usage-model-rates.json"), JSON.stringify({
+      "claude-opus-5-5": { input_cost_per_token: 5e-6, output_cost_per_token: 25e-6, cache_read_input_token_cost: 0.5e-6, cache_creation_input_token_cost: 6.25e-6 },
+    }));
+  };
+  const pageSidebar = async () => {
+    if (await page.locator("#sidebar").isVisible()) return;
+    await tapOrClick("#page-view .side-toggle");
+    await waitFor("the sidebar", () => page.locator("#sidebar").isVisible());
+  };
+  const usagePick = async (seg, value) => {
+    if (touch) await page.selectOption(`#page-view select.seg-select[data-seg="${seg}"]`, value);
+    else await page.click(`#page-view .seg[data-seg="${seg}"] button[data-value="${value}"]`);
+  };
+  const tile = (label) => text(`#page-view .tiles div:has(dt:text-is("${label}")) dd`);
+  await step("shell: the Usage page shows limits, cost and tokens from the transcripts", async () => {
+    seedUsage();
+    await page.evaluate(() => save("gui-usage-page", null));
+    await showSidebar();
+    await tapOrClick('#sidebar footer [data-open-page="usage"]');
+    await waitFor("the Usage page", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
+    check(!(await page.locator("#chat").isVisible()), "the thread still shows beside Usage");
+    await pageSidebar();
+    check(await page.locator("#sidebar footer .back").isVisible(), "the footer has no Back button");
+    await waitFor("two limit windows", async () => (await page.locator("#page-view .limit-card").count()) === 2);
+    const left = await page.locator("#page-view .limit-card .figure b").allTextContents();
+    check(left.join() === "77%,26%", `limits left: ${left.join()}`);
+    check(/↻ \d+[hm]/.test(await text('#page-view .limit-card[data-window="five_hour"] .chip')), "the session window has no reset time");
+    if (touch) await usagePick("metric", "cost");
+    else await page.keyboard.press("c");
+    await waitFor("the total cost", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    check((await text("#page-view .lead > p")) === "2 sessions · API estimate", `under the total: ${await text("#page-view .lead > p")}`);
+    check(/33\.3% unpriced/.test(await page.getAttribute("#page-view .info", "title")), "the unpriced share is missing");
+    check((await page.locator("#page-view .x-axis span").count()) === 3, "the chart has no three x labels");
+    check((await page.locator("#page-view .plot path.line").getAttribute("d")).startsWith("M"), "the chart has no line");
+    const tiles = [await tile("Processed tokens"), await tile("Cached input"), await tile("Uncached input"), await tile("Output"), await tile("Cache savings")];
+    check(tiles.join() === "2.16M,2M,1.50K,61K,$9.00", `totals: ${tiles.join()}`);
+    const models = await page.locator("#page-view table tbody tr td.model span").allTextContents();
+    check(models.join() === "claude-opus-5-5,claude-mystery-1", `models: ${models.join()}`);
+    check((await text('#page-view tr[data-model="claude-mystery-1"] td:nth-child(3)')) === "Unpriced", "the unknown model isn't Unpriced");
+    if (!touch) {
+      const plot = await rect("#page-view .plot");
+      await page.mouse.move(plot.left + plot.width - 4, plot.top + plot.height / 2);
+      await waitFor("the chart's tooltip", async () => /Total/.test(await text("#page-view .tip")));
+      await page.keyboard.press("Meta+Shift+1");
+    } else await usagePick("days", "1");
+    await waitFor("the past 24 hours", async () => (await text("#page-view .total")) === "$2.88");
+    check((await text("#page-view .chart-col h2")) === "Hourly cost", "the chart isn't hourly");
+    if (touch) await usagePick("metric", "tokens");
+    else await page.keyboard.press("t");
+    await waitFor("tokens", async () => (await text("#page-view .total")) === "2.15M");
+    await usagePick("breakdown", "day");
+    check((await page.locator("#page-view table th").first().textContent()) === "Hour", "the breakdown isn't by hour");
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    check(JSON.parse(await page.evaluate(() => load("gui-usage-page"))).days === 1, "the period wasn't saved");
+    if (touch) {
+      await pageSidebar();
+      await tapOrClick("#sidebar footer .back");
+    } else await page.keyboard.press("Escape");
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+    return "limits 77%/26%, $3.13 in 30 days, $2.88 and 2.15M in 24h";
+  });
+
+  await step("shell: ⌘U opens Usage, and ⌘[ comes back", async () => {
+    if (touch) return "touch: no keyboard";
+    const before = await crumbProject();
+    await page.keyboard.press("Meta+u");
+    await waitFor("⌘U to open Usage", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
+    await page.keyboard.press("Meta+[");
+    await waitFor("⌘[ to leave Usage", () => page.locator("#chat").isVisible());
+    check((await crumbProject()) === before, `back on ${await crumbProject()}, not ${before}`);
+    await page.keyboard.press("Meta+]");
+    await waitFor("⌘] to return to Usage", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
+    await page.keyboard.press("Escape");
+    await waitFor("Escape to leave Usage", () => page.locator("#chat").isVisible());
+    return before;
+  });
+
   await step("app view: back to the terminal", async () => {
     await showSidebar();
     await tapOrClick("#mode-terminal");

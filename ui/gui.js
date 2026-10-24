@@ -212,7 +212,6 @@ function renderGui() {
   if (active && threadOf(active).unsupported) renderUnsupported();
   else renderThread();
   renderPanel();
-  renderGuiUsage();
 }
 
 setInterval(() => {
@@ -221,12 +220,6 @@ setInterval(() => {
 }, POLL_MS);
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
 document.addEventListener("visibilitychange", () => markThreadSeen(active));
-
-function renderGuiUsage() {
-  const meter = document.getElementById("gui-usage");
-  meter.replaceChildren(...[...usageMeter.children].map((c) => c.cloneNode(true)));
-  meter.title = usageMeter.title;
-}
 
 function stepThread(step) {
   const order = [...threadList.querySelectorAll(".thread-row")].map((r) => tabByKey(r.dataset.tab));

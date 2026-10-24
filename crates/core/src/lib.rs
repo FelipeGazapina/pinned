@@ -21,5 +21,6 @@ pub mod slack;
 pub mod sync;
 pub mod thread;
 pub mod uploads;
+pub mod usage;
 pub mod wire;
 pub mod workspace;
