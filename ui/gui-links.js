@@ -69,13 +69,16 @@ function promptLinkFor(prompt, context = {}) {
 }
 const githubOf = (repo) => /^github\.com\/([^/]+\/[^/]+)$/i.exec(repo ?? "")?.[1] ?? null;
 
+/** The composer's model a link names, by its family as the menu shows it or by its slug. */
+const linkedModel = (name) => CLAUDE_MODELS.find((m) => (!m.legacy && m.menu.toLowerCase() === name.toLowerCase()) || m.slug === name) ?? null;
+
 function promptLinkItems(tab) {
   const draft = tab && drafts[threadKey(tab)];
   const plain = draft && promptLinkFor(draft);
   if (!plain) return [];
   const repository = githubOf(paletteProjects().find((p) => p.machine === tab.machine && p.path === projectOfTab(tab))?.repo);
   const family = modelName(tab).split(" ")[0].toLowerCase();
-  const withContext = repository && promptLinkFor(draft, { repository, provider: "claude", model: MODELS_MENU.some(([id]) => id === family && id !== "default") ? family : null });
+  const withContext = repository && promptLinkFor(draft, { repository, provider: "claude", model: linkedModel(family) ? family : null });
   return [
     { icon: "link", title: "Copy prompt link", terms: ["copy prompt link", "share"], run: () => copyAndTell(plain, "Prompt link") },
     withContext && { icon: "link", title: "Copy prompt link with repo and model", terms: ["copy prompt link with repo and model", "share repository"], run: () => copyAndTell(withContext, "Prompt link") },
@@ -125,17 +128,15 @@ async function untilClaudeStarts(tab) {
   for (let i = 0; i < 100 && !tabByKey(tab.key)?.view.session; i++) await new Promise((r) => setTimeout(r, 200));
   return !!tabByKey(tab.key)?.view.session;
 }
-/** The link's model, picked the way the composer's model menu picks one, once claude is up to read it. */
-async function pickLinkedModel(tab, link) {
+/** The link's model, picked the way the composer's model menu picks one once claude is up to read
+ * it; returns at once with what to tell about the link's provider and model. */
+function pickLinkedModel(tab, link) {
   if (!link.provider) return [];
   if (link.provider !== "claude" && link.provider !== "claudeagent") return [`The link asks for ${link.provider}; this thread runs Claude Code.`];
   if (!link.model) return [];
-  const pick = MODELS_MENU.find(([id]) => id === link.model.toLowerCase());
+  const pick = linkedModel(link.model);
   if (!pick) return [`The model ${link.model} isn't one Claude Code offers here, so your default stands in.`];
-  if (await untilClaudeStarts(tab) && sendSlash(tab, `/model ${pick[0]}`)) {
-    threadOf(tab).picked = pick[1];
-    if (tab === active) renderComposer(tab);
-  }
+  untilClaudeStarts(tab).then((up) => up && pickModel(tab, pick));
   return [];
 }
 
@@ -148,7 +149,7 @@ async function openThreadWith(machine, path, link) {
   await (machine === LOCAL || path === null ? openTab(machine, path) : openRemote(machine, path, false));
   const tab = active;
   linkLanding.state = OPENED;
-  if (link.prompt) placeLinkedPrompt(tab, link.prompt, link.kind === "new" ? await pickLinkedModel(tab, link) : []);
+  if (link.prompt) placeLinkedPrompt(tab, link.prompt, link.kind === "new" ? pickLinkedModel(tab, link) : []);
   return tab;
 }
 

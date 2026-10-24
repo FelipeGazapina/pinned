@@ -66,8 +66,6 @@ if (cmd === "pr" && sub === "view") {
   process.stdout.write(`Switched to branch 'pr-${number}'\n`);
 } else if (cmd === "pr" && sub === "create") {
   process.stdout.write("Creating pull request\nhttps://github.com/example/beta/pull/43\n");
-} else if (cmd === "repo" && sub === "create") {
-  process.stdout.write(`✓ Created repository ${args[2]} on GitHub\n`);
 } else if (cmd === "pr" && sub === "diff") {
   process.stdout.write("diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,2 @@\n+edited\n+second line\n");
 } else if (cmd === "pr" && sub === "merge" && (args.includes("--auto") || args.includes("--disable-auto"))) {
