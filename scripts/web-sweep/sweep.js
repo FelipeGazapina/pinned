@@ -3711,6 +3711,17 @@ async function sweep(profileName) {
     await page.evaluate(() => document.body.dataset.page === "settings" && toggleSettings());
   });
 
+  await step("follow: the Device tab's dashboard fills the panel's height", async () => {
+    if (touch) await page.evaluate(() => toggleSidebar(false));
+    await openPanelTo("device", "Device");
+    await waitFor("the hub's dashboard", async () => /Expo Device Hub dashboard/.test((await page.frameLocator("#panel-body iframe").locator("body").textContent().catch(() => "")) ?? ""), 20000);
+    const [frame, body] = await page.evaluate(() => [document.querySelector("#panel-body iframe").getBoundingClientRect().height, document.querySelector("#panel-body").getBoundingClientRect().height]);
+    check(frame > body - 80, `the dashboard is ${Math.round(frame)}px tall in a ${Math.round(body)}px panel`);
+    await page.locator('#panel-tabs .ptab[data-panel="device"] .lead').dispatchEvent("click");
+    await closePanelIfOpen();
+    return `${Math.round(frame)}px of ${Math.round(body)}px`;
+  });
+
   const openPulls = async () => {
     await showSidebar();
     await tapOrClick('#sidebar footer [data-open-page="pull-requests"]');

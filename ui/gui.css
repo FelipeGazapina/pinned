@@ -292,7 +292,7 @@ body[data-panel-max="true"] #panel-resize { display: none; }
 #panel-tabs [data-panel]:hover { background: rgb(var(--g-ink-rgb) / 0.024); color: var(--g-fg); }
 #panel-tabs [data-panel].active { background: var(--g-accent); color: var(--g-fg); }
 #panel-body { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--g-scrollbar) transparent; }
-#panel-body[data-kind="browser"] { overflow: hidden; display: flex; flex-direction: column; }
+#panel-body[data-kind="browser"], #panel-body[data-kind="device"] { overflow: hidden; display: flex; flex-direction: column; }
 .panel-empty { margin: 48px 24px; text-align: center; font-size: 12px; color: rgb(var(--g-muted-rgb) / 0.7); line-height: 1.5; }
 .panel-empty .outline { margin-top: 8px; }
 .panel-empty code { font: 11px var(--g-mono); }
