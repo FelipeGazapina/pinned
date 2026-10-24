@@ -4,16 +4,31 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const PREVIEW_CHARS: usize = 4000;
+const PLAN_CHARS: usize = 40_000;
 const SUMMARY_CHARS: usize = 300;
+/// The biggest image, as base64, that a thread page carries inline.
+const PICTURE_CHARS: usize = 2 << 20;
 const READ_LIMIT: u64 = 8 << 20;
 
 #[derive(Serialize, Debug, PartialEq, Clone)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Item {
-    /// What the user typed, or a slash command as `/name args`.
-    User { id: String, at: String, text: String, images: u32 },
+    /// What the user typed, or a slash command as `/name args`. `pictures` holds the `data:` URLs of
+    /// the attached images small enough to send; `images` counts them all.
+    User {
+        id: String,
+        at: String,
+        text: String,
+        images: u32,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pictures: Vec<String>,
+    },
     /// Markdown the assistant wrote.
     Text { id: String, at: String, text: String },
+    /// The assistant's reasoning before it answered or used a tool.
+    Thinking { id: String, at: String, text: String },
+    /// A request to the model that failed, such as `API Error: 529 Overloaded`.
+    Error { id: String, at: String, text: String },
     Tool { id: String, at: String, name: String, summary: String, detail: String },
     /// The outcome of the `Tool` whose id is `tool`.
     Result { tool: String, at: String, error: bool, text: String },
@@ -101,6 +116,10 @@ fn items_of(line: &Value) -> Vec<Item> {
             Some(name) => vec![Item::Model { name: name.to_owned() }],
             None => vec![],
         },
+        Some("assistant") if line["isApiErrorMessage"].as_bool() == Some(true) => {
+            let text = line["message"]["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n");
+            vec![Item::Error { id, at, text }]
+        }
         Some("assistant") => {
             let blocks = line["message"]["content"].as_array().cloned().unwrap_or_default();
             blocks
@@ -112,6 +131,10 @@ fn items_of(line: &Value) -> Vec<Item> {
                         "text" => {
                             let text = str_of(&block["text"]);
                             (!text.trim().is_empty()).then(|| Item::Text { id, at: at.clone(), text })
+                        }
+                        "thinking" => {
+                            let text = str_of(&block["thinking"]);
+                            (!text.trim().is_empty()).then(|| Item::Thinking { id, at: at.clone(), text })
                         }
                         "tool_use" => {
                             let name = str_of(&block["name"]);
@@ -130,7 +153,7 @@ fn items_of(line: &Value) -> Vec<Item> {
 fn user_items(content: &Value, id: String, at: String) -> Vec<Item> {
     if let Some(text) = content.as_str() {
         return match spoken(text) {
-            Some(Spoken::Prompt(text)) => vec![Item::User { id, at, text, images: 0 }],
+            Some(Spoken::Prompt(text)) => vec![Item::User { id, at, text, images: 0, pictures: vec![] }],
             Some(Spoken::Note(text)) => vec![Item::Note { id, at, text }],
             None => vec![],
         };
@@ -147,14 +170,25 @@ fn user_items(content: &Value, id: String, at: String) -> Vec<Item> {
         })
         .collect();
     let text = blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n");
-    let images = blocks.iter().filter(|b| b["type"] == "image").count() as u32;
+    let images: Vec<&Value> = blocks.iter().filter(|b| b["type"] == "image").collect();
+    let pictures = images.iter().filter_map(|b| picture(&b["source"])).collect();
+    let images = images.len() as u32;
     let said = match spoken(&text) {
-        Some(Spoken::Prompt(text)) => Some(Item::User { id, at, text, images }),
+        Some(Spoken::Prompt(text)) => Some(Item::User { id, at, text, images, pictures }),
         Some(Spoken::Note(text)) => Some(Item::Note { id, at, text }),
-        None if images > 0 && results.is_empty() => Some(Item::User { id, at, text: String::new(), images }),
+        None if images > 0 && results.is_empty() => Some(Item::User { id, at, text: String::new(), images, pictures }),
         None => None,
     };
     results.into_iter().chain(said).collect()
+}
+
+/// A `data:` URL for an image block's base64 source, when it is a picture a page can show and small enough.
+fn picture(source: &Value) -> Option<String> {
+    let kind = source["media_type"].as_str()?;
+    let data = source["data"].as_str()?;
+    let shown = ["image/png", "image/jpeg", "image/gif", "image/webp"].contains(&kind);
+    let base64 = data.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
+    (source["type"] == "base64" && shown && base64 && data.len() <= PICTURE_CHARS).then(|| format!("data:{kind};base64,{data}"))
 }
 
 enum Spoken {
@@ -227,6 +261,7 @@ fn describe_tool(name: &str, input: &Value) -> (String, String) {
         "WebSearch" => field("query").to_owned(),
         "Agent" | "Task" => field("description").to_owned(),
         "Skill" => field("skill").to_owned(),
+        "AskUserQuestion" => input["questions"][0]["question"].as_str().unwrap_or_default().to_owned(),
         _ => String::new(),
     };
     let summary = if summary.is_empty() { first_string(input).unwrap_or_default() } else { summary };
@@ -235,6 +270,7 @@ fn describe_tool(name: &str, input: &Value) -> (String, String) {
         "Edit" => format!("{}\n---\n{}", field("old_string"), field("new_string")),
         "Write" => field("content").to_owned(),
         "Agent" | "Task" => field("prompt").to_owned(),
+        "ExitPlanMode" => return (clip(summary.lines().next().unwrap_or_default(), SUMMARY_CHARS), clip(field("plan"), PLAN_CHARS)),
         _ => String::new(),
     };
     (clip(summary.lines().next().unwrap_or_default(), SUMMARY_CHARS), clip(&detail, PREVIEW_CHARS))
@@ -279,7 +315,7 @@ mod tests {
         assert_eq!(
             items,
             vec![
-                Item::User { id: "u1".into(), at: "2026-10-23T10:00:00Z".into(), text: "fix the bug".into(), images: 0 },
+                Item::User { id: "u1".into(), at: "2026-10-23T10:00:00Z".into(), text: "fix the bug".into(), images: 0, pictures: vec![] },
                 Item::Tool { id: "t1".into(), at: "2026-10-23T10:00:05Z".into(), name: "Bash".into(), summary: "Run the tests".into(), detail: "cargo test".into() },
                 Item::Result { tool: "t1".into(), at: "2026-10-23T10:00:09Z".into(), error: false, text: "ok".into() },
                 Item::Text { id: "a2:0".into(), at: "2026-10-23T10:01:00Z".into(), text: "Fixed.".into() },
@@ -304,9 +340,9 @@ mod tests {
         assert_eq!(
             items,
             vec![
-                Item::User { id: "c".into(), at: "".into(), text: "/goal ship it".into(), images: 0 },
+                Item::User { id: "c".into(), at: "".into(), text: "/goal ship it".into(), images: 0, pictures: vec![] },
                 Item::Note { id: "o".into(), at: "".into(), text: "Goal set: ship it".into() },
-                Item::User { id: "i".into(), at: "".into(), text: "look [Image #1]".into(), images: 1 },
+                Item::User { id: "i".into(), at: "".into(), text: "look [Image #1]".into(), images: 1, pictures: vec![] },
             ]
         );
     }
@@ -326,15 +362,52 @@ mod tests {
         assert_eq!(
             items,
             vec![
-                Item::User { id: "a".into(), at: "".into(), text: "<Button> doesn't re-render".into(), images: 0 },
-                Item::User { id: "c".into(), at: "".into(), text: "log line\nwhy does this fail?".into(), images: 0 },
-                Item::User { id: "d".into(), at: "".into(), text: "! ls".into(), images: 0 },
+                Item::User { id: "a".into(), at: "".into(), text: "<Button> doesn't re-render".into(), images: 0, pictures: vec![] },
+                Item::User { id: "c".into(), at: "".into(), text: "log line\nwhy does this fail?".into(), images: 0, pictures: vec![] },
+                Item::User { id: "d".into(), at: "".into(), text: "! ls".into(), images: 0, pictures: vec![] },
                 Item::Note { id: "e".into(), at: "".into(), text: "Interrupted.".into() },
                 Item::Note { id: "f".into(), at: "".into(), text: "The conversation was compacted.".into() },
                 Item::Result { tool: "t1".into(), at: "".into(), error: false, text: "denied".into() },
-                Item::User { id: "g".into(), at: "".into(), text: "use the other folder".into(), images: 0 },
+                Item::User { id: "g".into(), at: "".into(), text: "use the other folder".into(), images: 0, pictures: vec![] },
             ]
         );
+    }
+
+    #[test]
+    fn thinking_errors_plans_questions_and_pictures_are_kept() {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let items = page(&[
+            &format!(r#"{{"type":"user","uuid":"u","timestamp":"t0","message":{{"role":"user","content":[{{"type":"text","text":"what is this?"}},{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"{png}"}}}},{{"type":"image","source":{{"type":"base64","media_type":"image/svg+xml","data":"PHN2Zz4="}}}}]}}}}"#),
+            r#"{"type":"assistant","uuid":"a","timestamp":"t1","message":{"content":[{"type":"thinking","thinking":"Found the page. I'll read it now.\n\n","signature":"CAQS"},{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"Which one should open the PR?","header":"PR","multiSelect":false,"options":[{"label":"This session","description":"x"},{"label":"The other session","description":"y"}]}]}}]}}"#,
+            r#"{"type":"user","uuid":"r","timestamp":"t2","message":{"content":[{"tool_use_id":"q1","type":"tool_result","content":"Your questions have been answered: \"Which one should open the PR?\"=\"The other session\". You can now continue with these answers in mind."}]}}"#,
+            r##"{"type":"assistant","uuid":"p","timestamp":"t3","message":{"content":[{"type":"tool_use","id":"p1","name":"ExitPlanMode","input":{"plan":"# Ship the fix\n\n1. Patch\n2. Test"}}]}}"##,
+            r#"{"parentUuid":"p","isSidechain":false,"type":"assistant","uuid":"e","timestamp":"t4","isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"API Error: Your computer went to sleep mid-response. The response above may be incomplete."}]}}"#,
+        ])
+        .items;
+        assert_eq!(
+            items,
+            vec![
+                Item::User { id: "u".into(), at: "t0".into(), text: "what is this?".into(), images: 2, pictures: vec![format!("data:image/png;base64,{png}")] },
+                Item::Thinking { id: "a:0".into(), at: "t1".into(), text: "Found the page. I'll read it now.\n\n".into() },
+                Item::Tool { id: "q1".into(), at: "t1".into(), name: "AskUserQuestion".into(), summary: "Which one should open the PR?".into(), detail: "".into() },
+                Item::Result {
+                    tool: "q1".into(),
+                    at: "t2".into(),
+                    error: false,
+                    text: r#"Your questions have been answered: "Which one should open the PR?"="The other session". You can now continue with these answers in mind."#.into()
+                },
+                Item::Tool { id: "p1".into(), at: "t3".into(), name: "ExitPlanMode".into(), summary: "# Ship the fix".into(), detail: "# Ship the fix\n\n1. Patch\n2. Test".into() },
+                Item::Error { id: "e".into(), at: "t4".into(), text: "API Error: Your computer went to sleep mid-response. The response above may be incomplete.".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn new_fields_and_kinds_leave_the_old_shapes_alone() {
+        let user = Item::User { id: "u".into(), at: "t".into(), text: "hi".into(), images: 0, pictures: vec![] };
+        assert_eq!(serde_json::to_value(&user).unwrap(), serde_json::json!({ "kind": "user", "id": "u", "at": "t", "text": "hi", "images": 0 }));
+        let thought = Item::Thinking { id: "a:0".into(), at: "t".into(), text: "hm".into() };
+        assert_eq!(serde_json::to_value(&thought).unwrap(), serde_json::json!({ "kind": "thinking", "id": "a:0", "at": "t", "text": "hm" }));
     }
 
     #[test]
@@ -359,7 +432,7 @@ mod tests {
         let first = read(file.path(), 0).unwrap();
         assert_eq!(first.next, huge.len() as u64 + 1);
         assert!(matches!(first.items[..], [Item::Note { .. }]));
-        assert_eq!(read(file.path(), first.next).unwrap().items, vec![Item::User { id: "after".into(), at: "".into(), text: "after".into(), images: 0 }]);
+        assert_eq!(read(file.path(), first.next).unwrap().items, vec![Item::User { id: "after".into(), at: "".into(), text: "after".into(), images: 0, pictures: vec![] }]);
 
         let mut growing = tempfile::NamedTempFile::new().unwrap();
         write!(growing, "{}", &huge[..huge.len() - 2]).unwrap();
@@ -377,7 +450,7 @@ mod tests {
 
         writeln!(file, r#""message":{{"content":"two"}}}}"#).unwrap();
         let rest = read(file.path(), page.next).unwrap();
-        assert_eq!(rest.items, vec![Item::User { id: "u2".into(), at: "".into(), text: "two".into(), images: 0 }]);
+        assert_eq!(rest.items, vec![Item::User { id: "u2".into(), at: "".into(), text: "two".into(), images: 0, pictures: vec![] }]);
         assert_eq!(read(file.path(), rest.next).unwrap().items, vec![]);
         let over = read(file.path(), 1 << 30).unwrap();
         assert_eq!((over.items.len(), over.reset), (2, true), "an offset past the end starts over");

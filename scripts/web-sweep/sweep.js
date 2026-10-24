@@ -586,6 +586,236 @@ async function sweep(profileName) {
     return `${prompts.length} prompts`;
   });
 
+  // The timeline's own content goes to beta, so alpha's turns stay as the steps after these expect.
+  const lastTurn = (selector = "") => gui(`#thread .turn:last-of-type ${selector}`);
+  const clipboard = () => (engine === "chromium" ? page.evaluate(() => navigator.clipboard.readText()) : null);
+  const answered = (words) => waitFor(`the answer "${words}"`, async () => (await page.locator("#thread .assistant", { hasText: words }).count()) > 0, 10000);
+
+  await step("app view: tool runs group under a summary, with thinking and highlighted code", async () => {
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
+    await waitFor("beta", async () => /beta/.test(await text("#chat-head .crumb")));
+    await sendPrompt("rich");
+    await waitFor("the code block", async () => (await page.locator("#thread .answer .codeblock").count()) > 0, 10000);
+    const fold = lastTurn(".work > summary");
+    check(/^Worked for /.test(await fold.textContent()), `the fold reads ${await fold.textContent()}`);
+    check(/\d{4}$/.test(await fold.locator(".when").getAttribute("title")), "the fold row has no time to show on hover");
+    check(/Looked around/.test(await text("#thread .turn:last-of-type > .assistant")), "the first message is not in sight");
+    await press(fold);
+    const group = lastTurn(".group > summary");
+    const summary = (await group.textContent()).trim();
+    check(summary.startsWith("Read 2 files and ran 2 commands"), `the group reads ${summary}`);
+    check((await group.locator(".failed").count()) === 1, "the group doesn't mark its failed command");
+    check((await page.locator("#thread .turn:last-of-type .work > .steps > .tool").count()) === 1, "the lone Grep is not its own row");
+    await press(group);
+    const thought = await text("#thread .turn:last-of-type .group .tool.thought .label");
+    check(thought === "Planning the read", `the thinking row reads ${thought}`);
+    check((await text("#thread .codeblock .lang")) === "rust", `the code block's language is ${await text("#thread .codeblock .lang")}`);
+    check((await page.locator("#thread .codeblock .hljs-keyword").count()) >= 2, "the code is not highlighted");
+    const block = gui("#thread .codeblock");
+    check((await block.getAttribute("data-wrap")) === "true", "code doesn't wrap by default");
+    await press(block.locator("[data-code-wrap]"));
+    check((await block.getAttribute("data-wrap")) === "false", "Wrap didn't turn wrapping off");
+    await press(block.locator("[data-copy-code]"));
+    await waitFor("the copied check", async () => (await block.locator("[data-copy-code].copied").count()) === 1, 1500);
+    const copied = await clipboard();
+    check(copied === null || copied === "fn main() {\n    let answer = 42;\n}", `the clipboard holds ${JSON.stringify(copied)}`);
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    return summary;
+  });
+
+  await step("app view: links show their address, a GitHub PR link opens that PR", async () => {
+    const pr = gui("#thread .answer a[data-pr]");
+    check((await pr.getAttribute("title")) === "https://github.com/example/beta/pull/7", `the PR link's tooltip is ${await pr.getAttribute("title")}`);
+    check((await pr.locator("svg.github").count()) === 1, "the GitHub link has no GitHub glyph");
+    const docs = gui('#thread .answer a[href="https://example.com/docs"]');
+    check((await docs.getAttribute("title")) === "https://example.com/docs", "the docs link has no tooltip");
+    check((await docs.locator("svg").count()) === 0, "a non-GitHub link got the glyph");
+    await press(pr);
+    await waitFor("#7 in the PR tab", async () => /#7\b/.test(await text('#panel-tabs [data-panel="pr"]')), 15000);
+    await tapOrClick("#panel-close");
+    await waitFor("the panel to close", async () => !(await page.locator("#panel").isVisible()));
+  });
+
+  await step("app view: hovering a message shows its time and a Copy button", async () => {
+    const user = lastTurn(".user");
+    const meta = user.locator(".meta");
+    if (!touch) {
+      check((await meta.evaluate((el) => getComputedStyle(el).opacity)) === "0", "the user message's actions show before hover");
+      await user.hover();
+      await sleep(300);
+    }
+    check((await meta.evaluate((el) => getComputedStyle(el).opacity)) === "1", "hovering doesn't show the actions");
+    const when = meta.locator(".when");
+    check(/\d:\d\d/.test(await when.textContent()) && /\d{4}$/.test(await when.getAttribute("title")), `the time reads ${await when.textContent()} / ${await when.getAttribute("title")}`);
+    await press(meta.locator("[data-copy-item]"));
+    await waitFor("the copied check", async () => (await meta.locator(".copied").count()) === 1, 1500);
+    check([null, "rich"].includes(await clipboard()), `the clipboard holds ${await clipboard()}`);
+    const answer = lastTurn(".answer");
+    if (!touch) await answer.hover();
+    await press(answer.locator(".meta [data-copy-item]"));
+    await waitFor("the answer's copied check", async () => (await answer.locator(".meta .copied").count()) === 1, 1500);
+    const copied = await clipboard();
+    check(copied === null || copied.startsWith("Here is the fix:"), `the clipboard holds ${copied}`);
+  });
+
+  await step("app view: a long prompt clamps, mentions are chips, images open full size", async () => {
+    await sendPrompt("long-prompt");
+    await answered("Here is the walkthrough.");
+    const body = gui("#thread .bubble .body.clamped");
+    check((await body.locator("ol > li").count()) === 12, "the prompt's numbered lines don't render as a list");
+    check((await body.evaluate((el) => el.getBoundingClientRect().height)) <= 177, "the long prompt isn't clamped");
+    check((await text("#thread .mention")) === "main.rs" && (await gui("#thread .mention").getAttribute("title")) === "src/app/main.rs", `the mention reads ${await text("#thread .mention")}`);
+    const more = gui('#thread .bubble [data-toggle^="full:"]');
+    check((await more.textContent()) === "Show full message", `the toggle reads ${await more.textContent()}`);
+    await press(more);
+    await waitFor("the full message", async () => (await page.locator("#thread .bubble .body.clamped").count()) === 0);
+    check((await text('#thread .bubble [data-toggle^="full:"]')) === "Show less", "the toggle doesn't offer Show less");
+    await sendPrompt("picture");
+    await answered("A single dot.");
+    const img = gui("#thread .bubble .picture img");
+    check(await img.evaluate((el) => el.complete && el.naturalWidth === 1), "the picture didn't load");
+    await press(gui("#thread .bubble .picture"));
+    await waitFor("the zoomed image", () => page.locator("#image-zoom").isVisible());
+    await tapOrClick("#image-zoom");
+    await waitFor("the zoom to close", async () => !(await page.locator("#image-zoom").isVisible()));
+  });
+
+  await step("app view: errors, stopped turns and answered questions stay in sight", async () => {
+    await sendPrompt("oops");
+    await waitFor("the API error", async () => (await page.locator("#thread .error-row", { hasText: "API Error: 529 Overloaded" }).count()) === 1);
+    check(/service is busy/.test(await text("#thread .error-row .message")), "the error's detail is missing");
+    await sendPrompt("fail");
+    await waitFor("the failed build", async () => (await page.locator("#thread .error-row", { hasText: "Build the app" }).count()) === 1);
+    check(await gui("#thread .error-row:has-text('Build the app') .message").isVisible(), "the failure's output is not in sight");
+    await sendPrompt("stop");
+    await waitFor("the stopped turn", async () => /^You stopped (after |this response)/.test(await text("#thread .turn:last-of-type .work > summary .label")));
+    await sendPrompt("ask");
+    await answered("Blue it is.");
+    const row = lastTurn(".tool.answered");
+    check((await row.locator(".label").textContent()) === "Which color should the button be?", `the question row reads ${await row.textContent()}`);
+    check((await row.locator(".message").textContent()) === "Blue", `the answer reads ${await row.locator(".message").textContent()}`);
+  });
+
+  await step("app view: a proposed plan shows as a card to copy or download", async () => {
+    await sendPrompt("plan");
+    await answered("Plan approved.");
+    const card = lastTurn(".plan-card");
+    check((await card.locator(".badge").textContent()) === "Plan" && (await card.locator("h3").textContent()) === "Ship the fix", `the card reads ${(await card.textContent()).slice(0, 60)}`);
+    check(!/Summary/.test(await card.locator(".plan-body").textContent()), "the plan's title and Summary heading repeat in its body");
+    check((await card.locator(".plan-body.clamped").count()) === 1, "the long plan isn't clamped");
+    await press(card.locator(".plan-foot button"));
+    await waitFor("the whole plan", async () => (await card.locator(".plan-foot button").textContent()) === "Collapse plan");
+    await press(card.locator("[data-plan-menu]"));
+    await press(card.locator("[data-plan-copy]"));
+    const copied = await clipboard();
+    check(copied === null || copied.startsWith("# Ship the fix"), `the clipboard holds ${copied?.slice(0, 40)}`);
+    await press(card.locator("[data-plan-menu]"));
+    const [download] = await Promise.all([page.waitForEvent("download"), press(card.locator("[data-plan-download]"))]);
+    check(download.suggestedFilename() === "ship-the-fix.md", `the download is named ${download.suggestedFilename()}`);
+  });
+
+  await step("app view: the live row shows thinking and Running <program>, and /compact shows Compacting…", async () => {
+    await sendPrompt("think");
+    await waitFor("the live thought", async () => (await text("#thread .live-tool .label")) === "Weighing the options", 6000);
+    await answered("Done thinking.");
+    await sendPrompt("build");
+    await waitFor("the running command", async () => (await text("#thread .live-tool .label")) === "Running npm", 6000);
+    await answered("Built.");
+    await sendPrompt("/compact");
+    await waitFor("Compacting…", async () => (await text("#thread .work.live .shimmer")) === "Compacting…", 6000);
+    await waitFor("the compacted note", async () => (await page.locator("#thread .note", { hasText: "The conversation was compacted." }).count()) > 0, 10000);
+  });
+
+  await step("app view: changed files show as a folder tree with 1.2k counts", async () => {
+    await sendPrompt("tree");
+    await answered("Wrote the tree.");
+    await waitFor("the changed-files card", async () => (await page.locator("#thread .turn:last-of-type .changes").count()) > 0, 10000);
+    const card = lastTurn(".changes");
+    check(/\+1\.2k/.test(await card.locator("summary").textContent()), `the card reads ${await card.locator("summary").textContent()}`);
+    await press(card.locator("summary .show"));
+    await waitFor("the tree", async () => (await card.locator("li").count()) > 0);
+    const shifted = await page.evaluate(() => [...document.querySelectorAll("#expanded, #workspace")].map((el) => el.scrollLeft).join(","));
+    check(shifted === "0,0", `opening the card scrolled the view sideways: ${shifted}`);
+    const rows = async () => (await card.locator("li").allTextContents()).map((r) => r.replace(/[+−].*/, "").trim());
+    check((await rows()).join("|") === "docs|guide.md|src/app|lib.rs|main.rs|README.md", `rows: ${(await rows()).join("|")}`);
+    check((await card.locator("summary").evaluate((el) => getComputedStyle(el).position)) === "sticky", "the card's header doesn't stick");
+    await press(card.locator("[data-all-dirs]"));
+    await waitFor("folders to collapse", async () => (await rows()).join("|") === "docs|src/app|README.md");
+    await press(card.locator('li[data-dir="docs"]'));
+    await waitFor("docs to open", async () => (await rows()).join("|") === "docs|guide.md|src/app|README.md");
+    await press(card.locator("[data-all-dirs]"));
+    await waitFor("folders to expand", async () => (await card.locator("li[data-file]").count()) === 4);
+    return (await rows()).join(" | ");
+  });
+
+  await step("app view: a long thread loads earlier turns, and a pill scrolls to the end", async () => {
+    await sendPrompt("many");
+    await answered("answer 45");
+    await waitFor("the earlier button", () => gui("#thread [data-earlier]").isVisible());
+    const before = await page.locator("#thread .turn").count();
+    check(before === 40, `${before} turns shown`);
+    await page.evaluate(() => (threadView.scrollTop = 0));
+    await waitFor("the scroll pill", () => page.locator("#scroll-end").isVisible(), 2000);
+    await press(gui("#thread [data-earlier]"));
+    await waitFor("more turns", async () => (await page.locator("#thread .turn").count()) > before);
+    await tapOrClick("#scroll-end");
+    await waitFor("the end", () => page.evaluate(() => threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40), 3000);
+    await waitFor("the pill to go", async () => !(await page.locator("#scroll-end").isVisible()), 2000);
+    return `${before} then ${await page.locator("#thread .turn").count()} turns`;
+  });
+
+  await step("app view: ⌘F finds text in the thread and opens the folds around it", async () => {
+    if (touch) await page.evaluate(() => openFind());
+    else await page.keyboard.press(`${(await page.evaluate(() => IS_MAC)) ? "Meta" : "Control"}+f`);
+    await waitFor("the find bar", () => page.locator("#thread-find").isVisible());
+    await page.fill("#thread-find input", "test result: ok");
+    await waitFor("one match", async () => (await text("#thread-find .count")) === "1/1");
+    check(await page.locator("#thread .tool[open] pre", { hasText: "test result: ok" }).isVisible(), "the match's tool output is still folded");
+    const painted = await page.evaluate(() => (window.CSS?.highlights ? CSS.highlights.get("thread-find-active")?.size : 1));
+    check(painted === 1, `${painted} active highlights`);
+    await page.fill("#thread-find input", "answer 4");
+    await waitFor("several matches", async () => /^1\/\d+$/.test(await text("#thread-find .count")));
+    const count = await text("#thread-find .count");
+    await page.press("#thread-find input", "Enter");
+    check((await text("#thread-find .count")).startsWith("2/"), `Enter moved to ${await text("#thread-find .count")}`);
+    await page.press("#thread-find input", "Escape");
+    await waitFor("the bar to close", async () => !(await page.locator("#thread-find").isVisible()));
+    return count;
+  });
+
+  await step("app view: appearance: grain, pressed buttons, chat width, diff colors, code size", async () => {
+    check(/svg/.test(await page.evaluate(() => getComputedStyle(document.getElementById("expanded")).backgroundImage)), "the app view has no grain");
+    const r = await rect("#toggle-panel");
+    await page.mouse.move(r.left + r.width / 2, r.top + r.height / 2);
+    await page.mouse.down();
+    await sleep(200);
+    const pressed = await page.evaluate(() => getComputedStyle(document.getElementById("toggle-panel")).scale);
+    await page.mouse.move(0, 0);
+    await page.mouse.up();
+    check(pressed === "0.97", `a pressed button scales to ${pressed}`);
+    await page.evaluate(() => toggleSettings());
+    await tapOrClick('#settings-nav [data-page="general"]');
+    await page.selectOption("#look-chat-width", "wide");
+    await page.selectOption("#look-diff-colors", "blue-orange");
+    await page.selectOption("#look-code-size", "16px");
+    const looks = await page.evaluate(() => [
+      getComputedStyle(document.documentElement).getPropertyValue("--lane").trim(),
+      getComputedStyle(document.querySelector("#thread .changes .add")).color,
+      getComputedStyle(document.querySelector("#thread .md pre code")).fontSize,
+    ]);
+    check(looks.join("|") === "1152px|rgb(81, 162, 255)|16px", `looks: ${looks.join(" | ")}`);
+    await page.selectOption("#look-chat-width", "full");
+    check((await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--lane").trim())) === "100%", "Full doesn't widen the lane");
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    for (const name of ["chat-width", "diff-colors", "code-size"]) await page.selectOption(`#look-${name}`, "");
+    await page.evaluate(() => toggleSettings());
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+    await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
+    return looks.join(" | ");
+  });
+
   await step("app view: a prompt from the composer reaches the same session", async () => {
     await sendPrompt("hello from the app");
     await waitFor("the answer", async () => (await page.locator("#thread .assistant", { hasText: "echo: hello from the app" }).count()) > 0);

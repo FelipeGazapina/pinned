@@ -30,6 +30,22 @@ function record(entry) {
 }
 const said = (content) => record({ type: "user", message: { role: "user", content } });
 const wrote = (content) => record({ type: "assistant", message: { role: "assistant", content } });
+function used(name, input, content, is_error = false) {
+  const id = `tool-${lines}`;
+  wrote([{ type: "tool_use", id, name, input }]);
+  said([{ type: "tool_result", tool_use_id: id, content, is_error }]);
+}
+const DOT_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+// Each takes a while, as claude would, and ends the turn itself.
+const SLOW = {
+  "/compact": () => record({ type: "user", isCompactSummary: true, message: { role: "user", content: "This session is being continued from a previous conversation." } }),
+  think: () => wrote([{ type: "text", text: "Done thinking." }]),
+  build: () => {
+    said([{ type: "tool_result", tool_use_id: building, content: "built in 4s" }]);
+    wrote([{ type: "text", text: "Built." }]);
+  },
+};
+let building = "";
 
 const resetsIn = (seconds) => Math.floor(Date.now() / 1000) + seconds;
 if (settings.statusLine?.command) {
@@ -67,7 +83,67 @@ function submit() {
     drawMenu();
     line = "";
     return;
+  } else if (SLOW[line]) {
+    const finish = SLOW[line];
+    if (line === "think") wrote([{ type: "thinking", thinking: "**Weighing the options**\n\nComparing the two approaches before answering.", signature: "c2ln" }]);
+    if (line === "build") {
+      building = `tool-${lines}`;
+      wrote([{ type: "tool_use", id: building, name: "Bash", input: { command: "npm run build", description: "Build the app" } }]);
+    }
+    setTimeout(() => {
+      finish();
+      hook("Stop");
+      out("> ");
+    }, 4000);
+    line = "";
+    return;
   } else if (line === "long") for (let i = 1; i <= 120; i++) out(`line ${i} of a long answer\r\n`);
+  else if (line === "rich") {
+    const cwd = process.cwd();
+    wrote([{ type: "thinking", thinking: "**Planning the read**\n\nI'll look at the notes first. Then run the tests.", signature: "c2ln" }]);
+    used("Read", { file_path: path.join(cwd, "a.md") }, "alpha");
+    used("Read", { file_path: path.join(cwd, "b.md") }, "beta");
+    used("Bash", { command: "cargo test", description: "Run the tests" }, "test result: ok");
+    used("Bash", { command: "false", description: "Check the build" }, "Exit code 1", true);
+    wrote([{ type: "text", text: "Looked around; one check failed." }]);
+    used("Grep", { pattern: "TODO" }, "No matches found");
+    wrote([{ type: "text", text: "Here is the fix:\n\n```rust\nfn main() {\n    let answer = 42;\n}\n```\n\nSee [the pull request](https://github.com/example/beta/pull/7) and [the docs](https://example.com/docs)." }]);
+  } else if (line === "plan") {
+    const steps = Array.from({ length: 24 }, (_, i) => `${i + 1}. Step ${i + 1} of the plan`).join("\n");
+    used("ExitPlanMode", { plan: `# Ship the fix\n\n## Summary\n\nPatch the parser, then test it.\n\n${steps}` }, "User has approved your plan. You can now start coding.");
+    wrote([{ type: "text", text: "Plan approved." }]);
+  } else if (line === "ask") {
+    used("AskUserQuestion", { questions: [{ question: "Which color should the button be?", header: "Color", multiSelect: false, options: [{ label: "Blue", description: "Calm" }, { label: "Red", description: "Loud" }] }] },
+      'Your questions have been answered: "Which color should the button be?"="Blue". You can now continue with these answers in mind.');
+    wrote([{ type: "text", text: "Blue it is." }]);
+  } else if (line === "oops") {
+    record({ type: "assistant", isApiErrorMessage: true, message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "API Error: 529 Overloaded\nThe service is busy. Try again in a moment." }] } });
+  } else if (line === "fail") {
+    wrote([{ type: "text", text: "Building it now." }]);
+    used("Bash", { command: "npm run build", description: "Build the app" }, "Error: the build failed\nsrc/app.ts(3,1): missing semicolon", true);
+  } else if (line === "stop") {
+    used("Bash", { command: "sleep 100", description: "Wait" }, "[Request interrupted by user for tool use]", true);
+    said([{ type: "text", text: "[Request interrupted by user for tool use]" }]);
+  } else if (line === "picture") {
+    said([{ type: "text", text: "What is in this picture?" }, { type: "image", source: { type: "base64", media_type: "image/png", data: DOT_PNG } }]);
+    wrote([{ type: "text", text: "A single dot." }]);
+  } else if (line === "long-prompt") {
+    const paragraph = "Please read @src/app/main.rs and explain every line of it in detail, with examples.";
+    said(Array.from({ length: 12 }, (_, i) => `${i + 1}. ${paragraph}`).join("\n"));
+    wrote([{ type: "text", text: "Here is the walkthrough." }]);
+  } else if (line === "tree") {
+    for (const dir of ["src/app", "docs"]) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync("src/app/main.rs", "fn main() {}\n");
+    fs.writeFileSync("src/app/lib.rs", "pub fn lib() {}\n");
+    fs.writeFileSync("docs/guide.md", Array.from({ length: 1200 }, (_, i) => `line ${i}`).join("\n") + "\n");
+    fs.writeFileSync("README.md", "# beta\n");
+    wrote([{ type: "text", text: "Wrote the tree." }]);
+  } else if (line === "many") {
+    for (let i = 1; i <= 45; i++) {
+      said(`question ${i}`);
+      wrote([{ type: "text", text: `answer ${i}` }]);
+    }
+  }
   else if (line === "edit") {
     const id = `tool-${lines}`;
     wrote([{ type: "tool_use", id, name: "Edit", input: { file_path: path.join(process.cwd(), "notes.md"), old_string: "", new_string: "hello" } }]);
