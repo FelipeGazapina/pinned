@@ -117,7 +117,30 @@ const codeKey = (text) => {
   for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
   return (h >>> 0).toString(36);
 };
-const unwrapped = new Set();
+/** Code blocks and tables the user wrapped or unwrapped against the Word wrap setting, by content. */
+const flipped = new Set();
+const wrapsByDefault = () => load("look-word-wrap") !== "false";
+const wraps = (key) => wrapsByDefault() !== flipped.has(key);
+
+/** Hosts whose names may go to Google's favicon service, as T3 Code decides: never a private or internal one. */
+const PRIVATE_TLDS = /\.(alt|corp|example|home|internal|intranet|invalid|lan|onion|private|test|local|localhost|arpa)$/;
+function publicHost(host) {
+  const name = host.toLowerCase().replace(/\.$/, "");
+  if (!name.includes(".") || name.includes(":") || PRIVATE_TLDS.test(name) || name.split(".").some((l) => ["corp", "internal", "intranet"].includes(l))) return false;
+  const ip = name.split(".").map(Number);
+  if (ip.length !== 4 || ip.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  const [a, b, c] = ip;
+  return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 198 && b >= 18 && b <= 19) || (a === 192 && b === 0 && [0, 2].includes(c)) || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113));
+}
+const failedFavicons = new Set();
+function linkIcon(href) {
+  if (GITHUB_URL.test(href)) return `<span class="link-icon">${icon("github")}</span>`;
+  const host = new URL(href).hostname;
+  if (!publicHost(host) || failedFavicons.has(host)) return `<span class="link-icon">${icon("globe")}</span>`;
+  return `<span class="link-icon"><img class="favicon" alt="" loading="lazy" draggable="false" data-host="${esc(host)}" src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&amp;sz=32"></span>`;
+}
+
+const SHELL_LANGS = /^(?:sh|bash|zsh|fish|shell|powershell|pwsh|console)$/;
 /** Assistant text and pull request comments come from others, so only web links render, and an image
  * is a link to it rather than a request made on sight. */
 const RENDERER = {
@@ -125,8 +148,13 @@ const RENDERER = {
   link({ href, tokens }) {
     const text = this.parser.parseInline(tokens);
     if (!WEB_URL.test(href)) return text;
-    const glyph = GITHUB_URL.test(href) ? icon("github", "link-glyph") : "";
-    return `<a href="${esc(href)}" title="${esc(href)}"${PR_URL.test(href) ? ` data-pr="${esc(href)}"` : ""}>${glyph}${text}</a>`;
+    return `<a href="${esc(href)}" title="${esc(href)}"${PR_URL.test(href) ? ` data-pr="${esc(href)}"` : ""}>${linkIcon(href)}${text}</a>`;
+  },
+  table(token) {
+    const key = codeKey(token.raw);
+    return `<div class="md-table" data-table="${key}" data-expanded="${wraps(key)}"><div class="table-scroll">${marked.Renderer.prototype.table.call(this, token)}</div>
+      <div class="table-foot"><button type="button" class="xs" data-table-expand title="${wraps(key) ? "Collapse table cells" : "Expand table cells"}">${icon(wraps(key) ? "minimize-2" : "maximize-2")}</button>
+      <span class="table-copy"><button type="button" class="xs" data-table-menu title="Copy table">${icon("copy")}</button><span class="table-menu" hidden><button type="button" data-copy-table="markdown">Copy as Markdown</button><button type="button" data-copy-table="csv">Copy as CSV</button></span></span></div></div>`;
   },
   image: ({ href, text }) => (WEB_URL.test(href) ? `<a href="${esc(href)}" title="${esc(href)}">${esc(text || href)}</a>` : esc(text)),
   code({ text, lang }) {
@@ -137,8 +165,9 @@ const RENDERER = {
       if (known) body = hljs.highlight(text, { language, ignoreIllegals: true }).value;
     } catch {}
     const key = codeKey(text);
-    return `<div class="codeblock" data-code="${key}" data-wrap="${!unwrapped.has(key)}"><div class="code-head"><span class="lang">${esc(language || "text")}</span>
-      <span class="code-actions"><button type="button" class="xs" data-code-wrap title="${unwrapped.has(key) ? "Wrap lines" : "Disable line wrap"}">${icon("text-wrap")}</button><button type="button" class="xs" data-copy-code title="Copy code">${icon("copy")}</button></span></div>
+    const runs = SHELL_LANGS.test(language) && !!text.trim() && !/\\$/.test(text.trim()) && !/[\p{Cc}\p{Cf}]/u.test(text);
+    return `<div class="codeblock" data-code="${key}" data-wrap="${wraps(key)}"><div class="code-head"><span class="lang">${esc(language || "text")}</span>
+      <span class="code-actions"><button type="button" class="xs" data-code-wrap title="${wraps(key) ? "Disable line wrap" : "Wrap lines"}">${icon("text-wrap")}</button>${runs ? `<button type="button" class="xs" data-run-code title="Run in terminal">${icon("play")}</button>` : ""}<button type="button" class="xs" data-copy-code title="Copy code">${icon("copy")}</button></span></div>
       <pre><code class="hljs${known ? ` language-${esc(language)}` : ""}">${body}</code></pre></div>`;
   },
 };
@@ -529,6 +558,7 @@ function renderThread() {
   threadView.innerHTML = `<div class="lane">${body}</div>`;
   threadView.dataset.key = key;
   threadView.dataset.tab = tab.key;
+  markClippedTables(threadView);
   for (const rows of threadView.querySelectorAll(".group > .rows")) {
     rows.classList.toggle("scrolls", rows.scrollHeight > rows.clientHeight + 1);
     if (follow && rows.closest(".work.live")) rows.scrollTop = rows.scrollHeight;
@@ -578,19 +608,65 @@ function downloadText(name, text) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-// Code blocks also render in the pull request panel.
+const flip = (key) => flipped.delete(key) || flipped.add(key);
+
+function tableText(table, format) {
+  const rows = [...table.rows].map((row) => [...row.cells].map((cell) => cell.textContent.replace(/\s+/g, " ").trim()));
+  if (format === "csv") return rows.map((r) => r.map((v) => (/[",\n]/.test(v) ? `"${v.replaceAll('"', '""')}"` : v)).join(",")).join("\n");
+  const line = (r) => `| ${r.map((v) => v.replaceAll("|", "\\|")).join(" | ")} |`;
+  return [line(rows[0] ?? []), line((rows[0] ?? []).map(() => "---")), ...rows.slice(1).map(line)].join("\n");
+}
+
+/** A table offers to expand its cells only when one is cut short in the collapsed layout. */
+function markClippedTables(root) {
+  for (const box of root.querySelectorAll(".md-table")) {
+    const was = box.dataset.expanded;
+    box.dataset.expanded = "false";
+    box.dataset.clipped = [...box.querySelectorAll("th, td")].some((cell) => cell.scrollWidth > cell.clientWidth);
+    box.dataset.expanded = was;
+  }
+}
+
+// Code blocks and tables also render in the pull request panel.
 document.addEventListener("click", (e) => {
   const block = e.target.closest?.(".codeblock");
-  if (!block) return;
-  if (e.target.closest("[data-copy-code]")) copied(e.target.closest("[data-copy-code]"), block.querySelector("pre").textContent);
-  else if (e.target.closest("[data-code-wrap]")) {
-    const wrap = block.dataset.wrap !== "true";
-    block.dataset.wrap = wrap;
-    e.target.closest("[data-code-wrap]").title = wrap ? "Disable line wrap" : "Wrap lines";
-    if (wrap) unwrapped.delete(block.dataset.code);
-    else unwrapped.add(block.dataset.code);
+  const table = e.target.closest?.(".md-table");
+  if (block) {
+    if (e.target.closest("[data-copy-code]")) copied(e.target.closest("[data-copy-code]"), block.querySelector("pre").textContent);
+    else if (e.target.closest("[data-run-code]")) runInTerminal(block.querySelector("pre").textContent.trim());
+    else if (e.target.closest("[data-code-wrap]")) {
+      flip(block.dataset.code);
+      const wrap = wraps(block.dataset.code);
+      block.dataset.wrap = wrap;
+      e.target.closest("[data-code-wrap]").title = wrap ? "Disable line wrap" : "Wrap lines";
+    }
+  } else if (table) {
+    const menu = table.querySelector(".table-menu");
+    if (e.target.closest("[data-table-expand]")) {
+      flip(table.dataset.table);
+      const open = wraps(table.dataset.table);
+      table.dataset.expanded = open;
+      Object.assign(e.target.closest("[data-table-expand]"), { title: open ? "Collapse table cells" : "Expand table cells", innerHTML: icon(open ? "minimize-2" : "maximize-2") });
+    } else if (e.target.closest("[data-table-menu]")) menu.hidden = !menu.hidden;
+    else if (e.target.closest("[data-copy-table]")) {
+      copied(table.querySelector("[data-table-menu]"), tableText(table.querySelector("table"), e.target.closest("[data-copy-table]").dataset.copyTable));
+      menu.hidden = true;
+    }
   }
 });
+
+/** T3 Code runs a one-line shell block in its terminal; here the terminal is claude's, which runs a
+ * line starting with `!` as a shell command. */
+function runInTerminal(command) {
+  if (!active || !sendSlash(active, `! ${command}`)) return;
+  toggleDrawer(true);
+}
+
+document.addEventListener("error", (e) => {
+  if (!e.target.matches?.("img.favicon")) return;
+  failedFavicons.add(e.target.dataset.host);
+  e.target.outerHTML = icon("globe");
+}, true);
 
 threadView.addEventListener("click", (e) => {
   if (e.target.closest("[data-new-thread]")) return toggleProjects();

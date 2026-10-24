@@ -889,6 +889,31 @@ async function sweep(profileName) {
     check(error === "rgb(251, 65, 74)", `an error reads in ${error}`);
   });
 
+  await step("app view: wide tables cut cells until expanded and copy as Markdown, a shell block runs in the terminal, links show favicons", async () => {
+    await sendPrompt("table");
+    await answered("Open the app");
+    const table = gui("#thread .turn:last-of-type .md-table");
+    await waitFor("the clipped mark", async () => (await table.getAttribute("data-clipped")) === "true");
+    check((await table.getAttribute("data-expanded")) === "true", "a table doesn't wrap by default");
+    await press(table.locator("[data-table-expand]"));
+    check((await table.getAttribute("data-expanded")) === "false", "the toggle didn't collapse the cells");
+    const cell = await table.locator("td").nth(1).evaluate((el) => [el.scrollWidth > el.clientWidth, Math.round(el.getBoundingClientRect().height)]);
+    check(cell[0] && cell[1] < 40, `a collapsed cell is cut ${cell[0]}, ${cell[1]}px tall`);
+    await press(table.locator("[data-table-menu]"));
+    await press(table.locator('[data-copy-table="markdown"]'));
+    const copied = await clipboard();
+    check(copied === null || copied.startsWith("| Name | Notes |\n| --- | --- |\n| alpha | a long note"), `the clipboard holds ${copied?.slice(0, 60)}`);
+    const answer = gui("#thread .turn:last-of-type .answer");
+    check((await answer.locator('a[href^="https://example.com"] img.favicon').getAttribute("src")) === "https://www.google.com/s2/favicons?domain=example.com&sz=32", "the docs link has no favicon");
+    check((await answer.locator('a[href^="http://localhost"] img').count()) === 0 && (await answer.locator('a[href^="http://localhost"] svg').count()) === 1, "a local link asks Google for its favicon");
+    await press(answer.locator("[data-run-code]"));
+    await answered("echo: ! echo ran-from-thread");
+    check((await text("#thread .turn:last-of-type .bubble")) === "! echo ran-from-thread", `the run reads ${await text("#thread .turn:last-of-type .bubble")}`);
+    check(await page.evaluate(() => document.body.dataset.drawer === "open"), "the terminal drawer didn't open");
+    await page.evaluate(() => toggleDrawer(false));
+    check((await page.locator("#thread .codeblock .lang", { hasText: "rust" }).count()) === 0 || (await page.locator("#thread .codeblock:has(.lang:text-is('rust')) [data-run-code]").count()) === 0, "a Rust block offers to run");
+  });
+
   await step("app view: back on alpha after the timeline's own threads", async () => {
     await toThread("alpha");
   });

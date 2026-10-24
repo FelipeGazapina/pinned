@@ -32,8 +32,8 @@ body[data-mode="gui"] #expanded, body[data-mode="gui"] #sidebar { background-ima
 :is(#sidebar, #chat, #panel, #settings) button:not(.thread-row, [aria-haspopup]) { transition: scale 0.1s ease-out; }
 :is(#sidebar, #chat, #panel, #settings) button:not(.thread-row, [aria-haspopup], :disabled):active { scale: 0.97; }
 
-#thread button.xs, #thread-find button.xs, #panel .codeblock button.xs { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 8px; color: var(--g-muted); }
-#thread button.xs:hover, #thread-find button.xs:hover, #panel .codeblock button.xs:hover { background: var(--g-accent); color: var(--g-fg); }
+#thread button.xs, #thread-find button.xs, #panel :is(.codeblock, .md-table) button.xs { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 8px; color: var(--g-muted); }
+#thread button.xs:hover, #thread-find button.xs:hover, #panel :is(.codeblock, .md-table) button.xs:hover { background: var(--g-accent); color: var(--g-fg); }
 button.xs .i { width: 12px; height: 12px; }
 button.xs.copied { color: var(--g-success); }
 #thread .when { margin-left: auto; padding-left: 8px; font-size: 12px; color: var(--g-muted); font-variant-numeric: tabular-nums; white-space: nowrap; opacity: 0;
@@ -75,7 +75,28 @@ button.xs.copied { color: var(--g-success); }
 .mention { display: inline-flex; align-items: center; gap: 0.3em; height: 1.41em; padding: 0 0.5em; border-radius: 0.5em; vertical-align: -0.2em;
   font-size: 0.86em; font-weight: 500; color: var(--g-info); background: rgb(81 162 255 / 0.11); border: 1px solid rgb(81 162 255 / 0.34); }
 .mention .i { width: 1em; height: 1em; }
-.md a .link-glyph { width: 1em; height: 1em; margin: 0 0.2em 0 0.1em; vertical-align: -0.125em; color: var(--g-fg); }
+.md a .link-icon { display: inline-flex; width: 14px; height: 14px; margin: 0 0.2em 0 0.25em; vertical-align: -0.125em; }
+.md a .link-icon :is(svg, img) { display: block; width: 100%; height: 100%; flex: none; }
+.md a .link-icon svg { color: var(--g-fg); }
+.md a .link-icon img { border-radius: 6px; }
+
+.md .md-table { margin: 0.65rem 0; }
+.md .md-table .table-scroll { overflow-x: auto; scrollbar-width: thin; }
+.md .md-table table { display: table; width: 100%; min-width: max-content; margin: 0; border-collapse: collapse; overflow-wrap: normal; word-break: normal; font-size: 12px; }
+.md .md-table :is(th, td) { padding: 7.2px 12px; text-align: start; border: 0; }
+.md .md-table thead th { padding-block: 8.8px; font-weight: 600; white-space: nowrap; border-bottom: 1px solid rgb(255 255 255 / 0.06); }
+.md .md-table tbody td { border-bottom: 1px solid rgb(255 255 255 / 0.06); }
+.md .md-table[data-expanded="false"] :is(th, td) { overflow: hidden; max-width: 384px; text-overflow: ellipsis; white-space: nowrap; }
+.md .md-table[data-expanded="true"] td { max-width: 384px; overflow-wrap: anywhere; }
+.md .md-table .table-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; user-select: none; }
+.md .md-table:not([data-clipped="true"]) [data-table-expand] { visibility: hidden; }
+.md .md-table[data-expanded="true"] [data-table-expand] { background: var(--g-accent); }
+.md .md-table .table-copy { position: relative; }
+.md .md-table .table-menu { position: absolute; right: 0; bottom: 28px; z-index: 6; display: flex; flex-direction: column; min-width: 170px; padding: 4px; border-radius: 12px;
+  background: rgb(17 17 17 / 0.92); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid var(--g-border); box-shadow: 0 12px 28px -12px #000; }
+.md .md-table .table-menu[hidden] { display: none; }
+.md .md-table .table-menu button { padding: 6px 10px; border-radius: 8px; text-align: left; font-size: 13px; }
+.md .md-table .table-menu button:hover { background: var(--g-hover); }
 
 .codeblock { margin: 0.65rem 0; border-radius: 10px; background: rgb(255 255 255 / 0.026); overflow: hidden; line-height: 1.375; }
 .codeblock .code-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 6px 0 12px; user-select: none;
