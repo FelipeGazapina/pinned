@@ -3,6 +3,7 @@
 // pinned's --settings file names, and prints every key it gets, so a test can read them back.
 const { execFileSync } = require("child_process");
 const fs = require("fs");
+const path = require("path");
 
 const args = process.argv.slice(2);
 const settingsFile = args[args.indexOf("--settings") + 1];
@@ -18,6 +19,17 @@ const hook = (event, extra = {}) => {
   const command = settings.hooks?.[event]?.[0]?.hooks?.[0]?.command;
   if (command) run(command, { session_id: session, cwd: process.cwd(), ...extra });
 };
+// Claude Code's transcript, in the shape the GUI reads: one JSON object per line.
+const transcript = path.join(process.env.HOME, ".claude", "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${session}.jsonl`);
+fs.mkdirSync(path.dirname(transcript), { recursive: true });
+let lines = 0;
+function record(entry) {
+  lines++;
+  fs.appendFileSync(transcript, JSON.stringify({ uuid: `${session}-${lines}`, timestamp: new Date().toISOString(), sessionId: session, ...entry }) + "\n");
+}
+const said = (content) => record({ type: "user", message: { role: "user", content } });
+const wrote = (content) => record({ type: "assistant", message: { role: "assistant", content } });
+
 const resetsIn = (seconds) => Math.floor(Date.now() / 1000) + seconds;
 if (settings.statusLine?.command) {
   run(settings.statusLine.command, {
@@ -35,9 +47,23 @@ function submit() {
   out("\r\n");
   if (line === "/exit") process.exit(0);
   hook("UserPromptSubmit", { prompt: line });
-  if (line === "/ask") hook("Notification", { message: "fake claude needs you" });
-  else if (line === "long") for (let i = 1; i <= 120; i++) out(`line ${i} of a long answer\r\n`);
-  else out(`echo: ${line}\r\n`);
+  said(line);
+  if (line === "/ask") {
+    wrote([{ type: "tool_use", id: `ask-${lines}`, name: "Bash", input: { command: "rm -rf build", description: "Remove the build folder" } }]);
+    hook("Notification", { message: "fake claude needs you" });
+  } else if (line === "long") for (let i = 1; i <= 120; i++) out(`line ${i} of a long answer\r\n`);
+  else if (line === "edit") {
+    const id = `tool-${lines}`;
+    wrote([{ type: "tool_use", id, name: "Edit", input: { file_path: path.join(process.cwd(), "notes.md"), old_string: "", new_string: "hello" } }]);
+    fs.appendFileSync("notes.md", `edited at ${new Date().toISOString()}\nsecond line\n`);
+    said([{ type: "tool_result", tool_use_id: id, content: "The file notes.md has been updated." }]);
+    wrote([{ type: "text", text: "I edited **notes.md** and opened a pull request.\n\n- one change\n- `notes.md`" }]);
+    record({ type: "pr-link", prNumber: 42, prUrl: "https://github.com/example/alpha/pull/42", prRepository: "example/alpha" });
+    out("edited notes.md\r\n");
+  } else {
+    wrote([{ type: "text", text: `echo: ${line}` }]);
+    out(`echo: ${line}\r\n`);
+  }
   if (line !== "/ask") hook("Stop");
   line = "";
   out("> ");

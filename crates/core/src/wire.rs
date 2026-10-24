@@ -3,7 +3,7 @@
 
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
-use crate::sync;
+use crate::{sync, thread};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -53,6 +53,9 @@ pub struct TabView {
     pub subject: Option<Subject>,
     /// The tab's number, which orders tabs by when they opened.
     pub opened: u64,
+    /// Unix time the session last reported a status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -91,8 +94,12 @@ pub enum Call {
     SetFolder { tab: TabId, path: String },
     /// `Vec<ProjectView>`, most recent first.
     ListProjects,
-    /// `Vec<history::Turn>`, newest first.
-    ProjectHistory { path: String },
+    /// `Vec<history::Turn>`, newest first, only `session`'s when given.
+    ProjectHistory {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+    },
     /// The folder's `origin` remote, or `null`.
     GitRemote { path: String },
     /// `projects::Folders`: the subfolders matching a path as typed so far, such as `~/pro`.
@@ -111,6 +118,22 @@ pub enum Call {
     /// The absolute path the file was saved under, in a private folder of the machine, for a
     /// session to read. Refused past `uploads::LIMIT`.
     Upload { name: String, data: Bytes },
+    /// `ThreadPage`: the conversation's items from byte `from` of its transcript on.
+    Thread { tab: TabId, from: u64 },
+    /// `null`. Types `text` into the session as one prompt and submits it.
+    Prompt { tab: TabId, text: String },
+    /// `workspace::Workspace` of the tab's folder.
+    Workspace { tab: TabId },
+    /// What `gh pr view` answers for `pr`, a number or URL, run in the tab's folder, plus `diff`.
+    PullRequest { tab: TabId, pr: String },
+}
+
+/// A step of a tab's conversation. A client holding items of another `session` starts over.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ThreadPage {
+    pub session: Option<String>,
+    pub items: Vec<thread::Item>,
+    pub next: u64,
 }
 
 /// A connector's session, the same on any machine.
@@ -371,6 +394,7 @@ mod tests {
             connector: Some("c1".into()),
             subject: Some(Subject::LinearIssue { issue: "uuid".into() }),
             opened: 3,
+            updated: Some(1792400000),
         }
     }
 
@@ -434,7 +458,7 @@ mod tests {
             json!({ "kind": "tabs", "tabs": [{
                 "id": "tab-3", "cwd": "/repo", "bypass": false, "running": true, "status": "needs-input",
                 "title": "Fix the build", "message": "Claude needs your permission to use Bash",
-                "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3,
+                "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3, "updated": 1792400000,
             }] }),
         );
         round_trip(
