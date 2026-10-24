@@ -50,7 +50,7 @@ function submit() {
   said(line);
   if (line === "/ask") {
     wrote([{ type: "tool_use", id: `ask-${lines}`, name: "Bash", input: { command: "rm -rf build", description: "Remove the build folder" } }]);
-    hook("Notification", { message: "fake claude needs you" });
+    hook("Notification", { message: "Claude needs your permission to use Bash" });
   } else if (line === "long") for (let i = 1; i <= 120; i++) out(`line ${i} of a long answer\r\n`);
   else if (line === "edit") {
     const id = `tool-${lines}`;
@@ -71,7 +71,8 @@ function submit() {
 
 process.stdin.setRawMode?.(true);
 process.stdin.on("data", (chunk) => {
-  const text = chunk.toString("utf8");
+  // A prompt pinned types arrives as a bracketed paste, which claude reads as plain text.
+  const text = chunk.toString("utf8").replace(/\x1b\[20[01]~/g, "");
   if (KEYS[text]) return out(KEYS[text]);
   for (const c of text) {
     if (c === "\r") submit();

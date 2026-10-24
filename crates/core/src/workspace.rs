@@ -14,18 +14,19 @@ const PR_FIELDS: &str = "number,title,state,isDraft,url,body,author,createdAt,he
 pub struct Workspace {
     /// The folder the project's history is kept under, which a worktree shares with its repository.
     pub project: String,
+    /// The folder is inside a git repository.
+    pub repo: bool,
     pub branch: Option<String>,
     pub worktree: bool,
 }
 
 pub fn of(cwd: &Path) -> Workspace {
     let git = |args: &[&str]| run(cwd, "git", args).map(|out| out.trim().to_owned()).filter(|out| !out.is_empty());
-    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| b != "HEAD");
-    let worktree = match (git(&["rev-parse", "--git-dir"]), git(&["rev-parse", "--git-common-dir"])) {
-        (Some(dir), Some(common)) => dir != common,
-        _ => false,
-    };
-    Workspace { project: history::project_of(cwd).display().to_string(), branch, worktree }
+    // symbolic-ref names the branch of a repository with no commit yet too; a detached HEAD has none.
+    let branch = git(&["symbolic-ref", "--short", "-q", "HEAD"]);
+    let dir = git(&["rev-parse", "--git-dir"]);
+    let worktree = matches!((&dir, git(&["rev-parse", "--git-common-dir"])), (Some(dir), Some(common)) if *dir != common);
+    Workspace { project: history::project_of(cwd).display().to_string(), repo: dir.is_some(), branch, worktree }
 }
 
 /// What `gh` knows of the pull request `pr`, a number or URL, with its diff under `diff`.
@@ -66,8 +67,13 @@ mod tests {
         let tree = repo.join(".claude/worktrees/fix");
         git(&repo, &["worktree", "add", "-q", "-b", "fix-it", tree.to_str().unwrap()]);
 
+        let fresh = repo.join("fresh");
+        std::fs::create_dir(&fresh).unwrap();
+        git(&fresh, &["init", "-q", "-b", "trunk"]);
+        assert_eq!((of(&fresh).repo, of(&fresh).branch.as_deref()), (true, Some("trunk")), "a repository with no commit yet");
+
         let main = of(&repo);
-        assert_eq!((main.branch.as_deref(), main.worktree), (Some("main"), false));
+        assert_eq!((main.repo, main.branch.as_deref(), main.worktree), (true, Some("main"), false));
         let wt = of(&tree);
         assert_eq!((wt.branch.as_deref(), wt.worktree, wt.project), (Some("fix-it"), true, repo.display().to_string()));
     }
@@ -75,6 +81,6 @@ mod tests {
     #[test]
     fn a_plain_folder_has_no_branch() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(of(dir.path()), Workspace { project: dir.path().display().to_string(), branch: None, worktree: false });
+        assert_eq!(of(dir.path()), Workspace { project: dir.path().display().to_string(), repo: false, branch: None, worktree: false });
     }
 }

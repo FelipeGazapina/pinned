@@ -99,6 +99,8 @@ async function sweep(profileName) {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ ...profile, permissions: ["clipboard-read", "clipboard-write"] });
   if (touch) await context.addInitScript(stubVisualViewport);
+  // The terminal steps run in terminal view; the app-view steps switch to it themselves.
+  await context.addInitScript(() => localStorage.getItem("mode") || localStorage.setItem("mode", "terminal"));
   const page = await context.newPage();
 
   let seen = [];
@@ -513,6 +515,137 @@ async function sweep(profileName) {
   await step("switch tabs", async () => {
     await press(page.locator("#tab-list .tab .name", { hasText: "alpha" }));
     check(/alpha/.test(await text("#title")), "tapping the alpha tab did not show it");
+    await waitTerm(/work\/alpha/);
+  });
+
+  const gui = (selector) => page.locator(selector).filter({ visible: true }).first();
+  const sendPrompt = async (words) => {
+    await page.fill("#prompt", words);
+    if (touch) await page.tap("#send");
+    else await page.press("#prompt", "Enter");
+  };
+  const showSidebar = async () => {
+    if (await page.locator("#sidebar").isVisible()) return;
+    await tapOrClick("#chat-sidebar-toggle");
+    await waitFor("the sidebar", () => page.locator("#sidebar").isVisible());
+  };
+
+  await step("app view: switch from the terminal, threads in the sidebar", async () => {
+    await typeInTerm("typed in the terminal");
+    await page.keyboard.press("Enter");
+    await waitTerm(/echo: typed in the terminal/);
+    await tapOrClick("#mode-gui");
+    await waitFor("the app view", () => page.locator("#chat").isVisible());
+    check(!(await page.locator("#tab-bar").isVisible()), "the tab bar still shows in the app view");
+    await showSidebar();
+    const rows = await page.locator("#thread-list .thread-row").count();
+    check(rows === 2, `${rows} threads in the sidebar, expected 2`);
+    check(/alpha/.test(await text("#thread-list .thread-row.active .project")), "the active row is not alpha");
+    if (touch) await page.tap("#workspace", { position: { x: (await rect("#workspace")).width - 4, y: 300 } });
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    return `${rows} threads`;
+  });
+
+  await step("app view: the thread shows what was typed in the terminal", async () => {
+    await waitFor("the transcript", async () => (await page.locator("#thread .bubble").count()) > 0);
+    const prompts = await page.locator("#thread .bubble").allTextContents();
+    check(prompts.includes("typed in the terminal"), `prompts: ${prompts.join(" | ")}`);
+    check((await page.locator("#thread .assistant", { hasText: "echo: typed in the terminal" }).count()) === 1, "the answer is missing");
+    check(/alpha/.test(await text("#chat-head .crumb")), "the header doesn't name the project");
+    return `${prompts.length} prompts`;
+  });
+
+  await step("app view: a prompt from the composer reaches the same session", async () => {
+    await sendPrompt("hello from the app");
+    await waitFor("the answer", async () => (await page.locator("#thread .assistant", { hasText: "echo: hello from the app" }).count()) > 0);
+    check(/hello from the app/.test(await termText()), "the terminal behind the app view never got the prompt");
+    check((await page.inputValue("#prompt")) === "", "the composer kept the sent text");
+  });
+
+  await step("app view: a turn's changed files open in the Diff panel", async () => {
+    await sendPrompt("edit");
+    await waitFor("the changed-files card", async () => (await page.locator("#thread .changes").count()) > 0, 10000);
+    const card = await text("#thread .changes .count");
+    await press(gui("#thread .open-diff"));
+    await waitFor("the diff panel", () => page.locator("#panel-body .file").first().isVisible());
+    check(/notes\.md/.test(await text("#panel-body .file .path")), "the diff doesn't show notes.md");
+    const added = await page.locator("#panel-body .dl.add").count();
+    check(added >= 2, `${added} added lines in the diff`);
+    await press(gui('#panel-body [data-diff="split"]'));
+    check((await page.locator("#panel-body .dl.split").count()) > 0, "split view shows no side-by-side rows");
+    await press(gui('#panel-body [data-diff="unified"]'));
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    // On a phone the panel is a sheet over the thread, closed before reaching the header again.
+    if (touch) await tapOrClick("#panel-close");
+    return `${card}, ${added} lines added`;
+  });
+
+  await step("app view: the PR link opens the pull request panel", async () => {
+    check(await page.locator("#pr-chip").isVisible(), "the header has no PR chip after the session linked #42");
+    check(/#42/.test(await text("#composer-footer .pr")), "the composer footer doesn't show #42");
+    await tapOrClick("#pr-chip");
+    // The sweep's node has no gh login, so the panel ends on the error and the link to GitHub.
+    await waitFor("the PR panel", async () => /Open #42 on GitHub|#42/.test(await text("#panel-body")) && !/Loading/.test(await text("#panel-body")), 15000);
+    check(await page.locator('#panel-tabs [data-panel="pr"].active').isVisible(), "the PR tab is not the active one");
+    const shown = (await text("#panel-body")).slice(0, 80);
+    if (touch) {
+      await tapOrClick("#panel-close");
+      await tapOrClick("#toggle-panel");
+    }
+    return shown;
+  });
+
+  await step("app view: the browser panel loads a URL", async () => {
+    await press(gui('#panel-tabs [data-panel="browser"]'));
+    await page.fill("#panel-body .url-bar input", `${HUB}/manifest.webmanifest`);
+    await page.press("#panel-body .url-bar input", "Enter");
+    await waitFor("the frame", async () => (await page.locator("#panel-body iframe").getAttribute("src"))?.endsWith("manifest.webmanifest"));
+    const frame = page.frameLocator("#panel-body iframe");
+    await waitFor("the page in the frame", async () => /pinned/.test((await frame.locator("body").textContent().catch(() => "")) ?? ""));
+    await tapOrClick("#panel-close");
+    check(!(await page.locator("#panel").isVisible()), "the panel didn't close");
+    await sleep(200);
+  });
+
+  await step("app view: the approval banner answers claude's prompt", async () => {
+    await sendPrompt("/ask");
+    await waitFor("the banner", () => page.locator("#approval").isVisible());
+    check(/Command approval/.test(await text("#approval .kind")), `banner says ${await text("#approval .kind")}`);
+    check(/rm -rf build/.test(await text("#approval pre")), "the banner doesn't show the command");
+    await press(gui('#approval [data-key="1"]'));
+    await waitTerm(/\/ask\r?\n> 1/);
+    await page.evaluate(() => callOn(active.machine, { cmd: "write_input", tab: active.view.id, data: "\x7f\r" }));
+  });
+
+  await step("app view: the terminal drawer shows the same session", async () => {
+    await tapOrClick("#toggle-terminal");
+    await waitFor("the drawer", () => page.locator(".term:not([hidden])").evaluate((el) => getComputedStyle(el).visibility === "visible" && el.getBoundingClientRect().height > 60));
+    check(/hello from the app/.test(await termText()), "the drawer's terminal lacks the prompt sent from the composer");
+    await tapOrClick("#toggle-terminal");
+  });
+
+  await step("app view: the sidebar switches threads", async () => {
+    await showSidebar();
+    await press(page.locator("#thread-list .thread-row", { hasText: "beta" }).first());
+    await waitFor("beta", async () => /beta/.test(await text("#chat-head .crumb")));
+    await showSidebar();
+    await press(page.locator("#thread-list .thread-row", { hasText: "alpha" }).first());
+    await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
+  });
+
+  await step("app view: controls are big enough to tap", async () => {
+    if (!touch) return "desktop";
+    const small = await smallTargets("#chat-head button, #composer button, #composer-footer button");
+    touchCheck(!small.length, `small: ${small.join(", ")}`);
+  });
+
+  await step("app view: back to the terminal", async () => {
+    await showSidebar();
+    await tapOrClick("#mode-terminal");
+    await waitFor("the tab bar", () => page.locator("#tab-bar").isVisible());
+    check(!(await page.locator("#chat").isVisible()), "the app view still shows");
     await waitTerm(/work\/alpha/);
   });
 
