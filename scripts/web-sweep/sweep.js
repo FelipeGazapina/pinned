@@ -1266,7 +1266,7 @@ async function sweep(profileName) {
     await tapOrClick('#settings-nav [data-page="general"]');
     const slider = page.locator("#appearance-contrast");
     const shown = () => page.evaluate(() => [document.getElementById("appearance-contrast").value, document.querySelector("#contrast-row output").textContent, document.querySelector("[data-contrast-reset]").hidden, document.documentElement.dataset.contrast ?? "", localStorage.getItem("gui-contrast") ?? ""].join("|"));
-    const looks = async () => ({ side: (await paintOf("#sidebar", "color"))[0], meta: (await paintOf("#contrast-row .meta", "color"))[0], border: await paintOf("#theme-section .theme-card", "borderTopColor") });
+    const looks = async () => ({ side: (await paintOf("#sidebar", "color"))[0], meta: (await paintOf("#contrast-row .meta", "color"))[0], title: (await paintOf("#thread-list .thread-row .l2", "color"))[0], border: await paintOf("#theme-section .theme-card", "borderTopColor") });
     try {
       check((await text("#contrast-row label")) === "Contrast", `the row is ${await text("#contrast-row label")}`);
       const range = await slider.evaluate((i) => [i.min, i.max, i.step].join("|"));
@@ -1277,11 +1277,11 @@ async function sweep(profileName) {
       for (let i = 0; i < 12; i++) await page.keyboard.press("ArrowRight");
       check((await shown()) === "160|160%|false|160|160", `after twelve steps up: ${await shown()}`);
       const sharp = await looks();
-      check(sharp.side > base.side && sharp.meta > base.meta && sharp.border[1] > base.border[1], `160% in dark: ${JSON.stringify(sharp)} against ${JSON.stringify(base)}`);
+      check(sharp.side > base.side && sharp.meta > base.meta && sharp.title > base.title && sharp.border[1] > base.border[1], `160% in dark: ${JSON.stringify(sharp)} against ${JSON.stringify(base)}`);
       await page.keyboard.press("Home");
       check((await shown()) === "50|50%|false|50|50", `Home: ${await shown()}`);
       const faint = await looks();
-      check(faint.side < base.side && faint.meta < base.meta && faint.border[1] < base.border[1], `50% in dark: ${JSON.stringify(faint)} against ${JSON.stringify(base)}`);
+      check(faint.side < base.side && faint.meta < base.meta && faint.title < base.title && faint.border[1] < base.border[1], `50% in dark: ${JSON.stringify(faint)} against ${JSON.stringify(base)}`);
       await page.emulateMedia({ colorScheme: "light" });
       await waitFor("the light appearance", async () => (await appearance()) === "light|");
       await page.keyboard.press("End");
@@ -1289,7 +1289,7 @@ async function sweep(profileName) {
       await press(page.locator("[data-contrast-reset]"));
       check((await shown()) === "100|100%|true||", `after Reset: ${await shown()}`);
       const lightBase = await looks();
-      check(lightSharp.side < lightBase.side && lightSharp.meta < lightBase.meta && lightSharp.border[0] < lightBase.border[0], `200% in light: ${JSON.stringify(lightSharp)} against ${JSON.stringify(lightBase)}`);
+      check(lightSharp.side < lightBase.side && lightSharp.meta < lightBase.meta && lightSharp.title < lightBase.title && lightSharp.border[0] < lightBase.border[0], `200% in light: ${JSON.stringify(lightSharp)} against ${JSON.stringify(lightBase)}`);
     } finally {
       await page.emulateMedia({ colorScheme: "dark" });
       await page.evaluate(() => setContrast(CONTRAST.standard));

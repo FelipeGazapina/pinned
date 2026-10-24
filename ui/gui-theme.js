@@ -131,6 +131,7 @@ function paintTheme(appearance, colors, id) {
     for (const role of THEME_PALETTES.roles) themeRoot.style.removeProperty(themeVar(role));
     for (const role of CHANNEL_ROLES) themeRoot.style.removeProperty(`${themeVar(role)}-rgb`);
   }
+  applyContrast();
   themeSurroundings();
 }
 
@@ -302,13 +303,34 @@ function contrastLevel() {
   const n = Number(load(CONTRAST_KEY));
   return Number.isInteger(n) && n >= CONTRAST.min && n <= CONTRAST.max ? n : CONTRAST.standard;
 }
+/** Text is moved on its channels (--g-fg-rgb and kin), so the many rules that read them translucently
+ * follow too, as everything reading T3's --contrast-* variables does. Each against its own surface. */
+const CONTRAST_TEXT = [["--g-fg-rgb", "--g-canvas-rgb"], ["--g-muted-rgb", "--g-canvas-rgb"], ["--g-side-fg-rgb", "--g-sidebar"], ["--g-side-muted-rgb", "--g-sidebar"]];
 function applyContrast() {
   const c = contrastLevel();
+  for (const [name] of CONTRAST_TEXT) themeRoot.style.removeProperty(name);
   if (c === CONTRAST.standard) delete themeRoot.dataset.contrast;
   else themeRoot.dataset.contrast = c;
   themeRoot.style.setProperty("--g-contrast-base", `${Math.min(c, 100)}%`);
   themeRoot.style.setProperty("--g-contrast-boost", `${Math.max(c - 100, 0)}%`);
   themeRoot.style.setProperty("--g-contrast-border-boost", `${Math.max(c - 100, 0) / 4}%`);
+  if (c === CONTRAST.standard) return;
+  const css = getComputedStyle(themeRoot);
+  const color = (name) => {
+    const v = css.getPropertyValue(name).trim();
+    return parseColor(/^[\d.]+\s+[\d.]+\s+[\d.]+$/.test(v) ? `rgb(${v})` : v)?.color;
+  };
+  const lab = ({ L, C, h }) => [L, C * Math.cos((h * Math.PI) / 180), C * Math.sin((h * Math.PI) / 180)];
+  const mix = (x, y, t) => x.map((v, i) => v + (y[i] - v) * t);
+  const target = lab(rgbToOklch(themeRoot.dataset.appearance === "light" ? BLACK : WHITE));
+  for (const [name, surface] of CONTRAST_TEXT) {
+    const text = color(name);
+    const under = color(surface);
+    if (!text || !under) continue;
+    const [L, a, b] = mix(mix(lab(under), lab(text), Math.min(c, 100) / 100), target, Math.max(c - 100, 0) / 100);
+    const rgb = oklchToRgb({ L, C: Math.hypot(a, b), h: (Math.atan2(b, a) * 180) / Math.PI });
+    themeRoot.style.setProperty(name, `${rgb.r} ${rgb.g} ${rgb.b}`);
+  }
 }
 function setContrast(c) {
   if (c === CONTRAST.standard) localStorage.removeItem(CONTRAST_KEY);
@@ -802,7 +824,7 @@ function bindThemeEditor(panel) {
     if (!role) return;
     setThemeEditorColor(role, e.target.value);
     e.target.closest(".te-field").querySelector(".te-swatch span").style.background = themeEditor.colors[ed.appearance][role];
-    if (colorPicker?.role === role) syncColorPicker();
+    if (colorPicker?.role === role) syncColorPicker(true);
   });
   panel.addEventListener("change", (e) => {
     const ed = themeEditor;

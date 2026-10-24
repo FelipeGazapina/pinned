@@ -320,10 +320,12 @@ function parseJsonc(source, what) {
     } else if (c === "/" && source[i + 1] === "*") {
       const end = source.indexOf("*/", i + 2);
       i = end < 0 ? source.length : end + 1;
+    } else if (c === "," && /^\s*(?:\/\/[^\n]*\n\s*|\/\*[\s\S]*?\*\/\s*)*[}\]]/.test(source.slice(i + 1))) {
+      continue;
     } else out += c;
   }
   try {
-    const value = JSON.parse(out.replace(/,(\s*[}\]])/g, "$1"));
+    const value = JSON.parse(out);
     if (isRecord(value)) return value;
   } catch {}
   throw new Error(`${what} is not valid JSON.`);
@@ -539,6 +541,13 @@ const downloads = new Intl.NumberFormat(undefined, { notation: "compact", maximu
 const GITLAB_ICON = `<svg class="i" viewBox="0 0 32 32" fill="currentColor"><path d="m31.46 12.78-.04-.12-4.35-11.35A1.14 1.14 0 0 0 25.94.6c-.24 0-.47.1-.66.24-.19.15-.33.36-.39.6l-2.94 9h-11.9l-2.94-9A1.14 1.14 0 0 0 6.07.58a1.15 1.15 0 0 0-1.14.72L.58 12.68l-.05.11a8.1 8.1 0 0 0 2.68 9.34l.02.01.04.03 6.63 4.97 3.28 2.48 2 1.52a1.35 1.35 0 0 0 1.62 0l2-1.52 3.28-2.48 6.67-5h.02a8.09 8.09 0 0 0 2.7-9.36Z"/></svg>`;
 let themeImport = null;
 const importOpen = (t) => themeImport === t && !!shellDialog.querySelector(".theme-import");
+// Escape closes the shared dialog without asking this file; its search or install stops with it.
+new MutationObserver(() => {
+  if (!themeImport || shellDialog.querySelector(".theme-import")) return;
+  themeImport.controller?.abort();
+  clearTimeout(themeImport.timer);
+  themeImport = null;
+}).observe(shellDialog, { childList: true });
 
 function openThemeImport() {
   themeImport?.controller?.abort();
@@ -675,7 +684,8 @@ async function installOpenVsx(extension, allowUpdate) {
   if (!importOpen(t) || t.controller !== controller) return;
   Object.assign(t, { controller: null, installing: null });
   renderThemeSearch();
-  runThemeSearch();
+  if (t.query.trim()) runThemeSearch();
+  else queueThemeSearch();
 }
 
 /** The file half: a drop zone and chooser, the JSON box, or the Already installed choice. */
@@ -841,6 +851,20 @@ function resolveConflicts(mode) {
   }
   endThemeImport();
 }
+
+TAURI?.webview.getCurrentWebview().onDragDropEvent(async ({ payload }) => {
+  const zone = themeImport && shellDialog.querySelector(".ti-drop");
+  if (!zone) return;
+  const over = payload.position && document.elementFromPoint(payload.position.x / devicePixelRatio, payload.position.y / devicePixelRatio)?.closest(".ti-drop") === zone;
+  zone.classList.toggle("over", over && payload.type !== "drop" && payload.type !== "leave");
+  if (payload.type !== "drop" || !over) return;
+  try {
+    readThemeFiles(await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split("/").pop()))));
+  } catch (err) {
+    themeImport.error = String(err);
+    renderThemeFile();
+  }
+});
 
 function bindThemeImport(body) {
   const input = body.querySelector(".ti-query input");

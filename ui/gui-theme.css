@@ -191,15 +191,10 @@ html[data-appearance="light"][data-diff-colors="blue-orange"] {
 html[data-diff-colors="blue-orange"] { --g-add-row: #0a1220; --g-add-no: #0c1628; --g-del-row: #1c1209; --g-del-no: #22150a; }
 
 body[data-mode="gui"] { color-scheme: var(--g-scheme); }
-/* appearanceContrast.ts, as T3's index.css applies it: text mixes toward its surface below 100% and
-   toward black or white above it; borders fade out below 100% and take a quarter of the boost
-   toward the text above. gui-theme.js sets the three amounts and data-contrast when not 100%. */
+/* appearanceContrast.ts, as T3's index.css applies it. gui-theme.js moves the text channels toward
+   their surface below 100% and toward black or white above it; here borders fade out below 100% and
+   take a quarter of the boost toward the text above. data-contrast is set when it isn't 100%. */
 html[data-contrast] {
-  --g-fg: color-mix(in oklab, color-mix(in oklab, rgb(var(--g-fg-rgb)) var(--g-contrast-base), var(--g-canvas)), var(--g-contrast-target) var(--g-contrast-boost));
-  --g-text: color-mix(in oklab, color-mix(in oklab, rgb(var(--g-fg-rgb) / 0.86) var(--g-contrast-base), var(--g-canvas)), var(--g-contrast-target) var(--g-contrast-boost));
-  --g-muted: color-mix(in oklab, color-mix(in oklab, rgb(var(--g-muted-rgb)) var(--g-contrast-base), var(--g-canvas)), var(--g-contrast-target) var(--g-contrast-boost));
-  --g-side-fg: color-mix(in oklab, color-mix(in oklab, rgb(var(--g-side-fg-rgb)) var(--g-contrast-base), var(--g-sidebar)), var(--g-contrast-target) var(--g-contrast-boost));
-  --g-side-muted: color-mix(in oklab, color-mix(in oklab, rgb(var(--g-side-muted-rgb)) var(--g-contrast-base), var(--g-sidebar)), var(--g-contrast-target) var(--g-contrast-boost));
   --g-border: color-mix(in srgb, color-mix(in srgb, var(--g-border-base) var(--g-contrast-base), transparent), rgb(var(--g-fg-rgb)) var(--g-contrast-border-boost));
   --g-input: color-mix(in srgb, color-mix(in srgb, var(--g-input-base) var(--g-contrast-base), transparent), rgb(var(--g-fg-rgb)) var(--g-contrast-border-boost));
   --g-side-border: color-mix(in srgb, color-mix(in srgb, var(--g-side-border-base) var(--g-contrast-base), transparent), rgb(var(--g-side-fg-rgb)) var(--g-contrast-border-boost));
