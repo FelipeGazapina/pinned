@@ -405,9 +405,6 @@ body[data-panel-max="true"] #panel-resize { display: none; }
 .browser-empty .hint { margin-top: 16px; }
 
 .pr-head { padding: 4px 16px 0; border-bottom: 1px solid rgb(255 255 255 / 0.036); }
-.pr-head .crumbs { display: flex; align-items: center; gap: 6px; height: 28px; font-size: 13px; }
-.pr-head .num { display: inline-flex; align-items: center; gap: 4px; font-weight: 500; }
-.pr-head .num .i { width: 10px; height: 10px; }
 .pr-head .icon .i { width: 14px; height: 14px; }
 .state { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 500; }
 .state .i { width: 12px; height: 12px; }

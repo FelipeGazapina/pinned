@@ -107,10 +107,11 @@ const RENDERER = {
   html: ({ text }) => esc(text),
   link({ href, tokens }) {
     const text = this.parser.parseInline(tokens);
-    if (!WEB_URL.test(href)) return text;
+    if (!WEB_URL.test(href)) return fileChip(href, text) ?? text;
     const glyph = GITHUB_URL.test(href) ? icon("github", "link-glyph") : "";
     return `<a href="${esc(href)}" title="${esc(href)}"${PR_URL.test(href) ? ` data-pr="${esc(href)}"` : ""}>${glyph}${text}</a>`;
   },
+  codespan: ({ text }) => fileChip(text) ?? false,
   image: ({ href, text }) => (WEB_URL.test(href) ? `<a href="${esc(href)}" title="${esc(href)}">${esc(text || href)}</a>` : esc(text)),
   code({ text, lang }) {
     const language = (lang ?? "").trim().split(/\s+/)[0].toLowerCase();

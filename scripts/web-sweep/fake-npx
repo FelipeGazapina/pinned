@@ -1,0 +1,23 @@
+#!/usr/bin/env node
+// Stands in for `npx` on the sweep's node: `npx -y expo-device-hub@<version> --host H --port P` serves
+// a page where the device hub's dashboard would be, allowing the frame ancestor it was given, and
+// logs each run to $HOME/npx.log.
+const fs = require("fs");
+const path = require("path");
+
+const args = process.argv.slice(2);
+fs.appendFileSync(path.join(process.env.HOME, "npx.log"), `${args.join(" ")}\n`);
+const flag = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
+if (!args.some((a) => a.startsWith("expo-device-hub@"))) {
+  process.stderr.write(`fake npx can't run ${args.join(" ")}\n`);
+  process.exit(1);
+}
+require("http")
+  .createServer((req, res) => {
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    if (flag("--frame-ancestor")) res.setHeader("content-security-policy", `frame-ancestors ${flag("--frame-ancestor")}`);
+    res.end("<!doctype html><title>Expo Device Hub</title><p>Expo Device Hub dashboard</p>");
+  })
+  .listen(Number(flag("--port")), flag("--host") ?? "127.0.0.1");
+// A node killed outright leaves its hub behind; this one doesn't outlive a sweep.
+setTimeout(() => process.exit(0), 10 * 60 * 1000);
