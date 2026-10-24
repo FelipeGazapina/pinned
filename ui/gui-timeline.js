@@ -142,33 +142,10 @@ function linkIcon(href) {
   return `<span class="link-icon"><img class="favicon" alt="" loading="lazy" draggable="false" data-host="${esc(host)}" src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&amp;sz=32"></span>`;
 }
 
-/** Code is highlighted as T3 Code does it, by Shiki with the Pierre Dark theme. Until a language's grammar
- * has loaded its blocks show plain, and the thread draws again once it has. */
-const wantedGrammars = new Set();
-const loadingGrammars = new Set();
-function loadGrammar(language) {
-  if (loadingGrammars.has(language)) return;
-  loadingGrammars.add(language);
-  SHIKI.load(language).then((id) => id && grammarLoaded(), console.warn);
-}
-function shikiLines(text, language) {
-  if (!window.SHIKI) {
-    wantedGrammars.add(language);
-    return null;
-  }
-  try {
-    const lines = SHIKI.tokens(text, language);
-    if (lines) return lines;
-  } catch (e) {
-    console.warn(`highlighting ${language} failed`, e);
-    return null;
-  }
-  loadGrammar(language);
-  return null;
-}
-const tokenHtml = (t) => `<span style="color:${esc(t.color ?? "")}${t.fontStyle & 1 ? ";font-style:italic" : ""}${t.fontStyle & 2 ? ";font-weight:600" : ""}${t.fontStyle & 4 ? ";text-decoration:underline" : ""}">${esc(t.content)}</span>`;
+/** Code blocks share the diff view's Shiki, with T3 Code's Pierre Dark theme. Until a language's grammar
+ * has loaded, highlight.js colors its blocks, and the thread draws again once it has. */
 let redrawTimer = 0;
-function grammarLoaded() {
+document.addEventListener("highlighter", () => {
   clearTimeout(redrawTimer);
   redrawTimer = setTimeout(() => {
     rendered.clear();
@@ -176,8 +153,7 @@ function grammarLoaded() {
     rerender();
     if (ui.panelOpen && ui.panel === "pr") renderPanel();
   }, 30);
-}
-window.addEventListener("shiki", () => wantedGrammars.forEach(loadGrammar));
+});
 
 const SHELL_LANGS = /^(?:sh|bash|zsh|fish|shell|powershell|pwsh|console)$/;
 /** Assistant text and pull request comments come from others, so only web links render, and an image
@@ -198,13 +174,12 @@ const RENDERER = {
   image: ({ href, text }) => (WEB_URL.test(href) ? `<a href="${esc(href)}" title="${esc(href)}">${esc(text || href)}</a>` : esc(text)),
   code({ text, lang }) {
     const language = (lang ?? "").trim().split(/\s+/)[0].toLowerCase();
-    const lines = language ? shikiLines(text, language) : null;
-    const body = lines ? lines.map((line) => line.map(tokenHtml).join("")).join("\n") : esc(text);
+    const body = highlightLines(text.split("\n"), language || null).join("\n");
     const key = codeKey(text);
     const runs = SHELL_LANGS.test(language) && !!text.trim() && !/\\$/.test(text.trim()) && !/[\p{Cc}\p{Cf}]/u.test(text);
     return `<div class="codeblock" data-code="${key}" data-wrap="${wraps(key)}"><div class="code-head"><span class="lang">${esc(language || "text")}</span>
       <span class="code-actions"><button type="button" class="xs" data-code-wrap title="${wraps(key) ? "Disable line wrap" : "Wrap lines"}">${icon("text-wrap")}</button>${runs ? `<button type="button" class="xs" data-run-code title="Run in terminal">${icon("play")}</button>` : ""}<button type="button" class="xs" data-copy-code title="Copy code">${icon("copy")}</button></span></div>
-      <pre><code${lines ? ` class="shiki language-${esc(language)}"` : ""}>${body}</code></pre></div>`;
+      <pre><code${language ? ` class="language-${esc(language)}"` : ""}>${body}</code></pre></div>`;
   },
 };
 marked.use({ gfm: true, renderer: RENDERER });

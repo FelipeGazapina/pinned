@@ -614,10 +614,9 @@ async function sweep(profileName) {
     const thought = await text("#thread .turn:last-of-type .group .tool.thought .label");
     check(thought === "Planning the read", `the thinking row reads ${thought}`);
     check((await text("#thread .codeblock .lang")) === "rust", `the code block's language is ${await text("#thread .codeblock .lang")}`);
-    // Shiki with T3 Code's Pierre Dark theme: `fn` is a keyword, `main` a function, `42` a number.
-    await waitFor("highlighted code", async () => (await page.locator("#thread .codeblock code.shiki").count()) > 0, 5000);
-    const colors = await gui("#thread .codeblock code.shiki").evaluate((code) => [...code.querySelectorAll("span")].filter((s) => ["fn", "main", "42"].includes(s.textContent)).map((s) => `${s.textContent}=${s.style.color}`));
-    check(colors.join(" ") === "fn=rgb(255, 103, 141) main=rgb(157, 106, 251) 42=rgb(104, 205, 242)", `the code is colored ${colors.join(" ")}`);
+    // Shiki with T3 Code's Pierre Dark theme colors `let` as storage, which highlight.js can't tell from a keyword.
+    const colors = () => page.evaluate(() => [...document.querySelectorAll("#thread .codeblock code.language-rust span")].filter((s) => ["fn", "main", "let", "42"].includes(s.textContent)).map((s) => `${s.textContent}=${s.style.color}`).join(" "));
+    await waitFor("Shiki's colors", async () => (await colors()) === "fn=rgb(255, 103, 141) main=rgb(157, 106, 251) let=rgb(213, 104, 234) 42=rgb(104, 205, 242)", 8000).catch(async () => check(false, `the code is colored ${await colors()}`));
     const block = gui("#thread .codeblock");
     check((await block.getAttribute("data-wrap")) === "true", "code doesn't wrap by default");
     await press(block.locator("[data-code-wrap]"));
@@ -918,6 +917,8 @@ async function sweep(profileName) {
     check(await page.evaluate(() => document.body.dataset.drawer === "open"), "the terminal drawer didn't open");
     await page.evaluate(() => toggleDrawer(false));
     check((await page.locator("#thread .codeblock .lang", { hasText: "rust" }).count()) === 0 || (await page.locator("#thread .codeblock:has(.lang:text-is('rust')) [data-run-code]").count()) === 0, "a Rust block offers to run");
+    await page.evaluate(() => wantLang("cobol"));
+    await waitFor("a rare language's grammar", () => page.evaluate(() => shikiLangs.has("cobol")), 8000);
   });
 
   await step("app view: typography sets the interface, prompt, code and terminal fonts, and the lane keeps 48px gutters down to 640px", async () => {

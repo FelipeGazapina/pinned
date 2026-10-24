@@ -58,28 +58,82 @@ function withoutWhitespace(files) {
   });
 }
 
-const LANG_BY_EXT = { js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "javascript", ts: "typescript", tsx: "typescript", mts: "typescript", py: "python", rs: "rust", rb: "ruby", go: "go", java: "java", kt: "kotlin", swift: "swift", c: "c", h: "c", cc: "cpp", cpp: "cpp", hpp: "cpp", cs: "csharp", php: "php", sh: "bash", zsh: "bash", bash: "bash", json: "json", yml: "yaml", yaml: "yaml", toml: "ini", ini: "ini", md: "markdown", css: "css", scss: "scss", less: "less", html: "xml", xml: "xml", svg: "xml", vue: "xml", svelte: "xml", sql: "sql", lua: "lua", r: "r", graphql: "graphql", m: "objectivec", pl: "perl" };
+const LANG_BY_EXT = { js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "jsx", ts: "typescript", tsx: "tsx", mts: "typescript", cts: "typescript", py: "python", rs: "rust", rb: "ruby", go: "go", java: "java", kt: "kotlin", swift: "swift", c: "c", h: "c", cc: "cpp", cpp: "cpp", hpp: "cpp", cs: "csharp", php: "php", sh: "bash", zsh: "bash", bash: "bash", json: "json", jsonc: "jsonc", yml: "yaml", yaml: "yaml", toml: "toml", ini: "ini", md: "markdown", mdx: "mdx", css: "css", scss: "scss", less: "less", html: "html", xml: "xml", svg: "xml", vue: "vue", svelte: "svelte", sql: "sql", lua: "lua", r: "r", graphql: "graphql", gql: "graphql", m: "objective-c", pl: "perl", dart: "dart", ex: "elixir", exs: "elixir", zig: "zig", scala: "scala", hs: "haskell", tf: "hcl", proto: "proto", diff: "diff" };
+const LANG_BY_NAME = { Makefile: "makefile", Dockerfile: "docker", "Cargo.lock": "toml", ".gitignore": "ini", ".env": "ini" };
+const HLJS_NAMES = { jsx: "javascript", tsx: "typescript", jsonc: "json", toml: "ini", html: "xml", vue: "xml", svelte: "xml", mdx: "markdown", "objective-c": "objectivec", docker: "dockerfile", hcl: "ini" };
 const langOf = (path) => {
   const name = path.split("/").pop();
-  if (name === "Makefile") return "makefile";
-  const lang = LANG_BY_EXT[name.split(".").pop().toLowerCase()];
-  return lang && window.hljs?.getLanguage(lang) ? lang : null;
+  return LANG_BY_NAME[name] ?? LANG_BY_EXT[name.split(".").pop().toLowerCase()] ?? null;
 };
+
+/** Shiki with T3's pierre-dark theme, loaded on first use; hljs colors lines until it is ready. */
+let shiki = null;
+let shikiLoading = null;
+const shikiLangs = new Set();
+const shikiWaiting = new Set();
+function loadShiki() {
+  shikiLoading ??= import("./vendor/shiki/shiki.js").then(async (mod) => {
+    shiki = await mod.highlighter();
+    for (const lang of shikiWaiting) await shiki.loadLanguage(lang).then(() => shikiLangs.add(lang), () => {});
+    shikiWaiting.clear();
+    highlighted.clear();
+    document.dispatchEvent(new Event("highlighter"));
+  }, (e) => console.warn("shiki didn't load", e));
+  return shikiLoading;
+}
+function wantLang(lang) {
+  if (!lang || shikiLangs.has(lang)) return;
+  if (!shiki) {
+    shikiWaiting.add(lang);
+    loadShiki();
+    return;
+  }
+  if (shikiWaiting.has(lang)) return;
+  shikiWaiting.add(lang);
+  shiki.loadLanguage(lang).then(() => {
+    shikiLangs.add(lang);
+    shikiWaiting.delete(lang);
+    highlighted.clear();
+    document.dispatchEvent(new Event("highlighter"));
+  }, () => shikiWaiting.delete(lang));
+}
 
 const highlighted = new Map();
 /** Each of `texts` as highlighted HTML, lexed together so a string or comment that spans lines keeps
- * its color. hljs escapes the text; a span left open at a line's end is closed and opened again. */
+ * its color. */
 function highlightLines(texts, lang) {
   if (!lang) return texts.map((t) => esc(t));
+  wantLang(lang);
   const source = texts.join("\n");
   const key = `${lang}\n${source}`;
   if (highlighted.has(key)) return highlighted.get(key);
   if (highlighted.size > 2000) highlighted.clear();
+  const lines = shikiLangs.has(lang) ? shikiLines(source, lang) : hljsLines(source, HLJS_NAMES[lang] ?? lang);
+  if (!lines) return texts.map((t) => esc(t));
+  highlighted.set(key, lines);
+  return lines;
+}
+
+function shikiLines(source, lang) {
+  try {
+    const { tokens } = shiki.codeToTokens(source, { lang, theme: "pierre-dark" });
+    return tokens.map((line) => line.map((t) => {
+      const style = `${t.color ? `color:${t.color}` : ""}${t.fontStyle & 1 ? ";font-style:italic" : ""}${t.fontStyle & 2 ? ";font-weight:600" : ""}`;
+      return style ? `<span style="${style}">${esc(t.content)}</span>` : esc(t.content);
+    }).join(""));
+  } catch {
+    return null;
+  }
+}
+
+/** hljs escapes the text; a span left open at a line's end is closed and opened again. */
+function hljsLines(source, lang) {
+  if (!window.hljs?.getLanguage(lang)) return null;
   let html;
   try {
     html = hljs.highlight(source, { language: lang, ignoreIllegals: true }).value;
   } catch {
-    return texts.map((t) => esc(t));
+    return null;
   }
   const lines = [];
   const open = [];
@@ -97,7 +151,6 @@ function highlightLines(texts, lang) {
     } else line += part;
   }
   lines.push(line + "</span>".repeat(open.length));
-  highlighted.set(key, lines);
   return lines;
 }
 
