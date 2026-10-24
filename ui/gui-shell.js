@@ -1048,7 +1048,7 @@ function pullRowHtml(r) {
   const matched = words && pullMatchScore(r, words) <= 10 ? `<span class="matched" title="Matched in the description"><span class="sr">matched in the description</span>${icon("search")}<span class="wide">matched in the description</span></span>` : "";
   const host = prHosts().length > 1 ? `<span class="host" title="${esc(r.host)}" aria-label="${esc(r.host)}">${icon("github")}</span>` : "";
   const stack = r.stack ? `<span class="stack" role="button" tabindex="0" data-stack title="View stack #${r.stack.number}, layer ${r.stack.position} of ${r.stack.size}" aria-label="Stack ${r.stack.number}, layer ${r.stack.position} of ${r.stack.size}">${icon("layers-2")}${r.stack.position}/${r.stack.size}</span>` : "";
-  return `<div class="pr-row${active && threadOf(active).prUrl === r.url ? " selected" : ""}" role="button" tabindex="0" data-url="${esc(r.url)}" data-state="${r.state}">
+  return `<div class="pr-row${active && threadOf(active).prUrl === r.url ? " selected" : ""}${closeSweep.keys.includes(r.url) ? " sweeping" : ""}" role="button" tabindex="0" data-url="${esc(r.url)}" data-state="${r.state}">
     <span class="state" title="${stateLabel}" style="color:${stateColor}">${icon(stateIcon)}${open && r.state === "open" && r.conflicting ? `<span class="conflict" title="Conflicts with ${esc(r.base)}">${icon("triangle-alert")}</span>` : ""}</span>
     <span class="body"><span class="line1"><span class="num">#${r.number}</span><span class="title">${esc(r.title)}</span>${checks ? mark(checks, "checks") : ""}${review ? mark(review, "review") : ""}
       <span class="right">${stack}${prSize(r) ? `<span class="stat"><span class="add">+${r.additions}</span> <span class="del">-${r.deletions}</span></span>` : ""}</span></span>
@@ -1092,7 +1092,7 @@ function renderPullsPage() {
   const filterLabel = [stateLabel, involvementLabel, shownPulls() !== pulls.rows && pulls.host].filter(Boolean).join(" · ");
   const compact = `<span class="condensed"><button type="button" class="crumb-menu" data-pr="state">${stateLabel}${icon("chevron-down")}</button><button type="button" class="crumb-menu" data-pr="involvement">${involvementLabel}${icon("chevron-down")}</button>
     <span class="spacer"></span><button type="button" class="icon" data-pr="search-top" title="Search pull requests" aria-label="Search pull requests">${icon("search")}</button><button type="button" class="icon" data-pr="refresh" title="Refresh pull requests" aria-label="Refresh pull requests">${icon("refresh-cw")}</button></span>`;
-  setPage(`${headHtml("Pull Requests", compact)}<div class="page-body"><div class="page-wrap pulls"${pulls.loading && pulls.rows ? " data-refreshing" : ""}>
+  setPage(`${headHtml("Pull Requests", compact)}<div class="page-body"><div class="page-wrap pulls"${pulls.loading && pulls.rows ? " data-refreshing" : ""}${closeSweep.keys.length ? " data-sweeping" : ""}>
     <div class="pr-toolbar"><label class="pr-search">${icon("search")}<input type="search" placeholder="Search pull requests, or label:bug" aria-label="Search pull requests" value="${esc(pulls.q)}" spellcheck="false" autocomplete="off"></label>
       <button type="button" class="outline" data-pr="sort" title="Sort">${icon("arrow-down-up")}<span>Sort</span></button>
       <button type="button" class="outline" data-pr="filters" title="Filters">${icon("list-filter")}<span>${esc(filterLabel)}</span></button>
@@ -1218,8 +1218,10 @@ async function showStack(url, at) {
 }
 
 /** T3 Code's close sweep: pressing a row's Close and dragging over more rows of its group closes
- * every open one passed over, once the press ends. */
+ * every open one passed over, once the press ends. Rows are known by URL, since a refresh may
+ * draw the list again under the press. */
 const closeSweep = { origin: null, x: 0, y: 0, keys: [], swept: false };
+const pullRowOf = (url) => [...pageView.querySelectorAll(".pr-row[data-url]")].find((row) => row.dataset.url === url);
 const closeSweepRows = (origin) => [...(origin.closest(".pr-group") ?? origin.closest(".pr-list")).querySelectorAll(".pr-row[data-url]")];
 const canCloseRow = (row) => (row.dataset.state === "open" || row.dataset.state === "draft") && !pulls.closing.has(row.dataset.url);
 function markCloseSweep(keys) {
@@ -1228,18 +1230,20 @@ function markCloseSweep(keys) {
   pageView.querySelector(".pulls")?.toggleAttribute("data-sweeping", keys.length > 0);
 }
 function closeSweepTo(y) {
-  const rows = closeSweepRows(closeSweep.origin);
+  const origin = pullRowOf(closeSweep.origin);
+  if (!origin) return;
+  const rows = closeSweepRows(origin);
   const scroller = pageView.querySelector(".page-body").getBoundingClientRect();
   const at = Math.min(Math.max(y, scroller.top), scroller.bottom - 1);
   let target = rows[0];
   for (const row of rows) if (row.getBoundingClientRect().top <= at) target = row;
-  const [from, to] = [rows.indexOf(closeSweep.origin), rows.indexOf(target)].sort((a, b) => a - b);
+  const [from, to] = [rows.indexOf(origin), rows.indexOf(target)].sort((a, b) => a - b);
   markCloseSweep(rows.slice(from, to + 1).filter(canCloseRow).map((row) => row.dataset.url));
 }
 pageView.addEventListener("pointerdown", (e) => {
   const button = e.target.closest('[data-quick="close"]');
   if (!button || !e.isPrimary || e.button !== 0 || shellPage() !== "pull-requests") return;
-  Object.assign(closeSweep, { origin: button.closest(".pr-row"), x: e.clientX, y: e.clientY, keys: [], swept: false });
+  Object.assign(closeSweep, { origin: button.closest(".pr-row").dataset.url, x: e.clientX, y: e.clientY, keys: [], swept: false });
 });
 window.addEventListener("pointermove", (e) => {
   if (!closeSweep.origin) return;

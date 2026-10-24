@@ -3923,19 +3923,21 @@ async function sweep(profileName) {
     await page.keyboard.type("copy prompt link with repo");
     await waitFor("the link with repo and model", async () => (await paletteItems())[0] === "Copy prompt link with repo and model");
     await page.keyboard.press("Enter");
-    const [plain, full] = await page.evaluate(() => (delete navigator.clipboard.writeText, window.copiedLinks));
+    const links = await page.evaluate(() => (delete navigator.clipboard.writeText, window.copiedLinks));
+    const plain = links.find((l) => !l.includes("repo="));
+    const full = links.find((l) => l.includes("repo="));
     check(plain === `${HUB}/new?prompt=Fix+the+flaky+test`, `copied ${plain}`);
     check(new URL(full).searchParams.get("repo") === "example/alpha" && new URL(full).searchParams.get("provider") === "claude", `copied ${full}`);
     await page.fill("#prompt", "");
     await page.dispatchEvent("#prompt", "input");
     const other = await context.newPage();
+    const opened = await page.evaluate(() => tabs.map((t) => t.key));
     try {
       await other.goto(full);
       await other.waitForFunction(() => document.querySelector("#prompt")?.value === "Fix the flaky test" && location.pathname === "/", null, { timeout: 20000 });
-      const opened = await other.evaluate(() => [projectName(active), document.querySelector("#side-notice").textContent.trim()]);
-      check(opened[0] === "alpha", `the link opened in ${opened[0]}`);
-      check(opened[1].startsWith("Prompt added from a link. Read it before you send."), `notice: ${opened[1]}`);
-      await other.evaluate(() => closeTab(active));
+      const landed = await other.evaluate(() => [projectName(active), document.querySelector("#side-notice").textContent.trim()]);
+      check(landed[0] === "alpha", `the link opened in ${landed[0]}`);
+      check(landed[1].startsWith("Prompt added from a link. Read it before you send."), `notice: ${landed[1]}`);
       await other.goto(`${HUB}/new?prompt=hi&repo=example/nowhere`);
       await other.waitForFunction(() => document.querySelector("#page-view h2")?.textContent === "You don't have example/nowhere", null, { timeout: 20000 });
       check((await other.locator("#page-view [data-link]").allTextContents()).join() === "Clone example/nowhere,Use without project", "the missing repository's buttons");
@@ -3945,6 +3947,7 @@ async function sweep(profileName) {
       await other.waitForFunction(() => /only hidden characters/.test(document.querySelector("#page-view p")?.textContent ?? ""), null, { timeout: 20000 });
     } finally {
       await other.close();
+      await page.evaluate((keep) => tabs.filter((t) => !keep.includes(t.key)).forEach((t) => closeTab(t)), opened);
     }
     return full;
   });
@@ -4049,34 +4052,39 @@ async function sweep(profileName) {
       const box = await page.locator(sel).boundingBox();
       return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
     };
-    await page.keyboard.down("Shift");
-    await page.hover(prRow(1000));
-    check((await page.getAttribute(`${prRow(1000)} [data-quick="close"]`, "title")) === "Close immediately, or drag across rows to close several", "Close doesn't say it drags");
-    const from = await center(`${prRow(1000)} [data-quick="close"]`);
-    await page.mouse.move(from.x, from.y);
-    await page.mouse.down();
-    const to = await center(prRow(1002));
-    await page.mouse.move(from.x, to.y, { steps: 8 });
-    await waitFor("three rows swept", async () => (await page.locator("#page-view .pr-row.sweeping").count()) === 3);
-    await page.mouse.up();
-    await waitFor("gh to close the three", () => [1000, 1001, 1002].every((n) => readLog("gh.log").includes(`pr close -- https://github.com/example/alpha/pull/${n}`)), 10000);
-    await waitFor("the notice", async () => (await text("#side-notice")) === "Closed 3 pull requests");
-    check(!/pull\/1003/.test(readLog("gh.log")), "a row past the sweep closed");
-    await page.hover(prRow(1004));
-    const again = await center(`${prRow(1004)} [data-quick="close"]`);
-    await page.mouse.move(again.x, again.y);
-    await page.mouse.down();
-    await page.mouse.move(again.x, (await center(prRow(1006))).y, { steps: 8 });
-    await waitFor("a second sweep", async () => (await page.locator("#page-view .pr-row.sweeping").count()) === 3);
-    await page.keyboard.press("Escape");
-    check(!(await page.locator("#page-view .pr-row.sweeping").count()), "Escape left rows swept");
-    await page.mouse.up();
-    await page.keyboard.up("Shift");
-    await sleep(500);
-    check(!/pull\/100[4-6]/.test(readLog("gh.log")), "a called-off sweep closed rows");
-    await page.fill("#page-view .pr-search input", "");
-    await waitFor("every row again", async () => (await prNumbers()).length === 3, 15000);
-    await leavePulls();
+    try {
+      await page.keyboard.down("Shift");
+      await page.hover(prRow(1000));
+      check((await page.getAttribute(`${prRow(1000)} [data-quick="close"]`, "title")) === "Close immediately, or drag across rows to close several", "Close doesn't say it drags");
+      const from = await center(`${prRow(1000)} [data-quick="close"]`);
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      const to = await center(prRow(1002));
+      await page.mouse.move(from.x, to.y, { steps: 8 });
+      await waitFor("three rows swept", async () => (await page.locator("#page-view .pr-row.sweeping").count()) === 3);
+      await page.mouse.up();
+      await waitFor("gh to close the three", () => [1000, 1001, 1002].every((n) => readLog("gh.log").includes(`pr close -- https://github.com/example/alpha/pull/${n}`)), 10000);
+      await waitFor("the notice", async () => (await text("#side-notice")) === "Closed 3 pull requests");
+      check(!/pull\/1003/.test(readLog("gh.log")), "a row past the sweep closed");
+      await waitFor("the list to refresh", () => page.evaluate(() => !pulls.loading), 10000);
+      await page.hover(prRow(1004));
+      const again = await center(`${prRow(1004)} [data-quick="close"]`);
+      await page.mouse.move(again.x, again.y);
+      await page.mouse.down();
+      await page.mouse.move(again.x, (await center(prRow(1006))).y, { steps: 8 });
+      await waitFor("a second sweep", async () => (await page.locator("#page-view .pr-row.sweeping").count()) === 3);
+      await page.keyboard.press("Escape");
+      check(!(await page.locator("#page-view .pr-row.sweeping").count()), "Escape left rows swept");
+      await page.mouse.up();
+      await sleep(500);
+      check(!/pull\/100[4-6]/.test(readLog("gh.log")), "a called-off sweep closed rows");
+    } finally {
+      await page.mouse.up();
+      await page.keyboard.up("Shift");
+      await page.fill("#page-view .pr-search input", "");
+      await waitFor("every row again", async () => (await prNumbers()).length === 3, 15000);
+      await leavePulls();
+    }
     return "closed #1000-#1002";
   });
 
