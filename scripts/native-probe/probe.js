@@ -51,6 +51,28 @@
     return [ok, { terminal, gui, back, again, screen: { width: screen.availWidth, height: screen.availHeight } }];
   });
 
+  await step("the window's native appearance follows the app view's Light and Dark, and System or the terminal view hand it back", async () => {
+    const seen = async () => ({ theme: await win.theme(), dark: matchMedia("(prefers-color-scheme: dark)").matches });
+    const initial = await seen();
+    setAppearanceMode("light");
+    await sleep(500);
+    const light = await seen();
+    setAppearanceMode("dark");
+    await sleep(500);
+    const dark = await seen();
+    setMode("terminal");
+    await sleep(800);
+    const terminal = await seen();
+    setMode("gui");
+    await sleep(800);
+    const again = await seen();
+    setAppearanceMode("system");
+    await sleep(500);
+    const system = await seen();
+    const ok = light.theme === "light" && !light.dark && dark.theme === "dark" && dark.dark && terminal.theme === initial.theme && again.theme === "dark" && system.theme === initial.theme && system.dark === initial.dark;
+    return [ok, { initial, light, dark, terminal, again, system }];
+  });
+
   const page = () => shownSurface(active);
   const until = async (test, ms = 8000) => {
     for (let t = 0; t < ms && !(await test()); t += 100) await sleep(100);

@@ -93,6 +93,9 @@ pub enum Call {
     /// The folder claude runs in. Restarts claude on the tab's conversation with `--model model`,
     /// which picks it for that conversation alone.
     SetModel { tab: TabId, model: String, cols: u16, rows: u16 },
+    /// The folder claude runs in. Restarts claude on the tab's conversation, so its skills,
+    /// plugins and MCP servers load again.
+    RestartClaude { tab: TabId, cols: u16, rows: u16 },
     /// `null`. Keystrokes as xterm reports them.
     WriteInput { tab: TabId, data: String },
     /// `null`.
@@ -114,6 +117,11 @@ pub enum Call {
     GitRemote { path: String },
     /// `projects::Folders`: the subfolders matching a path as typed so far, such as `~/pro`.
     Browse { path: String },
+    /// `scaffold::Created`: a new folder named after `name` in `~/pinned`, a git repository with
+    /// a first commit, opened as a project.
+    CreateProject { name: String },
+    /// The URL of the private GitHub repository the project at `path` is now pushed to.
+    PublishProject { path: String },
     /// The folder of a clone of `repo`, found among the machine's projects or cloned into `~/pinned`.
     /// The hub adds the account's GitHub token, for a private repository.
     Clone {
@@ -195,6 +203,8 @@ pub enum Call {
         #[serde(default = "pulls_limit")]
         limit: usize,
     },
+    /// `pulls::Stack` the pull request `number` of github.com's `repo` (`owner/name`) sits in, or `null`.
+    PullRequestStack { repo: String, number: u64 },
     /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since` on.
     /// `prices` are the user's, per model, which win over LiteLLM's list.
     TokenUsage {
@@ -343,6 +353,7 @@ impl Call {
                 | Call::Checkout { .. }
                 | Call::TokenUsage { .. }
                 | Call::PullRequests { .. }
+                | Call::PullRequestStack { .. }
                 | Call::PageMeta { .. }
                 | Call::Refs { .. }
                 | Call::CheckoutPr { .. }
@@ -361,6 +372,8 @@ impl Call {
                 | Call::Rewind { .. }
                 | Call::Fork { .. }
                 | Call::SaveFile { .. }
+                | Call::CreateProject { .. }
+                | Call::PublishProject { .. }
         )
     }
 }
@@ -650,6 +663,13 @@ mod tests {
         round_trip(
             Call::SetBypass { tab: "tab-1".into(), on: true, cols: 120, rows: 32 },
             json!({ "cmd": "set_bypass", "tab": "tab-1", "on": true, "cols": 120, "rows": 32 }),
+        );
+        round_trip(Call::PullRequestStack { repo: "o/r".into(), number: 7 }, json!({ "cmd": "pull_request_stack", "repo": "o/r", "number": 7 }));
+        round_trip(Call::CreateProject { name: "My App".into() }, json!({ "cmd": "create_project", "name": "My App" }));
+        round_trip(Call::PublishProject { path: "/p".into() }, json!({ "cmd": "publish_project", "path": "/p" }));
+        round_trip(
+            Call::RestartClaude { tab: "tab-1".into(), cols: 120, rows: 32 },
+            json!({ "cmd": "restart_claude", "tab": "tab-1", "cols": 120, "rows": 32 }),
         );
         round_trip(
             Call::Run {

@@ -89,9 +89,10 @@ if (cmd === "pr" && sub === "view") {
     author: { login: author, avatarUrl: "" }, repository: { nameWithOwner: repo }, labels: { nodes: [] }, reviewRequests: { nodes: [] },
     commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] }, ...extra,
   });
-  const all = [
-    pr(42, "example/alpha", "Add notes", "sweeper", { reviewDecision: "APPROVED" }),
-    pr(41, "example/alpha", "Draft the notes", "octocat", { isDraft: true, reviewRequests: { nodes: [{ requestedReviewer: { login: "sweeper" } }] } }),
+  // #42 and #41 make up GitHub stack 7, and ghe.example.test's example/delta has #44.
+  const all = flag("--hostname") === "ghe.example.test" ? [pr(44, "example/delta", "Tune the delta cache", "hubot", { url: "https://ghe.example.test/example/delta/pull/44" })] : [
+    pr(42, "example/alpha", "Add notes", "sweeper", { reviewDecision: "APPROVED", body: "Adds notes.md, and fixes the flaky login.", stack: { number: 7, size: 2, baseRefName: "main" }, stackEntry: { position: 1 } }),
+    pr(41, "example/alpha", "Draft the notes", "octocat", { isDraft: true, reviewRequests: { nodes: [{ requestedReviewer: { login: "sweeper" } }] }, stack: { number: 7, size: 2, baseRefName: "main" }, stackEntry: { position: 2 } }),
     pr(43, "example/beta", "Rework the beta build", "hubot", { mergeable: "CONFLICTING", additions: 120, deletions: 30,
       labels: { nodes: [{ name: "build", color: "fbca04" }, { name: "beta", color: "0e8a16" }, { name: "ci", color: "1d76db" }, { name: "slow", color: "d93f0b" }] },
       commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] } }),
@@ -111,7 +112,7 @@ if (cmd === "pr" && sub === "view") {
     (q.includes("is:open") ? n.state === "OPEN" : q.includes("is:merged") ? n.state === "MERGED" : q.includes("is:closed") ? n.state === "CLOSED" : true) &&
     (!q.includes("author:@me") || n.author.login === "sweeper") &&
     (!q.includes("review-requested:@me") || n.reviewRequests.nodes.some((r) => r.requestedReviewer.login === "sweeper")) &&
-    words.every((w) => n.title.toLowerCase().includes(w)));
+    words.every((w) => `${n.title} ${n.body ?? ""}`.toLowerCase().includes(w)));
   process.stdout.write(JSON.stringify({ data: { viewer: { login: "sweeper" }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } }));
 } else if (cmd === "pr" && sub === "edit") {
   if (flag("--title") !== undefined) extra.title = flag("--title");
@@ -145,6 +146,21 @@ if (cmd === "pr" && sub === "view") {
   kept.reviews = [...(kept.reviews ?? []), { author: { login: "sweeper" }, state: review.event === "APPROVE" ? "APPROVED" : review.event === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "COMMENTED", body: review.body, submittedAt: at(55), comments: review.comments }];
   fs.writeFileSync(reviewFile, JSON.stringify(kept));
   fs.appendFileSync(path.join(process.env.HOME, "gh.log"), `review ${JSON.stringify(review)}\n`);
+} else if (cmd === "auth" && sub === "token") {
+  if (flag("--hostname") !== "ghe.example.test") {
+    process.stderr.write(`no oauth token found for ${flag("--hostname")}\n`);
+    process.exit(1);
+  }
+  process.stdout.write("ghe-token\n");
+} else if (cmd === "api" && /^repos\/example\/alpha\/stacks/.test(sub)) {
+  const stack = { number: 7, url: "https://api.github.com/repos/example/alpha/stacks/7", html_url: "https://github.com/example/alpha/stacks/7", base: { ref: "main" }, pull_requests: [
+    { number: 42, title: "Add notes", head: { ref: "sweep/notes-42" }, state: "open", draft: false, merged_at: null },
+    { number: 41, title: "Draft the notes", head: { ref: "sweep/notes-41" }, state: "open", draft: true, merged_at: null },
+  ] };
+  const member = /pull_request=(41|42)$/.test(sub);
+  process.stdout.write(JSON.stringify(sub.endsWith("/stacks/7") ? stack : member ? [stack] : []));
+} else if (cmd === "repo" && sub === "create") {
+  process.stdout.write(`https://github.com/sweeper/${args[2]}\n`);
 } else if ((cmd === "api" && args.includes("DELETE")) || (cmd === "run" && sub === "rerun")) {
   process.stdout.write("");
 } else {

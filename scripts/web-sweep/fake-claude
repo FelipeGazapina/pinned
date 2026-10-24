@@ -30,6 +30,7 @@ if (args.includes("-p")) {
   }, 1500);
   return;
 }
+fs.appendFileSync(path.join(process.env.HOME, "claude-launch.log"), `${args.filter((a) => !a.startsWith("{")).join(" ")}\n`);
 const settingsFile = args[args.indexOf("--settings") + 1];
 const settings = settingsFile ? JSON.parse(fs.readFileSync(settingsFile, "utf8")) : {};
 // --resume carries on the named session, so its transcript grows where it left off, as claude's does.

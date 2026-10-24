@@ -110,18 +110,41 @@ function sidebarSettingsHtml() {
     ${toggle("onMerge", sideSettings.onMerge, "Auto-settle merged threads", "Settle a thread when its pull request merges. Closed pull requests still settle automatically.")}
     ${toggle("inactive", !!sideSettings.days, "Auto-settle inactive threads", "Sidebar threads with no activity for this long settle automatically.")}
     ${sideSettings.days ? row("days", "Days of inactivity before auto-settle", "Any new activity un-settles a thread automatically.", `<input type="number" id="side-days" min="1" max="90" value="${sideSettings.days}" aria-label="Days of inactivity before auto-settle">`) : ""}
-    ${sideSettings.days ? toggle("keepPrs", sideSettings.keepPrs, "Keep threads with a PR", "Inactivity does not settle threads with a pull request. Merge and close still do.") : ""}
-    ${archivedHtml()}</section>`;
+    ${sideSettings.days ? toggle("keepPrs", sideSettings.keepPrs, "Keep threads with a PR", "Inactivity does not settle threads with a pull request. Merge and close still do.") : ""}</section>`;
 }
-/** T3 Code's Archive page: archived threads by project, each brought back with Unarchive. */
-function archivedHtml() {
-  const head = `<h2 class="looks-title">Archived threads</h2>`;
-  if (!archived.length) return `${head}<div class="side-setting"><div><label>${icon("archive")}No archived threads</label><p class="meta">Archived threads will appear here.</p></div></div>`;
+/** T3 Code's Archive settings page: archived threads by project, newest first, each brought back
+ * with Unarchive, or from its context menu, which also deletes. */
+function showArchive() {
   const since = (at) => (ago(at) === "now" ? "just now" : `${ago(at)} ago`);
-  const projects = [...new Set(archived.map((a) => a.project))];
-  return head + projects.map((project) => `<h3 class="archived-project">${projectIcon(project)}${esc(project)}</h3>${archived.map((a, i) => (a.project !== project ? "" : `
-    <div class="side-setting archived" data-archived="${i}"><div><label>${esc(a.name)}</label><p class="meta">${esc(machineName(a.machine))} · Archived ${since(a.at)}</p></div>
-      <button type="button" class="outline" data-unarchive="${i}">${icon("archive-x")}Unarchive</button></div>`)).join("")}`).join("");
+  const machinesShown = new Set(archived.map((a) => a.machine)).size > 1;
+  const order = archived.map((a, i) => [a, i]).sort(([a], [b]) => b.at - a.at);
+  const projects = [...new Set(order.map(([a]) => a.project))];
+  settingsPage.innerHTML = `<h2>Archive</h2><section id="archive-settings">${!archived.length
+    ? `<div class="side-setting"><div><label>${icon("archive")}No archived threads</label><p class="meta">Archived threads will appear here.</p></div></div>`
+    : projects.map((project) => `<h3 class="archived-project">${projectIcon(project)}${esc(project)}</h3>${order.filter(([a]) => a.project === project).map(([a, i]) => `
+      <div class="side-setting archived" data-archived="${i}"><div><label>${esc(a.name)}</label><p class="meta">${machinesShown ? `${esc(machineName(a.machine))} · ` : ""}Archived ${since(a.at)}${a.created ? ` · Created ${since(a.created)}` : ""}</p></div>
+        <button type="button" class="outline" data-unarchive="${i}">${icon("archive-x")}Unarchive</button></div>`).join("")}`).join("")}</section>`;
+  const root = document.getElementById("archive-settings");
+  const unarchive = (i) => resumeThread(archived[i], () => {
+    archived.splice(i, 1);
+    saveArchived();
+    showArchive();
+  });
+  root.onclick = (e) => e.target.closest("[data-unarchive]") && unarchive(Number(e.target.closest("[data-unarchive]").dataset.unarchive));
+  root.oncontextmenu = (e) => {
+    const row = e.target.closest("[data-archived]");
+    if (!row) return;
+    e.preventDefault();
+    const i = Number(row.dataset.archived);
+    showMenu([
+      { label: "Unarchive", icon: "archive-x", run: () => unarchive(i) },
+      { label: "Delete", icon: "trash", danger: true, run: () => {
+        archived.splice(i, 1);
+        saveArchived();
+        showArchive();
+      } },
+    ], { x: e.clientX, y: e.clientY });
+  };
 }
 function bindSidebarSettings() {
   const root = document.getElementById("side-settings");
@@ -143,26 +166,6 @@ function bindSidebarSettings() {
     rebuild();
   };
   if (on("keepPrs")) on("keepPrs").onchange = (e) => change(() => (sideSettings.keepPrs = e.target.checked));
-  const unarchive = (i) => resumeThread(archived[i], () => {
-    archived.splice(i, 1);
-    saveArchived();
-    rebuild();
-  });
-  root.onclick = (e) => e.target.closest("[data-unarchive]") && unarchive(Number(e.target.closest("[data-unarchive]").dataset.unarchive));
-  root.oncontextmenu = (e) => {
-    const row = e.target.closest("[data-archived]");
-    if (!row) return;
-    e.preventDefault();
-    const i = Number(row.dataset.archived);
-    showMenu([
-      { label: "Unarchive", icon: "archive-x", run: () => unarchive(i) },
-      { label: "Delete", icon: "trash", danger: true, run: () => {
-        archived.splice(i, 1);
-        saveArchived();
-        rebuild();
-      } },
-    ], { x: e.clientX, y: e.clientY });
-  };
   const days = on("days");
   if (!days) return;
   days.oninput = () => {
@@ -814,7 +817,7 @@ function openSideMenu(items, at) {
       const b = document.createElement("button");
       b.className = `${item.danger ? "danger" : ""}${item.children ? " sub" : ""}`;
       b.disabled = !!item.disabled;
-      b.innerHTML = `<span class="ic">${item.checked ? icon("check") : item.icon ? icon(item.icon) : ""}</span><span class="label">${esc(item.label)}</span>${item.hint ? `<span class="hint">${esc(item.hint)}</span>` : ""}${item.children ? icon("chevron-right") : ""}`;
+      b.innerHTML = `<span class="ic">${item.iconHtml ?? (item.checked ? icon("check") : item.icon ? icon(item.icon) : "")}</span><span class="label">${esc(item.label)}</span>${item.hint ? `<span class="hint">${esc(item.hint)}</span>` : ""}${item.trail ?? ""}${item.children ? icon("chevron-right") : ""}`;
       b.onclick = () => {
         if (item.children) return show(item.children(), item.label);
         closeSideMenu();
@@ -1267,9 +1270,9 @@ function newThreadWithoutProject() {
   if (pickerOpen()) closeProjects();
   openTab(machine, null).catch((e) => tell(`Couldn't open a thread: ${esc(e)}`, 6000));
 }
-async function addProject() {
+async function addProject(machine = active?.machine) {
   if (narrow(768)) toggleSidebar(false);
-  await showProjects({ machine: active?.machine });
+  await showProjects({ machine });
   if (pickerOpen() && picker.querySelector(".choices")) browseFolders();
 }
 document.getElementById("new-thread").onclick = (e) => newThread(e.shiftKey);
@@ -1323,7 +1326,7 @@ function forget(tab) {
 /** T3 Code's Archive: the session closes and Settings keeps it, to bring back with Unarchive. */
 function archiveThread(tab) {
   if (turnLive(tab)) return;
-  archived.push({ ...closedEntry(tab), name: threadTitle(tab), project: projectName(tab), at: nowS() });
+  archived.push({ ...closedEntry(tab), name: threadTitle(tab), project: projectName(tab), at: nowS(), created: unixOf(threadOf(tab).items[0]?.at) || undefined });
   saveArchived();
   forget(tab);
 }

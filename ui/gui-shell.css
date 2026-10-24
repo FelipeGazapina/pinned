@@ -63,6 +63,19 @@ body[data-sidebar="open"] #page-view .page-head .side-toggle { display: none; }
 #palette .status[data-tone="error"] { background: var(--g-error); }
 #palette .status[data-tone="success"] { background: var(--g-success); }
 #palette .status[data-tone="input"] { background: var(--g-input-tone); }
+#palette .field { display: flex; align-items: center; gap: 8px; }
+#palette .field input { flex: 1; min-width: 0; }
+#palette .accessory:empty, #palette .summary-slot:empty { display: none; }
+#palette .accessory .create { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 6px 0 10px; border-radius: 6px; background: var(--g-primary); color: var(--g-on-primary); font-size: 13px; font-weight: 500; flex: none; }
+#palette .accessory .create:disabled { opacity: 0.5; }
+#palette .accessory .create kbd { padding: 1px 4px; border-radius: 4px; background: rgb(var(--g-ink-rgb) / 0.16); font: 11px var(--g-mono); }
+#palette .summary { display: flex; align-items: flex-start; gap: 8px; margin: 8px 8px 0; padding: 6px 8px; font-size: 14px; }
+#palette .summary .ic { display: flex; padding-top: 2px; color: var(--g-muted); }
+#palette .summary .text { display: flex; flex-direction: column; min-width: 0; }
+#palette .summary .sub { color: var(--g-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#palette .checkbox { display: grid; place-items: center; width: 16px; height: 16px; margin: 2px 0 0 auto; border: 1px solid var(--g-border); border-radius: 4px; flex: none; }
+#palette .checkbox.on { background: var(--g-primary); border-color: var(--g-primary); color: var(--g-on-primary); }
+#palette .checkbox .i { width: 12px; height: 12px; }
 #palette .empty { margin: 0; padding: 40px 0; text-align: center; color: var(--g-muted); font-size: 14px; }
 #palette footer { flex: none; display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 10px 16px; background: color-mix(in srgb, var(--g-fg) 2.5%, transparent); color: var(--g-muted); font-size: 14px; font-weight: 500; }
 #palette footer span { display: inline-flex; align-items: center; gap: 4px; }
@@ -253,6 +266,25 @@ body[data-shift-held="true"] .pulls .pr-row:hover .quick { display: flex; }
 .pulls .quick button { height: 24px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--g-input); font-size: 12px; color: var(--g-fg); }
 .pulls .quick button:hover { background: var(--g-input); }
 .pulls .quick .danger { color: var(--g-error); }
+.pulls .quick button:disabled { opacity: 0.5; }
+.pulls .quick .spinner { margin-right: 4px; vertical-align: -2px; }
+.pulls[data-sweeping] * { pointer-events: none; }
+.pulls .pr-row.sweeping { background: rgb(var(--g-error-rgb) / 0.08); }
+.pulls .pr-row.sweeping .quick { display: flex; }
+.pulls .pr-row .stack { display: inline-flex; align-items: center; gap: 4px; color: var(--g-muted); font-size: 12px; cursor: pointer; }
+.pulls .pr-row .stack .i { width: 12px; height: 12px; }
+.pulls .pr-row .line2 { container-type: inline-size; }
+.pulls .pr-row .matched { display: inline-flex; align-items: center; gap: 4px; min-width: 24px; padding: 0 4px; border: 1px solid var(--g-border); border-radius: 999px; font-size: 10px; overflow: hidden; flex: none; }
+.pulls .pr-row .matched .i { width: 12px; height: 12px; flex: none; }
+.pulls .pr-row .matched .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+@container (max-width: 20rem) { .pulls .pr-row .matched .wide { display: none; } }
+.pulls .pr-row .host { display: inline-flex; flex: none; }
+.pulls .pr-row .host .i { width: 12px; height: 12px; }
+.pr-tone { display: inline-flex; }
+.pr-tone[data-state="open"] { color: var(--g-pr-open); }
+.pr-tone[data-state="draft"] { color: var(--g-pr-draft); }
+.pr-tone[data-state="closed"] { color: var(--g-pr-closed); }
+.pr-tone[data-state="merged"] { color: var(--g-pr-merged); }
 .pulls .ghost-row { flex-direction: column; cursor: default; }
 .pulls .ghost-row .ghost:first-child { width: 60%; height: 16px; }
 .pulls .ghost-row .ghost:last-child { width: 40%; height: 12px; }

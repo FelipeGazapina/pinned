@@ -102,7 +102,7 @@ async function sweep(profileName) {
   const context = await browser.newContext({ ...profile, colorScheme: "dark", permissions: engine === "chromium" ? ["clipboard-read", "clipboard-write"] : [] });
   if (touch) await context.addInitScript(stubVisualViewport);
   await context.addInitScript(() => localStorage.getItem("mode") || localStorage.setItem("mode", "terminal"));
-  const page = await context.newPage();
+  let page = await context.newPage();
 
   let seen = [];
   page.on("console", (m) => ["error", "warning"].includes(m.type()) && seen.push(`console.${m.type()}: ${m.text()}`));
@@ -1252,6 +1252,277 @@ async function sweep(profileName) {
       }, panelWas);
       await page.emulateMedia({ colorScheme: "dark" });
       await resetTheme();
+    }
+  });
+
+  /** A paint as [luminance, alpha], through a canvas so oklab() and color-mix() results compare. */
+  const paintOf = (selector, prop) =>
+    page.evaluate(([selector, prop]) => {
+      const ctx = Object.assign(document.createElement("canvas"), { width: 1, height: 1 }).getContext("2d", { willReadFrequently: true });
+      ctx.fillStyle = getComputedStyle(document.querySelector(selector))[prop];
+      ctx.fillRect(0, 0, 1, 1);
+      const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+      const lin = (c) => ((c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+      return [+(0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)).toFixed(4), a];
+    }, [selector, prop]);
+
+  await step("app view: Settings' Contrast slider runs 50 to 200% by 5, sharpens or fades text and borders in both appearances, and resets, as appearanceContrast.ts", async () => {
+    await resetTheme();
+    await page.evaluate(() => toggleSettings());
+    await tapOrClick('#settings-nav [data-page="general"]');
+    const slider = page.locator("#appearance-contrast");
+    const shown = () => page.evaluate(() => [document.getElementById("appearance-contrast").value, document.querySelector("#contrast-row output").textContent, document.querySelector("[data-contrast-reset]").hidden, document.documentElement.dataset.contrast ?? "", localStorage.getItem("gui-contrast") ?? ""].join("|"));
+    const looks = async () => ({ side: (await paintOf("#sidebar", "color"))[0], meta: (await paintOf("#contrast-row .meta", "color"))[0], title: (await paintOf("#thread-list .thread-row .l2", "color"))[0], border: await paintOf("#theme-section .theme-card", "borderTopColor") });
+    try {
+      check((await text("#contrast-row label")) === "Contrast", `the row is ${await text("#contrast-row label")}`);
+      const range = await slider.evaluate((i) => [i.min, i.max, i.step].join("|"));
+      check(range === "50|200|5", `the range is ${range}`);
+      check((await shown()) === "100|100%|true||", `at rest: ${await shown()}`);
+      const base = await looks();
+      await slider.focus();
+      for (let i = 0; i < 12; i++) await page.keyboard.press("ArrowRight");
+      check((await shown()) === "160|160%|false|160|160", `after twelve steps up: ${await shown()}`);
+      const sharp = await looks();
+      check(sharp.side > base.side && sharp.meta > base.meta && sharp.title > base.title && sharp.border[1] > base.border[1], `160% in dark: ${JSON.stringify(sharp)} against ${JSON.stringify(base)}`);
+      await page.keyboard.press("Home");
+      check((await shown()) === "50|50%|false|50|50", `Home: ${await shown()}`);
+      const faint = await looks();
+      check(faint.side < base.side && faint.meta < base.meta && faint.title < base.title && faint.border[1] < base.border[1], `50% in dark: ${JSON.stringify(faint)} against ${JSON.stringify(base)}`);
+      await page.emulateMedia({ colorScheme: "light" });
+      await waitFor("the light appearance", async () => (await appearance()) === "light|");
+      await page.keyboard.press("End");
+      const lightSharp = await looks();
+      await press(page.locator("[data-contrast-reset]"));
+      check((await shown()) === "100|100%|true||", `after Reset: ${await shown()}`);
+      const lightBase = await looks();
+      check(lightSharp.side < lightBase.side && lightSharp.meta < lightBase.meta && lightSharp.title < lightBase.title && lightSharp.border[0] < lightBase.border[0], `200% in light: ${JSON.stringify(lightSharp)} against ${JSON.stringify(lightBase)}`);
+    } finally {
+      await page.emulateMedia({ colorScheme: "dark" });
+      await page.evaluate(() => setContrast(CONTRAST.standard));
+      await resetTheme();
+      await page.evaluate(() => settingsOpen() && toggleSettings());
+    }
+  });
+
+  await step("app view: a theme color's swatch opens T3's picker (plane, hue, HEX, RGB) that paints live, and its label spotlights every use with a count", async () => {
+    await resetTheme();
+    const sub = () => text("#theme-editor .te-title span");
+    const field = (role) => page.locator(`#theme-editor .te-value[data-role="${role}"]`);
+    try {
+      await themeKey("T", true);
+      await waitFor("the editor", () => page.locator("#theme-editor").isVisible());
+      const labels = await page.locator("#theme-editor .te-label").evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
+      check(labels.join(",") === "Show Background usage,Show Accent usage", `labels: ${labels.join(", ")}`);
+      await press(page.locator('#theme-editor [data-te-usage="canvas"]'));
+      const uses = await page.evaluate(() => [...document.querySelectorAll("[data-theme-inspector-match]")].map((e) => e.id));
+      check(uses.includes("expanded") && (await sub()) === `Background · ${uses.length} ${uses.length === 1 ? "use" : "uses"}`, `Background: ${await sub()}, marked ${uses.join(" ")}`);
+      check((await page.locator("#theme-inspector-spotlight mask rect").count()) > 1, "no spotlight cut out");
+      check((await page.locator('#theme-editor [data-te-usage="canvas"]').getAttribute("aria-pressed")) === "true", "the label isn't pressed");
+      await press(page.locator('#theme-editor [data-te-usage="canvas"]'));
+      check((await page.locator("#theme-inspector-spotlight, [data-theme-inspector-match]").count()) === 0 && (await sub()) === "Select a color below", `a second press leaves ${await sub()}`);
+      const before = await field("accent").inputValue();
+      await press(page.locator('#theme-editor [data-te-pick="accent"]'));
+      await waitFor("the picker", () => page.locator("#theme-color-picker").isVisible());
+      const head = [await text("#theme-color-picker .cp-title"), await text("#theme-color-picker .cp-sub"), await page.inputValue('#theme-color-picker [data-cp="hex"]'), await page.inputValue('#theme-color-picker [data-cp="rgb"]')];
+      const rgb = [1, 3, 5].map((i) => parseInt(before.slice(i, i + 2), 16)).join(", ");
+      check(head.join("|") === `Accent|Choose a color|${before.slice(0, 7)}|${rgb}`, `the picker opens as ${head.join(" | ")}`);
+      check(/^Accent · \d+ uses?$/.test(await sub()) && (await page.evaluate(() => document.querySelector("#send").hasAttribute("data-theme-inspector-match"))), `the swatch selects Accent: ${await sub()}`);
+      const plane = await rect("#theme-color-picker .cp-plane");
+      const corner = { x: plane.right - 2, y: plane.top + 2 };
+      if (touch) await page.touchscreen.tap(corner.x, corner.y);
+      else await page.mouse.click(corner.x, corner.y);
+      await sleep(100);
+      const vivid = await page.inputValue('#theme-color-picker [data-cp="hex"]');
+      const hsv = await page.evaluate(() => colorPicker.hsv);
+      check(hsv.s > 0.97 && hsv.v > 0.97 && vivid !== before.slice(0, 7), `the plane's corner gives ${vivid} (${JSON.stringify(hsv)})`);
+      check((await field("accent").inputValue()) === (await page.evaluate(() => colorHex(themeEditor.colors.dark.accent))) && (await field("accent").inputValue()) !== before, "the field didn't take the picked color");
+      await page.fill('#theme-color-picker [data-cp="rgb"]', "224, 86, 154");
+      check((await page.inputValue('#theme-color-picker [data-cp="hex"]')) === "#e0569a", `RGB 224, 86, 154 shows hex ${await page.inputValue('#theme-color-picker [data-cp="hex"]')}`);
+      const painted = await page.evaluate(() => [colorHex(themeEditor.colors.dark.accent), document.documentElement.dataset.themeId]);
+      check(painted[1] === "__preview" && painted[0] !== before, `the preview: ${painted.join(" ")}`);
+      await page.keyboard.press("Escape");
+      check((await page.locator("#theme-color-picker").count()) === 0 && (await page.locator("#theme-editor").isVisible()), "Escape didn't close just the picker");
+      await press(page.locator('#theme-editor [data-te="inspect"]'));
+      check((await page.locator("#theme-inspector-spotlight").count()) === 0, "inspecting kept the usage spotlight");
+    } finally {
+      await page.evaluate(() => themeEditor && closeThemeEditor());
+      await resetTheme();
+    }
+  });
+
+  /** An Open VSX extension served from page.route: a search hit, its details, manifest, checksum and
+   * a real .vsix (deflated zip) whose themes are a light and dark pair and a third that includes one. */
+  const openVsxFixture = () => {
+    const zlib = require("zlib");
+    const crypto = require("crypto");
+    const manifest = { publisher: "fixture", name: "aurora-themes", version: "1.0.0", license: "MIT", contributes: { themes: [{ label: "Aurora Light", uiTheme: "vs", path: "./themes/light.json" }, { label: "Aurora Dark", uiTheme: "vs-dark", path: "./themes/dark.json" }, { label: "Aurora Midnight", uiTheme: "vs-dark", path: "./themes/midnight.json" }] } };
+    const files = {
+      "extension/package.json": JSON.stringify(manifest),
+      "extension/themes/light.json": JSON.stringify({ colors: { "editor.background": "#fbf7f0", "editor.foreground": "#2b2b2b", "button.background": "#c2410c" } }),
+      "extension/themes/dark.json": JSON.stringify({ colors: { "editor.background": "#1a1b26", "editor.foreground": "#c0caf5", "focusBorder": "#7aa2f7", "sideBar.background": "#16161e" } }),
+      "extension/themes/midnight.json": '{\n  // darker\n  "include": "./dark.json",\n  "colors": { "editor.background": "#0b0c14", },\n}',
+    };
+    const locals = [];
+    const central = [];
+    let at = 0;
+    for (const [name, text] of Object.entries(files)) {
+      const raw = Buffer.from(text);
+      const data = zlib.deflateRawSync(raw);
+      const head = Buffer.alloc(30);
+      head.writeUInt32LE(0x04034b50, 0); head.writeUInt16LE(20, 4); head.writeUInt16LE(8, 8); head.writeUInt32LE(data.length, 18); head.writeUInt32LE(raw.length, 22); head.writeUInt16LE(name.length, 26);
+      const dir = Buffer.alloc(46);
+      dir.writeUInt32LE(0x02014b50, 0); dir.writeUInt16LE(20, 6); dir.writeUInt16LE(8, 10); dir.writeUInt32LE(data.length, 20); dir.writeUInt32LE(raw.length, 24); dir.writeUInt16LE(name.length, 28); dir.writeUInt32LE(at, 42);
+      locals.push(head, Buffer.from(name), data);
+      central.push(dir, Buffer.from(name));
+      at += 30 + name.length + data.length;
+    }
+    const dirBytes = Buffer.concat(central);
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(Object.keys(files).length, 8); end.writeUInt16LE(Object.keys(files).length, 10); end.writeUInt32LE(dirBytes.length, 12); end.writeUInt32LE(at, 16);
+    const vsix = Buffer.concat([...locals, dirBytes, end]);
+    const base = "https://open-vsx.org/api/fixture/aurora-themes/1.0.0/file";
+    const detail = { namespace: "fixture", name: "aurora-themes", displayName: "Aurora Themes", version: "1.0.0", license: "MIT", description: "Light, dark and midnight.", downloadCount: 1234, repository: "https://github.com/example/aurora-themes", files: { manifest: `${base}/package.json`, sha256: `${base}/fixture.aurora-themes-1.0.0.sha256`, download: `${base}/fixture.aurora-themes-1.0.0.vsix` } };
+    const closed = { ...detail, name: "closed-themes", displayName: "Closed Themes", license: "Proprietary" };
+    const routes = {
+      "/api/fixture/aurora-themes": JSON.stringify(detail),
+      "/api/fixture/closed-themes": JSON.stringify(closed),
+      "/api/fixture/aurora-themes/1.0.0/file/package.json": JSON.stringify(manifest),
+      "/api/fixture/aurora-themes/1.0.0/file/fixture.aurora-themes-1.0.0.sha256": `${crypto.createHash("sha256").update(vsix).digest("hex")}  fixture.aurora-themes-1.0.0.vsix\n`,
+      "/api/fixture/aurora-themes/1.0.0/file/fixture.aurora-themes-1.0.0.vsix": vsix,
+    };
+    const hits = [];
+    const handler = (route) => {
+      const url = new URL(route.request().url());
+      hits.push(`${route.request().method()} ${url.pathname}`);
+      const headers = { "access-control-allow-origin": "*" };
+      if (url.pathname === "/api/-/search") return route.fulfill({ headers, contentType: "application/json", body: JSON.stringify({ extensions: url.searchParams.get("query") === "aurora" ? [{ namespace: "fixture", name: "aurora-themes" }, { namespace: "fixture", name: "closed-themes" }] : [] }) });
+      const body = routes[url.pathname];
+      return body === undefined ? route.fulfill({ status: 404, headers, body: "" }) : route.fulfill({ headers: { ...headers, "content-length": String(body.length) }, body: route.request().method() === "HEAD" ? "" : body });
+    };
+    return { handler, hits };
+  };
+  /** WebKit sends a service-worker-controlled page's fetches past page.route, so a step that serves
+   * a site from the sweep runs in a second page of the same account with service workers blocked. */
+  const withRoutablePage = async (run) => {
+    const main = page;
+    const ctx = await browser.newContext({ ...profile, colorScheme: "dark", serviceWorkers: "block", storageState: await context.storageState() });
+    if (touch) await ctx.addInitScript(stubVisualViewport);
+    page = await ctx.newPage();
+    page.on("console", (m) => ["error", "warning"].includes(m.type()) && seen.push(`console.${m.type()}: ${m.text()}`));
+    page.on("pageerror", (e) => seen.push(`pageerror: ${e.message}`));
+    try {
+      await page.goto(HUB);
+      await page.waitForFunction(() => typeof hub !== "undefined" && document.body.dataset.mode === "gui", null, { timeout: 20000 });
+      return await run();
+    } finally {
+      page = main;
+      await ctx.close();
+    }
+  };
+  const openAddTheme = async () => {
+    if (!(await page.evaluate(() => settingsOpen()))) await page.evaluate(() => toggleSettings());
+    await tapOrClick('#settings-nav [data-page="general"]');
+    await press(page.locator('#theme-section [data-theme-action="import"]'));
+    await waitFor("the Add a theme dialog", async () => (await text("#shell-dialog .dialog-head h2")) === "Add a theme");
+  };
+
+  await step("app view: Add theme searches Open VSX, installs an extension as one collection card whose variants fan out per appearance, updates it, and removes picked variants", async () => {
+    await withRoutablePage(async () => {
+      await resetTheme();
+      const fixture = openVsxFixture();
+      await page.route("https://open-vsx.org/**", fixture.handler);
+      const collection = page.locator('#theme-section .theme-card.collection[data-theme-collection="open-vsx:fixture.aurora-themes"]');
+      try {
+        await openAddTheme();
+        check((await text("#theme-search-heading")) === "Search community themes", `the search reads ${await text("#theme-search-heading")}`);
+        const chips = await page.locator("#shell-dialog .ti-chip").allTextContents();
+        check(chips.join(",") === "Dracula,Catppuccin,Nord,Tokyo Night", `popular: ${chips.join(", ")}`);
+        await page.fill('#shell-dialog input[aria-label="Search Open VSX themes"]', "aurora");
+        await waitFor("the results", async () => (await page.locator("#shell-dialog .ti-card").count()) > 0, 10000);
+        const cards = await page.locator("#shell-dialog .ti-card h4").allTextContents();
+        check(cards.join(",") === "Aurora Themes", `results (the proprietary one left out): ${cards.join(", ")}`);
+        check(/^fixture · 1\.2K downloads$/i.test(await text("#shell-dialog .ti-card .muted")), `the byline is ${await text("#shell-dialog .ti-card .muted")}`);
+        check((await page.locator("#shell-dialog .ti-sort option").allTextContents()).join(",") === "Most downloaded,Best rated,Newest,Most relevant", "the Sort menu is missing");
+        check((await page.locator('#shell-dialog .ti-source[href="https://github.com/example/aurora-themes"] .github').count()) === 1, "no GitHub source link");
+        await press(page.locator('#shell-dialog [data-ti-install="fixture.aurora-themes"]'));
+        await waitFor("the install", async () => (await page.locator("#shell-dialog").isHidden()) && (await collection.count()) === 1, 10000);
+        check(/^2 themes added · Aurora, Aurora Midnight$/.test(await text("#panel-note span")), `the toast reads ${await text("#panel-note span")}`);
+        check(fixture.hits.some((h) => h.endsWith(".vsix") && h.startsWith("GET")) && fixture.hits.some((h) => h.endsWith(".sha256")), `fetched: ${fixture.hits.join(", ")}`);
+        const installed = await page.evaluate(() => customThemes.map((t) => `${t.label}:${modesOf(t).join("+")}:${colorHex(colorsFor(t, modesOf(t).at(-1)).canvas)}:${t.collection.label}`));
+        check(installed.join(" ") === "Aurora:light+dark:#1a1b26:Aurora Themes Aurora Midnight:dark:#0b0c14:Aurora Themes", `installed: ${installed.join(" ")}`);
+        check((await collection.locator(".name").textContent()) === "Aurora Themes", "the card isn't named for the extension");
+        const roots = await collection.locator(".pick.root").evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
+        check(roots.join(" | ") === "Use light variant, currently Aurora | Choose dark variant, 2 options, currently Aurora", `roots: ${roots.join(" | ")}`);
+        const dark = collection.locator('.variant-mode[data-mode="dark"]');
+        await dark.locator(".pick.root").focus();
+        await waitFor("the dark variants to fan out", async () => (await dark.locator(".variant-option").evaluateAll((els) => els.filter((e) => getComputedStyle(e).opacity === "1").length)) === 2);
+        await press(dark.locator('.variant-option[aria-label^="Use Aurora Midnight"]'));
+        const midnight = await page.evaluate(() => customThemes.find((t) => t.label === "Aurora Midnight").id);
+        await page.evaluate(() => setAppearanceMode("dark"));
+        check((await appearance()) === `dark|${midnight}`, `picking Midnight for dark gives ${await appearance()}`);
+        await press(collection.locator(".name"));
+        check((await page.evaluate(() => JSON.stringify(Object.values(themeState().halves).map((id) => themeById(id).label)))) === '["Aurora","Aurora"]', "the card's name didn't pick the first variants");
+        await openAddTheme();
+        await page.fill('#shell-dialog input[aria-label="Search Open VSX themes"]', "aurora");
+        await waitFor("the Update button", async () => (await page.locator('#shell-dialog [data-ti-install="fixture.aurora-themes"]').textContent().catch(() => "")) === "Update", 10000);
+        await press(page.locator('#shell-dialog [data-ti-install="fixture.aurora-themes"]'));
+        check((await text("#ti-update-title")) === "Update “Aurora Themes”?", `the confirm reads ${await text("#ti-update-title")}`);
+        await press(page.locator("#shell-dialog [data-ti-update]"));
+        await waitFor("the update", async () => /^2 themes updated/.test(await text("#panel-note span")), 10000);
+        await press(collection.locator('[data-theme-action="remove"]'));
+        check((await text("#shell-dialog .dialog-head h2")) === "Remove themes from “Aurora Themes”?", `the removal asks ${await text("#shell-dialog .dialog-head h2")}`);
+        const remove = page.locator("#shell-dialog [data-dialog-remove]");
+        check(await remove.isDisabled(), "Remove selected is enabled with nothing picked");
+        await press(page.locator('#shell-dialog .theme-remove-option', { hasText: "Aurora Midnight" }));
+        check((await remove.textContent()) === "Remove selected (1)", `the button reads ${await remove.textContent()}`);
+        await press(remove);
+        const left = await page.evaluate(() => customThemes.map((t) => t.label).join(","));
+        check(left === "Aurora" && (await collection.count()) === 0 && (await page.locator('#theme-section .theme-card[data-theme-card] .name', { hasText: /^Aurora$/ }).count()) === 1, `after removing Midnight: ${left}`);
+      } finally {
+        await page.unroute("https://open-vsx.org/**", fixture.handler);
+        await resetTheme();
+      }
+    });
+  });
+
+  await step("app view: Add theme's JSON box converts a pasted VS Code theme, offers Update or Keep both for one already installed, and pairs dropped Light and Dark files", async () => {
+    await resetTheme();
+    const owl = { name: "night-owl-test", type: "dark", colors: { "editor.background": "#011627", "editor.foreground": "#d6deeb", "button.background": "#7e57c2", "focusBorder": "#122d42", "sideBar.background": "#011627" }, tokenColors: [] };
+    try {
+      await openAddTheme();
+      const spill = await overflowing();
+      check(!spill.length, `the dialog is wider than the screen: ${spill.join(", ")}`);
+      await page.fill("#theme-json-editor", JSON.stringify(owl, null, 2));
+      check((await page.locator("#shell-dialog .ti-editor pre .key").count()) > 3, "the JSON isn't highlighted");
+      await press(page.locator("#shell-dialog [data-ti-add]"));
+      await waitFor("the pasted theme", async () => (await appearance()) === "dark|night-owl-test");
+      check((await text("#panel-note span")) === "Night Owl Test added · It’s now your dark theme.", `the toast reads ${await text("#panel-note span")}`);
+      const owlColors = await page.evaluate(() => ["canvas", "messageAction", "sidebar"].map((r) => colorHex(themeById("night-owl-test").colors[r])).join(" "));
+      check(owlColors === "#011627 #7e57c2 #011627", `converted: ${owlColors}`);
+      await openAddTheme();
+      await page.fill("#theme-json-editor", JSON.stringify(owl));
+      await press(page.locator("#shell-dialog [data-ti-add]"));
+      const conflict = (await page.locator("#shell-dialog .ti-conflict").innerText()).replace(/\s+/g, " ");
+      check(conflict === "Already installed Night Owl Test", `the conflict reads ${conflict}`);
+      await press(page.locator('#shell-dialog [data-ti-resolve="copy"]'));
+      await waitFor("the copy", async () => (await page.evaluate(() => customThemes.map((t) => t.label).join(","))) === "Night Owl Test,Night Owl Test (1)");
+      await openAddTheme();
+      await page.fill("#theme-json-editor", JSON.stringify({ version: 1, name: "Broken", appearance: "dark", colors: { canvas: "teal-ish" } }));
+      await press(page.locator("#shell-dialog [data-ti-add]"));
+      check(/^The color for "canvas" must be a literal CSS color/.test(await text("#shell-dialog .ti-error")), `the error reads ${await text("#shell-dialog .ti-error")}`);
+      const ayu = (type, bg) => ({ name: `Ayu ${type === "light" ? "Light" : "Dark"}`, type, colors: { "editor.background": bg, "editor.foreground": type === "light" ? "#5c6166" : "#bfbdb6" } });
+      await page.setInputFiles('#shell-dialog .ti-file input[type="file"]', [
+        { name: "ayu-light.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(ayu("light", "#fcfcfc"))) },
+        { name: "ayu-dark.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(ayu("dark", "#0d1017"))) },
+      ]);
+      await waitFor("the paired files", async () => (await page.locator("#shell-dialog").isHidden()) && (await page.evaluate(() => !!themeById("ayu"))));
+      const pair = await page.evaluate(() => `${modesOf(themeById("ayu")).join("+")} ${colorHex(colorsFor(themeById("ayu"), "light").canvas)} ${colorHex(colorsFor(themeById("ayu"), "dark").canvas)}`);
+      check(pair === "light+dark #fcfcfc #0d1017", `Ayu: ${pair}`);
+      check((await text("#panel-note span")) === "Ayu added · Ayu", `the toast reads ${await text("#panel-note span")}`);
+    } finally {
+      await page.evaluate(() => (themeImport ? endThemeImport() : dialogOpen() && closeDialog()));
+      await resetTheme();
+      await page.evaluate(() => settingsOpen() && toggleSettings());
     }
   });
 
@@ -3659,9 +3930,10 @@ async function sweep(profileName) {
     await rowMenu(rowSel(third));
     await menuPick("Archive thread");
     await waitFor("the archived thread gone", async () => (await rows()) === 2);
-    await sideSetting("days");
-    await waitFor("it under Archived threads", async () => /to archive/.test(await text("#side-settings .archived")));
-    await press(gui("#side-settings [data-unarchive]"));
+    await page.evaluate(() => document.body.dataset.page === "settings" || toggleSettings());
+    await tapOrClick('#settings-nav [data-page="archive"]');
+    await waitFor("it on the Archive page", async () => /to archive/.test(await text("#archive-settings .archived")));
+    await press(gui("#archive-settings [data-unarchive]"));
     await waitFor("Unarchive to bring it back", async () => (await rows()) === 3 && (await text("#chat-head .crumb .title")) === "to archive", 15000);
     await waitFor("its conversation", async () => (await page.locator("#thread .bubble", { hasText: "to archive" }).count()) > 0, 10000);
     await rowMenu("#thread-list .thread-row.active");
@@ -3669,8 +3941,9 @@ async function sweep(profileName) {
     await waitFor("the delete dialog", async () => (await text("#side-dialog h3")) === 'Delete thread "to archive"?');
     await press(gui("#side-dialog .destructive"));
     await waitFor("the deleted thread gone", async () => (await rows()) === 2);
-    await sideSetting("days");
-    check(/No archived threads/.test(await text("#side-settings")), "the archive isn't empty");
+    await page.evaluate(() => document.body.dataset.page === "settings" || toggleSettings());
+    await tapOrClick('#settings-nav [data-page="archive"]');
+    check(/No archived threads/.test(await text("#archive-settings")), "the archive isn't empty");
     await closeSettings();
     await openRow(alpha);
   });
@@ -4173,6 +4446,326 @@ async function sweep(profileName) {
     }
     await waitFor("the thread again", () => page.locator("#chat").isVisible());
     return "100, then 150 rows";
+  });
+
+  const runFromPalette = async (query, title) => {
+    await page.keyboard.press("Meta+k");
+    await waitFor("the palette", () => page.locator("#palette").isVisible());
+    await page.keyboard.type(query);
+    await waitFor(`“${title}” in the palette`, async () => (await paletteItems())[0] === title);
+    await page.keyboard.press("Enter");
+  };
+  await step("follow: ⌘K's Go to file and Search project contents open the panel's searches, and Escape comes back to the palette", async () => {
+    if (touch) return "touch: no keyboard";
+    await openRow(await keyFor("alpha"));
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type("go to file");
+    await waitFor("Go to file", async () => (await paletteItems())[0] === "Go to file");
+    check((await text("#palette .item[data-i='0'] .hint")) === "⌘P", `its hint: ${await text("#palette .item[data-i='0'] .hint")}`);
+    await page.keyboard.press("Enter");
+    await waitFor("the file picker", async () => (await page.getAttribute("#file-picker .query", "placeholder")) === "Search files…" && (await page.locator("#file-picker .query").isVisible()));
+    check(!(await page.locator("#palette").isVisible()), "the palette stayed over the file picker");
+    await page.keyboard.press("Escape");
+    await waitFor("the palette again", () => page.locator("#palette").isVisible());
+    check(!(await page.locator("#file-picker .query").isVisible()), "the file picker stayed open");
+    check((await page.inputValue("#palette input")) === "go to file", `the palette's query came back as “${await page.inputValue("#palette input")}”`);
+    await page.fill("#palette input", "search project contents");
+    await waitFor("Search project contents", async () => (await paletteItems())[0] === "Search project contents");
+    check((await text("#palette .item[data-i='0'] .hint")) === "⌘⇧F", `its hint: ${await text("#palette .item[data-i='0'] .hint")}`);
+    await page.keyboard.press("Enter");
+    await waitFor("the content search", async () => (await page.getAttribute("#file-picker .query", "placeholder")) === "Search project contents…");
+    await page.keyboard.press("Escape");
+    await waitFor("the palette after the content search", async () => (await page.inputValue("#palette input")) === "search project contents");
+    await page.keyboard.press("Escape");
+    check(!(await page.locator("#palette").isVisible()), "Escape left the palette open");
+  });
+
+  await step("follow: ⌘K links a pull request to the thread, then shows the thread's linked pull requests", async () => {
+    if (touch) return "touch: no keyboard";
+    await runFromPalette("link pull request", "Link pull request to thread");
+    await waitFor("the Link pull request dialog", () => page.locator("#link-pr input").isVisible());
+    await page.fill("#link-pr input", "https://github.com/example/alpha/pull/43");
+    await page.press("#link-pr input", "Enter");
+    await waitFor("the dialog to close", async () => !(await page.locator("#link-pr").count()), 10000);
+    await runFromPalette("show linked pull requests", "Show linked pull requests");
+    await waitFor("the Pull requests tab", () => gui('#panel-tabs .ptab.active[data-panel="prs"]').isVisible());
+    await waitFor("#43 among them", () => gui('#panel-body .pr-row[data-prs-open$="/pull/43"]').isVisible(), 10000);
+    await page.evaluate(() => unlinkPr(active, "https://github.com/example/alpha/pull/43"));
+    await page.evaluate(() => closePanel());
+  });
+
+  await step("follow: ⌘K restarts the agent session on the thread's conversation", async () => {
+    if (touch) return "touch: no keyboard";
+    const session = await page.evaluate(() => active.view.session);
+    check(!!session, "alpha has no conversation to resume");
+    fs.writeFileSync(path.join(HOME, "claude-launch.log"), "");
+    await runFromPalette("restart agent", "Restart agent session");
+    await waitFor("claude to start again on the conversation", () => readLog("claude-launch.log").includes(`--resume ${session}`), 10000);
+    await waitFor("the notice", async () => (await text("#side-notice")) === "Agent session restarted. Skills, plugins and MCP servers load again.");
+    await waitFor("the session running again", () => page.evaluate((s) => active.view.running && active.view.session === s, session), 10000);
+    return readLog("claude-launch.log").trim();
+  });
+
+  await step("follow: ⌘K's New project makes a repository with a first commit, opens a thread in it, and publishes it", async () => {
+    if (touch) return "touch: no keyboard";
+    const gitconfig = path.join(HOME, ".gitconfig");
+    const hadConfig = fs.existsSync(gitconfig);
+    if (!hadConfig) fs.writeFileSync(gitconfig, "[user]\n\tname = Sweep\n\temail = sweep@example.test\n");
+    fs.writeFileSync(path.join(HOME, "gh.log"), "");
+    try {
+      await runFromPalette("new project", "New project");
+      await waitFor("the name field", async () => (await page.getAttribute("#palette input", "placeholder")) === "Project name");
+      check((await text("#palette .summary .sub")) === "Goes in ~/pinned/", `summary: ${await text("#palette .summary .sub")}`);
+      check(await page.locator("#palette .accessory [data-submit]").isDisabled(), "Create works without a name");
+      check((await paletteGroups()).join() === "Options,", `groups: ${(await paletteGroups()).join()}`);
+      await page.keyboard.type("Sweep Café");
+      await waitFor("the path preview", async () => (await text("#palette .summary .sub")) === "Creates ~/pinned/sweep-cafe");
+      check(!(await page.locator("#palette .item.hi").count()), "a row is highlighted, so Enter would run it");
+      await page.click("#palette .item:has-text('Create private repository on GitHub')");
+      await waitFor("the checked box", () => page.locator("#palette .checkbox.on").isVisible());
+      check((await text("#palette .item:has-text('Create private repository') .sub")) === "sweep-cafe", "the repository's name isn't shown");
+      await page.keyboard.press("Meta+Enter");
+      await waitFor("a thread in the new project", async () => (await crumbProject()) === "sweep-cafe", 15000);
+      const dir = path.join(HOME, "pinned", "sweep-cafe");
+      const log = require("child_process").execFileSync("git", ["log", "--format=%s"], { cwd: dir, encoding: "utf8" }).trim();
+      check(log === "Initial commit", `git log: ${log}`);
+      check(fs.readFileSync(path.join(dir, "README.md"), "utf8").includes("# Sweep Café") && fs.existsSync(path.join(dir, "assets", "icon.svg")), "README.md or the icon is missing");
+      await waitFor("gh to publish it", () => /^repo create sweep-cafe --private --source \. --remote origin --push$/m.test(readLog("gh.log")), 10000);
+      await waitFor("the published notice", async () => (await text("#side-notice")) === "Published to GitHub: sweeper/sweep-cafe");
+      await page.evaluate(() => closeTab(active));
+      return log;
+    } finally {
+      if (!hadConfig) fs.rmSync(gitconfig, { force: true });
+    }
+  });
+
+  await step("follow: ⌘K's Open WSL folder browses the folders of a machine running under WSL", async () => {
+    if (touch) return "touch: no keyboard";
+    await openRow(await keyFor("alpha"));
+    const machine = await page.evaluate(() => active.machine);
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type("open wsl");
+    await waitFor("no WSL item off WSL", async () => !(await paletteItems()).includes("Open WSL folder"));
+    await page.keyboard.press("Escape");
+    await page.evaluate((m) => (machines.get(m).view.os = "wsl"), machine);
+    try {
+      await runFromPalette("open wsl", "Open WSL folder");
+      await waitFor("the folder browser", () => page.locator("#projects .browse input").isVisible());
+      check((await page.inputValue("#projects .browse input")) === "~/", "the browser doesn't start at ~/");
+      await page.evaluate(() => closeProjects());
+    } finally {
+      await page.evaluate((m) => (machines.get(m).view.os = "macos"), machine);
+    }
+  });
+
+  await step("follow: ⌘K copies a prompt link, and the link opens a thread in its repository with the prompt in the composer", async () => {
+    if (touch) return "touch: no keyboard";
+    await openRow(await keyFor("alpha"));
+    await page.evaluate(() => {
+      window.copiedLinks = [];
+      navigator.clipboard.writeText = async (t) => void window.copiedLinks.push(t);
+    });
+    await page.fill("#prompt", "Fix the flaky test");
+    await runFromPalette("copy prompt link", "Copy prompt link");
+    await page.keyboard.press("Meta+k");
+    await page.keyboard.type("copy prompt link with repo");
+    await waitFor("the link with repo and model", async () => (await paletteItems())[0] === "Copy prompt link with repo and model");
+    await page.keyboard.press("Enter");
+    const links = await page.evaluate(() => (delete navigator.clipboard.writeText, window.copiedLinks));
+    const plain = links.find((l) => !l.includes("repo="));
+    const full = links.find((l) => l.includes("repo="));
+    check(plain === `${HUB}/new?prompt=Fix+the+flaky+test`, `copied ${plain}`);
+    check(new URL(full).searchParams.get("repo") === "example/alpha" && new URL(full).searchParams.get("provider") === "claude", `copied ${full}`);
+    await page.fill("#prompt", "");
+    await page.dispatchEvent("#prompt", "input");
+    const other = await context.newPage();
+    const opened = await page.evaluate(() => tabs.map((t) => t.key));
+    try {
+      await other.goto(full);
+      await other.waitForFunction(() => document.querySelector("#prompt")?.value === "Fix the flaky test" && location.pathname === "/", null, { timeout: 20000 });
+      const landed = await other.evaluate(() => [projectName(active), document.querySelector("#side-notice").textContent.trim()]);
+      check(landed[0] === "alpha", `the link opened in ${landed[0]}`);
+      check(landed[1].startsWith("Prompt added from a link. Read it before you send."), `notice: ${landed[1]}`);
+      await other.goto(`${HUB}/new?prompt=hi&repo=example/nowhere`);
+      await other.waitForFunction(() => document.querySelector("#page-view h2")?.textContent === "You don't have example/nowhere", null, { timeout: 20000 });
+      check((await other.locator("#page-view [data-link]").allTextContents()).join() === "Clone example/nowhere,Use without project", "the missing repository's buttons");
+      await other.goto(`${HUB}/new?prompt=${"x".repeat(8001)}`);
+      await other.waitForFunction(() => document.querySelector("#page-view p")?.textContent === "This prompt is longer than 8,000 characters, so Pinned did not open it.", null, { timeout: 20000 });
+      await other.goto(`${HUB}/new?prompt=%E2%80%8B%E2%80%8B`);
+      await other.waitForFunction(() => /only hidden characters/.test(document.querySelector("#page-view p")?.textContent ?? ""), null, { timeout: 20000 });
+    } finally {
+      await other.close();
+      await page.evaluate((keep) => tabs.filter((t) => !keep.includes(t.key)).forEach((t) => closeTab(t)), opened);
+    }
+    return full;
+  });
+
+  await step("follow: Archive is its own settings page, newest first, with when each thread was archived and created", async () => {
+    await page.evaluate(() => {
+      const base = { machine: active.machine, cwd: active.view.cwd, session: null, project: "alpha" };
+      archived.push({ ...base, name: "Older archive", at: nowS() - 7200, created: nowS() - 3 * 86400 }, { ...base, name: "Newer archive", at: nowS() - 120, created: nowS() - 7200 });
+      saveArchived();
+    });
+    if (touch) {
+      await page.evaluate(() => document.body.dataset.page === "settings" || toggleSettings());
+      await tapOrClick('#settings-nav [data-page="archive"]');
+    } else {
+      await page.keyboard.press("Meta+k");
+      await page.keyboard.type("archive");
+      await waitFor("the Archive settings item", async () => (await paletteItems())[0] === "Archive");
+      await page.keyboard.press("Enter");
+    }
+    await waitFor("the Archive page", async () => (await text("#settings-page h2")) === "Archive");
+    check(await page.locator('#settings-nav [data-page="archive"].active').isVisible(), "the nav doesn't mark Archive");
+    check((await page.locator("#archive-settings .archived label").allTextContents()).join() === "Newer archive,Older archive", "not newest first");
+    check((await text("#archive-settings .archived .meta")) === "Archived 2m ago · Created 2h ago", `meta: ${await text("#archive-settings .archived .meta")}`);
+    check(!(await page.locator("#side-settings .archived").count()), "General still lists archived threads");
+    for (const name of ["Newer archive", "Older archive"]) {
+      const row = page.locator("#archive-settings .archived", { hasText: name });
+      const box = await row.boundingBox();
+      await row.dispatchEvent("contextmenu", { clientX: box.x + 24, clientY: box.y + 12 });
+      await waitFor("the row's menu", async () => (await page.locator("#side-menu button .label").allTextContents()).join() === "Unarchive,Delete");
+      await press(page.locator("#side-menu button", { hasText: "Delete" }));
+    }
+    await waitFor("the empty archive", async () => /No archived threads/.test(await text("#archive-settings")));
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    await page.evaluate(() => document.body.dataset.page === "settings" && toggleSettings());
+  });
+
+  await step("follow: the Device tab's dashboard fills the panel's height", async () => {
+    if (touch) await page.evaluate(() => toggleSidebar(false));
+    await openPanelTo("device", "Device");
+    await waitFor("the hub's dashboard", async () => /Expo Device Hub dashboard/.test((await page.frameLocator("#panel-body iframe").locator("body").textContent().catch(() => "")) ?? ""), 20000);
+    const [frame, body] = await page.evaluate(() => [document.querySelector("#panel-body iframe").getBoundingClientRect().height, document.querySelector("#panel-body").getBoundingClientRect().height]);
+    check(frame > body - 80, `the dashboard is ${Math.round(frame)}px tall in a ${Math.round(body)}px panel`);
+    await page.locator('#panel-tabs .ptab[data-panel="device"] .lead').dispatchEvent("click");
+    await closePanelIfOpen();
+    return `${Math.round(frame)}px of ${Math.round(body)}px`;
+  });
+
+  const openPulls = async () => {
+    await showSidebar();
+    await tapOrClick('#sidebar footer [data-open-page="pull-requests"]');
+    await waitFor("the Pull requests page", () => page.locator("#page-view h1", { hasText: "Pull Requests" }).isVisible());
+  };
+  const leavePulls = async () => {
+    if (await page.evaluate(() => document.body.dataset.panel === "open")) await page.evaluate(() => closePanel());
+    if (touch) {
+      await pageSidebar();
+      await tapOrClick("#sidebar footer .back");
+    } else {
+      await page.evaluate(() => document.activeElement?.blur());
+      await page.keyboard.press("Escape");
+    }
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+  };
+  const prRow = (n) => `#page-view .pr-row[data-url$="/pull/${n}"]`;
+  await step("follow: Pull requests show a stacked pull request's stack, and a row matched only in its description says so", async () => {
+    await openPulls();
+    await waitFor("the rows", async () => (await prNumbers()).length === 3, 15000);
+    check((await text(`${prRow(42)} .stack`)) === "1/2" && (await text(`${prRow(41)} .stack`)) === "2/2", "the stack badges are wrong");
+    check((await page.getAttribute(`${prRow(42)} .stack`, "title")) === "View stack #7, layer 1 of 2", "the stack badge's tooltip is wrong");
+    check(!(await page.locator(`${prRow(43)} .stack`).count()), "#43 has a stack badge");
+    check((await page.locator(`${prRow(42)} [data-quick="merge"]`).getAttribute("title")) === "Open this pull request to merge its stack", "a stacked pull request merges from the list");
+    await press(page.locator(`${prRow(42)} .stack`));
+    await waitFor("the stack's layers", async () => (await page.locator("#side-menu button .label").allTextContents()).join() === "Stack #7,Draft the notes,Add notes,↳ main", 10000);
+    check((await text('#side-menu button:has-text("Draft the notes") .hint')) === "#41 · sweep/notes-41 · Draft", "the layer's line is wrong");
+    check((await page.locator('#side-menu button:has-text("Add notes") .i').count()) === 2, "the current layer isn't checked");
+    check(/stacks\?pull_request=42/.test(readLog("gh.log")) && /stacks\/7/.test(readLog("gh.log")), "gh never read the stack");
+    await press(page.locator('#side-menu button:has-text("Draft the notes")'));
+    await waitFor("#41 in the side panel", async () => /#41/.test(await text('#panel-tabs .ptab.active[data-panel="pr"]')), 10000);
+    await page.evaluate(() => closePanel());
+    await page.fill("#page-view .pr-search input", "flaky");
+    await waitFor("the description's match", async () => (await prNumbers()).join() === "#42");
+    check(await page.locator(`${prRow(42)} .matched`).isVisible(), "no matched in the description pill");
+    check((await page.getAttribute(`${prRow(42)} .matched`, "title")) === "Matched in the description", "the pill's tooltip is wrong");
+    await page.fill("#page-view .pr-search input", "add notes");
+    await waitFor("the title's match", async () => (await prNumbers()).join() === "#42");
+    await waitFor("no pill on a title match", async () => !(await page.locator(`${prRow(42)} .matched`).count()));
+    await page.fill("#page-view .pr-search input", "");
+    await waitFor("every row again", async () => (await prNumbers()).length === 3, 15000);
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    await leavePulls();
+  });
+
+  await step("follow: Pull requests: dragging Close across rows closes each open one, and Escape calls it off", async () => {
+    if (touch) return "touch: quick actions show while Shift is held";
+    fs.writeFileSync(path.join(HOME, "gh.log"), "");
+    await openPulls();
+    await page.fill("#page-view .pr-search input", "label:many");
+    await waitFor("the bulk rows", async () => (await prNumbers()).length >= 100, 15000);
+    const center = async (sel) => {
+      const box = await page.locator(sel).boundingBox();
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    };
+    try {
+      await page.keyboard.down("Shift");
+      await page.hover(prRow(1000));
+      check((await page.getAttribute(`${prRow(1000)} [data-quick="close"]`, "title")) === "Close immediately, or drag across rows to close several", "Close doesn't say it drags");
+      const from = await center(`${prRow(1000)} [data-quick="close"]`);
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      const to = await center(prRow(1002));
+      await page.mouse.move(from.x, to.y, { steps: 8 });
+      await waitFor("three rows swept", async () => (await page.locator("#page-view .pr-row.sweeping").count()) === 3);
+      await page.mouse.up();
+      await waitFor("gh to close the three", () => [1000, 1001, 1002].every((n) => readLog("gh.log").includes(`pr close -- https://github.com/example/alpha/pull/${n}`)), 10000);
+      await waitFor("the notice", async () => (await text("#side-notice")) === "Closed 3 pull requests");
+      check(!/pull\/1003/.test(readLog("gh.log")), "a row past the sweep closed");
+      await waitFor("the list to refresh", () => page.evaluate(() => !pulls.loading), 10000);
+      await page.hover(prRow(1004));
+      const again = await center(`${prRow(1004)} [data-quick="close"]`);
+      await page.mouse.move(again.x, again.y);
+      await page.mouse.down();
+      await page.mouse.move(again.x, (await center(prRow(1006))).y, { steps: 8 });
+      await waitFor("a second sweep", async () => (await page.locator("#page-view .pr-row.sweeping").count()) === 3);
+      await page.keyboard.press("Escape");
+      check(!(await page.locator("#page-view .pr-row.sweeping").count()), "Escape left rows swept");
+      await page.mouse.up();
+      await sleep(500);
+      check(!/pull\/100[4-6]/.test(readLog("gh.log")), "a called-off sweep closed rows");
+    } finally {
+      await page.mouse.up();
+      await page.keyboard.up("Shift");
+      await page.fill("#page-view .pr-search input", "");
+      await waitFor("every row again", async () => (await prNumbers()).length === 3, 15000);
+      await leavePulls();
+    }
+    return "closed #1000-#1002";
+  });
+
+  await step("follow: Pull requests list an Enterprise Server's pull requests beside github.com's, with a Host filter", async () => {
+    const delta = path.join(HOME, "work", "delta");
+    if (!fs.existsSync(delta)) {
+      require("child_process").execFileSync("git", ["init", "-q", delta]);
+      require("child_process").execFileSync("git", ["-C", delta, "remote", "add", "origin", "https://ghe.example.test/example/delta.git"]);
+    }
+    fs.writeFileSync(path.join(HOME, "gh.log"), "");
+    const before = await page.evaluate(() => active.key);
+    await page.evaluate((p) => openTab(active.machine, p), delta);
+    await waitFor("a thread in delta", async () => (await page.evaluate(() => projectName(active))) === "delta", 10000);
+    try {
+      await openPulls();
+      await waitFor("both hosts' rows", async () => (await prNumbers()).length === 4, 15000);
+      check(/auth token --hostname ghe\.example\.test/.test(readLog("gh.log")) && /api graphql --hostname ghe\.example\.test /.test(readLog("gh.log")), "gh never searched the Enterprise Server");
+      check((await page.getAttribute(`${prRow(44)} .host`, "title")) === "ghe.example.test" && (await page.getAttribute(`${prRow(42)} .host`, "title")) === "github.com", "the rows don't name their hosts");
+      await tapOrClick('#page-view [data-pr="filters"]');
+      await press(page.locator("#side-menu button", { hasText: "Host" }));
+      check((await page.locator("#side-menu button .label").allTextContents()).join() === "All hosts,github.com,ghe.example.test", "the Host filter's choices");
+      await press(page.locator("#side-menu button", { hasText: "ghe.example.test" }));
+      await waitFor("ghe.example.test's only", async () => (await prNumbers()).join() === "#44");
+      check(/ghe\.example\.test/.test(await text('#page-view [data-pr="filters"]')), "the filter button doesn't show the host");
+      await tapOrClick('#page-view [data-pr="filters"]');
+      await press(page.locator("#side-menu button", { hasText: "Host" }));
+      await press(page.locator("#side-menu button", { hasText: "All hosts" }));
+      await waitFor("every host again", async () => (await prNumbers()).length === 4);
+      await leavePulls();
+    } finally {
+      await page.evaluate(() => closeTab(active));
+      await page.evaluate((k) => tabByKey(k) && activate(tabByKey(k)), before);
+    }
   });
 
   await step("app view: back to the terminal", async () => {

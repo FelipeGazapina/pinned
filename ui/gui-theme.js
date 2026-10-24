@@ -47,6 +47,49 @@ function readThemeJson(key) {
 }
 let customThemes = (readThemeJson(CUSTOM_THEMES_KEY) ?? []).filter((t) => t && typeof t.id === "string" && typeof t.label === "string" && t.colors && ["light", "dark"].includes(t.appearance));
 const saveCustomThemes = () => save(CUSTOM_THEMES_KEY, JSON.stringify(customThemes));
+function installCustomTheme(theme) {
+  if (RESERVED_THEME_IDS.has(theme.id) || customThemes.some((t) => t.id === theme.id)) throw new Error(`A theme named "${theme.label}" is already installed.`);
+  customThemes = [...customThemes, theme];
+  saveCustomThemes();
+  applyTheme();
+  return theme;
+}
+function updateCustomTheme(theme) {
+  if (!customThemes.some((t) => t.id === theme.id)) throw new Error(`The theme "${theme.label}" is not installed.`);
+  customThemes = customThemes.map((t) => (t.id === theme.id ? theme : t));
+  saveCustomThemes();
+  applyTheme();
+  return theme;
+}
+/** An Open VSX install or update: the collection's themes replace the ones installed, in place. */
+function replaceThemeCollection(collectionId, themes, expected) {
+  const inCollection = (t) => t.collection?.id === collectionId;
+  if (JSON.stringify(customThemes.filter(inCollection)) !== JSON.stringify(expected)) throw new Error("Your installed themes changed while this package was downloading. Try again.");
+  const taken = themes.find((t) => RESERVED_THEME_IDS.has(t.id) || customThemes.some((c) => c.id === t.id && !inCollection(c)));
+  if (taken) throw new Error(`A theme named "${taken.label}" is already installed.`);
+  const at = customThemes.findIndex(inCollection);
+  const rest = customThemes.filter((t) => !inCollection(t));
+  customThemes = at < 0 ? [...rest, ...themes] : [...rest.slice(0, at), ...themes, ...rest.slice(at)];
+  saveCustomThemes();
+  applyTheme();
+  return themes;
+}
+/** The toast T3 shows after an import: one theme by name, or how many, then their names. */
+function themesImported(themes, updated) {
+  const verb = updated ? "updated" : "added";
+  flash(`${themes.length === 1 ? `${themes[0].label} ${verb}` : `${themes.length} themes ${verb}`} · ${themes.map((t) => t.label).join(", ")}`);
+}
+/** A pasted or single file theme is put to use: its one appearance, or the whole theme. */
+function useImportedTheme(theme) {
+  const modes = modesOf(theme);
+  if (modes.length === 1) {
+    setThemeHalf(modes[0], theme.id);
+    flash(`${theme.label} added · It’s now your ${modes[0]} theme.`);
+  } else {
+    setTheme(theme.id);
+    flash(`${theme.label} added · It’s now active.`);
+  }
+}
 const themeById = (id) => (id ? THEME_PALETTES.builtIn.find((t) => t.id === id) ?? customThemes.find((t) => t.id === id) ?? null : null);
 
 /** The stored choice, as T3 keeps it: a base theme ("system", "light", "dark" or a palette id), the
@@ -88,6 +131,7 @@ function paintTheme(appearance, colors, id) {
     for (const role of THEME_PALETTES.roles) themeRoot.style.removeProperty(themeVar(role));
     for (const role of CHANNEL_ROLES) themeRoot.style.removeProperty(`${themeVar(role)}-rgb`);
   }
+  applyContrast();
   themeSurroundings();
 }
 
@@ -126,11 +170,39 @@ function themeSurroundings() {
   for (const t of tabs) t.term.options.theme = theme;
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = guiOn() ? getComputedStyle(themeRoot).getPropertyValue("--g-canvas").trim() : "#0f1115";
+  syncWindowTheme();
+}
+
+/** T3's resolveDesktopTheme: the appearance the window itself should take, or null to follow the
+ * system. Under System that is still the palette's own appearance when it has only one. */
+function desktopTheme(s = themeState()) {
+  if (s.mode === "system") {
+    const t = themeById(s.theme);
+    const has = (m) => !!s.halves[m] || !!(t && colorsFor(t, m));
+    return t && !(has("light") && has("dark")) ? t.appearance : null;
+  }
+  if (s.halves[s.mode]) return s.mode;
+  const t = themeById(s.theme);
+  return t && !colorsFor(t, s.mode) ? t.appearance : s.mode;
+}
+/** T3's desktop shell sets nativeTheme.themeSource, so the window's own chrome, menus, scrollbars and
+ * the browser panel's page follow the app's appearance. The terminal view leaves it to the system. */
+let windowTheme;
+function syncWindowTheme() {
+  if (!TAURI || themeRoot.dataset.themeId === THEME_PREVIEW_ID) return;
+  const want = guiOn() ? desktopTheme() : null;
+  if (want === windowTheme) return;
+  windowTheme = want;
+  TAURI.window.getCurrentWindow().setTheme(want).catch((err) => {
+    console.error("Couldn't set the window's appearance", err);
+    if (windowTheme === want) windowTheme = undefined;
+  });
 }
 new MutationObserver(themeSurroundings).observe(document.body, { attributes: true, attributeFilter: ["data-mode"] });
 new MutationObserver(themeSurroundings).observe(document.getElementById("terms"), { childList: true });
 systemDark.addEventListener("change", () => themeState().mode === "system" && applyTheme());
 window.addEventListener("storage", (e) => {
+  if (e.key === CONTRAST_KEY || e.key === null) applyContrast(), showContrast();
   if (![THEME_KEY, THEME_MODE_KEY, THEME_HALVES_KEY, CUSTOM_THEMES_KEY, null].includes(e.key)) return;
   if (e.key === CUSTOM_THEMES_KEY || e.key === null) customThemes = (readThemeJson(CUSTOM_THEMES_KEY) ?? []).filter((t) => t?.id && t.colors);
   applyTheme();
@@ -223,12 +295,87 @@ onGuiKey("a", () => openThemePicker(), { alt: true });
 onGuiKey("a", () => cycleAppearance(), { alt: true, shift: true });
 onGuiKey("t", () => toggleThemeEditor(), { alt: true, shift: true });
 
+/** appearanceContrast.ts: 50 to 200%. Under 100 the text and borders fade toward their surface, over
+ * 100 the text moves toward black or white and the borders toward the text (gui-theme.css). */
+const CONTRAST_KEY = "gui-contrast";
+const CONTRAST = { min: 50, max: 200, standard: 100 };
+function contrastLevel() {
+  const n = Number(load(CONTRAST_KEY));
+  return Number.isInteger(n) && n >= CONTRAST.min && n <= CONTRAST.max ? n : CONTRAST.standard;
+}
+/** Text is moved on its channels (--g-fg-rgb and kin), so the many rules that read them translucently
+ * follow too, as everything reading T3's --contrast-* variables does. Each against its own surface. */
+const CONTRAST_TEXT = [["--g-fg-rgb", "--g-canvas-rgb"], ["--g-muted-rgb", "--g-canvas-rgb"], ["--g-side-fg-rgb", "--g-sidebar"], ["--g-side-muted-rgb", "--g-sidebar"]];
+function applyContrast() {
+  const c = contrastLevel();
+  for (const [name] of CONTRAST_TEXT) themeRoot.style.removeProperty(name);
+  if (c === CONTRAST.standard) delete themeRoot.dataset.contrast;
+  else themeRoot.dataset.contrast = c;
+  themeRoot.style.setProperty("--g-contrast-base", `${Math.min(c, 100)}%`);
+  themeRoot.style.setProperty("--g-contrast-boost", `${Math.max(c - 100, 0)}%`);
+  themeRoot.style.setProperty("--g-contrast-border-boost", `${Math.max(c - 100, 0) / 4}%`);
+  if (c === CONTRAST.standard) return;
+  const css = getComputedStyle(themeRoot);
+  const color = (name) => {
+    const v = css.getPropertyValue(name).trim();
+    return parseColor(/^[\d.]+\s+[\d.]+\s+[\d.]+$/.test(v) ? `rgb(${v})` : v)?.color;
+  };
+  const lab = ({ L, C, h }) => [L, C * Math.cos((h * Math.PI) / 180), C * Math.sin((h * Math.PI) / 180)];
+  const mix = (x, y, t) => x.map((v, i) => v + (y[i] - v) * t);
+  const target = lab(rgbToOklch(themeRoot.dataset.appearance === "light" ? BLACK : WHITE));
+  for (const [name, surface] of CONTRAST_TEXT) {
+    const text = color(name);
+    const under = color(surface);
+    if (!text || !under) continue;
+    const [L, a, b] = mix(mix(lab(under), lab(text), Math.min(c, 100) / 100), target, Math.max(c - 100, 0) / 100);
+    const rgb = oklchToRgb({ L, C: Math.hypot(a, b), h: (Math.atan2(b, a) * 180) / Math.PI });
+    themeRoot.style.setProperty(name, `${rgb.r} ${rgb.g} ${rgb.b}`);
+  }
+}
+function setContrast(c) {
+  if (c === CONTRAST.standard) localStorage.removeItem(CONTRAST_KEY);
+  else save(CONTRAST_KEY, String(c));
+  applyContrast();
+}
+
+/** AppearanceSettingsPanel.tsx's Interface row. */
+function contrastSettingsHtml() {
+  return `<div class="look" id="contrast-row"><div class="contrast-head"><label for="appearance-contrast">Contrast</label><button type="button" class="reset" data-contrast-reset aria-label="Reset contrast to default" title="Reset to default">${icon("undo-2")}</button></div>
+    <p class="meta">Adjust the contrast of colors and borders across the interface.</p>
+    <div class="contrast-control"><output for="appearance-contrast"></output><input type="range" class="settings-slider" id="appearance-contrast" aria-label="Contrast" min="${CONTRAST.min}" max="${CONTRAST.max}" step="5"></div></div>`;
+}
+function showContrast() {
+  const row = document.getElementById("contrast-row");
+  if (!row) return;
+  const c = contrastLevel();
+  const ratio = (c - CONTRAST.min) / (CONTRAST.max - CONTRAST.min);
+  const input = row.querySelector("input");
+  input.value = c;
+  input.style.setProperty("--settings-slider-progress", `${ratio * 100}%`);
+  input.style.setProperty("--settings-slider-fill-offset", `${0.5 - ratio}rem`);
+  row.querySelector("output").textContent = `${c}%`;
+  row.querySelector("[data-contrast-reset]").hidden = c === CONTRAST.standard;
+}
+document.addEventListener("input", (e) => {
+  if (e.target.id !== "appearance-contrast") return;
+  const c = Number(e.target.value);
+  if (!Number.isInteger(c) || c < CONTRAST.min || c > CONTRAST.max) return;
+  setContrast(c);
+  showContrast();
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest?.("[data-contrast-reset]")) return;
+  setContrast(CONTRAST.standard);
+  showContrast();
+});
+
 /** ThemeSettings.tsx: the Color scheme tiles, then the theme library. */
 function themeSettingsHtml() {
   return `<section id="theme-section" aria-label="Colors &amp; themes"></section>`;
 }
 function bindThemeSettings() {
   renderThemeSection();
+  showContrast();
 }
 
 const WIREFRAME_LINE = "rgb(127 127 127 / 0.25)";
@@ -255,7 +402,7 @@ function renderThemeSection() {
     const aria = { system: "Follow the system appearance", light: "Use light mode", dark: "Use dark mode" }[mode];
     return `<button type="button" class="mode-tile${s.mode === mode ? " on" : ""}" data-theme-mode="${mode}" aria-pressed="${s.mode === mode}" aria-label="${aria}"><span class="wireframe">${frame}</span><span class="label">${label}</span></button>`;
   }).join("");
-  const cards = themeCards().map((card) => {
+  const cardHtml = (card) => {
     const tip = card.previews.length === 1 ? `Use for ${card.previews[0].mode} mode only` : "Use for both light and dark";
     const circles = card.previews.map((p) => {
       const picked = owners[p.mode] === card.id;
@@ -266,13 +413,13 @@ function renderThemeSection() {
       <div class="circles">${circles}</div>
       <div class="foot"><button type="button" class="name" data-theme-choose="${esc(card.id ?? "")}">${esc(card.label)}</button>
         ${action("duplicate", "copy", "Duplicate theme", "Duplicate")}${card.custom ? action("edit", "pencil", "Edit theme", "Edit") + action("export", "upload", "Export theme file", "Export") + action("remove", "trash-2", "Remove theme", "Remove") : ""}</div></div>`;
-  }).join("");
+  };
+  const cards = themeGroups().map((g) => (g.length > 1 ? collectionCardHtml(g, owners) : cardHtml(g[0]))).join("");
   section.innerHTML = `<h3 class="theme-head">Color scheme</h3>
     <div class="mode-tiles" role="group" aria-label="Appearance mode">${tiles}</div>
     <div class="themes-head"><h3>Themes</h3><span class="actions">
       <button type="button" class="outline" data-theme-action="create">${icon("paintbrush")}Create theme</button>
-      <button type="button" class="outline" data-theme-action="import">${icon("plus")}Add theme</button>
-      <input type="file" accept=".json,application/json" multiple hidden id="theme-file"></span></div>
+      <button type="button" class="outline" data-theme-action="import">${icon("plus")}Add theme</button></span></div>
     <div class="theme-cards">${cards}</div>`;
 }
 
@@ -280,13 +427,21 @@ document.addEventListener("click", (e) => {
   const section = e.target.closest?.("#theme-section");
   if (!section) return;
   const card = (id) => themeCards().find((c) => (c.id ?? "") === id);
+  const variant = e.target.closest("[data-theme-variant]");
+  const collection = e.target.closest(".theme-card.collection")?.dataset.themeCollection;
+  if (variant) {
+    const theme = collectionOf(collection)[Number(variant.dataset.themeVariant)];
+    collectionVariant.set(collection, Number(variant.dataset.themeVariant));
+    return chooseHalf(variant.dataset.themeVariantMode, theme.id);
+  }
+  if (collection && !e.target.closest("[data-theme-action]")) return useCollectionDefaults(collection);
   const el = e.target.closest("[data-theme-mode], [data-theme-half], [data-theme-action], [data-theme-choose], .theme-card");
   if (!el) return;
   if (el.dataset.themeMode) return setAppearanceMode(el.dataset.themeMode);
   if (el.dataset.themeHalf) return chooseHalf(el.dataset.themeHalf, el.dataset.themeCard || null);
   const action = el.dataset.themeAction;
   if (action === "create") return openThemeEditor({ seedId: activeThemeId(resolvedAppearance()) });
-  if (action === "import") return document.getElementById("theme-file").click();
+  if (action === "import") return openThemeImport();
   const target = card(el.dataset.themeCard ?? el.dataset.themeChoose ?? "");
   if (!target) return;
   if (action === "duplicate") return openThemeEditor({ seedId: target.id, seedName: `${target.label} copy` });
@@ -295,23 +450,63 @@ document.addEventListener("click", (e) => {
   if (action === "remove") return confirmRemoveTheme(themeById(target.id));
   chooseCard(target);
 });
-document.addEventListener("change", async (e) => {
-  if (e.target.id !== "theme-file") return;
-  for (const file of e.target.files) {
-    try {
-      const theme = parseThemeFile(JSON.parse(await file.text()));
-      const had = customThemes.some((t) => t.id === theme.id);
-      customThemes = [...customThemes.filter((t) => t.id !== theme.id), theme];
-      saveCustomThemes();
-      if (modesOf(theme).length === 1) setThemeHalf(theme.appearance, theme.id);
-      else setTheme(theme.id);
-      flash(had ? `${theme.label} updated` : `${theme.label} added`);
-    } catch (err) {
-      flash(`Couldn't add ${file.name}: ${err.message}`);
-    }
+/** The library's cards, with an Open VSX extension's themes on one card (T3's customThemeCollections). */
+function themeGroups() {
+  const groups = new Map();
+  for (const card of themeCards()) {
+    const key = card.custom && themeById(card.id).collection ? `collection:${themeById(card.id).collection.id}` : `card:${card.id}`;
+    groups.set(key, [...(groups.get(key) ?? []), card]);
   }
-  e.target.value = "";
-});
+  return [...groups.values()];
+}
+/** The words every variant's name shares are dropped: "Catppuccin Latte" shows as "Latte". */
+function variantLabels(labels) {
+  const words = labels.map((l) => l.trim().split(/\s+/));
+  const shared = words[0].findIndex((w, i) => words.some((ws) => ws[i]?.toLowerCase() !== w.toLowerCase()));
+  const prefix = shared === -1 ? words[0].length - 1 : shared;
+  return labels.map((l, i) => words[i].slice(Math.max(0, prefix)).join(" ").trim() || l);
+}
+const collectionVariant = new Map();
+/** CustomThemeCollectionCard: per appearance, the variant in use (or the first) as a circle that fans
+ * out the others on hover or focus; the footer acts on the variant last picked. */
+function collectionCardHtml(cards, owners) {
+  const themes = cards.map((c) => themeById(c.id));
+  const cid = themes[0].collection.id;
+  const label = themes[0].collection.label;
+  const names = variantLabels(themes.map((t) => t.label));
+  const active = themes.findIndex((t) => owners.light === t.id || owners.dark === t.id);
+  const index = Math.min(collectionVariant.get(cid) ?? (active < 0 ? 0 : active), themes.length - 1);
+  const current = cards[index];
+  const modes = ["light", "dark"].map((mode) => {
+    const options = cards.flatMap((card, i) => card.previews.filter((p) => p.mode === mode).map((preview) => ({ i, preview, name: names[i], on: owners[mode] === card.id })));
+    if (!options.length) return "";
+    const sel = options.find((o) => o.on) ?? options[0];
+    const x = mode === "light" ? -52 : 52;
+    const fan = options.length > 1 ? options.map((o, n) => {
+      const t = n / (options.length - 1) - 0.5;
+      return `<button type="button" class="variant-option${o.on ? " picked" : ""}" style="--x:${x}px;--cx:${x + t * 68}px;--cy:${Math.abs(t) * 10}px;--d:${n * 35}ms" data-theme-variant="${o.i}" data-theme-variant-mode="${mode}" aria-label="Use ${esc(o.name)} for ${mode} mode${o.on ? ", currently active" : ""}" aria-pressed="${o.on}" title="Use ${esc(o.name)} for ${mode} mode">${previewCircle(o.preview, "mini")}</button>`;
+    }).join("") : "";
+    const aria = options.length > 1 ? `Choose ${mode} variant, ${options.length} options, currently ${esc(sel.name)}` : `Use ${mode} variant, currently ${esc(sel.name)}`;
+    return `<div class="variant-mode" data-mode="${mode}" style="--x:${x}px">
+      <button type="button" class="pick root${sel.on ? " picked" : ""}" data-theme-variant="${sel.i}" data-theme-variant-mode="${mode}" aria-label="${aria}" aria-pressed="${sel.on}" title="${mode === "light" ? "Light" : "Dark"}: ${esc(sel.name)}">${previewCircle(sel.preview)}${sel.on ? `<span class="badge">${icon(mode === "light" ? "sun" : "moon")}</span>` : ""}</button>
+      <span class="variant-label"><span>${esc(sel.name)}</span>${options.length > 1 ? `<span class="more">+${options.length - 1}</span>` : ""}</span>${fan}</div>`;
+  }).join("");
+  const action = (name, ic, tip, aria) => `<button type="button" class="icon${name === "remove" ? " danger" : ""}" data-theme-action="${name}" data-theme-card="${esc(current.id)}" title="${tip}" aria-label="${aria}">${icon(ic)}</button>`;
+  return `<div class="theme-card collection" data-theme-collection="${esc(cid)}" title="Use the first variants for light and dark">
+    <div class="circles variants" role="group" aria-label="Light and dark theme variants">${modes}</div>
+    <div class="foot"><button type="button" class="name" data-theme-collection-use aria-label="Use ${esc(label)}, ${esc(current.label)} variant">${esc(label)}</button>
+      ${action("duplicate", "copy", "Duplicate theme", `Duplicate ${esc(current.label)}`)}${action("edit", "pencil", "Edit theme", `Edit ${esc(current.label)}`)}${action("export", "upload", "Export theme file", `Export ${esc(current.label)}`)}${action("remove", "trash-2", "Remove themes", `Remove themes from ${esc(label)}`)}</div></div>`;
+}
+const collectionOf = (cid) => customThemes.filter((t) => t.collection?.id === cid);
+function useCollectionDefaults(cid) {
+  const themes = collectionOf(cid);
+  if (themes.length === 1) return chooseCard(themeCards().find((c) => c.id === themes[0].id));
+  const light = themes.find((t) => colorsFor(t, "light"));
+  const dark = themes.find((t) => colorsFor(t, "dark"));
+  collectionVariant.set(cid, 0);
+  if (light) chooseHalf("light", light.id);
+  if (dark) chooseHalf("dark", dark.id);
+}
 
 /** Picking one circle: T3's assignHalf, with its case for the standard theme under a palette base. */
 function chooseHalf(mode, id) {
@@ -327,19 +522,42 @@ function chooseHalf(mode, id) {
 }
 
 function confirmRemoveTheme(theme) {
-  showDialog(`<div class="dialog-head"><h2>Remove “${esc(theme.label)}”?</h2><p class="muted">You can bring it back anytime by importing its JSON file.</p></div>
-    <div class="theme-dialog-actions"><button type="button" class="outline" data-dialog-cancel>Cancel</button><button type="button" class="danger" data-dialog-remove>Remove theme</button></div>`);
+  const collection = theme.collection ? collectionOf(theme.collection.id) : [];
+  if (collection.length < 2) {
+    showDialog(`<div class="dialog-head"><h2>Remove “${esc(theme.label)}”?</h2><p class="muted">You can bring it back anytime by importing its JSON file.</p></div>
+      <div class="theme-dialog-actions"><button type="button" class="outline" data-dialog-cancel>Cancel</button><button type="button" class="danger" data-dialog-remove>Remove theme</button></div>`);
+  } else {
+    showDialog(`<div class="dialog-head"><h2>Remove themes from “${esc(theme.collection.label)}”?</h2><p class="muted">Select the variants you want to remove. You can restore them by importing the extension again.</p></div>
+      <div class="theme-remove-grid">${collection.map((t) => `<label class="theme-remove-option"><input type="checkbox" value="${esc(t.id)}" aria-label="${esc(t.label)}">
+        <span class="previews">${modesOf(t).map((mode) => previewCircle({ mode, colors: colorsFor(t, mode) }, "small")).join("")}</span><span class="label">${esc(t.label)}</span></label>`).join("")}</div>
+      <div class="theme-dialog-actions"><button type="button" class="outline" data-dialog-cancel>Cancel</button><button type="button" class="danger" data-dialog-remove disabled>Remove selected</button></div>`);
+    const remove = shellDialog.querySelector("[data-dialog-remove]");
+    shellDialog.querySelector(".theme-remove-grid").onchange = () => {
+      const n = shellDialog.querySelectorAll(".theme-remove-grid input:checked").length;
+      remove.disabled = !n;
+      remove.textContent = `Remove selected${n ? ` (${n})` : ""}`;
+    };
+  }
   shellDialog.querySelector("[data-dialog-cancel]").onclick = closeDialog;
   shellDialog.querySelector("[data-dialog-remove]").onclick = () => {
+    const ids = collection.length < 2 ? [theme.id] : [...shellDialog.querySelectorAll(".theme-remove-grid input:checked")].map((i) => i.value);
     closeDialog();
-    removeTheme(theme.id);
+    removeThemes(ids);
   };
 }
-function removeTheme(id) {
+/** T3's handleConfirmRemoveTheme: a removed base falls back to the mode, keeping the other halves. */
+function removeThemes(ids) {
+  const removed = new Set(ids);
   const s = themeState();
-  if (s.theme === id) setTheme(s.mode === "system" ? "system" : s.mode);
-  for (const m of ["light", "dark"]) if (themeState().halves[m] === id) setThemeHalf(m, null);
-  customThemes = customThemes.filter((t) => t.id !== id);
+  const halves = readThemeJson(THEME_HALVES_KEY) ?? {};
+  const removesBase = removed.has(s.theme);
+  if (removesBase) setTheme(s.mode === "system" ? "system" : s.mode);
+  for (const m of ["light", "dark"]) {
+    if (halves[m] === undefined) continue;
+    if (removed.has(halves[m])) setThemeHalf(m, null);
+    else if (removesBase) setThemeHalf(m, halves[m]);
+  }
+  customThemes = customThemes.filter((t) => !removed.has(t.id));
   saveCustomThemes();
   applyTheme();
 }
@@ -348,6 +566,7 @@ function themeFile(theme) {
   const canon = (colors) => Object.fromEntries(Object.entries(colors).map(([k, v]) => [k, canonicalColor(v) ?? v]));
   const file = { version: 1, id: theme.id, name: theme.label, appearance: theme.appearance, colors: canon(theme.colors) };
   if (theme.variants) file.variants = Object.fromEntries(Object.entries(theme.variants).map(([m, c]) => [m, canon(c)]));
+  if (theme.collection) file.collection = theme.collection;
   if (theme.managed) file.managed = true;
   return `${JSON.stringify(file, null, 2)}\n`;
 }
@@ -379,6 +598,11 @@ function parseThemeFile(file) {
   const theme = { id, label: name, appearance: file.appearance, colors: colorsOf(file.colors, file.appearance) };
   const other = file.appearance === "light" ? "dark" : "light";
   if (file.variants?.[other]) theme.variants = { [other]: colorsOf(file.variants[other], other) };
+  if (file.collection !== undefined) {
+    const c = file.collection;
+    if (!c || typeof c.id !== "string" || !/^[a-z0-9][a-z0-9.:-]{0,127}$/i.test(c.id) || typeof c.label !== "string" || !c.label.trim() || c.label.trim().length > 48) throw new Error("Theme collections need a valid id and label.");
+    theme.collection = { id: c.id, label: c.label.trim() };
+  }
   if (file.managed) theme.managed = true;
   return theme;
 }
@@ -417,6 +641,7 @@ function openThemeEditor({ editingId = null, seedId = null, seedName = "", appea
   };
   const panel = document.createElement("div");
   panel.id = "theme-editor";
+  panel.dataset.themeEditorPanel = "";
   panel.setAttribute("role", "dialog");
   panel.setAttribute("aria-label", editingId ? "Edit theme" : "Create theme");
   document.body.append(panel);
@@ -428,6 +653,8 @@ function openThemeEditor({ editingId = null, seedId = null, seedName = "", appea
 
 function closeThemeEditor() {
   clearInspectHover();
+  closeColorPicker();
+  stopUsageWatch();
   document.getElementById("theme-editor")?.remove();
   themeEditor = null;
   if (themeRoot.dataset.themeId === THEME_PREVIEW_ID) delete themeRoot.dataset.themeId;
@@ -455,12 +682,15 @@ function previewThemeEditor() {
   if (was !== themeEditor.appearance) rehighlight();
 }
 
+/** ThemeColorPicker.tsx's ThemeColorField: the label toggles where the color is used, the swatch opens
+ * the picker, and the hex field types a value. */
 function themeField(role, label) {
   const value = themeEditor.colors[themeEditor.appearance][role];
-  const hex = colorHex(value) ?? "#000000";
-  return `<div class="te-field${themeEditor.selected === role ? " selected" : ""}" data-theme-color-role="${role}"><span class="te-label">${esc(label)}</span>
-    <label class="te-swatch" style="background:${esc(value)}" title="Choose ${esc(label)} color"><input type="color" value="${hex.slice(0, 7)}" data-role="${role}" aria-label="Choose ${esc(label)} color"></label>
-    <input class="te-value" value="${esc(hex)}" data-role="${role}" spellcheck="false" autocomplete="off" aria-label="${esc(label)}"></div>`;
+  const selected = themeEditor.selected === role;
+  return `<div class="te-field${selected ? " selected" : ""}" data-theme-color-role="${role}">
+    <button type="button" class="te-label" data-te-usage="${role}" aria-pressed="${selected}" aria-label="${selected ? "Hide" : "Show"} ${esc(label)} usage" title="${selected ? "Hide" : "Show"} where ${esc(label)} is used">${esc(label)}</button>
+    <button type="button" class="te-swatch" data-te-pick="${role}" aria-label="Choose ${esc(label)} color" title="Choose ${esc(label)} color"><span style="background:${esc(value)}"></span></button>
+    <input class="te-value" value="${esc(colorHex(value) ?? value)}" data-role="${role}" spellcheck="false" autocomplete="off" aria-label="${esc(label)} hex value"></div>`;
 }
 
 function renderThemeEditor() {
@@ -475,7 +705,7 @@ function renderThemeEditor() {
   const fields = groups.length
     ? groups.map(([group, f]) => `<div class="te-group">${group ? `<h4>${esc(group)}</h4>` : ""}${f.map(([role, label]) => themeField(role, label)).join("")}</div>`).join("")
     : `<p class="te-empty">No matches.</p>`;
-  const sub = ed.inspecting ? "Select an element · Esc to cancel" : ed.selected ? familyLabel(ed.selected) : "Select a color below";
+  const sub = editorSubtitle();
   panel.dataset.minimized = ed.minimized;
   panel.innerHTML = `<header class="te-head"><div class="te-title"><b>${editing ? "Edit theme" : "Create theme"}</b>${ed.minimized ? "" : `<span>${sub}</span>`}</div>
       <button type="button" class="te-inspect${ed.inspecting ? " on" : ""}" data-te="inspect" aria-label="${ed.inspecting ? "Cancel inspecting app colors" : "Inspect app colors"}" title="${ed.inspecting ? "Cancel and clear the selection" : "Pick a color from the app"}">${ed.inspecting ? "Cancel" : "Inspect"}</button>
@@ -493,7 +723,22 @@ function renderThemeEditor() {
     <footer class="te-foot"><button type="button" class="ghost" data-te="cancel">Cancel</button><button type="button" class="primary" data-te="save"></button></footer>
     <span class="te-grip" aria-hidden="true"></span>`;
   refreshThemeEditorControls();
+  watchUsage();
+  if (!colorPicker) return;
+  const anchor = panel.querySelector(`[data-te-pick="${colorPicker.role}"]`);
+  if (!anchor) return closeColorPicker();
+  colorPicker.anchor = anchor;
+  syncColorPicker(true);
+  placeColorPicker();
 }
+
+const editorSubtitle = () => {
+  const ed = themeEditor;
+  if (ed.inspecting) return "Select an element · Esc to cancel";
+  if (!ed.selected) return "Select a color below";
+  const n = usageWatch?.count ?? 0;
+  return `${familyLabel(ed.selected)} · ${n} ${n === 1 ? "use" : "uses"}`;
+};
 
 /** What the name decides, kept in place while typing: the save label and the locked appearances. */
 function refreshThemeEditorControls() {
@@ -544,14 +789,21 @@ function bindThemeEditor(panel) {
     }
     if (act === "save") return saveThemeEditor();
     if (act === "inspect") return setInspecting(!ed.inspecting);
+    const usage = e.target.closest("[data-te-usage]")?.dataset.teUsage;
+    if (usage) {
+      ed.selected = ed.selected === usage ? null : usage;
+      renderThemeEditor();
+      return panel.querySelector(`[data-te-usage="${usage}"]`)?.focus();
+    }
+    const pick = e.target.closest("[data-te-pick]");
+    if (pick) return colorPicker?.role === pick.dataset.tePick ? closeColorPicker() : openColorPicker(pick.dataset.tePick, pick);
   });
-  panel.addEventListener("focusin", (e) => {
-    const field = e.target.closest("[data-theme-color-role]");
-    if (!field) return;
-    themeEditor.selected = field.dataset.themeColorRole;
-    for (const f of panel.querySelectorAll(".te-field")) f.classList.toggle("selected", f === field);
-    panel.querySelector(".te-title span").textContent = familyLabel(themeEditor.selected);
-  });
+  for (const type of ["focusin", "pointerdown"]) {
+    panel.addEventListener(type, (e) => {
+      const field = e.target.closest(".te-value, .te-swatch")?.closest("[data-theme-color-role]");
+      if (field) selectThemeField(field.dataset.themeColorRole);
+    });
+  }
   panel.addEventListener("input", (e) => {
     const ed = themeEditor;
     if (e.target.id === "theme-name") {
@@ -571,15 +823,15 @@ function bindThemeEditor(panel) {
     const role = e.target.dataset.role;
     if (!role) return;
     setThemeEditorColor(role, e.target.value);
-    const field = e.target.closest(".te-field");
-    field.querySelector(".te-swatch").style.background = themeEditor.colors[ed.appearance][role];
-    if (e.target.type === "color") field.querySelector(".te-value").value = e.target.value;
-    else if (parseColor(e.target.value)) field.querySelector('input[type="color"]').value = (colorHex(e.target.value) ?? "#000000").slice(0, 7);
+    e.target.closest(".te-field").querySelector(".te-swatch span").style.background = themeEditor.colors[ed.appearance][role];
+    if (colorPicker?.role === role) syncColorPicker(true);
   });
   panel.addEventListener("change", (e) => {
     const ed = themeEditor;
     if (e.target.dataset.te === "advanced") {
       ed.advanced = e.target.checked;
+      if (!ed.advanced && !["canvas", "accent"].includes(ed.selected)) ed.selected = null;
+      closeColorPicker();
       if (!ed.advanced && ed.regenerate) {
         for (const m of ["light", "dark"]) ed.colors[m] = vividThemeColors(chatColors(m), ed.colors[m].canvas, ed.colors[m].accent, m);
         ed.regenerate = false;
@@ -610,6 +862,7 @@ function bindThemeEditor(panel) {
       const left = Math.min(Math.max(8, ev.clientX - dx), innerWidth - r.width - 8);
       const top = Math.min(Math.max(8, ev.clientY - dy), innerHeight - 48);
       Object.assign(panel.style, { left: `${left}px`, top: `${top}px`, right: "auto", bottom: "auto" });
+      placeColorPicker();
     };
     const up = () => removeEventListener("pointermove", move) || removeEventListener("pointerup", up);
     addEventListener("pointermove", move);
@@ -677,6 +930,22 @@ const FAMILY_PROBES = {
   terminalBackground: ["terminalBackground", "terminalForeground"], error: ["error"], warning: ["warning", "warningForeground"],
 };
 const PROBE_PAINTS = [["backgroundColor", "backgroundImage"], ["borderTopColor", "borderRightColor", "borderBottomColor", "borderLeftColor", "outlineColor", "boxShadow"], ["color", "fill", "stroke"]];
+/** Paints each role's variables (and their channels) in the probe color; the return undoes it. */
+function probeRoles(roles) {
+  const vars = roles.flatMap((r) => [[themeVar(r), "#01fea7"], ...(CHANNEL_ROLES.includes(r) ? [[`${themeVar(r)}-rgb`, "1 254 167"]] : [])]);
+  const saved = vars.map(([v]) => themeRoot.style.getPropertyValue(v));
+  for (const [v, probe] of vars) themeRoot.style.setProperty(v, probe);
+  return () => vars.forEach(([v], i) => themeRoot.style.setProperty(v, saved[i]));
+}
+function withProbeSession(run) {
+  themeRoot.dataset.themeTokenProbe = "";
+  try {
+    return run();
+  } finally {
+    void getComputedStyle(themeRoot).color;
+    delete themeRoot.dataset.themeTokenProbe;
+  }
+}
 function familyAt(el) {
   const paints = () => {
     const s = getComputedStyle(el);
@@ -684,19 +953,13 @@ function familyAt(el) {
   };
   const before = paints();
   const found = [null, null, null];
-  themeRoot.dataset.themeTokenProbe = "";
-  for (const [family, roles] of Object.entries(FAMILY_PROBES)) {
-    const vars = roles.map(themeVar);
-    const channels = roles.filter((r) => CHANNEL_ROLES.includes(r)).map((r) => `${themeVar(r)}-rgb`);
-    const saved = vars.map((v) => themeRoot.style.getPropertyValue(v));
-    const savedChannels = channels.map((v) => themeRoot.style.getPropertyValue(v));
-    for (const v of vars) themeRoot.style.setProperty(v, "#01fea7");
-    for (const v of channels) themeRoot.style.setProperty(v, "1 254 167");
-    paints().forEach((p, i) => (found[i] ??= p !== before[i] ? family : null));
-    vars.forEach((v, i) => themeRoot.style.setProperty(v, saved[i]));
-    channels.forEach((v, i) => themeRoot.style.setProperty(v, savedChannels[i]));
-  }
-  delete themeRoot.dataset.themeTokenProbe;
+  withProbeSession(() => {
+    for (const [family, roles] of Object.entries(FAMILY_PROBES)) {
+      const restore = probeRoles(roles);
+      paints().forEach((p, i) => (found[i] ??= p !== before[i] ? family : null));
+      restore();
+    }
+  });
   return found.find(Boolean) ?? null;
 }
 const familyLabel = (role) => THEME_FAMILIES.flatMap(([, f]) => f).find(([r]) => r === role)?.[1] ?? role;
@@ -722,7 +985,7 @@ function clearInspectHover() {
   const box = document.getElementById("theme-inspector-hover");
   if (box) box.hidden = true;
 }
-const outsideEditor = (e) => e.target instanceof Element && !e.target.closest("#theme-editor");
+const outsideEditor = (e) => e.target instanceof Element && !e.target.closest("[data-theme-editor-panel]");
 const inspecting = () => themeEditor?.inspecting;
 document.addEventListener("pointerover", (e) => {
   if (!inspecting() || !outsideEditor(e)) return;
@@ -773,5 +1036,329 @@ function selectThemeFamily(role) {
   field?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   field?.querySelector(".te-value")?.focus({ preventScroll: true });
 }
+/** ThemeColorPicker.tsx's popover: a saturation and brightness plane, a hue slider, and HEX and RGB
+ * fields. Drags commit once per frame; the alpha of the original color is kept. */
+let colorPicker = null;
+function hexToHsv(hex) {
+  const n = parseInt(hex.slice(1, 7), 16);
+  const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((c) => c / 255);
+  const max = Math.max(r, g, b);
+  const d = max - Math.min(r, g, b);
+  let h = 0;
+  if (d) h = (max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4) * 60;
+  return { h: h < 0 ? h + 360 : h, s: max ? d / max : 0, v: max };
+}
+function hsvToHex({ h, s, v }) {
+  const hue = ((h % 360) + 360) % 360;
+  const c = v * s;
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
+  const m = v - c;
+  const [r, g, b] = hue < 60 ? [c, x, 0] : hue < 120 ? [x, c, 0] : hue < 180 ? [0, c, x] : hue < 240 ? [0, x, c] : hue < 300 ? [x, 0, c] : [c, 0, x];
+  return `#${[r, g, b].map((ch) => Math.round((ch + m) * 255).toString(16).padStart(2, "0")).join("")}`;
+}
+const pickerHex = (value) => (colorHex(value) ?? "#000000").slice(0, 7);
+const rgbText = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(", ");
+function rgbTextToHex(text) {
+  const ch = text.trim().replace(/^rgb\(\s*/i, "").replace(/\s*\)$/, "").split(/[,\s]+/).filter(Boolean).map(Number);
+  return ch.length === 3 && ch.every((c) => Number.isInteger(c) && c >= 0 && c <= 255) ? `#${ch.map((c) => c.toString(16).padStart(2, "0")).join("")}` : null;
+}
+
+function openColorPicker(role, anchor) {
+  closeColorPicker();
+  const label = anchor.closest(".te-field").querySelector(".te-label").textContent;
+  const value = themeEditor.colors[themeEditor.appearance][role];
+  const full = colorHex(value) ?? "#000000";
+  colorPicker = { role, label, anchor, alpha: full.length === 9 && !full.endsWith("ff") ? full.slice(7) : "", hsv: hexToHsv(pickerHex(value)), pending: null, frame: 0 };
+  const el = document.createElement("div");
+  el.id = "theme-color-picker";
+  el.dataset.themeEditorPanel = "";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-label", `${label} color`);
+  el.innerHTML = `<div class="cp-head"><div><p class="cp-title">${esc(label)}</p><p class="cp-sub">Choose a color</p></div><span class="cp-dot"></span></div>
+    <div class="cp-body">
+      <div class="cp-plane" role="group" aria-label="${esc(label)} saturation and brightness">
+        <input type="range" class="cp-axis" data-axis="s" min="0" max="100" step="any" aria-label="${esc(label)} saturation">
+        <input type="range" class="cp-axis" data-axis="v" min="0" max="100" step="any" aria-label="${esc(label)} brightness">
+        <span class="cp-thumb"></span></div>
+      <div class="cp-hue" role="slider" tabindex="0" aria-label="${esc(label)} hue" aria-valuemin="0" aria-valuemax="360"><span class="cp-track"></span><span class="cp-thumb"></span></div>
+      <div class="cp-fields"><label><span>HEX</span><span class="cp-input"><i></i><input data-cp="hex" aria-label="${esc(label)} picker hex value" spellcheck="false" autocomplete="off"></span></label>
+        <label><span>RGB</span><span class="cp-input"><input data-cp="rgb" aria-label="${esc(label)} picker RGB value" spellcheck="false" autocomplete="off"></span></label></div></div>`;
+  document.body.append(el);
+  bindColorPicker(el);
+  syncColorPicker(true);
+  placeColorPicker();
+}
+function closeColorPicker() {
+  if (!colorPicker) return;
+  flushColorPicker();
+  document.getElementById("theme-color-picker")?.remove();
+  colorPicker = null;
+}
+/** Below the swatch, its right edge on the swatch's, flipped above when there is no room. */
+function placeColorPicker() {
+  const el = document.getElementById("theme-color-picker");
+  const a = colorPicker?.anchor;
+  if (!el || !a?.isConnected) return;
+  const r = a.getBoundingClientRect();
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  const left = Math.min(Math.max(8, r.right - w), innerWidth - w - 8);
+  const top = r.bottom + 10 + h <= innerHeight - 8 ? r.bottom + 10 : Math.max(8, r.top - 10 - h);
+  Object.assign(el.style, { left: `${left}px`, top: `${top}px` });
+}
+/** Paints the picker from its HSV, and the text fields from it unless one is being typed in. */
+function syncColorPicker(fromValue = false) {
+  const el = document.getElementById("theme-color-picker");
+  if (!el || !colorPicker) return;
+  const p = colorPicker;
+  if (fromValue) {
+    const hex = pickerHex(themeEditor.colors[themeEditor.appearance][p.role]);
+    if (hsvToHex(p.hsv) !== hex) p.hsv = hexToHsv(hex);
+  }
+  const hex = hsvToHex(p.hsv);
+  el.querySelector(".cp-dot").style.background = hex;
+  el.querySelector(".cp-input i").style.background = hex;
+  const plane = el.querySelector(".cp-plane");
+  plane.style.backgroundColor = `hsl(${p.hsv.h} 100% 50%)`;
+  Object.assign(plane.querySelector(".cp-thumb").style, { left: `calc(${p.hsv.s} * (100% - 12px) + 6px)`, top: `calc(${1 - p.hsv.v} * (100% - 12px) + 6px)` });
+  for (const axis of plane.querySelectorAll(".cp-axis")) {
+    axis.value = p.hsv[axis.dataset.axis] * 100;
+    axis.setAttribute("aria-valuetext", `${Math.round(p.hsv[axis.dataset.axis] * 100)}%`);
+  }
+  const hue = el.querySelector(".cp-hue");
+  hue.setAttribute("aria-valuenow", Math.round(p.hsv.h));
+  Object.assign(hue.querySelector(".cp-thumb").style, { left: `calc(${p.hsv.h / 360} * (100% - 16px) + 8px)`, background: `hsl(${p.hsv.h} 100% 50%)` });
+  for (const input of el.querySelectorAll("[data-cp]")) if (document.activeElement !== input) input.value = input.dataset.cp === "hex" ? hex : rgbText(hex);
+}
+function commitPickerColor(color, now = false) {
+  const p = colorPicker;
+  p.pending = color;
+  if (now) return flushColorPicker();
+  if (!p.frame) p.frame = requestAnimationFrame(flushColorPicker);
+}
+function flushColorPicker() {
+  const p = colorPicker;
+  if (!p) return;
+  cancelAnimationFrame(p.frame);
+  p.frame = 0;
+  if (p.pending === null || !themeEditor) return;
+  const color = p.pending;
+  p.pending = null;
+  setThemeEditorColor(p.role, color);
+  const field = document.querySelector(`#theme-editor [data-theme-color-role="${p.role}"]`);
+  if (!field) return;
+  const value = themeEditor.colors[themeEditor.appearance][p.role];
+  field.querySelector(".te-swatch span").style.background = value;
+  field.querySelector(".te-value").value = colorHex(value) ?? value;
+}
+function setPickerHsv(hsv) {
+  colorPicker.hsv = hsv;
+  syncColorPicker();
+  commitPickerColor(hsvToHex(hsv) + colorPicker.alpha);
+}
+function bindColorPicker(el) {
+  const clamp = (n) => Math.min(1, Math.max(0, n));
+  const drag = (target, update) => {
+    target.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      (target.querySelector(".cp-axis") ?? target).focus({ preventScroll: true });
+      target.setPointerCapture(e.pointerId);
+      update(e);
+      const move = (ev) => update(ev);
+      const end = () => {
+        target.removeEventListener("pointermove", move);
+        target.removeEventListener("lostpointercapture", end);
+        flushColorPicker();
+      };
+      target.addEventListener("pointermove", move);
+      target.addEventListener("lostpointercapture", end);
+    });
+  };
+  const plane = el.querySelector(".cp-plane");
+  drag(plane, (e) => {
+    const r = plane.getBoundingClientRect();
+    setPickerHsv({ ...colorPicker.hsv, s: clamp((e.clientX - r.left) / r.width), v: 1 - clamp((e.clientY - r.top) / r.height) });
+  });
+  const hue = el.querySelector(".cp-hue");
+  drag(hue, (e) => {
+    const r = hue.getBoundingClientRect();
+    setPickerHsv({ ...colorPicker.hsv, h: clamp((e.clientX - r.left) / r.width) * 360 });
+  });
+  for (const axis of plane.querySelectorAll(".cp-axis")) {
+    axis.addEventListener("keydown", (e) => {
+      const k = axis.dataset.axis;
+      const step = e.shiftKey ? 0.1 : 0.02;
+      const now = colorPicker.hsv[k];
+      const next = { ArrowRight: now + step, ArrowUp: now + step, ArrowLeft: now - step, ArrowDown: now - step, Home: 0, End: 1 }[e.key];
+      if (next === undefined) return;
+      e.preventDefault();
+      setPickerHsv({ ...colorPicker.hsv, [k]: clamp(next) });
+    });
+  }
+  hue.addEventListener("keydown", (e) => {
+    if (!["ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp"].includes(e.key)) return;
+    e.preventDefault();
+    const dir = e.key === "ArrowRight" || e.key === "ArrowUp" ? 1 : -1;
+    setPickerHsv({ ...colorPicker.hsv, h: (colorPicker.hsv.h + dir * (e.shiftKey ? 10 : 1) + 360) % 360 });
+  });
+  el.addEventListener("input", (e) => {
+    const kind = e.target.dataset.cp;
+    if (!kind) return;
+    const hex = kind === "hex" ? (/^#[0-9a-f]{6}$/i.test(e.target.value) ? e.target.value.toLowerCase() : null) : rgbTextToHex(e.target.value);
+    if (!hex) return;
+    colorPicker.hsv = hexToHsv(hex);
+    syncColorPicker();
+    commitPickerColor(kind === "hex" ? hex : hex + colorPicker.alpha, true);
+  });
+  el.addEventListener("focusout", (e) => e.target.dataset.cp && syncColorPicker());
+}
+document.addEventListener("pointerdown", (e) => {
+  if (!colorPicker || !(e.target instanceof Element)) return;
+  if (e.target.closest("#theme-color-picker") || e.target.closest("[data-te-pick]") === colorPicker.anchor) return;
+  closeColorPicker();
+}, true);
+document.addEventListener("keydown", (e) => {
+  if (!colorPicker || e.key !== "Escape") return;
+  e.preventDefault();
+  e.stopPropagation();
+  const anchor = colorPicker.anchor;
+  closeColorPicker();
+  anchor.focus();
+}, true);
+addEventListener("resize", () => placeColorPicker());
+addEventListener("scroll", () => placeColorPicker(), true);
+
+/** Using a field's swatch or hex value selects it, as T3's onSelect: Advanced colors only show there. */
+function selectThemeField(role) {
+  const ed = themeEditor;
+  if (ed.selected === role) return;
+  ed.selected = role;
+  const panel = document.getElementById("theme-editor");
+  for (const f of panel.querySelectorAll(".te-field")) {
+    const on = f.dataset.themeColorRole === role;
+    f.classList.toggle("selected", on);
+    const label = f.querySelector(".te-label");
+    label.setAttribute("aria-pressed", on);
+    label.setAttribute("aria-label", `${on ? "Hide" : "Show"} ${label.textContent} usage`);
+    label.title = `${on ? "Hide" : "Show"} where ${label.textContent} is used`;
+  }
+  watchUsage();
+}
+
+/** themeInspector.ts's highlightThemeRoleUsage: every element whose paint changes when the selected
+ * color's roles take the probe color, cut out of a dimmed overlay. In Advanced a field stands for its
+ * family's roles; Background and Accent stand for every role that holds the same color. */
+let usageWatch = null;
+function usageRoles() {
+  const ed = themeEditor;
+  if (!ed?.selected || ed.inspecting) return [];
+  if (ed.advanced) return FAMILY_PROBES[ed.selected] ?? [ed.selected];
+  const colors = ed.colors[ed.appearance];
+  const value = colors[ed.selected]?.trim().toLowerCase();
+  return THEME_PALETTES.roles.filter((r) => colors[r]?.trim().toLowerCase() === value);
+}
+function watchUsage() {
+  const roles = usageRoles();
+  const key = roles.join(",");
+  if (usageWatch?.key === key) return showUsageCount();
+  stopUsageWatch();
+  if (!roles.length) return;
+  const watch = { key, count: 0, timer: 0, frame: 0, last: 0 };
+  usageWatch = watch;
+  const refresh = () => {
+    watch.timer = 0;
+    watch.last = performance.now();
+    watch.count = highlightUsage(roles);
+    showUsageCount();
+  };
+  refresh();
+  watch.observer = new MutationObserver((mutations) => {
+    if (mutations.every((m) => m.target instanceof Element && m.target.closest("#theme-inspector-spotlight, [data-theme-editor-panel]"))) return;
+    if (!watch.timer) watch.timer = setTimeout(refresh, Math.max(0, 500 - (performance.now() - watch.last)));
+  });
+  watch.observer.observe(document.body, { childList: true, subtree: true });
+  watch.reflow = () => {
+    if (!watch.frame) watch.frame = requestAnimationFrame(() => ((watch.frame = 0), drawSpotlight([...document.querySelectorAll("[data-theme-inspector-match]")])));
+  };
+  addEventListener("resize", watch.reflow);
+  addEventListener("scroll", watch.reflow, true);
+}
+function stopUsageWatch() {
+  if (!usageWatch) return;
+  usageWatch.observer?.disconnect();
+  clearTimeout(usageWatch.timer);
+  cancelAnimationFrame(usageWatch.frame);
+  removeEventListener("resize", usageWatch.reflow);
+  removeEventListener("scroll", usageWatch.reflow, true);
+  usageWatch = null;
+  for (const el of document.querySelectorAll("[data-theme-inspector-match]")) el.removeAttribute("data-theme-inspector-match");
+  document.getElementById("theme-inspector-spotlight")?.remove();
+}
+function showUsageCount() {
+  const sub = document.querySelector("#theme-editor .te-title span");
+  if (sub) sub.textContent = editorSubtitle();
+}
+
+function paintSnapshot(el) {
+  const s = getComputedStyle(el);
+  if (s.display === "none" || s.visibility === "hidden" || Number(s.opacity) === 0) return null;
+  const borders = [["Top"], ["Right"], ["Bottom"], ["Left"]].filter(([side]) => s[`border${side}Style`] !== "none" && parseFloat(s[`border${side}Width`]) > 0).map(([side]) => s[`border${side}Color`]);
+  if (s.outlineStyle !== "none" && parseFloat(s.outlineWidth) > 0) borders.push(s.outlineColor);
+  if (s.boxShadow !== "none") borders.push(s.boxShadow);
+  const text = el.matches("input, textarea, select, option") || [...el.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && n.textContent.trim());
+  const fg = [text ? s.color : "", el instanceof SVGElement ? `${s.fill}|${s.stroke}` : "", el.matches("input, textarea") ? s.caretColor : "", s.textDecorationLine !== "none" ? s.textDecorationColor : ""];
+  return `${s.backgroundColor}|${s.backgroundImage}\n${borders.join("|")}\n${fg.join("|")}`;
+}
+function highlightUsage(roles) {
+  for (const el of document.querySelectorAll("[data-theme-inspector-match]")) el.removeAttribute("data-theme-inspector-match");
+  const candidates = [document.body, ...document.body.querySelectorAll("*")].filter((el) => !el.closest("[data-theme-editor-panel], #theme-inspector-spotlight, #theme-inspector-hover"));
+  const changed = withProbeSession(() => {
+    const before = new Map();
+    for (const el of candidates) {
+      const p = paintSnapshot(el);
+      if (p) before.set(el, p);
+    }
+    const restore = probeRoles(roles);
+    try {
+      return [...before].filter(([el, p]) => paintSnapshot(el) !== p).map(([el]) => el);
+    } finally {
+      restore();
+    }
+  });
+  const marked = new Set(changed.map((el) => (el instanceof SVGElement ? el.closest("svg") ?? el : el)));
+  for (const el of marked) el.setAttribute("data-theme-inspector-match", "");
+  drawSpotlight([...marked]);
+  return marked.size;
+}
+function spotlightRect(el) {
+  const r = el.getBoundingClientRect();
+  if (r.width <= 0 || r.height <= 0 || r.right < 0 || r.bottom < 0 || r.left > innerWidth || r.top > innerHeight) return null;
+  const pad = 5;
+  return { x: r.left - pad, y: r.top - pad, width: r.width + pad * 2, height: r.height + pad * 2, radius: Math.min(18, Math.max(7, (parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0) + pad)) };
+}
+function drawSpotlight(els) {
+  const rects = new Map();
+  for (const el of els) {
+    const r = spotlightRect(el);
+    if (r) rects.set([r.x, r.y, r.width, r.height].map(Math.round).join(":"), r);
+  }
+  let svg = document.getElementById("theme-inspector-spotlight");
+  if (!rects.size) return svg?.remove();
+  if (!svg) {
+    svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.id = "theme-inspector-spotlight";
+    svg.setAttribute("aria-hidden", "true");
+    document.body.append(svg);
+  }
+  svg.setAttribute("viewBox", `0 0 ${innerWidth} ${innerHeight}`);
+  const box = (r) => `x="${r.x}" y="${r.y}" width="${r.width}" height="${r.height}" rx="${r.radius}"`;
+  const all = [...rects.values()];
+  svg.innerHTML = `<defs><mask id="theme-inspector-spotlight-mask" maskUnits="userSpaceOnUse"><rect width="${innerWidth}" height="${innerHeight}" fill="white"/>${all.map((r) => `<rect ${box(r)} fill="black"/>`).join("")}</mask>
+    <filter id="theme-inspector-spotlight-glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+    <rect class="dimmer" width="${innerWidth}" height="${innerHeight}" mask="url(#theme-inspector-spotlight-mask)"/>
+    <g>${all.map((r) => `<rect class="glow" ${box(r)} filter="url(#theme-inspector-spotlight-glow)"/>`).join("")}</g>`;
+}
 
 applyTheme();
+applyContrast();
