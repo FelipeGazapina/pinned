@@ -1,3 +1,4 @@
+use crate::accounts::AccountId;
 use serde::{Deserialize, Serialize};
 
 pub const SOCK_ENV: &str = "PINNED_SOCK";
@@ -160,7 +161,13 @@ pub enum Message {
     Remind { message: String, when: When },
     ListReminders,
     CancelReminder { id: u64 },
-    Usage(Usage),
+    Usage {
+        #[serde(flatten)]
+        usage: Usage,
+        /// The account whose usage this is; sessions of pinned before accounts name none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<AccountId>,
+    },
 }
 
 #[cfg(test)]
@@ -185,7 +192,11 @@ mod tests {
     fn a_usage_message_keeps_its_wire_shape() {
         let line = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":1792400000}}"#;
         let message: Message = serde_json::from_str(line).unwrap();
-        assert!(matches!(&message, Message::Usage(usage) if *usage == Usage { five_hour: Some(WINDOW), seven_day: None }));
+        assert!(matches!(&message, Message::Usage { usage, account: None } if *usage == Usage { five_hour: Some(WINDOW), seven_day: None }));
+        assert_eq!(serde_json::to_string(&message).unwrap(), line);
+        let line = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":1792400000},"account":"work"}"#;
+        let message: Message = serde_json::from_str(line).unwrap();
+        assert!(matches!(&message, Message::Usage { account: Some(a), .. } if a == "work"));
         assert_eq!(serde_json::to_string(&message).unwrap(), line);
     }
 }

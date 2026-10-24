@@ -69,6 +69,43 @@ image from the clipboard, or click **📎** to pick files. A tab on another mach
 file sent there first, up to 25 MB, into a private `uploads` folder in that machine's config
 folder. Uploads older than a day are deleted.
 
+## Accounts
+
+An account is one login of an agent CLI: a Claude Code subscription or a Codex login. Each
+project picks the account that runs its sessions, and pays for them, so a work project and a
+personal one can use different subscriptions on the same Mac.
+
+Settings → **Accounts** lists them, with the email, organization and plan each CLI reports.
+Two are built in and can't be removed: **Claude Code**, the login in `~/.claude`, and
+**Codex**, the login in `~/.codex`. Without changing anything, every project runs under the
+built-in Claude Code account, as before.
+
+To add one, pick the provider, type a name such as `Work` and click **Add account**. Then click
+**Sign in**: pinned opens a tab running the CLI's own login (`claude auth login` or `codex
+login`) for that account. Finish it in the browser page it opens and close the tab. **Sign in
+again** switches the login of an account that already has one.
+
+Each added account keeps its credentials in a home of its own, which pinned passes to the CLI
+as `CLAUDE_CONFIG_DIR` or `CODEX_HOME`: on a Mac,
+`~/Library/Application Support/dev.personal-harness.pinned/accounts/<id>`, and on a server,
+`accounts/<id>` in the node's config directory. pinned never reads the credentials. Removing
+an account leaves its home in place, so adding it again finds it signed in.
+
+Pick a project's account from the menu on its row under Settings → **Projects**. Tabs opened on
+the project from then on run under that account, and a resumed session reopens under the
+account it started with. A tab that runs under an account other than the built-in Claude Code
+one shows that account's name in the tab bar.
+
+A workflow runs under its project's account unless its **Run a session** step picks one
+under **Account**. Only Claude Code accounts can run a workflow. A machine where that account
+is missing or signed out refuses the run, so it goes to the next online machine where it is
+signed in.
+
+The usage meter shows the active tab's account. Each Claude Code account has its own limits.
+
+Codex tabs run the `codex` CLI without pinned's hooks, so they get no status dot, no usage
+meter and no resume after a restart.
+
 ## Machines
 
 Sign in under **Settings → Account** to use pinned from more than one machine. The hub

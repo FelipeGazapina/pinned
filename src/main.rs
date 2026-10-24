@@ -54,6 +54,13 @@ async fn read_dropped(path: String) -> Result<tauri::ipc::Response, String> {
     std::fs::read(&path).map(tauri::ipc::Response::new).map_err(read)
 }
 
+/// Calls that wait on an agent CLI, up to seconds, run off the main thread so typing in tabs doesn't stall.
+#[tauri::command]
+async fn machine_call_blocking(machine: State<'_, Arc<Machine>>, call: Call) -> Result<serde_json::Value, String> {
+    let machine = machine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || machine.call(call)).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn attach_tab(machine: State<Arc<Machine>>, tab: String, output: Channel<InvokeResponseBody>) -> Result<(), String> {
     let sink = move |bytes: &[u8]| drop(output.send(InvokeResponseBody::Raw(bytes.to_vec())));
@@ -145,7 +152,7 @@ fn get_opacity(panel: State<Panel>) -> u8 {
 }
 
 #[tauri::command]
-fn get_usage(machine: State<Arc<Machine>>) -> agent::Usage {
+fn get_usage(machine: State<Arc<Machine>>) -> std::collections::BTreeMap<String, agent::Usage> {
     machine.usage()
 }
 
@@ -251,6 +258,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             machine_call,
             read_dropped,
+            machine_call_blocking,
             attach_tab,
             detach_tab,
             restore_tabs,
@@ -311,7 +319,7 @@ fn main() {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),
                 agent::Message::ListReminders => Ok(handle.state::<reminders::Reminders>().list()),
                 agent::Message::CancelReminder { id } => handle.state::<reminders::Reminders>().cancel(id),
-                agent::Message::Agent(_) | agent::Message::Usage(_) => Err("the machine answers this itself".into()),
+                agent::Message::Agent(_) | agent::Message::Usage { .. } => Err("the machine answers this itself".into()),
                 callback => match handle.state::<account::Account>().forward(callback) {
                     Ok(answer) => answer,
                     Err(agent::Message::Stage { connector, subject, stage }) => tauri::async_runtime::block_on(

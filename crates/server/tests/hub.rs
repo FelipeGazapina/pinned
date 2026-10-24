@@ -1,5 +1,6 @@
 use base64::Engine;
 use pinned_core::account::{self, Credentials};
+use pinned_core::accounts::Provider;
 use pinned_core::agent::{self, Stage, Subject};
 use pinned_core::connectors::{Delivery, Run, Work};
 use pinned_core::link::{self, Link};
@@ -9,6 +10,7 @@ use pinned_core::wire::HubCall;
 use serde_json::{json, Value};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -212,11 +214,11 @@ struct Node {
 impl Node {
     fn start(dir: &Path, creds: Credentials) -> Node {
         let claude = dir.join("claude");
-        std::fs::write(&claude, "#!/bin/sh\nexec cat\n").unwrap();
+        std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let launch = Launch {
             exe: "/opt/pinned/bin/pinned-server".into(),
-            claude,
+            bins: BTreeMap::from([(Provider::Claude, claude)]),
             path_env: None,
             settings: dir.join("settings.json"),
             mcp_config: None,
@@ -310,7 +312,7 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
 
     assert_eq!(
         client.call(b, json!({ "cmd": "format_disk" })),
-        Err("this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`, `start_claude`, `set_bypass`, `write_input`, `resize_pty`, `close_tab`, `set_folder`, `list_projects`, `project_history`, `git_remote`, `browse`, `clone`, `run`, `deliver`, `upload`".replace("0.5.1", env!("CARGO_PKG_VERSION")))
+        Err("this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`, `start_claude`, `set_bypass`, `write_input`, `resize_pty`, `close_tab`, `set_folder`, `list_projects`, `project_history`, `git_remote`, `browse`, `clone`, `run`, `deliver`, `upload`, `list_accounts`, `add_account`, `remove_account`, `set_project_account`, `sign_in`".replace("0.5.1", env!("CARGO_PKG_VERSION")))
     );
     assert!(client.hub(json!({ "cmd": "self_destruct" })).unwrap_err().contains("unknown variant `self_destruct`"));
     assert_eq!(client.call("not-a-machine", json!({ "cmd": "tabs" })), Err("this account has no machine not-a-machine".into()));
@@ -373,10 +375,11 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     let id = connector["id"].as_str().unwrap().to_owned();
     client.wait("the saved connector", |f| f["type"] == "settings" && f["settings"]["connectors"][0]["id"] == id);
     let account_id = uuid::Uuid::parse_str(&account.id).unwrap();
-    let run = |subject: Subject| Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![] });
+    let run = |subject: Subject| Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![], account: None });
     let open = |work| hub.runtime.block_on(hub.hub().open(account_id, work));
     let connector_tabs = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.connector.as_deref() == Some(&id) && t.running).count();
 
+    std::fs::write(dir_b.join("accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
     let mut node_b = Node::start(&dir_b, creds_b);
     wait_for("vps online", || node_b.online());
     client.wait_machines(&[("mac-mini", false), ("vps", true)]);
@@ -416,6 +419,11 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     assert!(open(delivery("1792400050.000200")), "the thread's live session takes its new messages");
     wait_for("the delivered prompt", || String::from_utf8_lossy(&seen.lock().unwrap()).contains("yes, file it"));
     assert!(!open(delivery("1792499999.000100")), "no session answers that thread");
+
+    let work = Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject: Subject::LinearIssue { issue: "uuid-3".into() }, mentioned: vec![], account: Some("work".into()) };
+    assert!(open(Work::Run(work)), "mac-mini has no account work and refuses, so vps runs it");
+    let on_work = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.account == "work").count();
+    assert_eq!((on_work(&node_a), on_work(&node_b)), (0, 1));
 
     node_a.kill();
     node_b.kill();
@@ -481,19 +489,19 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
     };
     let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
     let project = sync::Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
-    let checkout = |home: &Path, folder: &str| sync::Checkout { project: project.clone(), path: home.join(folder), history: None };
+    let checkout = |home: &Path, folder: &str| sync::Checkout { project: project.clone(), path: home.join(folder), history: None, claude_home: Some(home.join(".claude")) };
     let (on_mac, on_mini) = (checkout(&mac_home, "projetos/app"), checkout(&mini_home, "pinned/app"));
-    let memory = |home: &Path, c: &sync::Checkout| sync::claude_dir(home, &c.path).join("memory/MEMORY.md");
-    std::fs::create_dir_all(memory(&mac_home, &on_mac).parent().unwrap()).unwrap();
-    std::fs::write(memory(&mac_home, &on_mac), "- deploys go through the VPS").unwrap();
+    let memory = |c: &sync::Checkout| sync::claude_dir(c.claude_home.as_ref().unwrap(), &c.path).join("memory/MEMORY.md");
+    std::fs::create_dir_all(memory(&on_mac).parent().unwrap()).unwrap();
+    std::fs::write(memory(&on_mac), "- deploys go through the VPS").unwrap();
 
     let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
     let now = std::time::SystemTime::now();
-    let pushed = sync::sync(&Through(mac_link), &mut sync::State::default(), &mac_home, &on_mac, now).unwrap().pushed;
+    let pushed = sync::sync(&Through(mac_link), &mut sync::State::default(), &on_mac, now).unwrap().pushed;
     assert_eq!(pushed, vec!["claude/memory/MEMORY.md"]);
-    let pulled = sync::sync(&Through(mini_link), &mut sync::State::default(), &mini_home, &on_mini, now).unwrap().pulled;
+    let pulled = sync::sync(&Through(mini_link), &mut sync::State::default(), &on_mini, now).unwrap().pulled;
     assert_eq!(pulled, vec!["claude/memory/MEMORY.md"]);
-    assert_eq!(std::fs::read_to_string(memory(&mini_home, &on_mini)).unwrap(), "- deploys go through the VPS");
+    assert_eq!(std::fs::read_to_string(memory(&on_mini)).unwrap(), "- deploys go through the VPS");
 
     let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1 }, data: Some("eA==".into()) };
     assert_eq!(
@@ -529,8 +537,8 @@ fn a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link() {
     };
     let ((mut mac, mac_home), (mut mini, mini_home)) = (start("mac"), start("mini"));
     let project = sync::Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
-    let checkout = |home: &Path| sync::Checkout { project: project.clone(), path: home.join("app"), history: None };
-    let session = |home: &Path| sync::claude_dir(home, &home.join("app")).join("session.jsonl");
+    let checkout = |home: &Path| sync::Checkout { project: project.clone(), path: home.join("app"), history: None, claude_home: Some(home.join(".claude")) };
+    let session = |home: &Path| sync::claude_dir(&home.join(".claude"), &home.join("app")).join("session.jsonl");
     // Random bytes don't compress, so the push carries about 19 MB of base64, past tungstenite's 16 MB default frame.
     let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
     let big: Vec<u8> = (0..14 << 20)
@@ -545,9 +553,9 @@ fn a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link() {
     std::fs::write(session(&mac_home), &big).unwrap();
 
     let now = std::time::SystemTime::now();
-    let pushed = sync::sync(&Through(mac.link.as_ref().unwrap()), &mut sync::State::default(), &mac_home, &checkout(&mac_home), now);
+    let pushed = sync::sync(&Through(mac.link.as_ref().unwrap()), &mut sync::State::default(), &checkout(&mac_home), now);
     assert_eq!(pushed.map(|s| s.pushed), Ok(vec!["claude/session.jsonl".to_owned()]));
-    let pulled = sync::sync(&Through(mini.link.as_ref().unwrap()), &mut sync::State::default(), &mini_home, &checkout(&mini_home), now);
+    let pulled = sync::sync(&Through(mini.link.as_ref().unwrap()), &mut sync::State::default(), &checkout(&mini_home), now);
     assert_eq!(pulled.map(|s| s.pulled), Ok(vec!["claude/session.jsonl".to_owned()]));
     assert!(std::fs::read(session(&mini_home)).unwrap() == big, "the mini got the session byte for byte");
     assert!(mac.online() && mini.online(), "both links stay up");
@@ -599,7 +607,7 @@ fn a_client_that_connects_later_sees_the_usage_a_machine_reported_before() {
     client.wait_machines(&[("vps", true)]);
     let report = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":4102444800}}"#;
     std::io::Write::write_all(&mut std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap(), format!("{report}\n").as_bytes()).unwrap();
-    let expected = json!({ "type": "event", "machine": creds.machine_id, "event": { "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 4102444800u64 } } } });
+    let expected = json!({ "type": "event", "machine": creds.machine_id, "event": { "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 4102444800u64 } }, "account": "claude" } });
     client.wait("the usage", |f| *f == expected);
 
     let mut later = Client::connect(&url, &token);

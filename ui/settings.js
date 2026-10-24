@@ -45,7 +45,7 @@ const GITHUB_TOKENS = "https://github.com/settings/tokens/new?scopes=repo&descri
 
 /** Mirrors the backend's `get_settings`. Unsaved connectors carry an empty id. */
 let settings = { linear: null, slack: null, connectors: [], checked: null };
-const PAGES = ["general", "integrations", "projects", "connectors", "account", "machines"];
+const PAGES = ["general", "integrations", "accounts", "projects", "connectors", "account", "machines"];
 let page = PAGES.includes(load("settings-page")) && (TAURI || load("settings-page") !== "general") ? load("settings-page") : "integrations";
 /** Names from the connected Linear workspace and Slack channels, for the connector form's suggestions. */
 let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [] };
@@ -98,6 +98,7 @@ function showPage(name) {
       fillList("github-repos", suggestions.repos);
     }, console.warn);
   }
+  if (name === "accounts") return showAccountsPage();
   if (name === "projects") return showProjectsPage();
   if (name === "general") return showGeneral();
   if (name === "account") return showAccount();
@@ -114,6 +115,14 @@ function fillList(id, names) {
 const esc = (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const options = (values, labelOf = (v) => v, selected) =>
   values.map((v) => `<option value="${esc(v)}"${v === selected ? " selected" : ""}>${esc(labelOf(v))}</option>`).join("");
+
+/** A row of chips that picks one of the machines, for pages that show one machine at a time. */
+function machineChipsHtml(current, action) {
+  if (machines.size < 2) return "";
+  const chips = [...machines.entries()].map(([id, m]) =>
+    `<button class="chip${id === current ? " active" : ""}" data-action="${action}" data-machine="${esc(id)}"${m.view.online ? "" : " disabled"}>${esc(machineName(id))}</button>`);
+  return `<div class="chips">${chips.join("")}</div>`;
+}
 
 function integrationsHtml() {
   const account = settings.linear;
@@ -245,7 +254,7 @@ const STEPS = {
     app: "Claude Code",
     title: "Run a session",
     summary: (c) =>
-      [folderName(c.folder) || folderName(c.repo.replace(/\.git$/, "")) || "no folder", account && runOnName(c), c.model.trim() || "default model", c.effort, PERMISSIONS[c.permissionMode]]
+      [folderName(c.folder) || folderName(c.repo.replace(/\.git$/, "")) || "no folder", account && runOnName(c), connectorAccountName(c), c.model.trim() || "default model", c.effort, PERMISSIONS[c.permissionMode]]
         .filter(Boolean)
         .join(" · "),
     issues: (c) => (c.folder.trim() || c.repo.trim() ? [] : ["Choose the folder or the repository the session opens in."]),
@@ -259,6 +268,7 @@ const STEPS = {
         <label>Model ${input("model", c.model, `list="models" placeholder="claude's default"`)}</label>
         <label>Effort ${select("effort", EFFORTS, undefined, c.effort)}</label>
         <label>Permissions ${select("permissionMode", Object.keys(PERMISSIONS), (p) => PERMISSIONS[p], c.permissionMode)}</label>
+        <label>Account ${accountSelectHtml(c)}</label>
       </div>
       ${check("worktree", c.worktree, `Separate git worktree per ${subject(c)}`)}
       <label>Instructions sent before the ${subject(c)}
@@ -340,6 +350,17 @@ function runOnHtml(c) {
     <span class="hint">${c.machine ? "Falls back to another online machine while this one is offline." : "Each run goes to whichever machine is online."}</span>`;
 }
 
+const connectorAccountName = (c) => c.account && accountName(folderMachine(c), c.account);
+
+/** The Claude Code accounts of the connector's machine; Codex can't run a connector, whose prompts rely on Claude Code's hooks. */
+function accountSelectHtml(c) {
+  const machine = folderMachine(c);
+  const ids = ["", ...(machines.get(machine)?.accounts ?? []).filter((a) => a.provider === "claude").map((a) => a.id)];
+  if (c.account && !ids.includes(c.account)) ids.push(c.account);
+  const label = (id) => (!id ? "Project's account" : accountOf(machine, id)?.name ?? `${id} (not on ${machineName(machine)})`);
+  return select("account", ids, label, c.account);
+}
+
 const repoHint = (c) =>
   !c.repo.trim()
     ? "A machine without the folder can't run this session."
@@ -352,6 +373,10 @@ async function loadFolders(c) {
     suggestions.folders = (await callOn(machine, { cmd: "list_projects" })).map((p) => p.path);
   } catch {}
   fillList("folders", suggestions.folders);
+  if (!machines.get(machine)?.accounts) {
+    await accountsOf(machine).catch(console.warn);
+    if (page === "connectors" && view.name === "edit" && view.draft === c) redraw();
+  }
 }
 
 async function fillRepo() {
@@ -395,7 +420,8 @@ function cardHtml(c, i) {
 
 function sentence(c) {
   const machine = account && c.machine ? ` on ${runOnName(c)}` : "";
-  const where = folderName(c.folder) ? ` in ${folderName(c.folder)}${machine}` : machine;
+  const as = c.account ? ` with the ${connectorAccountName(c)} account` : "";
+  const where = (folderName(c.folder) ? ` in ${folderName(c.folder)}${machine}` : machine) + as;
   if (!isSlack(c)) return `When an issue gets the label “${c.trigger.label}”, Claude picks it up${where}.`;
   const then = c.fix === "off" ? "answers in the thread" : "answers in the thread and fixes bugs";
   return `When the bot is mentioned in #${c.trigger.channel.replace(/^#/, "")}, Claude ${then}${where}.`;
@@ -496,7 +522,7 @@ function edit(index, draft = clone(settings.connectors[index]), open = null) {
 /** A fresh connector of `kind`, filled with the defaults that make it work once a folder is chosen. */
 function blank(kind) {
   const machine = active ? hubIdOf(active.machine) : "";
-  const common = { id: "", enabled: true, folder: active?.view.cwd ?? "", machine, repo: "", model: "opus", effort: "high", permissionMode: "auto", proof: true, team: "", label: "", fix: "off" };
+  const common = { id: "", account: "", enabled: true, folder: active?.view.cwd ?? "", machine, repo: "", model: "opus", effort: "high", permissionMode: "auto", proof: true, team: "", label: "", fix: "off" };
   return kind === "linear-label"
     ? {
         ...common,
@@ -510,7 +536,7 @@ function blank(kind) {
 }
 
 function commandPreview(c) {
-  const parts = ["claude"];
+  const parts = [c.account && c.account !== DEFAULT_ACCOUNT ? `CLAUDE_CONFIG_DIR=<${connectorAccountName(c)}'s home> claude` : "claude"];
   if (c.model) parts.push(`--model ${c.model}`);
   parts.push(`--effort ${c.effort}`, `--permission-mode ${c.permissionMode}`);
   if (c.worktree) parts.push(`--worktree=<${subject(c)}>`);
@@ -533,6 +559,7 @@ function tidy(c) {
     folder: t(c.folder),
     repo: t(c.repo),
     model: t(c.model),
+    account: t(c.account),
     team: t(c.team),
     label: t(c.label),
     trigger: isSlack(c) ? { kind: c.trigger.kind, channel: t(c.trigger.channel) } : { kind: c.trigger.kind, label: t(c.trigger.label) },
