@@ -88,6 +88,7 @@ const TRIGGERS = {
         model: DECISION_MODEL,
         instructions: "Categorize this Slack message. Choose escalation only for urgent production problems.",
         categories: clone(DEFAULT_CATEGORIES),
+        fallback: null,
       },
     }),
     instructions: (c) => TRIGGERS["slack-mention"].instructions(c),
@@ -378,6 +379,7 @@ const STEPS = {
       const twice = categories.find((cat, i) => names[i] && names.indexOf(names[i]) !== i);
       const vague = categories.find((cat) => cat.name.trim() && !cat.description.trim());
       const removed = categories.find((cat) => cat.workflow && !settings.connectors.some((k) => k.id === cat.workflow));
+      const fallback = fallbackOf(c.trigger.decide);
       return [
         !settings.vercel && "Connect the Vercel AI Gateway under Connectors.",
         !c.trigger.decide.model.trim() && "Name the decision model.",
@@ -386,6 +388,7 @@ const STEPS = {
         twice && `Two categories are named “${twice.name.trim()}”.`,
         vague && `Describe the category “${vague.name.trim()}”.`,
         removed && `The workflow that “${removed.name.trim()}” routes to was deleted.`,
+        fallback?.mention?.trim() && `The fallback can't ping a group, so saving sets it back to “${BEST_GUESS}”.`,
       ].filter(Boolean);
     },
     fields: (c) => decideHtml(c),
@@ -515,7 +518,17 @@ function decideHtml(c) {
     <label>Instructions <textarea data-bind="trigger.decide.instructions" rows="3">${esc(decide.instructions)}</textarea></label>
     <div class="categories">${decide.categories.map(row).join("")}</div>
     <div class="actions start"><button class="secondary" data-action="add-category">＋ Add category</button></div>
-    <p class="hint">The model puts each message in one category, judged by its description. A mention pings a Slack user group, by its handle or ID, in the message's thread. A route hands the thread to a Slack mention or called workflow, which answers it there.</p>`;
+    <label>When the model is less than 60% sure ${fallbackHtml(decide)}</label>
+    <p class="hint">The model puts each message in one category, judged by its description. A mention pings a Slack user group, by its handle or ID, in the message's thread. A route hands the thread to a Slack mention or called workflow, which answers it there. When the model is unsure, the fallback category takes the message instead of its guess.</p>`;
+}
+
+const BEST_GUESS = "Use its best guess";
+const fallbackOf = (decide) => (decide.fallback ? decide.categories.find((cat) => cat.name.trim() === decide.fallback) : undefined);
+
+/** Only a category that pings no one can take the unsure messages; one that gained a mention stays listed so its issue reads. */
+function fallbackHtml(decide) {
+  const names = decide.categories.filter((cat) => cat.name.trim() && (!cat.mention?.trim() || cat === fallbackOf(decide))).map((cat) => cat.name.trim());
+  return select("trigger.decide.fallback", ["", ...new Set(names)], (name) => name || BEST_GUESS, decide.fallback ?? "");
 }
 
 function routePanelHtml(c, i) {
@@ -798,6 +811,8 @@ function refresh() {
   if (command) command.textContent = commandPreview(c);
   const repo = document.getElementById("repo");
   if (repo) repo.innerHTML = repoHint(c);
+  const fallback = settingsPage.querySelector('.node-panel [data-bind="trigger.decide.fallback"]');
+  if (fallback && fallback !== document.activeElement) fallback.outerHTML = fallbackHtml(c.trigger.decide);
   const save = document.getElementById("save-connector");
   save.disabled = !!c.id && !changed();
   save.textContent = !c.id ? "Create" : changed() ? "Save" : "Saved";
@@ -871,6 +886,7 @@ function tidyTrigger({ kind, label, channel, decide }) {
         workflow: cat.workflow || null,
         mention: trimmed(cat.mention).replace(/^@/, "") || null,
       })),
+      fallback: decide.fallback || null,
     };
   }
   return trigger;
@@ -1050,7 +1066,9 @@ const actions = {
     settingsPage.querySelector(`.node-panel [data-bind="trigger.decide.categories.${categories.length - 1}.name"]`)?.focus();
   },
   "remove-category"(button) {
-    view.draft.trigger.decide.categories.splice(Number(button.closest("[data-category]").dataset.category), 1);
+    const decide = view.draft.trigger.decide;
+    const [removed] = decide.categories.splice(Number(button.closest("[data-category]").dataset.category), 1);
+    if (removed.name.trim() === decide.fallback) decide.fallback = null;
     showStep("decide");
   },
   "open-branch"(button) {
@@ -1078,6 +1096,8 @@ const actions = {
     fillRepo();
   },
   async "save-connector"() {
+    const decide = view.draft.trigger.decide;
+    if (decide && fallbackOf(decide)?.mention?.trim()) decide.fallback = null;
     const c = tidy(view.draft);
     const error = document.getElementById("editor-error");
     if (!c.name) {
@@ -1135,7 +1155,10 @@ settingsPage.addEventListener("input", (e) => {
   const path = e.target.dataset.bind;
   if (!path || path in RESHAPES) return;
   if (e.target.tagName === "SELECT" && e.target.value === NEW_ROUTE) return newRoute(e.target);
+  const decide = view.draft.trigger.decide;
+  const renamed = /^trigger\.decide\.categories\.\d+\.name$/.test(path) && decide.fallback && fallbackOf(decide);
   bind(path, e.target.type === "checkbox" ? e.target.checked : e.target.value);
+  if (renamed) decide.fallback = renamed.name.trim() || null;
   refresh();
 });
 
