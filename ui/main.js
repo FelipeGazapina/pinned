@@ -1081,6 +1081,11 @@ if (TAURI) {
   setInterval(checkUpdate, 6 * 60 * 60 * 1000);
 }
 
+// A browser runs the UI its hub serves, so it shows the hub's version.
+(TAURI ? TAURI.app.getVersion() : fetch("/api/version").then((r) => (r.ok ? r.text() : "")))
+  .then((version) => (document.getElementById("version").textContent = version && `v${version}`))
+  .catch(() => {});
+
 new ResizeObserver(() => refit(active)).observe(terms);
 
 // Safari leaves the page its full height under the on-screen keyboard, shrinks only the visual

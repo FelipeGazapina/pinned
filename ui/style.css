@@ -106,6 +106,9 @@ body[data-tabs="left"] .tab .resize, body[data-tabs="right"] .tab .resize { disp
 #workspace[data-drop="bottom"]::after { bottom: 0; left: 0; right: 0; height: 28px; }
 #workspace[data-drop="left"]::after { top: 0; bottom: 0; left: 0; width: var(--tab-bar-width); }
 #workspace[data-drop="right"]::after { top: 0; bottom: 0; right: 0; width: var(--tab-bar-width); }
+/* Which pinned this is: the app's own build, or the hub's in a browser. */
+#version { position: absolute; right: 18px; bottom: 2px; z-index: 40; font-size: 10px; color: var(--muted); opacity: 0.7;
+  pointer-events: none; user-select: none; -webkit-user-select: none; }
 #grip { position: absolute; right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize;
   background: linear-gradient(135deg, transparent 50%, var(--muted) 50%, transparent 60%,
     transparent 70%, var(--muted) 70%, transparent 80%); }
@@ -388,6 +391,7 @@ html[data-shell="web"] body { background: rgb(15 17 21); }
 html[data-shell="web"] #expanded { border: 0; border-radius: 0;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 html[data-shell="web"] header { cursor: default; }
+html[data-shell="web"] #version { right: calc(8px + env(safe-area-inset-right)); bottom: calc(2px + env(safe-area-inset-bottom)); }
 html[data-shell="web"] :is(#minimize, #grip, #pill, .update, [data-app-only]) { display: none !important; }
 
 #login { display: none; }
