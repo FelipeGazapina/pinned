@@ -7,7 +7,8 @@ use crate::branches::GitStep;
 use crate::scripts::Script;
 use crate::panel::{ReviewComment, ReviewEvent};
 use crate::workspace::{DiffScope, PrAction};
-use crate::{pulls, sync, thread, usage};
+use crate::stats::ThreadStats;
+use crate::{pulls, subagents, sync, thread, usage};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -63,6 +64,9 @@ pub struct TabView {
     /// Claude Code's id for the conversation, which outlives the tab's id across restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// What the conversation's work came to so far, once its transcript holds any of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<ThreadStats>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -391,6 +395,8 @@ pub struct ThreadPage {
     pub reset: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<thread::Context>,
+    /// Every agent the session spawned, whole on each page. A machine on an older pinned leaves it out.
+    pub agents: Vec<subagents::Subagent>,
 }
 
 /// A connector's session, the same on any machine.
@@ -653,6 +659,7 @@ mod tests {
             opened: 3,
             updated: Some(1792400000),
             session: Some("s1".into()),
+            stats: Some(ThreadStats { active_ms: Some(4_320_000), cost_usd: Some(3.42) }),
         }
     }
 
@@ -756,6 +763,7 @@ mod tests {
                 "id": "tab-3", "cwd": "/repo", "bypass": false, "running": true, "status": "needs-input",
                 "title": "Fix the build", "message": "Claude needs your permission to use Bash",
                 "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3, "updated": 1792400000, "session": "s1",
+                "stats": { "active_ms": 4320000, "cost_usd": 3.42 },
             }] }),
         );
         round_trip(

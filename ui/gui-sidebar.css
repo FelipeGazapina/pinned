@@ -12,9 +12,10 @@
 #chat-head .crumb .project:hover { color: var(--g-fg); }
 #chat-head .crumb .project > span { overflow: hidden; text-overflow: ellipsis; }
 #chat-head .crumb :is(.monogram, .favicon) { width: 14px; height: 14px; }
+#chat-head .crumb .stats { flex: none; margin-left: -4px; font-size: 12px; font-weight: 400; color: var(--g-muted); font-variant-numeric: tabular-nums; }
 
 .thread-row .slot { margin-left: auto; height: 20px; min-width: 32px; display: flex; align-items: center; justify-content: flex-end; flex: none; }
-.thread-row .since { font-variant-numeric: tabular-nums; }
+.thread-row .since, .thread-row .stats { font-variant-numeric: tabular-nums; }
 .thread-row .woke { cursor: pointer; }
 .thread-row .woke:hover { text-decoration: underline; }
 .thread-row .pin { display: flex; color: rgb(var(--g-muted-rgb) / 0.65); cursor: pointer; }
@@ -199,7 +200,7 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 .drag-hint.drop-target { border-color: rgb(var(--g-primary-rgb) / 0.4); background: rgb(var(--g-primary-rgb) / 0.05); color: var(--g-primary); }
 
 @media (max-width: 768px) {
-  #sidebar-resize, #chat-head .crumb .project { display: none; }
+  #sidebar-resize, #chat-head .crumb .project, #chat-head .crumb .stats { display: none; }
 }
 @media (pointer: coarse) {
   #side-menu button { min-height: 40px; }
