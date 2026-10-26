@@ -601,11 +601,7 @@ function renderThread() {
   const sub = subagentShown();
   const t = sub ?? threadOf(tab);
   document.body.toggleAttribute("data-subagent", !!sub);
-  if (!crumb.querySelector("input.rename:focus")) crumb.innerHTML = sub ? subagentCrumbHtml(tab, sub) : crumbHtml(tab);
-  const pr = prOf(tab);
-  const chip = document.getElementById("pr-chip");
-  chip.hidden = !pr;
-  if (pr) chip.querySelector("span").textContent = `#${pr.number}`;
+  if (!crumb.querySelector("input.rename:focus")) crumb.innerHTML = crumbHtml(tab, sub);
 
   const working = !sub && turnLive(tab);
   t.editable = !sub && (working ? "busy" : true);
@@ -682,8 +678,6 @@ setInterval(() => {
   for (const ticker of threadView.querySelectorAll(".ticker")) ticker.textContent = ticking(Date.now() - Number(ticker.dataset.since));
 }, 1000);
 
-const subagentCrumbHtml = (tab, sub) =>
-  `<button class="sub-back" data-subagent-back title="Back to ${esc(threadTitle(tab))}">${icon("corner-left-up")}</button>${crumbHtml(tab)}<span class="sep">/</span>${icon("bot", "sub-icon")}<span class="title" title="${esc(sub.title)}">${esc(sub.title)}</span>`;
 
 async function openSubagent(tool, title) {
   const tab = active;

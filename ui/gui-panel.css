@@ -24,9 +24,8 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 #chat-head .split .pick { border-radius: 0 8px 8px 0; border-left: 0; padding: 0 4px; }
 #chat-head .split .pick .i { width: 16px; height: 16px; }
 #chat-head .split .outline:hover { background: var(--g-input); }
-@media (max-width: 768px) {
-  #chat-head .split .label { display: none; }
-}
+#chat-head .split .label, #git-action .main .label { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+#scripts-control .main:not(.solo) { width: 24px; justify-content: center; padding: 0; }
 
 #panel-menu, #panel-submenu { position: fixed; z-index: 60; min-width: 208px; max-width: min(320px, calc(100vw - 16px)); padding: 4px; border-radius: 12px;
   background: var(--g-overlay); border: 1px solid var(--g-border); box-shadow: 0 12px 32px -8px var(--g-shadow); color: var(--g-fg); font-size: 13px; }

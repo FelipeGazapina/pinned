@@ -8,9 +8,20 @@
 .monogram { width: 16px; height: 16px; flex: none; border-radius: 25%; overflow: hidden; font-family: var(--g-mono);
   background: color-mix(in srgb, currentColor 14%, transparent); }
 .favicon { width: 16px; height: 16px; flex: none; border-radius: 25%; object-fit: contain; }
-#chat-head .crumb .project { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-radius: 6px; color: var(--g-muted); font-weight: 500; }
-#chat-head .crumb .project:hover { color: var(--g-fg); }
-#chat-head .crumb .project > span { overflow: hidden; text-overflow: ellipsis; }
+#chat-head .crumb .project { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 6px 0; border-radius: 6px; color: var(--g-muted); font-weight: 500; flex: 0 1 auto; }
+#chat-head .crumb .project > span { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+#chat-head .crumb :is(.project, .parent):hover { color: var(--g-fg); }
+#chat-head .crumb :is(.project, .parent, button.title) { cursor: pointer; }
+#chat-head .crumb .parent { display: flex; align-items: center; flex: none; max-width: 100%; padding: 6px 0; border-radius: 6px; color: var(--g-muted); font-weight: 500; }
+#chat-head .crumb .parent .text { overflow: hidden; text-overflow: ellipsis; }
+#chat-head .crumb .parent.folded .text { width: 0; }
+#chat-head .crumb .parent.folded::after { content: "..."; }
+#chat-head .crumb .title { display: flex; align-items: center; gap: 4px; flex: 1 1 0; min-width: 40px; margin: 0; padding: 0; border-radius: 6px; color: var(--g-fg); font: inherit; text-align: left; }
+#chat-head .crumb .title > .text { min-width: 0; margin: 0; padding: 6px 0; overflow: hidden; text-overflow: ellipsis; font: inherit; }
+#chat-head .crumb button.title { flex: 0 1 auto; max-width: 100%; }
+#chat-head .crumb .title .chev { width: 14px; height: 14px; flex: none; color: var(--g-muted); opacity: 0; transition: opacity 0.15s; }
+#chat-head .crumb .title:hover .chev, #chat-head .crumb .title:focus-visible .chev { opacity: 1; }
+@media (max-width: 639px) { #chat-head .crumb { gap: 8px; } }
 #chat-head .crumb :is(.monogram, .favicon) { width: 14px; height: 14px; }
 
 .thread-row .slot { margin-left: auto; height: 20px; min-width: 32px; display: flex; align-items: center; justify-content: flex-end; flex: none; }
@@ -199,9 +210,23 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
 .drag-hint.drop-target { border-color: rgb(var(--g-primary-rgb) / 0.4); background: rgb(var(--g-primary-rgb) / 0.05); color: var(--g-primary); }
 
 @media (max-width: 768px) {
-  #sidebar-resize, #chat-head .crumb .project { display: none; }
+  #sidebar-resize { display: none; }
 }
 @media (pointer: coarse) {
   #side-menu button { min-height: 40px; }
   #sidebar .search .clear { width: 40px; height: 40px; }
 }
+
+#side-tip { position: fixed; z-index: 140; display: flex; flex-direction: column; gap: 2px; max-width: 320px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--g-border);
+  background: var(--g-raised); box-shadow: 0 4px 6px -1px rgb(var(--g-shadow-rgb) / 0.05); color: var(--g-fg); font-size: 12px; line-height: 1.375; overflow-wrap: anywhere; pointer-events: none; }
+#side-tip[hidden] { display: none; }
+#side-tip .sub { color: var(--g-muted); }
+
+#side-update { margin-left: auto; border-radius: 999px; }
+#side-update[aria-disabled="true"] { cursor: not-allowed; }
+#side-update[aria-disabled="true"]:hover { background: none; }
+#side-update[data-state="available"], #side-update[data-state="downloading"] { background: var(--g-control); color: var(--g-side-fg); }
+#side-update .glyph { position: relative; display: grid; place-items: center; }
+#side-update[data-state="available"] .glyph::after { content: ""; position: absolute; top: -2px; right: -2px; width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor; box-shadow: 0 0 0 2px var(--g-control); }
+#side-update[data-state="downloading"] { box-shadow: inset 0 0 0 1.5px rgb(var(--g-side-fg-rgb) / 0.22); }

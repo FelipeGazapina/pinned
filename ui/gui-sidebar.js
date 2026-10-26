@@ -233,7 +233,7 @@ async function askFavicon(tab, key) {
   favicons.set(key, { url, at: Date.now() });
   if (url === was || !guiOn()) return;
   renderSidebar();
-  if (active && !crumbEl.querySelector("input.rename")) crumbEl.innerHTML = crumbHtml(active);
+  if (active && !crumbEl.querySelector("input.rename")) crumbEl.innerHTML = crumbHtml(active, subagentShown());
 }
 /** T3 Code's project icon: the project's favicon, or else a monogram of its name. */
 function projectIcon(name, tab) {
@@ -261,6 +261,7 @@ function renderSidebar() {
   threadList.replaceChildren(...rows);
   if (!rows.length) threadList.innerHTML = `<p class="empty" role="status">${tabs.length ? "No threads found" : "No threads yet"}</p>`;
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
+  document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
   tickDurations();
   scheduleWake();
 }
@@ -495,6 +496,44 @@ hoverCard.addEventListener("click", (e) => {
   if (tab !== active) activate(tab);
   openPr(tab, link.dataset.cardPr);
 });
+
+/** T3 Code's tooltips: an element's `data-tip` shows above it once the pointer rests 600ms, or
+ * `data-tip-delay` ms, and the next opens at once while one is up or just closed. `data-tip-sub`
+ * adds a muted second line; `data-tip-side` "bottom" puts it under the element's start, "left" at its left. */
+const sideTip = Object.assign(document.createElement("div"), { id: "side-tip", role: "tooltip", hidden: true });
+document.body.append(sideTip);
+let tipFor = null;
+let tipTimer;
+let tipClosedAt = 0;
+function hideTip() {
+  clearTimeout(tipTimer);
+  if (!sideTip.hidden) tipClosedAt = Date.now();
+  sideTip.hidden = true;
+  tipFor = null;
+}
+function showTip(el) {
+  if (!el.isConnected || !el.dataset.tip) return hideTip();
+  sideTip.innerHTML = `<span>${esc(el.dataset.tip)}</span>${el.dataset.tipSub ? `<span class="sub">${esc(el.dataset.tipSub)}</span>` : ""}`;
+  sideTip.hidden = false;
+  const a = el.getBoundingClientRect();
+  const r = sideTip.getBoundingClientRect();
+  const side = el.dataset.tipSide ?? (a.top - r.height - 4 >= 5 ? "top" : "bottom");
+  const x = side === "left" ? a.left - r.width - 4 : side === "bottom" && el.dataset.tipSide ? a.left : a.left + a.width / 2 - r.width / 2;
+  const y = side === "left" ? a.top + a.height / 2 - r.height / 2 : side === "top" ? a.top - r.height - 4 : a.bottom + 4;
+  sideTip.style.left = `${Math.max(5, Math.min(x, innerWidth - r.width - 5))}px`;
+  sideTip.style.top = `${Math.max(5, Math.min(y, innerHeight - r.height - 5))}px`;
+}
+document.addEventListener("pointerover", (e) => {
+  if (e.pointerType !== "mouse") return;
+  const el = e.target.closest?.("[data-tip]");
+  if (el === tipFor) return;
+  const shown = !sideTip.hidden;
+  hideTip();
+  if (!el || document.body.classList.contains("dragging-row")) return;
+  tipFor = el;
+  tipTimer = setTimeout(() => showTip(el), shown || Date.now() - tipClosedAt < 400 ? 0 : Number(el.dataset.tipDelay ?? 600));
+});
+for (const type of ["pointerdown", "blur", "scroll"]) addEventListener(type, hideTip, true);
 
 const wakeLabel = (until) => {
   const s = until - nowS();
@@ -741,7 +780,7 @@ function rowMenuItems(tab) {
       : { label: "Snooze", icon: "clock", disabled: !canSnooze(tab), children: () => snoozeItems([tab], true) },
     { label: "Rename thread", icon: "pencil", sep: true, run: () => startRename(tab) },
     { label: titling.has(tab.key) ? "Regenerating…" : "Regenerate title", icon: "refresh-cw", disabled: titling.has(tab.key) || !lastPrompt(tab), run: () => regenerateTitles([tab]) },
-    { label: "Mark unread", icon: "mail-open", disabled: phaseOf(tab) !== "done", run: () => markUnread(tab) },
+    { label: "Mark unread", icon: "mail-open", run: () => markUnread(tab) },
     { label: ui.project === project ? "Show all projects" : `Filter by ${project}`, icon: "folder-tree", run: () => setProjectFilter(ui.project === project ? "" : project) },
     { label: "Auto-settle behavior", icon: "timer", children: () => [
       { label: "Enabled", checked: !sideMarks.noAutoSettle[threadKey(tab)], run: () => changeMarks(threadKey(tab), () => delete sideMarks.noAutoSettle[threadKey(tab)]) },
@@ -751,7 +790,6 @@ function rowMenuItems(tab) {
       { label: "Path", icon: "folder", run: () => copyAndTell(tab.view.cwd, "path") },
       ...(ws?.branch ? [{ label: "Branch", icon: "git-branch", run: () => copyAndTell(ws.branch, "branch") }] : []),
       { label: "Thread ID", icon: "hash", disabled: !session, run: () => copyAndTell(session, "thread ID") },
-      { label: "Resume command", icon: "terminal", disabled: !session, run: () => copyAndTell(resumeCommand(tab), "resume command") },
     ] },
     { label: "Project settings", icon: "gear", run: () => openProjectSettings(tab) },
     { label: "Archive thread", icon: "archive", sep: true, disabled: turnLive(tab), run: () => archiveThread(tab) },
@@ -789,7 +827,8 @@ async function showMenu(items, at) {
     return out;
   };
   try {
-    await (await Menu.new({ items: await build(items) })).popup();
+    const point = at && !(at instanceof Element) && TAURI.dpi ? new TAURI.dpi.LogicalPosition(at.x, at.y) : undefined;
+    await (await Menu.new({ items: await build(items) })).popup(point);
   } catch (e) {
     console.warn("native menu", e);
     openSideMenu(items, at);
@@ -850,10 +889,12 @@ window.addEventListener("keydown", (e) => {
 
 function startRename(tab, where = "row") {
   if (where === "header") {
-    const title = document.querySelector("#chat-head .crumb .title");
+    const title = document.querySelector("#chat-head .crumb button.title");
     if (!title) return;
-    title.innerHTML = `<input class="rename" value="${esc(threadTitle(tab))}" aria-label="Thread title" spellcheck="false">`;
-    return editTitle(tab, title.querySelector("input"));
+    const input = Object.assign(document.createElement("input"), { className: "rename", value: threadTitle(tab), spellcheck: false });
+    input.setAttribute("aria-label", "Thread title");
+    title.replaceWith(input);
+    return editTitle(tab, input);
   }
   ui.renaming = tab.key;
   renderSidebar();
@@ -1258,11 +1299,11 @@ async function newThreadIn(tab) {
     tell(`Couldn't open a thread: ${esc(e)}`, 6000);
   }
 }
-/** T3 Code's chat.new: with more than one project the picker asks where, otherwise the thread opens here. */
+/** T3 Code's chat.new: with more than one project the palette asks where, otherwise the thread opens here. */
 function newThread(here = false) {
   if (narrow(768)) toggleSidebar(false);
   if (active && (here || projectCount() <= 1)) return newThreadIn(active);
-  toggleProjects();
+  openPalette({ mode: "new-thread-in" });
 }
 function newThreadWithoutProject() {
   const machine = active?.machine ?? onlineMachines()[0];
@@ -1270,8 +1311,12 @@ function newThreadWithoutProject() {
   if (pickerOpen()) closeProjects();
   openTab(machine, null).catch((e) => tell(`Couldn't open a thread: ${esc(e)}`, 6000));
 }
-async function addProject(machine = active?.machine) {
+/** T3 Code's Add project: the palette's sources, `machine` picked as their environment. */
+function addProject(machine = active?.machine) {
   if (narrow(768)) toggleSidebar(false);
+  openPalette({ mode: "add-project", machine });
+}
+async function browseProject(machine) {
   await showProjects({ machine });
   if (pickerOpen() && picker.querySelector(".choices")) browseFolders();
 }
@@ -1405,7 +1450,6 @@ function jumpToRow(n) {
 
 function toggleSidebar(open = !ui.sidebarOpen) {
   ui.sidebarOpen = open;
-  if (!narrow(768)) save("gui-sidebar", String(open));
   document.body.dataset.sidebar = open ? "open" : "closed";
 }
 document.getElementById("sidebar-toggle").innerHTML = icon("panel-left-close");
@@ -1450,6 +1494,40 @@ window.addEventListener("keydown", (e) => !(e.repeat && e.key === MOD_KEY) && sh
 window.addEventListener("keyup", (e) => e.key === MOD_KEY && showJumpHints(false), true);
 window.addEventListener("blur", () => showJumpHints(false));
 
+/** T3 Code's update control at the footer's end, in the desktop app: it checks for a new version, or
+ * installs the one found, which restarts the app. */
+const sideUpdate = document.getElementById("side-update");
+let updateBusy = null;
+function drawUpdate() {
+  const version = document.body.dataset.update;
+  const state = updateBusy ?? (version ? "available" : "idle");
+  const [glyph, tip] = {
+    idle: ["refresh-cw", "Check for updates"],
+    checking: ["refresh-cw", "Checking for updates…"],
+    available: ["download", `Update ${version} ready to download`],
+    downloading: ["download", "Downloading update"],
+  }[state];
+  sideUpdate.dataset.state = state;
+  sideUpdate.dataset.tip = tip;
+  sideUpdate.setAttribute("aria-label", tip);
+  sideUpdate.setAttribute("aria-disabled", String(!!updateBusy));
+  sideUpdate.innerHTML = `<span class="glyph">${icon(glyph, state === "checking" ? "spin" : "")}</span>`;
+}
+sideUpdate.onclick = async () => {
+  if (updateBusy) return;
+  const install = !!document.body.dataset.update;
+  updateBusy = install ? "downloading" : "checking";
+  drawUpdate();
+  await (install ? installUpdate() : checkUpdate());
+  updateBusy = null;
+  drawUpdate();
+};
+if (TAURI) {
+  sideUpdate.hidden = false;
+  drawUpdate();
+  new MutationObserver(drawUpdate).observe(document.body, { attributeFilter: ["data-update"] });
+}
+
 const sidebarEl = document.getElementById("sidebar");
 function setSidebarWidth(px) {
   const width = Math.round(Math.max(208, Math.min(px, innerWidth - 640)));
@@ -1470,14 +1548,33 @@ sidebarRail.onmousedown = (down) => {
 };
 sidebarRail.ondblclick = () => save("gui-sidebar-width", String(setSidebarWidth(SIDEBAR_WIDTH)));
 
-/** The header's project crumb opens a new thread there; a double-click on the title renames it. */
-function crumbHtml(tab) {
+/** T3 Code's breadcrumb: the project, which opens a new thread there, a subagent's parent thread, and
+ * the title, whose chevron shows on hover and whose click opens the thread's menu; a double-click
+ * renames it. A subagent's own title opens nothing. */
+function crumbHtml(tab, sub = null) {
   const name = projectName(tab);
-  return `<button class="project" data-new-here title="New thread in ${esc(name)}">${projectIcon(name, tab)}<span>${esc(name)}</span></button><span class="sep">/</span><span class="title" title="${esc(threadTitle(tab))}">${esc(threadTitle(tab))}</span>`;
+  const sep = `<span class="sep" aria-hidden="true">/</span>`;
+  const parent = threadTitle(tab);
+  const title = sub ? sub.title : parent;
+  return `<button type="button" class="project" data-new-here aria-label="New thread in ${esc(name)}" data-tip="New thread in ${esc(name)}">${projectIcon(name, tab)}<span>${esc(name)}</span></button>${sep}${sub
+    ? `<button type="button" class="parent" data-subagent-back aria-label="Open parent thread: ${esc(parent)}" data-tip="${esc(parent)}"><span class="text">${esc(parent)}</span></button>${sep}<h2 class="title sub" data-tip="${esc(title)}"><span class="text">${esc(title)}</span></h2>`
+    : `<button type="button" class="title" aria-haspopup="menu" aria-label="Thread actions for ${esc(title)}" data-tip="${esc(title)}"><h2 class="text">${esc(title)}</h2>${icon("chevron-down", "chev")}</button>`}`;
+}
+/** A parent crumb that would push the title out folds to "...", as T3 Code's does. */
+function fitParentCrumb() {
+  const parent = crumbEl.querySelector(".parent");
+  if (!parent) return;
+  parent.classList.remove("folded");
+  const gap = parseFloat(getComputedStyle(crumbEl).columnGap) || 0;
+  const items = [...crumbEl.children];
+  const need = items.reduce((sum, el) => sum + (el.classList.contains("title") ? el.querySelector(".text").scrollWidth : el.getBoundingClientRect().width), gap * (items.length - 1));
+  parent.classList.toggle("folded", need > crumbEl.clientWidth);
 }
 const crumbEl = document.querySelector("#chat-head .crumb");
+new ResizeObserver(fitParentCrumb).observe(crumbEl);
+new MutationObserver(fitParentCrumb).observe(crumbEl, { childList: true });
 crumbEl.addEventListener("click", (e) => e.target.closest("[data-new-here]") && newThreadIn(active));
-crumbEl.addEventListener("dblclick", (e) => active && e.target.closest(".title") && !e.target.closest("input") && startRename(active, "header"));
+crumbEl.addEventListener("dblclick", (e) => active && e.target.closest("button.title") && !e.target.closest(".chev") && startRename(active, "header"));
 document.getElementById("chat-head").addEventListener("contextmenu", (e) => {
   if (!active || e.target.closest("input, button:not([data-new-here])")) return;
   e.preventDefault();

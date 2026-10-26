@@ -1681,9 +1681,9 @@ async function sweep(profileName) {
   });
 
   await step("app view: the PR link opens the pull request panel", async () => {
-    check(await page.locator("#pr-chip").isVisible(), "the header has no PR chip after the session linked #42");
+    check(!(await page.locator("#chat-head #pr-chip, #chat-head .chip").count()), "the header has a PR chip, which T3 keeps in thread details");
     check(/#42/.test(await text("#composer-footer .pr")), "the composer footer doesn't show #42");
-    await tapOrClick("#pr-chip");
+    await tapOrClick("#composer-footer .pr");
     const prPanelSettled = async () => /#42/.test(await text("#panel-body")) && !/Loading/.test(await text("#panel-body"));
     await waitFor("the PR panel", prPanelSettled, 15000);
     check(await page.locator('#panel-tabs [data-panel="pr"].active').isVisible(), "the PR tab is not the active one");
@@ -1908,7 +1908,7 @@ async function sweep(profileName) {
 
   await step("app view: PR reviewers, labels, timeline, Viewed, copy, and merge after a confirm", async () => {
     await tapOrClick("#toggle-panel");
-    await tapOrClick("#pr-chip");
+    await tapOrClick("#composer-footer .pr");
     await waitFor("#42's details", async () => /Add notes/.test(await text("#panel-body .pr-head h3")), 15000);
     const meta = await text("#panel-body .meta");
     check(/monalisa/.test(meta) && /octocat/.test(meta) && /documentation/.test(meta), `reviewers and labels: ${meta}`);
@@ -2485,9 +2485,9 @@ async function sweep(profileName) {
 
   await step("app view: claude's folder trust menu, answered from the banner", async () => {
     await showSidebar();
-    await tapOrClick("#new-thread");
-    await page.waitForSelector("#projects .choices button");
-    await press(page.locator("#projects .choices button", { hasText: "Browse folders…" }));
+    await tapOrClick("#add-project");
+    await press(page.locator("#palette .item", { hasText: "Local folder" }));
+    await page.waitForSelector("#projects .browse input");
     await page.fill("#projects .browse input", `${HOME}/work/gamma/`);
     await waitFor("the folder listing", async () => (await text("#projects .folders button")).startsWith("Open "));
     await press(page.locator("#projects .folders button").first());
@@ -3318,16 +3318,17 @@ async function sweep(profileName) {
     check(!(await page.isDisabled("#send")), "Send stayed off");
   });
 
-  await step("composer: the header title shows a chevron and opens the thread menu a moment after a click", async () => {
+  await step("composer: the header title shows a chevron and opens the thread menu under it", async () => {
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
     await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
     if (!touch) {
       await page.hover("#chat-head .crumb .title");
-      await waitFor("the chevron", async () => (await page.evaluate(() => getComputedStyle(document.querySelector("#chat-head .crumb"), "::after").opacity)) === "0.6");
+      await waitFor("the chevron", async () => (await page.locator("#chat-head .crumb .title .chev").evaluate((el) => getComputedStyle(el).opacity)) === "1");
     }
     await press(page.locator("#chat-head .crumb .title"));
-    if (!touch) check(!(await page.locator("#side-menu").isVisible()), "the menu opened before a double-click could rename");
     await waitFor("the thread menu", () => page.locator("#side-menu").isVisible(), 2000);
+    const [menu, title] = [await rect("#side-menu"), await rect("#chat-head .crumb .title")];
+    check(Math.round(menu.left) === Math.round(Math.max(8, title.left)) && Math.round(menu.top) === Math.round(title.bottom + 4), `the menu opened at ${menu.left},${menu.top}, under a title at ${title.left},${title.bottom}`);
     const items = await page.locator("#side-menu button").allTextContents();
     check(items.some((i) => /Rename/.test(i)), `menu: ${items.join(" | ")}`);
     await page.keyboard.press("Escape");
@@ -3729,6 +3730,7 @@ async function sweep(profileName) {
     await waitFor("two threads", async () => (await rows()) === 2);
 
     await tapOrClick("#add-project");
+    await press(page.locator("#palette .item", { hasText: "Local folder" }));
     await waitFor("the path field", () => page.locator("#projects .browse input").isVisible());
     await page.keyboard.press("Escape");
     await page.keyboard.press("Escape");
@@ -3978,7 +3980,7 @@ async function sweep(profileName) {
   await step("app view: ⌘⇧T reopens a closed panel tab, as T3's closed views", async () => {
     if (touch) return "touch: ⌘⇧T needs a keyboard";
     await openRow(await keyFor("alpha"));
-    await tapOrClick("#pr-chip");
+    await tapOrClick("#composer-footer .pr");
     await waitFor("the PR tab", () => page.locator('#panel-tabs [data-panel="pr"].active').isVisible(), 10000);
     const label = await text('#panel-tabs [data-panel="pr"].active');
     await page.keyboard.press("Meta+w");
@@ -4113,6 +4115,158 @@ async function sweep(profileName) {
     await page.keyboard.press("Meta+z");
     await waitFor("the sweep undone", async () => (await page.locator("#thread-list .thread-row.tall").count()) === 2);
     await openRow(await keyFor("alpha"));
+  });
+
+  // T3 Code's sidebar chrome and chat header, round three.
+  const tip = async (selector) => {
+    await page.mouse.move(0, 0);
+    await page.hover(selector);
+    await waitFor(`the tooltip of ${selector}`, () => page.locator("#side-tip").isVisible(), 3000);
+    return { text: await text("#side-tip"), box: await rect("#side-tip"), at: await rect(selector) };
+  };
+  const filterLabels = async () => {
+    await showSidebar();
+    await press(page.locator("#project-filter"));
+    await waitFor("the project menu", () => page.locator("#project-menu").isVisible());
+    const labels = await page.locator("#project-menu .item .label").allTextContents();
+    await page.press("#project-menu input", "Escape");
+    return labels;
+  };
+  const paletteHeads = () => page.locator("#palette .group .label").allTextContents();
+  const paletteNames = () => page.locator("#palette .item .name").allTextContents();
+  const rowsNow = () => page.locator("#thread-list .thread-row").count();
+  const tabAt = (folder) => page.evaluate((f) => tabs.find((t) => t.view.cwd.endsWith(f))?.key, folder);
+  const openThreadIn = async (folder) => {
+    const before = await rowsNow();
+    await page.evaluate((p) => openTab(tabs[0].machine, p), path.join(HOME, folder));
+    await waitFor(`a thread in ${folder}`, async () => (await rowsNow()) === before + 1 && !!(await tabAt(`/${folder}`)), 10000);
+    return tabAt(`/${folder}`);
+  };
+
+  await step("app view: every load opens the sidebar, the phone's sheet spans the screen, T3's tooltips, and Back returns to the thread", async () => {
+    await openRow(await keyFor("alpha"));
+    if (!touch) {
+      await page.keyboard.press("Meta+b");
+      await waitFor("the sidebar closed", async () => !(await page.locator("#sidebar").isVisible()));
+    }
+    await page.reload();
+    await page.waitForFunction(() => document.body.dataset.hub === "online");
+    await waitFor("the app view again", () => page.locator("#chat").isVisible(), 10000);
+    await waitFor("the threads again", async () => (await page.evaluate(() => tabs.length)) >= 2, 10000);
+    check((await page.locator("#sidebar").isVisible()) === !touch, `after a reload the sidebar is ${touch ? "open on a phone" : "closed"}`);
+    await openRow(await keyFor("alpha"));
+    await showSidebar();
+    if (touch) {
+      const width = await page.evaluate(() => innerWidth);
+      const sheet = await rect("#sidebar");
+      check(Math.round(sheet.width) === width - 12, `the sheet is ${sheet.width}px on a ${width}px screen`);
+    } else {
+      const usage = await tip('#sidebar footer [data-open-page="usage"]');
+      check(usage.text === "Usage" && usage.box.bottom <= usage.at.top, `Usage's tooltip: ${usage.text} at ${usage.box.top}`);
+      check((await tip('#sidebar footer [data-open-page="pull-requests"]')).text === "Pull Requests", "Pull Requests has no tooltip");
+      check((await page.getAttribute('#sidebar footer [data-open-page="usage"]', "title")) === null, "Usage keeps a native tooltip");
+      const pencil = await tip("#new-thread");
+      check(pencil.text === "New thread (⌘N)New thread in current project: Shift+click (⌘⇧N)", `the pencil's tooltip: ${pencil.text}`);
+      check((await tip("#add-project")).text === "Add project", "Add project has no tooltip");
+      await page.mouse.move(0, 0);
+    }
+    await press(gui('#sidebar footer [data-open-page="pull-requests"]'));
+    await waitFor("the Pull requests page", () => page.evaluate(() => document.body.dataset.page === "pull-requests"));
+    await page.evaluate(() => openPage("usage"));
+    await waitFor("the Usage page", () => page.evaluate(() => document.body.dataset.page === "usage"));
+    await showSidebar();
+    await press(gui("#sidebar footer .back"));
+    await waitFor("Back to land on the thread", async () => await page.locator("#chat").isVisible(), 5000).catch(async () =>
+      check(false, `Back went to ${await page.evaluate(() => document.body.dataset.page)}`));
+    check((await crumbProject()) === "alpha", `Back opened ${await crumbProject()}`);
+    check(!(await page.locator("#chat-head .update").count()), "the header still has the update button");
+  });
+
+  await step("app view: the pencil and Add project open T3's palette lists, and the row menu marks unread and copies three things", async () => {
+    const alpha = await keyFor("alpha");
+    await openRow(alpha);
+    await showSidebar();
+    await press(gui("#new-thread"));
+    await waitFor("the palette's projects", () => page.locator("#palette").isVisible());
+    check((await page.getAttribute("#palette input", "placeholder")) === "Search...", `placeholder: ${await page.getAttribute("#palette input", "placeholder")}`);
+    const projects = await paletteNames();
+    check((await paletteHeads()).join() === "Projects" && projects.includes("No project") && projects.includes("alpha") && projects.includes("beta"), `new thread in: ${projects.join(", ")}`);
+    check(await page.locator("#projects").isHidden(), "the ＋ picker opened too");
+    await page.press("#palette input", "Escape");
+    if (!touch) {
+      await page.keyboard.press("Meta+n");
+      await waitFor("⌘N's palette", async () => (await page.locator("#palette").isVisible()) && (await paletteHeads()).join() === "Projects");
+      await page.press("#palette input", "Escape");
+    }
+    await showSidebar();
+    await press(gui("#add-project"));
+    await waitFor("the palette's sources", async () => (await page.locator("#palette").isVisible()) && (await paletteHeads()).includes("Sources"));
+    const sources = await paletteNames();
+    check(sources.includes("Local folder") && sources.includes("New project"), `sources: ${sources.join(", ")}`);
+    await press(page.locator("#palette .item", { hasText: "Local folder" }));
+    await waitFor("the folder browser", () => page.locator("#projects").isVisible(), 5000);
+    await page.keyboard.press("Escape");
+    await waitFor("the picker to close", () => page.locator("#projects").isHidden());
+
+    await rowMenu(rowSel(alpha));
+    check(!(await page.locator("#side-menu button", { hasText: "Mark unread" }).isDisabled()), "Mark unread is off for a thread that isn't done");
+    await menuPick("Copy");
+    const copy = await page.locator("#side-menu button:not(.back) .label").allTextContents();
+    check(copy.join() === "Path,Branch,Thread ID", `Copy: ${copy.join(", ")}`);
+    await page.keyboard.press("Escape");
+    await openRow(alpha);
+  });
+
+  await step("app view: the header as T3's: the project on a phone, the chevron on the title only, icon-only split buttons, disabled Git actions explained, a folding parent crumb", async () => {
+    const alpha = await keyFor("alpha");
+    await openRow(alpha);
+    check(await page.locator("#chat-head .crumb .project").isVisible(), "the header hides the project");
+    check(!(await page.locator("#chat-head .crumb .sub-back").count()), "the header has a back button");
+    for (const label of ["#open-in .main .label", "#git-action .main .label", "#scripts-control .main .label"]) {
+      if (!(await page.locator(label).count())) continue;
+      const box = await rect(label);
+      check(box.width <= 1, `${label} shows (${box.width}px)`);
+    }
+    if (!touch) {
+      await page.hover("#chat-head .crumb .project");
+      await sleep(300);
+      check((await page.locator("#chat-head .crumb .title .chev").evaluate((el) => getComputedStyle(el).opacity)) === "0", "the chevron shows over the project");
+      await page.hover("#chat-head .crumb button.title");
+      await waitFor("the chevron", async () => (await page.locator("#chat-head .crumb .title .chev").evaluate((el) => getComputedStyle(el).opacity)) === "1");
+      check((await page.getAttribute("#chat-head .crumb button.title", "title")) === null, "the title keeps a native tooltip");
+    }
+    if (await page.locator("#git-action .more").isVisible()) {
+      await press(gui("#git-action .more"));
+      await waitFor("the Git menu", () => page.locator("#header-menu").isVisible());
+      const why = page.locator("#header-menu .why").first();
+      if (await why.count()) {
+        const reason = await why.getAttribute("data-tip");
+        if (touch) check((await why.locator(".note").textContent()) === reason, "a touch screen doesn't say why");
+        else {
+          const shown = await tip("#header-menu .why");
+          check(shown.text === reason && shown.box.right <= shown.at.left + 1, `the reason: ${shown.text} at ${shown.box.left}`);
+        }
+      }
+      await page.keyboard.press("Escape");
+    }
+
+    const beta = await keyFor("beta");
+    await openRow(beta);
+    await sendPrompt("agent");
+    await answered("The agent reported back.");
+    await press(lastTurn(".work > summary"));
+    await press(gui("#thread .turn:last-of-type [data-subagent]"));
+    await waitFor("the subagent's thread", () => page.locator("#chat-head .crumb .parent").isVisible(), 10000);
+    check((await tone("#chat-head .crumb .parent")) === "rgb(129, 129, 129)", `the parent crumb is ${await tone("#chat-head .crumb .parent")}`);
+    check((await text("#chat-head .crumb h2.title")) === "Look for the bug", `the title reads ${await text("#chat-head .crumb h2.title")}`);
+    await page.evaluate(() => (document.querySelector("#chat-head .crumb").style.maxWidth = "150px"));
+    await waitFor("the parent folded", () => page.locator("#chat-head .crumb .parent.folded").count());
+    check((await page.locator("#chat-head .crumb .parent").evaluate((el) => getComputedStyle(el, "::after").content)) === '"..."', "the folded parent doesn't read ...");
+    await page.evaluate(() => (document.querySelector("#chat-head .crumb").style.maxWidth = ""));
+    await waitFor("the parent unfolded", async () => !(await page.locator("#chat-head .crumb .parent.folded").count()));
+    await press(gui("#chat-head .crumb .parent"));
+    await waitFor("the thread again", () => page.locator("#composer").isVisible());
+    await openRow(alpha);
   });
 
   await step("app view: controls are big enough to tap", async () => {

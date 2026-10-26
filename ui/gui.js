@@ -43,7 +43,7 @@ const ui = {
   get panelOpen() {
     return panelOf(active).open;
   },
-  sidebarOpen: load("gui-sidebar") !== "false" && !narrow(768),
+  sidebarOpen: !narrow(768),
   drawer: false,
   search: "",
   project: load("gui-project") ?? "",

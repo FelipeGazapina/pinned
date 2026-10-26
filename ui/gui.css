@@ -123,16 +123,9 @@ button.outline .i { width: 14px; height: 14px; }
 #chat-sidebar-toggle { display: none !important; }
 body[data-sidebar="closed"] #chat-sidebar-toggle { display: grid !important; margin-left: -8px; }
 #chat-head .crumb { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; font-weight: 500; white-space: nowrap; }
-#chat-head .crumb .project { color: var(--g-muted); max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
 #chat-head .crumb .sep { color: rgb(var(--g-muted-rgb) / 0.6); }
-#chat-head .crumb .title { min-width: 40px; overflow: hidden; text-overflow: ellipsis; }
-#chat-head .chip { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 9px; border-radius: 8px;
-  border: 1px solid var(--g-input); background: rgb(var(--g-ink-rgb) / 0.03); font-size: 12px; color: var(--g-fg); font-variant-numeric: tabular-nums; }
-#chat-head .chip:hover { background: var(--g-input); }
-#chat-head .chip .i { width: 14px; height: 14px; }
 #chat-head .controls { display: flex; gap: 4px; }
 body[data-shell="web"] #gui-minimize { display: none !important; }
-#chat .update { margin-right: 4px; }
 
 #thread { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 16px 48px 200px; overscroll-behavior: contain;
   scrollbar-width: thin; scrollbar-color: var(--g-scrollbar) transparent; }
@@ -414,11 +407,10 @@ body[data-panel-max="true"] #panel-resize { display: none; }
 }
 @media (max-width: 768px) {
   body[data-mode="gui"] #workspace, body[data-mode="gui"][data-panel="open"] #workspace { grid-template-columns: 0 minmax(0, 1fr) 0 !important; }
-  body[data-mode="gui"] #sidebar { position: absolute; top: 0; bottom: 0; left: 0; z-index: 35; width: calc(100vw - 12px); max-width: 360px;
+  body[data-mode="gui"] #sidebar { position: absolute; top: 0; bottom: 0; left: 0; z-index: 35; width: calc(100vw - 12px);
     box-shadow: 16px 0 40px -8px var(--g-shadow); }
   body[data-mode="gui"][data-sidebar="open"] #workspace::before { content: ""; position: absolute; inset: 0; z-index: 34; background: rgb(0 0 0 / 0.5); }
   #chat-head { padding: 0 8px 0 12px; }
-  #chat-head .crumb .project, #chat-head .crumb .sep { display: none; }
 }
 @media (max-width: 639px) {
   #thread { padding: 12px 12px 200px; }
