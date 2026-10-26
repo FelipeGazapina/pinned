@@ -357,7 +357,7 @@ function renderPullsPage() {
   const compact = `<span class="condensed"><span class="crumb-sep"${expanded ? " hidden" : ""}>/</span><button type="button" class="crumb-menu" data-pr="state" aria-label="Filter by state">${stateLabel}${icon("chevron-down")}</button><button type="button" class="crumb-menu" data-pr="involvement" aria-label="Filter by involvement">${involvementLabel}${icon("chevron-down")}</button>${hosts.length > 1 ? `<button type="button" class="crumb-menu" data-pr="host-compact" aria-label="Filter by host">${esc(pulls.host ? prHostLabel(pulls.host) : "All")}${icon("chevron-down")}</button>` : ""}
     <span class="spacer"></span>${expanded ? searchHtml("top") : `<button type="button" class="icon" data-pr="search-top" title="Search pull requests" aria-label="Search pull requests">${icon("search")}</button>`}<button type="button" class="icon" data-pr="refresh" title="Refresh pull requests" aria-label="Refresh pull requests"${pulls.loading ? " disabled" : ""}>${prRefreshIcon()}</button></span>`;
   const surfaces = PAGE_PANELS["pull-requests"].surfaces.length;
-  const toggle = `<span class="panel-toggle" title="${surfaces ? `Side panel (${chordLabel("B", { alt: true })})` : "Select a pull request first"}"><button type="button" class="icon" data-pr="panel" aria-label="Toggle right panel"${surfaces ? "" : " disabled"}>${icon("panel-right")}</button></span>`;
+  const toggle = `<span class="panel-toggle" title="${surfaces ? `Side panel (${bindingLabel("rightPanel.toggle")})` : "Select a pull request first"}"><button type="button" class="icon" data-pr="panel" aria-label="Toggle right panel"${surfaces ? "" : " disabled"}>${icon("panel-right")}</button></span>`;
   const count = filterCount();
   const host = pulls.host ? `<button type="button" class="outline icon-only" data-pr="host" title="Filter by provider: ${esc(prHostLabel(pulls.host))}" aria-label="Filter by provider: ${esc(prHostLabel(pulls.host))}">${icon("github")}</button>`
     : `<button type="button" class="outline" data-pr="host" aria-label="Filter by provider: All">${icon("plug-2")}<span>All</span></button>`;
@@ -1056,7 +1056,7 @@ function syncPullsPanel() {
   const toggle = pageView.querySelector(".pulls-head .panel-toggle");
   const any = PAGE_PANELS["pull-requests"].surfaces.length > 0;
   if (!toggle) return;
-  toggle.title = any ? `Side panel (${chordLabel("B", { alt: true })})` : "Select a pull request first";
+  toggle.title = any ? `Side panel (${bindingLabel("rightPanel.toggle")})` : "Select a pull request first";
   toggle.querySelector("button").disabled = !any;
 }
 new MutationObserver(syncPullsPanel).observe(document.getElementById("panel-tabs"), { subtree: true, childList: true });

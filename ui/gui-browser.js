@@ -425,7 +425,8 @@ function bindBrowserSettings() {
   const root = document.getElementById("browser-settings");
   if (!root) return;
   const rebuild = () => {
-    // Replacing the focused field blurs it, which fires its change again on the detached root.
+    // Blurring the focused field fires its change first, which may already have rebuilt the root.
+    if (root.contains(document.activeElement)) document.activeElement.blur();
     if (!root.isConnected) return;
     root.outerHTML = browserSettingsHtml();
     bindBrowserSettings();
