@@ -2,7 +2,7 @@ use crate::history;
 use crate::workspace::{run, Failure};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// A folder's branches and where its own stands, for the composer's branch picker and Git action.
 #[derive(Serialize, Debug, PartialEq)]
@@ -194,7 +194,7 @@ pub fn run_step(cwd: &Path, step: &GitStep, claude: &Path, path: Option<&str>) -
             let mut diff = git(&["diff", "--cached"])?;
             diff.truncate((0..=diff.len().min(20_000)).rev().find(|i| diff.is_char_boundary(*i)).unwrap_or(0));
             let ask = format!("Write the git commit message for the change below. Answer with the message alone: an imperative subject of at most 72 characters, then a blank line and a short body only if it helps.\n\n{stat}\n{diff}");
-            let mut command = Command::new(claude);
+            let mut command = crate::process::command(claude);
             command.args(["-p", "--model", "haiku", &ask]).current_dir(cwd).stdin(Stdio::null());
             if let Some(path) = path {
                 command.env("PATH", path);
@@ -238,10 +238,10 @@ fn said(e: Failure) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     fn git(dir: &Path, args: &[&str]) {
-        let ok = Command::new("git").args(["-c", "user.email=a@b", "-c", "user.name=a"]).args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success();
+        let ok = crate::process::command("git").args(["-c", "user.email=a@b", "-c", "user.name=a"]).args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success();
         assert!(ok, "git {args:?}");
     }
 
@@ -325,6 +325,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn git_steps_commit_chosen_files_with_a_written_message_and_push() {
         let dir = tempfile::tempdir().unwrap();
         let remote = dir.path().join("remote.git");

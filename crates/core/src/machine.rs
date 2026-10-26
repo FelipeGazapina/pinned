@@ -1570,6 +1570,7 @@ mod tests {
     /// here draws first and takes the terminal a while later, as claude does, and the prompt still
     /// arrives whole, and only then.
     #[test]
+    #[cfg(unix)]
     fn a_prompt_typed_before_the_session_takes_the_terminal_waits_for_it() {
         let file = std::env::temp_dir().join(format!("pinned-early-prompt-{}.bin", std::process::id()));
         let m = machine();
@@ -1814,6 +1815,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_model_picked_for_a_conversation_restarts_it_with_that_model_and_keeps_it() {
         let dir = temp("model");
         let claude = dir.join("claude");
@@ -1833,6 +1835,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_new_thread_moves_to_a_new_worktree_and_back_dropping_it_unused() {
         let dir = temp("workspace");
         let repo = dir.join("repo");
@@ -1859,6 +1862,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn restarting_claude_resumes_the_tabs_conversation() {
         let dir = temp("restart");
         let claude = dir.join("claude");

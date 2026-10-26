@@ -172,7 +172,7 @@ fn kill_tree(root: u32) {
 
 #[cfg(unix)]
 fn children(of: &[u32]) -> Vec<u32> {
-    let Ok(ps) = std::process::Command::new("ps").args(["-A", "-o", "pid=", "-o", "ppid="]).output() else { return vec![] };
+    let Ok(ps) = crate::process::command("ps").args(["-A", "-o", "pid=", "-o", "ppid="]).output() else { return vec![] };
     String::from_utf8_lossy(&ps.stdout)
         .lines()
         .filter_map(|line| {
@@ -186,7 +186,7 @@ fn children(of: &[u32]) -> Vec<u32> {
 
 #[cfg(unix)]
 fn signal(which: &str, pids: &[u32]) {
-    let _ = std::process::Command::new("kill").arg(which).args(pids.iter().map(u32::to_string)).output();
+    let _ = crate::process::command("kill").arg(which).args(pids.iter().map(u32::to_string)).output();
 }
 
 #[cfg(all(test, unix))]
@@ -196,7 +196,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn alive(pid: &str) -> bool {
-        std::process::Command::new("kill").args(["-0", pid]).status().is_ok_and(|s| s.success())
+        crate::process::command("kill").args(["-0", pid]).status().is_ok_and(|s| s.success())
     }
 
     #[test]
@@ -219,7 +219,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         let survived = alive(&pid);
-        let _ = std::process::Command::new("kill").args(["-9", &pid]).status();
+        let _ = crate::process::command("kill").args(["-9", &pid]).status();
         assert!(!survived, "the detached child outlived its session");
     }
 }

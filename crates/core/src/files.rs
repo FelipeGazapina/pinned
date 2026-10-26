@@ -43,7 +43,7 @@ fn walk(dir: &Path, prefix: &str, depth: usize, found: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     fn write(dir: &Path, rel: &str) {
         std::fs::create_dir_all(dir.join(rel).parent().unwrap()).unwrap();
@@ -53,7 +53,7 @@ mod tests {
     #[test]
     fn lists_what_git_would_track_with_the_folders() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(Command::new("git").args(["init", "-q"]).current_dir(dir.path()).stdout(Stdio::null()).status().unwrap().success());
+        assert!(crate::process::command("git").args(["init", "-q"]).current_dir(dir.path()).stdout(Stdio::null()).status().unwrap().success());
         for rel in ["src/main.rs", "src/ui/app.js", "README.md", "café.md", "target/debug/out", "notes.log"] {
             write(dir.path(), rel);
         }

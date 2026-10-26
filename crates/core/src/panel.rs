@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 const READ_LIMIT: usize = 2_000_000;
@@ -242,7 +242,7 @@ pub fn read_file(cwd: &Path, rel: &str, root: bool, rev: Option<&str>) -> Result
         Some(rev) => {
             check_rev(rev)?;
             let spec = if root { format!("{rev}:{rel}") } else { format!("{rev}:./{rel}") };
-            let out = Command::new("git").args(["show", &spec]).current_dir(&base).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
+            let out = crate::process::command("git").args(["show", &spec]).current_dir(&base).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
             if !out.status.success() {
                 return Err(format!("git: {}", String::from_utf8_lossy(&out.stderr).trim()));
             }
@@ -352,7 +352,7 @@ fn gh(cwd: &Path, path: Option<&str>, args: &[&str]) -> Result<String, String> {
 }
 
 fn gh_input(cwd: &Path, path: Option<&str>, args: &[&str], input: Option<&str>) -> Result<String, String> {
-    let mut command = Command::new("gh");
+    let mut command = crate::process::command("gh");
     command.args(args).current_dir(cwd).stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(path) = path {
         command.env("PATH", path);
@@ -580,7 +580,7 @@ pub fn guide(cwd: &Path, pr: &str, write: bool, store: &Path, claude: &Path, pat
     std::fs::create_dir_all(store).map_err(|e| e.to_string())?;
     std::fs::write(&file, kept.to_string()).map_err(|e| e.to_string())?;
     let prompt = guide_prompt(&view, &diff);
-    let mut command = Command::new(claude);
+    let mut command = crate::process::command(claude);
     command
         .args(["-p", "--output-format", "json", "--json-schema", GUIDE_SCHEMA, "--allowedTools", "Read,Grep,Glob"])
         .current_dir(cwd)
@@ -638,7 +638,8 @@ impl DeviceHub {
         if let Some(origin) = embed.filter(|o| o.starts_with("http://") || o.starts_with("https://")) {
             args.extend(["--frame-ancestor", origin]);
         }
-        let mut command = Command::new("npx");
+        // npm installs npx on Windows as a batch file, which a program name without its extension never finds.
+        let mut command = crate::process::command(if cfg!(windows) { "npx.cmd" } else { "npx" });
         command.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         if let Some(path) = path {
             command.env("PATH", path);
@@ -773,7 +774,7 @@ mod tests {
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) {
-        assert!(Command::new("git").args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "git {args:?}");
+        assert!(crate::process::command("git").args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "git {args:?}");
     }
 
     #[test]

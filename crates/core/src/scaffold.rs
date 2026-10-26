@@ -150,7 +150,7 @@ mod tests {
         assert_eq!(created, Created { path: dir.display().to_string(), commit_error: None });
         assert!(std::fs::read_to_string(dir.join("README.md")).unwrap().contains("# My App"));
         assert!(std::fs::read_to_string(dir.join("assets/icon.svg")).unwrap().contains(">MA</text>"));
-        let log = std::process::Command::new("git").args(["log", "--format=%s"]).current_dir(&dir).output().unwrap();
+        let log = crate::process::command("git").args(["log", "--format=%s"]).current_dir(&dir).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Initial commit");
     }
 
