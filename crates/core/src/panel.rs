@@ -66,9 +66,11 @@ fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>
     for _ in 0..5 {
         let host = at.host_str().ok_or("no host")?.to_owned();
         let port = at.port_or_known_default().unwrap_or(80);
-        // localhost may name ::1 first while the server listens on 127.0.0.1 only.
+        // localhost may name ::1 first while the server listens on 127.0.0.1 only. Windows takes
+        // seconds to refuse a closed loopback port, while an open one answers at once.
         let addrs: Vec<_> = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port)).map_err(|e| e.to_string())?.collect();
-        let mut stream = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, Duration::from_secs(2)).ok()).ok_or_else(|| format!("nothing answers at {host}:{port}"))?;
+        let wait = |a: &std::net::SocketAddr| if a.ip().is_loopback() { Duration::from_millis(300) } else { Duration::from_secs(2) };
+        let mut stream = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, wait(a)).ok()).ok_or_else(|| format!("nothing answers at {host}:{port}"))?;
         stream.set_read_timeout(Some(Duration::from_secs(4))).map_err(|e| e.to_string())?;
         let target = at.query().map_or_else(|| at.path().to_owned(), |q| format!("{}?{q}", at.path()));
         write!(stream, "GET {target} HTTP/1.0\r\nHost: {host}:{port}\r\nAccept: text/html,image/*;q=0.9,*/*;q=0.5\r\nUser-Agent: pinned\r\n\r\n").map_err(|e| e.to_string())?;
@@ -791,7 +793,8 @@ mod tests {
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = server.local_addr().unwrap().port();
         std::thread::spawn(move || {
-            for stream in server.incoming().flatten().take(2) {
+            // Every connection, as another test looking for web servers may knock on this one too.
+            for stream in server.incoming().flatten() {
                 let mut stream = stream;
                 let mut ask = vec![];
                 let mut chunk = [0; 1024];
