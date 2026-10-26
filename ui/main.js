@@ -551,21 +551,23 @@ const carousel = document.getElementById("carousel");
 const track = document.getElementById("track");
 // A card's three lines need this much height; below it the pill shows one compact row.
 const CARDS_FROM_HEIGHT = 64;
-const CAROUSEL_SPEED = 40;
-const stillMotion = matchMedia("(prefers-reduced-motion: reduce)");
 /** What the track was last built for; items are rebuilt only when this changes. */
 let builtFor = "";
 
-/** Loops every tab through the pill. Status and title changes update the items in place so the scroll doesn't jump. */
+/** The pill lists the sidebar's active threads, leaving settled and snoozed ones out. */
+const pillTabs = () => tabs.filter((t) => !["settled", "snoozed"].includes(sectionOf(t)));
+
+/** Lays the active threads out in a row to scroll through. Status and title changes update the items in place so the scroll doesn't jump. */
 function renderCarousel() {
   const { width } = carousel.getBoundingClientRect();
   if (!width) return;
   const mode = pill.getBoundingClientRect().height >= CARDS_FROM_HEIGHT ? "cards" : "compact";
-  const key = JSON.stringify([mode, Math.round(width), stillMotion.matches, tabs.map((t) => [t.key, tabName(t)])]);
+  const shown = pillTabs();
+  const key = JSON.stringify([mode, shown.map((t) => [t.key, tabName(t)])]);
   if (key !== builtFor) {
     builtFor = key;
     pill.dataset.mode = mode;
-    buildTrack(width);
+    buildTrack(shown);
   }
   for (const item of track.querySelectorAll(".item")) {
     const tab = tabByKey(item.dataset.tab);
@@ -576,25 +578,18 @@ function renderCarousel() {
   }
 }
 
-function buildTrack(width) {
-  if (!tabs.length) return track.replaceChildren();
-  const set = document.createElement("div");
-  set.className = "set";
-  for (const tab of tabs) {
-    const item = document.createElement("button");
-    item.className = "item";
-    item.dataset.tab = tab.key;
-    item.innerHTML = `<span class="dot"></span><span class="name"></span><span class="status"></span><span class="title"></span>`;
-    item.querySelector(".name").textContent = tabName(tab);
-    set.append(item);
-  }
-  track.replaceChildren(set);
-  const setWidth = set.getBoundingClientRect().width;
-  // Enough copies that the track still covers the pill when shifted by one whole set.
-  const copies = stillMotion.matches ? 1 : Math.ceil(width / setWidth) + 1;
-  for (let i = 1; i < copies; i++) track.append(set.cloneNode(true));
-  track.style.setProperty("--set-width", `${setWidth}px`);
-  track.style.setProperty("--period", `${setWidth / CAROUSEL_SPEED}s`);
+function buildTrack(shown) {
+  if (!shown.length) return track.replaceChildren(Object.assign(document.createElement("span"), { className: "none", textContent: "No active threads" }));
+  track.replaceChildren(
+    ...shown.map((tab) => {
+      const item = document.createElement("button");
+      item.className = "item";
+      item.dataset.tab = tab.key;
+      item.innerHTML = `<span class="dot"></span><span class="name"></span><span class="status"></span><span class="title"></span>`;
+      item.querySelector(".name").textContent = tabName(tab);
+      return item;
+    }),
+  );
 }
 
 /** Calls `move` while the mouse is dragged past a few pixels from `down`, then `drop` on release. */
@@ -944,14 +939,33 @@ document.getElementById("minimize").onclick = () => setView("pill");
 win?.onFocusChanged(({ payload: focused }) => {
   if (!focused && document.body.dataset.view === "expanded" && !choosingFolder && !pageDevtoolsOpen()) setView("pill");
 });
+// The row scrolls sideways: a trackpad swipes it, a mouse wheel turns into a sideways scroll, and a
+// drag pulls it along without opening the thread it started on.
+let dragged = false;
+carousel.addEventListener("wheel", (e) => {
+  if (Math.abs(e.deltaX) >= Math.abs(e.deltaY)) return;
+  e.preventDefault();
+  carousel.scrollLeft += e.deltaY;
+}, { passive: false });
+carousel.onmousedown = (e) => {
+  if (e.button !== 0) return;
+  const from = carousel.scrollLeft;
+  dragged = false;
+  drag(e, {
+    move: (m) => {
+      dragged = true;
+      carousel.scrollLeft = from - (m.clientX - e.clientX);
+    },
+  });
+};
 track.onclick = async (e) => {
+  if (dragged) return (dragged = false);
   const tab = tabByKey(e.target.closest(".item")?.dataset.tab);
   if (!tab) return;
   await setView("expanded");
   activate(tab);
 };
 new ResizeObserver(renderCarousel).observe(pill);
-stillMotion.addEventListener("change", renderCarousel);
 const resizeFrom = (direction) => (e) => {
   e.preventDefault();
   win.startResizeDragging(direction);
@@ -1086,6 +1100,11 @@ if (TAURI) {
   checkUpdate().then((version) => version && installUpdate());
   setInterval(checkUpdate, 6 * 60 * 60 * 1000);
 }
+
+// A browser runs the UI its hub serves, so it shows the hub's version.
+(TAURI ? TAURI.app.getVersion() : fetch("/api/version").then((r) => (r.ok ? r.text() : "")))
+  .then((version) => (document.getElementById("version").textContent = version && `v${version}`))
+  .catch(() => {});
 
 new ResizeObserver(() => refit(active)).observe(terms);
 

@@ -1698,7 +1698,8 @@ async function openBranches(anchor) {
     return;
   }
   threadOf(tab).git = git;
-  const busy = phaseOf(tab) === "working" || !!tab.menu;
+  const delegating = phaseOf(tab) === "delegating";
+  const busy = phaseOf(tab) === "working" || !!tab.menu || delegating;
   // A fresh worktree, as T3 Code's draft one, picks the ref it starts from, which may be the remote's.
   const base = threadOf(tab).madeWorktree === tab.view.cwd && workspaceOpen(tab);
   const current = git.refs.find((r) => r.current)?.name;
@@ -1712,7 +1713,7 @@ async function openBranches(anchor) {
       ${r.current ? `<span class="badge">current</span>` : r.worktree ? `<span class="badge">worktree</span>` : r.remote ? `<span class="badge">remote</span>` : r.name === git.default ? `<span class="badge">default</span>` : ""}</button>`);
     if (pr) rows.unshift(`<button type="button" data-pr-checkout="${esc(pr)}"${busy ? " disabled" : ""}>${icon("git-pull-request", "lead")}<span class="label">Checkout PR ${/^\d+$/.test(pr) ? `#${pr}` : esc(pr)}</span></button>`);
     if (fresh) rows.push(`<button type="button" data-create="${esc(needle)}"${busy ? " disabled" : ""}>${icon("plus", "lead")}<span class="label">Create new ref "${esc(needle)}"</span></button>`);
-    composerMenu.querySelector(".refs").innerHTML = (busy ? `<p class="none">claude is working. Switch branches when the turn ends.</p>` : "") + (rows.join("") || `<p class="none">No refs found.</p>`)
+    composerMenu.querySelector(".refs").innerHTML = (busy ? `<p class="none">${delegating ? "claude's agents are working. Switch branches when they finish." : "claude is working. Switch branches when the turn ends."}</p>` : "") + (rows.join("") || `<p class="none">No refs found.</p>`)
       + (base ? `<label class="from-remote"><span>Start from remote</span><input type="checkbox" role="switch"${fromRemote ? " checked" : ""}></label>` : "");
     const toggle = composerMenu.querySelector(".from-remote input");
     if (toggle) toggle.onchange = () => (fromRemote = toggle.checked);

@@ -25,9 +25,10 @@ xattr -dr com.apple.quarantine /Applications/pinned.app
 
 - pinned starts in the project you opened most recently. Click 📁 to start `claude` in another folder.
 - Drag the header to move the panel. Drag the bottom-right corner to resize it.
-- Click `–` to shrink it to a pill. The pill shows what the agent is doing: working, done, or
-  needs you. It flashes when the agent finishes or asks for permission. Click the pill to open
-  the panel again.
+- Click `–` to shrink it to a pill. The pill lists your active threads, leaving out settled and
+  snoozed ones, and shows what each agent is doing: working, done, or needs you. Swipe, scroll
+  or drag the row to move between threads. The pill flashes when an agent finishes or asks for
+  permission. Click a thread to open the panel on it.
 - The header shows how much of your Claude subscription you have used, for example
   `5h 23%  7d 41%`. Each window has a thin bar: blue below 70%, amber from 70%, red from 90%.
   Hover over it to see the exact figures and when each window resets.
@@ -62,7 +63,10 @@ The app view has three columns:
   **Worked for** row; click it to see each one. A turn that changed files ends with a card of
   those files. **Open diff** shows them in the side panel. Type below and press Enter to send.
   While Claude works, Enter queues your message and the red button stops the turn.
-  The menu under the prompt picks the model.
+  Each agent Claude spawns gets a card under the turn with its name, its kind, what it is doing
+  now and how long it has run; click a card to see its recent steps. While any agent runs after
+  Claude's turn ended, the thread and its sidebar row read **N agents working**, and you can still
+  send a prompt. The menu under the prompt picks the model.
 - **Side panel.** Each thread keeps its own panel: its tabs, the one shown, its width, and
   whether it is open or maximized. **+** (⌘T while the panel is open) adds a tab, and ⌘W closes
   the shown tab before it ever closes a thread. ⌘D opens the **Diff**: one turn, the latest

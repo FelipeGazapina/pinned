@@ -538,7 +538,7 @@ function turnHtml(tab, turn, change, live, first, t) {
         <div class="steps">${steps}</div></details>`;
   }
   const notes = turn.notes.filter((n) => !(fold && !live && turn.interrupted && n.text === "Interrupted."));
-  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${fold}
+  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${fold}${agentCardsHtml(tab, turn)}
     ${shown.map((s) => shownHtml(s, cwd, t, live ? null : turn.answer, t.editable === true)).join("")}
     ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}
     ${change ? changesHtml(change, t.open) : ""}</section>`;
@@ -614,7 +614,7 @@ function renderThread() {
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit, t.agentsKey, phaseOf(tab)]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
@@ -632,7 +632,7 @@ function renderThread() {
     ? `${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}<div class="spacer" style="height:${win.above}px"></div>${shown
         .slice(win.lo, win.hi)
         .map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + win.lo + i === turns.length - 1, turn === opening, t))
-        .join("")}<div class="spacer" style="height:${win.below}px"></div>`
+        .join("")}<div class="spacer" style="height:${win.below}px"></div>${sub ? "" : agentsFooterHtml(tab)}`
     : `<div class="blank"><p>${blank}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
   const liveRows = threadView.querySelector(".work.live .group[open] > .rows");
   const follow = !liveRows || liveRows.scrollHeight - liveRows.scrollTop - liveRows.clientHeight < 24;

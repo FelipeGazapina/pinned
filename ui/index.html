@@ -17,9 +17,11 @@
 <link rel="stylesheet" href="gui-theme.css">
 <link rel="stylesheet" href="gui-sidebar.css">
 <link rel="stylesheet" href="gui-timeline.css">
+<link rel="stylesheet" href="gui-agents.css">
 <link rel="stylesheet" href="gui-composer.css">
 <link rel="stylesheet" href="gui-panel.css">
 <link rel="stylesheet" href="gui-shell.css">
+<link rel="stylesheet" href="gui-settings.css">
 </head>
 <body data-view="expanded" data-tabs="top">
   <main id="expanded">
@@ -122,17 +124,21 @@
     </div>
     <div id="settings">
       <nav id="settings-nav">
-        <button data-page="general">General</button>
-        <button data-page="integrations">Connectors</button>
-        <button data-page="projects">Projects</button>
-        <button data-page="connectors">Workflows</button>
-        <button data-page="account">Account</button>
-        <button data-page="machines">Machines</button>
-        <button data-page="archive">Archive</button>
+        <div class="head" data-tauri-drag-region><button id="settings-back" class="icon" title="Back to the app (⌘,)"><i data-icon="arrow-left"></i></button><b data-tauri-drag-region>Settings</b></div>
+        <div class="links">
+          <button data-page="general"><i data-icon="settings"></i>General</button>
+          <button data-page="integrations"><i data-icon="plug"></i>Connectors</button>
+          <button data-page="projects"><i data-icon="folder"></i>Projects</button>
+          <button data-page="connectors"><i data-icon="workflow"></i>Workflows</button>
+          <button data-page="account"><i data-icon="circle-user"></i>Account</button>
+          <button data-page="machines"><i data-icon="server"></i>Machines</button>
+          <button data-page="archive"><i data-icon="archive"></i>Archive</button>
+        </div>
       </nav>
       <section id="settings-page"></section>
     </div>
     <div id="grip" title="Resize"></div>
+    <span id="version"></span>
   </main>
   <div id="pill" data-status="idle" data-mode="compact">
     <span class="handle" data-tauri-drag-region title="Drag">⠿</span>
@@ -167,6 +173,7 @@
 <script src="gui.js"></script>
 <script src="gui-sidebar.js"></script>
 <script src="gui-timeline.js"></script>
+<script src="gui-agents.js"></script>
 <script src="gui-composer.js"></script>
 <script src="gui-panel.js"></script>
 <script src="gui-shell.js"></script>

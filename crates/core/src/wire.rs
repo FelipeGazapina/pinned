@@ -8,7 +8,7 @@ use crate::scripts::Script;
 use crate::panel::{ReviewComment, ReviewEvent};
 use crate::workspace::{DiffScope, PrAction};
 use crate::stats::ThreadStats;
-use crate::{pulls, sync, thread, usage};
+use crate::{pulls, subagents, sync, thread, usage};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -392,6 +392,8 @@ pub struct ThreadPage {
     pub reset: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<thread::Context>,
+    /// Every agent the session spawned, whole on each page. A machine on an older pinned leaves it out.
+    pub agents: Vec<subagents::Subagent>,
 }
 
 /// A connector's session, the same on any machine.

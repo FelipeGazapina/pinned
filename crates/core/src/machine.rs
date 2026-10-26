@@ -2,7 +2,7 @@ use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTO
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, projects, pty, pulls, reminders, scaffold, scripts, sessions, sync, thread, titles, uploads, usage, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, projects, pty, pulls, reminders, scaffold, scripts, sessions, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::SystemTime;
 
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
 pub const OUTPUT_KEEP: usize = 256 * 1024;
@@ -166,6 +167,8 @@ impl Screen {
 struct Tab {
     cwd: PathBuf,
     session: Option<pty::Session>,
+    /// When the running claude started, so a subagent an earlier claude left mid-step reads as stopped.
+    started: Option<SystemTime>,
     /// Extra `claude` arguments for the first start only, so a restart doesn't redo the task.
     launch: Vec<String>,
     /// Environment for every start, such as the issue a connector's session reports on.
@@ -253,6 +256,7 @@ pub struct Machine {
     clones: PathBuf,
     quitting: AtomicBool,
     usage: Mutex<Usage>,
+    agents: Mutex<subagents::Cache>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -302,6 +306,7 @@ impl Machine {
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
             usage: Mutex::new(Usage::default()),
+            agents: Mutex::default(),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -529,15 +534,13 @@ impl Machine {
 
     /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
-        let session = self.tab(tab, |t| t.claude_session.clone())?;
-        let page = session.as_deref().and_then(|s| thread::find(&thread::projects_dir(&home()), s)).map(|file| thread::read(&file, from));
-        match page {
-            Some(page) => {
-                let page = page.map_err(|e| format!("could not read the transcript: {e}"))?;
-                Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context })
-            }
-            None => Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None }),
-        }
+        let (session, process) = self.tab(tab, |t| (t.claude_session.clone(), t.session.as_ref().and(t.started)))?;
+        let Some(file) = session.as_deref().and_then(|s| thread::find(&thread::projects_dir(&home()), s)) else {
+            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, agents: vec![] });
+        };
+        let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
+        let agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
+        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, agents })
     }
 
     /// Every tab, in the order they opened.
@@ -710,6 +713,7 @@ impl Machine {
             t.screen.clone()
         })?;
         let session = screen.lock().unwrap().restart();
+        let started = SystemTime::now();
         let (me, exited) = (self.me.clone(), tab.to_owned());
         let pty = pty::Session::spawn(
             cmd,
@@ -723,6 +727,7 @@ impl Machine {
         )?;
         self.tab(tab, |t| {
             t.session = Some(pty);
+            t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
         })?;
         self.type_held_once_raw(tab, session);
@@ -995,6 +1000,7 @@ impl Machine {
         let tab = Tab {
             cwd,
             session: None,
+            started: None,
             launch,
             env,
             bypass,
