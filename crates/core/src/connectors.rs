@@ -325,6 +325,74 @@ impl Store {
         c.created.insert(key, filed.clone());
         Ok(filed)
     }
+
+    /// Claims what a check found, moves the checked connectors' watermarks, and answers the work
+    /// to hand out. It reaches no integration, so the check runs it under the store lock.
+    fn settle(&mut self, checked: &[String], found: Vec<(String, Found)>, now: DateTime<Utc>, exe: &str) -> Settled {
+        let mut settled = Settled::default();
+        let watermark = now - SLACK_OVERLAP;
+        for connector in self.connectors.iter_mut().filter(|c| checked.contains(&c.id)) {
+            let mentioned = found.iter().any(|(id, f)| *id == connector.id && matches!(f, Found::Mention { .. }));
+            settled.changed |= connector.advance(watermark, mentioned);
+        }
+        for (id, found) in found {
+            // A Slack thread's session filed or took the issue, or another connector started it.
+            if let Found::Issue(issue) = &found {
+                if self.working_on(&issue.id).is_some_and(|(owner, _)| owner.id != id) {
+                    continue;
+                }
+            }
+            // The connector may have been edited or deleted while the integration answered.
+            let Some(connector) = self.connectors.iter_mut().find(|c| c.id == id && c.enabled) else { continue };
+            let key = found.key();
+            match found {
+                Found::Issue(issue) => {
+                    if connector.claim(key) {
+                        settled.work.push(Work::Run(run(connector, &issue, exe)));
+                        settled.changed = true;
+                    }
+                }
+                Found::Mention { channel, channel_name, mention, posts } => {
+                    if !connector.claim(key.clone()) {
+                        continue;
+                    }
+                    // The session starts with these messages, so only later ones are passed on.
+                    let cursor = posts.last().map_or_else(|| mention.thread.clone(), |p| p.ts.clone());
+                    connector.followed.insert(key, Followed { cursor, seen: None, replied: false });
+                    let note = mention_note(&mention, now);
+                    let run = slack_run(connector, &channel, &channel_name, &mention.thread, &posts, note, exe);
+                    settled.work.push(Work::Run(Run { mentioned: vec![mention.ts], ..run }));
+                    settled.changed = true;
+                }
+                Found::Replies { replies, .. } if replies.posts.is_empty() => {
+                    // Nobody mentioned the bot, so nothing is passed on yet. The session gets these
+                    // messages with the next mention, and nothing reads them again until then.
+                    if let Some(followed) = connector.followed.get_mut(&key) {
+                        followed.seen = Some(replies.newest);
+                        settled.changed = true;
+                    }
+                }
+                Found::Replies { channel, replies } => settled.work.push(Work::Delivery(Delivery {
+                    connector: id,
+                    channel,
+                    thread: replies.thread,
+                    messages: replies.posts.iter().map(reply_block).collect(),
+                    cursor: replies.newest,
+                    mentioned: replies.mentioned,
+                })),
+            }
+        }
+        settled
+    }
+}
+
+/// What settling a check's finds turned up.
+#[derive(Default)]
+struct Settled {
+    work: Vec<Work>,
+    /// Whether the store needs saving.
+    changed: bool,
+    errors: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -565,66 +633,14 @@ impl Connectors {
 
         let _filing = self.filing.lock().await;
         let mut store = self.store.lock().unwrap();
-        let mut changed = false;
-        let watermark = now - SLACK_OVERLAP;
-        for connector in store.connectors.iter_mut().filter(|c| checked.contains(&c.id)) {
-            let mentioned = found.iter().any(|(id, f)| *id == connector.id && matches!(f, Found::Mention { .. }));
-            changed |= connector.advance(watermark, mentioned);
-        }
-        let mut work = vec![];
-        for (id, found) in found {
-            // A Slack thread's session filed or took the issue, or another connector started it.
-            if let Found::Issue(issue) = &found {
-                if store.working_on(&issue.id).is_some_and(|(owner, _)| owner.id != id) {
-                    continue;
-                }
-            }
-            // The connector may have been edited or deleted while the integration answered.
-            let Some(connector) = store.connectors.iter_mut().find(|c| c.id == id && c.enabled) else { continue };
-            let key = found.key();
-            match found {
-                Found::Issue(issue) => {
-                    if connector.claim(key) {
-                        work.push(Work::Run(run(connector, &issue, &self.exe)));
-                        changed = true;
-                    }
-                }
-                Found::Mention { channel, channel_name, mention, posts } => {
-                    if !connector.claim(key.clone()) {
-                        continue;
-                    }
-                    // The session starts with these messages, so only later ones are passed on.
-                    let cursor = posts.last().map_or_else(|| mention.thread.clone(), |p| p.ts.clone());
-                    connector.followed.insert(key, Followed { cursor, seen: None, replied: false });
-                    let note = mention_note(&mention, now);
-                    let run = slack_run(connector, &channel, &channel_name, &mention.thread, &posts, note, &self.exe);
-                    work.push(Work::Run(Run { mentioned: vec![mention.ts], ..run }));
-                    changed = true;
-                }
-                Found::Replies { replies, .. } if replies.posts.is_empty() => {
-                    // Nobody mentioned the bot, so nothing is passed on yet. The session gets these
-                    // messages with the next mention, and nothing reads them again until then.
-                    if let Some(followed) = connector.followed.get_mut(&key) {
-                        followed.seen = Some(replies.newest);
-                        changed = true;
-                    }
-                }
-                Found::Replies { channel, replies } => work.push(Work::Delivery(Delivery {
-                    connector: id,
-                    channel,
-                    thread: replies.thread,
-                    messages: replies.posts.iter().map(reply_block).collect(),
-                    cursor: replies.newest,
-                    mentioned: replies.mentioned,
-                })),
-            }
-        }
-        if changed {
+        let settled = store.settle(&checked, found, now, &self.exe);
+        errors.extend(settled.errors);
+        if settled.changed {
             if let Err(e) = self.save(&store) {
                 errors.push(e);
             }
         }
-        (work, (!errors.is_empty()).then(|| errors.join("; ")))
+        (settled.work, (!errors.is_empty()).then(|| errors.join("; ")))
     }
 
     /// Gives `work` to the tabs. A thread's cursor moves only once its messages reached a session,
