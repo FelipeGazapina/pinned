@@ -401,16 +401,13 @@ impl Machine {
                 json(branches::run_step(&cwd, &step, &self.launch.claude, self.launch.path_env.as_deref())?)
             }
             Call::SetWorkspace { tab, worktree, cols, rows } => json(self.set_workspace(&tab, worktree.as_deref(), cols, rows)?),
-            Call::PullRequests { paths, state, involvement, query, limit } => {
+            Call::PullRequests { paths, state, involvement, query, filters, limit } => {
                 let path = self.launch.path_env.as_deref();
-                let mut repos: Vec<pulls::Repo> = paths.iter().filter_map(|p| git_remote(Path::new(p))).filter_map(|r| pulls::remote_repo(&r)).collect();
-                repos.sort_by_key(|r| (r.host != pulls::GITHUB, r.host.clone(), r.name.to_lowercase()));
-                repos.dedup_by(|a, b| a.host == b.host && a.name.eq_ignore_ascii_case(&b.name));
-                let mut known = HashMap::new();
-                repos.retain(|r| *known.entry(r.host.clone()).or_insert_with(|| pulls::gh_knows(&home(), path, &r.host)));
-                json(pulls::list(&home(), path, repos, state, involvement, &query, limit)?)
+                json(pulls::list(&home(), path, self.gh_repos(&paths), state, involvement, &query, &filters, limit)?)
             }
             Call::PullRequestStack { repo, number } => json(pulls::stack(&home(), self.launch.path_env.as_deref(), &repo, number)?),
+            Call::PullRequestFilterOptions { paths, kind, query } => json(pulls::filter_options(&home(), self.launch.path_env.as_deref(), &self.gh_repos(&paths), kind, &query)?),
+            Call::PullRequestFiles { host, repo, number } => json(pulls::files(&home(), self.launch.path_env.as_deref(), &host, &repo, number)?),
             Call::TokenUsage { since, prices } => json(usage::read(&thread::projects_dir(&home()), since, &usage::rates(self.rates_file.as_deref()), &prices)),
             Call::PageMeta { url } => json(panel::page_meta(&url)?),
             Call::Refs { tab } => json(panel::refs(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
@@ -620,6 +617,17 @@ impl Machine {
             Some(cwd) => Ok(cwd),
             None => self.restart_claude(tab, cols, rows),
         }
+    }
+
+    /// The GitHub repositories of the folders `paths`, github.com's first, once each, on the hosts gh can reach.
+    fn gh_repos(&self, paths: &[String]) -> Vec<pulls::Repo> {
+        let path = self.launch.path_env.as_deref();
+        let mut repos: Vec<pulls::Repo> = paths.iter().filter_map(|p| git_remote(Path::new(p))).filter_map(|r| pulls::remote_repo(&r)).collect();
+        repos.sort_by_key(|r| (r.host != pulls::GITHUB, r.host.clone(), r.name.to_lowercase()));
+        repos.dedup_by(|a, b| a.host == b.host && a.name.eq_ignore_ascii_case(&b.name));
+        let mut known = HashMap::new();
+        repos.retain(|r| *known.entry(r.host.clone()).or_insert_with(|| pulls::gh_knows(&home(), path, &r.host)));
+        repos
     }
 
     /// Where the projects' scripts are kept, beside the saved sessions.

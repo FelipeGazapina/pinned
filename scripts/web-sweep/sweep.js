@@ -4319,11 +4319,15 @@ async function sweep(profileName) {
     return "Unpriced, then $0.01 at $2/$10 per 1M";
   });
 
+  const iconIs = (selector, name) => page.evaluate(([sel, n]) => {
+    const drawn = Object.assign(document.createElement("div"), { innerHTML: icon(n) }).firstElementChild;
+    return document.querySelector(sel)?.innerHTML === drawn.innerHTML;
+  }, [selector, name]);
   const prNumbers = (group) => page.locator(`#page-view ${group ? `.pr-group[data-group="${group}"] ` : ""}.pr-row[data-url] .num`).allTextContents();
   const prFilter = async (kind, label) => {
     await tapOrClick('#page-view [data-pr="filters"]');
-    await press(page.locator("#side-menu button", { hasText: kind }));
-    await press(page.locator("#side-menu button", { hasText: label }));
+    await press(page.locator("#pr-menu button", { hasText: kind }));
+    await press(page.locator("#pr-submenu button", { has: page.locator(`.label:text-is("${label}")`) }));
   };
   await step("shell: the Pull requests page lists the open projects' pull requests", async () => {
     fs.writeFileSync(path.join(HOME, "gh.log"), "");
@@ -4341,7 +4345,10 @@ async function sweep(profileName) {
     check(await page.locator(`${busy} .conflict`).isVisible(), "#43's conflict isn't marked");
     check((await page.getAttribute(`${busy} .checks`, "title")) === "Checks failing", "#43's failing checks aren't shown");
     check((await text(`${busy} .stat`)) === "+120 -30", `#43's size: ${await text(`${busy} .stat`)}`);
-    check((await page.locator(`${busy} .label`).count()) === 3 && (await text(`${busy} .more`)) === "+1", "#43 doesn't show three labels and +1");
+    const chips = await page.locator(`${busy} .label`).filter({ visible: true }).count();
+    const more = (await page.locator(`${busy} .label .more`).filter({ visible: true }).allTextContents()).join();
+    check(touch ? chips === 1 && more === "+3" : chips === 3 && more === "+1", `#43 shows ${chips} labels and ${more}`);
+    check(await iconIs('#page-view .pr-group[data-group="authored"] h3 svg', "pen-line"), "Authored doesn't wear T3's pen-line");
     check((await page.getAttribute('#page-view .pr-row[data-url$="/pull/42"] .review', "title")) === "Approved", "#42 isn't approved");
     await prFilter("State", "Merged");
     await waitFor("the merged pull request", async () => (await prNumbers()).join() === "#40");
@@ -4411,8 +4418,14 @@ async function sweep(profileName) {
     await page.locator("#page-view .page-body").evaluate((el) => (el.scrollTop = 2000));
     await waitFor("the condensed header", () => page.locator("#page-view .page-head .condensed").isVisible());
     check((await page.locator("#page-view .page-head .condensed .crumb-menu").allTextContents()).join() === "Open,All", "the condensed filters are wrong");
-    await press(page.locator('#page-view .page-head [data-pr="search-top"]'));
-    await waitFor("the search, scrolled back", async () => (await page.evaluate(() => document.activeElement?.closest?.(".pr-search") !== null)) && !(await page.locator("#page-view .page-head .condensed").isVisible()));
+    await waitFor("the header's search box", () => page.locator('#page-view .page-head .pr-search[data-at="top"] input').isVisible());
+    check((await page.inputValue('#page-view .page-head .pr-search input')) === "label:many", "the header's search box lost the query");
+    check(!(await page.locator('#page-view .page-head [data-pr="search-top"]').count()), "the header offers a search button beside its search box");
+    if (!touch) {
+      await page.evaluate(() => document.activeElement?.blur());
+      await page.keyboard.press("Meta+f");
+      check(await page.evaluate(() => document.activeElement?.closest?.('.pr-search[data-at="top"]') && document.activeElement.selectionStart === 0 && document.activeElement.selectionEnd === 10), "⌘F didn't select the header's search");
+    }
     await page.fill("#page-view .pr-search input", "");
     await waitFor("every row again", async () => (await prNumbers()).length === 3, 15000);
     const num = page.locator('#page-view .pr-row[data-url$="/pull/42"] .num');
@@ -4422,15 +4435,24 @@ async function sweep(profileName) {
     } else await num.click({ button: "right" });
     await waitFor("the number's menu", () => page.locator("#side-menu").isVisible());
     const items = await page.locator("#side-menu button .label").allTextContents();
-    check(items.join() === "Copy link,Copy number,Open on GitHub", `menu: ${items.join()}`);
+    check(items.join() === "Copy link,Open on GitHub", `menu: ${items.join()}`);
     await press(page.locator("#side-menu button", { hasText: "Copy link" }));
     const copied = await clipboard();
     check(copied === null || copied === "https://github.com/example/alpha/pull/42", `copied ${copied}`);
+    if (!touch) {
+      await page.evaluate(() => document.activeElement?.blur());
+      await page.keyboard.press("Meta+f");
+      check(await page.evaluate(() => document.activeElement?.closest?.('.pr-search[data-at="flow"]') && document.activeElement.selectionStart === 0 && document.activeElement.selectionEnd === 0), "⌘F didn't reach the toolbar's search");
+      await page.locator("#page-view .pr-row").first().focus();
+    }
     await press(page.locator('#page-view .pr-row[data-url$="/pull/43"] .checks'));
-    await waitFor("the checks", () => page.locator("#side-menu button", { hasText: "build" }).isVisible(), 10000);
-    check((await text('#side-menu button:has-text("build") .hint')) === "success", "the check's result is missing");
-    if (touch) await page.evaluate(() => closeSideMenu());
+    await waitFor("the checks popover", () => page.locator("#pr-popover").isVisible());
+    check((await text("#pr-popover .title")) === "Some checks were not successful", `the popover's title: ${await text("#pr-popover .title")}`);
+    await waitFor("the checks", () => page.locator('#pr-popover li:has-text("build")').isVisible(), 10000);
+    check((await text('#pr-popover li:has-text("build") .status')) === "Passed" && (await text('#pr-popover li:has-text("build") [data-details]')) === "Details", "the check's result or Details link is missing");
+    if (touch) await page.evaluate(() => closePrPopover());
     else await page.keyboard.press("Escape");
+    check(!(await page.locator("#pr-popover").isVisible()), "the checks popover stayed open");
     if (!touch) {
       await press(page.locator('#page-view .pr-row[data-url$="/pull/42"]'));
       await waitFor("#42 selected", () => page.locator('#page-view .pr-row.selected[data-url$="/pull/42"]').isVisible());
@@ -4712,7 +4734,7 @@ async function sweep(profileName) {
       await waitFor("three rows swept", async () => (await page.locator("#page-view .pr-row.sweeping").count()) === 3);
       await page.mouse.up();
       await waitFor("gh to close the three", () => [1000, 1001, 1002].every((n) => readLog("gh.log").includes(`pr close -- https://github.com/example/alpha/pull/${n}`)), 10000);
-      await waitFor("the notice", async () => (await text("#side-notice")) === "Closed 3 pull requests");
+      await waitFor("the toast", async () => (await text("#panel-note")) === "Closed 3 pull requests");
       check(!/pull\/1003/.test(readLog("gh.log")), "a row past the sweep closed");
       await waitFor("the list to refresh", () => page.evaluate(() => !pulls.loading), 10000);
       await page.hover(prRow(1004));
@@ -4751,21 +4773,257 @@ async function sweep(profileName) {
       await waitFor("both hosts' rows", async () => (await prNumbers()).length === 4, 15000);
       check(/auth token --hostname ghe\.example\.test/.test(readLog("gh.log")) && /api graphql --hostname ghe\.example\.test /.test(readLog("gh.log")), "gh never searched the Enterprise Server");
       check((await page.getAttribute(`${prRow(44)} .host`, "title")) === "ghe.example.test" && (await page.getAttribute(`${prRow(42)} .host`, "title")) === "github.com", "the rows don't name their hosts");
+      check((await text(`${prRow(44)} .stat`)) === "+1,234 -5,678", `#44's size: ${await text(`${prRow(44)} .stat`)}`);
       await tapOrClick('#page-view [data-pr="filters"]');
-      await press(page.locator("#side-menu button", { hasText: "Host" }));
-      check((await page.locator("#side-menu button .label").allTextContents()).join() === "All hosts,github.com,ghe.example.test", "the Host filter's choices");
-      await press(page.locator("#side-menu button", { hasText: "ghe.example.test" }));
+      await press(page.locator("#pr-menu button", { hasText: "Host" }));
+      check((await page.locator("#pr-submenu button .label").allTextContents()).join() === "All,github.com,ghe.example.test", "the Host filter's choices");
+      await press(page.locator("#pr-submenu button", { hasText: "ghe.example.test" }));
       await waitFor("ghe.example.test's only", async () => (await prNumbers()).join() === "#44");
-      check(/ghe\.example\.test/.test(await text('#page-view [data-pr="filters"]')), "the filter button doesn't show the host");
-      await tapOrClick('#page-view [data-pr="filters"]');
-      await press(page.locator("#side-menu button", { hasText: "Host" }));
-      await press(page.locator("#side-menu button", { hasText: "All hosts" }));
+      check((await text('#page-view [data-pr="filters"] .badge')) === "1", "the Filters button doesn't count the host");
+      check((await page.getAttribute('#page-view [data-pr="host"]', "aria-label")) === "Filter by provider: ghe.example.test", "the provider button doesn't name the host");
+      await tapOrClick('#page-view [data-pr="host"]');
+      await press(page.locator("#pr-menu button", { has: page.locator('.label:text-is("All")') }));
       await waitFor("every host again", async () => (await prNumbers()).length === 4);
+      await page.evaluate(() => {
+        document.head.append(Object.assign(document.createElement("style"), { id: "sweep-tall", textContent: "#page-view .page-wrap.pulls { min-height: 3000px }" }));
+        document.querySelector("#page-view .page-body").scrollTop = 600;
+      });
+      await waitFor("the condensed header", () => page.locator("#page-view .page-head .condensed").isVisible());
+      check((await page.locator("#page-view .page-head .condensed .crumb-menu").allTextContents()).join() === "Open,All,All", "the condensed header has no host menu with two hosts");
+      await press(page.locator('#page-view .page-head [data-pr="search-top"]'));
+      await waitFor("the header's search box", () => page.evaluate(() => !!document.activeElement?.closest?.('#page-view .page-head .pr-search[data-at="top"]')));
+      check(await page.locator("#page-view .page-head .condensed").isVisible(), "the search icon scrolled the page back");
+      await page.evaluate(() => {
+        document.getElementById("sweep-tall").remove();
+        document.querySelector("#page-view .page-body").scrollTop = 0;
+      });
       await leavePulls();
     } finally {
       await page.evaluate(() => closeTab(active));
       await page.evaluate((k) => tabByKey(k) && activate(tabByKey(k)), before);
     }
+  });
+
+  const prSearch = '#page-view .pr-search[data-at="flow"] input';
+  const prMenuLabels = (menu) => page.locator(`${menu} button .label`).allTextContents();
+  await step("follow: Pull requests open in the page's own right panel, whose header toggle waits for one; ⌘⇧C copies its link and ⌘W closes it", async () => {
+    await openPulls();
+    await waitFor("the rows", async () => (await prNumbers()).length === 3, 15000);
+    await page.evaluate(() => {
+      Object.assign(PAGE_PANELS["pull-requests"], { open: false, surfaces: [], active: null });
+      renderPanel();
+      renderPullsPage();
+    });
+    const toggle = "#page-view .pulls-head .panel-toggle";
+    check(await page.locator(`${toggle} button`).isDisabled(), "the panel toggle works with no pull request to show");
+    check((await page.getAttribute(toggle, "title")) === "Select a pull request first", `the toggle says ${await page.getAttribute(toggle, "title")}`);
+    const threadPanel = () => page.evaluate(() => (panelStates.get(active.key)?.surfaces ?? []).map((s) => s.id).join());
+    const before = await threadPanel();
+    await press(page.locator(prRow(43)));
+    await waitFor("#43 in the page's panel", async () => /#43/.test(await text('#panel-tabs .ptab.active[data-panel="pr"]')), 10000);
+    check(await page.locator(`${prRow(43)}.selected`).count() === 1, "#43's row isn't selected");
+    check((await threadPanel()) === before, "the pull request went into the thread's panel");
+    if (!touch) {
+      await page.evaluate(() => navigator.clipboard?.writeText("").catch(() => {}));
+      await page.keyboard.press("Meta+Shift+c");
+      const link = await clipboard();
+      check(link === null || link === "https://github.com/example/beta/pull/43", `⌘⇧C copied ${link}`);
+      await waitFor("the toast", async () => (await text("#panel-note")) === "PR link copied · https://github.com/example/beta/pull/43");
+      await tapOrClick("#panel-expand");
+      await waitFor("the list to give way", async () => !(await page.locator("#page-view .pulls").isVisible()));
+      await tapOrClick("#panel-expand");
+      await waitFor("the list back", () => page.locator("#page-view .pulls").isVisible());
+      await page.locator(prRow(43)).focus();
+      await page.keyboard.press("Escape");
+    } else await page.evaluate(() => goBack(-1) || closePage());
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+    check(!(await page.evaluate(() => panelOf(active).surfaces.some((s) => s.id.endsWith("/pull/43")))), "the thread's panel shows the page's pull request");
+    await openPulls();
+    await waitFor("the page's panel again", async () => /#43/.test(await text('#panel-tabs .ptab.active[data-panel="pr"]')), 10000);
+    if (!touch) await page.keyboard.press("Meta+w");
+    else await page.locator('#panel-tabs .ptab.active [data-close-surface]').tap();
+    await waitFor("the panel to close", () => page.evaluate(() => document.body.dataset.panel === "closed"));
+    await waitFor("the toggle to wait again", () => page.locator(`${toggle} button`).isDisabled());
+    await leavePulls();
+  });
+
+  await step("follow: Pull requests: Sort and Filters carry T3's icons and count, and Author, Labels, Draft, Review, Checks and Project narrow through gh", async () => {
+    fs.writeFileSync(path.join(HOME, "gh.log"), "");
+    await page.evaluate(() => pulls.states.clear());
+    await openPulls();
+    await waitFor("the rows", async () => (await prNumbers()).length === 3, 15000);
+    const closeMenu = async () => {
+      while (await page.locator("#pr-menu").isVisible()) await (touch ? page.evaluate(() => closePullsMenu()) : page.keyboard.press("Escape"));
+    };
+    await tapOrClick('#page-view [data-pr="sort"]');
+    check((await prMenuLabels("#pr-menu")).join() === "Merge readiness,Blocked on me,Recently updated,Newest shown,Oldest shown,Largest shown,Smallest shown", "the sort choices");
+    check(await page.locator("#pr-menu button").evaluateAll((bs) => bs.every((b) => b.firstElementChild?.matches("svg.i"))), "a sort choice has no icon");
+    await closeMenu();
+    check((await text('#page-view [data-pr="filters"]')) === "Filters", `the Filters button reads ${await text('#page-view [data-pr="filters"]')}`);
+    check((await text('#page-view [data-pr="host"]')) === "All" && (await iconIs('#page-view [data-pr="host"] svg', "plug-2")), "no All button with a plug");
+    await tapOrClick('#page-view [data-pr="filters"]');
+    check((await prMenuLabels("#pr-menu")).join() === "State,Involvement,Author,Labels,Draft,Review,Checks,Project", `the filters: ${(await prMenuLabels("#pr-menu")).join()}`);
+    check((await text('#pr-menu button:has(.label:text-is("State")) .value')) === "Open", "State doesn't show its choice");
+    await press(page.locator("#pr-menu button", { hasText: "Involvement" }));
+    check((await prMenuLabels("#pr-submenu")).join() === "All,Reviewing,Authored" && (await page.locator("#pr-submenu button svg.i:first-child").count()) === 3, "the involvement choices lack T3's icons");
+    await closeMenu();
+    await prFilter("Review", "Approved");
+    await waitFor("approved only", async () => (await prNumbers()).join() === "#42", 10000);
+    await waitFor("gh to search review:approved", () => / review:approved sort:/.test(readLog("gh.log")), 10000);
+    check((await text('#page-view [data-pr="filters"] .badge')) === "1", "the Filters button doesn't count the review filter");
+    await prFilter("Review", "All");
+    await prFilter("Checks", "Failing");
+    await waitFor("failing only", async () => (await prNumbers()).join() === "#43", 10000);
+    await waitFor("gh to search status:failure", () => / status:failure sort:/.test(readLog("gh.log")), 10000);
+    await prFilter("Checks", "All");
+    await waitFor("every row", async () => (await prNumbers()).length === 3, 10000);
+    await page.fill(prSearch, "draft:true");
+    await waitFor("drafts only", async () => (await prNumbers()).join() === "#41", 10000);
+    await waitFor("gh to search draft:true", () => / draft:true sort:/.test(readLog("gh.log")), 10000);
+    await tapOrClick('#page-view [data-pr="filters"]');
+    check((await text('#pr-menu button:has(.label:text-is("Draft")) .value')) === "Drafts only", "the Draft filter doesn't show the typed draft:true");
+    await press(page.locator("#pr-menu button", { hasText: "Draft" }));
+    await press(page.locator("#pr-submenu button", { has: page.locator('.label:text-is("All")') }));
+    await waitFor("draft:true out of the search", async () => (await page.inputValue(prSearch)) === "" && (await prNumbers()).length === 3, 10000);
+    await tapOrClick('#page-view [data-pr="filters"]');
+    await press(page.locator("#pr-menu button", { hasText: "Labels" }));
+    await waitFor("the label search", () => page.locator("#pr-submenu .menu-search input").isVisible());
+    await page.fill("#pr-submenu .menu-search input", "tri");
+    await waitFor("the host's label", () => page.locator("#pr-submenu button", { hasText: "triage" }).isVisible(), 10000);
+    check(/labels\(first: 100, query: \$search/.test(readLog("gh.log")) && / -f search=tri/.test(readLog("gh.log")), "gh never searched the labels");
+    await page.fill("#pr-submenu .menu-search input", "");
+    await waitFor("the loaded labels", () => page.locator("#pr-submenu button", { hasText: "build" }).isVisible(), 10000);
+    await press(page.locator("#pr-submenu button", { hasText: "build" }));
+    await waitFor("build's rows", async () => (await prNumbers()).join() === "#43", 10000);
+    await waitFor("gh to search label:\"build\"", () => / label:"build" sort:/.test(readLog("gh.log")), 10000);
+    check(await page.locator("#pr-submenu button", { hasText: "build" }).getAttribute("aria-checked") === "true", "the label isn't checked, or the menu closed");
+    await press(page.locator("#pr-submenu button", { hasText: "build" }));
+    await waitFor("every row", async () => (await prNumbers()).length === 3, 10000);
+    await closeMenu();
+    await tapOrClick('#page-view [data-pr="filters"]');
+    await press(page.locator("#pr-menu button", { hasText: "Author" }));
+    await waitFor("the loaded authors", async () => (await text('#pr-submenu button:has(.label:text-is("sweeper")) .aside')) === "1 merges loaded", 10000);
+    await page.fill("#pr-submenu .menu-search input", "mona");
+    await waitFor("the host's author", () => page.locator("#pr-submenu button", { hasText: "monalisa" }).isVisible(), 10000);
+    await press(page.locator("#pr-submenu button", { hasText: "monalisa" }));
+    await waitFor("nothing by monalisa", async () => (await text("#page-view .pr-empty h2")) === "Nothing under these filters", 10000);
+    await waitFor("gh to search the author", () => / author:"monalisa" sort:/.test(readLog("gh.log")), 10000);
+    check((await text("#page-view .pr-empty p")) === "Widen the state, involvement or project filter to see more.", "the filtered empty state's text");
+    check((await page.locator("#page-view .pr-empty .branch-art").count()) === 1 && (await text('#page-view .pr-empty [data-pr="refresh"]')) === "Check again", "the filtered empty state lacks T3's drawing or Check again");
+    await prFilter("Author", "Anyone");
+    await prFilter("Project", "beta");
+    await waitFor("beta's only", async () => (await prNumbers()).join() === "#43", 10000);
+    await waitFor("gh to search beta alone", () => / -f q=is:pr is:open sort:updated-desc repo:example\/beta$/m.test(readLog("gh.log")), 10000);
+    await prFilter("Project", "All projects");
+    await waitFor("every row", async () => (await prNumbers()).length === 3, 10000);
+    check(!(await page.locator('#page-view [data-pr="filters"] .badge').count()), "a filter stayed on");
+    await leavePulls();
+  });
+
+  await step("follow: Pull requests: a row names its author in full on hover and splits its +/− by kind, and Shift shows every row's actions, merging by the remembered method", async () => {
+    fs.writeFileSync(path.join(HOME, "gh.log"), "");
+    await openPulls();
+    await waitFor("the rows", async () => (await prNumbers()).length === 3, 15000);
+    check((await page.getAttribute(`${prRow(43)} .author`, "title")) === "Hubot Robot (@hubot)", `#43's author: ${await page.getAttribute(`${prRow(43)} .author`, "title")}`);
+    check((await page.getAttribute(`${prRow(42)} .author`, "title")) === "sweeper" && (await text(`${prRow(42)} .author .monogram`)) === "S", "a nameless author's hover or monogram");
+    if (touch) await page.locator(`${prRow(43)} [data-breakdown]`).focus();
+    else await page.hover(`${prRow(43)} [data-breakdown]`);
+    await waitFor("the split", async () => (await text("#pr-tip")).startsWith("Code"), 10000);
+    const cells = await page.locator("#pr-tip .breakdown > span:not(.sep)").allTextContents();
+    check(cells.join(" ") === "Code +80 -20 Tests +30 -5 Generated +10 -5 Total +120 -30", `the split: ${cells.join(" ")}`);
+    check(/files\(first: 100.* -F number=43/.test(readLog("gh.log")), "gh never read #43's files");
+    if (touch) {
+      await page.evaluate(() => document.activeElement?.blur());
+      await leavePulls();
+      return "touch: quick actions show while Shift is held";
+    }
+    await page.mouse.move(2, 2);
+    const shown = () => page.locator("#page-view .pr-row .quick").filter({ visible: true }).count();
+    await page.keyboard.down("Shift");
+    try {
+      await waitFor("every row's actions", async () => (await shown()) === 3);
+      check((await page.locator(`${prRow(41)} .quick button`).allTextContents()).join() === "Close,Ready for review", "#41's actions");
+      check((await page.locator(`${prRow(43)} .quick button`).allTextContents()).join() === "Close,Merge", "#43's actions");
+      check(await page.locator("#page-view .pr-row .quick button").evaluateAll((bs) => bs.every((b) => b.querySelector("svg.i"))), "an action has no icon");
+      await page.evaluate(() => save("gui-merge-method", "squash"));
+      await press(page.locator(`${prRow(43)} [data-quick="merge"]`));
+      await waitFor("gh to squash #43", () => /pr merge --squash -- https:\/\/github.com\/example\/beta\/pull\/43/.test(readLog("gh.log")), 10000);
+      await waitFor("the toast", async () => (await text("#panel-note")) === "Merge requested");
+      await page.evaluate(() => save("gui-merge-method", "rebase"));
+      await waitFor("#43 free to act again", () => page.locator(`${prRow(43)} [data-quick="merge"]:not([disabled])`).isVisible());
+      await press(page.locator(`${prRow(43)} [data-quick="merge"]`));
+      await waitFor("gh to merge #43 by the first method beta allows", () => /pr merge --merge -- https:\/\/github.com\/example\/beta\/pull\/43/.test(readLog("gh.log")), 10000);
+    } finally {
+      await page.keyboard.up("Shift");
+      await page.evaluate(() => save("gui-merge-method", null));
+      fs.rmSync(path.join(HOME, ".fake-gh-43"), { force: true });
+    }
+    await waitFor("the actions to hide", async () => (await shown()) === 0);
+    await leavePulls();
+  });
+
+  await step("follow: Pull requests: a search spins and says it searches every host, refresh spins, Load more says so, and the query is remembered", async () => {
+    await openPulls();
+    await waitFor("the rows", async () => (await prNumbers()).length === 3, 15000);
+    await page.fill(prSearch, "slowly");
+    await waitFor("the search's spinner", () => page.locator('#page-view .pr-search[data-at="flow"] .spin').isVisible());
+    await waitFor("the searching rows", async () => (await text("#page-view .pr-ghosts .caption")) === "Searching every host for “slowly”");
+    const ghost = await page.locator("#page-view .ghost-row").evaluateAll((rows) => rows.map((r) => `${r.querySelectorAll(".dot").length}${r.querySelectorAll(".lines .ghost").length}${r.querySelectorAll(".ends .ghost").length}`));
+    check(ghost.length === 5 && ghost.every((g) => g === "122"), `the loading rows: ${ghost.join()}`);
+    check(await page.locator('#page-view .pr-toolbar [data-pr="refresh"]').isDisabled() && (await page.locator('#page-view .pr-toolbar [data-pr="refresh"] .spin').count()) === 1, "refresh doesn't spin while loading");
+    await waitFor("nothing matches", async () => (await text("#page-view .pr-empty h2")) === "Nothing matches “slowly”", 15000);
+    check((await page.locator('#page-view .pr-empty [data-pr="clear"] svg').count()) === 1 && (await page.locator('#page-view .pr-empty [data-pr="refresh"] svg').count()) === 1, "Clear search or Check again has no icon");
+    await page.fill(prSearch, "label:many slowly");
+    await waitFor("GitHub's first page", async () => (await prNumbers()).length === 100, 20000);
+    await press(page.locator('#page-view [data-pr="more"]'));
+    await waitFor("Loading more", async () => (await text("#page-view .pr-foot")) === "Loading more" && (await page.locator("#page-view .pr-foot .spin").count()) === 1);
+    await waitFor("the second page", async () => (await prNumbers()).length === 150, 20000);
+    await page.fill(prSearch, "zzqx");
+    await waitFor("nothing matches", async () => (await text("#page-view .pr-empty h2")) === "Nothing matches “zzqx”", 10000);
+    if (!touch) {
+      await page.focus(prSearch);
+      await page.keyboard.press("Escape");
+      await waitFor("Escape to leave from the search box", () => page.locator("#chat").isVisible());
+    } else await leavePulls();
+    await openPulls();
+    check((await page.inputValue(prSearch)) === "zzqx", "the search wasn't remembered");
+    await waitFor("its answer", async () => (await text("#page-view .pr-empty h2")) === "Nothing matches “zzqx”", 10000);
+    await press(page.locator('#page-view [data-pr="clear"]'));
+    await waitFor("every row", async () => (await prNumbers()).length === 3, 15000);
+    await leavePulls();
+  });
+
+  await step("follow: Pull requests: a failed load offers Retry, a failed refresh warns below the rows it kept, and no project offers Add project", async () => {
+    await openPulls();
+    await waitFor("the rows", async () => (await prNumbers()).length === 3, 15000);
+    await page.fill(prSearch, "failhard");
+    await waitFor("the warning", async () => /HTTP 502.*Showing the last pull requests loaded\.$/.test(await text("#page-view .pr-warn span")), 10000);
+    check(await page.evaluate(() => !!document.querySelector("#page-view .pr-groups + .pr-warn")), "the warning isn't below the rows");
+    check((await prNumbers()).length === 3, "the last rows went away");
+    await page.evaluate(() => {
+      pulls.rows = null;
+      fetchPulls();
+    });
+    await waitFor("the failure", async () => (await text("#page-view .pr-empty.unavailable h2")) === "Could not load pull requests", 10000);
+    check((await page.locator("#page-view .pr-empty.unavailable .media svg").count()) === 1 && (await text('#page-view .pr-empty.unavailable [data-pr="refresh"]')) === "Retry" && (await page.locator('#page-view .pr-empty.unavailable [data-pr="refresh"] svg').count()) === 1, "no pull request icon, or Retry without its icon");
+    await page.fill(prSearch, "");
+    await waitFor("every row", async () => (await prNumbers()).length === 3, 15000);
+    await page.evaluate(() => {
+      window.realOpenProjects = openProjects;
+      openProjects = () => new Map();
+      fetchPulls();
+    });
+    try {
+      await waitFor("the empty workspace", async () => (await page.locator("#page-view .pr-empty h2").allTextContents()).join() === "No projects in this workspace");
+      check((await text('#page-view .pr-empty button.primary[data-pr="add-project"]')) === "Add project" && (await iconIs('#page-view .pr-empty [data-pr="add-project"] svg', "plus")), "Add project isn't T3's primary button with a plus");
+    } finally {
+      await page.evaluate(() => {
+        openProjects = window.realOpenProjects;
+        fetchPulls();
+      });
+    }
+    await waitFor("every row", async () => (await prNumbers()).length === 3, 15000);
+    await leavePulls();
   });
 
   await step("app view: back to the terminal", async () => {

@@ -18,7 +18,7 @@ function save(key, value) {
 }
 
 /** The calls `Call::may_wait` lets run out of order, which machine_call would run on the app's main thread. */
-const WAITING_CALLS = new Set(["run", "pull_request", "pr_status", "favicon", "regenerate_title", "pr_action", "thread", "workspace", "project_history", "diff", "ports", "editors", "open_in", "commands", "files", "branches", "checkout", "token_usage", "pull_requests", "page_meta", "refs", "read_file", "write_file", "search", "pr_edit", "pr_comment", "pr_review", "pr_rerun", "pr_guide", "device_hub", "subagent", "rewind", "fork", "save_file", "pr_list", "checkout_pr", "set_workspace", "git", "create_project", "publish_project", "pull_request_stack"]);
+const WAITING_CALLS = new Set(["run", "pull_request", "pr_status", "favicon", "regenerate_title", "pr_action", "thread", "workspace", "project_history", "diff", "ports", "editors", "open_in", "commands", "files", "branches", "checkout", "token_usage", "pull_requests", "page_meta", "refs", "read_file", "write_file", "search", "pr_edit", "pr_comment", "pr_review", "pr_rerun", "pr_guide", "device_hub", "subagent", "rewind", "fork", "save_file", "pr_list", "checkout_pr", "set_workspace", "git", "create_project", "publish_project", "pull_request_stack", "pull_request_filter_options", "pull_request_files"]);
 
 const localTransport = {
   call: (call) => invoke(WAITING_CALLS.has(call.cmd) ? "machine_call_slow" : "machine_call", { call }),
