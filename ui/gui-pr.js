@@ -872,7 +872,7 @@ function prCode(tab, d, s) {
     openTitle: "Open file",
   };
   const diff = `<div class="diff ${ui.diffView}${ui.diffWrap ? " wrap" : ""}" data-key="${esc(key)}" data-rev="${esc(d.headRefOid ?? "")}">${filesHtml(files, key, opts)}${d.truncated ? `<p class="panel-empty">This preview exceeds the size limit, so its end is cut.</p>` : ""}</div>`;
-  return `${diffToolbar(sum(files, "added"), sum(files, "removed"), `<span class="muted">${d.changedFiles} file${d.changedFiles === 1 ? "" : "s"}</span>`)}
+  return `${diffToolbar(files, key, `<span class="muted">${d.changedFiles} file${d.changedFiles === 1 ? "" : "s"}</span>`)}
     ${ui.diffTree && files.length ? `<div class="diff-split">${diff}${fileTreeHtml(files)}</div>` : diff}`;
 }
 async function prThreadAct(s, d, t, act) {

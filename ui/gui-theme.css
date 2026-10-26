@@ -83,6 +83,12 @@
   --g-add-no: #0b1a12;
   --g-del-row: #190d0e;
   --g-del-no: #1d0f10;
+  /* @pierre/trees' git-status colors in the diff's file tree. */
+  --g-tree-added: #00cab1;
+  --g-tree-modified: #08c0ef;
+  --g-tree-renamed: #ffd452;
+  --g-tree-deleted: #ff6762;
+  --g-tree-muted: #84848a;
   --g-code-fg: #e5e5e5;
   --g-line-no: #a6a6a6;
   --g-pr-open: rgb(var(--g-pr-open-rgb));
@@ -157,6 +163,10 @@ html[data-appearance="light"] {
   --g-blue: #1a85d4;
   --g-add: #009966;
   --g-del: #e7000b;
+  --g-tree-added: #16a994;
+  --g-tree-modified: #1ca1c7;
+  --g-tree-renamed: #d5a910;
+  --g-tree-deleted: #ff2e3f;
   --g-add-row: color-mix(in srgb, #00bc7d 10%, var(--g-raised));
   --g-add-no: color-mix(in srgb, #00bc7d 16%, var(--g-raised));
   --g-del-row: color-mix(in srgb, #fb2c36 8%, var(--g-raised));

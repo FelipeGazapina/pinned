@@ -131,7 +131,7 @@ pub fn diff(cwd: &Path, before: &str, after: &str) -> Option<(Vec<FileChange>, S
     if files.is_empty() {
         return None;
     }
-    let mut patch = git(cwd, &["diff", "--no-color", "--no-renames", before, after], None)?;
+    let mut patch = git(cwd, &["diff", "--no-color", "--find-renames", before, after], None)?;
     let truncated = patch.len() > PATCH_LIMIT;
     if truncated {
         let mut cut = PATCH_LIMIT;
@@ -245,6 +245,9 @@ mod tests {
         assert!(patch.contains("+c\n") && patch.contains("+hello\n") && !patch.contains("two"));
         assert!(!truncated);
         assert_eq!(diff(&dir, &after, &snapshot(&dir).unwrap()), None);
+        std::fs::rename(dir.join("edited.txt"), dir.join("renamed.txt")).unwrap();
+        let (_, moved, _) = diff(&dir, &after, &snapshot(&dir).unwrap()).unwrap();
+        assert!(moved.contains("rename from edited.txt\nrename to renamed.txt"), "{moved}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

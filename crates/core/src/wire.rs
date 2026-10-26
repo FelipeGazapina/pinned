@@ -181,11 +181,14 @@ pub enum Call {
     /// `Vec<workspace::Editor>` installed on the machine.
     Editors,
     /// `null`. Opens the tab's folder, or `path` inside its repository, in the editor `editor`.
+    /// With `reveal`, the file manager shows `path` in its folder instead of opening it.
     OpenIn {
         tab: TabId,
         editor: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reveal: bool,
     },
     /// `Vec<commands::Command>`, the slash commands claude offers in the tab's folder.
     Commands { tab: TabId },
@@ -808,7 +811,8 @@ mod tests {
             Call::PrAction { tab: "tab-1".into(), pr: "7".into(), action: PrAction::Ready },
             json!({ "cmd": "pr_action", "tab": "tab-1", "pr": "7", "action": "ready" }),
         );
-        round_trip(Call::OpenIn { tab: "tab-1".into(), editor: "zed".into(), path: None }, json!({ "cmd": "open_in", "tab": "tab-1", "editor": "zed" }));
+        round_trip(Call::OpenIn { tab: "tab-1".into(), editor: "zed".into(), path: None, reveal: false }, json!({ "cmd": "open_in", "tab": "tab-1", "editor": "zed" }));
+        round_trip(Call::OpenIn { tab: "tab-1".into(), editor: "finder".into(), path: Some("src/a.rs".into()), reveal: true }, json!({ "cmd": "open_in", "tab": "tab-1", "editor": "finder", "path": "src/a.rs", "reveal": true }));
     }
 
     #[test]

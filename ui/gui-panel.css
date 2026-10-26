@@ -73,20 +73,6 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 .diff-skeleton .line { height: 12px; border-radius: 999px; margin-left: 40px; }
 @keyframes skeleton { 50% { opacity: 0.45; } }
 
-/* pierre-dark, the theme T3's diffs use. */
-.dl .code .hljs-keyword, .dl .code .hljs-meta .hljs-keyword, .dl .code .hljs-built_in.hljs-keyword, .dl .code .hljs-selector-tag { color: var(--hl-keyword); }
-.dl .code .hljs-string, .dl .code .hljs-regexp, .dl .code .hljs-addition, .dl .code .hljs-meta .hljs-string { color: var(--hl-string); }
-.dl .code .hljs-number, .dl .code .hljs-literal, .dl .code .hljs-symbol, .dl .code .hljs-bullet { color: var(--hl-number); }
-.dl .code .hljs-title.function_, .dl .code .hljs-title, .dl .code .hljs-section { color: var(--hl-function); }
-.dl .code .hljs-type, .dl .code .hljs-title.class_, .dl .code .hljs-built_in { color: var(--hl-type); }
-.dl .code .hljs-variable, .dl .code .hljs-template-variable, .dl .code .hljs-property, .dl .code .hljs-attr, .dl .code .hljs-attribute { color: var(--hl-variable); }
-.dl .code .hljs-params { color: var(--hl-param); }
-.dl .code .hljs-punctuation, .dl .code .hljs-operator { color: var(--hl-punctuation); }
-.dl .code .hljs-comment, .dl .code .hljs-quote, .dl .code .hljs-meta { color: var(--hl-comment); }
-.dl .code .hljs-tag, .dl .code .hljs-name, .dl .code .hljs-selector-class, .dl .code .hljs-selector-id { color: var(--hl-tag); }
-.dl .code .hljs-emphasis { font-style: italic; }
-.dl .code .hljs-strong { font-weight: 600; }
-
 .diff[data-comments] .dl .no[data-line] { cursor: pointer; }
 .diff[data-comments] .dl .no[data-line]:hover { color: var(--g-fg); box-shadow: inset -2px 0 var(--g-primary); }
 .dcomment { position: sticky; left: 0; box-sizing: border-box; width: min(100%, calc(var(--panel-width) - 2px)); display: flex; align-items: flex-start; gap: 8px;
@@ -118,18 +104,8 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 .diff-split > .diff { flex: 1; min-width: 0; }
 .file-tree { position: sticky; top: 40px; flex: none; width: min(16rem, 40%); min-width: 160px; max-height: calc(100dvh - var(--topbar) - 40px); overflow: auto;
   box-sizing: border-box; border-left: 1px solid rgb(var(--g-ink-rgb) / 0.036); padding: 0 4px 16px; font: 12px var(--g-sans); scrollbar-width: thin; }
-.file-tree header { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 6px; font-weight: 500; }
-.file-tree button { display: flex; align-items: center; gap: 4px; width: 100%; height: 24px; padding: 0 6px 0 calc(8px + var(--depth) * 14px); border-radius: 6px;
-  color: var(--g-text); text-align: left; white-space: nowrap; }
-.file-tree button:hover { background: var(--g-hover); }
-.file-tree button .i { width: 14px; height: 14px; color: var(--g-muted); flex: none; }
-.file-tree button span:not(.change) { overflow: hidden; text-overflow: ellipsis; }
-.file-tree .name { flex: 1; min-width: 0; }
-.file-tree .add, .file-tree .del { font-size: 10px; }
-.file-tree .del { color: var(--g-del); }
-.file-tree .change { width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--g-blue); flex: none; box-sizing: border-box; }
-.file-tree [data-status="added"] .change { border-color: var(--g-add); }
-.file-tree [data-status="deleted"] .change { border-color: var(--g-del); }
+.file-tree header { display: flex; align-items: center; }
+.file-tree button { display: flex; align-items: center; text-align: left; white-space: nowrap; }
 
 .url-bar { position: relative; }
 .url-bar .nav { display: flex; align-items: center; gap: 2px; }
@@ -275,12 +251,11 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 .file[data-fresh] .hunks { animation: file-in 0.2s ease-out; }
 @keyframes file-in { from { opacity: 0; } }
 .rows-later { display: block; }
-.dcomment .range { margin-right: 6px; font: 11px var(--g-mono); color: var(--g-muted); }
 
 .file-tree header .icon, .files-bar .icon { width: 24px !important; height: 24px !important; }
 .file-tree header .icon .i, .files-bar .icon .i { width: 14px; height: 14px; }
-.file-tree .ficon, .files-tree .ficon { display: grid; place-items: center; flex: none; }
-.file-tree .ficon .i, .files-tree .ficon .i { width: 14px; height: 14px; color: inherit; }
+.files-tree .ficon { display: grid; place-items: center; flex: none; }
+.files-tree .ficon .i { width: 14px; height: 14px; color: inherit; }
 
 #panel-body[data-kind="files"], #panel-body[data-kind="terminal"] { overflow: hidden; display: flex; flex-direction: column; }
 .files-browser { flex: 1; min-height: 0; display: flex; flex-direction: column; font: 12px -apple-system, system-ui, sans-serif; }

@@ -2347,6 +2347,8 @@ async function sweep(profileName) {
     await waitFor("the diff panel", () => page.locator("#panel-body .file").first().isVisible());
     check(/notes\.md/.test(await text("#panel-body .file .path")), "the diff doesn't show notes.md");
     await press(gui("#panel-body .file > header .change"));
+    // A file waits for its grammar rather than draw in plain colors first.
+    await waitFor("the added lines", async () => (await page.locator("#panel-body .dl.add").count()) >= 2, 10000).catch(() => {});
     const added = await page.locator("#panel-body .dl.add").count();
     check(added >= 2, `${added} added lines in the diff`);
     await press(gui('#panel-body [data-diff="split"]'));
@@ -2737,7 +2739,7 @@ async function sweep(profileName) {
       await press(gui("#diff-scope"));
       await press(gui("#panel-menu button[data-sub]"));
       const turns = await page.locator("#panel-submenu button").allTextContents();
-      await press(gui("#panel-submenu button >> nth=0"));
+      await press(page.locator("#panel-submenu button").last());
       await waitFor("the first turn", async () => (await text("#diff-scope")) === "Turn 1");
       check(turns.length >= 2, `turns: ${turns.join(" | ")}`);
       await press(gui("#diff-scope"));
@@ -2773,7 +2775,7 @@ async function sweep(profileName) {
       await press(gui('#panel-body [data-diff="tree"]'));
       await waitFor("the folders in the tree", () => page.locator('#panel-body .file-tree [data-tree-dir="nested/inner"]').isVisible());
       const jsColor = await page.locator('#panel-body .file-tree [data-tree-file="nested/inner/file.js"] .ficon').evaluate((el) => getComputedStyle(el).color);
-      check(jsColor === "rgb(240, 219, 79)", `a .js file's icon is ${jsColor}`);
+      check(jsColor === "rgb(255, 212, 82)", `a .js file's icon is ${jsColor}`);
       check((await page.getAttribute("#panel-body [data-tree-all]", "title")) === "Collapse all folders", "no Collapse all folders");
       await press(gui("#panel-body [data-tree-all]"));
       await waitFor("the folders to close", async () => !(await page.locator('#panel-body .file-tree [data-tree-file="nested/inner/file.js"]').count()));
@@ -2824,6 +2826,329 @@ async function sweep(profileName) {
     }
     await closePanelIfOpen();
     return first.join(" | ");
+  });
+
+  // The Diff surface's own steps share one Uncommitted diff: a modified, a renamed, a deleted file,
+  // and new files in languages only pierre's file-name table knows.
+  const DIFF3 = path.join(HOME, "work/alpha/diff3");
+  const diff3 = { head: null };
+  const diff3File = (name) => `#panel-body .file[data-path="diff3/${name}"]`;
+  const DIFF3_LANGS = {
+    "page.astro": '---\nconst title = "Hi";\n---\n<h1 class="big">{title}</h1>\n',
+    "build.gradle.kts": 'plugins {\n    kotlin("jvm") version "1.9.0"\n}\nval answer: Int = 42\n',
+    "flake.nix": '{ pkgs ? import <nixpkgs> {} }:\npkgs.mkShell { buildInputs = [ pkgs.hello ]; }\n',
+    "run.ps1": '$name = "world"\nWrite-Host "Hello $name"\n',
+    "schema.prisma": 'model User {\n  id    Int    @id @default(autoincrement())\n  email String @unique\n}\n',
+  };
+  const openDiff3 = async () => {
+    await openPanelTo("diff", "Diff");
+    await press(gui("#diff-scope"));
+    await press(menuItem("Uncommitted"));
+    await waitFor("diff3 in the diff", () => page.locator(diff3File("sep.txt")).isVisible(), 10000);
+  };
+  const unfold = async (name) => {
+    if ((await page.locator(diff3File(name)).getAttribute("data-collapsed")) === "") await press(gui(`${diff3File(name)} > header .change`));
+    await waitFor(`${name} open`, async () => (await page.locator(diff3File(name)).getAttribute("data-collapsed")) === null);
+  };
+
+  await step("app view: the diff colors every language pierre names from its first paint, with no plain flash", async () => {
+    fs.rmSync(DIFF3, { recursive: true, force: true });
+    fs.mkdirSync(DIFF3, { recursive: true });
+    const sep = Array.from({ length: 700 }, (_, i) => `row ${i + 1}`);
+    fs.writeFileSync(path.join(DIFF3, "sep.txt"), `${sep.join("\n")}\n`);
+    fs.writeFileSync(path.join(DIFF3, "old-name.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n");
+    fs.writeFileSync(path.join(DIFF3, "gone.txt"), "bye\n");
+    diff3.head = alphaGit("symbolic-ref", "--short", "HEAD");
+    alphaGit("add", "diff3");
+    alphaGit("commit", "-q", "-m", "diff3");
+    sep[9] = "row 10 changed";
+    sep[249] = "row 250 changed";
+    sep[499] = "row 500 changed";
+    fs.writeFileSync(path.join(DIFF3, "sep.txt"), `${sep.join("\n")}\n`);
+    fs.renameSync(path.join(DIFF3, "old-name.txt"), path.join(DIFF3, "new-name.txt"));
+    fs.rmSync(path.join(DIFF3, "gone.txt"));
+    for (const [name, body] of Object.entries(DIFF3_LANGS)) fs.writeFileSync(path.join(DIFF3, name), body);
+    await openPanelTo("diff", "Diff");
+    await page.evaluate(() => {
+      window.diffPlain = new Set();
+      const look = () => {
+        for (const c of document.querySelectorAll("#panel-body .file .dl .code")) {
+          const p = c.closest(".file").dataset.path;
+          if (/\.(astro|kts|nix|ps1|prisma)$/.test(p) && c.textContent.trim() && !c.querySelector('span[style*="color"]')) window.diffPlain.add(p);
+        }
+      };
+      window.diffPlainWatch = new MutationObserver(look);
+      window.diffPlainWatch.observe(panelBody, { childList: true, subtree: true });
+    });
+    await openDiff3();
+    await press(gui('#panel-body [data-diff="collapse"]'));
+    const names = Object.keys(DIFF3_LANGS);
+    const colors = {};
+    await waitFor("each language's colors", async () => {
+      for (const name of names) colors[name] = await page.locator(`${diff3File(name)} .dl .code span[style*="color"]`).evaluateAll((spans) => new Set(spans.map((s) => s.style.color)).size);
+      return names.every((n) => colors[n] >= 2);
+    }, 15000).catch(() => check(false, `colors per file: ${JSON.stringify(colors)}`));
+    const plain = await page.evaluate(() => {
+      window.diffPlainWatch.disconnect();
+      return [...window.diffPlain];
+    });
+    check(!plain.length, `drawn in plain text before Shiki colored them: ${plain.join(", ")}`);
+    return names.map((n) => `${n} ${colors[n]} colors`).join(", ");
+  });
+
+  await step("app view: diff file headers draw pierre's status icon, a rename's old name, and only the counts that apply", async () => {
+    await openDiff3();
+    const symbol = (name) => page.locator(`${diff3File(name)} > header .change use`).getAttribute("href");
+    const symbols = { "sep.txt": await symbol("sep.txt"), "new-name.txt": await symbol("new-name.txt"), "gone.txt": await symbol("gone.txt"), "page.astro": await symbol("page.astro") };
+    check(symbols["sep.txt"] === "#diffs-icon-symbol-modified" && symbols["new-name.txt"] === "#diffs-icon-symbol-moved" && symbols["gone.txt"] === "#diffs-icon-symbol-deleted" && symbols["page.astro"] === "#diffs-icon-symbol-added", `icons: ${JSON.stringify(symbols)}`);
+    check((await text(`${diff3File("new-name.txt")} > header .from`)) === "diff3/old-name.txt", `the rename's old name reads ${await text(`${diff3File("new-name.txt")} > header .from`)}`);
+    check((await page.locator(`${diff3File("new-name.txt")} > header .moved use`).getAttribute("href")) === "#diffs-icon-arrow-right-short", "no arrow between a rename's names");
+    check(!(await page.locator(`${diff3File("new-name.txt")} .dl`).count()), "a pure rename shows lines");
+    const counts = async (name) => (await page.locator(`${diff3File(name)} > header :is(.add, .del)`).allTextContents()).join(" ");
+    const shown = { added: await counts("page.astro"), deleted: await counts("gone.txt"), changed: await counts("sep.txt") };
+    check(shown.added === "+4" && shown.deleted === "-1" && shown.changed === "-3 +3", `counts: ${JSON.stringify(shown)}`);
+    const tint = await page.locator(`${diff3File("gone.txt")} > header .change`).evaluate((el) => getComputedStyle(el).color);
+    check(tint === "rgb(255, 103, 98)", `a deleted file's icon is ${tint}`);
+    return JSON.stringify(shown);
+  });
+
+  await step("app view: the diff toolbar shows totals and file controls only with files, says what each toggle will do, and Refresh keeps the diff", async () => {
+    await openDiff3();
+    const title = (action) => page.getAttribute(`#panel-body [data-diff="${action}"]`, "title");
+    if ((await page.locator("#panel-body .file:not([data-collapsed])").count()) > 0) await press(gui('#panel-body [data-diff="collapse"]'));
+    check((await title("collapse")) === "Expand all files", `with every file folded the button says ${await title("collapse")}`);
+    await press(gui('#panel-body [data-diff="collapse"]'));
+    check((await title("collapse")) === "Collapse all files", `with files open the button says ${await title("collapse")}`);
+    const wrapped = await page.evaluate(() => ui.diffWrap);
+    check((await title("wrap")) === (wrapped ? "Disable line wrapping" : "Enable line wrapping"), `wrap reads ${await title("wrap")}`);
+    await press(gui('#panel-body [data-diff="wrap"]'));
+    check((await title("wrap")) === (wrapped ? "Enable line wrapping" : "Disable line wrapping"), `toggled, wrap reads ${await title("wrap")}`);
+    await press(gui('#panel-body [data-diff="wrap"]'));
+    const treeOn = await page.evaluate(() => ui.diffTree);
+    check((await title("tree")) === (treeOn ? "Hide file tree" : "Show file tree"), `the tree toggle reads ${await title("tree")}`);
+    await page.evaluate(() => {
+      window.diffRefresh = { spun: false, emptied: false };
+      window.diffRefreshWatch = new MutationObserver(() => {
+        if (document.querySelector('#panel-body [data-diff="refresh"].refreshing')) window.diffRefresh.spun = true;
+        if (document.querySelector("#panel-body .diff-skeleton") || !document.querySelector("#panel-body .file")) window.diffRefresh.emptied = true;
+      });
+      window.diffRefreshWatch.observe(panelBody, { childList: true, subtree: true, attributes: true });
+    });
+    await press(gui('#panel-body [data-diff="refresh"]'));
+    await waitFor("the refresh to finish", async () => !(await page.locator('#panel-body [data-diff="refresh"].refreshing').count()) && (await page.evaluate(() => window.diffRefresh.spun)), 10000);
+    const refresh = await page.evaluate(() => (window.diffRefreshWatch.disconnect(), window.diffRefresh));
+    check(refresh.spun && !refresh.emptied, `refresh: ${JSON.stringify(refresh)}`);
+    check((await page.getAttribute('#panel-body [data-diff="refresh"]', "title")) === "Refresh diff", "Refresh's title");
+    return `wrap was ${wrapped ? "on" : "off"}`;
+  });
+
+  await step("app view: the diff's file tree draws pierre's icons, git-status letters and the chosen file", async () => {
+    await openDiff3();
+    if (!(await page.evaluate(() => ui.diffTree))) await press(gui('#panel-body [data-diff="tree"]'));
+    await waitFor("the tree", () => page.locator("#panel-body .file-tree").isVisible());
+    check((await page.getAttribute('#panel-body [data-diff="tree"]', "title")) === "Hide file tree", "with the tree open its toggle doesn't say Hide file tree");
+    const leaf = (name) => `#panel-body .file-tree [data-tree-file="diff3/${name}"]`;
+    const letters = {};
+    for (const name of ["sep.txt", "new-name.txt", "gone.txt", "page.astro"]) letters[name] = await text(`${leaf(name)} .git`);
+    check(letters["sep.txt"] === "M" && letters["new-name.txt"] === "R" && letters["gone.txt"] === "D" && letters["page.astro"] === "A", `letters: ${JSON.stringify(letters)}`);
+    const added = await page.locator(`${leaf("page.astro")} .name`).evaluate((el) => getComputedStyle(el).color);
+    check(added === "rgb(0, 202, 177)", `an added file's name is ${added}`);
+    check(/^#file-tree-builtin-/.test((await page.locator(`${leaf("page.astro")} .ficon use`).getAttribute("href")) ?? ""), "the file's icon isn't pierre's");
+    check(await page.locator('#panel-body .file-tree [data-tree-dir="diff3"] .git svg').isVisible(), "the folder has no dot for its changes");
+    check(!(await page.locator('#panel-body .file-tree [data-tree-dir="diff3"] .i:not(.chevron)').count()), "a folder row draws a folder icon");
+    await press(gui(leaf("gone.txt")));
+    await waitFor("the chosen file lit", async () => (await page.locator(`${leaf("gone.txt")}.picked`).count()) === 1);
+    const lit = await page.locator(`${leaf("gone.txt")}`).evaluate((el) => getComputedStyle(el).backgroundColor);
+    check(lit !== "rgba(0, 0, 0, 0)", "the chosen file isn't highlighted");
+    await press(gui('#panel-body [data-diff="tree"]'));
+    return Object.values(letters).join("");
+  });
+
+  await step("app view: diff separators use pierre's chevrons, open 100 lines on each side from the label, and Shift opens a whole stretch", async () => {
+    await openDiff3();
+    await unfold("sep.txt");
+    const gap = (i) => `${diff3File("sep.txt")} .gap[data-gap="${i}"]`;
+    const buttons = async (i) => page.locator(`${gap(i)} .expand`).evaluateAll((els) => els.map((b) => `${b.dataset.expand}:${b.querySelector("use")?.getAttribute("href")}:${getComputedStyle(b.querySelector("svg")).transform}`));
+    const first = await buttons(0);
+    check(first.length === 1 && first[0] === "bottom:#diffs-icon-expand:matrix(1, 0, 0, -1, 0, 0)", `the stretch above the first hunk: ${first.join(" | ")}`);
+    const middle = await buttons(1);
+    check(middle.length === 2 && middle[0] === "top:#diffs-icon-expand:none" && middle[1].startsWith("bottom:#diffs-icon-expand:matrix"), `the stretch between hunks: ${middle.join(" | ")}`);
+    check(await page.locator(`${gap(1)}.multi`).count() === 1, "the two chevrons aren't stacked");
+    const label = () => text(`${gap(1)} .label`);
+    check((await label()) === "233 unmodified lines", `the middle reads ${await label()}`);
+    await page.locator(`${gap(1)} .label`).evaluate((el) => el.scrollIntoView({ block: "center" }));
+    await press(gui(`${gap(1)} .label`));
+    await waitFor("100 lines on each side", async () => (await label()) === "33 unmodified lines", 10000);
+    check((await page.locator(`${gap(1)} .expand`).count()) === 1, "33 lines left don't get a single chevron");
+    const topChevron = page.locator(`${gap(2)} [data-expand="top"]`);
+    check((await text(`${gap(2)} .label`)) === "243 unmodified lines", `the second stretch reads ${await text(`${gap(2)} .label`)}`);
+    await topChevron.evaluate((el) => el.scrollIntoView({ block: "center" }));
+    if (touch) await topChevron.tap({ modifiers: ["Shift"] });
+    else await topChevron.click({ modifiers: ["Shift"] });
+    await waitFor("Shift to open the whole stretch", async () => !(await page.locator(gap(2)).count()));
+    await page.locator(`${gap(0)} .expand`).evaluate((el) => el.scrollIntoView({ block: "center" }));
+    await press(gui(`${gap(0)} .expand`));
+    await waitFor("the first six lines", async () => !(await page.locator(gap(0)).count()));
+    return `${first.length} + ${middle.length} chevrons`;
+  });
+
+  await step("app view: dragging over diff line numbers selects them, and a comment reads as T3's", async () => {
+    await openDiff3();
+    await unfold("sep.txt");
+    const no = (n) => `${diff3File("sep.txt")} .no[data-side="new"][data-line="${n}"]`;
+    const selected = () => page.locator(`${diff3File("sep.txt")} .dl.sel`).count();
+    await press(gui(no(7)));
+    check((await selected()) === 1, `${await selected()} rows after pressing line 7`);
+    await press(gui(no(7)));
+    check((await selected()) === 0, "pressing the one selected line again kept it");
+    let dragged = "tapped";
+    if (!touch) {
+      const at = async (n) => {
+        const r = await page.locator(no(n)).boundingBox();
+        return [r.x + r.width / 2, r.y + r.height / 2];
+      };
+      await page.mouse.move(...(await at(7)));
+      await page.mouse.down();
+      await page.mouse.move(...(await at(8)), { steps: 3 });
+      await page.mouse.move(...(await at(9)), { steps: 3 });
+      await page.mouse.up();
+      check((await selected()) === 3, `${await selected()} rows after dragging from 7 to 9`);
+      await press(gui(no(12)));
+      await press(gui(no(12)));
+      await page.hover(no(11));
+      const [x, y] = await (async () => {
+        const r = await page.locator(`${no(11)} [data-comment-line]`).boundingBox();
+        return [r.x + r.width / 2, r.y + r.height / 2];
+      })();
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await page.mouse.move(...(await at(13)), { steps: 4 });
+      await page.mouse.up();
+      dragged = "dragged";
+    } else {
+      await page.hover(no(11));
+      await press(gui(`${no(11)} [data-comment-line]`));
+    }
+    await waitFor("the draft", () => page.locator("#panel-body .dcomment.draft textarea").isVisible());
+    const range = await page.getAttribute("#panel-body .dcomment.draft textarea", "aria-label");
+    check(range === (touch ? "Comment on lines L11" : "Comment on lines L11 to L13"), `the draft covers ${range}`);
+    const box = await page.locator("#panel-body .dcomment.draft").evaluate((el) => [getComputedStyle(el).backgroundColor, getComputedStyle(el).borderInlineStartWidth]);
+    check(box[0] === "rgba(0, 0, 0, 0)" && box[1] === "0px", `the draft sits in a box: ${box.join(", ")}`);
+    check((await text("#panel-body .dcomment.draft .hint")) === "⌘/Ctrl Enter to send", `hint: ${await text("#panel-body .dcomment.draft .hint")}`);
+    check((await page.locator("#panel-body .dcomment.draft [data-comment-cancel].ghost").count()) === 1, "Cancel isn't a ghost button");
+    check(await page.locator("#panel-body [data-comment-save]").isDisabled(), "Comment is enabled with nothing written");
+    await page.fill("#panel-body [data-comment-text]", "tighten this");
+    check(!(await page.locator("#panel-body [data-comment-save]").isDisabled()), "Comment stays disabled once written");
+    await press(gui("#panel-body [data-comment-save]"));
+    await waitFor("the saved comment", () => page.locator("#panel-body .dcomment:not(.draft)").isVisible());
+    check(!(await page.locator("#panel-body .dcomment:not(.draft) .range").count()) && (await text("#panel-body .dcomment:not(.draft) p")) === "tighten this", `the comment reads ${await text("#panel-body .dcomment:not(.draft) p")}`);
+    const tone = await page.locator("#panel-body .dcomment:not(.draft) > .i").evaluate((el) => getComputedStyle(el).color);
+    check(tone === "rgba(52, 107, 241, 0.7)", `the comment's icon is ${tone}`);
+    await press(gui("#panel-body [data-comment-delete]"));
+    await waitFor("the comment to go", async () => !(await page.locator("#panel-body .dcomment").count()));
+    return `${dragged}, ${range}`;
+  });
+
+  await step("app view: the diff's scope menu lists the newest turn first and a fresh thread starts on Changes", async () => {
+    await closePanelIfOpen();
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
+    await waitFor("beta", async () => /beta/.test(await text("#chat-head .crumb")));
+    await openPanelTo("diff", "Diff");
+    await waitFor("beta's diff scope", async () => (await text("#diff-scope")) !== "", 10000);
+    const fresh = await text("#diff-scope");
+    check(fresh === "Changes", `a thread that never opened Diff starts on ${fresh}`);
+    await waitFor("beta's empty Changes", async () => /no default branch/.test(await text("#panel-body")), 10000);
+    const left = await page.locator('#panel-body .diff-bar :is(.add, .del, [data-diff="collapse"], [data-diff="tree"])').count();
+    check(!left, `with no files the toolbar still shows ${left} totals or file controls`);
+    await closePanelIfOpen();
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+    await openPanelTo("diff", "Diff");
+    await press(gui("#diff-scope"));
+    await press(gui("#panel-menu button[data-sub]"));
+    const turns = (await page.locator("#panel-submenu button .label").allTextContents()).map((t) => Number(t.replace("Turn ", "")));
+    check(turns.length >= 2 && turns.every((n, i) => i === 0 || n === turns[i - 1] - 1) && turns.at(-1) === 1, `submenu order: ${turns.join(", ")}`);
+    await press(gui("#panel-submenu button >> nth=0"));
+    await waitFor("the newest turn", async () => (await text("#diff-scope")) === "Latest turn");
+    await press(gui("#diff-scope"));
+    await press(gui("#panel-menu button[data-sub]"));
+    await press(page.locator("#panel-submenu button").last());
+    await waitFor("the first turn", async () => (await text("#diff-scope")) === "Turn 1");
+    await press(gui("#diff-scope"));
+    await press(menuItem("Uncommitted"));
+    return turns.join(", ");
+  });
+
+  await step("app view: a diff file's name opens a menu to open it, reveal it in Finder, or open it with an editor", async () => {
+    await openDiff3();
+    const log = path.join(HOME, "open.log");
+    const kept = readLog("open.log");
+    try {
+      return await diffFileMenu();
+    } finally {
+      if (await page.locator("#side-menu").isVisible()) await page.keyboard.press("Escape");
+      if (kept) fs.writeFileSync(log, kept);
+      else fs.rmSync(log, { force: true });
+    }
+  });
+  async function diffFileMenu() {
+    const lines = () => readLog("open.log").trim().split("\n");
+    const pick = async (...labels) => {
+      await page.click(`${diff3File("sep.txt")} > header .path`, { button: "right" });
+      await waitFor("the file menu", () => page.locator("#side-menu").isVisible());
+      for (const label of labels) await press(gui(`#side-menu button:has(.label:text-is("${label}"))`));
+    };
+    await page.click(`${diff3File("sep.txt")} > header .path`, { button: "right" });
+    await waitFor("the file menu", () => page.locator("#side-menu").isVisible());
+    const items = await page.locator("#side-menu button .label").allTextContents();
+    check(items.join("|") === "Open|Reveal in Finder|Open with", `menu: ${items.join(" | ")}`);
+    await page.keyboard.press("Escape");
+    const before = lines().length;
+    await pick("Reveal in Finder");
+    await waitFor("Finder to reveal the file", async () => /^-R \/\S*\/work\/alpha\/diff3\/sep\.txt$/.test(lines().at(-1)));
+    await pick("Open");
+    await waitFor("the file to open in its app", async () => /^\/\S*\/work\/alpha\/diff3\/sep\.txt$/.test(lines().at(-1)));
+    await pick("Open with", "Zed");
+    await waitFor("the file to open in Zed", async () => /^-a \S*\/Zed\.app \S*\/work\/alpha\/diff3\/sep\.txt$/.test(lines().at(-1)));
+    return `${lines().length - before} opens`;
+  }
+
+  await step("app view: Settings' Motion row sets panel animations on a 25 ms slider with a readout, preview and reset", async () => {
+    await closePanelIfOpen();
+    await page.evaluate(() => toggleSettings());
+    try {
+      await motionRow();
+    } finally {
+      await page.evaluate(() => save("gui-panel-animation", null));
+      await page.evaluate(() => toggleSettings());
+    }
+  });
+  async function motionRow() {
+    await tapOrClick('#settings-nav [data-page="general"]');
+    await waitFor("the Motion row", () => page.locator("#panel-animation-row").isVisible());
+    const slider = await page.locator("#panel-animation").evaluate((el) => [el.type, el.min, el.max, el.step].join(" "));
+    check(slider === "range 0 400 25", `the control is ${slider}`);
+    check((await text("#panel-animation-row label")) === "Panel animations" && (await page.locator("#panel-animation-row").evaluate((el) => el.previousElementSibling?.textContent)) === "Motion", "the row isn't Motion › Panel animations");
+    check((await text("#panel-animation-row output")) === "0 ms" && (await page.locator("[data-panel-animation-reset]").isHidden()), "at the default the readout isn't 0 ms with no reset");
+    await page.locator("#panel-animation").evaluate((el) => {
+      el.value = "225";
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    check((await text("#panel-animation-row output")) === "225 ms" && (await page.evaluate(() => load("gui-panel-animation"))) === "225", `set to 225 the readout is ${await text("#panel-animation-row output")}`);
+    const duration = await page.locator("[data-panel-animation-preview] .side").evaluate((el) => getComputedStyle(el).transitionDuration);
+    check(duration.split(", ").every((d) => d === "0.225s"), `the preview takes ${duration}`);
+    await press(gui("[data-panel-animation-preview]"));
+    check(!(await page.locator("[data-panel-animation-preview].open").count()), "the preview didn't close");
+    await press(gui("[data-panel-animation-reset]"));
+    check((await text("#panel-animation-row output")) === "0 ms" && (await page.evaluate(() => load("gui-panel-animation"))) === null, "reset didn't return to 0 ms");
+  }
+
+  await step("app view: the diff steps clean up", async () => {
+    await closePanelIfOpen();
+    if (diff3.head) alphaGit("update-ref", "-d", `refs/heads/${diff3.head}`);
+    alphaGit("rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "diff3");
+    fs.rmSync(DIFF3, { recursive: true, force: true });
+    const d = await page.evaluate(() => (setDiffState(active, { scope: "turn", turn: null }), diffState(active).scope));
+    check(d === "turn", "alpha's diff scope didn't go back to its turn");
   });
 
   await step("app view: Files lists the folder, a File tab shows and saves a file, and ⌘P and ⌘⇧F find files and text", async () => {

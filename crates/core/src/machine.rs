@@ -397,9 +397,9 @@ impl Machine {
                 json(workspace::listeners(pid, self.launch.path_env.as_deref()))
             }
             Call::Editors => json(workspace::editors(&home(), self.launch.path_env.as_deref())),
-            Call::OpenIn { tab, editor, path } => {
+            Call::OpenIn { tab, editor, path, reveal } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
-                json(workspace::open_in(&cwd, &editor, path.as_deref(), &home(), self.launch.path_env.as_deref())?)
+                json(workspace::open_in(&cwd, &editor, path.as_deref(), reveal, &home(), self.launch.path_env.as_deref())?)
             }
             Call::Commands { tab } => json(commands::list(&home(), &self.tab(&tab, |t| t.cwd.clone())?)),
             Call::Files { tab } => json(files::list(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())),
