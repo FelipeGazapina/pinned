@@ -18,6 +18,9 @@ pub struct Saved {
     /// Unix time a usage limit that stopped the turn lifts.
     #[serde(default)]
     pub resume_at: Option<u64>,
+    /// The model picked for this conversation alone, passed as `claude --model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// What the harness types to a session that has work left.
@@ -69,7 +72,7 @@ mod tests {
 
     #[test]
     fn interrupted_sessions_continue_once_no_limit_blocks_them() {
-        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at };
+        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, model: None };
         let resumed = vec!["--resume".to_owned(), "s1".to_owned()];
         let continued = [resumed.clone(), vec![CONTINUE_PROMPT.to_owned()]].concat();
         assert_eq!(saved(false, None).reopen(100), (resumed.clone(), None));
@@ -88,6 +91,7 @@ mod tests {
             bypass: true,
             interrupted: true,
             resume_at: Some(1792382400),
+            model: Some("claude-opus-4-8".into()),
         }];
         save(&file, &saved);
         assert_eq!(load(&file), saved);

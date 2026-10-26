@@ -1,0 +1,23 @@
+
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude API
+ ▝▝   ▝▝   ~/repo
+
+
+❯ Use the AskUserQuestion tool exactly once, with two questions in that one call: question 1 header Color, "Which
+  color?", options Red (warm) and Blue (calm), single select; question 2 header Sizes, "Which sizes?", options Small
+  (tiny) and Large (huge), multiSelect true. Do nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Color  ☐ Sizes  ✔ Submit  →
+
+Which color?
+
+❯ 1. Red (warm)
+     Warm red tone
+  2. Blue (calm)
+     Calm blue tone
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

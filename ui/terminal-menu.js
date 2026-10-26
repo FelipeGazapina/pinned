@@ -91,10 +91,13 @@ function terminalDialog(tab) {
   if (!body) return null;
   const top = lines.findLastIndex((l) => DIALOG_RULE.test(l)) + 1;
   const cell = buffer.getNullCell();
-  return rows.slice(top, top + body.length).map((row) => rowHtml(row, cell)).join("\n");
+  // The 16 named colors as the terminal drawer's theme sets them, so the card reads like the drawer.
+  const theme = tab.term.options.theme ?? {};
+  const palette = ANSI.map((c, i) => theme[ANSI_KEYS[i]] ?? c);
+  return rows.slice(top, top + body.length).map((row) => rowHtml(row, cell, palette)).join("\n");
 }
 
-function rowHtml(row, cell) {
+function rowHtml(row, cell, palette) {
   let html = "";
   let run = { key: null, text: "" };
   const flush = () => {
@@ -103,8 +106,8 @@ function rowHtml(row, cell) {
   for (let x = 0; x < row.length; x++) {
     row.getCell(x, cell);
     if (!cell.getWidth()) continue;
-    let fg = cell.isFgRGB() ? hex(cell.getFgColor()) : cell.isFgPalette() ? paletteColor(cell.getFgColor()) : null;
-    let bg = cell.isBgRGB() ? hex(cell.getBgColor()) : cell.isBgPalette() ? paletteColor(cell.getBgColor()) : null;
+    let fg = cell.isFgRGB() ? hex(cell.getFgColor()) : cell.isFgPalette() ? paletteColor(cell.getFgColor(), palette) : null;
+    let bg = cell.isBgRGB() ? hex(cell.getBgColor()) : cell.isBgPalette() ? paletteColor(cell.getBgColor(), palette) : null;
     const inverse = !!cell.isInverse();
     if (inverse) [fg, bg] = [bg, fg];
     const classes = [inverse && "inverse", cell.isBold() && "bold", cell.isDim() && "dim", cell.isItalic() && "italic", cell.isUnderline() && "underline"].filter(Boolean);
@@ -121,10 +124,12 @@ function rowHtml(row, cell) {
   return html;
 }
 const hex = (rgb) => `#${rgb.toString(16).padStart(6, "0")}`;
-// xterm's own palette, so a dialog reads in the colors the terminal view shows it in.
+// xterm's own palette, for a terminal whose theme names no colors, as the terminal view's.
 const ANSI = ["#2e3436", "#cc0000", "#4e9a06", "#c4a000", "#3465a4", "#75507b", "#06989a", "#d3d7cf", "#555753", "#ef2929", "#8ae234", "#fce94f", "#729fcf", "#ad7fa8", "#34e2e2", "#eeeeec"];
-function paletteColor(n) {
-  if (n < 16) return ANSI[n];
+const ANSI_NAMED = ["Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White"];
+const ANSI_KEYS = [...ANSI_NAMED.map((c) => c.toLowerCase()), ...ANSI_NAMED.map((c) => `bright${c}`)];
+function paletteColor(n, palette) {
+  if (n < 16) return palette[n];
   if (n >= 232) return `rgb(${Array(3).fill(8 + (n - 232) * 10)})`;
   const steps = [0, 95, 135, 175, 215, 255];
   return `rgb(${steps[Math.floor((n - 16) / 36)]},${steps[Math.floor((n - 16) / 6) % 6]},${steps[(n - 16) % 6]})`;

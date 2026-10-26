@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// Stands in for `gh` on the sweep's node, which has no GitHub login: it answers `pr view`, `pr diff`,
-// `pr merge` and `pr ready` for the pull requests fake claude links, #41 a draft and #42 open, and
-// logs every call to $HOME/gh.log so a test can read them back.
+// Stands in for `gh` on the sweep's node, which has no GitHub login: it answers `pr view`, `pr list`,
+// `pr checkout`, `pr create`, `repo create`, `pr diff`, `pr merge`, `pr ready` and the right panel's
+// other pull request work for the pull requests fake claude links, #41 a draft and the others open,
+// the Pull requests page's `api graphql` search, and logs every call to $HOME/gh.log so a test can
+// read them back. Edits, comments and reviews land in $HOME/.fake-gh-<n>.json.
 const fs = require("fs");
 const path = require("path");
 
@@ -9,24 +11,34 @@ const args = process.argv.slice(2);
 fs.appendFileSync(path.join(process.env.HOME, "gh.log"), `${args.join(" ")}\n`);
 const url = args.at(-1) ?? "";
 const number = Number(url.match(/\/pull\/(\d+)$/)?.[1] ?? url);
-const stateFile = path.join(process.env.HOME, `.fake-gh-${number}`);
-const state = fs.existsSync(stateFile) ? fs.readFileSync(stateFile, "utf8") : number === 41 ? "draft" : "open";
 const at = (minutes) => new Date(Date.UTC(2026, 0, 1, 10, minutes)).toISOString();
+const stateFile = path.join(process.env.HOME, `.fake-gh-${number}`);
+// The state file reads "merged", "closed", "draft" or "open", then optionally when it merged or closed.
+const [state, endedAt = at(40)] = (fs.existsSync(stateFile) ? fs.readFileSync(stateFile, "utf8") : number === 41 ? "draft" : "open").trim().split(" ");
 const [cmd, sub] = args;
+const extraFile = path.join(process.env.HOME, `.fake-gh-${number}.json`);
+const extra = fs.existsSync(extraFile) ? JSON.parse(fs.readFileSync(extraFile, "utf8")) : {};
+const keep = () => fs.writeFileSync(extraFile, JSON.stringify(extra));
+const flag = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
+const field = (name) => args.find((a) => a.startsWith(`${name}=`))?.slice(name.length + 1);
 
 if (cmd === "pr" && sub === "view") {
   process.stdout.write(JSON.stringify({
     number,
-    title: number === 41 ? "Draft the notes" : "Add notes",
-    state: state === "merged" ? "MERGED" : "OPEN",
+    title: extra.title ?? (number === 41 ? "Draft the notes" : "Add notes"),
+    state: state === "merged" ? "MERGED" : state === "closed" ? "CLOSED" : "OPEN",
     isDraft: state === "draft",
     url: `https://github.com/example/alpha/pull/${number}`,
-    body: "Adds **notes.md**.",
+    body: extra.body ?? "Adds **notes.md**.",
+    headRefOid: "abc1234def5678",
+    headRepository: { name: "alpha" },
+    headRepositoryOwner: { login: "example" },
+    autoMergeRequest: extra.auto ? { mergeMethod: extra.auto } : null,
     author: { login: "sweeper" },
     createdAt: at(0),
     updatedAt: at(30),
-    mergedAt: state === "merged" ? at(40) : null,
-    closedAt: state === "merged" ? at(40) : null,
+    mergedAt: state === "merged" ? endedAt : null,
+    closedAt: state === "merged" || state === "closed" ? endedAt : null,
     headRefName: `sweep/notes-${number}`,
     baseRefName: "main",
     additions: 2,
@@ -34,21 +46,121 @@ if (cmd === "pr" && sub === "view") {
     changedFiles: 1,
     reviewDecision: "REVIEW_REQUIRED",
     mergeable: "MERGEABLE",
-    statusCheckRollup: [{ __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "SUCCESS", startedAt: at(1), completedAt: at(3), detailsUrl: "https://github.com/example/alpha/actions/runs/1" }],
-    reviews: [{ author: { login: "octocat" }, state: "COMMENTED", body: "Looks fine.", submittedAt: at(20) }],
-    comments: [{ author: { login: "hubot" }, body: "Thanks!", createdAt: at(25) }],
+    statusCheckRollup: [
+      { __typename: "CheckRun", name: "build", status: "COMPLETED", conclusion: "SUCCESS", startedAt: at(1), completedAt: at(3), detailsUrl: "https://github.com/example/alpha/actions/runs/1" },
+      ...(number === 41 ? [{ __typename: "CheckRun", name: "lint", status: "COMPLETED", conclusion: "FAILURE", startedAt: at(1), completedAt: at(2), detailsUrl: "https://github.com/example/alpha/actions/runs/2/job/3" }] : []),
+    ],
+    reviews: [{ author: { login: "octocat" }, state: "COMMENTED", body: "Looks fine.", submittedAt: at(20) }, ...(extra.reviews ?? [])],
+    comments: [{ author: { login: "hubot" }, body: "Thanks!", createdAt: at(25) }, { author: { login: "dependabot[bot]" }, body: "Bumped a dependency.", createdAt: at(26) }, ...(extra.comments ?? [])],
     commits: [{ oid: "abc1234def5678", messageHeadline: "Write the notes", committedDate: at(5), authors: [{ login: "sweeper", name: "Sweep" }] }],
     labels: [{ name: "documentation", color: "0075ca" }],
     reviewRequests: [{ __typename: "User", login: "monalisa" }],
   }));
+} else if (cmd === "pr" && sub === "list" && (flag("--base") || flag("--head"))) {
+  const above = flag("--base") === "sweep/notes-42" ? [{ number: 43, title: "Build on the notes", url: "https://github.com/example/alpha/pull/43", state: "OPEN", isDraft: false, headRefName: "sweep/more", baseRefName: "sweep/notes-42" }] : [];
+  process.stdout.write(JSON.stringify(above));
+} else if (cmd === "pr" && sub === "list") {
+  process.stdout.write(JSON.stringify([41, 42].map((n) => ({ number: n, title: n === 41 ? "Draft the notes" : "Add notes", state: "OPEN", isDraft: n === 41, url: `https://github.com/example/alpha/pull/${n}`, headRefName: `sweep/notes-${n}` }))));
+} else if (cmd === "pr" && sub === "checkout") {
+  require("child_process").execFileSync("git", ["switch", "-q", "-c", `pr-${number}`]);
+  process.stdout.write(`Switched to branch 'pr-${number}'\n`);
+} else if (cmd === "pr" && sub === "create") {
+  process.stdout.write("Creating pull request\nhttps://github.com/example/beta/pull/43\n");
 } else if (cmd === "pr" && sub === "diff") {
   process.stdout.write("diff --git a/notes.md b/notes.md\nnew file mode 100644\n--- /dev/null\n+++ b/notes.md\n@@ -0,0 +1,2 @@\n+edited\n+second line\n");
+} else if (cmd === "pr" && sub === "merge" && (args.includes("--auto") || args.includes("--disable-auto"))) {
+  extra.auto = args.includes("--auto") ? ["MERGE", "SQUASH", "REBASE"][["--merge", "--squash", "--rebase"].findIndex((m) => args.includes(m))] : null;
+  keep();
 } else if (cmd === "pr" && sub === "merge") {
   fs.writeFileSync(stateFile, "merged");
   process.stdout.write(`✓ Merged pull request #${number}\n`);
 } else if (cmd === "pr" && sub === "ready") {
-  fs.writeFileSync(stateFile, "open");
+  fs.writeFileSync(stateFile, args.includes("--undo") ? "draft" : "open");
   process.stdout.write(`✓ Pull request #${number} is marked as "ready for review"\n`);
+} else if (cmd === "api" && sub === "graphql" && field("q") !== undefined) {
+  // The Pull requests page's search: #42 the viewer's, #41 awaiting their review, #43 someone else's
+  // with failing checks and a conflict, and #40 merged, across example/alpha and example/beta.
+  const q = (args.find((a) => a.startsWith("q=")) ?? "q=").slice(2);
+  const pr = (number, repo, title, author, extra = {}) => ({
+    number, title, url: `https://github.com/${repo}/pull/${number}`, isDraft: false, state: "OPEN", mergeable: "MERGEABLE", reviewDecision: "REVIEW_REQUIRED",
+    additions: 2, deletions: 0, createdAt: at(number - 40), updatedAt: at(50 - number), headRefName: `sweep/notes-${number}`, baseRefName: "main",
+    author: { login: author, avatarUrl: "" }, repository: { nameWithOwner: repo }, labels: { nodes: [] }, reviewRequests: { nodes: [] },
+    commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] }, ...extra,
+  });
+  // #42 and #41 make up GitHub stack 7, and ghe.example.test's example/delta has #44.
+  const all = flag("--hostname") === "ghe.example.test" ? [pr(44, "example/delta", "Tune the delta cache", "hubot", { url: "https://ghe.example.test/example/delta/pull/44" })] : [
+    pr(42, "example/alpha", "Add notes", "sweeper", { reviewDecision: "APPROVED", body: "Adds notes.md, and fixes the flaky login.", stack: { number: 7, size: 2, baseRefName: "main" }, stackEntry: { position: 1 } }),
+    pr(41, "example/alpha", "Draft the notes", "octocat", { isDraft: true, reviewRequests: { nodes: [{ requestedReviewer: { login: "sweeper" } }] }, stack: { number: 7, size: 2, baseRefName: "main" }, stackEntry: { position: 2 } }),
+    pr(43, "example/beta", "Rework the beta build", "hubot", { mergeable: "CONFLICTING", additions: 120, deletions: 30,
+      labels: { nodes: [{ name: "build", color: "fbca04" }, { name: "beta", color: "0e8a16" }, { name: "ci", color: "1d76db" }, { name: "slow", color: "d93f0b" }] },
+      commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] } }),
+    pr(40, "example/alpha", "Seed the notes", "sweeper", { state: "MERGED" }),
+  ];
+  // "label:many" finds 150, two pages of GitHub's 100.
+  if (q.includes("label:many")) {
+    const after = args.find((a) => a.startsWith("after="))?.slice(6);
+    const many = Array.from({ length: after ? 50 : 100 }, (_, i) => pr(1000 + i + (after ? 100 : 0), "example/alpha", `Bulk change ${i + (after ? 100 : 0)}`, "hubot"));
+    process.stdout.write(JSON.stringify({ data: { viewer: { login: "sweeper" }, search: { pageInfo: { hasNextPage: !after, endCursor: after ? null : "page-2" }, nodes: many } } }));
+    process.exit(0);
+  }
+  const words = q.split(" ").filter((w) => w && !w.includes(":")).map((w) => w.toLowerCase());
+  const repos = [...q.matchAll(/repo:(\S+)/g)].map((m) => m[1]);
+  const nodes = all.filter((n) =>
+    repos.includes(n.repository.nameWithOwner) &&
+    (q.includes("is:open") ? n.state === "OPEN" : q.includes("is:merged") ? n.state === "MERGED" : q.includes("is:closed") ? n.state === "CLOSED" : true) &&
+    (!q.includes("author:@me") || n.author.login === "sweeper") &&
+    (!q.includes("review-requested:@me") || n.reviewRequests.nodes.some((r) => r.requestedReviewer.login === "sweeper")) &&
+    words.every((w) => `${n.title} ${n.body ?? ""}`.toLowerCase().includes(w)));
+  process.stdout.write(JSON.stringify({ data: { viewer: { login: "sweeper" }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } }));
+} else if (cmd === "pr" && sub === "edit") {
+  if (flag("--title") !== undefined) extra.title = flag("--title");
+  if (flag("--body") !== undefined) extra.body = flag("--body");
+  keep();
+} else if (cmd === "pr" && sub === "comment") {
+  extra.comments = [...(extra.comments ?? []), { author: { login: "sweeper" }, body: flag("--body"), createdAt: at(50) }];
+  keep();
+} else if (cmd === "pr" && (sub === "close" || sub === "reopen")) {
+  fs.writeFileSync(stateFile, sub === "close" ? "closed" : "open");
+} else if (cmd === "pr" && sub === "revert") {
+  process.stdout.write(`https://github.com/example/alpha/pull/${number + 100}\n`);
+} else if (cmd === "api" && args.includes("graphql")) {
+  const n = Number(field("number"));
+  const threadFile = path.join(process.env.HOME, ".fake-gh-42.json");
+  const t42 = fs.existsSync(threadFile) ? JSON.parse(fs.readFileSync(threadFile, "utf8")) : {};
+  if (/addPullRequestReviewThreadReply/.test(field("query") ?? "")) {
+    t42.replies = [...(t42.replies ?? []), field("body")];
+    fs.writeFileSync(threadFile, JSON.stringify(t42));
+    process.stdout.write(JSON.stringify({ data: { addPullRequestReviewThreadReply: { comment: { id: "r1" } } } }));
+  } else {
+    const comments = [{ id: "c1", body: "Why a second line?", createdAt: at(22), url: "https://github.com/example/alpha/pull/42#discussion_r1", author: { login: "monalisa" } }, ...(t42.replies ?? []).map((body, i) => ({ id: `r${i}`, body, createdAt: at(51), url: "", author: { login: "sweeper" } }))];
+    const nodes = n === 42 ? [{ id: "T1", isResolved: false, isOutdated: false, path: "notes.md", line: 2, originalLine: 2, startLine: null, diffSide: "RIGHT", comments: { nodes: comments } }] : [];
+    process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes } } } } }));
+  }
+} else if (cmd === "api" && args.includes("POST") && /\/reviews$/.test(args.find((a) => a.startsWith("repos/")) ?? "")) {
+  const review = JSON.parse(fs.readFileSync(0, "utf8"));
+  const n = Number(args.find((a) => a.startsWith("repos/")).split("/")[4]);
+  const reviewFile = path.join(process.env.HOME, `.fake-gh-${n}.json`);
+  const kept = fs.existsSync(reviewFile) ? JSON.parse(fs.readFileSync(reviewFile, "utf8")) : {};
+  kept.reviews = [...(kept.reviews ?? []), { author: { login: "sweeper" }, state: review.event === "APPROVE" ? "APPROVED" : review.event === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "COMMENTED", body: review.body, submittedAt: at(55), comments: review.comments }];
+  fs.writeFileSync(reviewFile, JSON.stringify(kept));
+  fs.appendFileSync(path.join(process.env.HOME, "gh.log"), `review ${JSON.stringify(review)}\n`);
+} else if (cmd === "auth" && sub === "token") {
+  if (flag("--hostname") !== "ghe.example.test") {
+    process.stderr.write(`no oauth token found for ${flag("--hostname")}\n`);
+    process.exit(1);
+  }
+  process.stdout.write("ghe-token\n");
+} else if (cmd === "api" && /^repos\/example\/alpha\/stacks/.test(sub)) {
+  const stack = { number: 7, url: "https://api.github.com/repos/example/alpha/stacks/7", html_url: "https://github.com/example/alpha/stacks/7", base: { ref: "main" }, pull_requests: [
+    { number: 42, title: "Add notes", head: { ref: "sweep/notes-42" }, state: "open", draft: false, merged_at: null },
+    { number: 41, title: "Draft the notes", head: { ref: "sweep/notes-41" }, state: "open", draft: true, merged_at: null },
+  ] };
+  const member = /pull_request=(41|42)$/.test(sub);
+  process.stdout.write(JSON.stringify(sub.endsWith("/stacks/7") ? stack : member ? [stack] : []));
+} else if (cmd === "repo" && sub === "create") {
+  process.stdout.write(`https://github.com/sweeper/${args[2]}\n`);
+} else if ((cmd === "api" && args.includes("DELETE")) || (cmd === "run" && sub === "rerun")) {
+  process.stdout.write("");
 } else {
   process.stderr.write(`fake gh can't ${args.join(" ")}\n`);
   process.exit(1);
