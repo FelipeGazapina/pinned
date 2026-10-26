@@ -43,20 +43,32 @@ impl TestHub {
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let running = runtime
-            .block_on(pinned_server::start(pinned_server::Config {
-                db: format!("{POSTGRES}/{database}"),
-                listen: "127.0.0.1:0".into(),
-                ui: dir.join("ui"),
-                downloads: dir.join("downloads"),
-                public_url: None,
-                key_file: dir.join("hub.key"),
-                open_signup,
-                runs: pinned_core::runs::Timing { check: Duration::from_secs(1), grace: 3 },
-            }))
-            .unwrap();
+        let running = runtime.block_on(Self::serve(&database, &dir, "127.0.0.1:0", open_signup));
         let url = format!("http://{}", running.addr);
         TestHub { runtime, running: Some(running), url, database, dir }
+    }
+
+    async fn serve(database: &str, dir: &Path, listen: &str, open_signup: bool) -> pinned_server::Running {
+        pinned_server::start(pinned_server::Config {
+            db: format!("{POSTGRES}/{database}"),
+            listen: listen.into(),
+            ui: dir.join("ui"),
+            downloads: dir.join("downloads"),
+            public_url: None,
+            key_file: dir.join("hub.key"),
+            open_signup,
+            runs: pinned_core::runs::Timing { check: Duration::from_secs(1), grace: 3 },
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Stops the hub, every task of it included, and starts a new one on the same database and port.
+    fn restart(&mut self) {
+        let addr = self.running.take().unwrap().addr;
+        let old = std::mem::replace(&mut self.runtime, tokio::runtime::Runtime::new().unwrap());
+        old.shutdown_background();
+        self.running = Some(self.runtime.block_on(Self::serve(&self.database, &self.dir, &addr.to_string(), true)));
     }
 
     fn hub(&self) -> &Arc<pinned_server::hub::Hub> {
@@ -537,6 +549,56 @@ fn a_run_whose_machine_goes_offline_resumes_on_another_machine_with_its_work() {
     let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
     let run = &settings["runs"][0];
     assert_eq!((run["key"].as_str(), run["state"].as_str(), run["machine"].as_str(), run["attempt"].as_u64()), (Some("c1/uuid-1"), Some("running"), Some(vps.as_str()), Some(2)));
+}
+
+#[test]
+fn a_hub_restart_keeps_every_run_where_it_was() {
+    let mut hub = TestHub::start("restart");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let register = |name: &str, dir: &Path| {
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token }
+            .save(dir)
+            .unwrap();
+        Credentials::load(dir).unwrap()
+    };
+    let (dir_a, dir_b, repo) = (temp("restart-a"), temp("restart-b"), temp("restart-repo"));
+    let (creds_a, creds_b) = (register("mac-mini", &dir_a), register("vps", &dir_b));
+    let mac_mini = creds_a.machine_id.clone();
+    let node_a = Node::start(&dir_a, creds_a.clone());
+    let node_b = Node::start(&dir_b, creds_b);
+    client.wait_machines(&[("mac-mini", true), ("vps", true)]);
+    let store = json!({
+        "connectors": [{
+            "id": "c1", "name": "Bugs", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": repo, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+            "instructions": "", "machine": mac_mini,
+        }],
+        "runs": { "c1/uuid-1": {
+            "connector": "c1", "subject": { "issue": "uuid-1" }, "title": "ENG-1 Broken button", "state": "queued", "after": 0,
+            "attempt": 0, "cwd": repo, "args": ["Fix ENG-1"], "worktree": "eng-1", "created": 0, "updated": 0,
+        } },
+    });
+    assert_eq!(client.hub(json!({ "cmd": "import", "store": store, "linear_key": null, "slack_key": null })), Ok(json!(true)));
+    let tabs = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.connector.as_deref() == Some("c1") && t.running).count();
+    wait_for("mac-mini to start the run", || tabs(&node_a) == 1);
+    // The store reaches Postgres behind the connectors' back; give that write a moment.
+    std::thread::sleep(Duration::from_millis(500));
+
+    hub.restart();
+    wait_for("mac-mini back on the new hub", || node_a.online());
+    wait_for("vps back on the new hub", || node_b.online());
+    // Past the grace period and a few checks: nothing may start the run a second time.
+    std::thread::sleep(Duration::from_secs(5));
+    assert_eq!((tabs(&node_a), tabs(&node_b)), (1, 0));
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    let run = &settings["runs"][0];
+    assert_eq!((run["state"].as_str(), run["machine"].as_str(), run["attempt"].as_u64()), (Some("running"), Some(mac_mini.as_str()), Some(1)));
 }
 
 #[test]
