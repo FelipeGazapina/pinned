@@ -69,3 +69,38 @@ impl Drop for Session {
         });
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    fn alive(pid: &str) -> bool {
+        std::process::Command::new("kill").args(["-0", pid]).status().is_ok_and(|s| s.success())
+    }
+
+    #[test]
+    fn ending_a_session_ends_what_it_started_in_process_groups_of_its_own() {
+        // claude runs its tools and background shells in process groups the terminal's hangup never reaches.
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "perl -e 'setpgrp(0, 0); print \"$$\\n\"; sleep 300' & wait"]);
+        let (tx, rx) = mpsc::channel();
+        let session = Session::spawn(cmd, size(80, 24), move |bytes| _ = tx.send(bytes), || {}).unwrap();
+        let mut out = String::new();
+        while !out.contains('\n') {
+            out.push_str(&String::from_utf8_lossy(&rx.recv_timeout(Duration::from_secs(5)).unwrap()));
+        }
+        let pid = out.trim().to_owned();
+        assert!(alive(&pid), "the detached child is running");
+
+        drop(session);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while alive(&pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let survived = alive(&pid);
+        let _ = std::process::Command::new("kill").args(["-9", &pid]).status();
+        assert!(!survived, "the detached child outlived its session");
+    }
+}
