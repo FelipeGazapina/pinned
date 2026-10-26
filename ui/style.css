@@ -257,7 +257,18 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
   --line: rgb(var(--s-ink-rgb, 255 255 255) / 0.28); --dot: rgb(var(--s-ink-rgb, 255 255 255) / 0.09); --tile: var(--s-raised, rgb(25 28 34)); --ground: var(--s-bg, rgb(15 17 21)); }
 .editor > .error { position: absolute; z-index: 3; left: 12px; top: 12px; max-width: min(480px, calc(100% - 24px)); padding: 6px 10px;
   border: 1px solid currentColor; border-radius: 8px; background: var(--ground); }
-.canvas { flex: 1; min-width: 0; display: flex; overflow: auto; overscroll-behavior: contain; background: radial-gradient(circle, var(--dot) 1px, transparent 1.3px) 0 0 / 20px 20px local, var(--ground); }
+.canvas-wrap { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; }
+.canvas { flex: 1; min-width: 0; display: flex; overflow: auto; overscroll-behavior: contain; cursor: grab; user-select: none; -webkit-user-select: none;
+  background: radial-gradient(circle, var(--dot) 1px, transparent 1.3px) 0 0 / 20px 20px local, var(--ground); }
+.canvas.panning { cursor: grabbing; }
+.flow :is(.step, .branch, .stub, .end, .add-menu) { cursor: auto; }
+.zoom { position: absolute; z-index: 2; left: 16px; bottom: 16px; display: flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--tile); box-shadow: 0 1px 3px rgb(0 0 0 / 0.12); }
+.zoom button { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 7px; color: var(--muted); }
+.zoom button:hover:not(:disabled) { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.06); color: var(--fg); }
+.zoom button:disabled { opacity: 0.4; }
+.zoom .i { width: 16px; height: 16px; }
+@media (pointer: coarse) { .zoom button { width: 40px; height: 40px; } }
 /* Auto margins centre a small flow and start a big one at the edge, where it scrolls. */
 .flow { position: relative; flex: none; margin: auto; }
 .flow .edges { position: absolute; inset: 0; pointer-events: none; }
@@ -284,6 +295,15 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .flow .stub { position: absolute; width: 150px; display: flex; justify-content: center; }
 .flow .stub button { height: 32px; padding: 0 12px; border: 1px dashed var(--border); border-radius: 16px; background: var(--ground); color: var(--muted); font-size: 12px; }
 .flow .stub button:hover { border-color: var(--working); color: var(--fg); }
+.flow .end { position: absolute; z-index: 1; width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--ground); color: var(--muted); }
+.flow .end::after { content: ""; position: absolute; inset: -8px; }
+.flow .end:hover, .flow .end[aria-expanded="true"] { border-color: var(--working); color: var(--fg); }
+.flow .end .i { width: 14px; height: 14px; }
+.flow .add-menu { position: absolute; z-index: 3; display: flex; flex-direction: column; padding: 4px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--tile); box-shadow: 0 6px 20px rgb(0 0 0 / 0.18); }
+.flow .add-menu button { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 7px; color: var(--fg); text-align: left; line-height: 1.3; }
+.flow .add-menu button:hover { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.06); }
 .flow .text { width: 100%; display: flex; flex-direction: column; gap: 2px; line-height: 1.3; }
 .flow .text b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .flow .summary { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
@@ -309,7 +329,7 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .category:has([data-bind$=".mention"]:placeholder-shown) .mention-hint { display: none; }
 @container (max-width: 720px) {
   .editor { flex-direction: column; }
-  .canvas { min-height: 220px; }
+  .canvas-wrap { min-height: 220px; }
   .node-panel { width: auto; max-height: 62%; border-left: 0; border-top: 1px solid var(--border); }
 }
 

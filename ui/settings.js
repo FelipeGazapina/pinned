@@ -412,7 +412,7 @@ const STEPS = {
       ].filter(Boolean);
     },
     fields: (c) => decideHtml(c),
-    branches: (c) => c.trigger.decide.categories.map((cat, i) => ({ label: cat.name.trim() || "unnamed", nodes: branchNodes(cat, i) })),
+    branches: (c) => c.trigger.decide.categories.map((cat, i) => ({ label: cat.name.trim() || "unnamed", nodes: branchNodes(cat, i), end: cat.workflow ? undefined : i })),
     stub: "＋ Add category",
   },
   picked: moveStep("picked", "Move the issue when pinned picks it up"),
@@ -698,7 +698,14 @@ function editorHtml() {
       <button class="primary" id="save-connector" data-action="save-connector" title="Save (⌘S)"></button>
     </div>
     <div class="editor">
-      <div class="canvas"></div>
+      <div class="canvas-wrap">
+        <div class="canvas"></div>
+        <div class="zoom" role="toolbar" aria-label="Zoom">
+          <button data-action="zoom-fit" title="Fit to view">${icon("maximize")}</button>
+          <button data-action="zoom-in" title="Zoom in">${icon("zoom-in")}</button>
+          <button data-action="zoom-out" title="Zoom out">${icon("zoom-out")}</button>
+        </div>
+      </div>
       <p class="error" id="editor-error"></p>
       ${panelHtml(c)}
     </div>`;
@@ -710,10 +717,17 @@ const TEXT_H = 56;
 const COL = 230;
 const ROW = 150;
 const PAD = 48;
+const STUB = 40;
+const END = 24;
+const MENU_W = 280;
+
+/** Optional steps of the flow that are off, which the ＋ after the chain's last node offers. */
+const offSteps = (c) => flowOf(c).map(([id]) => id).filter((id) => !shown(c, id));
 
 function layoutOf(c) {
   const nodes = [];
   const edges = [];
+  const ends = [];
   const place = (node, col, row, h = node.ports > 2 ? Math.max(TILE, node.ports * 28 + 16) : TILE) => {
     nodes.push({ ...node, cx: PAD + TEXT_W / 2 + col * COL, cy: row * ROW, h });
     return nodes.at(-1);
@@ -733,26 +747,43 @@ function layoutOf(c) {
         edges.push(i ? { from, to: placed } : { from, to: placed, port, portLabel: branch.label });
         from = placed;
       });
+      if (branch.end !== undefined) ends.push({ from, category: branch.end });
     });
     if (branches.length && step.stub) place({ stub: step.stub }, col + 1, middle + 0.9, 32);
   });
+  if (offSteps(c).length) ends.push({ from: prev, menu: true });
   const top = Math.min(...nodes.map((n) => n.cy - n.h / 2));
   const bottom = Math.max(...nodes.map((n) => n.cy + n.h / 2 + TEXT_H));
   for (const n of nodes) n.cy += PAD - top;
-  const width = 2 * PAD + TEXT_W + Math.max(...nodes.map((n) => n.cx)) - nodes[0].cx;
-  return { nodes, edges, width, height: bottom - top + 2 * PAD };
+  const right = Math.max(...nodes.map((n) => n.cx + TEXT_W / 2), ...ends.map((e) => e.from.cx + TILE / 2 + STUB + END));
+  return { nodes, edges, ends, width: right + PAD, height: bottom - top + 2 * PAD };
 }
 
 function flowHtml(c) {
-  const { nodes, edges, width, height } = layoutOf(c);
+  const { nodes, edges, ends, width, height } = layoutOf(c);
   return `<div class="flow" data-width="${width}" data-height="${height}" style="width:${width}px;height:${height}px">
     ${nodes.map((n) => nodeHtml(c, n)).join("")}
     <svg class="edges" width="${width}" height="${height}" aria-hidden="true">
       <defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow" d="M0 1 9 5 0 9z"/></marker></defs>
       ${edges.map(edgeHtml).join("")}
+      ${ends.map(({ from }) => `<path d="M${from.cx + TILE / 2} ${from.cy}h${STUB}"/><circle cx="${from.cx + TILE / 2}" cy="${from.cy}" r="4.5"/>`).join("")}
     </svg>
     ${edges.map(edgeLabelHtml).join("")}
+    ${ends.map((end) => endHtml(c, end)).join("")}
   </div>`;
+}
+
+/** The ＋ at an open end: after the chain it lists the steps that are off, after a category that stops it picks what comes next. */
+function endHtml(c, { from, menu, category }) {
+  const x = from.cx + TILE / 2 + STUB;
+  const at = `left:${x}px;top:${from.cy - END / 2}px`;
+  if (!menu) {
+    const name = c.trigger.decide.categories[category].name.trim();
+    return `<button class="end" data-action="choose-route" data-category="${category}" title="${esc(`Choose what happens after “${name}”`)}" style="${at}">${icon("plus")}</button>`;
+  }
+  const items = offSteps(c).map((id) => `<button data-action="add-step" data-step="${id}">${iconHtml(STEPS[id])}<span>${esc(STEPS[id].ghost)}</span></button>`);
+  return `<button class="end" data-action="open-add-menu" aria-expanded="${!!view.menu}" title="Add a step" style="${at}">${icon("plus")}</button>
+    ${view.menu ? `<div class="add-menu" style="width:${MENU_W}px;left:${x + END - MENU_W}px;top:${from.cy + END / 2 + 6}px">${items.join("")}</div>` : ""}`;
 }
 
 const nodeAt = (n) => `left:${n.cx - TEXT_W / 2}px;top:${n.cy - n.h / 2}px`;
@@ -813,20 +844,53 @@ function panelHtml(c) {
 }
 
 const READABLE_ZOOM = 0.75;
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 1.5;
 
-function fitFlow() {
+/** The zoom that shows the whole flow, never above 1. Opening a workflow floors it at a readable size; the Fit button doesn't. */
+function fitZoom(floor) {
+  const canvas = settingsPage.querySelector(".canvas");
+  const flow = canvas.firstElementChild;
+  return Math.max(floor, Math.min(1, canvas.clientWidth / flow.dataset.width, canvas.clientHeight / flow.dataset.height));
+}
+
+/** Draws the flow at the view's zoom and pan; a null zoom fits it. */
+function applyZoom() {
   const canvas = settingsPage.querySelector(".canvas");
   const flow = canvas?.firstElementChild;
   if (!flow) return;
-  flow.style.zoom = Math.max(READABLE_ZOOM, Math.min(1, canvas.clientWidth / flow.dataset.width, canvas.clientHeight / flow.dataset.height));
+  const zoom = view.zoom ?? fitZoom(READABLE_ZOOM);
+  flow.style.zoom = zoom;
+  if (view.pan) [canvas.scrollLeft, canvas.scrollTop] = view.pan;
+  settingsPage.querySelector('[data-action="zoom-in"]').disabled = zoom >= MAX_ZOOM;
+  settingsPage.querySelector('[data-action="zoom-out"]').disabled = zoom <= MIN_ZOOM;
 }
+
+/** Zooms keeping the point under `at` (the canvas's centre by default) where it is. */
+function zoomTo(zoom, at) {
+  const canvas = settingsPage.querySelector(".canvas");
+  const flow = canvas.firstElementChild;
+  const box = canvas.getBoundingClientRect();
+  const [x, y] = at ?? [box.left + canvas.clientWidth / 2, box.top + canvas.clientHeight / 2];
+  const was = flow.getBoundingClientRect();
+  const scale = Number(flow.style.zoom) || 1;
+  view.zoom = Math.round(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom)) * 100) / 100;
+  view.pan = null;
+  applyZoom();
+  const now = flow.getBoundingClientRect();
+  canvas.scrollLeft += now.left + ((x - was.left) / scale) * view.zoom - x;
+  canvas.scrollTop += now.top + ((y - was.top) / scale) * view.zoom - y;
+  view.pan = [canvas.scrollLeft, canvas.scrollTop];
+}
+
+const zoomNow = () => Number(settingsPage.querySelector(".flow").style.zoom);
 
 const changed = () => JSON.stringify(view.draft) !== view.original;
 
 function refresh() {
   const c = view.draft;
   settingsPage.querySelector(".canvas").innerHTML = flowHtml(c);
-  fitFlow();
+  applyZoom();
   const command = document.getElementById("command");
   if (command) command.textContent = commandPreview(c);
   const repo = document.getElementById("repo");
@@ -845,7 +909,7 @@ function redraw() {
 }
 
 function edit(index, draft = clone(settings.connectors[index]), open = null) {
-  view = { name: "edit", index, draft, original: JSON.stringify(draft), open };
+  view = { name: "edit", index, draft, original: JSON.stringify(draft), open, zoom: null, pan: null, menu: false };
   loadFolders(draft);
 }
 
@@ -973,12 +1037,20 @@ function armed(button, text) {
 
 function showStep(id, focus) {
   view.open = id;
+  view.menu = false;
   redraw();
   settingsPage.querySelector(".flow .open")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   if (focus) settingsPage.querySelector(".node-panel .details [data-bind]")?.focus();
 }
 
-const stepOf = (button) => button.closest(".step").dataset.step;
+const stepOf = (button) => button.dataset.step ?? button.closest(".step").dataset.step;
+
+function focusCategory(category, field) {
+  showStep("decide");
+  const input = settingsPage.querySelector(`.node-panel [data-bind="trigger.decide.categories.${category}.${field}"]`);
+  input?.scrollIntoView({ block: "nearest" });
+  input?.focus();
+}
 
 const actions = {
   "go-integrations": () => showPage("integrations"),
@@ -1094,10 +1166,19 @@ const actions = {
   "open-branch"(button) {
     const { branch, category } = button.closest(".branch").dataset;
     if (branch === "route") return showStep(`route:${category}`);
-    showStep("decide");
-    const field = settingsPage.querySelector(`.node-panel [data-bind="trigger.decide.categories.${category}.${branch === "mention" ? "mention" : "workflow"}"]`);
-    field?.scrollIntoView({ block: "nearest" });
-    field?.focus();
+    focusCategory(category, branch === "mention" ? "mention" : "workflow");
+  },
+  "choose-route": (button) => focusCategory(button.dataset.category, "workflow"),
+  "open-add-menu"() {
+    view.menu = !view.menu;
+    refresh();
+  },
+  "zoom-in": () => zoomTo(Math.floor(zoomNow() * 10 + 1e-6) / 10 + 0.1),
+  "zoom-out": () => zoomTo(Math.ceil(zoomNow() * 10 - 1e-6) / 10 - 0.1),
+  "zoom-fit"() {
+    view.zoom = fitZoom(MIN_ZOOM);
+    view.pan = [0, 0];
+    applyZoom();
   },
   "open-route"(button) {
     if ((!view.draft.id || changed()) && !armed(button, "Discard changes and open?")) return;
@@ -1137,7 +1218,7 @@ const actions = {
       let index = settings.connectors.findIndex((known) => known.id === saved.id);
       if (index < 0) index = settings.connectors.push(saved) - 1;
       settings.connectors[index] = saved;
-      edit(index, clone(saved), view.open);
+      Object.assign(view, { index, draft: clone(saved), original: JSON.stringify(saved) });
       redraw();
     } catch (err) {
       error.textContent = err;
@@ -1152,12 +1233,71 @@ const actions = {
   },
 };
 
+/** A mouse drag on the canvas's ground pans it, and the click that ends it does nothing. Touch pans by scrolling. */
+let canvasPan = null;
+let canvasPanned = false;
+
 settingsPage.addEventListener("click", (e) => {
   const button = e.target.closest("[data-action]");
-  if (!button) return;
-  e.preventDefault();
-  actions[button.dataset.action](button);
+  if (button) {
+    e.preventDefault();
+    return actions[button.dataset.action](button);
+  }
+  if (canvasPanned || !e.target.closest(".canvas") || e.target.closest(".step, .branch, .add-menu")) return;
+  if (view.menu) {
+    view.menu = false;
+    return refresh();
+  }
+  if (view.open) showStep(null);
 });
+
+settingsPage.addEventListener("pointerdown", (e) => {
+  canvasPanned = false;
+  const canvas = e.target.closest(".canvas");
+  if (!canvas || e.button !== 0 || e.pointerType === "touch" || e.target.closest(".step, .branch, button, .add-menu")) return;
+  canvasPan = { canvas, id: e.pointerId, x: e.clientX, y: e.clientY, left: canvas.scrollLeft, top: canvas.scrollTop };
+});
+
+settingsPage.addEventListener("pointermove", (e) => {
+  if (canvasPan?.id !== e.pointerId) return;
+  const dx = e.clientX - canvasPan.x;
+  const dy = e.clientY - canvasPan.y;
+  if (!canvasPanned && Math.hypot(dx, dy) < 4) return;
+  if (!canvasPanned) {
+    canvasPanned = true;
+    canvasPan.canvas.setPointerCapture(e.pointerId);
+    canvasPan.canvas.classList.add("panning");
+  }
+  canvasPan.canvas.scrollLeft = canvasPan.left - dx;
+  canvasPan.canvas.scrollTop = canvasPan.top - dy;
+});
+
+for (const type of ["pointerup", "pointercancel"]) {
+  settingsPage.addEventListener(type, (e) => {
+    if (canvasPan?.id !== e.pointerId) return;
+    canvasPan.canvas.classList.remove("panning");
+    canvasPan = null;
+  });
+}
+
+settingsPage.addEventListener(
+  "wheel",
+  (e) => {
+    if (!(e.ctrlKey || e.metaKey) || !e.target.closest(".canvas")) return;
+    e.preventDefault();
+    // A mouse notch is about 100 and a pinch frame a few units, so both zoom by at most 10% a frame.
+    zoomTo(zoomNow() * Math.exp(-Math.max(-10, Math.min(10, e.deltaY)) / 100), [e.clientX, e.clientY]);
+  },
+  { passive: false },
+);
+
+settingsPage.addEventListener(
+  "scroll",
+  (e) => {
+    if (e.target.classList?.contains("canvas") && view.name === "edit") view.pan = [e.target.scrollLeft, e.target.scrollTop];
+  },
+  true,
+);
 
 settingsPage.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "linear-key") actions["connect-linear"]();
@@ -1167,6 +1307,10 @@ settingsPage.addEventListener("keydown", (e) => {
   if (e.key === "s" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
     actions["save-connector"]();
+  }
+  if (e.key === "Escape" && view.menu) {
+    view.menu = false;
+    return refresh();
   }
   if (e.key === "Escape" && view.open) showStep(null);
 });
@@ -1199,7 +1343,7 @@ settingsPage.addEventListener("change", async (e) => {
   e.target.closest(".flow-card").dataset.on = e.target.checked;
 });
 
-addEventListener("resize", fitFlow);
+addEventListener("resize", applyZoom);
 
 for (const b of document.querySelectorAll("#settings-nav [data-page]")) b.onclick = () => showPage(b.dataset.page);
 document.getElementById("settings-toggle").onclick = toggleSettings;
