@@ -25,6 +25,8 @@ const SLACK_OVERLAP: chrono::Duration = chrono::Duration::seconds(60);
 /// A mention older than this when pinned picks it up arrived while pinned was closed.
 const OFFLINE_AFTER: chrono::Duration = chrono::Duration::minutes(5);
 const MIN_CONFIDENCE_TO_PAGE: f64 = 0.85;
+/// Below this probability for its own choice, a decision sends the message to its fallback.
+const UNSURE_BELOW: f64 = 0.6;
 const PAGE_COOLDOWN: chrono::Duration = chrono::Duration::minutes(30);
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -115,6 +117,9 @@ pub struct Decide {
     pub model: String,
     pub instructions: String,
     pub categories: Vec<Category>,
+    /// The category, by name, that takes a message the model is unsure about. None keeps its guess.
+    #[serde(default)]
+    pub fallback: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -138,13 +143,36 @@ impl Decide {
         if self.categories.is_empty() {
             return Err(format!("workflow {workflow:?} has no categories to sort messages into: add one in its settings"));
         }
+        if let Some(name) = &self.fallback {
+            let unsure = format!("workflow {workflow:?} sends the messages its decision model is unsure about to {name:?}");
+            match self.fallback() {
+                None => return Err(format!("{unsure}, which is not one of its categories: pick another one in its settings")),
+                Some(i) if self.categories[i].group().is_some() => {
+                    return Err(format!(
+                        "{unsure}, which pings a group: the fallback can't ping a group, so pick a category without a mention in its settings"
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
         Ok(self.categories.iter().map(|c| (c.name.as_str(), c.description.as_str())).collect())
+    }
+
+    fn fallback(&self) -> Option<usize> {
+        let name = self.fallback.as_deref()?;
+        self.categories.iter().position(|c| c.name == name)
     }
 
     fn pick(&self, chosen: &vercel::Chosen) -> Pick {
         let quiet = |i: &usize| self.categories[*i].group().is_none();
-        if quiet(&chosen.index) || chosen.probabilities[chosen.index] >= MIN_CONFIDENCE_TO_PAGE {
-            return Pick::Sure(chosen.index);
+        let (guess, likelihood) = (chosen.index, chosen.probabilities[chosen.index]);
+        if let Some(fallback) = self.fallback().filter(quiet) {
+            if likelihood < UNSURE_BELOW {
+                return Pick::Unsure { guess, likelihood, fallback };
+            }
+        }
+        if quiet(&guess) || likelihood >= MIN_CONFIDENCE_TO_PAGE {
+            return Pick::Sure(guess);
         }
         match (0..self.categories.len()).filter(quiet).reduce(|best, i| if chosen.probabilities[i] > chosen.probabilities[best] { i } else { best }) {
             Some(quiet) => Pick::Downgraded(quiet),
@@ -158,6 +186,8 @@ impl Decide {
 enum Pick {
     /// The category the model chose.
     Sure(usize),
+    /// The model's probability for its guess was below `UNSURE_BELOW`, so the fallback takes the message.
+    Unsure { guess: usize, likelihood: f64, fallback: usize },
     /// The model chose a category that pages without being sure enough to page, so the likeliest
     /// category that pages no one takes the message.
     Downgraded(usize),
@@ -168,7 +198,7 @@ enum Pick {
 impl Pick {
     fn category(&self) -> Option<usize> {
         match *self {
-            Pick::Sure(i) | Pick::Downgraded(i) => Some(i),
+            Pick::Sure(i) | Pick::Downgraded(i) | Pick::Unsure { fallback: i, .. } => Some(i),
             Pick::Nowhere => None,
         }
     }
@@ -178,6 +208,12 @@ impl Pick {
     fn note(&self, categories: &[Category], router: &str) -> String {
         match *self {
             Pick::Sure(i) | Pick::Downgraded(i) => routed_note(router, &categories[i].name),
+            Pick::Unsure { guess, likelihood, fallback } => format!(
+                "\n\nThe decision model was unsure (it guessed {:?} at {:.0}%), so workflow {router:?} handed this thread over as {:?}.",
+                categories[guess].name,
+                likelihood * 100.0,
+                categories[fallback].name
+            ),
             Pick::Nowhere => String::new(),
         }
     }
@@ -2177,6 +2213,7 @@ mod tests {
                 category("escalation", "Someone needs an engineer on support now", None, Some("prod-engg")),
                 category("ignore", "Anything else", None, None),
             ],
+            fallback: None,
         };
         Connector {
             id: "c5".into(),
@@ -2520,6 +2557,7 @@ mod tests {
                 category("escalation", "Someone needs an engineer on support now", None, Some("prod-engg")),
                 category("ignore", "Anything else", None, None),
             ],
+            fallback: None,
         };
         assert_eq!(trigger, Trigger::SlackMessage { channel: "support".into(), decide });
         assert_eq!(
@@ -2531,6 +2569,66 @@ mod tests {
         assert_eq!(serde_json::to_value(Trigger::Called).unwrap(), serde_json::json!({ "kind": "called" }));
         assert_eq!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "called" })).unwrap(), Trigger::Called);
         assert!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "slack-message", "channel": "support" })).is_err(), "a message trigger needs its decision");
+    }
+
+    #[test]
+    fn a_fallback_round_trips_and_defaults_to_the_models_guess() {
+        let Trigger::SlackMessage { decide, .. } = router().trigger else { unreachable!() };
+        let json = serde_json::to_value(&decide).unwrap();
+        assert_eq!(json["fallback"], serde_json::Value::Null);
+        let mut absent = json;
+        absent.as_object_mut().unwrap().remove("fallback");
+        assert_eq!(serde_json::from_value::<Decide>(absent).unwrap(), decide, "a decision saved before the fallback keeps the model's guess");
+
+        let with = Decide { fallback: Some("doubt".into()), ..decide };
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(json["fallback"], serde_json::json!("doubt"));
+        assert_eq!(serde_json::from_value::<Decide>(json).unwrap(), with);
+    }
+
+    #[test]
+    fn an_unsure_answer_goes_to_the_fallback() {
+        let Trigger::SlackMessage { decide, .. } = router().trigger else { unreachable!() };
+        let routed = |decide: &Decide, index, probabilities: [f64; 4]| {
+            let pick = decide.pick(&vercel::Chosen { index, probabilities: probabilities.into() });
+            (pick.category().map(|i| decide.categories[i].name.clone()), pick.note(&decide.categories, "Support router"))
+        };
+        let sure = |category: &str| (Some(category.to_owned()), routed_note("Support router", category));
+        let with = Decide { fallback: Some("doubt".into()), ..decide.clone() };
+
+        assert_eq!(
+            routed(&with, 0, [0.55, 0.30, 0.10, 0.05]),
+            (
+                Some("doubt".into()),
+                "\n\nThe decision model was unsure (it guessed \"error\" at 55%), so workflow \"Support router\" handed this thread over as \"doubt\".".into()
+            )
+        );
+        assert_eq!(routed(&with, 0, [0.70, 0.20, 0.05, 0.05]), sure("error"));
+        assert_eq!(routed(&with, 0, [0.60, 0.30, 0.05, 0.05]), sure("error"), "60% is sure enough");
+        assert_eq!(routed(&decide, 0, [0.55, 0.30, 0.10, 0.05]), sure("error"), "without a fallback the guess stands");
+        assert_eq!(
+            routed(&with, 2, [0.10, 0.20, 0.52, 0.18]).1,
+            "\n\nThe decision model was unsure (it guessed \"escalation\" at 52%), so workflow \"Support router\" handed this thread over as \"doubt\".",
+            "an unsure guess that pages goes to the fallback, not the likeliest quiet category"
+        );
+        let to_ignore = Decide { fallback: Some("ignore".into()), ..decide };
+        assert_eq!(routed(&to_ignore, 2, [0.20, 0.25, 0.52, 0.03]).0, Some("ignore".into()));
+        assert_eq!(routed(&to_ignore, 2, [0.03, 0.10, 0.84, 0.03]), sure("doubt"), "a sure but not certain page still goes to the likeliest quiet category");
+    }
+
+    #[test]
+    fn a_fallback_must_be_a_category_that_pings_no_one() {
+        let Trigger::SlackMessage { decide, .. } = router().trigger else { unreachable!() };
+        let check = |fallback: &str| Decide { fallback: Some(fallback.into()), ..decide.clone() }.choices("Support router").map(|c| c.len());
+        assert_eq!(check("doubt"), Ok(4));
+        assert_eq!(
+            check("escalation"),
+            Err("workflow \"Support router\" sends the messages its decision model is unsure about to \"escalation\", which pings a group: the fallback can't ping a group, so pick a category without a mention in its settings".into())
+        );
+        assert_eq!(
+            check("spam"),
+            Err("workflow \"Support router\" sends the messages its decision model is unsure about to \"spam\", which is not one of its categories: pick another one in its settings".into())
+        );
     }
 
     #[test]
