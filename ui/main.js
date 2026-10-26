@@ -869,7 +869,8 @@ document.addEventListener("paste", (e) => {
   e.preventDefault();
   e.stopPropagation();
   // A clipboard image has no text for xterm to paste; on this Mac, Ctrl+V makes Claude Code read the image itself.
-  if (active.machine === LOCAL) callOn(LOCAL, { cmd: "write_input", tab: active.view.id, data: "\x16" });
+  // The app view attaches it instead, so it shows in the composer before it's sent.
+  if (active.machine === LOCAL && !guiOn()) callOn(LOCAL, { cmd: "write_input", tab: active.view.id, data: "\x16" });
   else attachFiles(active, [...e.clipboardData.files]);
 }, true);
 
