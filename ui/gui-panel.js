@@ -2259,8 +2259,6 @@ function toggleDevtools(s) {
   invoke("browser_do", { id: s.id, action: { do: "devtools" } }).catch((e) => flash(String(e)));
 }
 
-/** A page's devtools window takes the focus from the app's, which must not shrink to the pill for it. */
-const pageDevtoolsOpen = () => [...panelStates.values()].some((p) => p.surfaces.some((s) => s.devtools || s.shownDevtools));
 
 /** Keeps the native pages of surfaces still open, and closes the rest. */
 function closeGonePages() {

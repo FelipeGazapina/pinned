@@ -17,7 +17,7 @@ HUB_PORT=${SWEEP_HUB_PORT:-8797}
 HUB=http://127.0.0.1:$HUB_PORT
 EMAIL=sweep@example.test
 PASSWORD="sweep password 1"
-SERVER=$REPO/target/debug/pinned-server
+SERVER=${CARGO_TARGET_DIR:-$REPO/target}/debug/pinned-server
 
 stop() {
   for name in node hub; do
