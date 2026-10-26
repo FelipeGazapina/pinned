@@ -427,3 +427,18 @@ html[data-appearance="light"] #composer .box { box-shadow: 0 0 0 1px rgb(var(--g
 html[data-appearance="light"] #composer-footer { box-shadow: 0 12px 28px -18px rgb(var(--g-shadow-rgb) / 0.4); }
 
 #hero-head .project.picker { font-size: 14px; font-weight: 500; color: var(--g-fg); }
+
+#approval[data-kind="approval"] { align-items: flex-start; }
+#approval[data-kind="approval"] .lead { width: 16px; height: 16px; }
+#approval[data-kind="approval"] pre { margin-top: 4px; max-height: 160px; font-size: 12px; color: var(--g-fg); overflow-wrap: anywhere; outline: none; }
+#approval[data-kind="approval"] .about { font-size: 11px; color: var(--g-muted); overflow-wrap: break-word; }
+#approval[data-kind="approval"] .actions { align-self: center; gap: 6px; flex-wrap: nowrap; }
+#approval[data-kind="approval"] .actions .icon { display: grid; place-items: center; width: 24px; padding: 0; }
+#approval[data-kind="approval"] .actions .primary { height: 24px; padding: 0 9px; font-size: 12px; }
+#composer-menu[data-kind="approval"] { min-width: 200px; max-width: min(320px, 100%); }
+#composer-menu[data-kind="approval"] .label { white-space: normal; overflow-wrap: break-word; }
+@media (max-width: 640px) {
+  #approval[data-kind="approval"] { flex-wrap: wrap; }
+  #approval[data-kind="approval"] .body { flex-basis: calc(100% - 30px); }
+  #approval[data-kind="approval"] .actions { width: 100%; justify-content: flex-end; }
+}

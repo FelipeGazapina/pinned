@@ -2459,9 +2459,10 @@ async function sweep(profileName) {
     check(/Command approval/.test(await text("#approval .kind")), `banner says ${await text("#approval .kind")}`);
     check((await text("#approval pre")) === "rm -rf build", `the banner shows the command as ${await text("#approval pre")}`);
     check((await text("#approval .about")) === "Remove the build folder", `the banner describes it as ${await text("#approval .about")}`);
-    check(/Do you want to proceed/.test(await text("#approval .what")), `the banner asks ${await text("#approval .what")}`);
-    const options = await page.locator("#approval .options button").allTextContents();
-    check(options.length === 3 && options[1].startsWith("Yes, and don't ask again"), `options: ${options.join(" | ")}`);
+    check(!/Do you want to proceed/.test(await page.locator("#approval").innerText()), "the banner repeats claude's question, which T3 Code's doesn't");
+    await press(gui("#approval [data-approval-more]"));
+    const options = (await page.locator('#composer-menu[data-kind="approval"] button').allTextContents()).map((o) => o.trim());
+    check(options.length === 3 && options[1].startsWith("Always allow") && options[1].endsWith("Yes, and don't ask again for rm commands"), `options: ${options.join(" | ")}`);
     await page.fill("#prompt", "typed while claude asks");
     check(!/typed while claude asks/.test(await termText()), "the composer typed into claude's menu");
     await page.fill("#prompt", "");
@@ -2472,7 +2473,8 @@ async function sweep(profileName) {
     check(!/\/model/.test(await termText()), "picking a model typed into claude's menu");
     check((await text("#model-button")) === model, `the model button changed to ${await text("#model-button")} with nothing sent`);
     check((await text("#composer-note")) === "This applies once claude finishes the turn.", `the pick wasn't held for the turn: ${await text("#composer-note")}`);
-    await press(gui('#approval [data-option="2"]'));
+    await press(gui("#approval [data-approval-more]"));
+    await press(page.locator('#composer-menu[data-kind="approval"] button', { hasText: "Always allow" }));
     await waitTerm(/chose 2/);
     await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()), 1500);
     const row = await text("#thread-list .thread-row.active");
@@ -3488,6 +3490,23 @@ async function sweep(profileName) {
     return rows.join(" | ");
   });
 
+  // The next steps talk to claude in a thread of their own, so alpha's keeps its conversation and terminal.
+  const inNewThread = async (run) => {
+    const rows = await page.locator("#thread-list .thread-row").count();
+    const before = await page.evaluate(() => active?.key);
+    await page.evaluate(() => newThread(true));
+    await waitFor("a new thread in alpha", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1 && (await page.evaluate((key) => active?.key !== key && active.view.running, before)), 10000);
+    await waitTerm(/fake claude in .*work\/alpha/);
+    try {
+      return await run();
+    } finally {
+      await page.evaluate(() => closeTab(active));
+      await waitFor("the thread to close", async () => (await page.locator("#thread-list .thread-row").count()) === rows);
+      await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+      await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
+    }
+  };
+
   await step("composer: in light themes the input and its strip cast T3 Code's composer shadow", async () => {
     const was = await page.evaluate(() => themeState().mode);
     const shadows = () => page.evaluate(() => [getComputedStyle(document.querySelector("#composer .box")).boxShadow, getComputedStyle(document.getElementById("composer-footer")).boxShadow]);
@@ -3528,6 +3547,40 @@ async function sweep(profileName) {
     await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
     return `${said} · ${cwd.split("/").slice(-2).join("/")}`;
   });
+
+  await step("composer: a permission offers Decline and Approve, with Cancel and Always allow under …", () => inNewThread(async () => {
+    await sendPrompt("/ask");
+    await waitFor("the banner", () => page.locator("#approval").isVisible());
+    const actions = await page.locator("#approval .actions button").allTextContents();
+    check(actions.map((a) => a.trim()).join("|") === "Decline|Approve|", `actions: ${actions.join(" | ")}`);
+    check((await page.getAttribute("#approval [data-approval-more]", "aria-label")) === "More approval options", "no … button");
+    check((await page.locator("#approval .options button").count()) === 0, "claude's options still show as buttons");
+    check((await page.getAttribute('#approval [data-approval="accept"]', "class")) === "primary" && (await page.getAttribute('#approval [data-approval="decline"]', "class")) === "outline", "Approve isn't the primary");
+    await press(gui("#approval [data-approval-more]"));
+    await waitFor("the menu", () => page.locator('#composer-menu[data-kind="approval"]').isVisible());
+    const entries = (await page.locator('#composer-menu[data-kind="approval"] button .label').allTextContents()).map((l) => l.trim());
+    const hint = await text('#composer-menu[data-kind="approval"] button .hint');
+    check(entries[0] === "Cancel" && entries[1] === "Always allow" && hint === "Yes, and don't ask again for rm commands", `menu: ${entries.join(" | ")} (${hint})`);
+    const menu = await rect('#composer-menu[data-kind="approval"]');
+    const more = await rect("#approval [data-approval-more]");
+    check(menu.bottom <= more.top + 1, `the menu opens over the … button, not under it (${Math.round(menu.bottom)} > ${Math.round(more.top)})`);
+    const seen = async (what) => ((await termText()).match(new RegExp(what, "g")) ?? []).length;
+    const answers = async (choice, pick) => {
+      const [chose, ran] = [await seen(`chose ${choice}`), await seen("ran it")];
+      await pick();
+      await waitFor(`claude to take ${choice}`, async () => (await seen(`chose ${choice}`)) === chose + 1);
+      await waitFor("the banner to go", async () => !(await page.locator("#approval").isVisible()));
+      await waitFor("claude to finish", async () => (await seen("ran it")) === ran + 1, 8000);
+    };
+    await answers("esc", () => press(page.locator('#composer-menu[data-kind="approval"] button', { hasText: "Cancel" })));
+    await sendPrompt("/ask");
+    await waitFor("the banner again", () => page.locator("#approval [data-approval]").first().isVisible());
+    await answers(3, () => press(gui('#approval [data-approval="decline"]')));
+    await sendPrompt("/ask");
+    await waitFor("the banner a third time", () => page.locator("#approval [data-approval]").first().isVisible());
+    await answers(1, () => press(gui('#approval [data-approval="accept"]')));
+    return `${actions.map((a) => a.trim() || "…").join(" | ")}; … ${entries.join(" | ")}`;
+  }));
 
   await step("app view: the terminal drawer shows the same session", async () => {
     await tapOrClick("#toggle-terminal");

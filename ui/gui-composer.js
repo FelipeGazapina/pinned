@@ -322,19 +322,51 @@ function renderApproval(tab) {
   if (kind === "question") return renderQuestion(tab, menu, tabs, lines);
   delete approval.dataset.collapsed;
   const label = kind === "plan" ? "Plan ready" : /command/i.test(lines[0]) ? "Command approval" : /file|edit/i.test(lines[0]) ? "File change approval" : "Permission approval";
-  const what = permission ? lines.at(-1) : menu.question;
-  const middle = permission ? lines.slice(1, -1).filter((l) => !/^Tip:/.test(l)) : [];
+  if (permission) return renderPermission(menu, lines, label);
+  const options = menu.options.map((o) => `<button type="button" data-option="${o.n}" class="choice"${o.chosen ? " data-chosen" : ""}${o.n <= 9 ? ` data-key="${o.n}"` : ""}><span class="label">${esc(o.head)}</span>${o.more ? `<span class="about">${esc(o.more)}</span>` : ""}</button>`);
+  approval.innerHTML = `${icon("circle-alert", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
+      <p class="what">${esc(menu.question)}</p><div class="options choices">${options.join("")}</div></div>
+    <div class="actions"><button type="button" data-show-terminal class="outline">Terminal</button></div>`;
+}
+
+/** T3 Code's answers to a permission, each one the option of claude's menu that means it: Approve
+ * is its first "Yes", Decline its "No", Always allow the "Yes" that stops it asking, and Cancel its
+ * Esc. Claude's other options, such as "Yes, and switch to auto mode", stay in the "…" menu. */
+function approvalChoices(menu) {
+  const accept = menu.options.find((o) => /^Yes\b/.test(o.head));
+  const always = menu.options.find((o) => o !== accept && /^Yes\b/.test(o.head) && /always|don't ask again|during this session/i.test(o.label));
+  const decline = declineOption(menu) || null;
+  return { accept, decline, always, rest: menu.options.filter((o) => ![accept, always, decline].includes(o)) };
+}
+/** As T3 Code's approval panel: what is asked, the command or file, and why, then Decline,
+ * Approve and "…" at its right. */
+function renderPermission(menu, lines, label) {
+  const question = lines.at(-1);
+  const middle = lines.slice(1, -1).filter((l) => !/^Tip:/.test(l));
   const detail = menu.box || middle.join("\n");
   const about = menu.box ? middle.join("\n") : "";
-  const options = menu.options.map((o) =>
-    permission
-      ? `<button type="button" data-option="${o.n}" class="${o.chosen ? "primary" : "outline"}"${o.chosen ? " data-chosen" : ""}>${esc(o.label)}</button>`
-      : `<button type="button" data-option="${o.n}" class="choice"${o.chosen ? " data-chosen" : ""}${o.n <= 9 ? ` data-key="${o.n}"` : ""}><span class="label">${esc(o.head)}</span>${o.more ? `<span class="about">${esc(o.more)}</span>` : ""}</button>`,
-  );
-  approval.innerHTML = `${icon(permission ? "shield" : "circle-alert", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
-      <p class="what">${esc(what)}</p>${about ? `<p class="about">${esc(about)}</p>` : ""}${detail ? `<pre>${esc(detail)}</pre>` : ""}
-      <div class="options${permission ? "" : " choices"}">${options.join("")}</div></div>
-    <div class="actions"><button type="button" data-show-terminal class="outline">Terminal</button></div>`;
+  const { accept, decline } = approvalChoices(menu);
+  approval.innerHTML = `${icon("shield", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
+      ${detail ? `<pre tabindex="0">${esc(detail)}</pre>` : ""}${about ? `<p class="about">${esc(about)}</p>` : ""}${/^Do you want to proceed\?$/.test(question) ? "" : `<p class="about">${esc(question)}</p>`}</div>
+    <div class="actions">${decline ? `<button type="button" class="outline" data-approval="decline">Decline</button>` : ""}${accept ? `<button type="button" class="primary" data-approval="accept">Approve</button>` : ""}
+      <button type="button" class="outline icon" data-approval-more aria-label="More approval options" title="More approval options">${icon("ellipsis")}</button></div>`;
+}
+function approvalMore(tab, anchor) {
+  const menu = tab.menu;
+  const { always, rest } = approvalChoices(menu);
+  const pick = (o) => () => tab.menu === menu && chooseOption(tab, o.n, o.label);
+  const entries = [{ label: "Cancel", run: () => tab.menu === menu && cancelMenu(tab) }];
+  if (always) entries.push(/session/i.test(always.label) ? { label: "Always allow this session", run: pick(always) } : { label: "Always allow", hint: always.label, run: pick(always) });
+  entries.push(...rest.map((o) => ({ label: o.label, run: pick(o) })), { rule: true }, { label: "Show in terminal", run: () => toggleDrawer(true) });
+  openMenu(anchor, entries, "approval");
+  const box = composerMenu.offsetParent.getBoundingClientRect();
+  const at = anchor.getBoundingClientRect();
+  Object.assign(composerMenu.style, { left: "", right: `${Math.max(0, box.right - at.right)}px`, top: "", bottom: `${box.bottom - at.top + 4}px` });
+}
+function cancelMenu(tab) {
+  tab.menu = null;
+  renderComposer(tab);
+  return writeTo(tab, "\x1b");
 }
 function renderQuestion(tab, menu, tabs, lines) {
   const t = threadOf(tab);
@@ -377,16 +409,19 @@ function pickOption(tab, n) {
 approval.addEventListener("click", (e) => {
   const tab = active;
   if (!tab) return;
+  const answer = e.target.closest("[data-approval]");
+  if (answer && tab.menu) {
+    const choice = approvalChoices(tab.menu)[answer.dataset.approval];
+    if (answer.dataset.approval === "decline" && prompt.value.trim()) return send();
+    return choice && chooseOption(tab, choice.n, choice.label);
+  }
+  if (e.target.closest("[data-approval-more]") && tab.menu) return composerMenu.hidden || composerMenu.dataset.kind !== "approval" ? approvalMore(tab, e.target.closest("[data-approval-more]")) : (composerMenu.hidden = true);
   const option = e.target.closest("[data-option]");
   if (option && tab.menu) {
     if (menuKind(tab.menu) === "question") return pickOption(tab, Number(option.dataset.option));
     return chooseOption(tab, Number(option.dataset.option), tab.menu.options[option.dataset.option - 1]?.label);
   }
-  if (e.target.closest("[data-dismiss]") && tab.menu) {
-    tab.menu = null;
-    renderComposer(tab);
-    return writeTo(tab, "\x1b");
-  }
+  if (e.target.closest("[data-dismiss]") && tab.menu) return cancelMenu(tab);
   if (e.target.closest("[data-toggle]")) {
     const t = threadOf(tab);
     const header = approval.querySelector(".q-header")?.textContent;
@@ -758,7 +793,7 @@ function placeMenu(anchor) {
   else composerMenu.style.left = `${Math.max(0, left)}px`;
 }
 window.addEventListener("mousedown", (e) => {
-  const keeps = isTrigger() ? "#composer-menu, #prompt" : "#composer-menu, #model-button, #more-button, #mode-button, #traits-button, #stash, #composer-footer .branch, #composer-footer .where, [data-hero-project]";
+  const keeps = isTrigger() ? "#composer-menu, #prompt" : "#composer-menu, #model-button, #more-button, #mode-button, #traits-button, #stash, #composer-footer .branch, #composer-footer .where, [data-hero-project], [data-approval-more]";
   if (!composerMenu.hidden && !e.target.closest(keeps)) composerMenu.hidden = true;
 }, true);
 window.addEventListener("keydown", (e) => {
