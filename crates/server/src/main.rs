@@ -97,6 +97,7 @@ fn hub(args: &[String]) -> Result<(), String> {
         public_url: args.flags.get("public-url").cloned(),
         key_file: args.flags.get("key-file").map_or_else(|| args.config_dir().join("hub.key"), PathBuf::from),
         open_signup,
+        runs: Default::default(),
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {

@@ -15,7 +15,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::Notify;
 
-const INTERVAL: Duration = Duration::from_secs(60);
 const LINEAR_KEY: &str = "linear-key";
 const SLACK_KEY: &str = "slack-key";
 const GITHUB_KEY: &str = "github-key";
@@ -548,6 +547,7 @@ pub struct Connectors {
     /// restart every run counts from `started`, so machines get their grace to reconnect.
     seen: Mutex<HashMap<String, u64>>,
     started: u64,
+    timing: runs::Timing,
 }
 
 fn now() -> u64 {
@@ -567,7 +567,12 @@ impl Connectors {
             filing: tokio::sync::Mutex::new(()),
             seen: Mutex::new(HashMap::new()),
             started: now(),
+            timing: runs::Timing::default(),
         }
+    }
+
+    pub fn with_timing(self, timing: runs::Timing) -> Self {
+        Self { timing, ..self }
     }
 
     fn save(&self, store: &Store) -> Result<(), String> {
@@ -780,7 +785,7 @@ impl Connectors {
             for (key, job) in store.runs.iter_mut() {
                 let was = job.clone();
                 let last = seen.entry(key.clone()).or_insert(self.started);
-                for step in job.reconcile(online, last, now) {
+                for step in job.reconcile(online, last, now, self.timing.grace) {
                     todo.push((job.clone(), step));
                 }
                 changed |= *job != was;
@@ -859,6 +864,18 @@ impl Connectors {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Records the conversation a checkpoint of the run holds, which a resume continues even when
+    /// no check saw the session's tab name it before its machine went offline.
+    pub fn checkpointed(&self, connector: &str, subject: &Subject, session: &str) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        let Some(job) = store.runs.get_mut(&runs::key(connector, subject)) else { return Ok(()) };
+        if job.session.as_deref() == Some(session) {
+            return Ok(());
+        }
+        job.session = Some(session.to_owned());
+        self.save(&store)
     }
 
     /// Starts a failed or cancelled run again, from its first attempt.
@@ -1313,7 +1330,7 @@ impl Connectors {
             let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
             *self.checked.lock().unwrap() = Some(check.clone());
             on_check(&check);
-            let _ = tokio::time::timeout(INTERVAL, self.wake.notified()).await;
+            let _ = tokio::time::timeout(self.timing.check, self.wake.notified()).await;
         }
     }
 

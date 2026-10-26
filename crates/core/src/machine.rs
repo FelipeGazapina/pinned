@@ -983,7 +983,8 @@ impl Machine {
         self.device_hub.stop();
     }
 
-    fn record_event(&self, event: AgentEvent) {
+    /// Takes a hook's report on a tab's session.
+    pub fn record_event(&self, event: AgentEvent) {
         if let Some(tab) = &event.tab {
             let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
             self.record_status(tab, &event);

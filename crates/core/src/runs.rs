@@ -7,8 +7,19 @@ use crate::wire::{MachineId, TabId, TabView};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// How long a run's machine may stay offline before another machine resumes the run.
-pub const GRACE: u64 = 5 * 60;
+/// How often the connectors check, and how long a run's machine may stay offline before
+/// another machine resumes the run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Timing {
+    pub check: std::time::Duration,
+    pub grace: u64,
+}
+
+impl Default for Timing {
+    fn default() -> Timing {
+        Timing { check: std::time::Duration::from_secs(60), grace: 5 * 60 }
+    }
+}
 /// Starts a run gets, its first included, before it stops and reports why: one per machine
 /// lost under it and one per failed turn.
 pub const ATTEMPTS: u32 = 3;
@@ -207,7 +218,7 @@ impl Job {
     /// Moves the run on from what the online machines show, and answers what it needs from them.
     /// `seen` is when its machine last showed it alive, or when the hub started watching, which
     /// gives every machine the same grace after a hub restart.
-    pub fn reconcile(&mut self, online: &Online, seen: &mut u64, now: u64) -> Vec<Step> {
+    pub fn reconcile(&mut self, online: &Online, seen: &mut u64, now: u64, grace: u64) -> Vec<Step> {
         let tabs: Vec<(&MachineId, &TabView)> = online
             .iter()
             .flat_map(|(machine, tabs)| tabs.iter().map(move |t| (machine, t)))
@@ -233,7 +244,7 @@ impl Job {
                     None => self.set(Phase::Idle { machine }, now, "its tab closed"),
                 }
             }
-            Phase::Running { machine } if now.saturating_sub(*seen) >= GRACE => match tabs.first() {
+            Phase::Running { machine } if now.saturating_sub(*seen) >= grace => match tabs.first() {
                 Some((other, tab)) => {
                     self.set(Phase::Running { machine: (*other).clone() }, now, format!("found running on {other}"));
                     *seen = now;
@@ -320,6 +331,8 @@ impl Job {
 mod tests {
     use super::*;
 
+    const GRACE: u64 = 300;
+
     const NOW: u64 = 1_800_000_000;
 
     fn job(phase: Phase, attempt: u32) -> Job {
@@ -371,15 +384,15 @@ mod tests {
     #[test]
     fn a_queued_run_is_dispatched_once_its_time_comes() {
         let mut j = job(Phase::Queued { after: NOW + 60 }, 1);
-        assert_eq!(j.reconcile(&[], &mut 0, NOW), vec![]);
-        assert_eq!(j.reconcile(&[], &mut 0, NOW + 60), vec![Step::Dispatch]);
+        assert_eq!(j.reconcile(&[], &mut 0, NOW, GRACE), vec![]);
+        assert_eq!(j.reconcile(&[], &mut 0, NOW + 60, GRACE), vec![Step::Dispatch]);
     }
 
     #[test]
     fn a_queued_run_a_machine_already_runs_is_adopted_not_dispatched_again() {
         let mut j = job(Phase::Queued { after: NOW }, 1);
         let online = [("m2".to_owned(), vec![tab("tab-3", Some(AgentStatus::Working))])];
-        assert_eq!(j.reconcile(&online, &mut 0, NOW), vec![]);
+        assert_eq!(j.reconcile(&online, &mut 0, NOW, GRACE), vec![]);
         assert_eq!((j.phase, j.session.as_deref()), (running("m2"), Some("s1")));
     }
 
@@ -388,9 +401,9 @@ mod tests {
         let mut j = job(running("m1"), 1);
         let mut seen = NOW;
         let online = [("m2".to_owned(), vec![])];
-        assert_eq!(j.reconcile(&online, &mut seen, NOW + GRACE - 1), vec![]);
+        assert_eq!(j.reconcile(&online, &mut seen, NOW + GRACE - 1, GRACE), vec![]);
         assert_eq!(j.phase, running("m1"));
-        assert_eq!(j.reconcile(&online, &mut seen, NOW + GRACE), vec![Step::Dispatch]);
+        assert_eq!(j.reconcile(&online, &mut seen, NOW + GRACE, GRACE), vec![Step::Dispatch]);
         assert_eq!(j.phase, Phase::Queued { after: NOW + GRACE });
         assert_eq!(j.events.last().unwrap().text, "m1 went offline");
     }
@@ -401,27 +414,27 @@ mod tests {
         let mut seen = NOW;
         let mut limited = tab("tab-1", Some(AgentStatus::Failed));
         limited.resume_at = Some(NOW + 3600);
-        j.reconcile(&[("m1".to_owned(), vec![limited])], &mut seen, NOW);
+        j.reconcile(&[("m1".to_owned(), vec![limited])], &mut seen, NOW, GRACE);
         assert_eq!((j.attempt, j.limit), (1, Some(NOW + 3600)));
-        assert_eq!(j.reconcile(&[], &mut seen, NOW + GRACE), vec![]);
+        assert_eq!(j.reconcile(&[], &mut seen, NOW + GRACE, GRACE), vec![]);
         assert_eq!(j.phase, Phase::Queued { after: NOW + 3600 });
-        assert_eq!(j.reconcile(&[], &mut seen, NOW + 3600), vec![Step::Dispatch]);
+        assert_eq!(j.reconcile(&[], &mut seen, NOW + 3600, GRACE), vec![Step::Dispatch]);
     }
 
     #[test]
     fn a_machine_back_in_time_keeps_its_run() {
         let mut j = job(running("m1"), 1);
         let mut seen = NOW;
-        assert_eq!(j.reconcile(&[], &mut seen, NOW + 60), vec![]);
+        assert_eq!(j.reconcile(&[], &mut seen, NOW + 60, GRACE), vec![]);
         let online = [("m1".to_owned(), vec![tab("tab-1", Some(AgentStatus::Working))])];
-        assert_eq!(j.reconcile(&online, &mut seen, NOW + GRACE + 1), vec![]);
+        assert_eq!(j.reconcile(&online, &mut seen, NOW + GRACE + 1, GRACE), vec![]);
         assert_eq!((j.phase, seen), (running("m1"), NOW + GRACE + 1));
     }
 
     #[test]
     fn a_run_that_lost_its_machine_too_often_fails_and_reports() {
         let mut j = job(running("m1"), ATTEMPTS);
-        let steps = j.reconcile(&[], &mut NOW.clone(), NOW + GRACE);
+        let steps = j.reconcile(&[], &mut NOW.clone(), NOW + GRACE, GRACE);
         let error = "m1 went offline and the run has used its 3 attempts".to_owned();
         assert_eq!(steps, vec![Step::Report(error.clone())]);
         assert_eq!(j.phase, Phase::Failed { error });
@@ -434,24 +447,24 @@ mod tests {
             ("m1".to_owned(), vec![tab("tab-1", Some(AgentStatus::Working))]),
             ("m2".to_owned(), vec![tab("tab-7", Some(AgentStatus::Working))]),
         ];
-        assert_eq!(j.reconcile(&online, &mut 0, NOW), vec![Step::Close { machine: "m1".into(), tab: "tab-1".into() }]);
+        assert_eq!(j.reconcile(&online, &mut 0, NOW, GRACE), vec![Step::Close { machine: "m1".into(), tab: "tab-1".into() }]);
         assert_eq!(j.phase, running("m2"));
     }
 
     #[test]
     fn a_finished_turn_idles_the_run_and_a_closed_tab_does_too() {
         let mut j = job(running("m1"), 1);
-        j.reconcile(&[("m1".to_owned(), vec![tab("tab-1", Some(AgentStatus::Done))])], &mut 0, NOW);
+        j.reconcile(&[("m1".to_owned(), vec![tab("tab-1", Some(AgentStatus::Done))])], &mut 0, NOW, GRACE);
         assert_eq!(j.phase, Phase::Idle { machine: "m1".into() });
         let mut j = job(running("m1"), 1);
-        j.reconcile(&[("m1".to_owned(), vec![])], &mut 0, NOW);
+        j.reconcile(&[("m1".to_owned(), vec![])], &mut 0, NOW, GRACE);
         assert_eq!((j.phase, j.events.last().unwrap().text.as_str()), (Phase::Idle { machine: "m1".into() }, "its tab closed"));
     }
 
     #[test]
     fn an_idle_run_is_never_dispatched_when_its_machine_goes_away() {
         let mut j = job(Phase::Idle { machine: "m1".into() }, 1);
-        assert_eq!(j.reconcile(&[], &mut 0, NOW + 10 * GRACE), vec![]);
+        assert_eq!(j.reconcile(&[], &mut 0, NOW + 10 * GRACE, GRACE), vec![]);
         assert_eq!(j.phase, Phase::Idle { machine: "m1".into() });
     }
 
@@ -459,7 +472,7 @@ mod tests {
     fn an_idle_run_working_again_somewhere_runs_there() {
         let mut j = job(Phase::Idle { machine: "m1".into() }, 1);
         let online = [("m2".to_owned(), vec![tab("tab-2", Some(AgentStatus::Working))])];
-        assert_eq!(j.reconcile(&online, &mut 0, NOW), vec![]);
+        assert_eq!(j.reconcile(&online, &mut 0, NOW, GRACE), vec![]);
         assert_eq!(j.phase, running("m2"));
     }
 
@@ -467,11 +480,11 @@ mod tests {
     fn a_failed_turn_is_continued_once_per_failure_until_the_attempts_run_out() {
         let mut j = job(running("m1"), 1);
         let failed = |at| TabView { updated: Some(at), ..tab("tab-1", Some(AgentStatus::Failed)) };
-        assert_eq!(j.reconcile(&[("m1".to_owned(), vec![failed(NOW)])], &mut 0, NOW), vec![Step::Continue]);
-        assert_eq!(j.reconcile(&[("m1".to_owned(), vec![failed(NOW)])], &mut 0, NOW + 60), vec![]);
-        assert_eq!(j.reconcile(&[("m1".to_owned(), vec![failed(NOW + 90)])], &mut 0, NOW + 120), vec![Step::Continue]);
+        assert_eq!(j.reconcile(&[("m1".to_owned(), vec![failed(NOW)])], &mut 0, NOW, GRACE), vec![Step::Continue]);
+        assert_eq!(j.reconcile(&[("m1".to_owned(), vec![failed(NOW)])], &mut 0, NOW + 60, GRACE), vec![]);
+        assert_eq!(j.reconcile(&[("m1".to_owned(), vec![failed(NOW + 90)])], &mut 0, NOW + 120, GRACE), vec![Step::Continue]);
         let error = "its turn failed and the run has used its 3 attempts".to_owned();
-        assert_eq!(j.reconcile(&[("m1".to_owned(), vec![failed(NOW + 150)])], &mut 0, NOW + 180), vec![Step::Report(error.clone())]);
+        assert_eq!(j.reconcile(&[("m1".to_owned(), vec![failed(NOW + 150)])], &mut 0, NOW + 180, GRACE), vec![Step::Report(error.clone())]);
         assert_eq!((j.attempt, j.phase), (3, Phase::Failed { error }));
     }
 
@@ -479,7 +492,7 @@ mod tests {
     fn a_cancelled_run_has_every_tab_closed() {
         let mut j = job(Phase::Cancelled, 1);
         let online = [("m1".to_owned(), vec![tab("tab-1", Some(AgentStatus::Working))])];
-        assert_eq!(j.reconcile(&online, &mut 0, NOW), vec![Step::Close { machine: "m1".into(), tab: "tab-1".into() }]);
+        assert_eq!(j.reconcile(&online, &mut 0, NOW, GRACE), vec![Step::Close { machine: "m1".into(), tab: "tab-1".into() }]);
     }
 
     #[test]

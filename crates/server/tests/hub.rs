@@ -1,6 +1,7 @@
 use base64::Engine;
 use pinned_core::account::{self, Credentials};
-use pinned_core::agent::{self, Stage, Subject};
+use pinned_core::agent::{self, AgentEvent, AgentStatus, Stage, Subject};
+use pinned_core::checkpoint;
 use pinned_core::connectors::{Delivery, Run, Work};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
@@ -51,6 +52,7 @@ impl TestHub {
                 public_url: None,
                 key_file: dir.join("hub.key"),
                 open_signup,
+                runs: pinned_core::runs::Timing { check: Duration::from_secs(1), grace: 3 },
             }))
             .unwrap();
         let url = format!("http://{}", running.addr);
@@ -237,6 +239,15 @@ impl Node {
     fn kill(&mut self) {
         self.link.take().unwrap().stop();
         self.machine.quit();
+    }
+
+    /// Cuts the node off the hub, as a laptop closing its lid, with its sessions still running.
+    fn disconnect(&mut self) {
+        self.link.take().unwrap().stop();
+    }
+
+    fn reconnect(&mut self, creds: Credentials) {
+        self.link = Some(link::spawn(creds, self.machine.clone(), "0.0.0-test"));
     }
 }
 
@@ -425,6 +436,107 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     node_b.kill();
     client.wait_machines(&[("mac-mini", false), ("vps", false)]);
     assert_eq!(open(run(Subject::LinearIssue { issue: "uuid-2".into() })), None, "with no machine online the run is unclaimed, for the next check");
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git").args(args).current_dir(dir).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn a_run_whose_machine_goes_offline_resumes_on_another_machine_with_its_work() {
+    let hub = TestHub::start("resume");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let register = |name: &str, dir: &Path| {
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token }
+            .save(dir)
+            .unwrap();
+        Credentials::load(dir).unwrap()
+    };
+    let (dir_a, dir_b, repo) = (temp("resume-a"), temp("resume-b"), temp("resume-repo"));
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("app.txt"), "v1\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
+    let (creds_a, creds_b) = (register("mac-mini", &dir_a), register("vps", &dir_b));
+    let vps = creds_b.machine_id.clone();
+    let mut node_a = Node::start(&dir_a, creds_a.clone());
+    let node_b = Node::start(&dir_b, creds_b);
+    let args_file = dir_b.join("args");
+    std::fs::write(dir_b.join("claude"), format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec cat\n", args_file.display())).unwrap();
+    client.wait_machines(&[("mac-mini", true), ("vps", true)]);
+
+    let issue = Subject::LinearIssue { issue: "uuid-1".into() };
+    let store = json!({
+        "connectors": [{
+            "id": "c1", "name": "Bugs", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": repo, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+            "instructions": "", "machine": creds_a.machine_id,
+        }],
+        "runs": { "c1/uuid-1": {
+            "connector": "c1", "subject": { "issue": "uuid-1" }, "title": "ENG-1 Broken button", "state": "queued", "after": 0,
+            "attempt": 0, "cwd": repo, "args": ["--name", "ENG-1", "Fix ENG-1"], "worktree": "eng-1", "created": 0, "updated": 0,
+        } },
+    });
+    assert_eq!(client.hub(json!({ "cmd": "import", "store": store, "linear_key": null, "slack_key": null })), Ok(json!(true)));
+    let tab_on = |node: &Node| node.machine.tabs().into_iter().find(|t| t.connector.as_deref() == Some("c1") && t.running);
+    wait_for("mac-mini to start the queued run", || tab_on(&node_a).is_some());
+    assert!(tab_on(&node_b).is_none());
+
+    // The session names itself, then leaves work nobody committed.
+    let tab = tab_on(&node_a).unwrap();
+    node_a.machine.record_event(AgentEvent {
+        status: AgentStatus::Working,
+        cwd: Some(repo.display().to_string()),
+        message: None,
+        tab: Some(tab.id.clone()),
+        session: Some("s1".into()),
+        title: None,
+        resume_at: None,
+        prompt: None,
+        snapshot: None,
+    });
+    std::fs::write(repo.join("wip.txt"), "half done\n").unwrap();
+    std::fs::write(repo.join("app.txt"), "v2\n").unwrap();
+    let line = format!("{}\n", json!({ "type": "user", "cwd": repo }));
+    let transcripts = sync::claude_dir(&dir_a.join("home"), &repo);
+    std::fs::create_dir_all(&transcripts).unwrap();
+    std::fs::write(transcripts.join("s1.jsonl"), &line).unwrap();
+    let checkpoint = checkpoint::capture(&dir_a.join("home"), "s1", 1 << 20).unwrap();
+    let send = |node: &Node| node.link.as_ref().unwrap().call_hub(HubCall::Checkpoint { connector: "c1".into(), subject: issue.clone(), checkpoint: checkpoint.clone() });
+    assert_eq!(send(&node_b), Err("this machine runs no session of that workflow on that subject".into()));
+    assert_eq!(send(&node_a), Ok(Value::Null));
+
+    node_a.disconnect();
+    wait_for("vps to resume the run", || tab_on(&node_b).is_some());
+    let resumed = tab_on(&node_b).unwrap();
+    let worktree = repo.join(".claude/worktrees/eng-1");
+    assert_eq!((resumed.cwd, resumed.session.as_deref()), (worktree.display().to_string(), Some("s1")));
+    assert_eq!(std::fs::read_to_string(worktree.join("wip.txt")).unwrap(), "half done\n");
+    assert_eq!(std::fs::read_to_string(worktree.join("app.txt")).unwrap(), "v2\n");
+    assert_eq!(std::fs::read_to_string(sync::claude_dir(&dir_b.join("home"), &worktree).join("s1.jsonl")).unwrap(), line);
+    wait_for("vps's claude to start", || args_file.exists());
+    let args = std::fs::read_to_string(&args_file).unwrap();
+    let args: Vec<&str> = args.lines().collect();
+    assert_eq!(args.windows(2).find(|w| w[0] == "--resume"), Some(&["--resume", "s1"][..]));
+    assert!(args.last().unwrap().starts_with("pinned resumed this session because the machine running it went offline."), "{args:?}");
+
+    // mac-mini comes back with the old session: its callbacks are refused and its tab closes.
+    node_a.reconnect(creds_a);
+    wait_for("mac-mini back online", || node_a.online());
+    assert_eq!(
+        node_a.link.as_ref().unwrap().forward(agent::Message::Stage { connector: "c1".into(), subject: issue.clone(), stage: Stage::Coding }),
+        Err("this run moved to another machine after this one went offline: stop working on it here".into())
+    );
+    wait_for("mac-mini's stale tab to close", || tab_on(&node_a).is_none());
+    assert!(tab_on(&node_b).is_some(), "vps keeps the run");
+    let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    let run = &settings["runs"][0];
+    assert_eq!((run["key"].as_str(), run["state"].as_str(), run["machine"].as_str(), run["attempt"].as_u64()), (Some("c1/uuid-1"), Some("running"), Some(vps.as_str()), Some(2)));
 }
 
 #[test]

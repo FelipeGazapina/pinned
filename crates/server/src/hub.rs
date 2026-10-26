@@ -73,6 +73,7 @@ pub struct Hub {
     accounts: Mutex<HashMap<Uuid, Arc<Account>>>,
     /// Numbers every socket, so a machine's old connection can't unregister its new one.
     sockets: AtomicU64,
+    timing: runs::Timing,
 }
 
 pub struct Account {
@@ -123,8 +124,8 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
 }
 
 impl Hub {
-    pub fn new(db: Db, public_url: String) -> Arc<Hub> {
-        Arc::new(Hub { db, public_url: public_url.trim_end_matches('/').to_owned(), accounts: Mutex::default(), sockets: AtomicU64::new(1) })
+    pub fn new(db: Db, public_url: String, timing: runs::Timing) -> Arc<Hub> {
+        Arc::new(Hub { db, public_url: public_url.trim_end_matches('/').to_owned(), accounts: Mutex::default(), sockets: AtomicU64::new(1), timing })
     }
 
     pub fn next_socket(&self) -> u64 {
@@ -159,7 +160,7 @@ impl Hub {
             .get_or_try_init(|| async {
                 let stored = self.db.connectors(account.id).await?;
                 let storage = PgStorage::new(self.db.clone(), account.id, stored);
-                Ok::<_, String>(Arc::new(Connectors::new(storage, EXE_PLACEHOLDER.into())))
+                Ok::<_, String>(Arc::new(Connectors::new(storage, EXE_PLACEHOLDER.into()).with_timing(self.timing)))
             })
             .await?;
         Ok(connectors.clone())
@@ -383,7 +384,8 @@ impl Hub {
                 (json(c().await?.linear_take(&connector, &channel, &thread, &issue).await?), true)
             }
             HubCall::Checkpoint { connector, subject, checkpoint } => {
-                return json(self.db.save_checkpoint(account.id, &runs::key(&connector, &subject), &checkpoint).await?);
+                self.db.save_checkpoint(account.id, &runs::key(&connector, &subject), &checkpoint).await?;
+                return json(c().await?.checkpointed(&connector, &subject, &checkpoint.session)?);
             }
             HubCall::RetryRun { key } => (json(c().await?.retry_run(&key)?), true),
             HubCall::CancelRun { key } => (json(c().await?.cancel_run(&key)?), true),
