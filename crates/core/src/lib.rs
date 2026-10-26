@@ -20,6 +20,7 @@ pub mod projects;
 pub mod pty;
 pub mod pulls;
 pub mod reminders;
+pub mod runs;
 pub mod scaffold;
 pub mod scripts;
 pub mod sessions;
