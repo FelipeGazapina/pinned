@@ -120,8 +120,8 @@ fn glance(item: Item) -> Option<Item> {
     Some(match item {
         Item::Text { id, at, text } => Item::Text { id, at, text: clip(text) },
         Item::Thinking { id, at, text } => Item::Thinking { id, at, text: clip(text) },
-        Item::Tool { id, at, name, summary, detail } => Item::Tool { id, at, name, summary, detail: clip(detail) },
-        Item::Result { tool, at, error, text } => Item::Result { tool, at, error, text: clip(text) },
+        Item::Tool { id, at, name, summary, detail, args } => Item::Tool { id, at, name, summary, detail: clip(detail), args },
+        Item::Result { tool, at, error, text, links } => Item::Result { tool, at, error, text: clip(text), links },
         _ => return None,
     })
 }
@@ -228,8 +228,8 @@ mod tests {
         log.push(r#"{"type":"api-request","timestamp":"t10"}"#.into());
         let refs: Vec<&str> = log.iter().map(String::as_str).collect();
         let tail = tail_of(&lines(&refs), false);
-        let read = |n: u32| Item::Tool { id: format!("r{n}"), at: format!("t{n}"), name: "Read".into(), summary: format!("/w/f{n}.rs"), detail: "".into() };
-        let result = |n: u32| Item::Result { tool: format!("r{n}"), at: format!("t{n}r"), error: false, text: format!("ok {n}") };
+        let read = |n: u32| Item::Tool { id: format!("r{n}"), at: format!("t{n}"), name: "Read".into(), summary: format!("/w/f{n}.rs"), detail: "".into(), args: vec![] };
+        let result = |n: u32| Item::Result { tool: format!("r{n}"), at: format!("t{n}r"), error: false, text: format!("ok {n}"), links: vec![] };
         assert_eq!(
             tail,
             Tail {
@@ -245,7 +245,7 @@ mod tests {
                     read(7),
                     result(7),
                     Item::Thinking { id: "b:0".into(), at: "t8".into(), text: "**Next** the tests.".into() },
-                    Item::Tool { id: "b1".into(), at: "t9".into(), name: "Bash".into(), summary: "Run the tests".into(), detail: "cargo test".into() },
+                    Item::Tool { id: "b1".into(), at: "t9".into(), name: "Bash".into(), summary: "Run the tests".into(), detail: "cargo test".into(), args: vec![] },
                 ],
             }
         );
@@ -284,7 +284,7 @@ mod tests {
             updated: "t5".into(),
             steps: vec![Item::Text { id: "x:0".into(), at: "t5".into(), text: "Mapped.".into() }],
         };
-        let grep = Item::Tool { id: "g1".into(), at: "t6".into(), name: "Grep".into(), summary: "TODO".into(), detail: "".into() };
+        let grep = Item::Tool { id: "g1".into(), at: "t6".into(), name: "Grep".into(), summary: "TODO".into(), detail: "".into(), args: vec![] };
         let checking = Subagent {
             id: "a2".into(),
             tool: "toolu_9".into(),
@@ -302,7 +302,7 @@ mod tests {
         let mut log = std::fs::OpenOptions::new().append(true).open(dir.path().join("agent-a2.jsonl")).unwrap();
         std::io::Write::write_all(&mut log, &lines(&[r#"{"type":"user","isSidechain":true,"uuid":"z","timestamp":"t7","message":{"content":[{"type":"tool_result","tool_use_id":"g1","content":"No matches found"}]}}"#])).unwrap();
         let grown = scan(dir.path(), &mut cache, Some(SystemTime::UNIX_EPOCH));
-        let found = Item::Result { tool: "g1".into(), at: "t7".into(), error: false, text: "No matches found".into() };
+        let found = Item::Result { tool: "g1".into(), at: "t7".into(), error: false, text: "No matches found".into(), links: vec![] };
         assert_eq!(grown, vec![mapped, Subagent { updated: "t7".into(), steps: vec![grep, found], ..checking }]);
         assert_eq!(scan(&dir.path().join("missing"), &mut cache, None), vec![]);
     }

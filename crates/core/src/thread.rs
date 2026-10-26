@@ -9,6 +9,8 @@ const SUMMARY_CHARS: usize = 300;
 /// The biggest image, as base64, that a thread page carries inline.
 const PICTURE_CHARS: usize = 2 << 20;
 const READ_LIMIT: u64 = 8 << 20;
+/// The line `fork` adds to a copy, naming the session it was copied from.
+pub const FORK_LINE: &str = "pinned-fork";
 
 #[derive(Serialize, Debug, PartialEq, Clone)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -31,9 +33,30 @@ pub enum Item {
     Thinking { id: String, at: String, text: String },
     /// A request to the model that failed, such as `API Error: 529 Overloaded`.
     Error { id: String, at: String, text: String },
-    Tool { id: String, at: String, name: String, summary: String, detail: String },
-    /// The outcome of the `Tool` whose id is `tool`.
-    Result { tool: String, at: String, error: bool, text: String },
+    /// `args` holds the input of a tool T3 Code shows as a generic call, such as Grep or an MCP tool,
+    /// one `[key, value]` per field.
+    Tool {
+        id: String,
+        at: String,
+        name: String,
+        summary: String,
+        detail: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        args: Vec<(String, String)>,
+    },
+    /// The outcome of the `Tool` whose id is `tool`. `links` are a web search's results as `[title, url]`.
+    Result {
+        tool: String,
+        at: String,
+        error: bool,
+        text: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        links: Vec<(String, String)>,
+    },
+    /// Claude compacted the conversation, from `before` tokens to `after` when it says.
+    Compaction { id: String, at: String, before: Option<u64>, after: Option<u64> },
+    /// The conversation goes on from a copy of the session `source`, which pinned forked.
+    Fork { id: String, at: String, source: String },
     /// Output of a local command such as `/model`, which claude shows without a turn.
     Note { id: String, at: String, text: String },
     /// A pull request the session opened or worked on.
@@ -109,8 +132,9 @@ pub struct Forked {
 }
 
 /// Copies `file`'s lines up to `cut` into a sibling transcript for `session`, as `claude --fork-session`
-/// would. Claude then resumes the copy as its own conversation, leaving the original whole.
-pub fn fork(file: &Path, cut: Cut, session: &str) -> Result<Forked, String> {
+/// would. Claude then resumes the copy as its own conversation, leaving the original whole. With a
+/// `source`, the copy ends in a line naming the session it came from, which claude passes over.
+pub fn fork(file: &Path, cut: Cut, session: &str, source: Option<&str>) -> Result<Forked, String> {
     let text = std::fs::read_to_string(file).map_err(|e| format!("could not read the transcript: {e}"))?;
     let (uuid, keep) = match cut {
         Cut::Before(uuid) => (uuid, false),
@@ -121,7 +145,7 @@ pub fn fork(file: &Path, cut: Cut, session: &str) -> Result<Forked, String> {
     let at = lines.iter().position(|l| parsed(l).is_some_and(|v| v["uuid"] == uuid)).ok_or("that message is not in this conversation")?;
     let end = at + usize::from(keep);
     let timestamp = lines[end..].iter().find_map(|l| parsed(l).and_then(|v| v["timestamp"].as_str().map(str::to_owned))).unwrap_or_default();
-    let copied: Vec<String> = lines[..end]
+    let mut copied: Vec<String> = lines[..end]
         .iter()
         .map(|line| match parsed(line) {
             Some(mut v) if v.get("sessionId").is_some() => {
@@ -131,6 +155,10 @@ pub fn fork(file: &Path, cut: Cut, session: &str) -> Result<Forked, String> {
             _ => line.to_string(),
         })
         .collect();
+    if let Some(source) = source {
+        let at = lines[..end].iter().rev().find_map(|l| parsed(l).and_then(|v| v["timestamp"].as_str().map(str::to_owned))).unwrap_or_default();
+        copied.push(serde_json::json!({ "type": FORK_LINE, "sourceSession": source, "timestamp": at }).to_string());
+    }
     let said = lines[..end].iter().filter_map(|l| parsed(l)).any(|v| matches!(v["type"].as_str(), Some("user" | "assistant")));
     let target = file.with_file_name(format!("{session}.jsonl"));
     std::fs::write(&target, copied.iter().map(|l| format!("{l}\n")).collect::<String>()).map_err(|e| format!("could not write the copy: {e}"))?;
@@ -256,8 +284,13 @@ pub(crate) fn items_of(line: &Value) -> Vec<Item> {
             Some(number) => vec![Item::Pr { number, url: str_of(&line["prUrl"]), repo: str_of(&line["prRepository"]) }],
             None => vec![],
         },
-        Some("user") if line["isCompactSummary"].as_bool() == Some(true) => vec![Item::Note { id, at, text: "The conversation was compacted.".into() }],
-        Some("user") => user_items(&line["message"]["content"], id, at),
+        Some("user") if line["isCompactSummary"].as_bool() == Some(true) => vec![],
+        Some("system") if line["subtype"] == "compact_boundary" => {
+            let tokens = |k: &str| line["compactMetadata"][k].as_u64().filter(|n| *n > 0);
+            vec![Item::Compaction { id, at, before: tokens("preTokens"), after: tokens("postTokens") }]
+        }
+        Some(FORK_LINE) => vec![Item::Fork { id: format!("fork:{at}"), at, source: str_of(&line["sourceSession"]) }],
+        Some("user") => user_items(&line["message"]["content"], &line["toolUseResult"], id, at),
         Some("attachment") if line["attachment"]["type"] == "queued_command" && line["attachment"]["origin"]["kind"] == "human" => {
             match spoken(line["attachment"]["prompt"].as_str().unwrap_or_default()) {
                 Some(Spoken::Prompt(text)) => vec![Item::Steer { id, at, text }],
@@ -290,8 +323,8 @@ pub(crate) fn items_of(line: &Value) -> Vec<Item> {
                         }
                         "tool_use" => {
                             let name = str_of(&block["name"]);
-                            let (summary, detail) = describe_tool(&name, &block["input"]);
-                            Some(Item::Tool { id: str_of(&block["id"]), at: at.clone(), name, summary, detail })
+                            let (summary, detail, args) = describe_tool(&name, &block["input"]);
+                            Some(Item::Tool { id: str_of(&block["id"]), at: at.clone(), name, summary, detail, args })
                         }
                         _ => None,
                     }
@@ -302,7 +335,7 @@ pub(crate) fn items_of(line: &Value) -> Vec<Item> {
     }
 }
 
-fn user_items(content: &Value, id: String, at: String) -> Vec<Item> {
+fn user_items(content: &Value, outcome: &Value, id: String, at: String) -> Vec<Item> {
     if let Some(text) = content.as_str() {
         return match spoken(text) {
             Some(Spoken::Prompt(text)) => vec![Item::User { id, at, text, images: 0, pictures: vec![] }],
@@ -319,6 +352,7 @@ fn user_items(content: &Value, id: String, at: String) -> Vec<Item> {
             at: at.clone(),
             error: b["is_error"].as_bool() == Some(true),
             text: clip(&result_text(&b["content"]), PREVIEW_CHARS),
+            links: links_of(outcome),
         })
         .collect();
     let text = blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n");
@@ -332,6 +366,12 @@ fn user_items(content: &Value, id: String, at: String) -> Vec<Item> {
         None => None,
     };
     results.into_iter().chain(said).collect()
+}
+
+/// The pages a web search found, from the structured result Claude Code keeps beside its text.
+fn links_of(outcome: &Value) -> Vec<(String, String)> {
+    let found = outcome["results"].as_array().into_iter().flatten().flat_map(|r| r["content"].as_array().into_iter().flatten());
+    found.filter_map(|c| Some((c["title"].as_str().unwrap_or_default().to_owned(), c["url"].as_str()?.to_owned()))).take(50).collect()
 }
 
 /// A `data:` URL for an image block's base64 source, when it is a picture a page can show and small enough.
@@ -403,11 +443,17 @@ fn result_text(content: &Value) -> String {
     }
 }
 
-fn describe_tool(name: &str, input: &Value) -> (String, String) {
+/// Tools T3 Code draws with their own rows. Any other shows its input as `key value` lines.
+const OWN_ROWS: &[&str] = &["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Skill", "Agent", "Task", "ExitPlanMode", "AskUserQuestion"];
+const ARGS_SHOWN: usize = 40;
+
+/// A tool call's one-line summary, the detail its row expands to, and its input as `[key, value]` pairs.
+fn describe_tool(name: &str, input: &Value) -> (String, String, Vec<(String, String)>) {
     let field = |k: &str| input[k].as_str().unwrap_or_default();
     let summary = match name {
-        "Bash" => field("description").to_owned(),
-        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => field("file_path").to_owned(),
+        "Bash" => field("command").to_owned(),
+        "Read" | "Write" | "Edit" | "MultiEdit" => field("file_path").to_owned(),
+        "NotebookEdit" => field("notebook_path").to_owned(),
         "Grep" | "Glob" => field("pattern").to_owned(),
         "WebFetch" => field("url").to_owned(),
         "WebSearch" => field("query").to_owned(),
@@ -420,14 +466,21 @@ fn describe_tool(name: &str, input: &Value) -> (String, String) {
     let summary = if summary.is_empty() { first_string(input).unwrap_or_default() } else { summary };
     let detail = match name {
         "Bash" => field("command").to_owned(),
-        "Edit" => format!("{}\n---\n{}", field("old_string"), field("new_string")),
-        "Write" => field("content").to_owned(),
+        "Skill" => field("args").to_owned(),
         "Agent" | "Task" => field("prompt").to_owned(),
         "Artifact" => field("description").to_owned(),
-        "ExitPlanMode" => return (clip(summary.lines().next().unwrap_or_default(), SUMMARY_CHARS), clip(field("plan"), PLAN_CHARS)),
+        "ExitPlanMode" => return (clip(summary.lines().next().unwrap_or_default(), SUMMARY_CHARS), clip(field("plan"), PLAN_CHARS), vec![]),
         _ => String::new(),
     };
-    (clip(summary.lines().next().unwrap_or_default(), SUMMARY_CHARS), clip(&detail, PREVIEW_CHARS))
+    let args = match input.as_object() {
+        Some(fields) if !OWN_ROWS.contains(&name) => fields
+            .iter()
+            .take(ARGS_SHOWN)
+            .map(|(k, v)| (k.clone(), clip(&v.as_str().filter(|s| !s.is_empty()).map_or_else(|| v.to_string(), str::to_owned), PREVIEW_CHARS)))
+            .collect(),
+        _ => vec![],
+    };
+    (clip(summary.lines().next().unwrap_or_default(), SUMMARY_CHARS), clip(&detail, PREVIEW_CHARS), args)
 }
 
 fn first_string(input: &Value) -> Option<String> {
@@ -507,8 +560,8 @@ mod tests {
             items,
             vec![
                 Item::User { id: "u1".into(), at: "2026-10-23T10:00:00Z".into(), text: "fix the bug".into(), images: 0, pictures: vec![] },
-                Item::Tool { id: "t1".into(), at: "2026-10-23T10:00:05Z".into(), name: "Bash".into(), summary: "Run the tests".into(), detail: "cargo test".into() },
-                Item::Result { tool: "t1".into(), at: "2026-10-23T10:00:09Z".into(), error: false, text: "ok".into() },
+                Item::Tool { id: "t1".into(), at: "2026-10-23T10:00:05Z".into(), name: "Bash".into(), summary: "cargo test".into(), detail: "cargo test".into(), args: vec![] },
+                Item::Result { tool: "t1".into(), at: "2026-10-23T10:00:09Z".into(), error: false, text: "ok".into(), links: vec![] },
                 Item::Text { id: "a2:0".into(), at: "2026-10-23T10:01:00Z".into(), text: "Fixed.".into() },
                 Item::Pr { number: 7, url: "https://github.com/o/r/pull/7".into(), repo: "o/r".into() },
                 Item::Model { name: "Haiku 5.5".into() },
@@ -549,12 +602,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("old.jsonl");
         std::fs::write(&file, "{\"uuid\":\"a\",\"sessionId\":\"old\",\"timestamp\":\"t1\"}\nnot json\n{\"uuid\":\"b\",\"sessionId\":\"old\",\"timestamp\":\"t2\"}\n{\"uuid\":\"c\",\"sessionId\":\"old\"}\n").unwrap();
-        let forked = fork(&file, Cut::Before("b"), "new").unwrap();
+        let forked = fork(&file, Cut::Before("b"), "new", None).unwrap();
         assert_eq!((forked.until.as_str(), forked.said), ("t2", false));
-        assert_eq!(std::fs::read_to_string(dir.path().join("new.jsonl")).unwrap(), "{\"sessionId\":\"new\",\"timestamp\":\"t1\",\"uuid\":\"a\"}\nnot json\n");
-        assert_eq!(fork(&file, Cut::Through("b"), "new2").unwrap().until, "");
-        assert_eq!(std::fs::read_to_string(dir.path().join("new2.jsonl")).unwrap().lines().count(), 3);
-        assert!(fork(&file, Cut::Before("zzz"), "x").is_err());
+        assert_eq!(std::fs::read_to_string(dir.path().join("new.jsonl")).unwrap(), "{\"uuid\":\"a\",\"sessionId\":\"new\",\"timestamp\":\"t1\"}\nnot json\n");
+        assert_eq!(fork(&file, Cut::Through("b"), "new2", Some("old")).unwrap().until, "");
+        let copy = std::fs::read_to_string(dir.path().join("new2.jsonl")).unwrap();
+        assert_eq!(copy.lines().count(), 4);
+        assert_eq!(read(&dir.path().join("new2.jsonl"), 0).unwrap().items, vec![Item::Fork { id: "fork:t2".into(), at: "t2".into(), source: "old".into() }]);
+        assert!(fork(&file, Cut::Before("zzz"), "x", None).is_err());
         assert!(std::fs::read_to_string(&file).unwrap().contains("\"c\""));
     }
 
@@ -610,8 +665,7 @@ mod tests {
                 Item::User { id: "c".into(), at: "".into(), text: "log line\nwhy does this fail?".into(), images: 0, pictures: vec![] },
                 Item::User { id: "d".into(), at: "".into(), text: "! ls".into(), images: 0, pictures: vec![] },
                 Item::Note { id: "e".into(), at: "".into(), text: "Interrupted.".into() },
-                Item::Note { id: "f".into(), at: "".into(), text: "The conversation was compacted.".into() },
-                Item::Result { tool: "t1".into(), at: "".into(), error: false, text: "denied".into() },
+                Item::Result { tool: "t1".into(), at: "".into(), error: false, text: "denied".into(), links: vec![] },
                 Item::User { id: "g".into(), at: "".into(), text: "use the other folder".into(), images: 0, pictures: vec![] },
             ]
         );
@@ -633,14 +687,15 @@ mod tests {
             vec![
                 Item::User { id: "u".into(), at: "t0".into(), text: "what is this?".into(), images: 2, pictures: vec![format!("data:image/png;base64,{png}")] },
                 Item::Thinking { id: "a:0".into(), at: "t1".into(), text: "Found the page. I'll read it now.\n\n".into() },
-                Item::Tool { id: "q1".into(), at: "t1".into(), name: "AskUserQuestion".into(), summary: "Which one should open the PR?".into(), detail: "".into() },
+                Item::Tool { id: "q1".into(), at: "t1".into(), name: "AskUserQuestion".into(), summary: "Which one should open the PR?".into(), detail: "".into(), args: vec![] },
                 Item::Result {
                     tool: "q1".into(),
                     at: "t2".into(),
                     error: false,
-                    text: r#"Your questions have been answered: "Which one should open the PR?"="The other session". You can now continue with these answers in mind."#.into()
+                    text: r#"Your questions have been answered: "Which one should open the PR?"="The other session". You can now continue with these answers in mind."#.into(),
+                    links: vec![],
                 },
-                Item::Tool { id: "p1".into(), at: "t3".into(), name: "ExitPlanMode".into(), summary: "# Ship the fix".into(), detail: "# Ship the fix\n\n1. Patch\n2. Test".into() },
+                Item::Tool { id: "p1".into(), at: "t3".into(), name: "ExitPlanMode".into(), summary: "# Ship the fix".into(), detail: "# Ship the fix\n\n1. Patch\n2. Test".into(), args: vec![] },
                 Item::Error { id: "e".into(), at: "t4".into(), text: "API Error: Your computer went to sleep mid-response. The response above may be incomplete.".into() },
             ]
         );
@@ -656,8 +711,43 @@ mod tests {
         assert_eq!(
             items,
             vec![
-                Item::Tool { id: "x1".into(), at: "t1".into(), name: "Artifact".into(), summary: "/tmp/payouts.html".into(), detail: "Follows an invoice to the bank.".into() },
-                Item::Tool { id: "x2".into(), at: "t2".into(), name: "Artifact".into(), summary: "quickstart".into(), detail: "".into() },
+                Item::Tool { id: "x1".into(), at: "t1".into(), name: "Artifact".into(), summary: "/tmp/payouts.html".into(), detail: "Follows an invoice to the bank.".into(), args: vec![] },
+                Item::Tool { id: "x2".into(), at: "t2".into(), name: "Artifact".into(), summary: "quickstart".into(), detail: "".into(), args: vec![] },
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_tools_keep_their_input_and_searches_their_links() {
+        let items = page(&[
+            r#"{"type":"assistant","uuid":"a","timestamp":"t","message":{"content":[{"type":"tool_use","id":"m1","name":"mcp__linear__create_issue","input":{"title":"Fix it","priority":2}},{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"/w/a.rs","old_string":"x","new_string":"y"}},{"type":"tool_use","id":"s1","name":"Skill","input":{"skill":"deploy","args":"prod"}}]}}"#,
+            r#"{"type":"user","uuid":"r","timestamp":"t2","toolUseResult":{"query":"rust","results":[{"tool_use_id":"x","content":[{"title":"Rust","url":"https://rust-lang.org"}]},"Some text"]},"message":{"content":[{"type":"tool_result","tool_use_id":"w1","content":"Web search results"}]}}"#,
+        ])
+        .items;
+        assert_eq!(
+            items,
+            vec![
+                Item::Tool { id: "m1".into(), at: "t".into(), name: "mcp__linear__create_issue".into(), summary: "Fix it".into(), detail: "".into(), args: vec![("title".into(), "Fix it".into()), ("priority".into(), "2".into())] },
+                Item::Tool { id: "e1".into(), at: "t".into(), name: "Edit".into(), summary: "/w/a.rs".into(), detail: "".into(), args: vec![] },
+                Item::Tool { id: "s1".into(), at: "t".into(), name: "Skill".into(), summary: "deploy".into(), detail: "prod".into(), args: vec![] },
+                Item::Result { tool: "w1".into(), at: "t2".into(), error: false, text: "Web search results".into(), links: vec![("Rust".into(), "https://rust-lang.org".into())] },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_compaction_reads_as_its_token_counts() {
+        let items = page(&[
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"c","timestamp":"t","content":"Conversation compacted","compactMetadata":{"trigger":"manual","preTokens":258550,"postTokens":25325}}"#,
+            r#"{"type":"user","uuid":"s","timestamp":"t","isCompactSummary":true,"message":{"content":"This session is being continued."}}"#,
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"d","timestamp":"t2","compactMetadata":{"trigger":"auto","preTokens":1000}}"#,
+        ])
+        .items;
+        assert_eq!(
+            items,
+            vec![
+                Item::Compaction { id: "c".into(), at: "t".into(), before: Some(258550), after: Some(25325) },
+                Item::Compaction { id: "d".into(), at: "t2".into(), before: Some(1000), after: None },
             ]
         );
     }

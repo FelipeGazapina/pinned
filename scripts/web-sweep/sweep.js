@@ -626,7 +626,9 @@ async function sweep(profileName) {
     check((await page.locator("#thread .turn:last-of-type .work > .steps > .tool").count()) === 1, "the lone Grep is not its own row");
     await press(group);
     const thought = await text("#thread .turn:last-of-type .group .tool.thought .label");
-    check(thought === "Planning the read", `the thinking row reads ${thought}`);
+    check(thought === "Planning the read I'll look at the notes first. Then run the tests.", `the thinking row reads ${thought}`);
+    await press(lastTurn(".group .tool.thought > summary"));
+    await waitFor("the open thought to read Thought", async () => (await text("#thread .turn:last-of-type .group .tool.thought .label")) === "Thought", 3000);
     check((await text("#thread .codeblock .lang")) === "rust", `the code block's language is ${await text("#thread .codeblock .lang")}`);
     // Shiki with T3 Code's Pierre Dark theme colors `let` as storage, which highlight.js can't tell from a keyword.
     const colors = () => page.evaluate(() => [...document.querySelectorAll("#thread .codeblock code.language-rust span")].filter((s) => ["fn", "main", "let", "42"].includes(s.textContent)).map((s) => `${s.textContent}=${s.style.color}`).join(" "));
@@ -697,7 +699,7 @@ async function sweep(profileName) {
     check(await img.evaluate((el) => el.complete && el.naturalWidth === 1), "the picture didn't load");
     await press(gui("#thread .bubble .picture"));
     await waitFor("the zoomed image", () => page.locator("#image-zoom").isVisible());
-    await tapOrClick("#image-zoom");
+    await tapOrClick("#image-zoom .media-close");
     await waitFor("the zoom to close", async () => !(await page.locator("#image-zoom").isVisible()));
   });
 
@@ -706,8 +708,8 @@ async function sweep(profileName) {
     await waitFor("the API error", async () => (await page.locator("#thread .error-row", { hasText: "API Error: 529 Overloaded" }).count()) === 1);
     check(/service is busy/.test(await text("#thread .error-row .message")), "the error's detail is missing");
     await sendPrompt("fail");
-    await waitFor("the failed build", async () => (await page.locator("#thread .error-row", { hasText: "Build the app" }).count()) === 1);
-    check(await gui("#thread .error-row:has-text('Build the app') .message").isVisible(), "the failure's output is not in sight");
+    await waitFor("the failed build", async () => (await page.locator("#thread .error-row", { hasText: "npm run build" }).count()) === 1);
+    check(await gui("#thread .error-row:has-text('npm run build') .message").isVisible(), "the failure's output is not in sight");
     await sendPrompt("stop");
     await waitFor("the stopped turn", async () => /^You stopped (after |this response)/.test(await text("#thread .turn:last-of-type .work > summary .label")));
     await sendPrompt("ask");
@@ -758,7 +760,7 @@ async function sweep(profileName) {
     await answered("Built.");
     await sendPrompt("/compact");
     await waitFor("Compacting…", async () => (await text("#thread .work.live .shimmer")) === "Compacting…", 6000);
-    await waitFor("the compacted note", async () => (await page.locator("#thread .note", { hasText: "The conversation was compacted." }).count()) > 0, 10000);
+    await waitFor("the compaction divider", async () => (await page.locator("#thread .compaction", { hasText: "Context compacted 259K" }).count()) > 0, 10000);
   });
 
   await step("app view: Stop ends the background agents before the turn, and the turn they wake", async () => {
@@ -1036,10 +1038,15 @@ async function sweep(profileName) {
     const answer = gui("#thread .turn:last-of-type .answer");
     check((await answer.locator('a[href^="https://example.com"] img.favicon').getAttribute("src")) === "https://www.google.com/s2/favicons?domain=example.com&sz=32", "the docs link has no favicon");
     check((await answer.locator('a[href^="http://localhost"] img').count()) === 0 && (await answer.locator('a[href^="http://localhost"] svg').count()) === 1, "a local link asks Google for its favicon");
+    const bubbles = await page.locator("#thread .bubble").count();
     await press(answer.locator("[data-run-code]"));
-    await answered("echo: ! echo ran-from-thread");
-    check((await text("#thread .turn:last-of-type .bubble")) === "! echo ran-from-thread", `the run reads ${await text("#thread .turn:last-of-type .bubble")}`);
-    check(await page.evaluate(() => document.body.dataset.drawer === "open"), "the terminal drawer didn't open");
+    const shellText = () => page.evaluate(() => {
+      const b = scriptShells.at(-1)?.term.buffer.active;
+      return b ? Array.from({ length: b.length }, (_, i) => b.getLine(i).translateToString(true)).join("\n") : "";
+    });
+    await waitFor("the block's output in its own terminal", async () => /^ran-from-thread$/m.test(await shellText()), 10000);
+    check(await page.evaluate(() => document.body.dataset.drawer === "open" && scriptShells.at(-1).name === "Chat code block"), "the block didn't run as T3's Chat code block script in the drawer");
+    check((await page.locator("#thread .bubble").count()) === bubbles && !/ran-from-thread/.test(await termText()), "running the block went through the conversation");
     await page.evaluate(() => toggleDrawer(false));
     check((await page.locator("#thread .codeblock .lang", { hasText: "rust" }).count()) === 0 || (await page.locator("#thread .codeblock:has(.lang:text-is('rust')) [data-run-code]").count()) === 0, "a Rust block offers to run");
     await page.evaluate(() => wantLang("cobol"));
@@ -1756,6 +1763,224 @@ async function sweep(profileName) {
     await page.mouse.move(0, 400);
     await page.evaluate(() => (threadView.scrollTop = threadView.scrollHeight));
     return `drew ${drawn[1]} of ${drawn[0]}, ${ticks} ticks`;
+  });
+
+  await step("app view: tool rows read as T3's labels, MCP calls group by integration, and each kind opens to its own body", async () => {
+    await sendPrompt("tools");
+    await answered("Used the tools.");
+    await press(lastTurn(".work > summary"));
+    const group = lastTurn(".group > summary");
+    const summary = (await group.locator(".label").textContent()).trim();
+    check(summary === "Used Linear integration, ran 1 command, changed 1 file, and performed 6 other actions", `the group reads ${summary}`);
+    check(await group.evaluate((el) => el.querySelector("svg.kind").innerHTML.includes("m15 12-8.373")), "the mixed group doesn't draw T3's hammer");
+    await press(group);
+    const labels = (await page.locator("#thread .turn:last-of-type .group .tool > summary .label").allTextContents()).map((l) => l.trim());
+    const want = ["Read notes.md", "git status --short", "notes.md", "Searched **/*.rs", "Searched TODO in src", "rust parser crates", "https://example.com/docs", "Skill: deploy", "create issue", "list issues"];
+    check(JSON.stringify(labels) === JSON.stringify(want), `the rows read ${labels.join(" | ")}`);
+    const row = (label) => page.locator("#thread .turn:last-of-type .group .tool").filter({ has: page.locator("summary .label", { hasText: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) }) }).first();
+    const body = async (label) => {
+      const r = row(label);
+      if ((await r.getAttribute("open")) === null) await press(r.locator("summary"));
+      return (await r.locator(".tool-body").innerText()).replace(/\s+/g, " ").trim();
+    };
+    const read = await body("Read notes.md");
+    check(read === path.join(HOME, "work", "beta", "notes.md"), `the Read row opens to ${read}`);
+    const mcp = await body("create issue");
+    check(mcp === 'title Fix the parser team ENG {"id":"ENG-1"}', `the MCP row opens to ${mcp}`);
+    const search = await body("rust parser crates");
+    check(search === "rust parser crates nom on crates.io", `the search row opens to ${search}`);
+    check((await row("rust parser crates").locator('a[href="https://crates.io/crates/nom"]').count()) === 1, "the search result isn't a link");
+    const skill = await body("Skill: deploy");
+    check(skill === "prod", `the Skill row opens to ${skill}`);
+    await waitFor("the turn's changes", async () => (await page.locator("#thread .turn:last-of-type .changes").count()) > 0, 10000);
+    const edit = await body("notes.md");
+    check(edit === "notes.md Open diff", `the Edit row opens to ${edit}`);
+    await press(row("notes.md").locator(".open-diff"));
+    await waitFor("the diff panel", () => page.locator("#panel-body .file").first().isVisible());
+    await tapOrClick("#toggle-panel");
+    return summary;
+  });
+
+  await step("app view: a message's images open in T3's media dialog with a close button, Previous/Next, ←/→ and a name (i/N) caption", async () => {
+    await sendPrompt("pictures");
+    await answered("Two dots.");
+    await press(gui("#thread .turn:last-of-type .bubble .picture"));
+    await waitFor("the media dialog", () => page.locator("#image-zoom").isVisible());
+    const caption = () => text("#image-zoom figcaption");
+    check((await caption()) === "Image #1 (1/2)", `the caption reads ${await caption()}`);
+    check((await page.getAttribute("#image-zoom .media-close", "aria-label")) === "Close image preview", "the dialog has no close button");
+    await press(gui('#image-zoom [aria-label="Next media"]'));
+    check((await caption()) === "Image #2 (2/2)", `Next shows ${await caption()}`);
+    if (!touch) {
+      await page.keyboard.press("ArrowRight");
+      check((await caption()) === "Image #1 (1/2)", `→ shows ${await caption()}`);
+      await page.keyboard.press("ArrowLeft");
+      check((await caption()) === "Image #2 (2/2)", `← shows ${await caption()}`);
+    }
+    await press(gui('#image-zoom [aria-label="Previous media"]'));
+    check((await caption()) === "Image #1 (1/2)", `Previous shows ${await caption()}`);
+    await press(gui("#image-zoom img"));
+    check(await page.locator("#image-zoom").isVisible(), "a click on the image closed the dialog");
+    await press(gui("#image-zoom .media-close"));
+    await waitFor("the dialog to close", async () => !(await page.locator("#image-zoom").isVisible()));
+  });
+
+  await step("app view: a compaction reads as a Context compacted divider with its counts, after the /compact that asked for it", async () => {
+    const placed = await page.evaluate(() => {
+      const turns = turnsOf([
+        { kind: "user", id: "u1", text: "hi", images: 0 },
+        { kind: "text", id: "a1", text: "hello" },
+        { kind: "compaction", id: "c1", at: "", before: 258550, after: 25325 },
+        { kind: "user", id: "u2", text: "/compact", images: 0 },
+        { kind: "note", id: "n1", text: "Compacted" },
+      ]);
+      return [turns[0].dividers.length, turns[1].dividers[0]?.id, turns[1].notes.length, new DOMParser().parseFromString(dividerHtml(turns[1].dividers[0]), "text/html").body.textContent];
+    });
+    check(JSON.stringify(placed) === JSON.stringify([0, "c1", 0, "Context compacted 259K25.3K tokens"]), `the compaction lands as ${JSON.stringify(placed)}`);
+  });
+
+  await step("app view: replies draw images, sanitized HTML and mermaid diagrams as T3 does", async () => {
+    await sendPrompt("media");
+    const answer = lastTurn(".answer .assistant");
+    await waitFor("the reply", async () => (await page.locator("#thread .assistant", { hasText: "Two images" }).count()) > 0, 10000);
+    await waitFor("both images", () => answer.evaluate((el) => [...el.querySelectorAll("img.md-image")].filter((i) => i.complete && i.naturalWidth === 48).length === 2), 8000);
+    check((await answer.locator(".md-image-missing").textContent()).trim() === "Image unavailable · gone", "the missing image has no unavailable note");
+    await press(answer.locator('img.md-image[alt="dot"]'));
+    await waitFor("the media dialog", () => page.locator("#image-zoom").isVisible());
+    check((await text("#image-zoom figcaption")) === "dot (1/2)", `the caption reads ${await text("#image-zoom figcaption")}`);
+    await press(gui("#image-zoom .media-close"));
+    const details = answer.locator("details.md-details");
+    check((await details.locator("summary").textContent()).trim() === "More" && (await details.getAttribute("open")) === null, "the <details> isn't a closed fold named More");
+    await press(details.locator("summary"));
+    check((await details.locator("strong").textContent()) === "bold", "the fold's markdown didn't render");
+    const html = await answer.evaluate((el) => [el.querySelectorAll("kbd").length, el.querySelectorAll("br").length, el.querySelectorAll("script, [onclick], span[style]:not(.ficon), .evil").length, /alert\(1\)/.test(el.textContent), el.textContent.includes("plain")]);
+    check(JSON.stringify(html) === "[2,1,0,false,true]", `the HTML renders as ${JSON.stringify(html)}`);
+    const diagram = answer.locator(".mermaid-diagram");
+    await waitFor("the diagram", async () => (await diagram.locator(".diagram svg").count()) === 1, 10000);
+    check(/Start/.test(await diagram.locator(".diagram svg").textContent()), "the diagram doesn't show its nodes");
+    await press(diagram.locator('[aria-label="Show code"]'));
+    await waitFor("the source", async () => (await answer.locator(".codeblock .lang", { hasText: "mermaid" }).count()) === 1);
+    await press(answer.locator('[aria-label="Show diagram"]'));
+    await waitFor("the diagram again", async () => (await answer.locator(".mermaid-diagram .diagram svg").count()) === 1, 10000);
+    await press(answer.locator(".mermaid-diagram .diagram"));
+    await waitFor("the expanded diagram", async () => (await text("#image-zoom figcaption")) === "Mermaid diagram");
+    await press(gui("#image-zoom .media-close"));
+  });
+
+  await step("app view: a file chip opens in the editor on ⌘-click, and its menu opens, reveals and copies its path", async () => {
+    const chip = lastTurn('.answer .file-chip[data-file-path="notes.md"]');
+    const log = () => (fs.existsSync(path.join(HOME, "open.log")) ? fs.readFileSync(path.join(HOME, "open.log"), "utf8") : "");
+    await waitFor("the machine's editors", () => page.evaluate(() => editorsOn(active.machine).some((e) => e.id === "zed")), 8000);
+    // This Mac's own editors list too, so the step picks the stack's Zed and puts the choice back after.
+    const chosen = await page.evaluate(() => [load(`gui-editor:${active.machine}`) ?? null, save(`gui-editor:${active.machine}`, "zed")][0]);
+    const before = log().split("\n").length;
+    if (!touch) {
+      await chip.click({ modifiers: [(await page.evaluate(() => IS_MAC)) ? "Meta" : "Control"] });
+      await waitFor("notes.md in Zed", async () => log().split("\n").length > before && /Zed\.app .*\/work\/beta\/notes\.md$/m.test(log()));
+      check(!(await page.locator("#panel").isVisible()), "⌘-click also opened the File tab");
+    }
+    if (touch) await chip.dispatchEvent("contextmenu");
+    else await chip.click({ button: "right" });
+    await waitFor("the chip's menu", () => page.locator("#side-menu").isVisible());
+    const items = (await page.locator("#side-menu button .label").allTextContents()).join(" | ");
+    check(items === "Open in Zed | Reveal in Finder | Copy relative path | Copy full path", `the menu reads ${items}`);
+    await press(page.locator("#side-menu button", { hasText: "Copy relative path" }));
+    const copiedPath = await clipboard();
+    check(copiedPath === null || copiedPath === "notes.md:1", `the clipboard holds ${copiedPath}`);
+    await page.evaluate((v) => save(`gui-editor:${active.machine}`, v), chosen);
+    return items;
+  });
+
+  await step("app view: a prompt's Copy prompt link copies T3's /new link for it", async () => {
+    const user = lastTurn(".user");
+    if (!touch) await user.hover();
+    const button = user.locator('[data-copy-link]');
+    check((await button.getAttribute("aria-label")) === "Copy prompt link", "the prompt has no Copy prompt link");
+    await press(button);
+    await waitFor("the copied check", async () => (await user.locator("[data-copy-link].copied").count()) === 1, 1500);
+    const link = await clipboard();
+    check(link === null || link === `${HUB}/new?prompt=media`, `the clipboard holds ${link}`);
+  });
+
+  await step("app view: selecting reply text offers Cite, which puts a quote chip with a comment in the composer and sends it as T3's citation", async () => {
+    const source = lastTurn(".answer .assistant");
+    await source.evaluate((el) => {
+      const node = [...el.querySelectorAll("p")].find((p) => p.textContent.startsWith("Two images")).firstChild;
+      const range = document.createRange();
+      range.setStart(node, 0);
+      range.setEnd(node, "Two images".length);
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
+    });
+    await waitFor("the Cite button", () => page.locator("#cite-selection").isVisible(), 3000);
+    check((await text("#cite-selection")) === "Cite" && (await page.getAttribute("#cite-selection", "aria-label")) === "Cite selection in composer", `the button reads ${await text("#cite-selection")}`);
+    await press(page.locator("#cite-selection"));
+    await waitFor("the comment editor", () => page.locator('#cite-popover textarea[placeholder="Add an optional comment..."]').isVisible());
+    await page.fill("#cite-popover textarea", "why two?");
+    await page.press("#cite-popover textarea", "Enter");
+    const row = page.locator("#attachments .file", { hasText: "why two?" });
+    await waitFor("the quote chip", () => row.isVisible());
+    check((await row.locator("[data-attachment-action]").getAttribute("aria-label")) === "Edit citation comment", "the chip can't edit its comment");
+    await sendPrompt("explain");
+    const bubble = lastTurn(".user .bubble");
+    await waitFor("the sent quote", async () => (await bubble.locator(".cite-chip").count()) === 1, 10000);
+    check((await bubble.textContent()).replace(/\s+/g, " ").trim() === "explain why two?", `the prompt reads ${await bubble.textContent()}`);
+    const sent = await page.evaluate(() => threadOf(active).items.filter((i) => i.kind === "user").at(-1).text);
+    check(/^explain \[assistant-quote-1\]\n\n<assistant_citations>\n/.test(sent) && /"text": "Two images"/.test(sent) && /"comment": "why two\?"/.test(sent), `claude got ${sent.slice(0, 120)}`);
+    await press(bubble.locator(".cite-chip"));
+    await waitFor("the quote", () => page.locator("#cite-popover blockquote").isVisible());
+    check((await text("#cite-popover blockquote")) === "Two images", `the quote reads ${await text("#cite-popover blockquote")}`);
+    await press(page.locator("#cite-popover [data-cite-source-go]"));
+    await waitFor("the source selected", () => page.evaluate(() => getSelection().toString() === "Two images"), 3000);
+    check(!(await page.locator("#cite-popover").isVisible()), "the quote stays open after Go to source");
+    await page.evaluate(() => getSelection().removeAllRanges());
+  });
+
+  await step("app view: Edit from here gives back a prompt's pictures as attachments", async () => {
+    await sendPrompt("pictures");
+    await answered("Two dots.");
+    const user = lastTurn(".user");
+    if (!touch) await user.hover();
+    await press(user.locator("[data-rewind]"));
+    await waitFor("the dialog", () => page.locator(".tl-dialog").isVisible());
+    check((await text(".tl-dialog .about")).startsWith("Rewind chat to before this message. Your prompt and attachments return to the composer."), `the dialog says ${await text(".tl-dialog .about")}`);
+    await press(page.locator('.tl-dialog button[value="chat"]'));
+    await waitFor("the prompt back", async () => (await page.inputValue("#prompt")) === "compare these", 10000);
+    await waitFor("the pictures back", async () => (await page.locator("#attachments .tile img").count()) === 2, 10000);
+    await page.evaluate(() => clearComposer(active));
+  });
+
+  await step("app view: a fork starts with a Forked from conversation divider that opens its source", async () => {
+    const tabs = await tabCount();
+    const source = await page.evaluate(() => active.view.session);
+    const answer = lastTurn(".answer");
+    if (!touch) await answer.hover();
+    await press(answer.locator("[data-fork]"));
+    await waitFor("the forked thread", async () => (await tabCount()) === tabs + 1 && (await page.evaluate(() => threadOf(active).items.length)) > 0, 10000);
+    const divider = gui("#thread .system-divider button.pill");
+    await waitFor("the fork divider", () => divider.isVisible(), 10000);
+    check((await divider.textContent()).trim() === "Forked from conversation" && (await divider.getAttribute("aria-label")) === "Open source conversation", `the divider reads ${await divider.textContent()}`);
+    const fork = await page.evaluate(() => active.key);
+    await press(divider);
+    await waitFor("the source thread", async () => (await page.evaluate(() => active.view.session)) === source);
+    await page.evaluate((key) => closeTab(tabs.find((t) => t.key === key)), fork);
+    await waitFor("the fork to close", async () => (await tabCount()) === tabs);
+    await toThread("beta");
+  });
+
+  await step("app view: a subagent's thread opens under a Subagent of divider that leads back to its parent", async () => {
+    await sendPrompt("agent");
+    await answered("The agent reported back.");
+    await press(lastTurn(".work > summary"));
+    await press(gui('#thread .turn:last-of-type [data-subagent]'));
+    await waitFor("the subagent's answer", async () => (await page.locator("#thread .assistant", { hasText: "The subagent found it in src/parse.rs." }).count()) === 1);
+    const divider = gui("#thread .system-divider button.pill");
+    const label = `${await divider.locator(".what").textContent()} ${(await divider.locator(".detail").textContent()).replace(/\s+/g, " ")}`;
+    const parent = await page.evaluate(() => threadTitle(active));
+    check(label === `Subagent of · ${parent}` && (await divider.getAttribute("aria-label")) === "Open parent thread", `the divider reads ${label}`);
+    await press(divider);
+    await waitFor("the parent thread", async () => (await page.locator("#thread .assistant", { hasText: "The agent reported back." }).count()) > 0 && !(await page.evaluate(() => !!subagentShown())));
+    return label;
   });
 
   await step("app view: resting on a PR link previews the pull request", async () => {
@@ -3559,7 +3784,7 @@ async function sweep(profileName) {
     await tapOrClick("#compact-pill");
     await sendPrompt("after the break");
     await waitTerm(/\/compact[\s\S]*echo: after the break/);
-    await waitFor("the compaction note", async () => (await page.locator("#thread", { hasText: "The conversation was compacted." }).count()) > 0, 10000);
+    await waitFor("the compaction divider", async () => (await page.locator("#thread .compaction").count()) > 0, 10000);
     await waitFor("the pill to go", async () => !(await page.locator("#compact-pill").isVisible()));
     return card;
   });

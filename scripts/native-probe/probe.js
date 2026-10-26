@@ -233,6 +233,18 @@
     return [hit, { hit }];
   });
 
+  await step("a file chip's menu reveals a file of this machine in Finder", async () => {
+    threadView.insertAdjacentHTML("beforeend", fileChip("README.md"));
+    const chip = threadView.querySelector('.file-chip[data-file-path="README.md"]');
+    chip.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    await sleep(200);
+    const items = [...document.querySelectorAll("#side-menu button .label")].map((l) => l.textContent);
+    closeSideMenu();
+    const revealed = await openFileChipIn(chip, "reveal").then(() => true, (e) => String(e));
+    chip.remove();
+    return [items.includes("Reveal in Finder") && revealed === true, { items, revealed }];
+  });
+
   await step("a slow call leaves the main thread free", async () => {
     const tab = active;
     const t0 = performance.now();

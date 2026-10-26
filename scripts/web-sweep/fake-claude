@@ -136,9 +136,15 @@ function spawnAgents() {
 }
 
 const DOT_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+// 48 by 32 pixels, big enough to click.
+const TILE_PNG = "iVBORw0KGgoAAAANSUhEUgAAADAAAAAgCAIAAADbtmxLAAAAMUlEQVR42u3OQQ0AAAgEoItjRCMayxbOBxsBSPW8EiEhISEhISEhISEhISEhISGhSwvNGXB5IWPlbwAAAABJRU5ErkJggg==";
 // Each takes a while, as claude would, and ends the turn itself.
 const SLOW = {
-  "/compact": () => record({ type: "user", isCompactSummary: true, message: { role: "user", content: "This session is being continued from a previous conversation." } }),
+  "/compact": () => {
+    record({ type: "system", subtype: "compact_boundary", content: "Conversation compacted", isMeta: false, compactMetadata: { trigger: "manual", preTokens: 258550, postTokens: 25325 } });
+    record({ type: "user", isCompactSummary: true, message: { role: "user", content: "This session is being continued from a previous conversation." } });
+    said("<local-command-stdout>Compacted </local-command-stdout>");
+  },
   think: () => wrote([{ type: "text", text: "Done thinking." }]),
   build: () => {
     said([{ type: "tool_result", tool_use_id: building, content: "built in 4s" }]);
@@ -210,7 +216,8 @@ function submit() {
     return drawSettings();
   }
   hook("UserPromptSubmit", { prompt: line });
-  said(line);
+  // "pictures" stands for a prompt with images, which claude writes as one message below.
+  if (line !== "pictures") said(line);
   if (line === "/modes") {
     mode = "manual";
     line = "";
@@ -293,6 +300,22 @@ function submit() {
     wrote([{ type: "text", text: "Looked around; one check failed." }]);
     used("Grep", { pattern: "TODO" }, "No matches found");
     wrote([{ type: "text", text: "Here is the fix:\n\n```rust\nfn main() {\n    let answer = 42;\n}\n```\n\nSee [the pull request](https://github.com/example/beta/pull/7) and [the docs](https://example.com/docs)." }]);
+  } else if (line === "tools") {
+    const cwd = process.cwd();
+    used("Read", { file_path: path.join(cwd, "notes.md") }, "1\tnotes");
+    used("Bash", { command: "git status --short", description: "Show the working tree" }, " M notes.md");
+    fs.appendFileSync("notes.md", "tools\n");
+    used("Edit", { file_path: path.join(cwd, "notes.md"), old_string: "a", new_string: "b" }, "The file has been updated.");
+    used("Glob", { pattern: "**/*.rs" }, "src/main.rs");
+    used("Grep", { pattern: "TODO", path: path.join(cwd, "src"), glob: "*.rs" }, "src/main.rs:3");
+    const search = `tool-${lines}`;
+    wrote([{ type: "tool_use", id: search, name: "WebSearch", input: { query: "rust parser crates" } }]);
+    record({ type: "user", toolUseResult: { query: "rust parser crates", results: [{ tool_use_id: "srv", content: [{ title: "nom on crates.io", url: "https://crates.io/crates/nom" }] }] }, message: { role: "user", content: [{ type: "tool_result", tool_use_id: search, content: "Web search results for query: \"rust parser crates\"" }] } });
+    used("WebFetch", { url: "https://example.com/docs", prompt: "Summarize" }, "The docs say hello.");
+    used("Skill", { skill: "deploy", args: "prod" }, "Launching skill: deploy");
+    used("mcp__claude_ai_Linear__create_issue", { title: "Fix the parser", team: "ENG" }, '{"id":"ENG-1"}');
+    used("mcp__claude_ai_Linear__list_issues", { query: "parser" }, "[]");
+    wrote([{ type: "text", text: "Used the tools." }]);
   } else if (line === "plan") {
     const steps = Array.from({ length: 24 }, (_, i) => `${i + 1}. Step ${i + 1} of the plan`).join("\n");
     used("ExitPlanMode", { plan: `# Ship the fix\n\n## Summary\n\nPatch the parser, then test it.\n\n${steps}` }, "User has approved your plan. You can now start coding.");
@@ -318,6 +341,28 @@ function submit() {
   } else if (line === "picture") {
     said([{ type: "text", text: "What is in this picture?" }, { type: "image", source: { type: "base64", media_type: "image/png", data: DOT_PNG } }]);
     wrote([{ type: "text", text: "A single dot." }]);
+  } else if (line === "media") {
+    fs.writeFileSync("shot.png", Buffer.from(TILE_PNG, "base64"));
+    wrote([{ type: "text", text: [
+      "Two images: ![dot](data:image/png;base64," + TILE_PNG + ") and ![shot](shot.png), and ![gone](missing.png).",
+      "",
+      "<details><summary>More</summary>",
+      "",
+      "Hidden **bold** text",
+      "",
+      "</details>",
+      "",
+      'Press <kbd>Ctrl</kbd>+<kbd>C</kbd><br>then <script>alert(1)</script><span onclick="steal()" style="color:red" class="evil">plain</span> and `notes.md:1`.',
+      "",
+      "```mermaid",
+      "flowchart LR",
+      "  A[Start] --> B[Done]",
+      "```",
+    ].join("\n") }]);
+  } else if (line === "pictures") {
+    const image = { type: "image", source: { type: "base64", media_type: "image/png", data: DOT_PNG } };
+    said([{ type: "text", text: "[Image #1] [Image #2] compare these" }, image, image]);
+    wrote([{ type: "text", text: "Two dots." }]);
   } else if (line === "long-prompt") {
     const paragraph = "Please read @src/app/main.rs and explain every line of it in detail, with examples.";
     said(Array.from({ length: 12 }, (_, i) => `${i + 1}. ${paragraph}`).join("\n"));
