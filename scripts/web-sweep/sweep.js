@@ -5227,7 +5227,7 @@ async function sweep(profileName) {
 
   await step("Connectors: disconnect all", async () => {
     await settingsPage("integrations");
-    for (const name of ["disconnect-linear", "disconnect-slack", "disconnect-github"]) {
+    for (const name of ["disconnect-linear", "disconnect-slack", "disconnect-vercel", "disconnect-github"]) {
       await action(name);
       await page.waitForSelector(`#settings-page [data-action="${name}"]`, { state: "detached" });
     }
