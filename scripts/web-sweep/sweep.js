@@ -4019,12 +4019,13 @@ async function sweep(profileName) {
     await page.fill("#project-menu input", "nothing like it");
     check((await text("#project-menu .empty")) === "No matching projects.", `empty: ${await text("#project-menu .empty")}`);
     await page.fill("#project-menu input", "bet");
-    if (touch) await press(gui('#project-menu .item[data-project="beta"]'));
+    const betaItem = page.locator("#project-menu .item", { hasText: /^beta$/ });
+    if (touch) await press(betaItem);
     else await page.press("#project-menu input", "Enter");
     await waitFor("only beta's rows", async () => (await sideOrder()).every((p) => p === "beta") && (await text("#project-filter .label")) === "beta");
-    check((await page.evaluate(() => load("gui-project"))) === "beta", "the filter wasn't saved");
+    check(await page.evaluate(() => load("gui-project") === projectKeyOf(tabs.find((t) => t.view.cwd.endsWith("/beta")))), "the filter wasn't saved");
     await tapOrClick("#project-filter");
-    await press(gui('#project-menu [data-gear="beta"]'));
+    await press(betaItem.locator("[data-gear]"));
     await waitFor("beta's project page", async () => (await text("#settings-page h2")) === "beta", 10000);
     await closeSettings();
     await showSidebar();

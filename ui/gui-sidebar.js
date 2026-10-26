@@ -544,6 +544,10 @@ document.body.append(hoverCard);
 let card = null;
 let cardTimer;
 let cardClosedAt = 0;
+/** Where the pointer clicked a card's link: no card opens until it moves from there, so the row
+ * the closed card uncovers doesn't pop its own card under a still pointer. */
+let cardHeldAt = null;
+addEventListener("pointermove", (e) => cardHeldAt && (e.clientX !== cardHeldAt.x || e.clientY !== cardHeldAt.y) && (cardHeldAt = null), true);
 function cardTarget(el) {
   const pr = el.closest("#thread-list .pr[data-pr], #thread-list .pr[data-pr-list], #composer-footer .pr[data-pr]");
   const row = el.closest("#thread-list .thread-row:not(.result)");
@@ -573,7 +577,7 @@ function showCard(target) {
 }
 document.addEventListener("pointerover", (e) => {
   if (!guiOn() || settingsOpen()) return hideCard();
-  if (e.pointerType !== "mouse") return;
+  if (e.pointerType !== "mouse" || cardHeldAt) return;
   if (e.target.closest("#hover-card")) return clearTimeout(cardTimer);
   const target = sideMenu.hidden && !document.body.classList.contains("dragging-row") ? cardTarget(e.target) : null;
   if (target?.key === card?.key) {
@@ -600,6 +604,7 @@ hoverCard.addEventListener("click", (e) => {
   e.preventDefault();
   const tab = card?.tab;
   hideCard();
+  cardHeldAt = { x: e.clientX, y: e.clientY };
   if (e.metaKey || e.ctrlKey) return openOutside(link.dataset.cardPr);
   if (!tab) return;
   if (tab !== active) activate(tab);
