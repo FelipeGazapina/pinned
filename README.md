@@ -88,7 +88,7 @@ under the thread at any time; drag its top edge to resize it.
 The composer keeps a draft per thread, and the sidebar marks threads with one. ⌘S sets a draft
 aside in the **Stash** above the prompt. ↑ and ↓ in an empty prompt bring back the thread's
 earlier prompts, and `/` lists Claude's commands with your own and your project's commands and
-skills. Attached files show above the prompt and go out with it. Next to the model menu (⌘⇧M),
+skills, your plugins' and those claude.ai syncs to your account. Attached files show above the prompt and go out with it. Next to the model menu (⌘⇧M),
 the mode menu (⌘⇧A, or ⇧Tab in the prompt) switches Claude between Supervised, Auto-accept
 edits, Plan and Auto. The branch under the prompt (⌘⇧G) switches or creates branches once Claude
 is between turns, and the Git button in the header asks Claude to commit, push or open a pull
