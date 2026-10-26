@@ -171,6 +171,8 @@ body[data-jump-hints] .thread-row[data-jump]::after { display: block; }
 #settings-page .side-setting label:not(.switch) { display: block; font-weight: 500; }
 #settings-page .side-setting .meta { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
 #settings-page .side-setting input[type="number"] { width: 96px; flex: none; }
+#settings-page .side-setting select { width: 176px; flex: none; }
+@media (max-width: 639px) { #settings-page .side-setting select { width: 100%; flex: 1; } }
 
 #project-filter { text-align: left; }
 #project-filter .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -186,6 +188,7 @@ body[data-jump-hints] .thread-row[data-jump]::after { display: block; }
 #project-menu .item :is(.i, .monogram, .favicon) { width: 16px; height: 16px; flex: none; }
 #project-menu .item > .i { color: var(--g-muted); }
 #project-menu .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#project-menu .where { flex: none; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-muted); }
 #project-menu .gear { display: grid; place-items: center; width: 24px; height: 24px; margin-left: auto; border-radius: 6px; color: var(--g-muted); }
 #project-menu .gear:hover { background: var(--g-input); color: var(--g-fg); }
 #project-menu .gear .i { width: 14px; height: 14px; }

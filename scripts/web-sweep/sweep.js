@@ -4276,6 +4276,106 @@ async function sweep(profileName) {
     await openRow(alpha);
   });
 
+  await step("app view: settings: project grouping and order, snooze limited threads, and the confirmations", async () => {
+    const alpha = await keyFor("alpha");
+    const beta = await keyFor("beta");
+    await sideSetting("grouping");
+    const on = (id) => page.locator(`#side-${id}`).isChecked();
+    check((await on("grouping")) && !(await on("snoozeLimited")) && !(await on("confirmUnpin")) && !(await on("confirmArchive")) && (await on("confirmDelete")), "T3's defaults: grouping on, snooze off, ask only before delete");
+    check((await page.inputValue("#side-projectOrder")) === "updated_at", `project order: ${await page.inputValue("#side-projectOrder")}`);
+    await closeSettings();
+
+    await openRow(beta);
+    await sendPrompt("limit");
+    const status = `${rowSel(beta)} .stamp.status`;
+    await showSidebar();
+    await waitFor("beta Limited", async () => (await page.locator(status).count()) && /Limited/.test(await text(status)), 10000);
+    check((await tone(status)) === "rgb(254, 154, 0)", `Limited reads in ${await tone(status)}`);
+    await sideSetting("snoozeLimited", true);
+    await closeSettings();
+    await showSidebar();
+    await waitFor("beta snoozed until the limit lifts", async () => (await text('#thread-list .settled-head[data-shelf="snoozed"]')) === "Snoozed (1)", 5000);
+    await rowMenu(rowSel(beta));
+    await menuPick("Wake thread");
+    await waitFor("beta awake", async () => !(await page.locator('#thread-list .settled-head[data-shelf="snoozed"]').count()));
+    check(!(await page.locator('#thread-list .settled-head[data-shelf="snoozed"]').count()), "the limit snoozed beta again");
+    await sideSetting("snoozeLimited", false);
+    await closeSettings();
+    await openRow(beta);
+    await sendPrompt("past the limit");
+    await answered("echo: past the limit");
+
+    check((await filterLabels()).join() === "All projects,beta,alpha", `by last message: ${(await filterLabels()).join()}`);
+    await sideSetting("grouping");
+    await page.selectOption("#side-projectOrder", "manual");
+    await closeSettings();
+    check((await filterLabels()).join() === "All projects,alpha,beta", `manual: ${(await filterLabels()).join()}`);
+    await sideSetting("grouping");
+    await page.selectOption("#side-projectOrder", "updated_at");
+    await closeSettings();
+
+    const two = path.join(HOME, "work/alpha-two");
+    if (!fs.existsSync(two)) {
+      require("child_process").execFileSync("git", ["init", "-q", two]);
+      require("child_process").execFileSync("git", ["-C", two, "remote", "add", "origin", "https://github.com/example/alpha.git"]);
+    }
+    const copy = await openThreadIn("work/alpha-two");
+    await waitFor("alpha's two checkouts as one project", async () => [...(await filterLabels())].sort().join() === "All projects,alpha,beta", 10000);
+    await sideSetting("grouping", false);
+    await closeSettings();
+    const apart = await filterLabels();
+    check([...apart].sort().join() === "All projects,alpha,alpha-two,beta", `kept apart: ${apart.join()}`);
+    await sideSetting("grouping", true);
+    await closeSettings();
+    await press(page.locator("#project-filter"));
+    await press(page.locator("#project-menu .item", { hasText: /^alpha$/ }));
+    await waitFor("both checkouts under alpha", async () => (await rowsNow()) === 2 && (await page.locator(rowSel(copy)).count()) === 1 && (await page.locator(rowSel(alpha)).count()) === 1);
+    await press(page.locator("#project-filter"));
+    await press(page.locator("#project-menu .item", { hasText: "All projects" }));
+
+    await sideSetting("confirmArchive", true);
+    await closeSettings();
+    await rowMenu(rowSel(copy));
+    await menuPick("Archive thread");
+    await waitFor("the archive question", () => page.locator("#side-dialog").isVisible());
+    check(/^Archive thread ".+"\?$/.test(await text("#side-dialog h3")), `asks: ${await text("#side-dialog h3")}`);
+    await press(gui("#side-dialog .primary"));
+    await waitFor("the copy archived", async () => !(await page.locator(rowSel(copy)).count()), 10000);
+    await sideSetting("confirmArchive", false);
+
+    const loose = await openThreadIn("work");
+    await showSidebar();
+    await waitFor("its workspace", () => page.evaluate((k) => !!threadOf(tabByKey(k)).workspace, loose));
+    await page.evaluate(() => renderSidebar());
+    check((await text(`${rowSel(loose)} .l3 .branch`)) === "" && !(await page.locator(`${rowSel(loose)} .l3 .branch .i`).count()), `a thread outside git shows ${await text(`${rowSel(loose)} .l3`)}`);
+    await sideSetting("confirmDelete", false);
+    await closeSettings();
+    await rowMenu(rowSel(loose));
+    await menuPick("Delete");
+    await waitFor("the thread deleted without asking", async () => !(await page.locator(rowSel(loose)).count()), 10000);
+    check(!(await page.locator("#side-dialog").isVisible()), "Delete asked with its confirmation off");
+    await sideSetting("confirmDelete", true);
+
+    await sideSetting("confirmUnpin", true);
+    await closeSettings();
+    await rowMenu(rowSel(alpha));
+    await menuPick("Pin thread");
+    const pin = `${rowSel(alpha)} .pin`;
+    await waitFor("alpha pinned", () => page.locator(pin).count());
+    await press(page.locator(pin));
+    await waitFor("the unpin question", () => page.locator("#side-dialog").isVisible());
+    check(/^Unpin thread ".+"\?$/.test(await text("#side-dialog h3")), `asks: ${await text("#side-dialog h3")}`);
+    await press(gui("#side-dialog [data-cancel]"));
+    await sleep(300);
+    check((await page.locator(pin).count()) === 1, "Cancel unpinned alpha");
+    await press(page.locator(pin));
+    await press(gui("#side-dialog .primary"));
+    await waitFor("alpha unpinned", async () => !(await page.locator(pin).count()));
+    await sideSetting("confirmUnpin", false);
+    await closeSettings();
+    await openRow(alpha);
+  });
+
   await step("app view: the header as T3's: the project on a phone, the chevron on the title only, icon-only split buttons, disabled Git actions explained, a folding parent crumb", async () => {
     const alpha = await keyFor("alpha");
     await openRow(alpha);

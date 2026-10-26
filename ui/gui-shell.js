@@ -189,7 +189,7 @@ function paletteProjects() {
     const path = projectOfTab(tab);
     if (!seen.has(`${tab.machine}:${path}`)) seen.set(`${tab.machine}:${path}`, { machine: tab.machine, path, name: path.split("/").filter(Boolean).pop() || "/" });
   }
-  return [...seen.values()];
+  return sortedProjects([...seen.values()], (p) => tabs.filter((t) => t.machine === p.machine && projectOfTab(t) === p.path));
 }
 const projectSub = (p) => [p.machine === LOCAL ? "" : machineName(p.machine), tilde(p.path)].filter(Boolean).join(" · ");
 

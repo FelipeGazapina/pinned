@@ -76,11 +76,16 @@ const lastPrompt = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kin
 const latestUserAt = (tab) => unixOf(lastPrompt(tab)?.at) || tab.view.updated || 0;
 const isPinned = (tab) => sideMarks.pins.includes(threadKey(tab));
 const canSnooze = (tab) => !["asking", "input"].includes(phaseOf(tab));
-const raisedHand = (tab) => !canSnooze(tab) || (phaseOf(tab) === "failed" && (tab.view.updated ?? 0) > (sideMarks.snoozed[threadKey(tab)]?.at ?? 0));
+const raisedHand = (tab) => {
+  const snoozed = sideMarks.snoozed[threadKey(tab)];
+  return !canSnooze(tab) || (phaseOf(tab) === "failed" && snoozed?.limit !== tab.view.resume_at && (tab.view.updated ?? 0) > (snoozed?.at ?? 0));
+};
 const snoozedNow = (tab) => !!sideMarks.snoozed[threadKey(tab)] && sideMarks.snoozed[threadKey(tab)].until > nowS() && !raisedHand(tab);
 const wokeNow = (tab) => !!sideMarks.snoozed[threadKey(tab)] && !snoozedNow(tab);
-/** The sidebar's settings, as T3 Code's: the Working shelf, and when threads settle on their own. */
-const sideSettings = { working: false, onMerge: true, days: 3, keepPrs: false };
+/** The sidebar's settings, as T3 Code's: how projects group and sort, limited threads, the Working
+ * shelf, when threads settle on their own, and which thread actions ask first. */
+const sideSettings = { grouping: true, projectOrder: "updated_at", snoozeLimited: false, working: false, onMerge: true, days: 3, keepPrs: false, confirmUnpin: false, confirmArchive: false, confirmDelete: true };
+const PROJECT_ORDERS = [["updated_at", "Last user message"], ["created_at", "Created at"], ["manual", "Manual"]];
 try {
   Object.assign(sideSettings, JSON.parse(load("gui-sidebar-settings")));
 } catch {}
@@ -106,11 +111,18 @@ function sidebarSettingsHtml() {
   const row = (key, title, about, control) => `<div class="side-setting" data-setting="${key}"><div><label for="side-${key}">${title}</label><p class="meta">${about}</p></div>${control}</div>`;
   const toggle = (key, on, title, about) => row(key, title, about, `<label class="switch"><input type="checkbox" id="side-${key}" aria-label="${title}"${on ? " checked" : ""}><span></span></label>`);
   return `<section id="side-settings"><h2 class="looks-title">Organization</h2>
+    ${toggle("grouping", sideSettings.grouping, "Project grouping", "Combine matching repositories across environments.")}
+    ${row("projectOrder", "Project order", "Order of projects in the sidebar project picker and command palette.", `<select id="side-projectOrder" aria-label="Project order">${PROJECT_ORDERS.map(([v, l]) => `<option value="${v}"${v === sideSettings.projectOrder ? " selected" : ""}>${l}</option>`).join("")}</select>`)}
+    ${toggle("snoozeLimited", sideSettings.snoozeLimited, "Snooze limited threads", "Snooze usage-limit stops until the reported reset time, when the session continues.")}
     ${toggle("working", sideSettings.working, "Working section (beta)", "Fold working and monitoring threads into a Working section. They return to the top of the inbox when they need you.")}
     ${toggle("onMerge", sideSettings.onMerge, "Auto-settle merged threads", "Settle a thread when its pull request merges. Closed pull requests still settle automatically.")}
     ${toggle("inactive", !!sideSettings.days, "Auto-settle inactive threads", "Sidebar threads with no activity for this long settle automatically.")}
     ${sideSettings.days ? row("days", "Days of inactivity before auto-settle", "Any new activity un-settles a thread automatically.", `<input type="number" id="side-days" min="1" max="90" value="${sideSettings.days}" aria-label="Days of inactivity before auto-settle">`) : ""}
-    ${sideSettings.days ? toggle("keepPrs", sideSettings.keepPrs, "Keep threads with a PR", "Inactivity does not settle threads with a pull request. Merge and close still do.") : ""}</section>`;
+    ${sideSettings.days ? toggle("keepPrs", sideSettings.keepPrs, "Keep threads with a PR", "Inactivity does not settle threads with a pull request. Merge and close still do.") : ""}
+    <h2 class="looks-title">Confirmations</h2>
+    ${toggle("confirmUnpin", sideSettings.confirmUnpin, "Unpin confirmation", "Ask before unpinning a thread from the pinned section.")}
+    ${toggle("confirmArchive", sideSettings.confirmArchive, "Archive confirmation", "Ask before archiving a thread.")}
+    ${toggle("confirmDelete", sideSettings.confirmDelete, "Delete confirmation", "Ask before deleting a thread.")}</section>`;
 }
 /** T3 Code's Archive settings page: archived threads by project, newest first, each brought back
  * with Unarchive, or from its context menu, which also deletes. */
@@ -159,8 +171,8 @@ function bindSidebarSettings() {
     bindSidebarSettings();
   };
   const on = (key) => root.querySelector(`#side-${key}`);
-  on("working").onchange = (e) => change(() => (sideSettings.working = e.target.checked));
-  on("onMerge").onchange = (e) => change(() => (sideSettings.onMerge = e.target.checked));
+  for (const key of ["grouping", "snoozeLimited", "working", "onMerge", "confirmUnpin", "confirmArchive", "confirmDelete"]) on(key).onchange = (e) => change(() => (sideSettings[key] = e.target.checked));
+  on("projectOrder").onchange = (e) => change(() => (sideSettings.projectOrder = e.target.value));
   on("inactive").onchange = (e) => {
     change(() => (sideSettings.days = e.target.checked ? 3 : null));
     rebuild();
@@ -245,16 +257,37 @@ function projectIcon(name, tab) {
   return `<svg class="monogram" viewBox="0 0 16 16" style="color:${MONOGRAM_COLORS[hash]}" aria-hidden="true"><text x="8" y="10.8" text-anchor="middle" fill="currentColor" font-size="8.25" font-weight="700" textLength="${[...text].length === 1 ? 6 : 12}" lengthAdjust="spacingAndGlyphs">${esc(text)}</text></svg>`;
 }
 
+/** Limits whose stop was snoozed already, as `threadKey:resume_at`, so a woken thread stays awake. */
+const limitsSnoozed = new Set();
+try {
+  for (const id of JSON.parse(load("gui-limits-snoozed")) ?? []) limitsSnoozed.add(id);
+} catch {}
+/** T3 Code's Snooze limited threads: a usage-limit stop snoozes until the limit lifts, once. */
+function snoozeLimitStops() {
+  if (!sideSettings.snoozeLimited) return;
+  for (const tab of tabs) {
+    const at = tab.view.resume_at;
+    const id = `${threadKey(tab)}:${at}`;
+    if (phaseOf(tab) !== "failed" || !at || at <= nowS() || limitsSnoozed.has(id) || settled(tab)) continue;
+    limitsSnoozed.add(id);
+    sideMarks.snoozed[threadKey(tab)] = { until: at, at: nowS(), limit: at };
+    saveMarks();
+    save("gui-limits-snoozed", JSON.stringify([...limitsSnoozed].slice(-200)));
+  }
+}
+
 function renderSidebar() {
   if (document.activeElement?.matches("#thread-list input.rename") || rowDrag?.started) return;
+  snoozeLimitStops();
   for (const tab of tabs) if (!firstSeen.has(tab.key)) firstSeen.set(tab.key, nowS());
   for (const key of selected) if (!tabByKey(key)) selected.delete(key);
   noteReturns();
-  if (ui.project && !projectNames().includes(ui.project)) ui.project = "";
-  const trigger = `${ui.project ? projectIcon(ui.project, tabOfProject(ui.project)) : icon("folder")}<span class="label">${esc(ui.project || "All projects")}</span>${icon("chevron-down")}`;
+  const scope = projectGroups().find((g) => g.key === ui.project);
+  if (!scope) ui.project = "";
+  const trigger = `${scope ? projectIcon(scope.name, scope.tab) : icon("folder")}<span class="label">${esc(scope?.name ?? "All projects")}</span>${icon("chevron-down")}`;
   if (projectFilter.innerHTML !== trigger) projectFilter.innerHTML = trigger;
-  projectFilter.setAttribute("aria-label", ui.project ? `Filter threads by project: ${ui.project}` : "Filter threads by project");
-  const inScope = tabs.filter((t) => !ui.project || projectName(t) === ui.project);
+  projectFilter.setAttribute("aria-label", scope ? `Filter threads by project: ${scope.name}` : "Filter threads by project");
+  const inScope = tabs.filter((t) => !ui.project || projectKeyOf(t) === ui.project);
   const needle = ui.search.trim().toLowerCase();
   document.getElementById("search-clear").hidden = !ui.search;
   const rows = needle ? searchRows(inScope, needle) : shelfRows(inScope);
@@ -720,8 +753,9 @@ function unsettle(tab) {
     sideMarks.order = sideMarks.order.filter((k) => k !== threadKey(tab));
   });
 }
-function pin(tab) {
+async function pin(tab, ask = true) {
   if (isPinned(tab)) {
+    if (ask && sideSettings.confirmUnpin && !(await confirmAction(`Unpin thread "${esc(threadTitle(tab))}"?`, "This will move the thread out of your pinned section.", "Unpin"))) return;
     noteUndo("Unpinned", changeMarks(threadKey(tab), () => (sideMarks.pins = sideMarks.pins.filter((k) => k !== threadKey(tab)))));
     return;
   }
@@ -792,6 +826,11 @@ function askDialog(html, submit, bind = () => {}) {
   });
 }
 
+/** The confirmations T3 Code's settings turn on: a title, a line under it, and the action's button. */
+const confirmAction = (title, about, verb, danger = false) =>
+  askDialog(`<h3>${title}</h3><p class="about">${about}</p>
+    <div class="actions"><button type="button" class="outline" data-cancel>Cancel</button><button class="${danger ? "destructive" : "primary"}">${verb}</button></div>`, () => true);
+
 async function customSnooze(list) {
   const soon = new Date(Date.now() + 3600e3);
   const pad = (n) => String(n).padStart(2, "0");
@@ -842,7 +881,7 @@ function rowMenuItems(tab) {
     { label: "Rename thread", icon: "pencil", sep: true, run: () => startRename(tab) },
     { label: titling.has(tab.key) ? "Regenerating…" : "Regenerate title", icon: "refresh-cw", disabled: titling.has(tab.key) || !lastPrompt(tab), run: () => regenerateTitles([tab]) },
     { label: "Mark unread", icon: "mail-open", run: () => markUnread(tab) },
-    { label: ui.project === project ? "Show all projects" : `Filter by ${project}`, icon: "folder-tree", run: () => setProjectFilter(ui.project === project ? "" : project) },
+    { label: ui.project === projectKeyOf(tab) ? "Show all projects" : `Filter by ${project}`, icon: "folder-tree", run: () => setProjectFilter(ui.project === projectKeyOf(tab) ? "" : projectKeyOf(tab)) },
     { label: "Auto-settle behavior", icon: "timer", children: () => [
       { label: "Enabled", checked: !sideMarks.noAutoSettle[threadKey(tab)], run: () => changeMarks(threadKey(tab), () => delete sideMarks.noAutoSettle[threadKey(tab)]) },
       { label: "Disabled", checked: !!sideMarks.noAutoSettle[threadKey(tab)], run: () => changeMarks(threadKey(tab), () => (sideMarks.noAutoSettle[threadKey(tab)] = true)) },
@@ -864,7 +903,7 @@ function bulkMenuItems(list) {
   const settling = list.filter((t) => !settled(t));
   const titled = list.filter((t) => !titling.has(t.key) && lastPrompt(t));
   return [
-    ...(pinned.length ? [{ label: `Unpin (${pinned.length})`, icon: "pin-off", run: () => pinned.forEach(pin) }] : []),
+    ...(pinned.length ? [{ label: `Unpin (${pinned.length})`, icon: "pin-off", run: () => pinned.forEach((t) => pin(t, false)) }] : []),
     { label: `Settle (${list.length})`, icon: "circle-check", disabled: !settling.length, run: () => settling.forEach(settle) },
     ...(list.every(canSnooze) ? [{ label: `Snooze (${list.length})`, icon: "clock", children: () => snoozeItems(list, true) }] : []),
     titled.length ? { label: `Regenerate titles (${titled.length})`, icon: "refresh-cw", run: () => regenerateTitles(titled) } : { label: `Regenerating… (${list.length})`, icon: "refresh-cw", disabled: true },
@@ -1267,8 +1306,50 @@ function setProjectFilter(project) {
   save("gui-project", ui.project);
   renderSidebar();
 }
-const projectNames = () => [...new Set(tabs.map(projectName))].sort();
-const tabOfProject = (name) => tabs.find((t) => projectName(t) === name);
+/** Each machine's projects' origins (`host/owner/name`), by `machine:path`, which group a project's
+ * checkouts across machines, as T3 Code's repository identity does. */
+const projectRepos = new Map();
+const reposAsked = new Map();
+function askProjectRepos(machine, place) {
+  if (reposAsked.has(machine)) return;
+  reposAsked.set(machine, place);
+  callOn(machine, { cmd: "list_projects" }).then((list) => {
+    const was = [...projectRepos.entries()].join();
+    for (const p of list) projectRepos.set(`${machine}:${p.path}`, p.repo ?? null);
+    if (!projectRepos.has(place)) projectRepos.set(place, null);
+    reposAsked.delete(machine);
+    if ([...projectRepos.entries()].join() !== was && guiOn()) renderSidebar();
+  }, () => setTimeout(() => reposAsked.delete(machine), 30e3));
+}
+const projectPathOf = (tab) => threadOf(tab).workspace?.project ?? tab.view.cwd;
+/** The project group a thread is in: its repository with Project grouping on, else its folder on its machine. */
+function projectKeyOf(tab) {
+  const place = `${tab.machine}:${projectPathOf(tab)}`;
+  if (!projectRepos.has(place)) askProjectRepos(tab.machine, place);
+  const repo = sideSettings.grouping && projectRepos.get(place);
+  return repo ? `repo:${repo}` : place;
+}
+const threadCreatedAt = (tab) => unixOf(threadOf(tab).items[0]?.at) || firstSeen.get(tab.key) || 0;
+/** T3 Code's project order: by the latest user message or the newest thread, newest first, or
+ * manually, which with no reordering here keeps the order projects first appeared in. */
+function sortedProjects(list, tabsOf) {
+  const order = sideSettings.projectOrder;
+  const latest = (p) => Math.max(-Infinity, ...tabsOf(p).map(order === "created_at" ? threadCreatedAt : latestUserAt));
+  const first = (p) => Math.min(Infinity, ...tabsOf(p).map(threadCreatedAt));
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  return [...list].sort(order === "manual" ? (a, b) => first(a) - first(b) || byName(a, b) : (a, b) => latest(b) - latest(a) || byName(a, b));
+}
+/** The sidebar's projects: `{ key, name, tab, machine }`, `tab` the group's first thread. */
+function projectGroups() {
+  const groups = new Map();
+  for (const tab of tabs) {
+    const key = projectKeyOf(tab);
+    if (!groups.has(key)) groups.set(key, { key, name: projectName(tab), tab, machine: tab.machine, tabs: [] });
+    groups.get(key).tabs.push(tab);
+  }
+  return sortedProjects([...groups.values()], (g) => g.tabs);
+}
+const tabOfProject = (key) => tabs.find((t) => projectKeyOf(t) === key);
 const projectFilter = document.getElementById("project-filter");
 const projectMenu = document.createElement("div");
 projectMenu.id = "project-menu";
@@ -1284,10 +1365,12 @@ function openProjectMenu() {
   let shown = [];
   const draw = () => {
     const q = input.value.trim().toLowerCase();
-    shown = ["", ...projectNames()].filter((name) => !q || (name || "All projects").toLowerCase().includes(q));
+    const groups = projectGroups();
+    const machinesShown = !sideSettings.grouping && new Set(groups.map((g) => g.machine)).size > 1;
+    shown = [{ key: "", name: "All projects" }, ...groups].filter((g) => !q || g.name.toLowerCase().includes(q));
     hit = Math.min(hit, Math.max(0, shown.length - 1));
     list.innerHTML = shown.length
-      ? shown.map((name, i) => `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(name)}" aria-selected="${name === ui.project}">${name ? projectIcon(name, tabOfProject(name)) : icon("folder")}<span class="label">${esc(name || "All projects")}</span>${name ? `<button type="button" class="gear" data-gear="${esc(name)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(name)}">${icon("gear")}</button>` : ""}</div>`).join("")
+      ? shown.map((g, i) => `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(g.key)}" aria-selected="${g.key === ui.project}">${g.key ? projectIcon(g.name, g.tab) : icon("folder")}<span class="label">${esc(g.name)}</span>${machinesShown && g.key ? `<span class="where">${esc(machineName(g.machine))}</span>` : ""}${g.key ? `<button type="button" class="gear" data-gear="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(g.name)}">${icon("gear")}</button>` : ""}</div>`).join("")
       : `<p class="empty">No matching projects.</p>`;
   };
   const pick = (name) => {
@@ -1301,7 +1384,7 @@ function openProjectMenu() {
   input.onkeydown = (e) => {
     if (e.isComposing) return;
     if (e.key === "Escape") return (e.stopPropagation(), closeProjectMenu());
-    if (e.key === "Enter" && shown.length) return (e.preventDefault(), pick(shown[hit]));
+    if (e.key === "Enter" && shown.length) return (e.preventDefault(), pick(shown[hit].key));
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     e.preventDefault();
     hit = (hit + (e.key === "ArrowDown" ? 1 : -1) + shown.length) % Math.max(1, shown.length);
@@ -1346,7 +1429,7 @@ function closeProjectMenu() {
 projectFilter.onclick = () => (projectMenu.hidden ? openProjectMenu() : closeProjectMenu());
 window.addEventListener("mousedown", (e) => !projectMenu.hidden && !e.target.closest("#project-menu, #project-filter") && closeProjectMenu(), true);
 
-const projectCount = () => new Set(tabs.map((t) => `${t.machine}:${threadOf(t).workspace?.project ?? t.view.cwd}`)).size;
+const projectCount = () => projectGroups().length;
 /** A new session in the thread's folder, on its machine, without the picker. */
 async function newThreadIn(tab) {
   if (!tab) return toggleProjects();
@@ -1430,15 +1513,16 @@ function forget(tab) {
   closeTab(tab);
 }
 /** T3 Code's Archive: the session closes and Settings keeps it, to bring back with Unarchive. */
-function archiveThread(tab) {
+async function archiveThread(tab) {
   if (turnLive(tab)) return;
+  if (sideSettings.confirmArchive && !(await confirmAction(`Archive thread "${esc(threadTitle(tab))}"?`, "Settings › Archive keeps it to bring back.", "Archive"))) return;
   archived.push({ ...closedEntry(tab), name: threadTitle(tab), project: projectName(tab), at: nowS(), created: unixOf(threadOf(tab).items[0]?.at) || undefined });
   saveArchived();
   forget(tab);
 }
 async function deleteThreads(list) {
   const one = list.length === 1;
-  const sure = await askDialog(`<h3>${one ? `Delete thread "${esc(threadTitle(list[0]))}"?` : `Delete ${list.length} threads?`}</h3>
+  const sure = !sideSettings.confirmDelete || await askDialog(`<h3>${one ? `Delete thread "${esc(threadTitle(list[0]))}"?` : `Delete ${list.length} threads?`}</h3>
     <p class="about">This closes ${one ? "its session" : "their sessions"} and removes ${one ? "it" : "them"} from pinned for good. Claude Code keeps ${one ? "its transcript" : "their transcripts"}.</p>
     <div class="actions"><button type="button" class="outline" data-cancel>Cancel</button><button class="destructive">Delete</button></div>`, () => true);
   if (sure) list.forEach(forget);
