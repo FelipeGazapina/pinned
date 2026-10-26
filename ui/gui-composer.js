@@ -686,7 +686,7 @@ const formatSize = (n) => (n == null ? "" : n < 1024 ? `${n} B` : n < 1024 ** 2 
 function renderAttachments(t) {
   const files = t?.attachments ?? [];
   attachmentsRow.hidden = !files.length;
-  const key = JSON.stringify(files.map((f) => f.path));
+  const key = JSON.stringify(files.map((f) => [f.path, f.name]));
   if (attachmentsRow.dataset.key === key) return;
   attachmentsRow.dataset.key = key;
   const tiles = files.map((f, i) => [f, i]).filter(([f]) => f.url);
@@ -694,7 +694,7 @@ function renderAttachments(t) {
   attachmentsRow.innerHTML = `${tiles.length ? `<div class="tiles">${tiles.map(([f, i]) => `<span class="tile" title="${esc(f.path)}"><button type="button" class="zoom" data-zoom="${i}" aria-label="Preview ${esc(f.name)}"><img src="${esc(f.url)}" alt="${esc(f.name)}"></button>
       <button type="button" class="remove" data-remove="${i}" aria-label="Remove ${esc(f.name)}" title="Remove ${esc(f.name)}">${icon("x")}</button></span>`).join("")}</div>` : ""}
     ${rows.length ? `<div class="rows">${rows.map(([f, i]) => `<div class="file" title="${esc(f.path)}">${f.icon ? icon(f.icon) : fileTypeIcon(f.name)}<button type="button" class="name" data-preview="${i}"${f.file ? "" : " disabled"}>${esc(f.name)}</button>
-      <span class="size">${formatSize(f.size)}</span><button type="button" class="remove" data-remove="${i}" aria-label="Remove ${esc(f.name)}" title="Remove ${esc(f.name)}">${icon("x")}</button></div>`).join("")}</div>` : ""}`;
+      <span class="size">${formatSize(f.size)}</span>${f.action ? `<button type="button" class="remove" data-attachment-action="${i}" aria-label="${esc(f.action.label)}" title="${esc(f.action.label)}">${icon(f.action.icon)}</button>` : ""}<button type="button" class="remove" data-remove="${i}" aria-label="Remove ${esc(f.name)}" title="Remove ${esc(f.name)}">${icon("x")}</button></div>`).join("")}</div>` : ""}`;
 }
 const filePreview = Object.assign(document.createElement("div"), { id: "file-preview", hidden: true });
 document.body.append(filePreview);

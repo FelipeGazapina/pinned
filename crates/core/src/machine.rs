@@ -446,12 +446,12 @@ impl Machine {
 
     /// Copies the tab's conversation up to `cut` under a new session id, with the turns pinned saved for
     /// it, so the copy keeps its changed files. Returns the new id, or none when the copy holds no message.
-    fn fork_session(&self, tab: &str, cut: thread::Cut) -> Result<Option<String>, String> {
+    fn fork_session(&self, tab: &str, cut: thread::Cut, marked: bool) -> Result<Option<String>, String> {
         let (cwd, session) = self.tab(tab, |t| (t.cwd.clone(), t.claude_session.clone()))?;
         let session = session.ok_or("this thread has no conversation yet")?;
         let new = new_session_id(&session);
         let transcript = self.transcript(tab)?;
-        let forked = thread::fork(&transcript, cut, &new)?;
+        let forked = thread::fork(&transcript, cut, &new, marked.then_some(session.as_str()))?;
         if !forked.said {
             let _ = std::fs::remove_file(transcript.with_file_name(format!("{new}.jsonl")));
             return Ok(None);
@@ -476,7 +476,7 @@ impl Machine {
             return Err("claude is working. Rewind when the turn ends.".into());
         }
         let checkpoint = if files { self.checkpoint(tab, &cwd, before)? } else { None };
-        let new = self.fork_session(tab, thread::Cut::Before(before))?;
+        let new = self.fork_session(tab, thread::Cut::Before(before), false)?;
         if let Some(tree) = checkpoint {
             history::restore(&cwd, &tree)?;
         }
@@ -513,7 +513,7 @@ impl Machine {
     /// T3 Code's "Fork from this response" does, and returns the new tab's id.
     pub fn fork(&self, tab: &str, through: &str) -> Result<TabId, String> {
         let (cwd, env, bypass) = self.tab(tab, |t| (t.cwd.clone(), t.env.clone(), t.bypass))?;
-        let new = self.fork_session(tab, thread::Cut::Through(through))?.ok_or("there is nothing to fork before this message")?;
+        let new = self.fork_session(tab, thread::Cut::Through(through), true)?.ok_or("there is nothing to fork before this message")?;
         let id = self.add_tab(cwd, vec!["--resume".into(), new.clone()], env, bypass, Some(new));
         self.emit_tabs();
         Ok(id)

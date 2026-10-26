@@ -1399,7 +1399,8 @@ document.addEventListener("click", (e) => {
   if (!chip) return;
   e.preventDefault();
   e.stopPropagation();
-  openFileChip(chip);
+  if (IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) openFileChipIn(chip, "editor");
+  else openFileChip(chip);
 }, true);
 document.addEventListener("keydown", (e) => {
   if ((e.key === "Enter" || e.key === " ") && e.target.matches?.(".file-chip")) {
