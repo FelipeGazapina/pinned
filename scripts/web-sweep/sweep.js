@@ -752,7 +752,7 @@ async function sweep(profileName) {
     const readouts = () =>
       page.evaluate(() => {
         const row = document.querySelector("#thread-list .thread-row.active");
-        return { head: document.querySelector("#chat-head .crumb .stats")?.textContent ?? "", row: row?.querySelector(".stats")?.textContent ?? "", tip: row?.title ?? "", status: active.view.status };
+        return { head: document.querySelector("#chat-head .crumb .stats")?.textContent ?? "", row: row?.querySelector(".stats")?.textContent ?? "", status: active.view.status };
       });
     const parse = (s) => {
       const m = /^(\d+)s · \$(\d+\.\d\d)$/.exec(s);
@@ -762,7 +762,13 @@ async function sweep(profileName) {
     await sleep(1000);
     const before = await readouts();
     check(before.row === before.head, `the row reads "${before.row}", the header "${before.head}"`);
-    check(before.tip.split("\n").includes(before.head), `the row's tooltip lacks the readout: ${before.tip}`);
+    if (!touch) {
+      await page.hover("#thread-list .thread-row.active .l2");
+      await waitFor("the row's hover card", () => page.locator("#hover-card").isVisible(), 3000);
+      const card = await text("#hover-card .card-lines .stats");
+      await page.mouse.move(0, 0);
+      check(card === before.head, `the row's hover card reads "${card}", the header "${before.head}"`);
+    }
     const placed = await page.evaluate(() =>
       [["#chat-head .crumb .stats", "#chat-head .crumb"], ["#thread-list .thread-row.active .stats", "#thread-list .thread-row.active .l3"]].map(([inner, outer]) => {
         const box = document.querySelector(inner).getBoundingClientRect();
@@ -909,7 +915,11 @@ async function sweep(profileName) {
     await answered("echo: Continue from where you left off.");
     check((await text("#thread .turn:last-of-type .sent-by")) === "Sent by Pinned", "pinned's own prompt isn't marked");
     check((await page.locator("#thread .turn:nth-last-of-type(2) .sent-by").count()) === 0, "a typed prompt is marked as pinned's");
+    // A tabs event, such as the turn's stats arriving, replaces the view, so the faked connector rides on each one.
     await page.evaluate(() => {
+      const plain = updateView;
+      window.updateView = (tab, view) => plain(tab, tab === active ? { ...view, connector: "sweep-workflow" } : view);
+      window.updateView.plain = plain;
       active.view.connector = "sweep-workflow";
       rerender();
       threadView.scrollTop = 0;
@@ -921,6 +931,7 @@ async function sweep(profileName) {
     await waitFor("the automation's text", () => gui("#thread .user.automation .body").isVisible());
     check(await gui("#thread .user.automation [data-open-automation]").isVisible(), "no Open automation link");
     await page.evaluate(() => {
+      window.updateView = updateView.plain;
       delete active.view.connector;
       rerender();
       threadView.scrollTop = threadView.scrollHeight;
@@ -2810,7 +2821,8 @@ async function sweep(profileName) {
       await page.press("#prompt", "Enter");
       await waitTerm(/echo: one line/);
       await page.fill("#prompt", "a second\nline");
-      check((await page.getAttribute("#send", "title")) === "Send (⌘Enter)", "a multiline prompt doesn't ask for ⌘Enter");
+      // Until the last turn ends, the button offers to queue the prompt instead.
+      await waitFor("a multiline prompt to ask for ⌘Enter", async () => (await page.getAttribute("#send", "title")) === "Send (⌘Enter)");
       await page.press("#prompt", "Enter");
       check((await page.inputValue("#prompt")) === "a second\nline\n", `Enter on a multiline prompt left ${JSON.stringify(await page.inputValue("#prompt"))}`);
       await page.press("#prompt", "Meta+Enter");
@@ -2947,6 +2959,7 @@ async function sweep(profileName) {
       await tapOrClick("#head-more");
       const options = await page.locator("#panel-menu button .label").allTextContents();
       check(options.join("|").includes("Push & create PR|Commit|Push|Create PR"), `Options menu: ${options.join("|")}`);
+      await page.screenshot({ path: path.join(shots, "options-menu.png") });
       await tapOrClick("#head-more");
       await tapOrClick("#toggle-details");
     }
@@ -3504,6 +3517,8 @@ async function sweep(profileName) {
       fs.writeFileSync(path.join(beta, "leave.txt"), "left out");
       await page.evaluate(() => Object.assign(threadOf(active), { gitFor: null }) && renderComposer(active));
       await waitFor("the Git action", async () => (await text("#git-action .main")) === "Commit, push & PR");
+      // The label reads the same before the files were written, so the status that lists them is waited for.
+      await waitFor("the written files in the Git status", () => page.evaluate(() => !!threadOf(active).git?.changed.includes("leave.txt")));
       // A phone commits from its Options menu and runs the Git action from the thread details card, as T3 Code's.
       if (touch) {
         await tapOrClick("#head-more");
@@ -3902,6 +3917,10 @@ async function sweep(profileName) {
     check(lead === "draft-pen", `line 1 starts with ${lead}`);
     check(!(await page.locator(`${rowSel(alpha)} .l2 .draft-pen`).count()), "the pen is still on the title line");
     if (!touch) {
+      await page.hover(`${rowSel(alpha)} .l2`);
+      await waitFor("the row's hover card", () => page.locator("#hover-card").isVisible(), 3000);
+      const [row, card] = [await rect(rowSel(alpha)), await rect("#hover-card")];
+      await page.screenshot({ path: path.join(shots, "row-draft-pr-stats.png"), clip: { x: 0, y: row.top - 8, width: card.right + 8, height: Math.max(row.bottom, card.bottom) - row.top + 16 } });
       await rowAct(alpha, "discard");
       await waitFor("the draft gone", async () => !(await page.locator(`${rowSel(alpha)} .draft-pen`).count()));
       await openRow(alpha);
