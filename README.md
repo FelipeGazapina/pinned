@@ -60,7 +60,8 @@ The app view has three columns:
   it; double-click the edge to reset it. ⌘B hides the sidebar.
 - **Thread.** Your prompts and Claude's answers. The tool calls of a turn fold into one
   **Worked for** row; click it to see each one. A turn that changed files ends with a card of
-  those files. **Open diff** shows them in the side panel. Type below and press Enter to send.
+  those files. **Open diff** shows them in the side panel. A page Claude published with its
+  Artifact tool shows as a card; **Open** opens it on claude.ai. Type below and press Enter to send.
   While Claude works, Enter queues your message and the red button stops the turn.
   The menu under the prompt picks the model.
   A command that opens one of Claude's own screens, such as `/usage`, `/status`, `/mcp` or

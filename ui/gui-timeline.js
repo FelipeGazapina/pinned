@@ -11,6 +11,9 @@ Object.assign(ICON_PATHS, {
 
 const PLAN_TOOL = "ExitPlanMode";
 const QUESTION_TOOL = "AskUserQuestion";
+/** A page the Artifact tool published to claude.ai: its local file and its link. */
+const PUBLISHED = /^Published (.+?) at (https:\/\/claude\.ai\/(?:code\/)?artifact\/[\w-]+)/;
+const published = (step) => (step.kind === "tool" && step.name === "Artifact" && !step.result?.error && step.result?.text.match(PUBLISHED)) || null;
 const interruption = (step) => /^\[Request interrupted/.test(step.result?.text ?? "");
 
 function turnsOf(items) {
@@ -35,7 +38,7 @@ function turnsOf(items) {
     const lastText = t.steps.lastIndexOf(texts.at(-1));
     // Errors, answered questions and plans stay in sight, and once the turn settles so does a tool that
     // failed after the last thing claude said.
-    const shown = (s) => s === t.lead || s === t.answer || s.kind === "error" || (s.kind === "tool" && (s.name === PLAN_TOOL || (s.name === QUESTION_TOOL && s.result)));
+    const shown = (s) => s === t.lead || s === t.answer || s.kind === "error" || (s.kind === "tool" && (s.name === PLAN_TOOL || (s.name === QUESTION_TOOL && s.result) || !!published(s)));
     t.failed = new Set(t.steps.filter((s, i) => i > lastText && s.kind === "tool" && s.result?.error && !shown(s) && !interruption(s)));
     t.shown = t.steps.filter(shown);
     t.work = t.steps.filter((s) => !shown(s));
@@ -314,9 +317,17 @@ function shownHtml(step, cwd, t, answer) {
   if (step.kind === "error" || (step.kind === "tool" && step.result?.error && step.name !== QUESTION_TOOL && step.name !== PLAN_TOOL)) return errorHtml(step, cwd);
   if (step.name === PLAN_TOOL) return planHtml(step, t);
   if (step.name === QUESTION_TOOL) return questionHtml(step);
+  if (published(step)) return artifactHtml(step);
   if (step !== answer) return `<div class="assistant md">${markdown(step.text)}</div>`;
   return `<div class="answer"><div class="assistant md">${markdown(step.text)}</div>
     <div class="meta"><button type="button" class="xs" data-copy-item="${esc(step.id)}" title="Copy">${icon("copy")}</button>${whenHtml(step.at)}</div></div>`;
+}
+
+function artifactHtml(step) {
+  const [, file, url] = published(step);
+  return `<div class="artifact-card">${icon("globe", "lead")}<div class="body"><span class="badge">Artifact</span><h3>${esc(file.split("/").pop())}</h3>
+      ${step.detail ? `<p class="about">${esc(step.detail)}</p>` : ""}</div>
+    <a class="open" href="${esc(url)}" title="${esc(url)}">Open${icon("external-link")}</a></div>`;
 }
 
 const endOfSecond = (seconds) => seconds * 1000 + 999;

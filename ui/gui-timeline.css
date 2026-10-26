@@ -131,6 +131,15 @@ button.xs.copied { color: var(--g-success); }
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent); }
 .plan-foot { display: flex; justify-content: center; margin-top: 16px; }
 
+.artifact-card { display: flex; align-items: center; gap: 12px; margin: 4px 0 16px; padding: 12px 16px; border-radius: 16px; border: 1px solid rgb(255 255 255 / 0.05); background: rgb(17 17 17 / 0.7); }
+.artifact-card .lead { flex: none; color: var(--g-muted); }
+.artifact-card .body { flex: 1; min-width: 0; }
+.artifact-card .badge { padding: 1px 6px; border-radius: 6px; background: rgb(255 255 255 / 0.06); color: var(--g-fg); font-size: 11px; font-weight: 500; }
+.artifact-card h3 { margin: 6px 0 0; font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-card .about { margin: 2px 0 0; color: var(--g-muted); font-size: 13px; }
+.artifact-card .open { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--g-border); color: var(--g-fg); font-size: 13px; text-decoration: none; }
+.artifact-card .open:hover { background: var(--g-hover); }
+
 .dialog-card { margin: 4px 0 16px; border-radius: 16px; border: 1px solid rgb(255 255 255 / 0.08); background: #0a0a0a; outline: none; overflow: hidden; }
 .dialog-card:focus-within { border-color: rgb(81 162 255 / 0.5); }
 .dialog-card .head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--g-border); color: var(--g-muted); font-size: 12px; }
