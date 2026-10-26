@@ -24,6 +24,12 @@ const VERCEL_KEY: &str = "vercel-key";
 const SLACK_OVERLAP: chrono::Duration = chrono::Duration::seconds(60);
 /// A mention older than this when pinned picks it up arrived while pinned was closed.
 const OFFLINE_AFTER: chrono::Duration = chrono::Duration::minutes(5);
+/// A page reaches every member of a user group, so a category that pages wins only when the
+/// decision model is at least this sure of it.
+const PAGE_CONFIDENCE: f64 = 0.85;
+/// A workflow that paged in a channel this recently points new escalations there at that page
+/// instead of paging again, so many reports of one incident page the group once.
+const PAGE_COOLDOWN: chrono::Duration = chrono::Duration::minutes(30);
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
@@ -140,6 +146,24 @@ impl Decide {
         }
         Ok(self.categories.iter().map(|c| (c.name.as_str(), c.description.as_str())).collect())
     }
+
+    /// The category a message goes to, given the decision model's answer, or None when the model
+    /// isn't sure enough to page and every category pages. Below `PAGE_CONFIDENCE` a category that
+    /// pages yields to the likeliest one that doesn't.
+    fn pick(&self, chosen: &vercel::Chosen) -> Option<usize> {
+        let quiet = |i: &usize| self.categories[*i].group().is_none();
+        if quiet(&chosen.index) || chosen.probabilities[chosen.index] >= PAGE_CONFIDENCE {
+            return Some(chosen.index);
+        }
+        (0..self.categories.len()).filter(quiet).reduce(|best, i| if chosen.probabilities[i] > chosen.probabilities[best] { i } else { best })
+    }
+}
+
+impl Category {
+    /// The user group the category pages, as written in it.
+    fn group(&self) -> Option<&str> {
+        self.mention.as_deref().map(str::trim).filter(|g| !g.is_empty())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -182,6 +206,10 @@ pub struct Connector {
     /// How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.
     #[serde(default)]
     pub followed: BTreeMap<String, Followed>,
+    /// When a message workflow paged a category's user group in each Slack thread (RFC 3339), by
+    /// `<channel id>:<thread ts>`. A thread is paged once, however often it is sorted again.
+    #[serde(default)]
+    pub paged: BTreeMap<String, String>,
     /// Whether a session that opens a pull request must prove it works, with a Playwright video.
     #[serde(default = "on")]
     pub proof: bool,
@@ -285,6 +313,17 @@ impl Connector {
         }
         self.since = watermark.to_rfc3339();
         true
+    }
+
+    /// The thread ts of the newest page in `channel` within `PAGE_COOLDOWN` of `now`.
+    fn recent_page(&self, channel: &str, now: DateTime<Utc>) -> Option<String> {
+        let prefix = thread_key(channel, "");
+        self.paged
+            .iter()
+            .filter_map(|(key, at)| Some((key.strip_prefix(&prefix)?, DateTime::parse_from_rfc3339(at).ok()?)))
+            .filter(|(_, at)| now.signed_duration_since(*at) < PAGE_COOLDOWN)
+            .max_by_key(|(_, at)| *at)
+            .map(|(thread, _)| thread.to_owned())
     }
 
     fn unclaim(&mut self, subject: &Subject) {
@@ -419,6 +458,26 @@ impl Store {
         Ok(filed)
     }
 
+    /// What `router` posts in the thread it sorted into a category that pages. The first escalation
+    /// in a channel pings the group and is recorded in `paged`; later ones within `PAGE_COOLDOWN`
+    /// point at it without a ping, and a thread already paged posts nothing.
+    fn page(&mut self, router: &str, channel: String, thread: String, paging: Option<Paging>, now: DateTime<Utc>, react: bool) -> Option<Page> {
+        let paging = paging?;
+        let c = self.connectors.iter_mut().find(|c| c.id == router)?;
+        let key = thread_key(&channel, &thread);
+        if c.paged.contains_key(&key) {
+            return None;
+        }
+        let reply = match c.recent_page(&channel, now) {
+            Some(paged) => Reply::Already { handle: paging.handle, thread: paged },
+            None => {
+                c.paged.insert(key, now.to_rfc3339());
+                Reply::Ping(paging.ping)
+            }
+        };
+        Some(Page { channel, thread, reply, react })
+    }
+
     /// Claims what a check found, moves the checked connectors' watermarks, and answers the work
     /// to hand out. It reaches no integration, so the check runs it under the store lock.
     fn settle(&mut self, checked: &[String], found: Vec<(String, Found)>, now: DateTime<Utc>, exe: &str) -> Settled {
@@ -457,7 +516,7 @@ impl Store {
                 }
                 Found::Stopped { channel, thread, page } => {
                     if self.claim_thread(&id, &key).is_some() {
-                        settled.pages.extend(page.map(|text| Page { channel, thread, text, react: true }));
+                        settled.pages.extend(self.page(&id, channel, thread, page, now, true));
                         settled.changed = true;
                     }
                 }
@@ -466,7 +525,7 @@ impl Store {
                     if let Err(e) = self.route(&router, &category, &workflow) {
                         // The router keeps the thread, so the error is reported once.
                         if self.claim_thread(&id, &key).is_some() {
-                            settled.pages.extend(page.map(|text| Page { channel, thread, text, react: true }));
+                            settled.pages.extend(self.page(&id, channel, thread, page, now, true));
                             settled.errors.push(e);
                             settled.changed = true;
                         }
@@ -478,7 +537,7 @@ impl Store {
                     let note = routed_note(&router, &category);
                     let run = slack_run(target, &channel, &channel_name, &thread, &posts, Some(&note), exe);
                     settled.work.push(Work::Run(Run { mentioned: vec![thread.clone()], ..run }));
-                    settled.pages.extend(page.map(|text| Page { channel, thread, text, react: false }));
+                    settled.pages.extend(self.page(&id, channel, thread, page, now, false));
                     settled.changed = true;
                 }
                 Found::Replies { replies, .. } if replies.posts.is_empty() => {
@@ -605,8 +664,8 @@ enum Found {
     /// New messages in a thread that already started a session.
     Replies { channel: String, replies: slack::Replies },
     /// A new message the decision model put in a category without a workflow, which stops there.
-    /// `page` is the reply that pages the category's user group.
-    Stopped { channel: String, thread: String, page: Option<String> },
+    /// `page` is how the category pages its user group.
+    Stopped { channel: String, thread: String, page: Option<Paging> },
     /// A new message the decision model put in `category`, whose `workflow` then owns the thread.
     Routed {
         channel: String,
@@ -615,7 +674,7 @@ enum Found {
         category: String,
         workflow: String,
         posts: Vec<slack::Post>,
-        page: Option<String>,
+        page: Option<Paging>,
     },
 }
 
@@ -643,19 +702,41 @@ fn thread_key(channel: &str, thread: &str) -> String {
     format!("{channel}:{thread}")
 }
 
-/// A reply that pages a category's Slack user group in the thread of the message it sorted.
+/// How a category pages its Slack user group.
+#[derive(Clone, Debug, PartialEq)]
+struct Paging {
+    /// The reply that pings the group.
+    ping: String,
+    /// The group as the category writes it, for a reply that must not ping it.
+    handle: String,
+}
+
+/// A reply about a category's Slack user group in the thread of the message it sorted.
 #[derive(Debug, PartialEq)]
 struct Page {
     channel: String,
     thread: String,
-    text: String,
+    reply: Reply,
     /// Reacts to the message too, when no session will once a tab takes it.
     react: bool,
+}
+
+#[derive(Debug, PartialEq)]
+enum Reply {
+    Ping(String),
+    /// The group was paged in the thread `thread` of the same channel a moment ago.
+    Already { handle: String, thread: String },
 }
 
 /// What a category's page says: the group's mention, then why it was paged.
 fn page_text(group: &str, category: &Category) -> String {
     format!("{} {}: {}", slack::group_mention(group), category.name, category.description.trim())
+}
+
+/// What an escalation says when the group was paged for another thread a moment ago. It names the
+/// group in plain text, which notifies no one.
+fn already_text(handle: &str, permalink: &str) -> String {
+    format!("Already escalated to @{}: {permalink}", handle.trim_start_matches('@'))
 }
 
 /// How far each thread `followed` holds in `channel` was read, by thread ts.
@@ -830,7 +911,11 @@ impl Connectors {
 
     async fn page(&self, page: &Page) -> Result<(), String> {
         let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
-        slack::post(&token, &page.channel, &page.thread, &page.text).await?;
+        let text = match &page.reply {
+            Reply::Ping(text) => text.clone(),
+            Reply::Already { handle, thread } => already_text(handle, &slack::permalink(&token, &page.channel, thread).await?),
+        };
+        slack::post(&token, &page.channel, &page.thread, &text).await?;
         if page.react {
             slack::react(&token, &page.channel, &page.thread, slack::WORKING).await?;
         }
@@ -979,6 +1064,10 @@ impl Connectors {
                 for message in messages {
                     let state = json!({ "channel": format!("#{channel_name}"), "author": message.author, "message": message.text });
                     let chosen = vercel::choose(&key, decide.model.trim(), &decide.instructions, &choices, &state).await?;
+                    let Some(chosen) = decide.pick(&chosen) else {
+                        found.push(Found::Stopped { channel: channel.clone(), thread: message.ts, page: None });
+                        continue;
+                    };
                     let (category, page) = (&decide.categories[chosen], pages[chosen].clone());
                     found.push(match &category.workflow {
                         None => Found::Stopped { channel: channel.clone(), thread: message.ts, page },
@@ -1016,11 +1105,11 @@ impl Connectors {
 
     /// The page each of `decide`'s categories posts, by category. A handle that doesn't resolve
     /// fails the whole check, so no message is recorded before its group can be paged.
-    async fn pages(&self, token: &str, c: &Connector, decide: &Decide) -> Result<Vec<Option<String>>, String> {
+    async fn pages(&self, token: &str, c: &Connector, decide: &Decide) -> Result<Vec<Option<Paging>>, String> {
         let mut groups: HashMap<String, String> = HashMap::new();
         let mut pages = vec![];
         for category in &decide.categories {
-            let Some(group) = category.mention.as_deref().map(str::trim).filter(|g| !g.is_empty()) else {
+            let Some(group) = category.group() else {
                 pages.push(None);
                 continue;
             };
@@ -1034,7 +1123,7 @@ impl Connectors {
                     id
                 }
             };
-            pages.push(Some(page_text(&id, category)));
+            pages.push(Some(Paging { ping: page_text(&id, category), handle: group.to_owned() }));
         }
         Ok(pages)
     }
@@ -1441,7 +1530,7 @@ impl Connectors {
         slack::member_channels(&token).await
     }
 
-    /// Adds or replaces a connector. Its watermark, handled issues, filed issues and thread cursors stay with the stored copy.
+    /// Adds or replaces a connector. Its watermark, handled issues, filed issues, thread cursors and pages stay with the stored copy.
     pub fn save_connector(&self, mut connector: Connector) -> Result<Connector, String> {
         let mut store = self.store.lock().unwrap();
         match store.connectors.iter_mut().find(|c| c.id == connector.id && !c.id.is_empty()) {
@@ -1450,6 +1539,7 @@ impl Connectors {
                 connector.handled = std::mem::take(&mut existing.handled);
                 connector.created = std::mem::take(&mut existing.created);
                 connector.followed = std::mem::take(&mut existing.followed);
+                connector.paged = std::mem::take(&mut existing.paged);
                 *existing = connector.clone();
             }
             None => {
@@ -1458,6 +1548,7 @@ impl Connectors {
                 connector.handled.clear();
                 connector.created.clear();
                 connector.followed.clear();
+                connector.paged.clear();
                 store.connectors.push(connector.clone());
             }
         }
@@ -1671,6 +1762,7 @@ mod tests {
             fix: Fix::Off,
             created: BTreeMap::new(),
             followed: BTreeMap::new(),
+            paged: BTreeMap::new(),
             proof: false,
             machine: String::new(),
             repo: String::new(),
@@ -1729,6 +1821,7 @@ mod tests {
             fix: Fix::Off,
             created: BTreeMap::new(),
             followed: BTreeMap::new(),
+            paged: BTreeMap::new(),
             proof: false,
             machine: String::new(),
             repo: String::new(),
@@ -2032,6 +2125,7 @@ mod tests {
         let store: Store = serde_json::from_str(saved).unwrap();
         assert!(store.slack.is_none());
         assert!(store.vercel.is_none(), "a store saved before the Vercel AI Gateway has no account for it");
+        assert_eq!(store.connectors[0].paged, BTreeMap::new(), "a store saved before pages loads with none");
         let json = serde_json::to_value(&store.connectors).unwrap();
         assert_eq!(json[0]["trigger"], serde_json::json!({ "kind": "linear-label", "label": "claude" }));
         assert_eq!(json[0]["handled"], serde_json::json!(["uuid"]));
@@ -2097,7 +2191,7 @@ mod tests {
         Connector { id: "c6".into(), name: "Answer".into(), trigger: Trigger::Called, ..slack_connector() }
     }
 
-    fn routed(category: &str, workflow: &str, page: Option<&str>) -> Found {
+    fn routed(category: &str, workflow: &str, page: Option<Paging>) -> Found {
         Found::Routed {
             channel: "C0123ABCD".into(),
             channel_name: "support".into(),
@@ -2105,12 +2199,21 @@ mod tests {
             category: category.into(),
             workflow: workflow.into(),
             posts: posts().into(),
-            page: page.map(Into::into),
+            page,
         }
     }
 
-    fn stopped(page: Option<&str>) -> Found {
-        Found::Stopped { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), page: page.map(Into::into) }
+    fn stopped(page: Option<Paging>) -> Found {
+        Found::Stopped { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), page }
+    }
+
+    fn paging() -> Paging {
+        let escalation = category("escalation", " Someone needs an engineer on support now ", None, Some("prod-engg"));
+        Paging { ping: page_text("S0123ABC", &escalation), handle: "prod-engg".into() }
+    }
+
+    fn escalated(channel: &str, thread: &str) -> Found {
+        Found::Stopped { channel: channel.into(), thread: thread.into(), page: Some(paging()) }
     }
 
     fn mentioned() -> Found {
@@ -2124,8 +2227,12 @@ mod tests {
     }
 
     fn settle(store: &mut Store, found: Vec<(&str, Found)>) -> Settled {
+        settle_at(store, found, checked_at())
+    }
+
+    fn settle_at(store: &mut Store, found: Vec<(&str, Found)>, now: DateTime<Utc>) -> Settled {
         let checked: Vec<String> = found.iter().map(|(id, _)| id.to_string()).collect();
-        store.settle(&checked, found.into_iter().map(|(id, f)| (id.to_owned(), f)).collect(), checked_at(), "/bin/pinned")
+        store.settle(&checked, found.into_iter().map(|(id, f)| (id.to_owned(), f)).collect(), now, "/bin/pinned")
     }
 
     /// The (connector, thread, mentioned) of each run, and the prompt of the last one.
@@ -2180,21 +2287,89 @@ mod tests {
 
     #[test]
     fn a_category_that_mentions_a_group_pages_it_once() {
-        let escalation = category("escalation", " Someone needs an engineer on support now ", None, Some("prod-engg"));
-        let page = page_text("S0123ABC", &escalation);
-        assert_eq!(page, "<!subteam^S0123ABC> escalation: Someone needs an engineer on support now");
+        let ping = "<!subteam^S0123ABC> escalation: Someone needs an engineer on support now";
+        assert_eq!(paging().ping, ping);
 
         let mut store = Store { connectors: vec![router(), slack_connector()], ..Store::default() };
-        let settled = settle(&mut store, vec![("c5", stopped(Some(&page)))]);
-        let posted = Page { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), text: page.clone(), react: true };
+        let settled = settle(&mut store, vec![("c5", stopped(Some(paging())))]);
+        let posted = Page { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), reply: Reply::Ping(ping.into()), react: true };
         assert_eq!((settled.work.len(), settled.pages, settled.errors.len()), (0, vec![posted], 0), "it stops, pages and reacts");
         assert_eq!(store.connectors[0].handled, [THREAD]);
-        assert_eq!(settle(&mut store, vec![("c5", stopped(Some(&page)))]).pages, [], "the next check pages no one again");
+        assert_eq!(store.connectors[0].paged, BTreeMap::from([(THREAD.to_owned(), "2026-10-19T10:01:00+00:00".to_owned())]));
+        assert_eq!(settle(&mut store, vec![("c5", stopped(Some(paging())))]).pages, [], "the next check pages no one again");
 
         let mut store = Store { connectors: vec![router(), slack_connector()], ..Store::default() };
-        let settled = settle(&mut store, vec![("c5", routed("error", "c2", Some(&page)))]);
-        let posted = Page { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), text: page, react: false };
+        let settled = settle(&mut store, vec![("c5", routed("error", "c2", Some(paging())))]);
+        let posted = Page { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), reply: Reply::Ping(ping.into()), react: false };
         assert_eq!((runs(&settled).0.len(), settled.pages), (1, vec![posted]), "the session reacts once a tab takes it");
+        assert_eq!(store.connectors[0].paged.len(), 1, "the router records the page of a thread it handed on");
+    }
+
+    #[test]
+    fn a_thread_sorted_again_is_not_paged_again() {
+        let (connectors, dir) = stored("paged-once", vec![router(), slack_connector()]);
+        let settled = settle(&mut connectors.store.lock().unwrap(), vec![("c5", routed("escalation", "c2", Some(paging())))]);
+        assert_eq!(settled.pages.len(), 1);
+        let work = settled.work.into_iter().next().unwrap();
+        assert!(block_on(connectors.hand_over(work, &|_| async { false })).is_err());
+        let mut store = connectors.store.lock().unwrap();
+        let later = checked_at() + chrono::Duration::hours(2);
+        let settled = settle_at(&mut store, vec![("c5", routed("escalation", "c2", Some(paging())))], later);
+        assert_eq!((runs(&settled).0.len(), settled.pages), (1, vec![]), "the thread starts a session again but pages no one");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_category_that_pages_wins_only_when_the_model_is_sure() {
+        let Trigger::SlackMessage { decide, .. } = router().trigger else { unreachable!() };
+        let picked = |index, probabilities: [f64; 4]| {
+            decide.pick(&vercel::Chosen { index, probabilities: probabilities.into() }).map(|i| decide.categories[i].name.clone())
+        };
+        assert_eq!(picked(2, [0.03, 0.10, 0.84, 0.03]), Some("doubt".into()), "the likeliest category that pages no one");
+        assert_eq!(picked(2, [0.04, 0.03, 0.90, 0.03]), Some("escalation".into()));
+        assert_eq!(picked(2, [0.05, 0.05, 0.85, 0.05]), Some("escalation".into()));
+        assert_eq!(picked(0, [0.40, 0.30, 0.20, 0.10]), Some("error".into()), "a category that pages no one needs no certainty");
+        assert_eq!(picked(2, [0.0, 0.0, 0.0, 0.0]), Some("error".into()), "an answer without probabilities pages no one");
+
+        let paging_only = Decide { categories: vec![category("escalation", "Production is down", None, Some("prod-engg"))], ..decide.clone() };
+        assert_eq!(paging_only.pick(&vercel::Chosen { index: 0, probabilities: vec![0.6] }), None);
+        assert_eq!(paging_only.pick(&vercel::Chosen { index: 0, probabilities: vec![0.9] }), Some(0));
+    }
+
+    #[test]
+    fn escalations_in_a_channel_page_once_per_cooldown() {
+        let mut store = Store { connectors: vec![router(), slack_connector()], ..Store::default() };
+        let at = |minutes| checked_at() + chrono::Duration::minutes(minutes);
+        let page = |channel: &str, thread: &str, reply, react| Page { channel: channel.into(), thread: thread.into(), reply, react };
+        let ping = || Reply::Ping("<!subteam^S0123ABC> escalation: Someone needs an engineer on support now".into());
+        let already = || Reply::Already { handle: "prod-engg".into(), thread: "1792399000.000000".into() };
+
+        let settled = settle_at(&mut store, vec![("c5", escalated("C0123ABCD", "1792399000.000000"))], at(0));
+        assert_eq!(settled.pages, [page("C0123ABCD", "1792399000.000000", ping(), true)]);
+
+        let settled = settle_at(&mut store, vec![("c5", escalated("C0123ABCD", "1792399600.000000"))], at(10));
+        assert_eq!(settled.pages, [page("C0123ABCD", "1792399600.000000", already(), true)], "it points at the page and reacts");
+        let text = already_text("prod-engg", "https://acme.slack.com/archives/C0123ABCD/p1792399000000000");
+        assert_eq!(text, "Already escalated to @prod-engg: https://acme.slack.com/archives/C0123ABCD/p1792399000000000");
+        assert_eq!(already_text("@prod-engg", "https://x"), "Already escalated to @prod-engg: https://x");
+
+        let settled = settle_at(&mut store, vec![("c5", routed("escalation", "c2", Some(paging())))], at(20));
+        assert_eq!(runs(&settled).0.len(), 1, "a category with a workflow still hands the thread on");
+        assert_eq!(settled.pages, [page("C0123ABCD", "1792400050.000200", already(), false)]);
+
+        let settled = settle_at(&mut store, vec![("c5", escalated("C0999WXYZ", "1792400100.000000"))], at(21));
+        assert_eq!(settled.pages, [page("C0999WXYZ", "1792400100.000000", ping(), true)], "another channel is another incident");
+
+        let settled = settle_at(&mut store, vec![("c5", escalated("C0123ABCD", "1792400900.000000"))], at(31));
+        assert_eq!(settled.pages, [page("C0123ABCD", "1792400900.000000", ping(), true)], "after the cooldown it pages again");
+
+        let router = &store.connectors[0];
+        assert_eq!(router.handled, ["C0123ABCD:1792399000.000000", "C0123ABCD:1792399600.000000", "C0999WXYZ:1792400100.000000", "C0123ABCD:1792400900.000000"]);
+        assert_eq!(
+            router.paged.keys().collect::<Vec<_>>(),
+            ["C0123ABCD:1792399000.000000", "C0123ABCD:1792400900.000000", "C0999WXYZ:1792400100.000000"],
+            "only pings are recorded, so the cooldown runs from the page"
+        );
     }
 
     #[test]

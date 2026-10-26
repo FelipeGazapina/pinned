@@ -35,6 +35,17 @@ struct Evaluation {
 #[derive(Deserialize)]
 struct Answer {
     choice: Option<String>,
+    #[serde(default)]
+    probabilities: HashMap<String, f64>,
+}
+
+/// What the decision model answered.
+#[derive(Debug, PartialEq)]
+pub struct Chosen {
+    /// The position of the choice it picked.
+    pub index: usize,
+    /// How likely it found each choice, by position. A choice it gave no probability gets 0.
+    pub probabilities: Vec<f64>,
 }
 
 async fn send(request: reqwest::RequestBuilder) -> Result<Value, String> {
@@ -72,9 +83,9 @@ fn deciding(models: Value) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
-/// Asks `model` which of `choices`, as (name, description), fits `state`, and answers the
-/// position of the one it picked, so the caller takes it without looking the name up again.
-pub async fn choose(key: &str, model: &str, instructions: &str, choices: &[(&str, &str)], state: &impl Serialize) -> Result<usize, String> {
+/// Asks `model` which of `choices`, as (name, description), fits `state`. Answers positions, so
+/// the caller takes the choice without looking the name up again.
+pub async fn choose(key: &str, model: &str, instructions: &str, choices: &[(&str, &str)], state: &impl Serialize) -> Result<Chosen, String> {
     let criteria: serde_json::Map<String, Value> = choices.iter().map(|(name, description)| (name.to_string(), json!(description))).collect();
     let body = json!({
         "model": model,
@@ -84,13 +95,16 @@ pub async fn choose(key: &str, model: &str, instructions: &str, choices: &[(&str
     chosen(send(reqwest::Client::new().post(format!("{API}/evaluate")).bearer_auth(key).json(&body)).await?, choices)
 }
 
-fn chosen(answer: Value, choices: &[(&str, &str)]) -> Result<usize, String> {
+fn chosen(answer: Value, choices: &[(&str, &str)]) -> Result<Chosen, String> {
     let evaluation: Evaluation = serde_json::from_value(answer).map_err(|e| format!("Vercel AI Gateway sent a bad answer: {e}"))?;
-    let choice = evaluation.answers.get(QUESTION).and_then(|a| a.choice.as_deref()).ok_or("the decision model gave no answer")?;
-    choices
+    let answer = evaluation.answers.get(QUESTION).ok_or("the decision model gave no answer")?;
+    let choice = answer.choice.as_deref().ok_or("the decision model gave no answer")?;
+    let index = choices
         .iter()
         .position(|(name, _)| *name == choice)
-        .ok_or_else(|| format!("the decision model answered {choice:?}, which is not one of the categories"))
+        .ok_or_else(|| format!("the decision model answered {choice:?}, which is not one of the categories"))?;
+    let probabilities = choices.iter().map(|(name, _)| answer.probabilities.get(*name).copied().unwrap_or(0.0)).collect();
+    Ok(Chosen { index, probabilities })
 }
 
 #[cfg(test)]
@@ -106,7 +120,12 @@ mod tests {
             "answers": { "category": { "type": "choice", "choice": "doubt", "probabilities": { "error": 0.02, "doubt": 0.97, "ignore": 0.01 } } },
             "usage": { "input_tokens": 80 },
         });
-        assert_eq!(chosen(answer, &CHOICES), Ok(1));
+        assert_eq!(chosen(answer, &CHOICES), Ok(Chosen { index: 1, probabilities: vec![0.02, 0.97, 0.01] }));
+        assert_eq!(
+            chosen(json!({ "answers": { "category": { "type": "choice", "choice": "error", "probabilities": { "error": 0.6 } } } }), &CHOICES),
+            Ok(Chosen { index: 0, probabilities: vec![0.6, 0.0, 0.0] }),
+            "a choice the model gave no probability is unlikely"
+        );
         assert_eq!(chosen(json!({ "answers": {} }), &CHOICES), Err("the decision model gave no answer".into()));
         assert_eq!(
             chosen(json!({ "answers": { "category": { "type": "choice", "choice": null } } }), &CHOICES),
