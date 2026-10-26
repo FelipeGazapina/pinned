@@ -30,5 +30,6 @@ pub mod thread;
 pub mod titles;
 pub mod uploads;
 pub mod usage;
+pub mod vercel;
 pub mod wire;
 pub mod workspace;

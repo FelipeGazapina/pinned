@@ -24,6 +24,8 @@ sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "test-util"] }
+# Only the ignored live test reaches the network, and reqwest needs a provider for it.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
