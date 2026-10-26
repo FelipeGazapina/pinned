@@ -1,4 +1,5 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
+use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, Shells};
 use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, projects, pty, pulls, reminders, scaffold, scripts, sessions, sync, thread, titles, uploads, usage, workspace};
@@ -16,6 +17,8 @@ pub const OUTPUT_KEEP: usize = 256 * 1024;
 /// Slack after a usage limit's reset time before the session is told to continue.
 const LIMIT_MARGIN_SECS: u64 = 5;
 const UNWATCHED: (u16, u16) = (120, 32);
+/// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
+const TURN_LOG_WAIT: (u32, std::time::Duration) = (25, std::time::Duration::from_millis(200));
 
 pub type Event = MachineEvent;
 /// Names a viewer of a tab, such as `local` for the app's own webview; attaching again replaces it.
@@ -171,6 +174,8 @@ struct Tab {
     bypass: bool,
     /// Claude Code's id for the conversation in progress, known once a hook reports it.
     claude_session: Option<String>,
+    /// `claude_session`'s transcript as read so far, which starts over whenever the session changes.
+    tally: Tally,
     /// A turn is running, or died on an error: the session has work left if pinned quits now.
     interrupted: bool,
     /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
@@ -221,6 +226,7 @@ impl Tab {
             opened: tab_number(id).into(),
             updated: self.updated,
             session: self.claude_session.clone(),
+            stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
         }
     }
 }
@@ -595,6 +601,7 @@ impl Machine {
             // Without launch arguments this is a fresh conversation, not the one recorded before.
             if t.launch.is_empty() {
                 t.claude_session = None;
+                t.tally = Tally::default();
             }
             let mut args = std::mem::take(&mut t.launch);
             if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
@@ -920,6 +927,10 @@ impl Machine {
             })
             .collect();
         self.emit_tabs();
+        // A resumed session reports no new id, so its transcript is read here.
+        for id in &ids {
+            self.refresh_stats(id, false);
+        }
         ids
     }
 
@@ -961,11 +972,13 @@ impl Machine {
 
     fn record_event(&self, event: AgentEvent) {
         if let Some(tab) = &event.tab {
-            if let Some(session) = &event.session {
-                self.record_session(tab, session.clone(), event.cwd.as_deref());
-            }
+            let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
             self.record_status(tab, &event);
             self.record_turn(tab, &event);
+            let turn_ended = matches!(event.status, AgentStatus::Done | AgentStatus::Failed);
+            if new_session || turn_ended {
+                self.refresh_stats(tab, turn_ended);
+            }
             self.continue_when_limit_lifts(tab);
             self.emit_tabs();
         }
@@ -986,6 +999,7 @@ impl Machine {
             env,
             bypass,
             claude_session,
+            tally: Tally::default(),
             interrupted: false,
             resume_at: None,
             model: None,
@@ -1038,19 +1052,60 @@ impl Machine {
     }
 
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
-    fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) {
-        let changed = self.tab(tab, |t| {
-            let mut changed = t.claude_session.as_ref() != Some(&session);
+    /// True when the session is new to the tab.
+    fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) -> bool {
+        let Ok((new, changed)) = self.tab(tab, |t| {
+            let new = t.claude_session.as_ref() != Some(&session);
+            if new {
+                t.tally = Tally::default();
+            }
+            let mut changed = new;
             if let Some(worktree) = reported_cwd.and_then(|c| sessions::worktree(&t.cwd, Path::new(c))) {
                 t.cwd = worktree;
                 changed = true;
             }
             t.claude_session = Some(session);
-            changed
-        });
-        if changed == Ok(true) {
+            (new, changed)
+        }) else {
+            return false;
+        };
+        if changed {
             self.save_sessions();
         }
+        new
+    }
+
+    /// Reads what the tab's transcript gained, off the caller's thread, then sends the tabs again.
+    /// After a turn ends it reads again until that turn's duration shows up, or gives up.
+    fn refresh_stats(&self, tab: &str, turn_ended: bool) {
+        let (Some(machine), tab) = (self.me.upgrade(), tab.to_owned()) else { return };
+        std::thread::spawn(move || {
+            let before = machine.tab(&tab, |t| t.tally.turns).ok();
+            for _ in 0..TURN_LOG_WAIT.0 {
+                let after = machine.read_stats(&tab);
+                if !turn_ended || after.is_none() || after != before {
+                    break;
+                }
+                std::thread::sleep(TURN_LOG_WAIT.1);
+            }
+            machine.emit_tabs();
+        });
+    }
+
+    /// Reads what the tab's transcript gained since the last read, outside the tabs lock, and
+    /// returns the turns counted so far. `None` when the tab has no transcript to read.
+    fn read_stats(&self, tab: &str) -> Option<u32> {
+        let (session, mut tally) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone()))).ok()??;
+        let file = thread::find(&thread::projects_dir(&home()), &session)?;
+        tally.advance(&file).ok()?;
+        let turns = tally.turns;
+        self.tab(tab, |t| {
+            if t.claude_session.as_ref() == Some(&session) {
+                t.tally = tally;
+            }
+        })
+        .ok()?;
+        Some(turns)
     }
 
     fn record_status(&self, tab: &str, event: &AgentEvent) {
@@ -1110,7 +1165,11 @@ impl Machine {
             return;
         }
         let _ = self.tab(tab, |t| (t.interrupted, t.resume_at) = (false, None));
-        if self.tab(tab, |t| t.claude_session.take()).ok().flatten().is_some() {
+        let ended = self.tab(tab, |t| {
+            t.tally = Tally::default();
+            t.claude_session.take()
+        });
+        if ended.ok().flatten().is_some() {
             self.save_sessions();
         }
     }

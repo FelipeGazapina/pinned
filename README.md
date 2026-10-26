@@ -104,6 +104,14 @@ edits, Plan and Auto. The branch under the prompt (⌘⇧G) switches or creates 
 is between turns, and the Git button in the header asks Claude to commit, push or open a pull
 request, whichever the branch needs.
 
+Each thread shows how long Claude worked on it and what it cost, such as `1h 12m · $3.42`, on its
+row in the sidebar, in the row's tooltip and in the header. The time adds up Claude's turns, not
+the time the thread sat open, and counts up while a turn runs. The cost is Claude Code's own
+estimate at API prices, subagents included, summed over every time the session was resumed.
+Claude Code saves that total only from time to time, so it can trail a session that is still
+running. Threads started from Claude Desktop or the SDK log no turn times, so they show the cost
+alone.
+
 ⌘K opens the command palette: new threads, find in the thread, copy the thread ID, settings and
 the other actions, then your recent threads. Type to search actions, projects, settings and every
 thread; start with `>` for actions only. ⌘[ and ⌘] go back and forward through the threads and

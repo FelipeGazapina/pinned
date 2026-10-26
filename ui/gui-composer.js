@@ -2404,7 +2404,7 @@ function toggleDetails(open = detailsCard.hidden) {
 }
 detailsButton.onclick = () => toggleDetails();
 onGuiKey("b", () => toggleDetails(), { shift: true });
-window.addEventListener("mousedown", (e) => !detailsCard.hidden && !e.target.closest("#details-card, #toggle-details, #header-menu, #composer-menu, #panel-menu, #composer-dialog") && toggleDetails(false), true);
+window.addEventListener("mousedown", (e) => !detailsCard.hidden && !e.target.closest("#details-card, #toggle-details, #head-more, #header-menu, #composer-menu, #panel-menu, #composer-dialog") && toggleDetails(false), true);
 window.addEventListener("keydown", (e) => e.key === "Escape" && !detailsCard.hidden && headerMenu.hidden && composerSheet.hidden && (toggleDetails(false), e.stopPropagation()), true);
 function renderDetails(tab) {
   if (detailsCard.hidden || !tab) return;

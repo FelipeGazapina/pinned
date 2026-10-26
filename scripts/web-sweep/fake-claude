@@ -42,9 +42,19 @@ function run(command, input) {
     execFileSync("/bin/sh", ["-c", command], { input: JSON.stringify(input), stdio: ["pipe", "ignore", "ignore"] });
   } catch {}
 }
+// Each turn costs $0.42, and claude logs the turn's length and its running cost after the Stop hook returns.
+const started = Date.now();
+let turnStart = started;
+let turnsDone = 0;
 const hook = (event, extra = {}) => {
+  if (event === "UserPromptSubmit") turnStart = Date.now();
   const command = settings.hooks?.[event]?.[0]?.hooks?.[0]?.command;
   if (command) run(command, { session_id: session, cwd: process.cwd(), ...extra });
+  if (event === "Stop") {
+    turnsDone++;
+    record({ type: "system", subtype: "turn_duration", durationMs: Date.now() - turnStart });
+    record({ type: "cost-state", startTime: started, totalCostUSD: turnsDone * 0.42, hasUnknownModelCost: false });
+  }
 };
 const transcript = path.join(process.env.HOME, ".claude", "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${session}.jsonl`);
 fs.mkdirSync(path.dirname(transcript), { recursive: true });

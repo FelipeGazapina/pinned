@@ -197,6 +197,19 @@ function markThreadSeen(tab) {
 }
 
 const durationLabel = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h ${Math.floor(s / 60) % 60}m`);
+/** The thread's active time and cost, as `1h 12m · $3.42`. A running turn counts until its end reports the exact time. */
+function statsLabel(tab) {
+  const stats = tab?.view.stats;
+  if (!stats) return "";
+  const running = statusOf(tab) === "working" && tab.view.updated ? Math.max(0, nowS() - tab.view.updated) : 0;
+  const active = stats.active_ms == null ? "" : durationLabel(stats.active_ms / 1000 + running);
+  const cost = stats.cost_usd == null ? "" : stats.cost_usd < 0.01 ? "<$0.01" : `$${stats.cost_usd.toFixed(2)}`;
+  return [active, cost].filter(Boolean).join(" · ");
+}
+function statsHtml(tab) {
+  const label = statsLabel(tab);
+  return label ? `<span class="stats" data-stats="${esc(tab.key)}">${esc(label)}</span>` : "";
+}
 function statusSlot(tab) {
   const phase = phaseOf(tab);
   if (phase === "asking") return { icon: "shield-question", text: "Approval", tone: "warning" };
@@ -389,7 +402,7 @@ function cardRow(tab) {
   const acts = `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${MOD_LABEL}⇧S)">${icon("check")}Settle</span></span>`;
   row.innerHTML = `<span class="l1">${draft ? `<span class="draft-pen" role="img" title="Unsent draft" aria-label="Unsent draft">${icon("square-pen")}</span>` : ""}${projectIcon(projectName(tab), tab)}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>
     <span class="l2">${titleHtml(tab)}</span>
-    <span class="l3">${where}${prBadge(tab)}<span class="right">${remote}<span class="provider">${icon("claude")}</span></span></span>`;
+    <span class="l3">${where}${prBadge(tab)}<span class="right">${statsHtml(tab)}${remote}<span class="provider">${icon("claude")}</span></span></span>`;
   return row;
 }
 
@@ -422,6 +435,7 @@ function rowCardHtml(tab) {
     ${line(icon("monitor"), esc(machineName(tab.machine)))}
     ${ws?.branch ? line(icon("git-branch"), middle(ws.branch, 30), "branch") : ""}
     ${line(icon("claude"), esc(modelName(tab)))}
+    ${statsLabel(tab) ? line(icon("clock"), statsHtml(tab), "stats") : ""}
     ${failed ? line(icon("circle-alert"), tab.view.resume_at ? "Usage limit reached" : "Error occurred", tab.view.resume_at ? "warning" : "error") : ""}
   </div>${prs.length ? `<ul class="card-foot">${prs.map((p) => prItem(tab, p, false)).join("")}</ul>` : ""}`;
 }
@@ -510,6 +524,10 @@ function scheduleWake() {
 
 function tickDurations() {
   for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, nowS() - el.dataset.since)) : "";
+  for (const el of document.querySelectorAll("[data-stats]")) {
+    const text = statsLabel(tabByKey(el.dataset.stats));
+    if (el.textContent !== text) el.textContent = text;
+  }
 }
 setInterval(() => guiOn() && tickDurations(), 1000);
 
@@ -1473,7 +1491,7 @@ sidebarRail.ondblclick = () => save("gui-sidebar-width", String(setSidebarWidth(
 /** The header's project crumb opens a new thread there; a double-click on the title renames it. */
 function crumbHtml(tab) {
   const name = projectName(tab);
-  return `<button class="project" data-new-here title="New thread in ${esc(name)}">${projectIcon(name, tab)}<span>${esc(name)}</span></button><span class="sep">/</span><span class="title" title="${esc(threadTitle(tab))}">${esc(threadTitle(tab))}</span>`;
+  return `<button class="project" data-new-here title="New thread in ${esc(name)}">${projectIcon(name, tab)}<span>${esc(name)}</span></button><span class="sep">/</span><span class="title" title="${esc(threadTitle(tab))}">${esc(threadTitle(tab))}</span>${statsHtml(tab)}`;
 }
 const crumbEl = document.querySelector("#chat-head .crumb");
 crumbEl.addEventListener("click", (e) => e.target.closest("[data-new-here]") && newThreadIn(active));
