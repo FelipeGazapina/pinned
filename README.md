@@ -25,9 +25,10 @@ xattr -dr com.apple.quarantine /Applications/pinned.app
 
 - pinned starts in the project you opened most recently. Click 📁 to start `claude` in another folder.
 - Drag the header to move the panel. Drag the bottom-right corner to resize it.
-- Click `–` to shrink it to a pill. The pill shows what the agent is doing: working, done, or
-  needs you. It flashes when the agent finishes or asks for permission. Click the pill to open
-  the panel again.
+- Click `–` to shrink it to a pill. The pill lists your active threads, leaving out settled and
+  snoozed ones, and shows what each agent is doing: working, done, or needs you. Swipe, scroll
+  or drag the row to move between threads. The pill flashes when an agent finishes or asks for
+  permission. Click a thread to open the panel on it.
 - The header shows how much of your Claude subscription you have used, for example
   `5h 23%  7d 41%`. Each window has a thin bar: blue below 70%, amber from 70%, red from 90%.
   Hover over it to see the exact figures and when each window resets.

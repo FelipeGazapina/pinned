@@ -118,17 +118,11 @@ body[data-tabs="left"] .tab .resize, body[data-tabs="right"] .tab .resize { disp
 #pill[data-mode="cards"] { border-radius: 10px; }
 #pill .handle { padding: 0 6px 0 10px; color: var(--muted); cursor: grab; height: 100%;
   display: flex; align-items: center; }
-#carousel { flex: 1; min-width: 0; height: 100%; overflow: hidden;
+#carousel { flex: 1; min-width: 0; height: 100%; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
   mask-image: linear-gradient(90deg, transparent, #000 12px, #000 calc(100% - 12px), transparent); }
-#track { display: flex; width: max-content; height: 100%;
-  animation: marquee var(--period, 0s) linear infinite; }
-#carousel:hover #track { animation-play-state: paused; }
-@keyframes marquee { to { transform: translateX(calc(-1 * var(--set-width, 0px))); } }
-@media (prefers-reduced-motion: reduce) {
-  #track { animation: none; }
-  #carousel { overflow-x: auto; scrollbar-width: none; }
-}
-.set { display: flex; align-items: center; gap: var(--item-gap); padding-right: var(--item-gap); height: 100%; }
+#carousel::-webkit-scrollbar { display: none; }
+#track { display: flex; align-items: center; gap: var(--item-gap); width: max-content; height: 100%; padding: 0 12px 0 4px; }
+#track .none { color: var(--muted); }
 #pill { --item-gap: 16px; }
 #pill[data-mode="cards"] { --item-gap: 8px; }
 .item { flex: none; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
