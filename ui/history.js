@@ -34,6 +34,8 @@ async function showProjectsPage() {
   const [projects, accounts] = projectsMachine
     ? await Promise.all([callOn(projectsMachine, { cmd: "list_projects" }).catch(() => []), accountsOf(projectsMachine).catch(() => [])])
     : [[], []];
+  // Asking every account's CLI takes a while, and the user may have moved to another page meanwhile.
+  if (page !== "projects") return;
   settingsPage.innerHTML = `<h2>Projects</h2>
     ${machineChipsHtml(projectsMachine, "projects-machine")}
     <p>Pick a project to see what its sessions changed, turn by turn${accounts.length ? ", or the account its sessions run under" : ""}.</p>

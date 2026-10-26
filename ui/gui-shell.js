@@ -659,11 +659,18 @@ const PACE = {
   on: ["gauge", "On pace with the window"],
   under: ["trending-down", "Under pace: headroom left for the rest of the window"],
 };
+/** One section per Claude Code account that reports its subscription limits, on the selected machines. */
 function limitsHtml() {
   const now = Date.now() / 1000;
   const sources = usageState.machine ? [usageState.machine] : [...machines.keys()];
-  const windows = sources.map((m) => machines.get(m)?.usage).find((u) => LIMIT_WINDOWS.some(([k]) => u?.[k]?.resets_at > now));
-  if (!windows) return `<p class="muted">No provider on the selected environments reports subscription limits.</p>`;
+  const reported = sources
+    .flatMap((m) => Object.entries(machines.get(m)?.usage ?? {}).map(([account, windows]) => ({ name: accountOf(m, account)?.name ?? (account === DEFAULT_ACCOUNT ? "Claude Code" : account), windows })))
+    .filter(({ windows }) => LIMIT_WINDOWS.some(([k]) => windows?.[k]?.resets_at > now));
+  if (!reported.length) return `<p class="muted">No provider on the selected environments reports subscription limits.</p>`;
+  return reported.map(({ name, windows }) => accountLimitsHtml(name, windows, now)).join("");
+}
+
+function accountLimitsHtml(name, windows, now) {
   const cards = LIMIT_WINDOWS.filter(([k]) => windows[k]?.resets_at > now).map(([k, label, length]) => {
     const w = windows[k];
     const remaining = Math.round(100 - w.used_percentage);
@@ -680,7 +687,7 @@ function limitsHtml() {
         <span class="tick" style="left:${at}"></span>
         <span class="inside"><b>${remaining}%</b><span class="chip">${resetsInText(w.resets_at, now).replace("resets in ", "↻ ")}</span></span></div></div>`;
   });
-  return `<section class="limits"><h2>${icon("claude")}Claude Code</h2>${cards.join("")}</section>`;
+  return `<section class="limits"><h2>${icon("claude")}${esc(name)}</h2>${cards.join("")}</section>`;
 }
 
 /** Fritsch-Carlson monotone cubic through `points`, as the chart's curveMonotoneX draws it. */

@@ -5236,7 +5236,7 @@ async function sweep(profileName) {
   await step("Accounts: a usage limit offers Continue under Spare, which resumes the thread there", async () => {
     const machine = await page.evaluate(() => [...machines.keys()].find((k) => machines.get(k).view.online && machines.get(k).view.name === "sweep-node"));
     spareTab = await page.evaluate(async ([m, p]) => (await openTab(m, p)).key, [machine, path.join(HOME, "work/alpha")]);
-    await waitFor("claude's session", () => page.evaluate(() => !!active?.view.session), 15000);
+    await waitFor("claude running", () => page.evaluate((k) => active?.key === k && !!active.view.running, spareTab), 15000);
     await page.evaluate(() => callOn(active.machine, { cmd: "prompt", tab: active.view.id, text: "/limit" }));
     await page.waitForSelector("#limit-note:not([hidden]) [data-switch-account=spare]", { timeout: 15000 });
     const note = await text("#limit-note");
@@ -5254,24 +5254,29 @@ async function sweep(profileName) {
     return note;
   });
 
+  const accountsInApp = async () => {
+    await showSidebar();
+    await tapOrClick("#gui-settings");
+    await tapOrClick('#settings-nav [data-page="accounts"]');
+  };
   await step("Accounts: Remove waits for the thread to leave Spare, which its row menu moves back", async () => {
-    await settingsPage("accounts");
+    await accountsInApp();
     await page.waitForSelector('#account-list .card[data-account="spare"]', { timeout: 15000 });
     await action("remove-account", await page.locator('#settings-page [data-action="remove-account"]').count() - 1);
     await action("confirm-remove-account");
     await waitFor("the refusal", async () => /close the tabs that run under spare/.test(await text("#account-list .error")));
     const refused = await text("#account-list .error");
-    await closeSettings();
+    await tapOrClick("#settings-back");
     await rowMenu(rowSel(spareTab));
     await menuPick("Move to account");
     await menuPick("Move to Claude Code");
     await waitFor("the thread under the built-in account", () => page.evaluate((k) => tabByKey(k)?.view.account === "claude", spareTab), 15000);
-    await settingsPage("accounts");
+    await accountsInApp();
     await page.waitForSelector('#account-list .card[data-account="spare"]', { timeout: 15000 });
     await action("remove-account", await page.locator('#settings-page [data-action="remove-account"]').count() - 1);
     await action("confirm-remove-account");
     await page.waitForSelector('#account-list .card[data-account="spare"]', { state: "detached" });
-    await closeSettings();
+    await tapOrClick("#settings-back");
     await page.evaluate((k) => closeTab(tabByKey(k)), spareTab);
     await showSidebar();
     await tapOrClick("#mode-terminal");
