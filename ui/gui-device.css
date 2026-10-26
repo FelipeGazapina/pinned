@@ -6,6 +6,7 @@
 .device-panel .switch.on::after, #device-setup .switch.on::after { transform: translateX(12px); background: var(--g-on-primary); }
 
 #device-setup { position: fixed; inset: 0; z-index: 66; display: grid; place-items: center; background: rgb(var(--g-shadow-rgb) / 0.45); }
+#device-setup[hidden] { display: none; }
 #device-setup .setup-card { width: min(480px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; display: flex; flex-direction: column; border-radius: 16px; background: var(--g-overlay); border: 1px solid var(--g-border); color: var(--g-fg); font-size: 13px; box-shadow: 0 24px 48px -16px var(--g-shadow); }
 #device-setup header { padding: 20px 20px 12px; }
 #device-setup h2 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
