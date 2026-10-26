@@ -245,7 +245,7 @@ mod tests {
                     read(7),
                     result(7),
                     Item::Thinking { id: "b:0".into(), at: "t8".into(), text: "**Next** the tests.".into() },
-                    Item::Tool { id: "b1".into(), at: "t9".into(), name: "Bash".into(), summary: "Run the tests".into(), detail: "cargo test".into(), args: vec![] },
+                    Item::Tool { id: "b1".into(), at: "t9".into(), name: "Bash".into(), summary: "cargo test".into(), detail: "cargo test".into(), args: vec![] },
                 ],
             }
         );
@@ -284,7 +284,7 @@ mod tests {
             updated: "t5".into(),
             steps: vec![Item::Text { id: "x:0".into(), at: "t5".into(), text: "Mapped.".into() }],
         };
-        let grep = Item::Tool { id: "g1".into(), at: "t6".into(), name: "Grep".into(), summary: "TODO".into(), detail: "".into(), args: vec![] };
+        let grep = Item::Tool { id: "g1".into(), at: "t6".into(), name: "Grep".into(), summary: "TODO".into(), detail: "".into(), args: vec![("pattern".into(), "TODO".into())] };
         let checking = Subagent {
             id: "a2".into(),
             tool: "toolu_9".into(),

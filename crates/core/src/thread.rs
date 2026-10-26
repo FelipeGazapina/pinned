@@ -764,8 +764,8 @@ mod tests {
         assert_eq!(
             items,
             vec![
-                Item::Tool { id: "x1".into(), at: "t1".into(), name: "Artifact".into(), summary: "/tmp/payouts.html".into(), detail: "Follows an invoice to the bank.".into(), args: vec![] },
-                Item::Tool { id: "x2".into(), at: "t2".into(), name: "Artifact".into(), summary: "quickstart".into(), detail: "".into(), args: vec![] },
+                Item::Tool { id: "x1".into(), at: "t1".into(), name: "Artifact".into(), summary: "/tmp/payouts.html".into(), detail: "Follows an invoice to the bank.".into(), args: vec![("file_path".into(), "/tmp/payouts.html".into()), ("icon".into(), "flow".into()), ("description".into(), "Follows an invoice to the bank.".into())] },
+                Item::Tool { id: "x2".into(), at: "t2".into(), name: "Artifact".into(), summary: "quickstart".into(), detail: "".into(), args: vec![("action".into(), "quickstart".into()), ("intent".into(), "other".into())] },
             ]
         );
     }
