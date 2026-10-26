@@ -66,8 +66,9 @@ if (cmd === "pr" && sub === "view") {
     updatedAt: at(30),
     mergedAt: state === "merged" ? endedAt : null,
     closedAt: state === "merged" || state === "closed" ? endedAt : null,
-    headRefName: `sweep/notes-${number}`,
-    baseRefName: "main",
+    // #43 builds on #42's branch, as the stack `pr list --base` answers.
+    headRefName: number === 43 ? "sweep/more" : `sweep/notes-${number}`,
+    baseRefName: number === 43 ? "sweep/notes-42" : "main",
     additions: 2,
     deletions: 0,
     changedFiles: 1,

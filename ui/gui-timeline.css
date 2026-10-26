@@ -257,9 +257,6 @@ svg.pierre { color-scheme: var(--g-scheme); }
 .tool > summary .inline { flex: none; font-size: 14px; font-weight: 500; color: var(--g-fg); }
 .tool > summary .inline:hover { text-decoration: underline; text-underline-offset: 2px; }
 body[data-subagent] #composer { display: none; }
-#chat-head .crumb .sub-back { display: inline-grid; place-items: center; width: 28px; height: 28px; margin-right: -4px; border-radius: 8px; color: var(--g-muted); flex: none; }
-#chat-head .crumb .sub-back:hover { background: var(--g-accent); color: var(--g-fg); }
-#chat-head .crumb .sub-back .i, #chat-head .crumb .sub-icon { width: 16px; height: 16px; flex: none; color: var(--g-muted); }
 
 #minimap { display: none; position: absolute; top: var(--topbar); bottom: 0; left: 0; z-index: 40; width: 72px; pointer-events: none; opacity: 0; transition: opacity 0.15s; }
 @media (pointer: fine) { #minimap:not([hidden]) { display: block; } }

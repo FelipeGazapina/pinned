@@ -1850,10 +1850,15 @@ function renderGitAction(tab) {
     return renderDetails(tab);
   }
   const quick = quickAction(t.git, t.workspace, !!prOf(tab));
-  main.disabled = !!quick.disabled;
-  main.dataset.action = quick.action ?? "";
-  main.title = quick.hint ?? quick.label;
-  main.innerHTML = `${icon(GIT_ICONS[quick.action] ?? "git-commit")}<span>${esc(quick.label)}</span>`;
+  // As T3 Code's: a disabled quick action says why in a popover under it.
+  main.disabled = !!quick.disabled && !quick.hint;
+  if (quick.disabled) main.setAttribute("aria-disabled", "true");
+  else main.removeAttribute("aria-disabled");
+  if (quick.disabled && quick.hint) Object.assign(main.dataset, { tip: quick.hint, tipSide: "bottom", tipDelay: "300" });
+  else for (const k of ["tip", "tipSide", "tipDelay"]) delete main.dataset[k];
+  main.dataset.action = quick.disabled ? "" : quick.action ?? "";
+  main.removeAttribute("title");
+  main.innerHTML = `${icon(GIT_ICONS[quick.action] ?? "git-commit")}<span class="label">${esc(quick.label)}</span>`;
   more.hidden = !t.workspace.repo;
   renderDetails(tab);
 }
@@ -2054,17 +2059,20 @@ drawerResize.ondblclick = () => {
   if (active) refit(active);
 };
 
-/** The header title opens the thread's menu half a second after a click, so a double-click can
- * rename it instead, as T3 Code's does; its chevron shows on hover. */
+/** The header title opens the thread's menu under it, as T3 Code's does. The desktop app's native menu
+ * takes the input while it is up, so there a click waits half a second for a double-click to rename. */
 let titleClick;
 crumbEl.addEventListener("click", (e) => {
-  const title = crumbEl.querySelector(".title");
-  const onTitle = e.target.closest(".title") || (e.target === crumbEl && title && e.clientX > title.getBoundingClientRect().right);
+  const title = e.target.closest("button.title");
   clearTimeout(titleClick);
-  if (!active || !onTitle || e.target.closest("input") || e.detail > 1) return;
-  const at = title.getBoundingClientRect();
+  if (!active || !title || e.detail > 1) return;
   const tab = active;
-  titleClick = setTimeout(() => tab === active && openSideMenu(rowMenuItems(tab), { x: at.left, y: at.bottom + 4 }), narrow(768) ? 0 : 500);
+  const open = () => {
+    const at = title.getBoundingClientRect();
+    if (tab === active && title.isConnected) showMenu(rowMenuItems(tab), { x: at.left, y: at.bottom + 4 });
+  };
+  if (!TAURI?.menu || e.detail === 0 || e.target.closest(".chev")) return open();
+  titleClick = setTimeout(open, 500);
 });
 crumbEl.addEventListener("dblclick", () => clearTimeout(titleClick));
 
@@ -2113,10 +2121,10 @@ function renderScripts(tab) {
   if (scriptsControl.hidden) return;
   const primary = primaryScript(known.scripts);
   const html = primary
-    ? `<button type="button" class="main outline" data-run="${esc(primary.id)}" title="Run ${esc(primary.name)}" aria-label="Run ${esc(primary.name)}">${scriptIcon(primary.icon)}<span class="label">${esc(primary.name)}</span></button><button type="button" class="pick outline" aria-label="Script actions" title="Script actions">${icon("chevron-down")}</button>`
+    ? `<button type="button" class="main outline" data-run="${esc(primary.id)}" data-tip="Run ${esc(primary.name)}" aria-label="Run ${esc(primary.name)}">${scriptIcon(primary.icon)}<span class="label">${esc(primary.name)}</span></button><button type="button" class="pick outline" aria-label="Script actions">${icon("chevron-down")}</button>`
     : known.scripts.length || importable(known).length
-      ? `<button type="button" class="main outline solo" data-scripts-menu aria-label="Project actions" title="Project actions">${icon("wrench")}<span class="label">Actions</span>${icon("chevron-down")}</button>`
-      : `<button type="button" class="main outline solo" data-add-script aria-label="Add action" title="Add action">${icon("plus")}<span class="label">Add action</span></button>`;
+      ? `<button type="button" class="main outline solo" data-scripts-menu aria-label="Project actions">${icon("wrench")}<span class="label">Actions</span>${icon("chevron-down")}</button>`
+      : `<button type="button" class="main outline solo" data-add-script aria-label="Add action" data-tip="Add action">${icon("plus")}<span class="label">Add action</span></button>`;
   if (scriptsControl.dataset.html !== html) {
     scriptsControl.dataset.html = html;
     scriptsControl.innerHTML = html;
@@ -2171,7 +2179,15 @@ function openHeaderMenu(anchor, entries, kind) {
     const b = document.createElement("button");
     b.type = "button";
     b.disabled = !!entry.disabled;
-    if (entry.title) b.title = entry.title;
+    // As T3 Code's: a disabled item says why in a popover at its left, or under it on a touch screen.
+    if (entry.disabled && entry.title) {
+      const why = Object.assign(document.createElement("span"), { className: "why" });
+      Object.assign(why.dataset, { tip: entry.title, tipSide: "left", tipDelay: "300" });
+      why.append(b);
+      if (matchMedia("(pointer: coarse)").matches) why.append(Object.assign(document.createElement("p"), { className: "note", textContent: entry.title }));
+      b.innerHTML = entry.html ?? `${entry.icon ? icon(entry.icon) : ""}<span class="label">${esc(entry.label)}</span>`;
+      return why;
+    }
     b.innerHTML = entry.html ?? `${entry.icon ? icon(entry.icon) : ""}<span class="label">${esc(entry.label)}</span>`;
     b.onclick = (e) => {
       const edit = e.target.closest("[data-edit]");

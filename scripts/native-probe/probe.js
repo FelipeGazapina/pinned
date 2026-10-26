@@ -257,5 +257,43 @@
     return [ok, seen];
   });
 
+  await step("the header title opens the thread's native menu under it, after the double-click wait", async () => {
+    const shown = [];
+    const real = TAURI.menu.Menu.new;
+    TAURI.menu.Menu.new = async (options) => ({ popup: async (at) => shown.push({ items: options.items.length, at: at && { x: at.x, y: at.y }, ms: performance.now() }) });
+    try {
+      renderThread();
+      const title = document.querySelector("#chat-head .crumb button.title");
+      const r = title.getBoundingClientRect();
+      const t0 = performance.now();
+      title.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+      await sleep(250);
+      const early = shown.length;
+      await until(() => shown.length > 0, 2000);
+      const [menu] = shown;
+      const ok = early === 0 && !!menu?.at && Math.round(menu.at.x) === Math.round(r.left) && Math.round(menu.at.y) === Math.round(r.bottom + 4) && menu.ms - t0 >= 450 && document.getElementById("side-menu").hidden;
+      return [ok, { early, menu: menu && { ...menu, ms: Math.round(menu.ms - t0) }, title: { left: r.left, bottom: r.bottom } }];
+    } finally {
+      TAURI.menu.Menu.new = real;
+    }
+  });
+
+  await step("the sidebar's update control sits at the footer's end and checks for a new version", async () => {
+    const b = document.getElementById("side-update");
+    const footer = b.parentElement.getBoundingClientRect();
+    const r = b.getBoundingClientRect();
+    const placed = !b.hidden && Math.round(r.width) === 32 && Math.abs(r.right - (footer.right - 8)) <= 1;
+    const before = { state: b.dataset.state, tip: b.dataset.tip };
+    let checked = before.state !== "idle";
+    if (before.state === "idle") {
+      b.click();
+      const busy = b.dataset.state === "checking" && b.dataset.tip === "Checking for updates…";
+      checked = busy && (await until(() => b.dataset.state !== "checking", 20000));
+    }
+    const after = { state: b.dataset.state, tip: b.dataset.tip };
+    const ok = placed && checked && (after.state === "idle" ? after.tip === "Check for updates" : /^Update .+ ready to download$/.test(after.tip));
+    return [ok, { placed, width: r.width, right: r.right, footerRight: footer.right, before, after }];
+  });
+
   await fetch(`${base}/done`, { method: "POST" });
 })();

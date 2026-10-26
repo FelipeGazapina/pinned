@@ -64,7 +64,7 @@ function closePage() {
   else delete document.body.dataset.page;
 }
 for (const b of document.querySelectorAll("#sidebar footer [data-open-page]")) b.onclick = () => openPage(b.dataset.openPage);
-document.querySelector("#sidebar footer .back").onclick = () => goBack(-1) || closePage();
+document.querySelector("#sidebar footer .back").onclick = () => closePage();
 
 /** Where ⌘[ and ⌘] go: the threads and pages visited, as T3 Code's router history keeps them. */
 const visits = { back: [], forward: [], at: null };
@@ -192,7 +192,7 @@ function paletteProjects() {
     const path = projectOfTab(tab);
     if (!seen.has(`${tab.machine}:${path}`)) seen.set(`${tab.machine}:${path}`, { machine: tab.machine, path, name: path.split(/[\\/]/).filter(Boolean).pop() || "/" });
   }
-  return [...seen.values()];
+  return sortedProjects([...seen.values()], (p) => tabs.filter((t) => t.machine === p.machine && projectOfTab(t) === p.path));
 }
 const projectSub = (p) => [p.machine === LOCAL ? "" : machineName(p.machine), tilde(p.path)].filter(Boolean).join(" · ");
 
@@ -310,6 +310,20 @@ const PALETTE_VIEWS = {
       return group ? [group] : [];
     },
   },
+  "add-project": {
+    placeholder: "Search sources...",
+    groups(query) {
+      const machines = onlineMachines();
+      const machine = machines.includes(palette.addMachine) ? palette.addMachine : machines.includes(active?.machine) ? active.machine : machines[0];
+      return filterGroups([
+        machines.length > 1 && { label: "Environments", items: machines.map((m) => ({ icon: "monitor", title: esc(machineName(m)), trail: m === machine ? icon("check", "chev") : "", terms: [machineName(m)], keep: true, run: () => (palette.addMachine = m) })) },
+        { label: "Sources", items: [
+          onlineMachines().length > 0 && { icon: "folder-git-2", title: "New project", page: "new-project", terms: ["new project", "create empty repository"] },
+          { icon: "folder", title: "Local folder", terms: ["local folder", "open browse directory"], run: () => browseProject(machine) },
+        ].filter(Boolean) },
+      ].filter(Boolean), query);
+    },
+  },
 };
 
 /** T3 Code's newProjectFolderName, which the machine applies too. */
@@ -346,11 +360,12 @@ async function createProject(query) {
   }
 }
 
-function openPalette(view = "root") {
+/** Opens the palette at `mode`: the root, "new-thread-in" or "add-project", whose sources go to `machine`. */
+function openPalette({ mode = "root", machine = null } = {}) {
   closeSideMenu();
-  palette.views = [{ view, query: "" }];
+  palette.views = [{ view: mode, query: "" }];
   palette.hi = 0;
-  Object.assign(palette, { publish: false, newMachine: null });
+  Object.assign(palette, { publish: false, newMachine: null, addMachine: machine });
   paletteEl.hidden = false;
   paletteInput.value = "";
   renderPalette();

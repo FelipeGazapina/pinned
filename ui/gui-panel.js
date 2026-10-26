@@ -192,7 +192,6 @@ onGuiKey("k", () => {
   if (pr) copyText(`#${pr.number}`, "PR number copied");
 }, { shift: true });
 onGuiKey("o", () => openInEditor());
-document.getElementById("pr-chip").onclick = (e) => (e.metaKey || e.ctrlKey ? openOutside(prOf(active).url) : openPr(active, prOf(active).url));
 
 const panelTabs = document.getElementById("panel-tabs");
 const tabStrip = panelTabs.querySelector(".strip");
@@ -2534,7 +2533,7 @@ threadList.addEventListener("click", (e) => {
 }, true);
 document.addEventListener("auxclick", (e) => {
   if (e.button !== 1) return;
-  const pr = e.target.closest?.("[data-pr], #pr-chip, [data-prs-open]");
+  const pr = e.target.closest?.("[data-pr], [data-prs-open]");
   if (!pr || !active) return;
   e.preventDefault();
   openOutside(pr.dataset.pr ?? pr.dataset.prsOpen ?? prOf(active)?.url);
@@ -2741,7 +2740,7 @@ function renderOpenIn(tab) {
   openIn.hidden = !editor;
   if (!editor) return;
   const main = openIn.querySelector(".main");
-  main.title = `Open in ${editor.name} (${IS_MAC ? "⌘" : "Ctrl+"}O)`;
+  main.setAttribute("aria-label", "Open");
   main.querySelector(".label").textContent = "Open";
   main.dataset.editor = editor.id;
 }

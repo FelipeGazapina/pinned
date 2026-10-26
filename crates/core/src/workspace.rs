@@ -65,11 +65,14 @@ pub struct PrStatus {
     pub title: String,
     pub merged_at: Option<String>,
     pub closed_at: Option<String>,
+    /// The branches it merges from and into, which chain a thread's pull requests into a stack.
+    pub head: Option<String>,
+    pub base: Option<String>,
 }
 
 pub fn pr_status(cwd: &Path, pr: &str, path: Option<&str>) -> Result<PrStatus, String> {
     check_pr(pr)?;
-    parse_pr_status(&gh(cwd, path, &["pr", "view", "--json", "state,isDraft,title,mergedAt,closedAt", "--", pr])?)
+    parse_pr_status(&gh(cwd, path, &["pr", "view", "--json", "state,isDraft,title,mergedAt,closedAt,headRefName,baseRefName", "--", pr])?)
 }
 
 fn parse_pr_status(view: &str) -> Result<PrStatus, String> {
@@ -83,6 +86,8 @@ fn parse_pr_status(view: &str) -> Result<PrStatus, String> {
         title: String,
         merged_at: Option<String>,
         closed_at: Option<String>,
+        head_ref_name: Option<String>,
+        base_ref_name: Option<String>,
     }
     let view: View = serde_json::from_str(view).map_err(|e| format!("gh sent a bad answer: {e}"))?;
     let state = match view.state.as_str() {
@@ -91,7 +96,7 @@ fn parse_pr_status(view: &str) -> Result<PrStatus, String> {
         _ if view.is_draft => PrState::Draft,
         _ => PrState::Open,
     };
-    Ok(PrStatus { state, title: view.title, merged_at: view.merged_at, closed_at: view.closed_at })
+    Ok(PrStatus { state, title: view.title, merged_at: view.merged_at, closed_at: view.closed_at, head: view.head_ref_name, base: view.base_ref_name })
 }
 
 /// Checks out the pull request `pr`, a number or URL, in `cwd` with gh.
@@ -597,8 +602,15 @@ mod tests {
         assert_eq!(status(r#"{"state":"OPEN","isDraft":true,"title":"t","mergedAt":null,"closedAt":null}"#).state, PrState::Draft);
         assert_eq!(status(r#"{"state":"CLOSED","isDraft":true,"title":"t","mergedAt":null,"closedAt":"2026-01-02T00:00:00Z"}"#).state, PrState::Closed);
         assert_eq!(
-            status(r#"{"state":"MERGED","isDraft":false,"title":"Add notes","mergedAt":"2026-01-01T10:40:00Z","closedAt":"2026-01-01T10:40:00Z"}"#),
-            PrStatus { state: PrState::Merged, title: "Add notes".into(), merged_at: Some("2026-01-01T10:40:00Z".into()), closed_at: Some("2026-01-01T10:40:00Z".into()) }
+            status(r#"{"state":"MERGED","isDraft":false,"title":"Add notes","mergedAt":"2026-01-01T10:40:00Z","closedAt":"2026-01-01T10:40:00Z","headRefName":"notes","baseRefName":"main"}"#),
+            PrStatus {
+                state: PrState::Merged,
+                title: "Add notes".into(),
+                merged_at: Some("2026-01-01T10:40:00Z".into()),
+                closed_at: Some("2026-01-01T10:40:00Z".into()),
+                head: Some("notes".into()),
+                base: Some("main".into()),
+            }
         );
         assert!(parse_pr_status("not json").unwrap_err().contains("bad answer"));
     }
