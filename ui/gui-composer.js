@@ -746,7 +746,8 @@ async function openBranches(anchor) {
     return;
   }
   threadOf(tab).git = git;
-  const busy = phaseOf(tab) === "working" || !!tab.menu;
+  const delegating = phaseOf(tab) === "delegating";
+  const busy = phaseOf(tab) === "working" || !!tab.menu || delegating;
   const list = () => {
     const needle = search.value.trim();
     const shown = git.refs.filter((r) => r.name.toLowerCase().includes(needle.toLowerCase())).slice(0, 80);
@@ -754,7 +755,7 @@ async function openBranches(anchor) {
     const rows = shown.map((r) => `<button type="button" data-ref="${esc(r.name)}"${r.current || r.worktree || busy ? " disabled" : ""}>${icon("git-branch", "lead")}<span class="label">${esc(r.name)}</span>
       ${r.current ? `<span class="badge">current</span>` : r.worktree ? `<span class="badge">worktree</span>` : r.remote ? `<span class="badge">remote</span>` : r.name === git.default ? `<span class="badge">default</span>` : ""}</button>`);
     if (fresh) rows.push(`<button type="button" data-create="${esc(needle)}"${busy ? " disabled" : ""}>${icon("plus", "lead")}<span class="label">Create new branch "${esc(needle)}"</span></button>`);
-    composerMenu.querySelector(".refs").innerHTML = (busy ? `<p class="none">claude is working. Switch branches when the turn ends.</p>` : "") + (rows.join("") || `<p class="none">No branches found.</p>`);
+    composerMenu.querySelector(".refs").innerHTML = (busy ? `<p class="none">${delegating ? "claude's agents are working. Switch branches when they finish." : "claude is working. Switch branches when the turn ends."}</p>` : "") + (rows.join("") || `<p class="none">No branches found.</p>`);
   };
   list();
   search.oninput = list;

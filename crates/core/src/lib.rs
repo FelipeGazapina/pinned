@@ -19,6 +19,7 @@ pub mod reminders;
 pub mod sessions;
 pub mod slack;
 pub mod stats;
+pub mod subagents;
 pub mod sync;
 pub mod thread;
 pub mod uploads;

@@ -5,7 +5,7 @@ use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
 use crate::workspace::{DiffScope, PrAction};
 use crate::stats::ThreadStats;
-use crate::{sync, thread};
+use crate::{subagents, sync, thread};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -201,6 +201,8 @@ pub struct ThreadPage {
     pub items: Vec<thread::Item>,
     pub next: u64,
     pub reset: bool,
+    /// Every agent the session spawned, whole on each page. A machine on an older pinned leaves it out.
+    pub agents: Vec<subagents::Subagent>,
 }
 
 /// A connector's session, the same on any machine.

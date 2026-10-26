@@ -425,7 +425,7 @@ function turnHtml(tab, turn, change, live) {
         <div class="steps">${steps}</div></details>`;
   }
   const notes = turn.notes.filter((n) => !(fold && !live && turn.interrupted && n.text === "Interrupted."));
-  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t) : ""}${notes.map((n) => `<p class="note">${esc(n.text)}</p>`).join("")}${fold}
+  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t) : ""}${notes.map((n) => `<p class="note">${esc(n.text)}</p>`).join("")}${fold}${agentCardsHtml(tab, turn)}
     ${shown.map((s) => shownHtml(s, cwd, t, live ? null : turn.answer)).join("")}
     ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}
     ${change ? changesHtml(change, t.open) : ""}</section>`;
@@ -452,13 +452,13 @@ function renderThread() {
 
   const working = turnLive(tab);
   const limit = finder.open ? Infinity : t.limit ?? TURNS_SHOWN;
-  const key = JSON.stringify([tab.key, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit]);
+  const key = JSON.stringify([tab.key, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit, t.agentsKey, phaseOf(tab)]);
   if (threadView.dataset.key === key) return renderComposer(tab);
   const turns = turnsOf(t.items);
   const changes = changesByTurn(t.history, turns);
   const first = Math.max(0, turns.length - limit);
   const body = turns.length
-    ? `${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}${turns.slice(first).map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + i === turns.length - 1)).join("")}`
+    ? `${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}${turns.slice(first).map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + i === turns.length - 1)).join("")}${agentsFooterHtml(tab)}`
     : `<div class="blank"><p>${t.loaded ? "Send a message to start the conversation." : t.error ? `This thread couldn't be read: ${esc(t.error)}` : "Loading…"}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
   const stick = threadView.dataset.tab !== tab.key || threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
   const liveRows = threadView.querySelector(".work.live .group[open] > .rows");
