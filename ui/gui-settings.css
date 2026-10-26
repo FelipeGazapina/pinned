@@ -1,0 +1,111 @@
+/* Settings in the app view: a page over the whole window, in the sidebar's and thread's look. The
+   workspace only turns invisible underneath, so its terminals keep their size and the thread its scroll. */
+body[data-mode="gui"][data-page="settings"] #workspace { visibility: hidden; }
+body[data-mode="gui"] #settings { position: absolute; inset: 0; color-scheme: var(--g-scheme); font-size: 13px; color: var(--g-text);
+  --fg: var(--g-fg); --muted: var(--g-muted); --border: var(--g-input); --working: var(--g-primary); --done: var(--g-success); }
+
+body[data-mode="gui"] #settings-nav { width: var(--sidebar-width); gap: 0; padding: 0 8px 8px; font-size: 14px; color: var(--g-side-fg);
+  background-color: var(--g-side); background-image: var(--grain); background-size: 256px 256px; border-right: 1px solid var(--g-input); }
+body[data-mode="gui"] #settings-nav .head { height: var(--topbar); flex: none; display: flex; align-items: center; gap: 12px; margin: 0 -8px 4px; padding: 0 12px;
+  cursor: grab; user-select: none; background: linear-gradient(180deg, rgb(var(--g-primary-rgb) / 0.16), transparent 80%); }
+body[data-mode="gui"] #settings-nav .head b { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+body[data-mode="gui"] #settings-nav .icon { padding: 0; width: 28px; height: 28px; border-radius: 8px; background: none; color: var(--g-side-muted); }
+body[data-mode="gui"] #settings-nav .icon:hover { background: var(--g-row-hover); color: var(--g-side-fg); }
+body[data-mode="gui"] #settings-nav .links { display: flex; flex-direction: column; gap: 1px; }
+body[data-mode="gui"] #settings-nav .links button { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: 8px;
+  color: var(--g-side-muted); font-weight: 500; }
+body[data-mode="gui"] #settings-nav .links button:hover { background: var(--g-row-hover); color: var(--g-side-fg); }
+body[data-mode="gui"] #settings-nav .links button.active { background: var(--g-row-active); color: var(--g-fg); }
+body[data-mode="gui"] #settings-nav .i { display: block; color: rgb(var(--g-side-muted-rgb) / 0.7); }
+body[data-mode="gui"] #settings-nav .active .i, body[data-mode="gui"] #settings-nav .icon .i { color: inherit; }
+
+/* One centered column, like the thread's lane. */
+body[data-mode="gui"] #settings-page { --top: 40px; padding: var(--top) 40px 96px; }
+body[data-mode="gui"] #settings-page > * { max-width: 720px; margin-inline: auto; }
+body[data-mode="gui"] #settings-page h2 { margin-bottom: 6px; font-size: 20px; font-weight: 600; letter-spacing: -0.02em; color: var(--g-fg); }
+body[data-mode="gui"] #settings-page h2 ~ h2 { margin-top: 32px; font-size: 15px; letter-spacing: -0.01em; }
+body[data-mode="gui"] #settings-page p { line-height: 1.55; }
+body[data-mode="gui"] #settings :is(.hint, .meta) { color: var(--g-muted); }
+body[data-mode="gui"] #settings code { padding: 1px 4px; border-radius: 4px; background: var(--g-hover); font: 12px var(--g-mono); color: var(--g-fg); }
+body[data-mode="gui"] #settings b { color: var(--g-fg); font-weight: 600; }
+body[data-mode="gui"] #settings .error { color: var(--g-error); }
+
+body[data-mode="gui"] #settings :is(input:not([type="checkbox"]), select, textarea) { min-height: 32px; padding: 6px 10px; border: 1px solid var(--g-input);
+  border-radius: 8px; background-color: rgb(var(--g-ink-rgb) / 0.03); color: var(--g-fg); font-size: 13px; transition: border-color 0.12s, box-shadow 0.12s; }
+body[data-mode="gui"] #settings :is(input, select, textarea)::placeholder { color: rgb(var(--g-muted-rgb) / 0.7); }
+body[data-mode="gui"] #settings :is(input, select, textarea):hover { border-color: rgb(var(--g-ink-rgb) / 0.14); }
+body[data-mode="gui"] #settings :is(input, select, textarea):focus { border-color: rgb(var(--g-primary-rgb) / 0.8); box-shadow: 0 0 0 3px rgb(var(--g-primary-rgb) / 0.2); }
+body[data-mode="gui"] #settings select { appearance: none; -webkit-appearance: none; padding-right: 32px; cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23818181' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 15 5 5 5-5'/%3E%3Cpath d='m7 9 5-5 5 5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center; background-size: 14px; }
+body[data-mode="gui"] #settings select option { background: var(--g-raised); color: var(--g-fg); }
+body[data-mode="gui"] #settings textarea { font: 12px/1.55 var(--g-mono); }
+body[data-mode="gui"] #settings input[type="checkbox"] { accent-color: var(--g-primary); }
+
+body[data-mode="gui"] #settings :is(button.primary, button.secondary) { height: 32px; display: inline-flex; align-items: center; justify-content: center;
+  gap: 6px; padding: 0 14px; border-radius: 8px; font-weight: 500; }
+body[data-mode="gui"] #settings button.primary { background: var(--g-primary); color: var(--g-on-primary); box-shadow: inset 0 1px rgb(255 255 255 / 0.16); }
+body[data-mode="gui"] #settings button.primary:hover:not(:disabled) { background: var(--g-primary-hover); }
+body[data-mode="gui"] #settings button.primary:disabled { background: var(--g-input); color: var(--g-muted); box-shadow: none; }
+body[data-mode="gui"] #settings button.secondary { border: 1px solid var(--g-input); background: rgb(var(--g-ink-rgb) / 0.03); color: var(--g-fg); }
+body[data-mode="gui"] #settings button.secondary:hover { background: var(--g-input); }
+body[data-mode="gui"] #settings button.danger:hover { background: var(--g-error); border-color: var(--g-error); color: var(--g-on-primary); }
+body[data-mode="gui"] #settings .confirm { border-color: rgb(var(--g-error-rgb) / 0.5); border-radius: 12px; background: rgb(var(--g-error-rgb) / 0.06); }
+body[data-mode="gui"] #settings .confirm button.danger { background: var(--g-error); border-color: var(--g-error); }
+
+/* Cards, list rows and the workflow canvas share one surface. */
+body[data-mode="gui"] #settings :is(.card, .flow-card, .template, .machine-row) { border: 1px solid var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.02); }
+body[data-mode="gui"] #settings .card { margin-block: 16px; padding: 16px; }
+body[data-mode="gui"] #settings :is(.flow-card, .template) { padding: 14px 16px; }
+body[data-mode="gui"] #settings :is(.flow-card, .template):hover { border-color: rgb(var(--g-ink-rgb) / 0.14); background: rgb(var(--g-ink-rgb) / 0.035); }
+body[data-mode="gui"] #settings .new-card { padding: 14px; border-color: rgb(var(--g-ink-rgb) / 0.1); border-radius: 12px; color: var(--g-muted); }
+body[data-mode="gui"] #settings .new-card:hover { border-color: rgb(var(--g-primary-rgb) / 0.7); color: var(--g-fg); }
+body[data-mode="gui"] #settings .card-head { gap: 12px; margin-bottom: 12px; }
+body[data-mode="gui"] #settings .card-head b { font-size: 14px; }
+body[data-mode="gui"] #settings .logo { width: 32px; height: 32px; border-radius: 8px; }
+body[data-mode="gui"] #settings .badge { padding: 2px 10px; border-color: var(--g-input); font-weight: 500; }
+body[data-mode="gui"] #settings .badge[data-on="true"] { border-color: color-mix(in srgb, var(--g-success) 35%, transparent); background: color-mix(in srgb, var(--g-success) 10%, transparent); color: var(--g-success); }
+body[data-mode="gui"] #settings .steps { padding-left: 20px; line-height: 1.6; }
+body[data-mode="gui"] #settings .steps li { margin-bottom: 12px; }
+body[data-mode="gui"] #settings .row { gap: 8px; margin-top: 8px; }
+body[data-mode="gui"] #settings .machine-row { padding: 12px 14px; }
+body[data-mode="gui"] #settings .chip { height: 28px; padding: 0 12px; border-color: var(--g-input); border-radius: 999px; }
+body[data-mode="gui"] #settings .chip.active { border-color: rgb(var(--g-primary-rgb) / 0.7); background: rgb(var(--g-primary-rgb) / 0.12); }
+body[data-mode="gui"] #settings-page .project { padding: 8px 10px; border-radius: 8px; }
+body[data-mode="gui"] #settings-page .project:hover { background: var(--g-row-hover); }
+
+/* General's appearance choices read as one settings list: what it is on the left, its value on the right. */
+body[data-mode="gui"] #settings-page .look { display: grid; grid-template-columns: minmax(0, 1fr) 200px; column-gap: 24px; align-items: center;
+  margin-block: 0; padding: 14px 16px; border: 1px solid var(--g-border); border-top: 0; background: rgb(var(--g-ink-rgb) / 0.02); }
+body[data-mode="gui"] #settings-page .looks-title + .look { border-top: 1px solid var(--g-border); border-radius: 12px 12px 0 0; }
+body[data-mode="gui"] #settings-page .look:last-child { border-radius: 0 0 12px 12px; }
+body[data-mode="gui"] #settings-page .look label { color: var(--g-fg); }
+body[data-mode="gui"] #settings-page .look .meta { grid-column: 1; margin: 2px 0 0; }
+body[data-mode="gui"] #settings-page .look select { grid-column: 2; grid-row: 1 / 3; }
+
+body[data-mode="gui"] #settings .editor-bar { top: calc(-1 * var(--top)); margin-top: calc(-1 * var(--top)); margin-bottom: 16px; padding: 16px 0 12px;
+  background: var(--g-canvas); border-color: var(--g-border); }
+body[data-mode="gui"] #settings .editor-bar input.title { font-size: 15px; }
+body[data-mode="gui"] #settings .flow { padding: 20px 16px; border-color: var(--g-border); border-radius: 12px;
+  background: radial-gradient(circle, rgb(var(--g-ink-rgb) / 0.07) 1px, transparent 1.3px) 0 0 / 16px 16px, rgb(var(--g-ink-rgb) / 0.015); }
+body[data-mode="gui"] #settings .node { padding: 10px 12px; border-color: var(--g-input); border-radius: 12px; background: var(--g-overlay); }
+body[data-mode="gui"] #settings .node.trigger { border-radius: 24px 12px 12px 24px; }
+body[data-mode="gui"] #settings .node:hover { border-color: rgb(var(--g-ink-rgb) / 0.2); }
+body[data-mode="gui"] #settings .node.ghost { background: rgb(var(--g-canvas-rgb) / 0.6); border-color: rgb(var(--g-ink-rgb) / 0.1); }
+body[data-mode="gui"] #settings .step.open .node { border-color: rgb(var(--g-primary-rgb) / 0.8); }
+body[data-mode="gui"] #settings .details { gap: 12px; padding: 14px; border-color: rgb(var(--g-primary-rgb) / 0.8); border-radius: 0 0 12px 12px; background: var(--g-raised); }
+body[data-mode="gui"] #settings .details label { gap: 6px; color: var(--g-muted); }
+body[data-mode="gui"] #settings .details label.toggle { color: var(--g-fg); }
+body[data-mode="gui"] #settings .edge { border-color: rgb(var(--g-ink-rgb) / 0.12); }
+body[data-mode="gui"] #settings .edge span { border-color: var(--g-input); background: var(--g-canvas); color: var(--g-muted); }
+
+@media (max-width: 600px) {
+  body[data-mode="gui"] #settings-nav { width: auto; flex-direction: column; overflow: visible; padding: 0 8px 8px;
+    border-right: 0; border-bottom: 1px solid var(--g-border); }
+  body[data-mode="gui"] #settings-nav .links { flex-direction: row; overflow-x: auto; scrollbar-width: none; }
+  body[data-mode="gui"] #settings-nav .links button { flex: none; }
+  body[data-mode="gui"] #settings-page { --top: 20px; padding: var(--top) 16px 64px; }
+  body[data-mode="gui"] #settings .editor-bar { margin-inline: auto; padding: 12px 0; }
+  body[data-mode="gui"] #settings-page .look { grid-template-columns: minmax(0, 1fr); row-gap: 8px; }
+  body[data-mode="gui"] #settings-page .look select { grid-column: 1; grid-row: auto; }
+}
