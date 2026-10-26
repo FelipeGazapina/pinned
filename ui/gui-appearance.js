@@ -314,6 +314,10 @@ const fontDefaultOf = (font) => (font.name === "prompt" ? look("sans-font") || d
 
 /** FontFamilyPicker.tsx: once the browser lists installed fonts (queryLocalFonts, asked on a field's
  * focus or already granted), each family is a searchable list drawn in its own face. */
+// The desktop app's webview can't list fonts, so pinned asks AppKit (src/fonts.rs), which needs no
+// permission, as T3's Electron build lists them without asking.
+const nativeFonts = TAURI && typeof window.queryLocalFonts !== "function";
+if (nativeFonts) window.queryLocalFonts = async () => (await invoke("font_families")).map((family) => ({ family }));
 const installedFonts = { status: typeof window.queryLocalFonts === "function" ? "unknown" : "unavailable", families: [], loading: false };
 function discoverInstalledFonts(gesture = false) {
   if (installedFonts.status !== "unknown" || installedFonts.loading) return;
@@ -333,6 +337,7 @@ let grantedFontsProbed = false;
 function probeGrantedFonts() {
   if (grantedFontsProbed || installedFonts.status !== "unknown") return;
   grantedFontsProbed = true;
+  if (nativeFonts) return discoverInstalledFonts();
   navigator.permissions?.query({ name: "local-fonts" }).then((p) => p.state === "granted" && discoverInstalledFonts(), () => {});
 }
 
