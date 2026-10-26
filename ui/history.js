@@ -1,10 +1,21 @@
 /** The General page: app-wide switches. */
 async function showGeneral() {
-  const awake = await invoke("get_keep_awake");
+  const awake = TAURI && (await invoke("get_keep_awake"));
   settingsPage.innerHTML = `<h2>General</h2>
-    <p><label class="toggle"><input type="checkbox" id="keep-awake"${awake ? " checked" : ""}> Keep this ${COMPUTER} awake</label></p>
+    ${TAURI ? `<p><label class="toggle"><input type="checkbox" id="keep-awake"${awake ? " checked" : ""}> Keep this ${COMPUTER} awake</label></p>
     <p class="meta">While this is on, the ${COMPUTER} and its display don't go to sleep, so sessions keep working when you step away. It turns off when you switch it off or quit pinned.</p>
-    <p class="error" id="awake-error"></p>`;
+    <p class="error" id="awake-error"></p>` : ""}
+    ${themeSettingsHtml()}
+    ${contrastSettingsHtml()}
+    ${appearanceHtml()}
+    ${sidebarSettingsHtml()}${panelSettingsHtml()}
+    ${sendShortcutHtml()}`;
+  bindThemeSettings();
+  bindAppearance();
+  bindSidebarSettings();
+  bindPanelSettings();
+  bindSendShortcut();
+  if (!TAURI) return;
   document.getElementById("keep-awake").onchange = async (e) => {
     try {
       await invoke("set_keep_awake", { on: e.target.checked });

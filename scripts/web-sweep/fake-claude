@@ -3,21 +3,123 @@
 // pinned's --settings file names, and prints every key it gets, so a test can read them back.
 const { execFileSync } = require("child_process");
 const fs = require("fs");
+const path = require("path");
 
 const args = process.argv.slice(2);
+// `claude -p`, which pinned runs to title a conversation: the title names the thread's first prompt.
+if (args.includes("-p") && /USER: /.test(args.at(-1) ?? "")) {
+  process.stdout.write(`${JSON.stringify({ title: `Titled ${args.at(-1).match(/USER: (.*)/)?.[1] ?? "nothing"}` })}\n`);
+  process.exit(0);
+}
+// The Git action's commit message: `claude -p --model haiku <ask>` with no stdin, answered at once.
+if (args.includes("-p") && /git commit message/.test(args.at(-1) ?? "")) {
+  process.stdout.write("Write the sweep's notes\n");
+  process.exit(0);
+}
+// Any other `claude -p`, as the pull request guide runs it: the prompt on stdin, one JSON answer, then exit.
+if (args.includes("-p")) {
+  const asked = fs.readFileSync(0, "utf8");
+  fs.appendFileSync(path.join(process.env.HOME, "claude-p.log"), `${args.filter((a) => !a.startsWith("{")).join(" ")}\n${asked.split("\n")[0]}\n`);
+  const stops = [
+    { title: "The notes file arrives", summary: "A new **notes.md** holds two lines.", attention: { kind: "product", note: "Should notes live at the root?" }, excerpts: [{ path: "notes.md", side: "new", start: 1, end: 2, caption: "The new notes" }], files: [], notes: [{ path: "notes.md", line: 2, title: "Second line", body: "Kept short on purpose." }], questions: ["Why a separate file?"] },
+    { title: "Nothing else changes", summary: "No other file moves.", attention: null, excerpts: [], files: [{ path: "notes.md", note: "the only file" }], notes: [], questions: [] },
+  ];
+  setTimeout(() => {
+    process.stdout.write(JSON.stringify({ type: "result", is_error: false, result: "", structured_output: { stops } }));
+    process.exit(0);
+  }, 1500);
+  return;
+}
+fs.appendFileSync(path.join(process.env.HOME, "claude-launch.log"), `${args.filter((a) => !a.startsWith("{")).join(" ")}\n`);
 const settingsFile = args[args.indexOf("--settings") + 1];
 const settings = settingsFile ? JSON.parse(fs.readFileSync(settingsFile, "utf8")) : {};
-const session = `fake-${process.pid}`;
+// --resume carries on the named session, so its transcript grows where it left off, as claude's does.
+const resumed = args.includes("--resume") ? args[args.indexOf("--resume") + 1] : null;
+const session = resumed ?? `fake-${process.pid}`;
 
 function run(command, input) {
   try {
     execFileSync("/bin/sh", ["-c", command], { input: JSON.stringify(input), stdio: ["pipe", "ignore", "ignore"] });
   } catch {}
 }
+// Each turn costs $0.42, and claude logs the turn's length and its running cost after the Stop hook returns.
+const started = Date.now();
+let turnStart = started;
+let turnsDone = 0;
 const hook = (event, extra = {}) => {
+  if (event === "UserPromptSubmit") turnStart = Date.now();
   const command = settings.hooks?.[event]?.[0]?.hooks?.[0]?.command;
   if (command) run(command, { session_id: session, cwd: process.cwd(), ...extra });
+  if (event === "Stop") {
+    turnsDone++;
+    record({ type: "system", subtype: "turn_duration", durationMs: Date.now() - turnStart });
+    record({ type: "cost-state", startTime: started, totalCostUSD: turnsDone * 0.42, hasUnknownModelCost: false });
+  }
 };
+const transcript = path.join(process.env.HOME, ".claude", "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${session}.jsonl`);
+fs.mkdirSync(path.dirname(transcript), { recursive: true });
+let lines = 0;
+function record(entry) {
+  lines++;
+  fs.appendFileSync(transcript, JSON.stringify({ uuid: `${session}-${lines}`, timestamp: new Date().toISOString(), sessionId: session, ...entry }) + "\n");
+}
+const said = (content) => record({ type: "user", message: { role: "user", content } });
+const wrote = (content) => record({ type: "assistant", message: { role: "assistant", content } });
+function used(name, input, content, is_error = false) {
+  const id = `tool-${lines}`;
+  wrote([{ type: "tool_use", id, name, input }]);
+  said([{ type: "tool_result", tool_use_id: id, content, is_error }]);
+}
+// Background agents as claude keeps them: the Agent tool uses answer at once, and each agent writes its
+// own transcript and meta file under the session's subagents folder, a step a second, until it ends.
+function spawnAgents() {
+  const dir = path.join(transcript.replace(/\.jsonl$/, ""), "subagents");
+  fs.mkdirSync(dir, { recursive: true });
+  const agents = [
+    { id: "a1sweep", name: "Map the parser", kind: "Explore", model: "haiku", tool: "Read", steps: 4 },
+    { id: "a2sweep", name: "Check the tests", kind: "general-purpose", tool: "Bash", steps: 9, finished: true },
+  ];
+  wrote(agents.map((a) => ({ type: "tool_use", id: `agent-${a.id}`, name: "Agent", input: { description: a.name, subagent_type: a.kind, prompt: `${a.name}.`, run_in_background: true } })));
+  record({
+    type: "user",
+    message: { role: "user", content: agents.map((a) => ({ type: "tool_result", tool_use_id: `agent-${a.id}`, content: [{ type: "text", text: `Async agent launched successfully.\nagentId: ${a.id}` }] })) },
+    toolUseResult: { isAsync: true },
+  });
+  wrote([{ type: "text", text: "Two agents are on it." }]);
+  for (const a of agents) {
+    const meta = (extra) => fs.writeFileSync(path.join(dir, `agent-${a.id}.meta.json`), JSON.stringify({ agentType: a.kind, description: a.name, toolUseId: `agent-${a.id}`, spawnDepth: 1, requestShape: "background", model: a.model, ...extra }));
+    let n = 0;
+    const append = (entry) => fs.appendFileSync(path.join(dir, `agent-${a.id}.jsonl`), JSON.stringify({ isSidechain: true, agentId: a.id, uuid: `${a.id}-${++n}`, timestamp: new Date().toISOString(), sessionId: session, ...entry }) + "\n");
+    meta({});
+    append({ type: "user", message: { role: "user", content: `${a.name}.` } });
+    let step = 0;
+    const timer = setInterval(() => {
+      if (++step <= a.steps) {
+        const id = `${a.id}-${step}`;
+        const input = a.tool === "Read" ? { file_path: path.join(process.cwd(), `src/part${step}.rs`) } : { command: `cargo test batch_${step}`, description: `Run test batch ${step}` };
+        append({ type: "assistant", message: { role: "assistant", stop_reason: "tool_use", content: [{ type: "tool_use", id, name: a.tool, input }] } });
+        return append({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: `step ${step} ok` }] } });
+      }
+      clearInterval(timer);
+      append({ type: "assistant", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: `${a.name}: all clear.` }] } });
+      if (a.finished) meta({ finished: true });
+      said(`<task-notification>\n<task-id>${a.id}</task-id>\n<status>completed</status>\n</task-notification>`);
+    }, 1000);
+  }
+}
+
+const DOT_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+// Each takes a while, as claude would, and ends the turn itself.
+const SLOW = {
+  "/compact": () => record({ type: "user", isCompactSummary: true, message: { role: "user", content: "This session is being continued from a previous conversation." } }),
+  think: () => wrote([{ type: "text", text: "Done thinking." }]),
+  build: () => {
+    said([{ type: "tool_result", tool_use_id: building, content: "built in 4s" }]);
+    wrote([{ type: "text", text: "Built." }]);
+  },
+};
+let building = "";
+
 const resetsIn = (seconds) => Math.floor(Date.now() / 1000) + seconds;
 if (settings.statusLine?.command) {
   run(settings.statusLine.command, {
@@ -26,26 +128,504 @@ if (settings.statusLine?.command) {
   });
 }
 
-const KEYS = { "\x1b": "[esc]", "\t": "[tab]", "\x1b[Z": "[shift-tab]", "\x1b[A": "[up]", "\x1b[B": "[down]", "\x1bOA": "[up]", "\x1bOB": "[down]", "\x03": "[ctrl-c]" };
+const KEYS = { "\x1b": "[esc]", "\t": "[tab]", "\x1b[Z": "[shift-tab]", "\x1b[A": "[up]", "\x1b[B": "[down]", "\x1bOA": "[up]", "\x1bOB": "[down]", "\x03": "[ctrl-c]", "\x18": "[ctrl-x]", "\x0b": "[ctrl-k]" };
 const out = (text) => process.stdout.write(text);
-out(`fake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}\r\n> `);
+const UNTRUSTED_MARKER = ".untrusted";
+let trusting = fs.existsSync(UNTRUSTED_MARKER) ? 1 : 0;
+const TRUST = ["No, exit", "Yes, I trust this folder"];
+function drawTrust() {
+  out(`${"─".repeat(40)}\r\n Accessing workspace:\r\n\r\n ${process.cwd()}\r\n\r\n Quick safety check: is this a project you trust?\r\n\r\n`);
+  TRUST.forEach((c, i) => out(`${i + 1 === trusting ? " ❯" : "  "} ${c}\r\n`));
+  out("\r\n Enter to confirm · Esc to cancel\r\n");
+}
+const greet = () => out(`fake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}${args.includes("--model") ? ` (model ${args[args.indexOf("--model") + 1]})` : ""}\r\n> `);
+if (resumed) out(`resumed ${resumed}\r\n`);
+if (trusting) drawTrust();
+else greet();
 
 let line = "";
 function submit() {
   out("\r\n");
   if (line === "/exit") process.exit(0);
   hook("UserPromptSubmit", { prompt: line });
-  if (line === "/ask") hook("Notification", { message: "fake claude needs you" });
-  else if (line === "long") for (let i = 1; i <= 120; i++) out(`line ${i} of a long answer\r\n`);
-  else out(`echo: ${line}\r\n`);
+  said(line);
+  if (line === "/modes") {
+    mode = "manual";
+    line = "";
+    hook("Stop");
+    return prompt();
+  }
+  if (line === "/traits") {
+    traits = { effort: "medium", ultracode: false, fast: false };
+    line = "";
+    hook("Stop");
+    return prompt();
+  }
+  if (line === "/effort" && traits) {
+    effortMenu = { at: LEVELS.indexOf(traits.effort), ultracode: traits.ultracode };
+    line = "";
+    return drawEffort();
+  }
+  if (line === "/model") {
+    modelMenu = 1;
+    line = "";
+    return drawModels();
+  }
+  if (/^\/fast (on|off)$/.test(line) && traits) {
+    traits.fast = line.endsWith("on");
+    said(`<local-command-stdout>${traits.fast ? "↯ Fast mode ON" : "Fast mode OFF"}</local-command-stdout>`);
+    line = "";
+    hook("Stop");
+    return prompt();
+  }
+  if (line === "full") {
+    record({ type: "assistant", timestamp: new Date(Date.now() - 2 * 3600 * 1000).toISOString(), message: { role: "assistant", content: [{ type: "text", text: "A long session." }], usage: { input_tokens: 4, cache_read_input_tokens: 230000, output_tokens: 600 } } });
+    line = "";
+    hook("Stop");
+    return prompt();
+  }
+  if (line === "/questions") {
+    asked = { at: 0, answers: [null, []], cursor: 1 };
+    wrote([{ type: "tool_use", id: `questions-${lines}`, name: "AskUserQuestion", input: { questions: QUESTIONS.map(({ header, question, multiSelect }) => ({ header, question, multiSelect })) } }]);
+    hook("Notification", { message: "Claude needs your input" });
+    line = "";
+    return drawAsked();
+  }
+  if (CHOICES_MENUS[line]) {
+    choosing = CHOICES_MENUS[line];
+    wrote([{ type: "tool_use", id: `question-${lines}`, ...choosing.tool }]);
+    hook("Notification", { message: "Claude needs your input" });
+    questioning = 1;
+    line = "";
+    return drawQuestion();
+  }
+  if (line === "/ask") {
+    wrote([{ type: "tool_use", id: `ask-${lines}`, name: "Bash", input: { command: "rm -rf build", description: "Remove the build folder" } }]);
+    hook("Notification", { message: "Claude needs your permission to use Bash" });
+    asking = 1;
+    drawMenu();
+    line = "";
+    return;
+  } else if (SLOW[line]) {
+    const finish = SLOW[line];
+    if (line === "think") wrote([{ type: "thinking", thinking: "**Weighing the options**\n\nComparing the two approaches before answering.", signature: "c2ln" }]);
+    if (line === "build") {
+      building = `tool-${lines}`;
+      wrote([{ type: "tool_use", id: building, name: "Bash", input: { command: "npm run build", description: "Build the app" } }]);
+    }
+    setTimeout(() => {
+      finish();
+      hook("Stop");
+      out("> ");
+    }, 4000);
+    line = "";
+    return;
+  } else if (line === "long") for (let i = 1; i <= 120; i++) out(`line ${i} of a long answer\r\n`);
+  else if (line === "rich") {
+    const cwd = process.cwd();
+    wrote([{ type: "thinking", thinking: "**Planning the read**\n\nI'll look at the notes first. Then run the tests.", signature: "c2ln" }]);
+    used("Read", { file_path: path.join(cwd, "a.md") }, "alpha");
+    used("Read", { file_path: path.join(cwd, "b.md") }, "beta");
+    used("Bash", { command: "cargo test", description: "Run the tests" }, "test result: ok");
+    used("Bash", { command: "false", description: "Check the build" }, "Exit code 1", true);
+    wrote([{ type: "text", text: "Looked around; one check failed." }]);
+    used("Grep", { pattern: "TODO" }, "No matches found");
+    wrote([{ type: "text", text: "Here is the fix:\n\n```rust\nfn main() {\n    let answer = 42;\n}\n```\n\nSee [the pull request](https://github.com/example/beta/pull/7) and [the docs](https://example.com/docs)." }]);
+  } else if (line === "plan") {
+    const steps = Array.from({ length: 24 }, (_, i) => `${i + 1}. Step ${i + 1} of the plan`).join("\n");
+    used("ExitPlanMode", { plan: `# Ship the fix\n\n## Summary\n\nPatch the parser, then test it.\n\n${steps}` }, "User has approved your plan. You can now start coding.");
+    wrote([{ type: "text", text: "Plan approved." }]);
+  } else if (line === "ask") {
+    used("AskUserQuestion", { questions: [{ question: "Which color should the button be?", header: "Color", multiSelect: false, options: [{ label: "Blue", description: "Calm" }, { label: "Red", description: "Loud" }] }] },
+      'Your questions have been answered: "Which color should the button be?"="Blue". You can now continue with these answers in mind.');
+    wrote([{ type: "text", text: "Blue it is." }]);
+  } else if (line === "oops") {
+    record({ type: "assistant", isApiErrorMessage: true, message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "API Error: 529 Overloaded\nThe service is busy. Try again in a moment." }] } });
+  } else if (line === "fail") {
+    wrote([{ type: "text", text: "Building it now." }]);
+    used("Bash", { command: "npm run build", description: "Build the app" }, "Error: the build failed\nsrc/app.ts(3,1): missing semicolon", true);
+  } else if (line === "stop") {
+    used("Bash", { command: "sleep 100", description: "Wait" }, "[Request interrupted by user for tool use]", true);
+    said([{ type: "text", text: "[Request interrupted by user for tool use]" }]);
+  } else if (line === "picture") {
+    said([{ type: "text", text: "What is in this picture?" }, { type: "image", source: { type: "base64", media_type: "image/png", data: DOT_PNG } }]);
+    wrote([{ type: "text", text: "A single dot." }]);
+  } else if (line === "long-prompt") {
+    const paragraph = "Please read @src/app/main.rs and explain every line of it in detail, with examples.";
+    said(Array.from({ length: 12 }, (_, i) => `${i + 1}. ${paragraph}`).join("\n"));
+    wrote([{ type: "text", text: "Here is the walkthrough." }]);
+  } else if (line === "tree") {
+    for (const dir of ["src/app", "docs"]) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync("src/app/main.rs", "fn main() {}\n");
+    fs.writeFileSync("src/app/lib.rs", "pub fn lib() {}\n");
+    fs.writeFileSync("docs/guide.md", Array.from({ length: 1200 }, (_, i) => `line ${i}`).join("\n") + "\n");
+    fs.writeFileSync("README.md", "# beta\n");
+    wrote([{ type: "text", text: "Wrote the tree." }]);
+  } else if (line === "spawn agents") {
+    spawnAgents();
+  } else if (line === "many") {
+    for (let i = 1; i <= 45; i++) {
+      said(`question ${i}`);
+      wrote([{ type: "text", text: `answer ${i}` }]);
+    }
+  }
+  else if (line === "steer") {
+    used("Read", { file_path: path.join(process.cwd(), "a.md") }, "alpha");
+    record({ type: "attachment", attachment: { type: "queued_command", prompt: "also check the docs", commandMode: "prompt", origin: { kind: "human" }, humanTurn: true } });
+    used("Read", { file_path: path.join(process.cwd(), "docs.md") }, "docs");
+    wrote([{ type: "text", text: "Checked both." }]);
+  } else if (line === "table") {
+    const note = "a long note that keeps going ".repeat(30).trim();
+    wrote([{ type: "text", text: `| Name | Notes |\n|---|---|\n| alpha | ${note} |\n| beta | short |\n\n\`\`\`bash\necho ran-from-thread\n\`\`\`\n\nOpen [the app](http://localhost:3000/) or [the docs](https://example.com/docs).` }]);
+  } else if (line === "icons") {
+    fs.mkdirSync("web", { recursive: true });
+    fs.writeFileSync("web/app.ts", "export const app = 1;\n");
+    fs.writeFileSync("Cargo.toml", "[package]\nname = \"beta\"\n");
+    wrote([{ type: "text", text: "Wrote two files." }]);
+  } else if (line === "agent") {
+    const id = `agent-tool-${lines}`;
+    wrote([{ type: "tool_use", id, name: "Agent", input: { description: "Look for the bug", subagent_type: "general-purpose", prompt: "Find where the parser drops the last line." } }]);
+    const agents = path.join(path.dirname(transcript), session, "subagents");
+    fs.mkdirSync(agents, { recursive: true });
+    fs.writeFileSync(path.join(agents, "agent-a1b2.meta.json"), JSON.stringify({ agentType: "general-purpose", description: "Look for the bug", toolUseId: id }));
+    const side = (entry) => JSON.stringify({ isSidechain: true, agentId: "a1b2", sessionId: session, timestamp: new Date().toISOString(), ...entry });
+    fs.writeFileSync(path.join(agents, "agent-a1b2.jsonl"), [
+      side({ type: "user", uuid: "sub-1", message: { role: "user", content: "Find where the parser drops the last line." } }),
+      side({ type: "assistant", uuid: "sub-2", message: { role: "assistant", content: [{ type: "tool_use", id: "sub-tool", name: "Grep", input: { pattern: "lines()" } }] } }),
+      side({ type: "user", uuid: "sub-3", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "sub-tool", content: "src/parse.rs:12" }] } }),
+      side({ type: "assistant", uuid: "sub-4", message: { role: "assistant", content: [{ type: "text", text: "The subagent found it in src/parse.rs." }] } }),
+    ].join("\n") + "\n");
+    said([{ type: "tool_result", tool_use_id: id, content: "The parser drops the last line in src/parse.rs:12." }]);
+    wrote([{ type: "text", text: "The agent reported back." }]);
+  } else if (line === "revertme") {
+    fs.writeFileSync("revert.txt", "made by claude\n");
+    wrote([{ type: "text", text: "Wrote revert.txt." }]);
+  } else if (line === "prlink") {
+    wrote([{ type: "text", text: "Opened [the pull request](https://github.com/example/alpha/pull/42)." }]);
+  } else if (line === "notice") {
+    said("<local-command-stdout>Set model to Haiku 5.5\nfor this session</local-command-stdout>");
+  } else if (line === "limit") {
+    record({ type: "assistant", isApiErrorMessage: true, error: "rate_limit", message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "You've hit your limit · resets 5pm (UTC)" }] } });
+  }
+  else if (line === "edit") {
+    const id = `tool-${lines}`;
+    wrote([{ type: "tool_use", id, name: "Edit", input: { file_path: path.join(process.cwd(), "notes.md"), old_string: "", new_string: "hello" } }]);
+    fs.appendFileSync("notes.md", `edited at ${new Date().toISOString()}\nsecond line\n`);
+    said([{ type: "tool_result", tool_use_id: id, content: "The file notes.md has been updated." }]);
+    wrote([{ type: "text", text: "I edited **notes.md** and opened a pull request.\n\n- one change\n- `notes.md`" }]);
+    record({ type: "pr-link", prNumber: 41, prUrl: "https://github.com/example/alpha/pull/41", prRepository: "example/alpha" });
+    record({ type: "pr-link", prNumber: 42, prUrl: "https://github.com/example/alpha/pull/42", prRepository: "example/alpha" });
+    out("edited notes.md\r\n");
+  } else if (line === "open-pr") {
+    wrote([{ type: "text", text: "I opened a pull request." }]);
+    record({ type: "pr-link", prNumber: 43, prUrl: "https://github.com/example/beta/pull/43", prRepository: "example/beta" });
+    out("opened #43\r\n");
+  } else if (line === "code") {
+    const id = `tool-${lines}`;
+    const source = 'const answer = 42; // the answer\nfunction greet(name) {\n  return "hi " + name;\n}\n';
+    wrote([{ type: "tool_use", id, name: "Write", input: { file_path: path.join(process.cwd(), "app.js"), content: source } }]);
+    fs.writeFileSync("app.js", source);
+    if (fs.existsSync("notes.md")) fs.writeFileSync("notes.md", fs.readFileSync("notes.md", "utf8").replace(/^second line$/gm, "  second line"));
+    said([{ type: "tool_result", tool_use_id: id, content: "File created." }]);
+    wrote([{ type: "text", text: "I wrote app.js and indented notes.md." }]);
+    out("wrote app.js\r\n");
+  } else if (line === "paths") {
+    wrote([{ type: "text", text: "Look at `app.js:2` and [the notes](notes.md), not `v1.2.3`, `example.com/a.js` or `npm`." }]);
+    out("paths\r\n");
+  } else if (line === "serve") {
+    // The address stays out of the transcript, so only port discovery can find the server.
+    const server = require("http").createServer((req, res) => {
+      const send = () => {
+        res.setHeader("content-type", "text/html; charset=utf-8");
+        res.end("<!doctype html><title>Sweep server</title><p>served by fake claude</p>");
+      };
+      if (req.url === "/a") {
+        res.setHeader("content-type", "text/html; charset=utf-8");
+        return res.end('<!doctype html><title>Page A</title><link rel="icon" href="/dot.png"><p>page a</p><a href="/">home</a>');
+      }
+      if (req.url === "/dot.png") {
+        res.setHeader("content-type", "image/png");
+        return res.end(Buffer.from(DOT_PNG, "base64"));
+      }
+      req.url === "/slow" ? setTimeout(send, 2500) : send();
+    });
+    server.listen(0, "127.0.0.1", () => {
+      fs.writeFileSync(path.join(process.env.HOME, "serve.port"), String(server.address().port));
+      out(`serving on ${server.address().port}\r\n`);
+    });
+    wrote([{ type: "text", text: "Started a web server." }]);
+  } else {
+    wrote([{ type: "text", text: `echo: ${line}` }]);
+    out(`echo: ${line}\r\n`);
+  }
   if (line !== "/ask") hook("Stop");
   line = "";
+  prompt();
+}
+
+// After /modes, the prompt has claude 2.1's mode line under it, and Shift+Tab cycles the mode.
+const MODES = { manual: "⏸ manual mode on · ? for shortcuts", accept: "⏵⏵ accept edits on (shift+tab to cycle)", plan: "⏸ plan mode on (shift+tab to cycle)", auto: "⏵⏵ auto mode on (shift+tab to cycle)" };
+let mode = null;
+function prompt() {
+  if (traits) out(`${" ".repeat(60)}${GLYPHS[traits.effort]} ${traits.effort}${traits.ultracode ? " · ultracode" : ""} · /effort\r\n${"─".repeat(60)}${traits.fast ? " ↯ /fast ─" : ""}\r\n`);
+  if (mode) out(`  ${MODES[mode]}\r\n`);
   out("> ");
+}
+
+// After /traits, claude 2.1's effort marks, its /effort slider, its /model menu and /fast, as
+// recorded in scripts/web-sweep/screens.
+const LEVELS = ["low", "medium", "high", "xhigh", "max"];
+const GLYPHS = { low: "○", medium: "◐", high: "●", xhigh: "◉", max: "◈" };
+let traits = null;
+let effortMenu = null;
+function drawEffort() {
+  const starts = [];
+  let labels = "";
+  for (const level of LEVELS) {
+    starts.push(labels.length + Math.floor(level.length / 2));
+    labels += `${level}${" ".repeat(level === "xhigh" ? 6 : 5)}`;
+  }
+  const rail = [..."─".repeat(42)].map((c, i) => (i === starts[effortMenu.at] ? "▲" : c)).join("");
+  const pad = " ".repeat(29);
+  out(`${"─".repeat(60)}\r\n  Effort\r\n${pad}Faster${" ".repeat(29)}Smarter\r\n${pad}${rail}      Ultracode  ${effortMenu.ultracode ? "on" : "off"}\r\n${pad}${labels} Tab to toggle\r\n\r\n  ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel\r\n`);
+}
+function answerEffort(key) {
+  if (key === "\x1b[C" || key === "\x1b[D") effortMenu.at = Math.min(LEVELS.length - 1, Math.max(0, effortMenu.at + (key === "\x1b[C" ? 1 : -1)));
+  else if (key === "\t") effortMenu.ultracode = !effortMenu.ultracode;
+  else if (key === "s" || key === "\r" || key === "\x1b") {
+    if (key !== "\x1b") {
+      Object.assign(traits, { effort: LEVELS[effortMenu.at], ultracode: effortMenu.ultracode });
+      said(`<local-command-stdout>Set effort level to ${traits.effort} (${key === "s" ? "this session only" : "saved as your default for new sessions"})</local-command-stdout>`);
+      out(`effort ${traits.effort}${traits.ultracode ? " ultracode" : ""} ${key === "s" ? "for this session" : "saved"}\r\n`);
+    }
+    effortMenu = null;
+    hook("Stop");
+    return prompt();
+  } else return;
+  drawEffort();
+}
+const MODEL_ROWS = [["Default (recommended) ✔", "Sonnet 5.5"], ["Sonnet", "Sonnet 5.5"], ["Fable", "Fable 5.1"], ["Opus", "Opus 5.5"], ["Haiku", "Haiku 5.5"]];
+let modelMenu = 0;
+function drawModels() {
+  out(`${"▔".repeat(60)}\r\n   Select model\r\n   Switch between Claude models. Your pick becomes the default for new sessions.\r\n\r\n`);
+  MODEL_ROWS.forEach(([name, model], i) => out(`   ${i + 1 === modelMenu ? "❯" : " "} ${i + 1}. ${name.padEnd(24)} ${model}\r\n`));
+  out(`\r\n   ${GLYPHS[traits?.effort ?? "medium"]} ${traits?.effort ?? "medium"} effort ←/→ to adjust\r\n   Enter to set as default · s to use this session only · Esc to cancel\r\n`);
+}
+function answerModels(key) {
+  if (key === "\x1b[B" || key === "\x1b[A") {
+    modelMenu = Math.min(MODEL_ROWS.length, Math.max(1, modelMenu + (key === "\x1b[B" ? 1 : -1)));
+    return drawModels();
+  }
+  if (key !== "s" && key !== "\r" && key !== "\x1b") return;
+  if (key !== "\x1b") {
+    const name = MODEL_ROWS[modelMenu - 1][1];
+    record({ type: "attachment", attachment: { type: "model", identity: { modelId: name, marketingName: name } } });
+    out(`model ${name} ${key === "s" ? "for this session" : "saved"}\r\n`);
+  }
+  modelMenu = 0;
+  hook("Stop");
+  prompt();
+}
+
+// Choices as claude 2.1 draws them: AskUserQuestion's numbered options with descriptions, a
+// free-text one and one past a rule, and the plan approval with its own free-text option.
+const CHOICES_MENUS = {
+  "/question": {
+    head: ` ☐ Color\r\n\r\nWhich color do you prefer?\r\n\r\n`,
+    options: [["Red", "warm and bold"], ["Blue", "calm and cool"], ["Type something.", ""], ["Chat about this", ""]],
+    free: 3, rule: 4, indent: "", footer: "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    tool: { name: "AskUserQuestion", input: { questions: [{ question: "Which color do you prefer?", header: "Color" }] } },
+  },
+  "/plan-ready": {
+    head: ` Ready to code?\r\n Here is Claude's plan:\r\n${"╌".repeat(40)}\r\n 1. Add a hello comment to a.py.\r\n${"╌".repeat(40)}\r\n${"─".repeat(40)}\r\n Claude has written up a plan and is ready to execute. Would you like to proceed?\r\n`,
+    options: [["Yes, and use auto mode", ""], ["Yes, manually approve edits", ""], ["Tell Claude what to change", "shift+tab to approve with this feedback"]],
+    free: 3, indent: " ", footer: " ctrl+g to edit in Vim · ~/.claude/plans/hello.md",
+    tool: { name: "ExitPlanMode", input: { plan: "1. Add a hello comment to a.py." } },
+  },
+};
+// AskUserQuestion with two questions, as claude 2.1 draws them: a row of tabs with the shown one on
+// a background, number keys that answer and move on, Space toggling a multi-select option, ←/→
+// between tabs, and a review tab that submits them.
+const QUESTIONS = [
+  { header: "Color", question: "Which color?", options: [["Red", "Warm red tone"], ["Blue", "Calm blue tone"]] },
+  { header: "Sizes", question: "Which sizes?", multiSelect: true, options: [["Small", "Tiny size"], ["Large", "Huge size"]] },
+];
+let asked = null;
+function drawAsked() {
+  const lit = (text, on) => (on ? `\x1b[48;5;153m\x1b[38;5;16m ${text} \x1b[39m\x1b[49m` : ` ${text} `);
+  const tabs = QUESTIONS.map((q, i) => lit(`${(i === 0 ? asked.answers[0] : asked.answers[1].length) ? "☒" : "☐"} ${q.header}`, asked.at === i));
+  out(`${"─".repeat(40)}\r\n← ${tabs.join(" ")} ${lit("✔ Submit", asked.at === QUESTIONS.length)} →\r\n\r\n`);
+  if (asked.at === QUESTIONS.length) {
+    out(`Review your answers\r\n\r\n ● Which color?\r\n   → ${asked.answers[0] ?? ""}\r\n ● Which sizes?\r\n   → ${asked.answers[1].join(", ")}\r\n\r\nReady to submit your answers?\r\n\r\n`);
+    ["Submit answers", "Cancel"].forEach((c, i) => out(`${i + 1 === asked.cursor ? "❯" : " "} ${i + 1}. ${c}\r\n`));
+    return out("\r\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\r\n");
+  }
+  const q = QUESTIONS[asked.at];
+  out(`${q.question}\r\n\r\n`);
+  q.options.forEach(([label, about], i) => {
+    const box = q.multiSelect ? `[${asked.answers[1].includes(label) ? "✔" : " "}] ` : "";
+    const done = !q.multiSelect && asked.answers[0] === label ? " ✔" : "";
+    out(`${i + 1 === asked.cursor ? "❯" : " "} ${i + 1}. ${box}${label}${done}\r\n${" ".repeat(q.multiSelect ? 9 : 5)}${about}\r\n`);
+  });
+  out("\r\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\r\n");
+}
+function answerAsked(key) {
+  const review = asked.at === QUESTIONS.length;
+  const q = QUESTIONS[asked.at];
+  const count = review ? 2 : q.options.length;
+  if (key === "\x1b[B" || key === "\x1b[A") asked.cursor = Math.min(count, Math.max(1, asked.cursor + (key === "\x1b[B" ? 1 : -1)));
+  else if (key === "\x1b[C" || key === "\x1b[D") {
+    asked.at = Math.min(QUESTIONS.length, Math.max(0, asked.at + (key === "\x1b[C" ? 1 : -1)));
+    asked.cursor = 1;
+  } else if (key === " " && q?.multiSelect) {
+    const label = q.options[asked.cursor - 1][0];
+    asked.answers[1] = asked.answers[1].includes(label) ? asked.answers[1].filter((l) => l !== label) : [...asked.answers[1], label];
+  } else if (key === "\r" || /^[1-9]$/.test(key) || key === "\x1b") {
+    if (/^[1-9]$/.test(key)) asked.cursor = Number(key);
+    if (key === "\x1b" || (review && asked.cursor === 2)) {
+      out("questions dismissed\r\n");
+      asked = null;
+      hook("Stop");
+      return prompt();
+    }
+    if (review) {
+      out(`answered: Which color? → ${asked.answers[0]} · Which sizes? → ${asked.answers[1].join(", ")}\r\n`);
+      said([{ type: "tool_result", tool_use_id: "questions", content: "The user answered." }]);
+      asked = null;
+      hook("Stop");
+      return prompt();
+    }
+    if (q.multiSelect) return;
+    asked.answers[0] = q.options[asked.cursor - 1][0];
+    asked.at += 1;
+    asked.cursor = 1;
+  } else return;
+  drawAsked();
+}
+
+let choosing = null;
+let questioning = 0;
+let typed = "";
+function drawQuestion() {
+  const { head, options, free, rule, indent, footer } = choosing;
+  out(`${"─".repeat(40)}\r\n${head}`);
+  options.forEach(([label, about], i) => {
+    if (i + 1 === rule) out(`${"─".repeat(40)}\r\n`);
+    const at = `${indent}${i + 1 === questioning ? "❯" : " "} ${i + 1}. `;
+    out(`${at}${i + 1 === free && typed ? typed : label}\r\n${about ? `${" ".repeat(at.length)}${about}\r\n` : ""}`);
+  });
+  out(`\r\n${footer}\r\n`);
+}
+function answerQuestion(key) {
+  const { options, free } = choosing;
+  if (key === "\x1b[B" || key === "\x1b[A") {
+    questioning = Math.min(options.length, Math.max(1, questioning + (key === "\x1b[B" ? 1 : -1)));
+    return drawQuestion();
+  }
+  if (key !== "\r" && key !== "\x1b") {
+    if (questioning !== free) return;
+    typed = key === "\x7f" ? typed.slice(0, -1) : typed + key;
+    return drawQuestion();
+  }
+  const answer = key === "\x1b" ? "esc" : questioning === free ? typed : options[questioning - 1][0];
+  out(`answered: ${answer}\r\n`);
+  said([{ type: "tool_result", tool_use_id: `question-${lines - 1}`, content: `The user answered: ${answer}` }]);
+  choosing = null;
+  questioning = 0;
+  typed = "";
+  hook("Stop");
+  prompt();
+}
+
+// As claude 2.1 asks: Tab on "No" opens a line for telling Claude what to do instead.
+const CHOICES = ["Yes", "Yes, and don't ask again for rm commands", "No"];
+let asking = 0;
+let amending = null;
+function drawMenu() {
+  const box = "╌".repeat(40);
+  out(`${"─".repeat(40)}\r\n Bash command\r\n Tip: auto mode handles these prompts for you\r\n Remove the build folder\r\n${box}\r\n rm -rf build\r\n${box}\r\n Do you want to proceed?\r\n`);
+  const no = amending === null ? "No" : amending ? `No, ${amending}` : "No, and tell Claude what to do differently";
+  [...CHOICES.slice(0, -1), no].forEach((c, i) => out(`${i + 1 === asking ? " ❯" : "  "} ${i + 1}. ${c}\r\n`));
+  out(amending === null ? " Esc to cancel · Tab to amend\r\n" : " Esc to cancel\r\n");
+}
+function answerMenu(key) {
+  if (key === "\t" && asking === CHOICES.length && amending === null) {
+    amending = "";
+    return drawMenu();
+  }
+  if (amending !== null && key !== "\r" && key !== "\x1b" && !/^\x1b\[[AB]$/.test(key)) {
+    amending = key === "\x7f" ? amending.slice(0, -1) : amending + key;
+    return drawMenu();
+  }
+  if (amending !== null && key === "\r") {
+    const feedback = amending;
+    amending = null;
+    asking = 0;
+    out(`declined: ${feedback}\r\n`);
+    said([{ type: "tool_result", tool_use_id: `ask-${lines - 1}`, content: `The user doesn't want to proceed with this tool use. The user said:\n${feedback}`, is_error: true }]);
+    wrote([{ type: "text", text: `Understood: ${feedback}` }]);
+    hook("Stop");
+    return prompt();
+  }
+  if (key === "\x1b[B" || key === "\x1b[A") {
+    asking = Math.min(CHOICES.length, Math.max(1, asking + (key === "\x1b[B" ? 1 : -1)));
+    return drawMenu();
+  }
+  if (key !== "\r" && key !== "\x1b") return;
+  out(`chose ${key === "\x1b" ? "esc" : asking}\r\n`);
+  asking = 0;
+  amending = null;
+  setTimeout(() => {
+    out("ran it\r\n");
+    hook("Stop");
+    prompt();
+  }, 4000);
 }
 
 process.stdin.setRawMode?.(true);
 process.stdin.on("data", (chunk) => {
-  const text = chunk.toString("utf8");
+  // A prompt pinned types arrives as a bracketed paste, which claude reads as plain text.
+  const text = chunk.toString("utf8").replace(/\x1b\[20[01]~/g, "");
+  if (trusting) {
+    for (const key of text.match(/\x1b\[[AB]|[\s\S]/g)) {
+      if (key === "\x1b[B" || key === "\x1b[A") {
+        trusting = key === "\x1b[B" ? 2 : 1;
+        drawTrust();
+      } else if (key === "\r") {
+        if (trusting === 1) process.exit(0);
+        trusting = 0;
+        greet();
+      }
+    }
+    return;
+  }
+  if (asking) {
+    for (const key of text.match(/\x1b\[[AB]|[\s\S]/g)) answerMenu(key);
+    return;
+  }
+  if (asked) {
+    for (const key of text.match(/\x1b\[[A-D]|[\s\S]/g)) asked && answerAsked(key);
+    return;
+  }
+  if (questioning) {
+    for (const key of text.match(/\x1b\[[AB]|[\s\S]/g)) answerQuestion(key);
+    return;
+  }
+  if (effortMenu) {
+    for (const key of text.match(/\x1b\[[A-D]|[\s\S]/g)) effortMenu && answerEffort(key);
+    return;
+  }
+  if (modelMenu) {
+    for (const key of text.match(/\x1b\[[A-D]|[\s\S]/g)) modelMenu && answerModels(key);
+    return;
+  }
+  if (text === "\x1b[Z" && mode) {
+    const order = Object.keys(MODES);
+    mode = order[(order.indexOf(mode) + 1) % order.length];
+    out("\r\n");
+    prompt();
+    return out(line);
+  }
   if (KEYS[text]) return out(KEYS[text]);
   for (const c of text) {
     if (c === "\r") submit();

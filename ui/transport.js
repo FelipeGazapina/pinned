@@ -17,8 +17,11 @@ function save(key, value) {
   } catch {}
 }
 
+/** The calls `Call::may_wait` lets run out of order, which machine_call would run on the app's main thread. */
+const WAITING_CALLS = new Set(["run", "pull_request", "pr_status", "favicon", "regenerate_title", "pr_action", "thread", "workspace", "project_history", "diff", "ports", "editors", "open_in", "commands", "files", "branches", "checkout", "token_usage", "pull_requests", "page_meta", "refs", "read_file", "write_file", "search", "pr_edit", "pr_comment", "pr_review", "pr_rerun", "pr_guide", "device_hub", "subagent", "rewind", "fork", "save_file", "pr_list", "checkout_pr", "set_workspace", "git", "create_project", "publish_project", "pull_request_stack"]);
+
 const localTransport = {
-  call: (call) => invoke("machine_call", { call }),
+  call: (call) => invoke(WAITING_CALLS.has(call.cmd) ? "machine_call_slow" : "machine_call", { call }),
   attach(tab, sink) {
     const output = new TAURI.core.Channel();
     output.onmessage = (bytes) => sink.write(new Uint8Array(bytes));

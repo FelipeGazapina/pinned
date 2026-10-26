@@ -964,7 +964,7 @@ fn slack_run(
     let mut args = claude_args(c, &format!("slack-{}", thread.replace('.', "-")), format!("#{channel_name} {opening}"));
     let mut prompt = c.instructions.trim().to_owned();
     prompt += &format!(
-        "\n\nAnswer in the Slack thread below by running `'{}' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. \
+        "\n\nAnswer in the Slack thread below by running `'{}' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Keep every answer short. Before each `slack reply`, invoke the `pinned:bro` skill on your draft and post the message it gives you, not the draft. \
          Later messages in the thread reach you only when one of them mentions you, as `{}` blocks with every message written since the last one you got; answer them in the thread the same way.",
         exe,
         reply_header("<name>")
@@ -1436,7 +1436,7 @@ mod tests {
                 "plan",
                 "--name",
                 "#support @pinned export 500s since today",
-                "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\nThis workflow only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here",
+                "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Keep every answer short. Before each `slack reply`, invoke the `pinned:bro` skill on your draft and post the message it gives you, not the draft. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\nThis workflow only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here",
             ]
         );
     }
@@ -1458,7 +1458,7 @@ mod tests {
         let prompt = connector_thread_run(&fixing_connector(), "2026-10-19T10:00:00Z", "2026-10-19T10:01:00Z").args.pop().unwrap();
         assert_eq!(
             prompt,
-            "Fix what you can.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\n\
+            "Fix what you can.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Keep every answer short. Before each `slack reply`, invoke the `pinned:bro` skill on your draft and post the message it gives you, not the draft. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\n\
              Decide what the thread needs, then act:\n\
              - Not a bug, or existing behavior or a known fix already answers it: reply with the answer and stop.\n\
              - A bug that is obvious, because you reproduced it or found it in the code, and whose fix is small and low-risk: fix it, in this order:\n\
@@ -1477,7 +1477,7 @@ mod tests {
         let prompt = connector_thread_run(&asking, "2026-10-19T10:00:00Z", "2026-10-19T10:01:00Z").args.pop().unwrap();
         assert_eq!(
             prompt,
-            "Fix what you can.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\n\
+            "Fix what you can.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Keep every answer short. Before each `slack reply`, invoke the `pinned:bro` skill on your draft and post the message it gives you, not the draft. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\n\
              Decide what the thread needs, then act:\n\
              - Not a bug, or existing behavior or a known fix already answers it: reply with the answer and stop.\n\
              - A bug: reply with your analysis and what you would change, ask in the thread whether to file a Linear issue and fix it, telling them to mention you in their answer, and stop without filing an issue or changing code.\n\

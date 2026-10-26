@@ -1,0 +1,40 @@
+
+ ▐▛███▛█▄╱✦  Claude Code v2.1.310
+▝▜██████▘    Sonnet 5.5 with max effort · Claude API
+ ▝▝   ▝▝     ~/repo
+
+  Get to finished work sooner with Opus 5.5. Switch anytime with /model.
+
+❯ /effort
+  ⎿  Set effort level to low (this session only): Quick, straightforward implementation with minimal overhead
+
+❯ /effort
+  ⎿  Set effort level to max (this session only): Maximum capability with deepest reasoning. May use excessive tokens
+     resulting in long response times or overthinking. Use sparingly for the hardest tasks.
+
+❯ /effort
+  ⎿  Ultracode on (this session only): dynamic workflows on every task. Effort stays max.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                           ◈ max · ultracode · /effort
+──────────────────────────────────────────────────────────────────────────────────────────────────────────── ultracode ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)

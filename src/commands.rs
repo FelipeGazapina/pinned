@@ -48,6 +48,14 @@ pub async fn slack_suggestions(connectors: State<'_, Connectors>) -> Result<Vec<
 }
 
 #[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(format!("not a web address: {url}"));
+    }
+    std::process::Command::new("open").arg(url).spawn().map(drop).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn open_github_tokens() -> Result<(), String> {
     open(github::TOKEN_PAGE)
 }

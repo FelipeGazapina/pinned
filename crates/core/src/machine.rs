@@ -1,6 +1,8 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
-use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, EXE_PLACEHOLDER};
-use crate::{github, history, hooks, plugin, process, projects, pty, reminders, sessions, sync, uploads};
+use crate::stats::{ThreadStats, Tally};
+use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
+use crate::panel::{DeviceHub, Shells};
+use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, process, projects, pty, pulls, reminders, scaffold, scripts, sessions, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -9,12 +11,15 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::SystemTime;
 
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
 pub const OUTPUT_KEEP: usize = 256 * 1024;
 /// Slack after a usage limit's reset time before the session is told to continue.
 const LIMIT_MARGIN_SECS: u64 = 5;
 const UNWATCHED: (u16, u16) = (120, 32);
+/// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
+const TURN_LOG_WAIT: (u32, std::time::Duration) = (25, std::time::Duration::from_millis(200));
 
 pub type Event = MachineEvent;
 /// Names a viewer of a tab, such as `local` for the app's own webview; attaching again replaces it.
@@ -105,7 +110,7 @@ impl Launch {
 /// What a Claude Code session sets for the processes it runs. pinned started from inside one (a
 /// terminal tab of claude, or a node run from it) would pass them on, and each tab's claude
 /// would then take itself for a nested session: no transcript, so `--resume` finds nothing.
-const INHERITED_SESSION_ENV: [&str; 11] = [
+pub(crate) const INHERITED_SESSION_ENV: [&str; 11] = [
     "CLAUDECODE",
     "CLAUDE_PID",
     "CLAUDE_EFFORT",
@@ -164,6 +169,8 @@ impl Screen {
 struct Tab {
     cwd: PathBuf,
     session: Option<pty::Session>,
+    /// When the running claude started, so a subagent an earlier claude left mid-step reads as stopped.
+    started: Option<SystemTime>,
     /// Extra `claude` arguments for the first start only, so a restart doesn't redo the task.
     launch: Vec<String>,
     /// Environment for every start, such as the issue a connector's session reports on.
@@ -172,15 +179,24 @@ struct Tab {
     bypass: bool,
     /// Claude Code's id for the conversation in progress, known once a hook reports it.
     claude_session: Option<String>,
+    /// `claude_session`'s transcript as read so far, which starts over whenever the session changes.
+    tally: Tally,
     /// A turn is running, or died on an error: the session has work left if pinned quits now.
     interrupted: bool,
     /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
     resume_at: Option<u64>,
+    /// The model every start of this tab passes as `--model`, picked for its conversation alone.
+    model: Option<String>,
+    /// The worktree made for this tab by `set_workspace`, dropped when the tab leaves it unused.
+    made: Option<PathBuf>,
     /// Working tree and prompt as the running turn began, to diff against when it ends.
     turn: Option<(String, Option<String>)>,
     status: Option<AgentStatus>,
+    updated: Option<u64>,
     title: Option<String>,
     message: Option<String>,
+    /// Prompts typed before the session took the terminal, typed in once it does.
+    held: Vec<String>,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
     screen: Arc<Mutex<Screen>>,
@@ -196,6 +212,7 @@ impl Tab {
             bypass: self.bypass,
             interrupted: self.interrupted,
             resume_at: self.resume_at,
+            model: self.model.clone(),
         })
     }
 
@@ -212,6 +229,9 @@ impl Tab {
             connector: self.env.iter().find(|(k, _)| k == CONNECTOR_ENV).map(|(_, v)| v.clone()),
             subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
+            updated: self.updated,
+            session: self.claude_session.clone(),
+            stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
         }
     }
 }
@@ -229,9 +249,16 @@ pub struct Machine {
     history_dir: Option<PathBuf>,
     /// Files clients attached, saved for sessions to read.
     uploads: Option<PathBuf>,
+    /// LiteLLM's price list, downloaded at most daily for the usage page.
+    rates_file: Option<PathBuf>,
+    /// The review guides claude wrote for pull requests.
+    guides: PathBuf,
+    shells: Shells,
+    device_hub: DeviceHub,
     clones: PathBuf,
     quitting: AtomicBool,
     usage: Mutex<Usage>,
+    agents: Mutex<subagents::Cache>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -274,9 +301,14 @@ impl Machine {
             projects_file,
             history_dir: dir.as_ref().map(|d| d.join("history")),
             uploads,
+            rates_file: dir.as_ref().map(|d| d.join("usage-model-rates.json")),
+            guides: dir.as_ref().map(|d| d.join("guides")).unwrap_or_else(|| std::env::temp_dir().join("pinned-guides")),
+            shells: Shells::default(),
+            device_hub: DeviceHub::default(),
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
             usage: Mutex::new(Usage::default()),
+            agents: Mutex::default(),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -308,6 +340,8 @@ impl Machine {
             Call::OpenTab { path, bypass } => json(self.open_tab(path, bypass)),
             Call::StartClaude { tab, cols, rows } => json(self.start_claude(&tab, cols, rows)?),
             Call::SetBypass { tab, on, cols, rows } => json(self.set_bypass(&tab, on, cols, rows)?),
+            Call::SetModel { tab, model, cols, rows } => json(self.set_model(&tab, &model, cols, rows)?),
+            Call::RestartClaude { tab, cols, rows } => json(self.restart_claude(&tab, cols, rows)?),
             Call::WriteInput { tab, data } => json(self.write_input(&tab, data.as_bytes())?),
             Call::ResizePty { tab, cols, rows } => json(self.resize_pty(&tab, cols, rows)?),
             Call::CloseTab { tab } => {
@@ -316,9 +350,21 @@ impl Machine {
             }
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
-            Call::ProjectHistory { path } => json(self.project_history(&path)),
+            Call::ProjectHistory { path, session } => {
+                let mut turns = self.project_history(&path);
+                if let Some(session) = session {
+                    turns.retain(|t| t.session == session);
+                }
+                json(turns)
+            }
             Call::GitRemote { path } => json(git_remote(Path::new(&path))),
             Call::Browse { path } => json(projects::browse(&path, &home())?),
+            Call::CreateProject { name } => {
+                let mut created = scaffold::create(&self.clones, &name, self.launch.path_env.as_deref())?;
+                created.path = self.open_project(created.path.into()).display().to_string();
+                json(created)
+            }
+            Call::PublishProject { path } => json(scaffold::publish(Path::new(&path), self.launch.path_env.as_deref())?),
             Call::Clone { repo, token } => json(self.find_folder("", Some(&repo), token.as_deref())?),
             Call::Run { run } => json(self.run(&run)?),
             Call::Deliver { env, text } => json(self.deliver(&env, &text)),
@@ -326,7 +372,177 @@ impl Machine {
                 let dir = self.uploads.as_ref().ok_or("this machine keeps no files")?;
                 json(uploads::save(dir, &name, &data.0)?.display().to_string())
             }
+            Call::Thread { tab, from } => json(self.thread(&tab, from)?),
+            Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
+            Call::Workspace { tab } => json(workspace::of(&self.tab(&tab, |t| t.cwd.clone())?)),
+            Call::RegenerateTitle { tab, previous, thread } => {
+                let cwd = self.tab(&tab, |t| t.cwd.clone())?;
+                json(titles::regenerate(&self.launch.claude, &cwd, self.launch.path_env.as_deref(), &previous, &thread)?)
+            }
+            Call::Favicon { tab } => json(favicon::of(&history::project_of(&self.tab(&tab, |t| t.cwd.clone())?))),
+            Call::PrStatus { tab, pr } => json(workspace::pr_status(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
+            Call::PullRequest { tab, pr } => json(workspace::pull_request(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
+            Call::PrList { tab } => json(workspace::pull_requests(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
+            Call::PrAction { tab, pr, action } => json(workspace::pr_action(&self.tab(&tab, |t| t.cwd.clone())?, &pr, action, self.launch.path_env.as_deref())?),
+            Call::Diff { tab, scope, ignore_whitespace, base } => json(workspace::diff(&self.tab(&tab, |t| t.cwd.clone())?, scope, ignore_whitespace, base.as_deref())?),
+            Call::Ports { tab } => {
+                let pid = self.tab(&tab, |t| t.session.as_ref().and_then(|s| s.pid()))?;
+                json(workspace::listeners(pid, self.launch.path_env.as_deref()))
+            }
+            Call::Editors => json(workspace::editors(&home(), self.launch.path_env.as_deref())),
+            Call::OpenIn { tab, editor, path } => {
+                let cwd = self.tab(&tab, |t| t.cwd.clone())?;
+                json(workspace::open_in(&cwd, &editor, path.as_deref(), &home(), self.launch.path_env.as_deref())?)
+            }
+            Call::Commands { tab } => json(commands::list(&home(), &self.tab(&tab, |t| t.cwd.clone())?)),
+            Call::Files { tab } => json(files::list(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())),
+            Call::Branches { tab } => json(branches::of(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
+            Call::Checkout { tab, branch, create, from } => {
+                let cwd = self.idle_folder(&tab, "Switch branches")?;
+                json(branches::checkout(&cwd, &branch, create, from.as_deref(), self.launch.path_env.as_deref())?)
+            }
+            Call::CheckoutPr { tab, pr } => {
+                let cwd = self.idle_folder(&tab, "Check out the pull request")?;
+                json(workspace::checkout_pr(&cwd, &pr, self.launch.path_env.as_deref())?)
+            }
+            Call::ProjectScripts { tab } => json(scripts::of(self.scripts_file().as_deref(), &history::project_of(&self.tab(&tab, |t| t.cwd.clone())?))),
+            Call::SaveProjectScripts { tab, scripts } => {
+                let project = history::project_of(&self.tab(&tab, |t| t.cwd.clone())?);
+                let file = self.scripts_file().ok_or("this machine keeps no scripts")?;
+                json(scripts::save(&file, &project, scripts)?)
+            }
+            Call::Git { tab, step } => {
+                let cwd = self.idle_folder(&tab, "Run git")?;
+                json(branches::run_step(&cwd, &step, &self.launch.claude, self.launch.path_env.as_deref())?)
+            }
+            Call::SetWorkspace { tab, worktree, cols, rows } => json(self.set_workspace(&tab, worktree.as_deref(), cols, rows)?),
+            Call::PullRequests { paths, state, involvement, query, limit } => {
+                let path = self.launch.path_env.as_deref();
+                let mut repos: Vec<pulls::Repo> = paths.iter().filter_map(|p| git_remote(Path::new(p))).filter_map(|r| pulls::remote_repo(&r)).collect();
+                repos.sort_by_key(|r| (r.host != pulls::GITHUB, r.host.clone(), r.name.to_lowercase()));
+                repos.dedup_by(|a, b| a.host == b.host && a.name.eq_ignore_ascii_case(&b.name));
+                let mut known = HashMap::new();
+                repos.retain(|r| *known.entry(r.host.clone()).or_insert_with(|| pulls::gh_knows(&home(), path, &r.host)));
+                json(pulls::list(&home(), path, repos, state, involvement, &query, limit)?)
+            }
+            Call::PullRequestStack { repo, number } => json(pulls::stack(&home(), self.launch.path_env.as_deref(), &repo, number)?),
+            Call::TokenUsage { since, prices } => json(usage::read(&thread::projects_dir(&home()), since, &usage::rates(self.rates_file.as_deref()), &prices)),
+            Call::PageMeta { url } => json(panel::page_meta(&url)?),
+            Call::Refs { tab } => json(panel::refs(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
+            Call::ReadFile { tab, path, root, rev } => json(panel::read_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, root, rev.as_deref())?),
+            Call::WriteFile { tab, path, root, text, since } => json(panel::write_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, root, &text, since.as_deref())?),
+            Call::Search { tab, query, case, regex } => json(panel::search(&self.tab(&tab, |t| t.cwd.clone())?, &query, case, regex, self.launch.path_env.as_deref())?),
+            Call::PrEdit { tab, pr, title, body } => json(panel::pr_edit(&self.tab(&tab, |t| t.cwd.clone())?, &pr, title.as_deref(), body.as_deref(), self.launch.path_env.as_deref())?),
+            Call::PrComment { tab, pr, body, reply_to } => json(panel::pr_comment(&self.tab(&tab, |t| t.cwd.clone())?, &pr, &body, reply_to.as_deref(), self.launch.path_env.as_deref())?),
+            Call::PrReview { tab, pr, event, body, comments } => json(panel::pr_review(&self.tab(&tab, |t| t.cwd.clone())?, &pr, event, &body, &comments, self.launch.path_env.as_deref())?),
+            Call::PrRerun { tab, check } => json(panel::pr_rerun(&self.tab(&tab, |t| t.cwd.clone())?, &check, self.launch.path_env.as_deref())?),
+            Call::PrGuide { tab, pr, write } => json(panel::guide(&self.tab(&tab, |t| t.cwd.clone())?, &pr, write, &self.guides, &self.launch.claude, self.launch.path_env.as_deref())?),
+            Call::OpenShell { tab, cols, rows } => json(self.shells.open(&self.tab(&tab, |t| t.cwd.clone())?, cols, rows, self.launch.path_env.as_deref())?),
+            Call::CloseShell { shell } => {
+                self.shells.close(&shell);
+                Ok(Value::Null)
+            }
+            Call::DeviceHub { embed } => json(self.device_hub.url(embed.as_deref(), self.launch.path_env.as_deref())?),
+            Call::Subagent { tab, tool } => {
+                let file = thread::subagent(&self.transcript(&tab)?, &tool).ok_or("Claude Code kept no transcript of this subagent")?;
+                json(thread::read_subagent(&file).map_err(|e| format!("could not read the subagent's transcript: {e}"))?)
+            }
+            Call::Rewind { tab, before, files, cols, rows } => json(self.rewind(&tab, &before, files, cols, rows)?),
+            Call::Fork { tab, through } => json(self.fork(&tab, &through)?),
+            Call::SaveFile { tab, path, text } => json(save_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, &text)?),
         }
+    }
+
+    /// The tab's transcript file.
+    fn transcript(&self, tab: &str) -> Result<PathBuf, String> {
+        let session = self.tab(tab, |t| t.claude_session.clone())?.ok_or("this thread has no conversation yet")?;
+        thread::find(&thread::projects_dir(&home()), &session).ok_or_else(|| "Claude Code's transcript of this conversation is gone".into())
+    }
+
+    /// Copies the tab's conversation up to `cut` under a new session id, with the turns pinned saved for
+    /// it, so the copy keeps its changed files. Returns the new id, or none when the copy holds no message.
+    fn fork_session(&self, tab: &str, cut: thread::Cut) -> Result<Option<String>, String> {
+        let (cwd, session) = self.tab(tab, |t| (t.cwd.clone(), t.claude_session.clone()))?;
+        let session = session.ok_or("this thread has no conversation yet")?;
+        let new = new_session_id(&session);
+        let transcript = self.transcript(tab)?;
+        let forked = thread::fork(&transcript, cut, &new)?;
+        if !forked.said {
+            let _ = std::fs::remove_file(transcript.with_file_name(format!("{new}.jsonl")));
+            return Ok(None);
+        }
+        let at = chrono::DateTime::parse_from_rfc3339(&forked.until).map_or(u64::MAX, |t| t.timestamp().max(0) as u64 + 1);
+        if let Some(dir) = &self.history_dir {
+            let file = history::file_for(dir, &history::project_of(&cwd));
+            let mut kept: Vec<history::Turn> = history::load(&file).into_iter().filter(|t| t.session == session && t.ended < at).collect();
+            kept.reverse();
+            for turn in kept {
+                history::append(&file, &history::Turn { session: new.clone(), ..turn });
+            }
+        }
+        Ok(Some(new))
+    }
+
+    /// Restarts the tab's claude on its conversation as it was before the prompt `before`, as T3 Code's
+    /// "Edit from here" reverts to that prompt's checkpoint, and returns the tab's folder.
+    pub fn rewind(&self, tab: &str, before: &str, files: bool, cols: u16, rows: u16) -> Result<String, String> {
+        let (cwd, working) = self.tab(tab, |t| (t.cwd.clone(), t.status == Some(AgentStatus::Working)))?;
+        if working {
+            return Err("claude is working. Rewind when the turn ends.".into());
+        }
+        let checkpoint = if files { self.checkpoint(tab, &cwd, before)? } else { None };
+        let new = self.fork_session(tab, thread::Cut::Before(before))?;
+        if let Some(tree) = checkpoint {
+            history::restore(&cwd, &tree)?;
+        }
+        // Before the first prompt there is nothing to resume, so claude starts a new conversation.
+        self.tab(tab, |t| {
+            t.launch = new.iter().flat_map(|id| ["--resume".to_owned(), id.clone()]).collect();
+            t.claude_session = new.clone();
+        })?;
+        self.start_claude(tab, cols, rows)
+    }
+
+    /// The working tree as the prompt `before` began, from the first turn pinned saved from then on;
+    /// none when claude has changed nothing since.
+    fn checkpoint(&self, tab: &str, cwd: &Path, before: &str) -> Result<Option<String>, String> {
+        let session = self.tab(tab, |t| t.claude_session.clone())?.unwrap_or_default();
+        let text = std::fs::read_to_string(self.transcript(tab)?).unwrap_or_default();
+        let at = text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v["uuid"] == before)
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v["timestamp"].as_str()?).ok())
+            .ok_or("that prompt is not in this conversation")?
+            .timestamp()
+            .max(0) as u64;
+        let Some(dir) = &self.history_dir else { return Ok(None) };
+        let turns = history::load(&history::file_for(dir, &history::project_of(cwd)));
+        match turns.into_iter().rfind(|t| t.session == session && t.ended >= at) {
+            None => Ok(None),
+            Some(turn) => turn.before.map(Some).ok_or_else(|| "pinned saved no checkpoint for that turn, so its files can't be put back".into()),
+        }
+    }
+
+    /// Opens a tab beside `tab` whose claude resumes its conversation through the message `through`, as
+    /// T3 Code's "Fork from this response" does, and returns the new tab's id.
+    pub fn fork(&self, tab: &str, through: &str) -> Result<TabId, String> {
+        let (cwd, env, bypass) = self.tab(tab, |t| (t.cwd.clone(), t.env.clone(), t.bypass))?;
+        let new = self.fork_session(tab, thread::Cut::Through(through))?.ok_or("there is nothing to fork before this message")?;
+        let id = self.add_tab(cwd, vec!["--resume".into(), new.clone()], env, bypass, Some(new));
+        self.emit_tabs();
+        Ok(id)
+    }
+
+    /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
+    pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
+        let (session, process) = self.tab(tab, |t| (t.claude_session.clone(), t.session.as_ref().and(t.started)))?;
+        let Some(file) = session.as_deref().and_then(|s| thread::find(&thread::projects_dir(&home()), s)) else {
+            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, agents: vec![] });
+        };
+        let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
+        let agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
+        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, agents })
     }
 
     /// Every tab, in the order they opened.
@@ -358,7 +574,9 @@ impl Machine {
         let cwd = self.find_folder(&run.folder, run.repo.as_deref(), run.token.as_deref())?;
         let exe = self.launch.exe.display().to_string();
         let args = run.args.iter().map(|a| a.replace(EXE_PLACEHOLDER, &exe)).collect();
-        let id = self.add_tab(cwd, args, run.env.clone(), false, None);
+        // A run resuming a conversation shows its transcript before claude's first hook names it.
+        let resumed = run.args.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone());
+        let id = self.add_tab(cwd, args, run.env.clone(), false, resumed);
         self.emit_tabs();
         Ok(id)
     }
@@ -388,8 +606,13 @@ impl Machine {
             // Without launch arguments this is a fresh conversation, not the one recorded before.
             if t.launch.is_empty() {
                 t.claude_session = None;
+                t.tally = Tally::default();
             }
-            (t.cwd.clone(), std::mem::take(&mut t.launch), t.env.clone(), t.bypass)
+            let mut args = std::mem::take(&mut t.launch);
+            if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
+                args.extend(["--model".to_owned(), model]);
+            }
+            (t.cwd.clone(), args, t.env.clone(), t.bypass)
         })?;
         self.save_sessions();
         let cmd = self.launch.command(tab, &cwd, bypass, args, &env);
@@ -404,27 +627,95 @@ impl Machine {
     pub fn set_bypass(&self, tab: &str, on: bool, cols: u16, rows: u16) -> Result<String, String> {
         let unchanged = self.tab(tab, |t| {
             let unchanged = t.bypass == on && t.session.is_some();
-            if !unchanged {
-                t.bypass = on;
-                if let Some(saved) = t.saved() {
-                    (t.launch, t.resume_at) = saved.reopen(unix_now());
-                }
-            }
+            t.bypass = on;
             unchanged.then(|| t.cwd.display().to_string())
         })?;
         match unchanged {
             Some(cwd) => Ok(cwd),
-            None => self.start_claude(tab, cols, rows),
+            None => self.restart_claude(tab, cols, rows),
         }
+    }
+
+    /// Where the projects' scripts are kept, beside the saved sessions.
+    fn scripts_file(&self) -> Option<PathBuf> {
+        self.sessions_file.as_ref().map(|f| f.with_file_name("scripts.json"))
+    }
+
+    /// The tab's folder, refused while claude works there: `what` names what to do once the turn ends.
+    fn idle_folder(&self, tab: &str, what: &str) -> Result<PathBuf, String> {
+        // A permission prompt mid-turn reports NeedsInput with the turn still open.
+        let (cwd, working) = self.tab(tab, |t| (t.cwd.clone(), t.status == Some(AgentStatus::Working) || (t.status == Some(AgentStatus::NeedsInput) && t.interrupted)))?;
+        if working {
+            return Err(format!("claude is working in this folder. {what} when the turn ends."));
+        }
+        Ok(cwd)
+    }
+
+    /// Moves the tab to a new worktree of its project (`"new"`), an existing one, or the project's
+    /// own checkout (`None`), and restarts claude there. A worktree made for the tab and left
+    /// unused goes when the tab moves on.
+    pub fn set_workspace(&self, tab: &str, worktree: Option<&str>, cols: u16, rows: u16) -> Result<String, String> {
+        let cwd = self.idle_folder(tab, "Change the workspace")?;
+        let path = self.launch.path_env.as_deref();
+        let project = history::project_of(&cwd);
+        let target = match worktree {
+            None => project.clone(),
+            Some("new") => branches::new_worktree(&cwd, path)?,
+            Some(dir) => {
+                let dir = PathBuf::from(dir);
+                if !dir.is_dir() || history::project_of(&dir) != project {
+                    return Err(format!("{} is not a worktree of {}", dir.display(), project.display()));
+                }
+                dir
+            }
+        };
+        let left = self.tab(tab, |t| {
+            let made = t.made.take();
+            t.made = if worktree == Some("new") || made.as_ref() == Some(&target) { Some(target.clone()) } else { None };
+            t.cwd = target.clone();
+            made.filter(|m| *m != target)
+        })?;
+        if let Some(made) = left {
+            branches::drop_worktree(&made, path);
+        }
+        self.start_claude(tab, cols, rows)
+    }
+
+    /// Restarts the tab's claude on its conversation with `model`, for this conversation alone, and
+    /// returns its folder. Claude's own /model saves its pick as the default for every session.
+    pub fn set_model(&self, tab: &str, model: &str, cols: u16, rows: u16) -> Result<String, String> {
+        if model.starts_with('-') || !model.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.[]_".contains(&b)) {
+            return Err(format!("{model:?} is not a model name"));
+        }
+        self.tab(tab, |t| {
+            t.model = Some(model.to_owned());
+            if let Some(saved) = t.saved() {
+                (t.launch, t.resume_at) = saved.reopen(unix_now());
+            }
+        })?;
+        self.start_claude(tab, cols, rows)
+    }
+
+    /// Starts claude again on the tab's conversation and returns its folder; a tab with no
+    /// conversation yet starts a fresh one.
+    pub fn restart_claude(&self, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
+        self.tab(tab, |t| {
+            if let Some(saved) = t.saved() {
+                (t.launch, t.resume_at) = saved.reopen(unix_now());
+            }
+        })?;
+        self.start_claude(tab, cols, rows)
     }
 
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
         // Dropping the old session kills it silently, so its exit can't be mistaken for the new one's.
         let screen = self.tab(tab, |t| {
             t.session = None;
+            t.held.clear();
             t.screen.clone()
         })?;
         let session = screen.lock().unwrap().restart();
+        let started = SystemTime::now();
         let (me, exited) = (self.me.clone(), tab.to_owned());
         let pty = pty::Session::spawn(
             cmd,
@@ -438,24 +729,64 @@ impl Machine {
         )?;
         self.tab(tab, |t| {
             t.session = Some(pty);
+            t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
-        })
+        })?;
+        self.type_held_once_raw(tab, session);
+        Ok(())
+    }
+
+    /// Watches the session until it takes the terminal, then types the prompts held for it. The
+    /// program says nothing when it does, so the poll asks the pty.
+    fn type_held_once_raw(&self, tab: &str, session: u64) {
+        let (me, tab) = (self.me.clone(), tab.to_owned());
+        std::thread::spawn(move || loop {
+            let Some(machine) = me.upgrade() else { return };
+            let Ok(screen) = machine.tab(&tab, |t| t.screen.clone()) else { return };
+            if screen.lock().unwrap().session != session {
+                return;
+            }
+            let done = machine.tab(&tab, |t| match t.session.as_mut() {
+                Some(s) if s.raw() => {
+                    for text in std::mem::take(&mut t.held) {
+                        let _ = s.write(&paste(&text));
+                    }
+                    true
+                }
+                Some(_) => false,
+                None => true,
+            });
+            if done.unwrap_or(true) {
+                return;
+            }
+            drop(machine);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        });
     }
 
     /// Replays the tab's screen to `sink`, then streams its output there until `detach`.
     pub fn attach(&self, tab: &str, viewer: ViewerId, sink: Sink) -> Result<(), String> {
+        if Shells::owns(tab) {
+            return self.shells.attach(tab, viewer, sink);
+        }
         let screen = self.tab(tab, |t| t.screen.clone())?;
         screen.lock().unwrap().attach(viewer, sink);
         Ok(())
     }
 
     pub fn detach(&self, tab: &str, viewer: &str) {
+        if Shells::owns(tab) {
+            return self.shells.detach(tab, viewer);
+        }
         if let Ok(screen) = self.tab(tab, |t| t.screen.clone()) {
             screen.lock().unwrap().detach(viewer);
         }
     }
 
     pub fn write_input(&self, tab: &str, data: &[u8]) -> Result<(), String> {
+        if Shells::owns(tab) {
+            return self.shells.write(tab, data);
+        }
         self.tab(tab, |t| match t.session.as_mut() {
             Some(s) => s.write(data).map_err(|e| e.to_string()),
             None => Ok(()),
@@ -463,6 +794,9 @@ impl Machine {
     }
 
     pub fn resize_pty(&self, tab: &str, cols: u16, rows: u16) -> Result<(), String> {
+        if Shells::owns(tab) {
+            return self.shells.resize(tab, cols, rows);
+        }
         self.tab(tab, |t| match t.session.as_ref() {
             Some(s) => s.resize(pty::size(cols, rows)),
             None => Ok(()),
@@ -562,10 +896,22 @@ impl Machine {
         live.max_by_key(|(id, _)| tab_number(id)).map(|(id, _)| id.clone())
     }
 
-    /// Types `text` into the tab's session as one prompt and submits it.
+    /// Types `text` into the tab's session as one prompt and submits it. A session that has not
+    /// taken the terminal yet, as claude starting up, gets it once it does: typed earlier, the
+    /// pty's cooked mode would echo it and turn the submitting \r into \n, and claude would never
+    /// see a prompt.
     fn type_prompt(&self, tab: &str, text: &str) -> Result<(), String> {
         self.tab(tab, |t| match t.session.as_mut() {
-            Some(s) => s.write(&paste(text)).map_err(|e| e.to_string()),
+            Some(s) if s.raw() => {
+                for held in std::mem::take(&mut t.held) {
+                    s.write(&paste(&held)).map_err(|e| e.to_string())?;
+                }
+                s.write(&paste(text)).map_err(|e| e.to_string())
+            }
+            Some(_) => {
+                t.held.push(text.to_owned());
+                Ok(())
+            }
             None => Err(format!("tab {tab} has no running session")),
         })?
     }
@@ -583,11 +929,15 @@ impl Machine {
             .map(|s| {
                 let (launch, resume_at) = s.reopen(now);
                 let id = self.add_tab(s.cwd, launch, s.env, s.bypass, Some(s.session));
-                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at) = (s.interrupted, resume_at));
+                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.model) = (s.interrupted, resume_at, s.model));
                 id
             })
             .collect();
         self.emit_tabs();
+        // A resumed session reports no new id, so its transcript is read here.
+        for id in &ids {
+            self.refresh_stats(id, false);
+        }
         ids
     }
 
@@ -624,15 +974,18 @@ impl Machine {
     pub fn quit(&self) {
         self.quitting.store(true, Ordering::SeqCst);
         self.tabs.lock().unwrap().clear();
+        self.device_hub.stop();
     }
 
     fn record_event(&self, event: AgentEvent) {
         if let Some(tab) = &event.tab {
-            if let Some(session) = &event.session {
-                self.record_session(tab, session.clone(), event.cwd.as_deref());
-            }
+            let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
             self.record_status(tab, &event);
             self.record_turn(tab, &event);
+            let turn_ended = matches!(event.status, AgentStatus::Done | AgentStatus::Failed);
+            if new_session || turn_ended {
+                self.refresh_stats(tab, turn_ended);
+            }
             self.continue_when_limit_lifts(tab);
             self.emit_tabs();
         }
@@ -649,16 +1002,22 @@ impl Machine {
         let tab = Tab {
             cwd,
             session: None,
+            started: None,
             launch,
             env,
             bypass,
             claude_session,
+            tally: Tally::default(),
             interrupted: false,
             resume_at: None,
+            model: None,
+            made: None,
             turn: None,
             status: None,
+            updated: None,
             title: None,
             message: None,
+            held: vec![],
             screen: Arc::default(),
         };
         self.tabs.lock().unwrap().insert(id.clone(), tab);
@@ -701,19 +1060,60 @@ impl Machine {
     }
 
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
-    fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) {
-        let changed = self.tab(tab, |t| {
-            let mut changed = t.claude_session.as_ref() != Some(&session);
+    /// True when the session is new to the tab.
+    fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) -> bool {
+        let Ok((new, changed)) = self.tab(tab, |t| {
+            let new = t.claude_session.as_ref() != Some(&session);
+            if new {
+                t.tally = Tally::default();
+            }
+            let mut changed = new;
             if let Some(worktree) = reported_cwd.and_then(|c| sessions::worktree(&t.cwd, Path::new(c))) {
                 t.cwd = worktree;
                 changed = true;
             }
             t.claude_session = Some(session);
-            changed
-        });
-        if changed == Ok(true) {
+            (new, changed)
+        }) else {
+            return false;
+        };
+        if changed {
             self.save_sessions();
         }
+        new
+    }
+
+    /// Reads what the tab's transcript gained, off the caller's thread, then sends the tabs again.
+    /// After a turn ends it reads again until that turn's duration shows up, or gives up.
+    fn refresh_stats(&self, tab: &str, turn_ended: bool) {
+        let (Some(machine), tab) = (self.me.upgrade(), tab.to_owned()) else { return };
+        std::thread::spawn(move || {
+            let before = machine.tab(&tab, |t| t.tally.turns).ok();
+            for _ in 0..TURN_LOG_WAIT.0 {
+                let after = machine.read_stats(&tab);
+                if !turn_ended || after.is_none() || after != before {
+                    break;
+                }
+                std::thread::sleep(TURN_LOG_WAIT.1);
+            }
+            machine.emit_tabs();
+        });
+    }
+
+    /// Reads what the tab's transcript gained since the last read, outside the tabs lock, and
+    /// returns the turns counted so far. `None` when the tab has no transcript to read.
+    fn read_stats(&self, tab: &str) -> Option<u32> {
+        let (session, mut tally) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone()))).ok()??;
+        let file = thread::find(&thread::projects_dir(&home()), &session)?;
+        tally.advance(&file).ok()?;
+        let turns = tally.turns;
+        self.tab(tab, |t| {
+            if t.claude_session.as_ref() == Some(&session) {
+                t.tally = tally;
+            }
+        })
+        .ok()?;
+        Some(turns)
     }
 
     fn record_status(&self, tab: &str, event: &AgentEvent) {
@@ -729,6 +1129,10 @@ impl Machine {
                     t.resume_at = event.resume_at;
                 }
                 AgentStatus::NeedsInput => {}
+            }
+            let idle_notice = event.status == AgentStatus::NeedsInput && t.status == Some(AgentStatus::Done);
+            if !idle_notice {
+                t.updated = Some(unix_now());
             }
             t.status = Some(event.status);
             if event.title.is_some() {
@@ -757,7 +1161,7 @@ impl Machine {
                     return;
                 };
                 let (Some(dir), Some((files, patch, truncated))) = (&self.history_dir, history::diff(&cwd, &before, &tree)) else { return };
-                let turn = history::Turn { session, title: event.title.clone(), prompt, ended: unix_now(), files, patch, truncated };
+                let turn = history::Turn { session, title: event.title.clone(), prompt, ended: unix_now(), files, patch, truncated, tree: Some(tree), before: Some(before) };
                 history::append(&history::file_for(dir, &history::project_of(&cwd)), &turn);
             }
             NeedsInput => {}
@@ -769,7 +1173,11 @@ impl Machine {
             return;
         }
         let _ = self.tab(tab, |t| (t.interrupted, t.resume_at) = (false, None));
-        if self.tab(tab, |t| t.claude_session.take()).ok().flatten().is_some() {
+        let ended = self.tab(tab, |t| {
+            t.tally = Tally::default();
+            t.claude_session.take()
+        });
+        if ended.ok().flatten().is_some() {
             self.save_sessions();
         }
     }
@@ -979,6 +1387,33 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// A version 4 UUID for a forked conversation, as Claude Code names sessions, drawn from the clock and
+/// the session it came from.
+fn new_session_id(from: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let mut b: [u8; 16] = Sha256::digest(format!("{from}:{nanos}:{}", std::process::id()))[..16].try_into().unwrap();
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+}
+
+/// Writes `text` to `path` inside `cwd`, creating its folders, and returns the path relative to `cwd`.
+/// A path that climbs out of the folder is refused.
+fn save_file(cwd: &Path, path: &str, text: &str) -> Result<String, String> {
+    let relative = Path::new(path.trim());
+    if path.trim().is_empty() || relative.is_absolute() || relative.components().any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) {
+        return Err("enter a path inside the workspace".into());
+    }
+    let target = cwd.join(relative);
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    }
+    std::fs::write(&target, text).map_err(|e| format!("could not write {path}: {e}"))?;
+    Ok(relative.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,6 +1502,23 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_file_stays_inside_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(save_file(dir.path(), " plans/ship.md ", "# Ship\n").unwrap(), "plans/ship.md");
+        assert_eq!(std::fs::read_to_string(dir.path().join("plans/ship.md")).unwrap(), "# Ship\n");
+        for bad in ["", "../out.md", "/etc/x", "a/../../b"] {
+            assert!(save_file(dir.path(), bad, "x").is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn forked_sessions_get_fresh_version_4_ids() {
+        let (a, b) = (new_session_id("s"), new_session_id("s"));
+        assert_ne!(a, b);
+        assert!(a.len() == 36 && a.as_bytes()[14] == b'4' && "89ab".contains(a.as_bytes()[19] as char), "{a}");
+    }
+
+    #[test]
     fn a_paste_is_bracketed_submitted_and_cannot_close_itself() {
         assert_eq!(paste("[Slack reply from ana in the thread]\nyes,\tdo it"), b"\x1b[200~[Slack reply from ana in the thread]\nyes,\tdo it\x1b[201~\r");
         assert_eq!(paste("a\x1b[201~\rb\x07"), b"\x1b[200~a[201~b\x1b[201~\r");
@@ -1110,6 +1562,29 @@ mod tests {
         assert_eq!(std::fs::read(&file).unwrap(), expected);
         let elsewhere = delivery("c2", "1792499999.000100", &["elsewhere"]);
         assert!(!m.deliver(&elsewhere.env(), &elsewhere.text()));
+        let _ = std::fs::remove_file(file);
+    }
+
+    /// Until claude takes the terminal, the pty is in cooked mode: it echoes what is typed and
+    /// turns the submitting \r into \n, so a prompt typed that early never submits. The session
+    /// here draws first and takes the terminal a while later, as claude does, and the prompt still
+    /// arrives whole, and only then.
+    #[test]
+    fn a_prompt_typed_before_the_session_takes_the_terminal_waits_for_it() {
+        let file = std::env::temp_dir().join(format!("pinned-early-prompt-{}.bin", std::process::id()));
+        let m = machine();
+        let tab = running(&m, vec![], &format!("sleep 0.2; echo drawn; sleep 0.3; stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "typed early".into() }), Ok(json!(null)));
+        wait_for("the session to draw", || text(&seen).contains("drawn"));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "typed after drawing".into() }), Ok(json!(null)));
+        wait_for("stty", || text(&seen).contains("ready"));
+        let expected: &[u8] = b"\x1b[200~typed early\x1b[201~\r\x1b[200~typed after drawing\x1b[201~\r";
+        wait_for("cat to write", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
+        assert_eq!(std::fs::read(&file).unwrap(), expected);
+        assert!(text(&seen).starts_with("drawn\r\nready"), "the terminal echoed a prompt before the session took it: {:?}", text(&seen));
         let _ = std::fs::remove_file(file);
     }
 
@@ -1272,6 +1747,26 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_switch_waits_for_claude_to_finish_the_turn() {
+        let dir = temp("checkout");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(&dir, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        git(&dir, &["branch", "other"]);
+        let m = machine();
+        let tab = m.add_tab(dir.clone(), vec![], vec![], false, None);
+        let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None };
+        m.record_event(working.clone());
+        let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false, from: None };
+        assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"));
+        m.record_event(AgentEvent { status: AgentStatus::NeedsInput, ..working.clone() });
+        assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"), "a permission prompt mid-turn let the branch switch");
+        m.record_event(AgentEvent { status: AgentStatus::Done, ..working.clone() });
+        m.record_event(AgentEvent { status: AgentStatus::NeedsInput, ..working });
+        assert_eq!(m.call(checkout), Ok(Value::Null));
+        assert_eq!(m.call(Call::Workspace { tab }).unwrap()["branch"], "other");
+    }
+
+    #[test]
     fn calls_answer_with_the_json_a_client_reads() {
         let m = machine();
         assert_eq!(m.call(Call::OpenTab { path: None, bypass: true }), Ok(json!("tab-1")));
@@ -1319,6 +1814,70 @@ mod tests {
     }
 
     #[test]
+    fn a_model_picked_for_a_conversation_restarts_it_with_that_model_and_keeps_it() {
+        let dir = temp("model");
+        let claude = dir.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { claude, ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let tab = m.add_tab(dir.clone(), vec![], vec![], false, Some("s1".into()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+
+        assert_eq!(m.call(Call::SetModel { tab: tab.clone(), model: "--evil".into(), cols: 80, rows: 24 }), Err("\"--evil\" is not a model name".into()));
+        assert_eq!(m.call(Call::SetModel { tab: tab.clone(), model: "claude-opus-4-8".into(), cols: 80, rows: 24 }), Ok(json!(dir.display().to_string())));
+        wait_for("claude's arguments", || text(&seen).ends_with("\r\n"));
+        assert_eq!(text(&seen), "--settings|s|--plugin-dir|p|--resume|s1|--model|claude-opus-4-8|\r\n");
+        assert_eq!(sessions::load(&dir.join("sessions.json"))[0].model.as_deref(), Some("claude-opus-4-8"), "a relaunch keeps the model");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_thread_moves_to_a_new_worktree_and_back_dropping_it_unused() {
+        let dir = temp("workspace");
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let claude = dir.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\npwd; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { claude, ..launch() }, None, None, |_| {});
+        let tab = m.add_tab(std::fs::canonicalize(&repo).unwrap(), vec![], vec![], false, None);
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+
+        let set = |worktree: Option<&str>| m.call(Call::SetWorkspace { tab: tab.clone(), worktree: worktree.map(Into::into), cols: 80, rows: 24 });
+        let tree = PathBuf::from(set(Some("new")).unwrap().as_str().unwrap());
+        assert!(tree.starts_with(std::fs::canonicalize(&repo).unwrap().join(".claude/worktrees")), "{}", tree.display());
+        wait_for("claude in the worktree", || text(&seen).contains(".claude/worktrees/pinned-"));
+        assert_eq!(m.call(Call::Workspace { tab: tab.clone() }).unwrap()["worktree"], true);
+        assert!(set(Some("/elsewhere")).unwrap_err().contains("is not a worktree of"));
+        assert_eq!(PathBuf::from(set(None).unwrap().as_str().unwrap()), std::fs::canonicalize(&repo).unwrap());
+        assert!(!tree.exists(), "the unused worktree stayed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restarting_claude_resumes_the_tabs_conversation() {
+        let dir = temp("restart");
+        let claude = dir.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { claude, ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let tab = m.add_tab(dir.clone(), vec![], vec![], false, Some("s1".into()));
+        m.spawn(&tab, sh("sleep 30"), pty::size(80, 24)).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+
+        assert_eq!(m.call(Call::RestartClaude { tab: tab.clone(), cols: 80, rows: 24 }), Ok(json!(dir.display().to_string())));
+        wait_for("claude's arguments", || text(&seen).ends_with("\r\n"));
+        assert_eq!(text(&seen), "--settings|s|--plugin-dir|p|--resume|s1|\r\n");
+        assert!(!m.view(&tab).unwrap().bypass);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_run_opens_in_its_folder_with_this_machines_binary() {
         let dir = temp("run-folder");
         let m = machine();
@@ -1335,6 +1894,21 @@ mod tests {
         assert_eq!(m.tab(&id, |t| t.launch.clone()).unwrap(), ["--name", "ENG-7", "Run `'/opt/pinned/bin/pinned' stage coding` first"]);
         let elsewhere = RunSpec { folder: "/nonexistent/acme".into(), repo: None, ..run };
         assert_eq!(m.open_run(&elsewhere), Err("/nonexistent/acme does not exist on this machine".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_resuming_a_session_reads_its_transcript_from_the_start() {
+        let dir = temp("run-resume");
+        let m = machine();
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec!["--resume".into(), "s1".into()], env: vec![], token: None };
+        let id = m.open_run(&run).unwrap();
+        assert_eq!(m.tab(&id, |t| t.claude_session.clone()).unwrap().as_deref(), Some("s1"));
+        assert_eq!(m.thread(&id, 0).unwrap().session.as_deref(), Some("s1"));
+        assert_eq!(m.view(&id).unwrap().session.as_deref(), Some("s1"), "the tab's view lacks the session clients key it by");
+        let fresh = m.open_run(&RunSpec { args: vec![], ..run }).unwrap();
+        assert_eq!(m.tab(&fresh, |t| t.claude_session.clone()).unwrap(), None);
+        assert_eq!(m.view(&fresh).unwrap().session, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 

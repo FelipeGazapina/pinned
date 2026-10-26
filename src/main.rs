@@ -2,6 +2,7 @@
 
 mod account;
 mod awake;
+mod browser;
 mod commands;
 
 use pinned_core::machine::{Launch, Machine};
@@ -13,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow, Window};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 const OPACITIES: [u8; 6] = [100, 90, 80, 60, 40, 20];
@@ -46,6 +47,12 @@ fn machine_call(machine: State<Arc<Machine>>, call: Call) -> Result<serde_json::
     machine.call(call)
 }
 
+#[tauri::command]
+async fn machine_call_slow(machine: State<'_, Arc<Machine>>, call: Call) -> Result<serde_json::Value, String> {
+    let machine = machine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || machine.call(call)).await.map_err(|e| e.to_string())?
+}
+
 /// A dropped file's bytes, for a tab on another machine, which can't read this Mac's paths.
 #[tauri::command]
 async fn read_dropped(path: String) -> Result<tauri::ipc::Response, String> {
@@ -73,7 +80,7 @@ fn restore_tabs(machine: State<Arc<Machine>>) -> Vec<TabId> {
 }
 
 #[tauri::command]
-fn set_view(window: WebviewWindow, panel: State<Panel>, view: View) -> Result<(), String> {
+fn set_view(window: Window, panel: State<Panel>, view: View) -> Result<(), String> {
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
     let current = window.inner_size().map_err(|e| e.to_string())?.to_logical(scale);
     let (leaving, entering, min) = match view {
@@ -100,7 +107,7 @@ fn set_view(window: WebviewWindow, panel: State<Panel>, view: View) -> Result<()
 }
 
 /// Moves the window so a `size`-sized frame at its position fits inside the monitor's work area.
-fn keep_on_screen(window: &WebviewWindow, size: LogicalSize<f64>, scale: f64) -> tauri::Result<()> {
+fn keep_on_screen(window: &Window, size: LogicalSize<f64>, scale: f64) -> tauri::Result<()> {
     let Some(monitor) = window.current_monitor()? else { return Ok(()) };
     let area = monitor.work_area();
     let size = size.to_physical::<i32>(scale);
@@ -119,7 +126,7 @@ fn keep_on_screen(window: &WebviewWindow, size: LogicalSize<f64>, scale: f64) ->
 /// A nonactivating panel never becomes key on its own, so keystrokes would go to the app
 /// underneath. Called on every click and on start so the terminal receives typing.
 #[tauri::command]
-fn focus_panel(app: AppHandle, window: WebviewWindow) {
+fn focus_panel(app: AppHandle, window: Window) {
     #[cfg(target_os = "macos")]
     {
         use tauri_nspanel::ManagerExt;
@@ -205,6 +212,18 @@ fn notify(app: &AppHandle, message: &str) {
     let _ = app.notification().builder().title("Reminder").body(message).show();
 }
 
+/// Debug builds run the script `PINNED_PROBE` names in the main window once it has loaded, so
+/// scripts/native-probe can check what only the native window does.
+#[cfg(debug_assertions)]
+fn run_probe(app: &tauri::App) {
+    let Some(script) = std::env::var_os("PINNED_PROBE").and_then(|path| std::fs::read_to_string(path).ok()) else { return };
+    let Some(window) = app.get_webview_window("main") else { return };
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        drop(window.eval(&script));
+    });
+}
+
 fn add_tray(app: &tauri::App) -> tauri::Result<()> {
     let current = app.state::<Panel>().opacity.load(Ordering::Relaxed);
     let levels = OPACITIES
@@ -261,6 +280,7 @@ fn main() {
     builder
         .invoke_handler(tauri::generate_handler![
             machine_call,
+            machine_call_slow,
             read_dropped,
             attach_tab,
             detach_tab,
@@ -283,6 +303,7 @@ fn main() {
             commands::disconnect_slack,
             commands::slack_suggestions,
             commands::open_github_tokens,
+            commands::open_url,
             commands::connect_github,
             commands::disconnect_github,
             commands::github_repos,
@@ -293,7 +314,19 @@ fn main() {
             account::account,
             account::sign_in,
             account::change_password,
-            account::sign_out
+            account::sign_out,
+            browser::browser_show,
+            browser::browser_place,
+            browser::browser_hide,
+            browser::browser_close,
+            browser::browser_state,
+            browser::browser_do,
+            browser::browser_eval,
+            browser::browser_snapshot,
+            browser::browser_window,
+            browser::save_capture,
+            browser::reveal_file,
+            browser::browser_debug_key
         ])
         .setup(move |app| {
             let config = app.path().app_config_dir().ok();
@@ -317,6 +350,8 @@ fn main() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             add_tray(app)?;
+            #[cfg(debug_assertions)]
+            run_probe(app);
             let handle = app.handle().clone();
             machine.listen(move |message| match message {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),

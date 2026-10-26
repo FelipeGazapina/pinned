@@ -1,0 +1,21 @@
+Claude Code's fullscreen renderer didn't finish starting last time on this machine, so this launch is using the classic
+renderer. It will try fullscreen again next launch; /tui default keeps the classic renderer.
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Sonnet 5.5 · Claude API
+ ▝▝   ▝▝   ~/repo
+
+  Get to finished work sooner with Opus 5.5. Switch anytime with /model.
+
+❯ /effort
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Effort
+
+                             Faster                             Smarter
+                             ──────────▲───────────────────────────────      Ultracode  off
+                             low     medium     high     xhigh      max      Tab to toggle
+
+                                            The default effort for this model
+
+
+  ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel

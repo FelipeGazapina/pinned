@@ -48,9 +48,10 @@ the place of ⌘ in every shortcut below.
 
 - pinned starts in the project you opened most recently. Click 📁 to start `claude` in another folder.
 - Drag the header to move the panel. Drag the bottom-right corner to resize it.
-- Click `–` to shrink it to a pill. The pill shows what the agent is doing: working, done, or
-  needs you. It flashes when the agent finishes or asks for permission. Click the pill to open
-  the panel again.
+- Click `–` to shrink it to a pill. The pill lists your active threads, leaving out settled and
+  snoozed ones, and shows what each agent is doing: working, done, or needs you. Swipe, scroll
+  or drag the row to move between threads. The pill flashes when an agent finishes or asks for
+  permission. Click a thread to open the panel on it.
 - The header shows how much of your Claude subscription you have used, for example
   `5h 23%  7d 41%`. Each window has a thin bar: blue below 70%, amber from 70%, red from 90%.
   Hover over it to see the exact figures and when each window resets.
@@ -61,6 +62,110 @@ From a terminal you can open a specific folder:
 ```sh
 /Applications/pinned.app/Contents/MacOS/pinned ~/path/to/project
 ```
+
+## App view and terminal view
+
+pinned opens in the app view, laid out like T3 Code. Press ⌘E, or click the view button, to
+switch between it and the terminal view. Both views show the same running `claude` session, so
+switching never restarts or interrupts it. A prompt you type in one view shows in the other.
+
+The app view has three columns:
+
+- **Sidebar.** Your threads, one per tab, with the project, the title Claude gave the session, the
+  branch and the pull request. A thread that is working, waiting for your approval, or finished
+  while you were away says so. Pinned threads (⌘⇧P) stay on top; new threads come next. Search
+  matches titles, projects, branches, PR numbers and the messages themselves; ↑ and ↓ pick a
+  result and Enter opens it. **All projects** narrows the list to one project. Threads idle for
+  3 days move under **Settled**, and **Settle** on a row (or ⌘⇧S) moves one there now; the clock
+  snoozes a thread until a time you pick, after which it shows **Woke**. ⌘Z undoes a settle,
+  snooze or unpin for 5 seconds. Right-click a row to pin, settle, snooze, rename, mark it
+  unread, filter by its project, copy its path, branch or session ID, or close it. Double-click
+  a title to rename it. Hold ⌘ to see which row ⌘1–⌘9 opens. Drag the sidebar's edge to resize
+  it; double-click the edge to reset it. ⌘B hides the sidebar.
+- **Thread.** Your prompts and Claude's answers. The tool calls of a turn fold into one
+  **Worked for** row; click it to see each one. A turn that changed files ends with a card of
+  those files. **Open diff** shows them in the side panel. Type below and press Enter to send.
+  While Claude works, Enter queues your message and the red button stops the turn.
+  Each agent Claude spawns gets a card under the turn with its name, its kind, what it is doing
+  now and how long it has run; click a card to see its recent steps. While any agent runs after
+  Claude's turn ended, the thread and its sidebar row read **N agents working**, and you can still
+  send a prompt. The menu under the prompt picks the model.
+- **Side panel.** Each thread keeps its own panel: its tabs, the one shown, its width, and
+  whether it is open or maximized. **+** (⌘T while the panel is open) adds a tab, and ⌘W closes
+  the shown tab before it ever closes a thread. ⌘D opens the **Diff**: one turn, the latest
+  turn, **Uncommitted** changes, or **Changes** since the branch left the default branch, unified
+  or split, with syntax colors, a file tree, and whitespace changes hidden by default. Click a line
+  number to write a review comment; it goes into the prompt as `path:line: comment`.
+  **Browser** (⌘⇧J) previews a page your project serves, such as `localhost:3000`, at a device's
+  size if you like, and lists the web servers the session started and the pages you opened
+  recently. **Pull request** shows the pull request the session opened: reviewers, labels,
+  description, checks, a timeline, and the code with **Viewed** marks. Its menu copies the link
+  or number (⌘⇧K), merges, or marks a draft ready, each after you confirm. It uses the GitHub CLI,
+  so `gh` must be installed and signed in on the machine the session runs on. Click the PR number
+  in the header or under the prompt to open it. **Open** in the header (⌘O) opens the thread's
+  folder in an editor installed on that machine; its arrow picks which one.
+
+The composer works like T3 Code's. Its controls pick the model (⌘⇧M), the reasoning effort
+(⌘⇧E, set for that session alone through Claude Code's own menus, with Ultrathink put in the
+prompt), the access mode (⌘⇧A) and Build or Plan; a narrow composer folds them into **…**. `@`
+mentions a file, `$` a skill and `#` a pull request, each as a chip. The ring beside **Send** shows
+how full the context window is. Before a thread's first prompt, the strip under the composer can
+move it to a new git worktree (⌘⇧X) or the previous one (⌘⇧L), and **Send and new thread** is
+⌘⌥Enter. The header's **+** keeps project actions, commands per project that run in a terminal of
+the drawer, and the Git action commits (with a message Claude writes), pushes and opens pull
+requests itself. ⌘⇧B shows the thread's details in one card.
+
+When Claude asks something in its terminal, such as whether to trust a new folder or to allow a
+command, the app view shows the question above the prompt with Claude's own options. Pick one,
+or click **Terminal** to answer there. Typing instead answers it too: on a permission it declines
+and tells Claude what to do instead, on a question it is your own answer, and on a plan it is
+feedback that refines it. A question's options also take the keys 1 to 9. ⌘J opens the terminal
+under the thread at any time; drag its top edge to resize it.
+
+The composer keeps a draft per thread, and the sidebar marks threads with one. ⌘S sets a draft
+aside in the **Stash** above the prompt. ↑ and ↓ in an empty prompt bring back the thread's
+earlier prompts, and `/` lists Claude's commands with your own and your project's commands and
+skills. Attached files show above the prompt and go out with it. Next to the model menu (⌘⇧M),
+the mode menu (⌘⇧A, or ⇧Tab in the prompt) switches Claude between Supervised, Auto-accept
+edits, Plan and Auto. The branch under the prompt (⌘⇧G) switches or creates branches once Claude
+is between turns, and the Git button in the header asks Claude to commit, push or open a pull
+request, whichever the branch needs.
+
+Each thread shows how long Claude worked on it and what it cost, such as `1h 12m · $3.42`, on its
+row in the sidebar, on the row's hover card and in the header. The time adds up Claude's turns, not
+the time the thread sat open, and counts up while a turn runs. The cost is Claude Code's own
+estimate at API prices, subagents included, summed over every time the session was resumed.
+Claude Code saves that total only from time to time, so it can trail a session that is still
+running. Threads started from Claude Desktop or the SDK log no turn times, so they show the cost
+alone.
+
+⌘K opens the command palette: new threads, find in the thread, copy the thread ID, settings and
+the other actions, then your recent threads. Type to search actions, projects, settings and every
+thread; start with `>` for actions only. ⌘[ and ⌘] go back and forward through the threads and
+pages you visited. The buttons at the bottom of the sidebar open two pages in place of the thread:
+
+- **Pull requests.** The pull requests of every open project's GitHub repository, grouped into
+  yours, those awaiting your review, and others, with their checks, reviews, size and labels.
+  Filter by state and involvement, search GitHub, and sort by merge readiness or age. Click one to
+  open it in the side panel; hold Shift for Close, Merge, Ready for review or Reopen. It uses `gh`
+  on each machine.
+- **Usage** (⌘U). What Claude cost and how many tokens it used over the past day or 7, 30 or 90
+  days, read from Claude Code's transcripts on each machine and priced with LiteLLM's public
+  price list, by model and by day. Click a model for its details, or set your own price for one
+  under **Model prices**. **Limits** shows how much of the 5-hour and weekly limits is left. C, T
+  and L switch between cost, tokens and limits, and ⌘⇧1 to ⌘⇧4 pick the period.
+
+Other keys in the app view: ⌘N for a new thread (in the current project when only one is open,
+otherwise it asks where), ⌘⇧N for a new thread in the current project, ⌘⌥N for one in the home
+folder, ⌘⇧T to reopen the last thread you closed, ⌘⇧C to copy `claude --resume <session>`,
+⌘⇧[ and ⌘⇧] for the previous or next thread, and ⌘⌥B to show or hide the side panel. On Windows and Linux these keys use Ctrl, they do nothing
+while the terminal has the focus, and Ctrl+Shift+E switches views, since a shell needs Ctrl+E.
+
+The app view has T3 Code's light and dark themes and its palettes (T3 Chat, Grove, Ocean, Ember and
+Iris). Appearance follows the system until you pick Light or Dark: ⌘⌥⇧A cycles System, Light and
+Dark, ⌘⌥A picks a theme, and **Settings > General** shows them all, a palette per appearance if you
+like. ⌘⌥⇧T opens the theme editor, which builds a theme from a background and an accent, or color by
+color under Advanced, and previews it on the app as you go. The terminal view stays dark.
 
 ## Tabs
 
@@ -213,7 +318,9 @@ issues may run at the same time in one repository.
 
 A Slack workflow watches one channel for messages that @mention your bot. For each new
 thread that mentions it, pinned opens a tab whose prompt holds the whole thread, and the
-session answers in that thread by running `pinned slack reply "<text>"`. The bot token stays
+session answers in that thread by running `pinned slack reply "<text>"`. Replies are kept
+short. Before each one, the session runs its draft through the `pinned:bro` skill, which
+pinned loads into every session it starts. The bot token stays
 in the app, as the Linear key does. The default instructions ask Claude to triage the thread:
 analyse a bug and reply with the cause, or reply with an existing solution, without editing
 code. Each Slack workflow can also file a Linear issue and fix the bug, as below.

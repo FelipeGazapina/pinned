@@ -152,6 +152,17 @@ pub fn hostname() -> String {
     }
 }
 
+/// The system the hub lists the machine under: `std::env::consts::OS`, or "wsl" for Linux running
+/// under Windows' WSL, whose folders T3 Code's palette opens on their own.
+pub fn os() -> String {
+    os_named(std::env::consts::OS, std::fs::read_to_string("/proc/sys/kernel/osrelease").ok().as_deref())
+}
+
+fn os_named(os: &str, kernel_release: Option<&str>) -> String {
+    let wsl = os == "linux" && kernel_release.is_some_and(|r| r.to_ascii_lowercase().contains("microsoft"));
+    if wsl { "wsl".into() } else { os.into() }
+}
+
 fn post<T: DeserializeOwned>(hub: &str, path: &str, bearer: Option<&str>, body: &impl Serialize) -> Result<T, String> {
     let hub = hub.trim().trim_end_matches('/');
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
@@ -192,5 +203,13 @@ mod tests {
         Credentials::remove(&dir);
         assert_eq!(Credentials::load(&dir), None);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn linux_under_wsl_is_named_wsl() {
+        assert_eq!(os_named("linux", Some("5.15.153.1-microsoft-standard-WSL2\n")), "wsl");
+        assert_eq!(os_named("linux", Some("6.8.0-45-generic\n")), "linux");
+        assert_eq!(os_named("linux", None), "linux");
+        assert_eq!(os_named("macos", Some("microsoft")), "macos");
     }
 }

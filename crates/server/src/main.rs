@@ -108,7 +108,7 @@ fn hub(args: &[String]) -> Result<(), String> {
 fn pair(args: &[String]) -> Result<(), String> {
     let args = Args::parse(args, &["name", "config-dir"], 2)?;
     let name = args.name();
-    let creds = account::pair(&args.positional[0], &args.positional[1], &name, std::env::consts::OS)?;
+    let creds = account::pair(&args.positional[0], &args.positional[1], &name, &account::os())?;
     creds.save(&args.config_dir())?;
     println!("{name}");
     Ok(())
@@ -126,7 +126,7 @@ fn login(args: &[String]) -> Result<(), String> {
         }
     };
     let (user_token, account) = account::login(hub, email, &password)?;
-    let (machine, machine_token) = account::register_machine(hub, &user_token, &args.name(), std::env::consts::OS)?;
+    let (machine, machine_token) = account::register_machine(hub, &user_token, &args.name(), &account::os())?;
     let creds = Credentials { hub: hub.trim_end_matches('/').to_owned(), email: account.email, user_token, machine_id: machine.id, machine_token };
     creds.save(&args.config_dir())?;
     println!("{}", machine.name);

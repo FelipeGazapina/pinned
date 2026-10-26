@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Opus 5.5 · Claude API
+ ▝▝   ▝▝   ~/repo
+
+  Get to finished work sooner with Opus 5.5. Switch anytime with /model.
+
+❯ /model opus
+  ⎿  Set model to Opus 5.5 and saved as your default for new sessions
+
+❯ /fast on
+  ⎿  ↯ Fast mode ON · $8/$40 per Mtok
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────── ↯ /fast ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)
