@@ -183,10 +183,8 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .row { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
 .row input { flex: 1; min-width: 0; }
 #settings .row select { width: auto; flex: none; }
-.logo.slack { background: #4a154b; }
-.logo.github { background: #24292f; }
-.logo[data-tone] { background: var(--tone); }
-.logo[data-tone="vercel"] { box-shadow: inset 0 0 0 1px rgb(var(--s-ink-rgb, 255 255 255) / 0.14); font-size: 14px; }
+.logo[data-logo] { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.05); box-shadow: inset 0 0 0 1px rgb(var(--s-ink-rgb, 255 255 255) / 0.08); }
+.logo[data-logo] svg { width: 60%; height: 60%; }
 .actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 10px; }
 .actions.start { justify-content: flex-start; }
 #settings button.primary, #settings button.secondary { padding: 4px 12px; border-radius: 6px; white-space: nowrap; }
@@ -207,9 +205,19 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 [data-tone="proof"] { --tone: #2ead33; }
 [data-tone="called"] { --tone: #0e7c6b; }
 [data-tone="vercel"] { --tone: #000; }
-#settings .icon[data-tone="vercel"] { box-shadow: inset 0 0 0 1px rgb(var(--s-ink-rgb, 255 255 255) / 0.16); }
 #settings .icon { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; flex: none;
   background: var(--tone, rgb(var(--s-ink-rgb, 255 255 255) / 0.078)); color: #fff; font-size: 14px; }
+/* An app's mark stands on the tile itself, as n8n draws it, in the app's colours: Vercel and GitHub in the text colour. */
+#settings .icon[data-logo] { background: none; }
+#settings .icon[data-logo] svg { width: 80%; height: 80%; }
+[data-logo] svg { fill: var(--tone); }
+[data-logo="vercel"] svg, [data-logo="github"] svg { fill: var(--fg); }
+[data-logo="claude"] svg { fill: none; stroke: var(--tone); stroke-width: 2.2; stroke-linecap: round; }
+[data-logo="slack"] { --slack-red: #e01e5a; --slack-blue: #36c5f0; --slack-green: #2eb67d; --slack-yellow: #ecb22e; }
+[data-logo="slack"] .red { fill: var(--slack-red); }
+[data-logo="slack"] .blue { fill: var(--slack-blue); }
+[data-logo="slack"] .green { fill: var(--slack-green); }
+[data-logo="slack"] .yellow { fill: var(--slack-yellow); }
 
 .switch { position: relative; flex: none; width: 28px; height: 16px; }
 .switch input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }

@@ -210,7 +210,7 @@ function integrationsHtml() {
   return `<h2>Connectors</h2>
     <p class="hint">Services the harness can read from and act on.</p>
     <div class="card">
-      <div class="card-head"><span class="logo">◐</span><div><b>Linear</b><div class="hint">Issues, labels and comments</div></div>
+      <div class="card-head"><span class="logo" data-tone="linear" data-logo="linear">${LOGOS.linear}</span><div><b>Linear</b><div class="hint">Issues, labels and comments</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>
@@ -233,7 +233,7 @@ function githubCardHtml() {
        </ol>
        <p class="error" id="github-error"></p>`;
   return `<div class="card">
-      <div class="card-head"><span class="logo github">⎇</span><div><b>GitHub</b><div class="hint">Clones your repositories on any machine that lacks them, private ones too</div></div>
+      <div class="card-head"><span class="logo" data-logo="github">${LOGOS.github}</span><div><b>GitHub</b><div class="hint">Clones your repositories on any machine that lacks them, private ones too</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
@@ -253,7 +253,7 @@ function vercelCardHtml() {
        </ol>
        <p class="error" id="vercel-error"></p>`;
   return `<div class="card">
-      <div class="card-head"><span class="logo" data-tone="vercel">▲</span><div><b>Vercel AI Gateway</b><div class="hint">Decision models that sort Slack messages into categories</div></div>
+      <div class="card-head"><span class="logo" data-tone="vercel" data-logo="vercel">${LOGOS.vercel}</span><div><b>Vercel AI Gateway</b><div class="hint">Decision models that sort Slack messages into categories</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
@@ -275,7 +275,7 @@ function slackCardHtml() {
        </ol>
        <p class="error" id="slack-error"></p>`;
   return `<div class="card">
-      <div class="card-head"><span class="logo slack">#</span><div><b>Slack</b><div class="hint">Mentions of the bot, answered in their thread</div></div>
+      <div class="card-head"><span class="logo" data-logo="slack">${LOGOS.slack}</span><div><b>Slack</b><div class="hint">Mentions of the bot, answered in their thread</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
@@ -293,7 +293,27 @@ const input = (path, value, attrs = "") => `<input data-bind="${path}" value="${
 const select = (path, values, labelOf, selected) => `<select data-bind="${path}">${options(values, labelOf, selected)}</select>`;
 const check = (path, on, text) => `<label class="toggle"><input type="checkbox" data-bind="${path}"${on ? " checked" : ""}> ${text}</label>`;
 const switchHtml = (attrs, on) => `<label class="switch" title="On: the workflow watches and starts sessions"><input type="checkbox" ${attrs}${on ? " checked" : ""}><span></span></label>`;
-const iconHtml = (step) => `<span class="icon" data-tone="${step.tone}" title="${esc(`${step.app}: ${step.title}`)}">${step.icon}</span>`;
+const SLACK_MARK = [
+  ["red", "M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zm1.271 0a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313z"],
+  ["blue", "M8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zm0 1.271a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312z"],
+  ["green", "M18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zm-1.268 0a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312z"],
+  ["yellow", "M15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zm0-1.268a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"],
+];
+const CLAUDE_RAYS = Array.from({ length: 12 }, (_, i) => {
+  const a = (i * Math.PI) / 6 + 0.2;
+  const r = i % 2 ? 8.5 : 11;
+  return `M${(12 + 2.6 * Math.cos(a)).toFixed(2)} ${(12 + 2.6 * Math.sin(a)).toFixed(2)}L${(12 + r * Math.cos(a)).toFixed(2)} ${(12 + r * Math.sin(a)).toFixed(2)}`;
+}).join("");
+/** Each app's mark, drawn in its theme-aware colours by the stylesheet. Steps of other apps keep their glyph. */
+const LOGOS = {
+  slack: `<svg viewBox="0 0 24 24">${SLACK_MARK.map(([part, d]) => `<path class="${part}" d="${d}"/>`).join("")}</svg>`,
+  linear: `<svg viewBox="0 0 24 24"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg>`,
+  vercel: `<svg viewBox="0 0 24 24"><path d="M12 2.5 23 21.5H1z"/></svg>`,
+  claude: `<svg viewBox="0 0 24 24"><path d="${CLAUDE_RAYS}"/></svg>`,
+  github: `<svg viewBox="0 0 24 24"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 0-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.2.5-2.3 1.3-3.1-.2-.4-.6-1.6 0-3.2 0 0 1-.3 3.4 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8 0 3.2.9.8 1.3 1.9 1.3 3.2 0 4.6-2.8 5.6-5.5 5.9.5.4.9 1 .9 2.2v3.3c0 .3.1.7.8.6A12 12 0 0 0 12 .3"/></svg>`,
+};
+const iconHtml = (step) =>
+  `<span class="icon" data-tone="${step.tone}"${LOGOS[step.tone] ? ` data-logo="${step.tone}"` : ""} title="${esc(`${step.app}: ${step.title}`)}">${LOGOS[step.tone] ?? step.icon}</span>`;
 const kindHtml = (c) => `<label>Starts when ${select("trigger.kind", Object.keys(TRIGGERS), (t) => TRIGGERS[t].text, c.trigger.kind)}</label>`;
 
 /** An optional step that moves the Linear issue to a column at `stage`, matching the backend's `Stage`. Off while it names no column. */
