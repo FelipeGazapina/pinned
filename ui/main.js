@@ -1129,12 +1129,12 @@ function connectHub(signedIn) {
     hello(frame) {
       account.email = frame.account.email;
       showMachines(frame.machines, frame.tabs);
-      hub.hub({ cmd: "get_settings" }).then(onHubSettings, console.warn);
+      hub.hub({ cmd: "get_settings" }).then(onSettings, console.warn);
     },
     machines: (list) => showMachines(list),
     // This Mac's own events come over Tauri, not back through the hub.
     event: (machine, event) => machine !== account.machine_id && onMachineEvent(machine, event),
-    settings: (latest) => onHubSettings(latest),
+    settings: (latest) => onSettings(latest),
     online(on) {
       document.body.dataset.hub = on ? "online" : "offline";
       if (settingsOpen() && page === "account") showAccount();
