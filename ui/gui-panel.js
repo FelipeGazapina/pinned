@@ -1266,15 +1266,8 @@ panelBody.addEventListener("input", (e) => {
 panelBody.addEventListener("scroll", (e) => {
   if (!e.target.matches?.(".code-edit")) return;
 }, true);
-/** ⌘S saves the file being edited; elsewhere it keeps doing what the composer gave it, stashing the
- * draft. The app view finds a key's first registration, so this one goes first. */
-const saveKey = {
-  keys: ["s"],
-  shift: false,
-  alt: false,
-  run: (e) => (e.target.closest?.(".code-edit") ? saveFile(shownSurface(active)) : guiKeys.find((k) => k !== saveKey && k.keys.includes("s") && !k.shift && !k.alt)?.run(e)),
-};
-guiKeys.unshift(saveKey);
+/** ⌘S saves the file being edited; elsewhere it keeps doing what the composer gave it, stashing the draft. */
+onGuiKey("s", () => saveFile(shownSurface(active)), { when: () => !!document.activeElement?.closest?.(".code-edit") });
 panelBody.addEventListener("keydown", (e) => {
   if (e.target.matches(".code-edit")) {
     if (e.key === "Tab" && !e.shiftKey) {
@@ -2656,7 +2649,7 @@ function prMenu(s) {
       : { label: "Link to this thread", icon: "link-2", run: () => (linkPr(tab, d.url), renderPanel()) },
     { label: "Open on GitHub", icon: "arrow-up-right", run: () => openOutside(d.url) },
     { label: "Copy link", icon: "link-2", run: () => copyText(d.url, "Link copied") },
-    { label: "Copy PR number", icon: "copy", kbd: `${IS_MAC ? "⌘⇧" : "Ctrl+Shift+"}K`, run: () => copyText(`#${d.number}`, `PR #${d.number} number copied`) },
+    { label: "Copy PR number", icon: "copy", kbd: bindingLabel("pullRequest.copyNumber"), run: () => copyText(`#${d.number}`, `PR #${d.number} number copied`) },
     ...(state === "open" || state === "draft" ? ["-", { label: "Close pull request", icon: "circle-x", danger: true, confirm: "Confirm close?", run: () => prAct(s, "close") }]
       : state === "closed" ? ["-", { label: "Reopen pull request", icon: "rotate-ccw", run: () => prAct(s, "reopen") }]
       : state === "merged" ? ["-", { label: "Revert changes", icon: "rotate-ccw", confirm: "Confirm revert?", run: () => prAct(s, "revert") }, { label: "Delete branch", icon: "trash-2", confirm: "Confirm delete?", run: () => prAct(s, "delete_branch") }] : []),
@@ -2925,7 +2918,7 @@ function renderPrPanel(s) {
   const crumbs = `<div class="crumbs"><span class="repo muted">${esc(d.url.match(/github\.com\/([^/]+\/[^/]+)/)?.[1] ?? "")}</span><button class="num ${state}" data-open-url="${esc(d.url)}" title="Open on GitHub">#${d.number}${icon("external-link")}</button><span class="condensed-title">${esc(d.title)}</span>
       <span class="spacer"></span>
       ${stack ? `<button type="button" class="icon" data-pr-stack title="Stack">${icon("layers")}</button>` : ""}
-      ${linked.length ? `<button type="button" class="ghost small" data-pr-threads aria-label="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}" title="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}">${icon("message-square")}${linked.length}</button>` : ""}
+      ${linked.length ? `<button type="button" class="ghost small" data-pr-threads aria-label="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}" title="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}. Search in the command palette.">${icon("message-square")}${linked.length}</button>` : ""}
       ${primary}<button type="button" class="icon" data-pr-more title="More">${icon("ellipsis")}</button></div>`;
   const title = s.editing === "title"
     ? `<div class="edit-title"><input data-pr-edit="title" value="${esc(d.title)}" aria-label="Title"><button type="button" class="outline" data-edit-cancel>Cancel</button><button type="button" class="primary" data-edit-save="title">Save</button></div>`
@@ -3036,7 +3029,7 @@ function prClick(e) {
     toggleMenu(e.target.closest("[data-pr-stack]"), [{ group: "Stack" }, ...d.stack.above.map((pr) => row(pr, "above")), { label: `#${d.number} ${d.title}`, checked: true, run: () => {} }, ...d.stack.below.map((pr) => row(pr, "below"))]);
     return true;
   } else if (e.target.closest("[data-pr-threads]")) {
-    toggleMenu(e.target.closest("[data-pr-threads]"), [{ group: "Linked threads" }, ...threadsOn(d.url).map((t) => ({ label: threadTitle(t), hint: projectName(t), checked: t === tab, run: () => activate(t) }))]);
+    openPalette({ query: d.url, linkedThreads: threadsOn(d.url) });
     return true;
   } else return false;
   renderPanel();

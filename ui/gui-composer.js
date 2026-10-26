@@ -168,7 +168,7 @@ function renderComposer(tab) {
   footer.innerHTML = `${workspaceHtml(tab)}
     <span class="spacer"></span>
     ${prBadge(tab, "button", pr)}
-    ${ws?.branch ? `<button type="button" class="branch" title="${esc(ws.branch)} · ⌘⇧G">${icon("git-branch")}<span>${esc(ws.branch)}</span>${icon("chevron-down", "chev")}</button>` : ""}`;
+    ${ws?.branch ? `<button type="button" class="branch" title="${esc(ws.branch)} · ${bindingLabel("composer.branch") ?? ""}">${icon("git-branch")}<span>${esc(ws.branch)}</span>${icon("chevron-down", "chev")}</button>` : ""}`;
   const branchLabel = footer.querySelector(".branch > span");
   if (branchLabel) branchLabel.innerHTML = middle(ws.branch, 24);
   hostControls();
@@ -944,6 +944,7 @@ function renderModels(tab) {
   const lit = list.querySelectorAll("[data-row]")[Math.min(highlight, list.querySelectorAll("[data-row]").length - 1)];
   lit?.classList.add("highlight");
   lit?.scrollIntoView({ block: "nearest" });
+  markModelJumps(list);
 }
 document.getElementById("model-button").onclick = (e) => (composerMenu.hidden || composerMenu.dataset.kind !== "models" ? openModels(e.currentTarget) : (composerMenu.hidden = true));
 onGuiKey("m", () => document.getElementById("model-button").click(), { shift: true });
@@ -1064,7 +1065,7 @@ function renderControls(tab) {
   const name = tab ? modelName(tab) : "Default";
   const modelButton = document.getElementById("model-button");
   modelButton.querySelector(".name").textContent = name;
-  modelButton.title = `${name} · ${IS_MAC ? "⌘⇧M" : "Ctrl+Shift+M"}`;
+  modelButton.title = `${name} · ${bindingLabel("modelPicker.toggle") ?? ""}`;
   const label = tab?.view.running && traitsLabel(tab);
   const traitsBlock = document.getElementById("traits-block");
   traitsBlock.hidden = !label || !traitEntries(tab).length;
@@ -1079,7 +1080,7 @@ function renderControls(tab) {
   if (modeButton.dataset.mode === shown) return;
   modeButton.dataset.mode = shown;
   modeButton.innerHTML = `${icon(MODES[access].icon)}<span class="name">${esc(MODES[access].label)}</span>${icon("chevron-down")}`;
-  modeButton.title = `${MODES[access].hint} (${IS_MAC ? "⌘⇧A" : "Ctrl+Shift+A"})`;
+  modeButton.title = `${MODES[access].hint} (${bindingLabel("composer.mode") ?? ""})`;
   const plan = mode === "plan";
   planToggle.setAttribute("aria-pressed", plan);
   planToggle.title = plan ? "Plan mode. Click to return to normal build mode" : "Default mode. Click to enter plan mode";
@@ -1530,7 +1531,7 @@ function workspaceHtml(tab) {
   const remote = tab.machine !== LOCAL;
   const content = `${remote ? icon("monitor") : ""}<span class="ws-icon" title="${esc(label)}">${icon(name)}</span><span class="label">${esc(remote ? machineName(tab.machine) : label)}</span>`;
   return open
-    ? `<button type="button" class="where" title="${esc(tab.view.cwd)} · ${IS_MAC ? "⌘⇧X" : "Ctrl+Shift+X"}">${content}${icon("chevron-down", "chev")}</button>`
+    ? `<button type="button" class="where" title="${esc(tab.view.cwd)} · ${bindingLabel("composer.workspace") ?? ""}">${content}${icon("chevron-down", "chev")}</button>`
     : `<span class="where" title="${esc(tab.view.cwd)}">${content}</span>`;
 }
 /** T3 Code's run context menu: the machines it can run on, and Current checkout, New worktree or
@@ -1550,6 +1551,14 @@ function openWorkspace(anchor) {
     if (previous) entries.push({ label: previous.branch ? `Previous worktree (${previous.branch})` : "Previous worktree", icon: "folder-git", run: () => setWorkspace(tab, previous.path) });
   }
   openMenu(anchor, entries, "workspace");
+}
+/** T3 Code's Run on picker (⌘⇧H): the machines alone, where the composer is wide enough to show it
+ * apart from the workspace; a narrow one has the combined menu. */
+function openHosts(anchor) {
+  const tab = active;
+  if (!tab || !anchor || !workspaceOpen(tab)) return;
+  if (composer.offsetWidth < 768) return anchor.click();
+  openMenu(anchor, [{ heading: "Run on" }, ...onlineMachines().map((m) => ({ label: machineName(m), icon: "monitor", checked: m === tab.machine, run: () => m !== tab.machine && runOn(tab, m) }))], "hosts");
 }
 /** Moves an unstarted thread to a new worktree, another, or the project's checkout; claude starts
  * over there. Send waits meanwhile, as T3 Code's does while it prepares a worktree. */
@@ -1591,7 +1600,7 @@ const pickPreviousWorktree = () => {
   if (previous) setWorkspace(tab, previous.path);
 };
 onGuiKey("x", () => document.querySelector("#composer-footer button.where")?.click(), { shift: true });
-onGuiKey("h", () => document.querySelector("#composer-footer button.where")?.click(), { shift: true });
+onGuiKey("h", () => openHosts(document.querySelector("#composer-footer button.where")), { shift: true });
 onGuiKey("l", pickPreviousWorktree, { shift: true });
 
 /** T3 Code's empty-thread headline, "What should we build in <project>?", whose project opens a
@@ -2259,7 +2268,7 @@ window.addEventListener("keydown", (e) => {
 const drawerTabs = Object.assign(document.createElement("nav"), { id: "drawer-tabs" });
 document.getElementById("terms").prepend(drawerTabs);
 const scriptShells = [];
-async function runScript(tab, script, cwd = null) {
+async function runScript(tab, script, cwd = null, group = null) {
   if (!tab || !script) return;
   if (script.previewUrl && script.autoOpenPreview && tab === active) {
     setBrowserUrl(script.previewUrl);
@@ -2272,7 +2281,8 @@ async function runScript(tab, script, cwd = null) {
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(el);
-  const shell = { tab, name: script.name, el, term, fit, id: null, done: null };
+  const shell = { tab, name: script.name, el, term, fit, id: null, done: null, group };
+  group?.members.push(shell);
   shell.done = new Promise((resolve) => (shell.exited = resolve));
   scriptShells.push(shell);
   showDrawerView(tab, shell);
@@ -2295,7 +2305,11 @@ function closeShell(shell) {
   shell.term.dispose();
   shell.exited();
   if (shell.id) callOn(shell.tab.machine, { cmd: "close_shell", shell: shell.id }).catch(() => {});
-  if (threadOf(shell.tab).drawerShell === shell) threadOf(shell.tab).drawerShell = null;
+  const t = threadOf(shell.tab);
+  const group = shell.group?.members;
+  group?.splice(group.indexOf(shell), 1);
+  if (t.drawerShell === shell) t.drawerShell = group?.at(-1) ?? null;
+  if (group?.length === 1) group[0] ? (group[0].group = null) : (t.claudeGroup = null);
   renderDrawer();
 }
 /** Shows claude's terminal or a script's shell in the drawer, and the tabs to switch them. */
@@ -2306,18 +2320,39 @@ function showDrawerView(tab, shell) {
 function renderDrawer() {
   const tab = active;
   const own = scriptShells.filter((s) => s.tab === tab);
-  const shown = tab && document.body.dataset.drawer === "open" ? threadOf(tab).drawerShell : null;
-  for (const s of scriptShells) s.el.hidden = s !== shown;
-  if (tab && tab.el.hidden !== !!shown && guiOn()) {
-    tab.el.hidden = !!shown;
-    if (!shown) refit(tab);
-  }
-  if (shown) {
-    shown.fit.fit();
-    if (shown.id) callOn(tab.machine, { cmd: "resize_pty", tab: shown.id, cols: shown.term.cols, rows: shown.term.rows }).catch(() => {});
+  const open = tab && document.body.dataset.drawer === "open";
+  const shown = open ? threadOf(tab).drawerShell : null;
+  const group = open ? (shown ? shown.group : threadOf(tab).claudeGroup) : null;
+  const visible = group?.members ?? [shown];
+  for (const s of scriptShells) s.el.hidden = !visible.includes(s);
+  if (tab) layoutSplit([tab.el, ...own.map((s) => s.el)], group && group.members.map((s) => s?.el ?? tab.el), group?.vertical, own.length ? 38 : 6);
+  if (tab && tab.el.hidden !== !visible.includes(null) && guiOn()) {
+    tab.el.hidden = !visible.includes(null);
+    if (!tab.el.hidden) refit(tab);
+  } else if (tab && group && visible.includes(null)) refit(tab);
+  for (const s of visible) {
+    if (!s) continue;
+    s.fit.fit();
+    if (s.id) callOn(tab.machine, { cmd: "resize_pty", tab: s.id, cols: s.term.cols, rows: s.term.rows }).catch(() => {});
   }
   drawerTabs.hidden = !own.length;
   drawerTabs.innerHTML = own.length ? `<button type="button" data-shell=""${shown ? "" : " aria-pressed=\"true\""}>${icon("claude")}<span>claude</span></button>${own.map((s, i) => `<span class="shell-tab"><button type="button" data-shell="${i}"${s === shown ? " aria-pressed=\"true\"" : ""}>${icon("terminal")}<span>${esc(s.name)}</span></button><button type="button" class="close" data-close-shell="${i}" aria-label="Close ${esc(s.name)}" title="Close ${esc(s.name)}">${icon("x")}</button></span>`).join("")}` : "";
+}
+/** T3 Code's split terminals: a group's terminals share the drawer side by side, or stacked when `vertical`. */
+function layoutSplit(all, members, vertical, top) {
+  for (const el of all) {
+    for (const side of ["top", "bottom", "left", "right"]) el.style[side] = "";
+    el.classList.remove("split-next", "vertical");
+  }
+  if (!members || members.length < 2) return;
+  const n = members.length;
+  members.forEach((el, i) => {
+    const [start, end, a, b] = vertical ? ["top", "bottom", top, 4] : ["left", "right", 8, 4];
+    el.style[start] = `calc(${a}px + (100% - ${a + b}px) * ${i} / ${n})`;
+    el.style[end] = `calc(${b}px + (100% - ${a + b}px) * ${n - 1 - i} / ${n})`;
+    el.classList.toggle("split-next", i > 0);
+    el.classList.toggle("vertical", !!vertical);
+  });
 }
 drawerTabs.addEventListener("click", (e) => {
   const tab = active;

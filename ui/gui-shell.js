@@ -27,11 +27,10 @@ Object.assign(ICON_PATHS, {
   "message-square-dashed": `<path d="M10 17H7l-4 4v-7"/><path d="M14 17h1"/><path d="M14 3h1"/><path d="M19 3a2 2 0 0 1 2 2"/><path d="M21 14v1a2 2 0 0 1-2 2"/><path d="M21 9v1"/><path d="M3 9v1"/><path d="M5 3a2 2 0 0 0-2 2"/><path d="M9 3h1"/>`,
   "folder-git-2": `<path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"/><circle cx="13" cy="12" r="2"/><path d="M18 19c-2.8 0-5-2.2-5-5v8"/><circle cx="20" cy="19" r="2"/>`,
   "layers-2": `<path d="m16.02 12 5.48 3.13a1 1 0 0 1 0 1.74L13 21.74a2 2 0 0 1-2 0l-8.5-4.87a1 1 0 0 1 0-1.74L7.98 12"/><path d="M13 13.74a2 2 0 0 1-2 0L2.5 8.87a1 1 0 0 1 0-1.74L11 2.26a2 2 0 0 1 2 0l8.5 4.87a1 1 0 0 1 0 1.74Z"/>`,
+  "chart-no-axes-column": `<line x1="18" x2="18" y1="20" y2="10"/><line x1="12" x2="12" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/>`,
   "folder-plus": `<path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>`,
 });
 
-const chordLabel = (key, { shift = false, alt = false } = {}) =>
-  IS_MAC ? `⌘${alt ? "⌥" : ""}${shift ? "⇧" : ""}${key}` : `Ctrl+${alt ? "Alt+" : ""}${shift ? "Shift+" : ""}${key}`;
 const agoLong = (unix) => {
   const s = Date.now() / 1000 - unix;
   if (s < 60) return "just now";
@@ -109,12 +108,11 @@ paletteEl.id = "palette";
 paletteEl.hidden = true;
 paletteEl.innerHTML = `<div class="backdrop"></div><div class="popup" role="dialog" aria-label="Command palette">
   <div class="field"><button type="button" class="lead" tabindex="-1"></button><input type="text" autocomplete="off" spellcheck="false" aria-label="Search"><span class="accessory"></span></div>
-  <div class="summary-slot"></div><div class="results" role="listbox"></div>
-  <footer><span><kbd>↑</kbd><kbd>↓</kbd>Navigate</span><span><kbd>↵</kbd>Select</span><span class="pop"><kbd>⌫</kbd>Back</span><span><kbd>Esc</kbd>Close</span></footer></div>`;
+  <div class="summary-slot"></div><p class="notice" role="status" hidden></p><div class="results" role="listbox"></div><footer></footer></div>`;
 document.body.append(paletteEl);
 const paletteInput = paletteEl.querySelector("input");
 const paletteResults = paletteEl.querySelector(".results");
-const palette = { views: [], hi: 0, shown: [], projects: [] };
+const palette = { views: [], hi: 0, shown: [], projects: [], linked: null };
 const paletteOpen = () => !paletteEl.hidden;
 const RECENT_THREADS = 12;
 const SETTINGS_PAGES = [
@@ -155,30 +153,72 @@ function filterGroups(groups, raw) {
       items: g.items
         .map((item, index) => ({ item, index, rank: rankItem(item, query, tokens) }))
         .filter(({ item }) => tokens.every((t) => normalize(item.terms.join(" ")).includes(t)))
-        .sort((a, b) => b.rank - a.rank || (b.item.recency ?? 0) - (a.item.recency ?? 0) || a.index - b.index)
+        .sort((a, b) => Number(!!a.item.secondary) - Number(!!b.item.secondary) || b.rank - a.rank || (b.item.recency ?? 0) - (a.item.recency ?? 0) || a.index - b.index)
         .map((r) => r.item),
     }))
     .filter((g) => g.items.length);
 }
 
 const projectOfTab = (tab) => threadOf(tab).workspace?.project ?? tab.view.cwd;
-function threadSub(tab) {
-  const ws = threadOf(tab).workspace;
-  return [projectName(tab), tab.machine === LOCAL ? "" : machineName(tab.machine), ws?.branch ?? "", tab === active ? "Current thread" : ""].filter(Boolean).join(" · ");
+const machineLabel = (machine) => (machine === LOCAL ? "Local" : machineName(machine));
+const metaDot = `<span class="dot">·</span>`;
+/** ThreadStatusIndicators' pill, from the phase the sidebar reads too. */
+function paletteStatus(tab) {
+  const phase = phaseOf(tab);
+  if (phase === "asking") return { label: "Pending Approval", tone: "warning" };
+  if (phase === "input") return { label: "Awaiting Input", tone: "input" };
+  if (phase === "working") return { label: "Working", tone: "info", pulse: true };
+  if (phase === "failed") return { label: "Failed", tone: "error" };
+  return unseenDone(tab) ? { label: "Completed", tone: "success" } : null;
 }
-function threadItem(tab) {
-  const t = threadOf(tab);
+/** ThreadRowLeadingStatus: the pull request's state icon, then the status dot and its label. */
+function threadLead(tab) {
   const pr = prOf(tab);
-  const said = t.items.filter((i) => i.kind === "user" || i.kind === "assistant").map((i) => i.text ?? "").join(" ").slice(0, 4000);
-  const slot = statusSlot(tab);
+  const state = pr && prStatus(tab, pr)?.state;
+  const status = paletteStatus(tab);
+  const mark = !pr ? "" : state
+    ? `<span class="pr-state" data-state="${state}" role="img" aria-label="PR #${pr.number} ${PR_LOOKS[state].label.toLowerCase()}" title="#${pr.number} ${esc(PR_LOOKS[state].label)}">${icon(PR_LOOKS[state].icon)}</span>`
+    : `<span class="pr-state" role="img" aria-label="PR #${pr.number}, status pending">${icon("git-pull-request-arrow")}</span>`;
+  const pill = status ? `<span class="status" data-tone="${status.tone}"${status.pulse ? " data-pulse" : ""} role="img" aria-label="${status.label}" title="${status.label}"><i></i><span>${status.label}</span></span>` : "";
+  return mark || pill ? `<span class="lead-status">${mark}${pill}</span>` : "";
+}
+const threadPrs = (tab) => [prOf(tab), ...linkedPrs(tab)].filter((pr, i, all) => pr && all.findIndex((o) => o?.url === pr.url) === i);
+const prTerms = (tab) => threadPrs(tab).flatMap((pr) => [`#${pr.number}`, `${pr.url.match(/github\.com\/([^/]+\/[^/]+)/)?.[1] ?? ""}#${pr.number}`, pr.url]);
+/** ThreadRowTrailingStatus, after the PR number a query found: a running terminal and the machine of a remote thread. */
+function threadTrail(tab, query) {
+  const tokens = normalize(query).split(" ").filter(Boolean);
+  const hit = tokens.length && threadPrs(tab).find((pr) => tokens.every((t) => normalize(prTerms(tab).filter((term) => term.includes(`#${pr.number}`) || term === pr.url).join(" ")).includes(t)));
+  const state = hit && prStatus(tab, hit)?.state;
+  const parts = [
+    hit && `<span class="pr-num"${state ? ` data-state="${state}"` : ""} aria-label="PR #${hit.number}">${icon(PR_LOOKS[state]?.icon ?? "git-pull-request-arrow")}#${hit.number}</span>`,
+    (scriptShells.some((s) => s.tab === tab) || panelOf(tab).surfaces.some((s) => s.kind === "terminal")) && `<span class="terminal-run" role="img" aria-label="Terminal process running" title="Terminal process running">${icon("terminal")}</span>`,
+    tab.machine !== LOCAL && `<span class="remote" aria-label="${esc(machineName(tab.machine))}" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>`,
+  ].filter(Boolean);
+  return parts.length ? `<span class="trail-status">${parts.join("")}</span>` : "";
+}
+/** ThreadCommandSubtitle: the project's icon, name and machine, the branch, the agent, and "Current thread". */
+function threadSubHtml(tab) {
+  const ws = threadOf(tab).workspace;
+  return [
+    `<span class="part">${projectIcon(projectName(tab), tab)}<span class="cut">${esc(projectName(tab))}</span>${metaDot}<span>${esc(machineLabel(tab.machine))}</span></span>`,
+    ws?.branch && `<span class="part">${icon(ws.worktree ? "folder-git-2" : "folder")}<span class="cut">${esc(ws.branch)}</span></span>`,
+    `<span class="part agent" title="Claude">${icon("claude")}</span>`,
+    tab === active && `<span>Current thread</span>`,
+  ].filter(Boolean).join(metaDot);
+}
+function threadItem(tab, query = "") {
+  const t = threadOf(tab);
+  const found = palette.search?.query && palette.search.matches.get(tab.key);
   return {
     icon: "message-square",
     title: esc(threadTitle(tab)),
-    status: slot ? `<span class="status" data-tone="${slot.tone}" title="${esc(slot.text)}"></span>` : "",
-    sub: threadSub(tab),
+    status: threadLead(tab),
+    trail: threadTrail(tab, query),
+    subHtml: threadSubHtml(tab),
+    excerpt: found ? { ...found, query: palette.search.query } : null,
     time: latestUserAt(tab),
     recency: latestUserAt(tab),
-    terms: [threadTitle(tab), pr ? `#${pr.number} ${pr.url}` : "", projectName(tab), t.workspace?.branch ?? "", said, t.session ?? ""],
+    terms: [threadTitle(tab), ...prTerms(tab), projectName(tab), t.workspace?.branch ?? "", found?.snippet ?? "", t.session ?? ""],
     run: () => activate(tab),
   };
 }
@@ -191,48 +231,55 @@ function paletteProjects() {
   }
   return [...seen.values()];
 }
-const projectSub = (p) => [p.machine === LOCAL ? "" : machineName(p.machine), tilde(p.path)].filter(Boolean).join(" · ");
+/** A thread without a project runs in the home folder, T3 Code's scratch project. */
+const isScratch = (p) => tilde(p.path) === "~";
+const tabOfProjectAt = (p) => tabs.filter((t) => t.machine === p.machine && projectOfTab(t) === p.path).sort((a, b) => latestUserAt(b) - latestUserAt(a))[0];
+/** ProjectLocationDescription: a remote project's machine icon, where it is, and its folder. */
+const projectSubHtml = (p) => `<span class="part">${p.machine === LOCAL ? "" : icon("monitor")}<span>${esc(machineLabel(p.machine))}</span></span>${metaDot}<span class="cut">${esc(p.path)}</span>`;
+const projectRowIcon = (p) => projectIcon(p.name, tabOfProjectAt(p));
+/** The project ⌘N and "New thread in" mean: the open thread's, else the most recent one. */
+const contextProject = () => (active ? { machine: active.machine, path: projectOfTab(active), name: projectName(active), tab: active } : paletteProjects()[0] ?? null);
 
 function actionItems() {
   const tab = active;
-  const project = tab && projectName(tab);
+  const here = contextProject();
   const pr = tab && prOf(tab);
-  const resume = tab && resumeCommand(tab);
-  const hasProjects = paletteProjects().length > 0;
+  const projects = paletteProjects();
+  const online = onlineMachines();
   return [
-    tab && { icon: "square-pen", title: `New thread in <b>${esc(project)}</b>`, hint: chordLabel("N", { shift: true }), terms: [`new thread in ${project}`, "chat create"], run: () => newThreadIn(tab) },
-    hasProjects && { icon: "square-pen", title: "New thread in...", page: "new-thread-in", terms: ["new thread in", "project chat create"] },
-    { icon: "square-pen", title: "New thread without a project", hint: chordLabel("N", { alt: true }), terms: ["new thread without a project", "chat create blank"], run: () => newThreadWithoutProject() },
-    tab && { icon: "search", title: "Find in current thread", hint: chordLabel("F"), terms: ["find in current thread", "search"], run: () => openFind() },
+    here && { icon: "square-pen", title: `New thread in <b>${esc(here.name)}</b>`, command: "chat.newLocal", terms: ["new thread", "chat", "create", "draft"], run: () => (here.tab ? newThreadIn(here.tab) : openProjectIn(here.machine, here.path)) },
+    projects.length > 0 && { icon: "square-pen", title: "New thread in...", page: "new-thread-in", terms: ["new thread", "project", "pick", "choose", "select"] },
+    online.length > 0 && { icon: "message-square-dashed", title: "New thread without a project", command: "chat.newWithoutProject", terms: ["new thread", "no project", "without project", "none", "chat"], run: () => newThreadWithoutProject() },
+    tab && { icon: "text-search", title: "Find in current thread", command: "chat.find", terms: ["find", "search", "messages", "plans"], run: () => openFind() },
     ...promptLinkItems(tab),
-    pr && { icon: "copy", title: "Copy PR link", sub: pr.url, terms: ["copy pr link", "pull request url"], run: () => copyAndTell(pr.url, "PR link") },
-    resume && { icon: "copy", title: "Copy thread ID", sub: threadOf(tab).session, hint: chordLabel("C", { shift: true }), terms: ["copy thread id", "resume session reference"], run: () => copyResume() },
-    tab && { icon: "link", title: "Link pull request to thread", terms: ["link pull request to thread", "pr attach stack"], run: () => linkPrDialog(tab) },
-    tab && { icon: "link", title: "Show linked pull requests", disabled: !linkedPrs(tab).length, terms: ["show linked pull requests", "pr stack prs"], run: () => addSurface(tab, { id: "prs", kind: "prs" }) },
-    tab && { icon: "rotate-ccw", title: "Restart agent session", terms: ["restart agent session", "reset reload skills plugins mcp"], run: () => restartAgent(tab) },
-    tab && { icon: "file-search", title: "Go to file", hint: chordLabel("P"), terms: ["go to file", "open file picker find quick open"], run: () => childSearch("files") },
-    tab && { icon: "text-search", title: "Search project contents", hint: chordLabel("F", { shift: true }), terms: ["search project contents", "find in files grep content text search"], run: () => childSearch("content") },
-    onlineMachines().length > 0 && { icon: "folder-git-2", title: "New project", page: "new-project", terms: ["new project", "create project empty repository repo git init"] },
-    { icon: "folder-plus", title: "Add project", terms: ["add project", "open folder"], run: () => addProject() },
-    ...onlineMachines().filter((m) => machines.get(m).view.os === "wsl").map((m) => ({ icon: "folder-plus", title: "Open WSL folder", sub: machineName(m), terms: ["open wsl folder", "add project linux directory"], run: () => addProject(m) })),
-    { icon: "git-pull-request", title: "Open pull requests", terms: ["open pull requests", "prs reviews"], run: () => openPage("pull-requests") },
-    { icon: "chart-column", title: "Open usage", hint: chordLabel("U"), terms: ["open usage", "cost tokens limits"], run: () => openPage("usage") },
+    tab && (pr || threadOf(tab).session) && { icon: "link", title: pr ? "Copy PR link" : "Copy thread ID", sub: pr ? pr.url : threadOf(tab).session, command: "thread.copyReference", terms: ["copy", "pull request", "pr link", "thread id", "reference"], run: () => copyThreadReference() },
+    tab && { icon: "link-2", title: "Link pull request to thread", terms: ["link", "pull request", "pr", "attach", "stack"], run: () => linkPrDialog(tab) },
+    tab && { icon: "link-2", title: "Show linked pull requests", disabled: !linkedPrs(tab).length, terms: ["pull requests", "linked", "stack", "prs"], run: () => addSurface(tab, { id: "prs", kind: "prs" }) },
+    tab && { icon: "rotate-ccw", title: "Restart agent session", terms: ["restart", "reset", "reload", "agent", "session", "skills", "plugins", "mcp"], run: () => restartAgent(tab) },
+    { icon: "file-search", title: "Go to file", command: "filePicker.toggle", keep: true, terms: ["go to file", "open file", "file picker", "find file", "quick open"], run: () => childSearch("files") },
+    { icon: "text-search", title: "Search project contents", command: "projectSearch.toggle", keep: true, terms: ["search project", "find in files", "grep", "content search", "text search"], run: () => childSearch("content") },
+    online.length > 0 && { icon: "folder-git-2", title: "New project", page: "new-project", terms: ["new project", "create project", "empty", "repository", "repo", "git init"] },
+    { icon: "folder-plus", title: "Add project", keep: true, terms: ["add project", "folder", "directory", "browse", "clone", "remote", "repository", "repo", "git", "github", "url", "environment"], run: () => startAddProject() },
+    ...online.filter((m) => machines.get(m).view.os === "wsl").slice(0, 1).map((m) => ({ icon: "folder-plus", title: "Open WSL folder", sub: machineName(m), keep: true, terms: ["add project", "open", "wsl", "linux", "folder", "directory"], run: () => browseForProject(m) })),
     ...themeActionItems(),
-    { icon: "square-terminal", title: "Switch to terminal view", hint: chordLabel("E"), terms: ["switch to terminal view", "mode"], run: () => setMode("terminal") },
-    { icon: "settings", title: "Open settings", hint: chordLabel(","), terms: ["open settings", "settings preferences configuration"], run: () => openSettings() },
-    tab && { icon: "folder", title: "Project settings", sub: project, terms: ["project settings", project], run: () => openSettings("projects") },
+    { icon: "git-pull-request-arrow", title: "Open pull requests", terms: ["pull requests", "prs", "pr", "github", "review", "merge", "branch"], run: () => openPage("pull-requests") },
+    { icon: "chart-no-axes-column", title: "Open usage", command: "usage.open", terms: ["usage", "use", "tokens", "cost", "spend", "limits", "stats", "analytics"], run: () => openPage("usage") },
+    { icon: "settings", title: "Open settings", terms: ["settings", "preferences", "configuration", "keybindings"], run: () => openSettings() },
+    here && { icon: "folder", title: "Project settings", sub: here.name, terms: ["project", "settings", "name", "icon", "scripts", "model", "workspace", "grouping", "checkout", "remove", "t3.json"], run: () => openSettings("projects") },
   ].filter(Boolean);
 }
 /** Claude reads its skills, plugins and MCP servers at launch, so it starts again on the thread's conversation. */
 async function restartAgent(tab) {
   refit(tab);
   await callOn(tab.machine, { cmd: "restart_claude", tab: tab.view.id, cols: tab.term.cols, rows: tab.term.rows });
-  tell("Agent session restarted. Skills, plugins and MCP servers load again.", 4000);
+  tell("<b>Agent session will restart</b> Your next message starts a fresh session.", 4000);
 }
 /** T3 Code's child searches: ⌘P's files and ⌘⇧F's contents take the palette's place, and Escape
  * there comes back to it with its query as it was. */
 function childSearch(mode) {
+  if (!active) return tell("Open a project to search its files.");
   palette.parent = paletteView()?.query ?? "";
+  paletteEl.hidden = true;
   openPicker(mode);
 }
 function backToPalette() {
@@ -247,31 +294,33 @@ async function openSettings(name) {
   if (name) showPage(name);
 }
 
+/** CommandPalette.logic's linked-thread search: the threads a pull request's link names, while the query is its URL. */
+const linkedThreadItems = () =>
+  palette.linked.threads.map((tab) => ({ icon: "message-square", title: esc(threadTitle(tab)), sub: "Linked thread", terms: [palette.linked.query, threadTitle(tab)], run: () => activate(tab) }));
+
 const PALETTE_VIEWS = {
   root: {
     placeholder: "Search commands, projects, and threads...",
+    mode: (query) => (isBrowseQuery(query) ? rootBrowseView : null),
     groups(query) {
       const actionsOnly = query.startsWith(">");
       const actions = { label: "Actions", items: actionItems() };
       if (actionsOnly) return filterGroups([actions], query.slice(1));
-      if (!normalize(query)) {
-        const recent = [...tabs].sort((a, b) => latestUserAt(b) - latestUserAt(a)).slice(0, RECENT_THREADS).map(threadItem);
-        return [actions, { label: "Recent Threads", items: recent }].filter((g) => g.items.length);
-      }
+      const byRecent = [...tabs].sort((a, b) => latestUserAt(b) - latestUserAt(a));
+      if (!normalize(query)) return [actions, { label: "Recent Threads", items: byRecent.slice(0, RECENT_THREADS).map((t) => threadItem(t)) }].filter((g) => g.items.length);
+      searchThreads(query);
       const projects = paletteProjects().map((p) => ({
-        iconHtml: projectIcon(p.name),
+        iconHtml: projectRowIcon(p),
         title: esc(p.name),
-        sub: projectSub(p),
-        terms: [p.name, p.path, p.machine === LOCAL ? "" : machineName(p.machine)],
-        run: () => {
-          const latest = tabs.filter((t) => t.machine === p.machine && projectOfTab(t) === p.path).sort((a, b) => latestUserAt(b) - latestUserAt(a))[0];
-          return latest ? activate(latest) : openProjectIn(p.machine, p.path);
-        },
+        subHtml: projectSubHtml(p),
+        terms: [p.name, p.path, machineLabel(p.machine)],
+        run: () => (tabOfProjectAt(p) ? activate(tabOfProjectAt(p)) : openProjectIn(p.machine, p.path)),
       }));
-      const settings = SETTINGS_PAGES.map(([name, label, ic]) => ({ icon: ic, title: esc(label), sub: "Settings", terms: [label, "settings"], run: () => openSettings(name) }));
-      const threadsGroup = { label: "Threads", items: tabs.map(threadItem) };
-      return filterGroups([actions, { label: "Projects", items: projects }, { label: "Settings", items: settings }, threadsGroup], query);
+      const linked = palette.linked && palette.linked.query === query;
+      const threadsGroup = { label: "Threads", items: linked ? linkedThreadItems() : byRecent.map((t) => threadItem(t, query)) };
+      return filterGroups([actions, { label: "Projects", items: projects }, { label: "Settings", items: settingsSearchItems() }, threadsGroup], query);
     },
+    empty: (query) => (palette.search?.pending ? "Searching thread messages…" : query.startsWith(">") ? "No matching actions." : "No matching commands, projects, or threads."),
   },
   "new-project": {
     placeholder: "Project name",
@@ -279,18 +328,20 @@ const PALETTE_VIEWS = {
     summary(query) {
       const name = query.trim();
       const machine = newProjectMachine();
-      const on = onlineMachines().length > 1 ? ` on ${machineName(machine)}` : "";
+      const label = onlineMachines().length > 1 ? ` on ${machineName(machine)}` : "";
       return `<div class="summary"><span class="ic">${icon("folder-git-2")}</span><span class="text"><span class="title"><span class="name">${esc(name || "New project")}</span></span>
-        <span class="sub">${esc(name ? `Creates ${NEW_PROJECTS_ROOT}${projectFolderName(name)}${on}` : `Goes in ${NEW_PROJECTS_ROOT}${on}`)}</span></span></div>`;
+        <span class="sub">${esc(`${name ? `Creates ${NEW_PROJECTS_ROOT}${projectFolderName(name)}` : `Goes in ${NEW_PROJECTS_ROOT}`}${label}`)}</span></span></div>`;
     },
-    accessory: () => `<button type="button" class="create" data-submit${!palette.views.at(-1).query.trim() || palette.creating ? " disabled" : ""}>${palette.creating ? "Creating" : "Create"}<kbd>${IS_MAC ? "⌘↵" : "Ctrl+↵"}</kbd></button>`,
+    accessory: () => submitButton(palette.creating ? "Creating" : "Create", palette.hi >= 0 ? `${IS_MAC ? "⌘" : "Ctrl"} Enter` : "Enter", !paletteView().query.trim() || palette.creating),
+    footerAction: () => (palette.hi < 0 ? "Create" : palette.shown[palette.hi]?.toggle ? "Toggle" : "Select"),
     groups(query) {
       const machines = onlineMachines();
       const name = projectFolderName(query.trim());
+      const owner = account?.github?.login ?? null;
       return [
-        machines.length > 1 && { label: "Machines", items: machines.map((m) => ({ icon: "monitor", title: esc(machineName(m)), trail: m === newProjectMachine() ? icon("check", "chev") : "", terms: [], keep: true, run: () => (palette.newMachine = m) })) },
-        { label: "Options", items: [{ icon: "github", title: "Create private repository on GitHub", sub: query.trim() ? name : "Your GitHub account", trail: `<span class="checkbox${palette.publish ? " on" : ""}">${palette.publish ? icon("check") : ""}</span>`, terms: [], keep: true, run: () => (palette.publish = !palette.publish) }] },
-        { label: "", items: [{ icon: "folder-plus", title: "Add existing project", sub: "Open a folder or clone a repository", page: "", terms: [], run: () => addProject() }] },
+        machines.length > 1 && { label: "Environments", items: machines.map((m) => ({ icon: "monitor", title: esc(machineName(m)), sub: m === LOCAL ? "This device" : m, trail: m === newProjectMachine() ? icon("check", "chev") : "", terms: [], keep: true, run: () => (palette.newMachine = m) })) },
+        { label: "Options", items: [{ icon: "github", title: "Create private repository on GitHub", sub: query.trim() ? (owner ? `${owner}/${name}` : name) : owner ?? "Your GitHub account", trail: `<span class="checkbox${palette.publish ? " on" : ""}">${palette.publish ? icon("check") : ""}</span>`, terms: [], keep: true, toggle: true, run: () => (palette.publish = !palette.publish) }] },
+        { label: "", items: [{ icon: "folder-plus", title: "Add existing project", sub: "Open a folder or clone a repository", trail: icon("chevron-right", "chev"), terms: [], keep: true, run: () => existingProjectSources(newProjectMachine()) }] },
       ].filter(Boolean);
     },
     submit: (query) => createProject(query),
@@ -298,20 +349,20 @@ const PALETTE_VIEWS = {
   "new-thread-in": {
     placeholder: "Search...",
     groups(query) {
-      const items = [
-        { icon: "square-pen", title: "No project", terms: ["no project", "without"], run: () => newThreadWithoutProject() },
-        ...paletteProjects().map((p) => ({ iconHtml: projectIcon(p.name), title: esc(p.name), sub: projectSub(p), terms: [p.name, p.path], run: () => openProjectIn(p.machine, p.path) })),
-      ];
-      const [group] = filterGroups([{ label: "Projects", items }], query);
-      group?.items.slice(0, 9).forEach((item, i) => (item.hint = chordLabel(String(i + 1))));
-      return group ? [group] : [];
+      const all = paletteProjects();
+      const at = all[0] && isScratch(all[0]) ? 0 : 1;
+      const projects = all.filter((p) => !isScratch(p)).map((p, i) => ({ iconHtml: projectRowIcon(p), title: esc(p.name), subHtml: projectSubHtml(p), terms: [p.name, p.path, machineLabel(p.machine)], command: i < 9 ? `thread.jump.${i + 1}` : null, run: () => (active && active.machine === p.machine && projectOfTab(active) === p.path ? newThreadIn(active) : openProjectIn(p.machine, p.path)) }));
+      const none = onlineMachines().length > 0 && { icon: "message-square-dashed", title: "No project", command: "chat.newWithoutProject", terms: ["no project", "without project", "none"], run: () => newThreadWithoutProject() };
+      return filterGroups([{ label: "Projects", items: [...projects.slice(0, at), none, ...projects.slice(at)].filter(Boolean) }], query);
     },
   },
 };
+const submitButton = (label, keys, disabled) =>
+  `<button type="button" class="create" data-submit title="${esc(`${label} (${keys})`)}"${disabled ? " disabled" : ""}>${esc(label)}<kbd>${esc(keys)}</kbd></button>`;
 
 /** T3 Code's newProjectFolderName, which the machine applies too. */
 const projectFolderName = (name) => {
-  const slug = name.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, 64).replace(/-+$/, "");
+  const slug = name.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, 64).replace(/-+$/, "");
   if (!slug) return "project";
   return /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(slug) ? `${slug}-project` : slug;
 };
@@ -343,13 +394,48 @@ async function createProject(query) {
   }
 }
 
-function openPalette(view = "root") {
+/** Thread message search on each machine, as T3 Code's server does it: two characters at least,
+ * 200ms after the last keystroke. `matches` is by tab key: `{ source, snippet }`. */
+const THREAD_SEARCH_MS = 200;
+let threadSearchTimer = null;
+function searchThreads(query) {
+  const q = query.trim();
+  if (palette.search?.query === q || palette.search?.asked === q) return;
+  clearTimeout(threadSearchTimer);
+  if (q.length < 2) return (palette.search = null);
+  palette.search = { asked: q, query: palette.search?.query ?? "", matches: palette.search?.matches ?? new Map(), pending: true };
+  threadSearchTimer = setTimeout(async () => {
+    const answers = await Promise.all(onlineMachines().map((m) => callOn(m, { cmd: "search_threads", query: q }).then((found) => found.map((f) => ({ ...f, machine: m })), () => [])));
+    if (palette.search?.asked !== q) return;
+    const byTab = new Map();
+    for (const f of answers.flat()) {
+      const tab = tabs.find((t) => t.machine === f.machine && t.view.id === f.tab);
+      if (tab) byTab.set(tab.key, { source: f.source, snippet: f.snippet });
+    }
+    palette.search = { asked: q, query: q, matches: byTab, pending: false };
+    if (paletteOpen() && paletteView().view === "root") renderPalette();
+  }, THREAD_SEARCH_MS);
+}
+/** ThreadSearchMatchExcerpt: who wrote the match, then the excerpt with the query in bold. */
+function threadExcerptHtml({ source, snippet, query }) {
+  const at = snippet.toLowerCase().indexOf(query.toLowerCase());
+  const text = at < 0 ? esc(snippet) : `${esc(snippet.slice(0, at))}<mark>${esc(snippet.slice(at, at + query.length))}</mark>${esc(snippet.slice(at + query.length))}`;
+  return `<span class="excerpt"><span class="who" data-source="${source}">${source === "user" ? "You:" : "Agent:"}</span> ${text}</span>`;
+}
+
+/** Opens the palette at `mode`: the root, or "new-thread-in", "add-project" or a view's name, with
+ * `query` typed and, for a pull request's link, the `linkedThreads` it names. */
+function openPalette({ mode = "root", query = "", linkedThreads = null, machine = null } = {}) {
   closeSideMenu();
-  palette.views = [{ view, query: "" }];
+  palette.views = [{ view: "root", query }];
   palette.hi = 0;
-  Object.assign(palette, { publish: false, newMachine: null });
+  Object.assign(palette, { publish: false, newMachine: null, linked: linkedThreads && { query, threads: linkedThreads }, search: null, adding: null });
   paletteEl.hidden = false;
-  paletteInput.value = "";
+  paletteInput.value = query;
+  if (mode === "add-project") startAddProject(machine);
+  else if (mode !== "root") palette.views.push({ view: mode, query: "" });
+  if (paletteView().view !== "root") paletteInput.value = paletteView().query;
+  palette.hi = PALETTE_VIEWS[paletteView().view].unhighlighted ? -1 : 0;
   renderPalette();
   paletteInput.focus();
   Promise.all(onlineMachines().map((m) => callOn(m, { cmd: "list_projects" }).then((list) => list.map((p) => ({ ...p, machine: m })), () => []))).then((lists) => {
@@ -360,30 +446,44 @@ function openPalette(view = "root") {
 function closePalette() {
   if (!paletteOpen()) return;
   paletteEl.hidden = true;
+  clearTimeout(threadSearchTimer);
   if (!shellPage()) focusInput();
 }
 const paletteView = () => palette.views.at(-1);
+/** A view's spec, or the one its `mode` gives for the query, as the root browses for a typed path. */
+const specFor = (view, query) => PALETTE_VIEWS[view].mode?.(query) ?? PALETTE_VIEWS[view];
+const viewSpec = () => specFor(paletteView().view, paletteView().query);
+const selectable = () => palette.shown.flatMap((item, i) => (item.disabled ? [] : [i]));
 
 function renderPalette() {
   const { view, query } = paletteView();
-  const spec = PALETTE_VIEWS[view];
+  const spec = specFor(view, query);
   const groups = spec.groups(query);
   palette.shown = groups.flatMap((g) => g.items);
-  paletteInput.placeholder = spec.placeholder;
+  if (palette.hi >= 0 && !selectable().includes(palette.hi)) palette.hi = spec.unhighlighted ? -1 : selectable()[0] ?? -1;
+  const nested = palette.views.length > 1;
+  paletteInput.placeholder = typeof spec.placeholder === "function" ? spec.placeholder(query) : spec.placeholder;
   paletteEl.querySelector(".summary-slot").innerHTML = spec.summary?.(query) ?? "";
   paletteEl.querySelector(".accessory").innerHTML = spec.accessory?.() ?? "";
-  paletteEl.dataset.nested = palette.views.length > 1;
-  paletteEl.querySelector(".lead").innerHTML = icon(palette.views.length > 1 ? "arrow-left" : "search");
+  const notice = spec.notice?.(query) ?? "";
+  Object.assign(paletteEl.querySelector(".notice"), { hidden: !notice, textContent: notice });
+  paletteEl.dataset.nested = nested;
+  paletteEl.querySelector(".lead").innerHTML = icon(nested ? "arrow-left" : spec.lead?.(query) ?? "search");
+  paletteEl.querySelector(".lead").setAttribute("aria-label", nested ? "Back" : "Search");
   let n = 0;
   paletteResults.innerHTML = palette.shown.length
-    ? groups.map((g) => `<div class="group" role="group"><div class="label">${esc(g.label)}</div>${g.items.map((item) => {
+    ? groups.map((g) => `<div class="group" role="group">${g.label ? `<div class="label">${esc(g.label)}</div>` : ""}${g.items.map((item) => {
         const i = n++;
+        const hint = item.command ? bindingLabel(item.command, item.context) : item.hint;
+        const sub = item.subHtml ?? (item.sub ? esc(item.sub) : "");
         return `<div class="item${i === palette.hi ? " hi" : ""}" role="option" data-i="${i}"${item.disabled ? ` aria-disabled="true"` : ""}>
           <span class="ic">${item.iconHtml ?? icon(item.icon)}</span>
-          <span class="text"><span class="title">${item.status ?? ""}<span class="name">${item.title}</span></span>${item.sub ? `<span class="sub">${esc(item.sub)}</span>` : ""}</span>
-          ${item.time ? `<span class="time">${agoLong(item.time)}</span>` : ""}${item.trail ?? ""}${item.hint ? `<span class="hint">${esc(item.hint)}</span>` : ""}${item.page !== undefined ? icon("chevron-right", "chev") : ""}</div>`;
+          <span class="text"><span class="title">${item.status ?? ""}<span class="name">${item.title}</span></span>${item.excerpt ? threadExcerptHtml(item.excerpt) : ""}${sub ? `<span class="sub">${sub}</span>` : ""}</span>
+          ${item.trail ?? ""}${item.time ? `<span class="time">${agoLong(item.time)}</span>` : ""}${hint ? `<span class="hint">${esc(hint)}</span>` : ""}${item.page !== undefined ? icon("chevron-right", "chev") : ""}</div>`;
       }).join("")}</div>`).join("")
-    : `<p class="empty">${query.startsWith(">") ? "No matching actions." : "No matching commands, projects, or threads."}</p>`;
+    : `<p class="empty">${esc(spec.empty?.(query) ?? (query.startsWith(">") ? "No matching actions." : "No matching commands, projects, or threads."))}</p>`;
+  const action = spec.footerAction ? spec.footerAction(query) : "Select";
+  paletteEl.querySelector("footer").innerHTML = `<span class="keys"><span><kbd>${icon("arrow-up")}</kbd><kbd>${icon("arrow-down")}</kbd>Navigate</span>${action === undefined ? "" : `<span><kbd>Enter</kbd>${esc(action)}</span>`}${nested ? `<span><kbd>Backspace</kbd>Back</span>` : ""}<span><kbd>Esc</kbd>Close</span></span>${spec.footerTrail?.(query) ?? ""}`;
   paletteResults.querySelector(".item.hi")?.scrollIntoView({ block: "nearest" });
 }
 
@@ -396,37 +496,48 @@ function runPaletteItem(item) {
     palette.hi = PALETTE_VIEWS[item.page].unhighlighted ? -1 : 0;
     return renderPalette();
   }
-  if (item.keep) {
-    item.run();
-    return renderPalette();
-  }
-  paletteEl.hidden = true;
-  Promise.resolve(item.run()).catch((e) => tell(`Unable to run command: ${esc(e)}`, 6000));
+  if (!item.keep) paletteEl.hidden = true;
+  Promise.resolve(item.run()).then(() => item.keep && paletteOpen() && renderPalette(), (e) => tell(`<b>Unable to run command</b> ${esc(e?.message ?? e)}`, 6000));
 }
 function popPalette() {
   palette.views.pop();
+  palette.adding = palette.views.some((v) => v.adding) ? palette.adding : null;
   paletteInput.value = paletteView().query;
-  palette.hi = 0;
+  palette.hi = viewSpec().unhighlighted ? -1 : 0;
   renderPalette();
 }
 function highlight(i) {
   palette.hi = i;
   for (const el of paletteResults.querySelectorAll(".item")) el.classList.toggle("hi", Number(el.dataset.i) === i);
   paletteResults.querySelector(".item.hi")?.scrollIntoView({ block: "nearest" });
+  if (viewSpec().footerAction || viewSpec().accessory) renderPalette();
+}
+/** CommandPalette's handleKeyDown: an app chord pressed in the palette runs its item there, ⌘1-9
+ * stay in it, and any other closes it before it runs. True when the palette took the chord. */
+function paletteChord(command) {
+  if (command === "commandPalette.toggle") return false;
+  const item = palette.shown.find((i) => i.command === command && !i.disabled);
+  if (item) return (runPaletteItem(item), true);
+  if (/^thread\.jump\./.test(command)) return true;
+  closePalette();
+  return false;
 }
 
 paletteInput.addEventListener("input", () => {
   paletteView().query = paletteInput.value;
   palette.hi = -1;
+  viewSpec().onQuery?.(paletteInput.value);
   renderPalette();
 });
 paletteInput.addEventListener("keydown", (e) => {
-  const count = palette.shown.length;
-  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-    if (count) highlight(palette.hi < 0 ? 0 : (palette.hi + (e.key === "ArrowDown" ? 1 : -1) + count) % count);
-  } else if (e.key === "Enter" && PALETTE_VIEWS[paletteView().view].submit && (palette.hi < 0 || e.metaKey || e.ctrlKey)) {
-    if (!e.isComposing) PALETTE_VIEWS[paletteView().view].submit(paletteInput.value);
-  } else if (e.key === "Enter") runPaletteItem(palette.shown[Math.max(palette.hi, 0)]);
+  const rows = selectable();
+  const spec = viewSpec();
+  const primary = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    if (rows.length) highlight(palette.hi < 0 ? (e.key === "ArrowDown" ? rows[0] : rows.at(-1)) : rows[(rows.indexOf(palette.hi) + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length]);
+  } else if (e.key === "Enter" && (e.isComposing || e.keyCode === 229)) return;
+  else if (e.key === "Enter" && spec.submit && (palette.hi < 0 || primary || spec.submitsFirst?.())) spec.submit(paletteInput.value);
+  else if (e.key === "Enter") runPaletteItem(palette.shown[palette.hi >= 0 ? palette.hi : rows[0]]);
   else if (e.key === "Escape") closePalette();
   else if (e.key === "Backspace" && !paletteInput.value && palette.views.length > 1) popPalette();
   else return;
@@ -435,19 +546,19 @@ paletteInput.addEventListener("keydown", (e) => {
 });
 paletteResults.addEventListener("mousedown", (e) => e.preventDefault());
 paletteResults.addEventListener("mousemove", (e) => {
-  const el = e.target.closest(".item");
+  const el = e.target.closest(".item:not([aria-disabled])");
   if (el && Number(el.dataset.i) !== palette.hi) highlight(Number(el.dataset.i));
 });
 paletteResults.addEventListener("click", (e) => {
   const el = e.target.closest(".item");
   if (el) runPaletteItem(palette.shown[Number(el.dataset.i)]);
 });
-paletteEl.querySelector(".accessory").onclick = (e) => e.target.closest("[data-submit]") && PALETTE_VIEWS[paletteView().view].submit?.(paletteInput.value);
+paletteEl.querySelector(".accessory").onclick = (e) => e.target.closest("[data-submit]:not(:disabled)") && viewSpec().submit?.(paletteInput.value);
+paletteEl.querySelector("footer").onclick = (e) => e.target.closest("[data-footer-act]") && viewSpec().footerRun?.();
 paletteEl.querySelector(".backdrop").onclick = () => closePalette();
 paletteEl.querySelector(".lead").onclick = () => (palette.views.length > 1 ? popPalette() : paletteInput.focus());
 
 onGuiKey("k", () => (paletteOpen() ? closePalette() : openPalette()));
-onGuiKey(["1", "2", "3", "4", "5", "6", "7", "8", "9"], (e) => paletteView().view === "new-thread-in" && runPaletteItem(palette.shown[Number(e.key) - 1]), { when: paletteOpen });
 
 /** T3 Code's Usage page: cost or tokens over a window, read from claude's transcripts on each
  * machine, or how much of the subscription's limits is left. */
@@ -560,7 +671,7 @@ async function fetchUsage() {
 }
 
 const segmented = (name, options, current, disabled = false) =>
-  `<span class="seg" role="radiogroup" data-seg="${name}">${options.map(([value, label]) => `<button type="button" role="radio" aria-checked="${value === current}" data-value="${value}"${disabled ? " disabled" : ""}>${label}</button>`).join("")}</span>
+  `<span class="part" role="radiogroup" data-seg="${name}">${options.map(([value, label]) => `<button type="button" role="radio" aria-checked="${value === current}" data-value="${value}"${disabled ? " disabled" : ""}>${label}</button>`).join("")}</span>
    <select class="seg-select" data-seg="${name}"${disabled ? " disabled" : ""}>${options.map(([value, label]) => `<option value="${value}"${value === current ? " selected" : ""}>${label}</option>`).join("")}</select>`;
 /** Draws the page, keeping where its body was scrolled. */
 function setPage(html) {

@@ -2485,12 +2485,11 @@ async function sweep(profileName) {
 
   await step("app view: claude's folder trust menu, answered from the banner", async () => {
     await showSidebar();
-    await tapOrClick("#new-thread");
-    await page.waitForSelector("#projects .choices button");
-    await press(page.locator("#projects .choices button", { hasText: "Browse folders…" }));
-    await page.fill("#projects .browse input", `${HOME}/work/gamma/`);
-    await waitFor("the folder listing", async () => (await text("#projects .folders button")).startsWith("Open "));
-    await press(page.locator("#projects .folders button").first());
+    await page.evaluate(() => openPalette({ mode: "add-project" }));
+    await press(page.locator("#palette .item", { hasText: "Local folder" }));
+    await page.fill("#palette input", `${HOME}/work/gamma/`);
+    await waitFor("gamma's folders listed", async () => !(await page.locator("#palette .notice").isVisible()) && (await text("#palette .accessory [data-submit]")).startsWith("Add"));
+    await press(page.locator("#palette .accessory [data-submit]"));
     await waitFor("the trust banner", () => page.locator("#approval .options button").first().isVisible());
     const options = await page.locator("#approval .options button").allTextContents();
     check(options.join("|") === "No, exit|Yes, I trust this folder", `options: ${options.join(" | ")}`);
@@ -3710,14 +3709,14 @@ async function sweep(profileName) {
       await rowMenu("#thread-list .thread-row.active");
       await menuPick("Delete");
       await press(gui("#side-dialog .destructive"));
-    } else await page.keyboard.press("Meta+w");
+    } else await page.evaluate(() => closeTab(active));
     await waitFor("two threads", async () => (await rows()) === 2);
     if (touch) return "touch: ⌘⇧T and the header's project need a keyboard and a wide screen";
     await page.keyboard.press("Meta+Shift+T");
     await waitFor("the reopened thread", async () => (await rows()) === 3, 10000);
     await waitTerm(new RegExp(`resumed ${session}`));
     await waitFor("its conversation", async () => (await page.locator("#thread .bubble", { hasText: "before closing" }).count()) > 0);
-    await page.keyboard.press("Meta+w");
+    await page.evaluate(() => closeTab(active));
     await waitFor("two threads", async () => (await rows()) === 2);
 
     await openRow(await keyFor("alpha"));
@@ -3725,7 +3724,7 @@ async function sweep(profileName) {
     await waitFor("a thread from the header", async () => (await rows()) === 3, 10000);
     await waitFor("the header's new thread to open", async () => (await text("#chat-head .crumb .title")) === "New thread", 10000);
     check((await crumbProject()) === "alpha", `the header opened a thread in ${await crumbProject()}`);
-    await page.keyboard.press("Meta+w");
+    await page.evaluate(() => closeTab(active));
     await waitFor("two threads", async () => (await rows()) === 2);
 
     await tapOrClick("#add-project");
@@ -4149,21 +4148,23 @@ async function sweep(profileName) {
     await page.keyboard.type(">sett");
     await waitFor("actions only", async () => (await paletteGroups()).join() === "Actions");
     check((await paletteItems()).join() === "Open settings,Project settings", `> results: ${(await paletteItems()).join(" | ")}`);
-    await page.fill("#palette input", "new thread in");
+    await page.fill("#palette input", "choose project");
     await waitFor("the sub-page item", async () => (await paletteItems())[0] === "New thread in...");
     await page.keyboard.press("Enter");
     await waitFor("the projects sub-page", async () => (await page.getAttribute("#palette input", "placeholder")) === "Search...");
     const nested = await paletteItems();
-    check(nested[0] === "No project" && nested.includes("alpha") && nested.includes("beta"), `sub-page: ${nested.join(" | ")}`);
-    check((await text("#palette .item[data-i='1'] .hint")) === "⌘2", "the second row has no ⌘2 hint");
+    check(nested[1] === "No project" && nested.includes("alpha") && nested.includes("beta"), `sub-page: ${nested.join(" | ")}`);
+    const hints = await page.locator("#palette .item .hint").allTextContents();
+    check(hints.slice(0, 3).join(" ") === "⌘1 ⌥⌘N ⌘2", `sub-page hints: ${hints.join(" ")}`);
     await page.keyboard.press("Backspace");
-    await waitFor("the root again", async () => (await page.inputValue("#palette input")) === "new thread in");
+    await waitFor("the root again", async () => (await page.inputValue("#palette input")) === "choose project");
     await page.fill("#palette input", "zzqx");
     await waitFor("the empty state", async () => (await text("#palette .empty")) === "No matching commands, projects, or threads.");
     await page.keyboard.press("Escape");
     check(!(await page.locator("#palette").isVisible()), "Escape left the palette open");
     await page.keyboard.press("Meta+k");
-    await page.keyboard.type("find in current");
+    await page.keyboard.type("find");
+    await waitFor("Find in current thread", async () => (await paletteItems())[0] === "Find in current thread");
     await page.keyboard.press("Enter");
     await waitFor("⌘K's Find in current thread", () => page.locator("#thread-find").isVisible());
     await page.keyboard.press("Escape");
@@ -4471,7 +4472,7 @@ async function sweep(profileName) {
     check((await page.inputValue("#palette input")) === "go to file", `the palette's query came back as “${await page.inputValue("#palette input")}”`);
     await page.fill("#palette input", "search project contents");
     await waitFor("Search project contents", async () => (await paletteItems())[0] === "Search project contents");
-    check((await text("#palette .item[data-i='0'] .hint")) === "⌘⇧F", `its hint: ${await text("#palette .item[data-i='0'] .hint")}`);
+    check((await text("#palette .item[data-i='0'] .hint")) === "⇧⌘F", `its hint: ${await text("#palette .item[data-i='0'] .hint")}`);
     await page.keyboard.press("Enter");
     await waitFor("the content search", async () => (await page.getAttribute("#file-picker .query", "placeholder")) === "Search project contents…");
     await page.keyboard.press("Escape");
@@ -4501,7 +4502,7 @@ async function sweep(profileName) {
     fs.writeFileSync(path.join(HOME, "claude-launch.log"), "");
     await runFromPalette("restart agent", "Restart agent session");
     await waitFor("claude to start again on the conversation", () => readLog("claude-launch.log").includes(`--resume ${session}`), 10000);
-    await waitFor("the notice", async () => (await text("#side-notice")) === "Agent session restarted. Skills, plugins and MCP servers load again.");
+    await waitFor("the notice", async () => (await text("#side-notice")) === "Agent session will restart Your next message starts a fresh session.");
     await waitFor("the session running again", () => page.evaluate((s) => active.view.running && active.view.session === s, session), 10000);
     return readLog("claude-launch.log").trim();
   });
@@ -4517,7 +4518,7 @@ async function sweep(profileName) {
       await waitFor("the name field", async () => (await page.getAttribute("#palette input", "placeholder")) === "Project name");
       check((await text("#palette .summary .sub")) === "Goes in ~/pinned/", `summary: ${await text("#palette .summary .sub")}`);
       check(await page.locator("#palette .accessory [data-submit]").isDisabled(), "Create works without a name");
-      check((await paletteGroups()).join() === "Options,", `groups: ${(await paletteGroups()).join()}`);
+      check((await paletteGroups()).join() === "Options", `groups: ${(await paletteGroups()).join()}`);
       await page.keyboard.type("Sweep Café");
       await waitFor("the path preview", async () => (await text("#palette .summary .sub")) === "Creates ~/pinned/sweep-cafe");
       check(!(await page.locator("#palette .item.hi").count()), "a row is highlighted, so Enter would run it");
@@ -4550,9 +4551,10 @@ async function sweep(profileName) {
     await page.evaluate((m) => (machines.get(m).view.os = "wsl"), machine);
     try {
       await runFromPalette("open wsl", "Open WSL folder");
-      await waitFor("the folder browser", () => page.locator("#projects .browse input").isVisible());
-      check((await page.inputValue("#projects .browse input")) === "~/", "the browser doesn't start at ~/");
-      await page.evaluate(() => closeProjects());
+      await waitFor("the folder browser", async () => (await page.getAttribute("#palette input", "placeholder")) === "Enter path (e.g. ~/projects/my-app)");
+      check((await page.inputValue("#palette input")) === "~/", "the browser doesn't start at ~/");
+      await waitFor("the home folder's folders", async () => (await paletteGroups()).join() === "Directories");
+      await page.keyboard.press("Escape");
     } finally {
       await page.evaluate((m) => (machines.get(m).view.os = "macos"), machine);
     }

@@ -387,6 +387,8 @@ body.resizing-rows { cursor: row-resize; user-select: none; }
 #drawer-tabs { display: none; }
 body[data-mode="gui"][data-drawer="open"] #drawer-tabs:not([hidden]) { position: absolute; top: 6px; left: 8px; right: 8px; z-index: 7; display: flex; gap: 4px; height: 26px; }
 body[data-mode="gui"][data-drawer="open"] #terms:has(#drawer-tabs:not([hidden])) .term { top: 38px; }
+body[data-mode="gui"] #terms .term.split-next { border-left: 1px solid var(--g-border); padding-left: 6px; }
+body[data-mode="gui"] #terms .term.split-next.vertical { border-left: 0; padding-left: 0; border-top: 1px solid var(--g-border); padding-top: 6px; }
 #drawer-tabs button { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 8px; border-radius: 6px; font-size: 12px; color: var(--g-muted); }
 #drawer-tabs button[aria-pressed="true"] { background: var(--g-input); color: var(--g-fg); }
 #drawer-tabs .i { width: 12px; height: 12px; }

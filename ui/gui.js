@@ -228,29 +228,262 @@ function stepThread(step) {
   if (order.length > 1) activate(order[(i + step + order.length) % order.length]);
 }
 
-/** The app view's shortcuts, which each part of it adds with `onGuiKey`. They are ⌘ chords, Ctrl ones
- * off the Mac, where a shell in the terminal needs Ctrl+E to end the line. With Option a key goes by
- * position, since Option turns B into ∫ on a Mac. A chord given `when` overrides the others while `when()` holds. */
-const guiKeys = [];
-const onGuiKey = (key, run, { shift = false, alt = false, when = null } = {}) => guiKeys.push({ keys: [key].flat(), run, shift, alt, when });
+/** T3 Code's keybindings (packages/shared/src/keybindings.ts) for the commands the app view has.
+ * `mod` is ⌘ on a Mac and Ctrl elsewhere, and `when` reads `guiContext()`. ⌘1-9 jump on the web
+ * too, where T3 Code leaves them to the browser. */
+const DEFAULT_KEYBINDINGS = [
+  { key: "mod+b", command: "sidebar.toggle" },
+  { key: "mod+[", command: "navigation.back", when: "!terminalFocus" },
+  { key: "mod+]", command: "navigation.forward", when: "!terminalFocus" },
+  { key: "mod+j", command: "terminal.toggle" },
+  { key: "mod+alt+b", command: "rightPanel.toggle" },
+  { key: "mod+shift+b", command: "threadPanel.toggle", when: "!terminalFocus" },
+  { key: "mod+t", command: "rightPanel.new", when: "rightPanelOpen && !terminalFocus" },
+  { key: "mod+d", command: "terminal.split", when: "terminalFocus" },
+  { key: "mod+shift+d", command: "terminal.splitVertical", when: "terminalFocus" },
+  { key: "mod+n", command: "terminal.new", when: "terminalFocus" },
+  { key: "mod+w", command: "terminal.close", when: "terminalFocus" },
+  { key: "mod+w", command: "rightPanel.close", when: "!terminalFocus" },
+  { key: "mod+shift+t", command: "view.reopenClosed" },
+  { key: "mod+d", command: "diff.toggle", when: "!terminalFocus" },
+  { key: "mod+shift+j", command: "preview.toggle" },
+  { key: "mod+k", command: "commandPalette.toggle", when: "!terminalFocus" },
+  { key: "mod+p", command: "filePicker.toggle", when: "!terminalFocus" },
+  { key: "mod+shift+f", command: "projectSearch.toggle", when: "!terminalFocus" },
+  { key: "mod+u", command: "usage.open", when: "!terminalFocus" },
+  { key: "mod+alt+a", command: "theme.select", when: "!terminalFocus" },
+  { key: "mod+alt+shift+a", command: "appearance.cycle", when: "!terminalFocus" },
+  { key: "mod+alt+shift+t", command: "themeEditor.toggle" },
+  { key: "mod+s", command: "composer.stash", when: "!terminalFocus" },
+  { key: "mod+n", command: "chat.new", when: "!terminalFocus" },
+  { key: "mod+shift+o", command: "chat.new", when: "!terminalFocus" },
+  { key: "mod+shift+n", command: "chat.newLocal", when: "!terminalFocus" },
+  { key: "mod+alt+n", command: "chat.newWithoutProject", when: "!terminalFocus" },
+  { key: "mod+f", command: "chat.find", when: "!terminalFocus && !previewFocus" },
+  { key: "mod+shift+m", command: "modelPicker.toggle", when: "!terminalFocus" },
+  { key: "mod+shift+h", command: "composer.host", when: "!terminalFocus" },
+  { key: "mod+shift+e", command: "composer.effort", when: "!terminalFocus" },
+  { key: "mod+shift+a", command: "composer.mode", when: "!terminalFocus" },
+  { key: "mod+shift+x", command: "composer.workspace", when: "!terminalFocus" },
+  { key: "mod+shift+g", command: "composer.branch", when: "!terminalFocus" },
+  { key: "mod+shift+l", command: "composer.previousWorktree", when: "!terminalFocus" },
+  { key: "mod+shift+k", command: "pullRequest.copyNumber", when: "!terminalFocus" },
+  { key: "mod+o", command: "editor.openFavorite" },
+  { key: "mod+shift+[", command: "thread.previous" },
+  { key: "mod+shift+]", command: "thread.next" },
+  { key: "mod+shift+c", command: "thread.copyReference", when: "!terminalFocus" },
+  { key: "mod+shift+s", command: "thread.settle", when: "!terminalFocus" },
+  { key: "mod+shift+p", command: "thread.pin", when: "!terminalFocus" },
+  ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ key: `mod+${n}`, command: `thread.jump.${n}`, when: "!modelPickerOpen" })),
+  ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ key: `mod+${n}`, command: `modelPicker.jump.${n}`, when: "modelPickerOpen" })),
+];
+
+const SHIFTED_KEYS = { "!": "1", "@": "2", "#": "3", $: "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0", "~": "`", _: "-", "+": "=", "{": "[", "}": "]", "|": "\\", ":": ";", '"': "'", "<": ",", ">": ".", "?": "/" };
+const CODE_KEYS = { Backquote: "`", Backslash: "\\", BracketLeft: "[", BracketRight: "]", Comma: ",", Equal: "=", Minus: "-", Period: ".", Quote: "'", Semicolon: ";", Slash: "/" };
+for (let n = 0; n < 10; n++) CODE_KEYS[`Digit${n}`] = String(n);
+
+/** `"mod+shift+["` as `{ key, mod, meta, ctrl, shift, alt }`, or null. */
+function parseShortcut(value) {
+  const tokens = String(value).toLowerCase().split("+").map((t) => t.trim());
+  if (tokens.at(-1) === "") {
+    while (tokens.at(-1) === "") tokens.pop();
+    tokens.push("+");
+  }
+  const sc = { key: null, mod: false, meta: false, ctrl: false, shift: false, alt: false };
+  for (const t of tokens) {
+    if (!t) return null;
+    if (t === "cmd" || t === "meta") sc.meta = true;
+    else if (t === "ctrl" || t === "control") sc.ctrl = true;
+    else if (t === "shift") sc.shift = true;
+    else if (t === "alt" || t === "option") sc.alt = true;
+    else if (t === "mod") sc.mod = true;
+    else if (sc.key !== null) return null;
+    else sc.key = t === "space" ? " " : t === "esc" ? "escape" : t;
+  }
+  return sc.key === null ? null : sc;
+}
+/** The keys an event can stand for: the layout's, the letter at its position, and the US key at it. */
+function eventKeys(e) {
+  const layout = e.key.toLowerCase() === "esc" ? "escape" : e.key.toLowerCase();
+  const keys = new Set([layout]);
+  const letter = e.code?.match(/^Key([A-Z])$/)?.[1];
+  if (letter && !/^[a-z]$/.test(layout)) keys.add(letter.toLowerCase());
+  keys.add(/^[a-z]$/.test(layout) ? layout : CODE_KEYS[e.code] ?? layout);
+  return keys;
+}
+function matchesShortcut(e, sc) {
+  if (!IS_MAC && e.getModifierState?.("AltGraph") && !/^[a-z0-9]$/i.test(e.key)) return false;
+  const meta = sc.meta || (sc.mod && IS_MAC);
+  const ctrl = sc.ctrl || (sc.mod && !IS_MAC);
+  return e.metaKey === meta && e.ctrlKey === ctrl && e.shiftKey === sc.shift && e.altKey === sc.alt && eventKeys(e).has(sc.key);
+}
+
+/** T3 Code's `when` grammar: identifiers, `!`, `&&`, `||` and parentheses, as `{ type, ... }` nodes. */
+function parseWhen(expression) {
+  const tokens = [];
+  for (let i = 0; i < expression.length; ) {
+    const rest = expression.slice(i);
+    const word = /^[A-Za-z_][A-Za-z0-9_.-]*/.exec(rest)?.[0];
+    if (/^\s/.test(rest)) i++;
+    else if (rest.startsWith("&&") || rest.startsWith("||")) (tokens.push(rest.slice(0, 2)), (i += 2));
+    else if ("!()".includes(rest[0])) tokens.push(expression[i++]);
+    else if (word) (tokens.push({ name: word }), (i += word.length));
+    else return null;
+  }
+  let at = 0;
+  const primary = (depth) => {
+    const t = tokens[at];
+    if (depth > 32 || !t) return null;
+    if (t.name) return (at++, { type: "identifier", name: t.name });
+    if (t !== "(") return null;
+    at++;
+    const node = or(depth + 1);
+    if (!node || tokens[at] !== ")") return null;
+    at++;
+    return node;
+  };
+  const unary = (depth) => {
+    let nots = 0;
+    while (tokens[at] === "!") (at++, nots++);
+    let node = primary(depth);
+    while (node && nots--) node = { type: "not", node };
+    return node;
+  };
+  const binary = (type, op, next) => (depth) => {
+    let left = next(depth);
+    while (left && tokens[at] === op) {
+      at++;
+      const right = next(depth);
+      left = right && { type, left, right };
+    }
+    return left;
+  };
+  const and = binary("and", "&&", unary);
+  const or = binary("or", "||", and);
+  const ast = tokens.length ? or(0) : null;
+  return ast && at === tokens.length ? ast : null;
+}
+function evalWhen(node, context) {
+  if (!node) return true;
+  if (node.type === "identifier") return node.name === "true" || (node.name !== "false" && !!context[node.name]);
+  if (node.type === "not") return !evalWhen(node.node, context);
+  if (node.type === "and") return evalWhen(node.left, context) && evalWhen(node.right, context);
+  return evalWhen(node.left, context) || evalWhen(node.right, context);
+}
+
+/** What `when` clauses read, as T3 Code's ShortcutMatchContext. */
+function guiContext() {
+  const el = document.activeElement;
+  return {
+    terminalFocus: !!el?.closest?.(".xterm"),
+    terminalOpen: ui.drawer,
+    previewFocus: !!el?.closest?.("#panel-body .browser"),
+    previewOpen: !!active && ui.panelOpen && ui.panel === "browser",
+    rightPanelOpen: !!active && ui.panelOpen,
+    modelPickerOpen: !composerMenu.hidden && composerMenu.dataset.kind === "models",
+    usagePageOpen: document.body.dataset.page === "usage",
+    composerFocus: el === prompt,
+    editableFocus: !!el?.closest?.("input, textarea, select, [contenteditable]"),
+    isDesktop: !!TAURI,
+    isWeb: !TAURI,
+  };
+}
+
+/** The user's keybindings, every rule the way T3 Code's keybindings.json keeps them: the defaults
+ * once, then the user's edits. Defaults added since are put in unless their chord is taken. */
+let keybindingRules = [];
+function loadKeybindings() {
+  let saved = null;
+  try {
+    saved = JSON.parse(load("gui-keybindings"));
+  } catch {}
+  const rules = Array.isArray(saved) ? saved.filter((r) => typeof r?.command === "string" && parseShortcut(r.key) && (r.when === undefined || parseWhen(r.when))) : [];
+  const commands = new Set(rules.map((r) => r.command));
+  for (const d of DEFAULT_KEYBINDINGS) if (!commands.has(d.command) && !rules.some((r) => r.key === d.key && r.when === d.when)) rules.push({ ...d });
+  keybindingRules = rules.map((r) => ({ ...r, shortcut: parseShortcut(r.key), whenAst: r.when ? parseWhen(r.when) : null }));
+}
+function saveKeybindings(rules) {
+  save("gui-keybindings", JSON.stringify(rules.map(({ key, command, when }) => (when ? { key, command, when } : { key, command }))));
+  loadKeybindings();
+}
+loadKeybindings();
+
+/** The command a key press runs now: the last rule whose chord and `when` match, as T3 Code resolves it. */
+function resolveGuiCommand(e, context = guiContext()) {
+  for (let i = keybindingRules.length - 1; i >= 0; i--) {
+    const rule = keybindingRules[i];
+    if (evalWhen(rule.whenAst, context) && matchesShortcut(e, rule.shortcut)) return rule.command;
+  }
+  return null;
+}
+
+const KEY_LABELS = { " ": "Space", escape: "Esc", arrowup: "Up", arrowdown: "Down", arrowleft: "Left", arrowright: "Right" };
+/** T3 Code's formatShortcutLabel: ⌃⌥⇧⌘K on a Mac, Ctrl+Alt+Shift+K elsewhere. */
+function shortcutText(sc) {
+  const key = KEY_LABELS[sc.key] ?? (sc.key.length === 1 ? sc.key.toUpperCase() : sc.key[0].toUpperCase() + sc.key.slice(1));
+  const meta = sc.meta || (sc.mod && IS_MAC);
+  const ctrl = sc.ctrl || (sc.mod && !IS_MAC);
+  if (IS_MAC) return `${ctrl ? "⌃" : ""}${sc.alt ? "⌥" : ""}${sc.shift ? "⇧" : ""}${meta ? "⌘" : ""}${key}`;
+  return [ctrl && "Ctrl", sc.alt && "Alt", sc.shift && "Shift", meta && "Meta", key].filter(Boolean).join("+");
+}
+/** The label of the chord that runs `command` with nothing focused, or with `context`, as T3 Code's
+ * shortcutLabelForCommand: a later rule that takes the same chord hides it. */
+function bindingLabel(command, context = {}) {
+  const ctx = { isDesktop: !!TAURI, isWeb: !TAURI, ...context };
+  const claimed = new Set();
+  for (let i = keybindingRules.length - 1; i >= 0; i--) {
+    const { shortcut: sc, whenAst } = keybindingRules[i];
+    if (!evalWhen(whenAst, ctx)) continue;
+    const chord = shortcutText(sc);
+    if (claimed.has(chord)) continue;
+    claimed.add(chord);
+    if (keybindingRules[i].command === command) return chord;
+  }
+  return null;
+}
+
+/** The app view's commands, which each part of it adds with `onGuiKey` by its default chord or with
+ * `onGuiCommand` by name. A handler given `when` overrides the others while `when()` holds. */
+const guiCommands = new Map();
+const onGuiCommand = (command, run, { when = null } = {}) => (guiCommands.get(command) ?? guiCommands.set(command, []).get(command)).push({ run, when });
+const onGuiKey = (key, run, { shift = false, alt = false, when = null } = {}) => {
+  const commands = new Set([key].flat().map((k) => {
+    const chord = `mod+${alt ? "alt+" : ""}${shift ? "shift+" : ""}${SHIFTED_KEYS[k] ?? k.toLowerCase()}`;
+    return DEFAULT_KEYBINDINGS.find((r) => r.key === chord && r.when !== "terminalFocus")?.command ?? chord;
+  }));
+  for (const command of commands) onGuiCommand(command, run, { when });
+};
+/** Runs `command` as its chord would, true when a handler took it. */
+function runGuiCommand(command, e) {
+  const live = (guiCommands.get(command) ?? []).filter((h) => h.when?.() !== false);
+  const hit = live.find((h) => h.when) ?? live[0];
+  hit?.run(e);
+  return !!hit;
+}
 
 window.addEventListener("keydown", (e) => {
-  if (settingsOpen() || pickerOpen()) return;
   const mod = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-  if (!mod) return;
-  const key = (e.altKey ? e.code.replace(/^Key/, "") : e.key).toLowerCase();
-  const switchView = key === "e" && !e.altKey && e.shiftKey === !IS_MAC;
-  if (switchView) setMode(guiOn() ? "terminal" : "gui");
-  else if (!guiOn() || (!IS_MAC && e.target.closest?.("#terms"))) return;
-  else {
-    const hits = guiKeys.filter((k) => k.keys.includes(key) && k.shift === e.shiftKey && k.alt === e.altKey && k.when?.() !== false);
-    const hit = hits.find((k) => k.when) ?? hits[0];
-    if (!hit) return;
-    hit.run(e);
+  // ⌘E, which T3 Code doesn't have: Ctrl+Shift+E off the Mac, where a shell needs Ctrl+E to end the line.
+  if (mod && !e.altKey && e.key && eventKeys(e).has("e") && e.shiftKey === !IS_MAC) {
+    setMode(guiOn() ? "terminal" : "gui");
+    e.preventDefault();
+    e.stopPropagation();
+    return;
   }
+  if (!guiOn() || !e.key || e.target.closest?.("[data-keybinding-capture]")) return;
+  const command = resolveGuiCommand(e);
+  if (!command) return;
+  if (paletteOpen() && paletteChord(command)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+  if (!runGuiCommand(command, e)) return;
   e.preventDefault();
   e.stopPropagation();
 }, true);
+onGuiCommand("rightPanel.new", () => document.getElementById("panel-add").click());
+onGuiCommand("rightPanel.close", () => ui.panelOpen && closeSurface());
 onGuiKey(["[", "{"], () => stepThread(-1), { shift: true });
 onGuiKey(["]", "}"], () => stepThread(1), { shift: true });
 

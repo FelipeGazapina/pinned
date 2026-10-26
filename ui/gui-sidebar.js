@@ -386,7 +386,7 @@ function cardRow(tab) {
   const state = slot
     ? `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : ""}>${icon(slot.icon)}${slot.text}${slot.since ? ` <span class="since" data-since="${slot.since}"></span>` : ""}</span>`
     : `<span class="stamp when${unseenDone(tab) ? " unread" : ""}">${esc(ago(latestUserAt(tab)))}</span>`;
-  const acts = `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${MOD_LABEL}⇧S)">${icon("check")}Settle</span></span>`;
+  const acts = `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${bindingLabel("thread.settle") ?? ""})">${icon("check")}Settle</span></span>`;
   row.innerHTML = `<span class="l1">${draft ? `<span class="draft-pen" role="img" title="Unsent draft" aria-label="Unsent draft">${icon("square-pen")}</span>` : ""}${projectIcon(projectName(tab), tab)}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>
     <span class="l2">${titleHtml(tab)}</span>
     <span class="l3">${where}${prBadge(tab)}<span class="right">${remote}<span class="provider">${icon("claude")}</span></span></span>`;
@@ -734,8 +734,8 @@ function rowMenuItems(tab) {
   const session = threadOf(tab).session;
   return [
     { label: ws?.branch ? `New thread on ${ws.branch}` : `New thread in ${project}`, icon: "message-square-plus", run: () => newThreadIn(tab) },
-    isPinned(tab) ? { label: "Unpin thread", icon: "pin-off", hint: `${MOD_LABEL}⇧P`, run: () => pin(tab) } : { label: "Pin thread", icon: "pin", hint: `${MOD_LABEL}⇧P`, run: () => pin(tab) },
-    settled(tab) ? { label: "Un-settle thread", icon: "circle-check", run: () => unsettle(tab) } : { label: "Settle thread", icon: "circle-check", hint: `${MOD_LABEL}⇧S`, run: () => settle(tab) },
+    isPinned(tab) ? { label: "Unpin thread", icon: "pin-off", hint: bindingLabel("thread.pin"), run: () => pin(tab) } : { label: "Pin thread", icon: "pin", hint: bindingLabel("thread.pin"), run: () => pin(tab) },
+    settled(tab) ? { label: "Un-settle thread", icon: "circle-check", run: () => unsettle(tab) } : { label: "Settle thread", icon: "circle-check", hint: bindingLabel("thread.settle"), run: () => settle(tab) },
     sideMarks.snoozed[threadKey(tab)] && snoozedNow(tab)
       ? { label: "Wake thread", icon: "clock", run: () => wake(tab) }
       : { label: "Snooze", icon: "clock", disabled: !canSnooze(tab), children: () => snoozeItems([tab], true) },
@@ -1262,7 +1262,7 @@ async function newThreadIn(tab) {
 function newThread(here = false) {
   if (narrow(768)) toggleSidebar(false);
   if (active && (here || projectCount() <= 1)) return newThreadIn(active);
-  toggleProjects();
+  openPalette({ mode: "new-thread-in" });
 }
 function newThreadWithoutProject() {
   const machine = active?.machine ?? onlineMachines()[0];

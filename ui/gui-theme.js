@@ -254,7 +254,7 @@ function previewCircle({ mode, colors }, cls = "") {
 }
 
 PALETTE_VIEWS.themes = {
-  placeholder: "Search themes...",
+  placeholder: "Search...",
   groups(query) {
     const s = themeState();
     const current = s.halves[resolvedAppearance(s)] ?? themeById(s.theme)?.id ?? null;
@@ -270,7 +270,7 @@ PALETTE_VIEWS.themes = {
   },
 };
 PALETTE_VIEWS.appearance = {
-  placeholder: "Search appearance...",
+  placeholder: "Search...",
   groups(query) {
     const { mode } = themeState();
     const items = APPEARANCE_OPTIONS.map(([m, label, ic]) => ({ icon: ic, title: label, trail: m === mode ? `<span class="theme-trail"><span class="current">Current</span></span>` : "", terms: [label, "appearance", "mode"], run: () => setAppearanceMode(m) }));
@@ -280,9 +280,9 @@ PALETTE_VIEWS.appearance = {
 /** CommandPaletteThemeItems.tsx: Change theme, Change appearance, Toggle theme editor. */
 function themeActionItems() {
   return [
-    { icon: "palette", title: "Change theme", page: "themes", hint: chordLabel("A", { alt: true }), terms: ["change theme", "appearance", "colors", "palette"] },
-    { icon: "monitor", title: "Change appearance", page: "appearance", hint: chordLabel("A", { alt: true, shift: true }), terms: ["change appearance", "light", "dark", "system", "mode", "toggle"] },
-    { icon: "palette", title: "Toggle theme editor", hint: chordLabel("T", { alt: true, shift: true }), terms: ["toggle theme editor", "appearance", "colors", "palette", "customize"], run: () => toggleThemeEditor() },
+    { icon: "palette", title: "Change theme", page: "themes", command: "theme.select", terms: ["change theme", "appearance", "colors", "palette"] },
+    { icon: "monitor", title: "Change appearance", page: "appearance", command: "appearance.cycle", terms: ["change appearance", "light", "dark", "system", "mode", "toggle"] },
+    { icon: "palette", title: "Toggle theme editor", command: "themeEditor.toggle", terms: ["toggle theme editor", "appearance", "colors", "palette", "customize"], run: () => toggleThemeEditor() },
   ];
 }
 function openThemePicker() {

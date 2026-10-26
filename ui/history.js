@@ -9,12 +9,14 @@ async function showGeneral() {
     ${contrastSettingsHtml()}
     ${appearanceHtml()}
     ${sidebarSettingsHtml()}${panelSettingsHtml()}
-    ${sendShortcutHtml()}`;
+    ${sendShortcutHtml()}
+    ${keybindingsSettingsHtml()}`;
   bindThemeSettings();
   bindAppearance();
   bindSidebarSettings();
   bindPanelSettings();
   bindSendShortcut();
+  bindKeybindingsSettings();
   if (!TAURI) return;
   document.getElementById("keep-awake").onchange = async (e) => {
     try {
