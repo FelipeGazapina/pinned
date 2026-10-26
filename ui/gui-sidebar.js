@@ -71,7 +71,7 @@ const rowTabs = () => [...threadList.querySelectorAll(".thread-row")].map((r) =>
 
 function markThreadSeen(tab) {
   if (!tab || !guiOn() || document.hidden) return;
-  seenAt[threadKey(tab)] = tab.view.updated ?? 0;
+  seenAt[threadKey(tab)] = lastActivity(tab);
   save("gui-seen", JSON.stringify(seenAt));
   if (wokeNow(tab)) {
     delete sideMarks.snoozed[threadKey(tab)];
@@ -84,6 +84,7 @@ function statusSlot(tab) {
   const phase = phaseOf(tab);
   if (phase === "asking") return { icon: "shield-question", text: "Approval", tone: "warning" };
   if (phase === "working") return { icon: "circle-dashed", text: "Working", tone: "info", since: unixOf(lastPrompt(tab)?.at) };
+  if (phase === "delegating") return { icon: "bot", text: agentsWorking(runningAgents(tab).length), tone: "info", since: delegatedSince(tab) / 1000 || 0 };
   if (phase === "input") return { icon: "message-circle-question", text: "Input", tone: "input" };
   if (phase === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "warning" } : { icon: "circle-alert", text: "Failed", tone: "error" };
   if (wokeNow(tab) && tab !== active) return { icon: "alarm-clock", text: "Woke", tone: "warning", woke: true };
@@ -188,9 +189,9 @@ function cardRow(tab) {
   const phase = phaseOf(tab);
   const woke = !!slot?.woke;
   const row = rowShell(tab, "tall");
-  row.classList.toggle("receded", tab !== active && (phase === "working" || (["asking", "done", "idle"].includes(phase) && !unseenDone(tab) && !woke)));
+  row.classList.toggle("receded", tab !== active && (["working", "delegating"].includes(phase) || (["asking", "done", "idle"].includes(phase) && !unseenDone(tab) && !woke)));
   row.classList.toggle("bright", unseenDone(tab) || woke || phase === "input");
-  row.classList.toggle("working", phase === "working" && tab !== active);
+  row.classList.toggle("working", ["working", "delegating"].includes(phase) && tab !== active);
   const draft = tab !== active && hasDraft(tab);
   row.classList.toggle("draft", draft);
   const ws = threadOf(tab).workspace;

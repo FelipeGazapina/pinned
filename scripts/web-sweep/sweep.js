@@ -731,6 +731,44 @@ async function sweep(profileName) {
     await waitFor("the compacted note", async () => (await page.locator("#thread .note", { hasText: "The conversation was compacted." }).count()) > 0, 10000);
   });
 
+  await step("app view: spawned agents show as live cards, and the thread reads in progress until they finish", async () => {
+    const beta = await page.evaluate(() => active.key);
+    const card = (name) => page.locator("#thread .turn:last-of-type .agents .agent-card", { hasText: name });
+    const stepLine = (name) => card(name).locator(".agent-step .label").textContent();
+    const rowStatus = () => page.locator(`#thread-list .thread-row[data-tab="${beta}"] .stamp.status`).textContent().catch(() => "");
+    await sendPrompt("spawn agents");
+    await waitFor("two agent cards", async () => (await page.locator("#thread .turn:last-of-type .agents .agent-card").count()) === 2, 6000);
+    check((await card("Map the parser").locator(".chip").textContent()) === "Explore · haiku", `the first card's chip reads ${await card("Map the parser").locator(".chip").textContent()}`);
+    check((await card("Check the tests").getAttribute("data-state")) === "running", "the second card is not running");
+    const first = await stepLine("Check the tests");
+    await waitFor("the card's step to move on", async () => (await stepLine("Check the tests")) !== first, 5000);
+    const later = await stepLine("Check the tests");
+    check(/^Run test batch \d$/.test(later), `the step line reads ${later}`);
+    await waitFor("claude's turn to end", () => page.evaluate(() => statusOf(active) === "done"), 5000);
+    check((await page.evaluate(() => phaseOf(active))) === "delegating", `the phase is ${await page.evaluate(() => phaseOf(active))}`);
+    check(/^Worked for /.test(await lastTurn(".work > summary").textContent()), "the turn's own work did not settle");
+    const footer = (await text("#thread .agents-working")).replace(/\s+/g, " ");
+    check(/^2 agents working \d/.test(footer), `the footer reads ${footer}`);
+    check(/2 agents working/.test(await rowStatus()), `the sidebar row reads ${await rowStatus()}`);
+    check((await page.locator("#composer").getAttribute("data-working")) === "false", "the composer acts as if claude's turn were running");
+    await card("Check the tests").screenshot({ path: path.join(shots, "agent-card-running.png") });
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+    await waitFor("one agent left", async () => /1 agent working/.test(await rowStatus()), 8000);
+    check(!(await page.evaluate((k) => unseenDone(tabByKey(k)), beta)), "the row read Done while an agent still worked");
+    await waitFor("the row to read Done", async () => /Done/.test(await rowStatus()), 12000);
+    await page.evaluate((k) => activate(tabByKey(k)), beta);
+    await waitFor("both cards done", async () => (await page.locator('#thread .agent-card[data-state="done"]').count()) === 2, 4000);
+    check((await page.locator("#thread .agents-working").count()) === 0, "the agents footer outlived the agents");
+    const done = await stepLine("Check the tests");
+    check(done === "Check the tests: all clear.", `the finished card's step reads ${done}`);
+    await press(card("Check the tests").locator(".agent-head"));
+    const rows = await card("Check the tests").locator(".agent-steps .tool").count();
+    check(rows === 5, `the open card shows ${rows} tool rows`);
+    await card("Check the tests").screenshot({ path: path.join(shots, "agent-card-done.png") });
+    await press(card("Check the tests").locator(".agent-head"));
+    return `${first} → ${later}`;
+  });
+
   await step("app view: changed files show as a folder tree with 1.2k counts", async () => {
     await sendPrompt("tree");
     await answered("Wrote the tree.");

@@ -62,7 +62,10 @@ The app view has three columns:
   **Worked for** row; click it to see each one. A turn that changed files ends with a card of
   those files. **Open diff** shows them in the side panel. Type below and press Enter to send.
   While Claude works, Enter queues your message and the red button stops the turn.
-  The menu under the prompt picks the model.
+  Each agent Claude spawns gets a card under the turn with its name, its kind, what it is doing
+  now and how long it has run; click a card to see its recent steps. While any agent runs after
+  Claude's turn ended, the thread and its sidebar row read **N agents working**, and you can still
+  send a prompt. The menu under the prompt picks the model.
 - **Side panel.** Each thread keeps its own panel: its tabs, the one shown, its width, and
   whether it is open or maximized. **+** (⌘T while the panel is open) adds a tab, and ⌘W closes
   the shown tab before it ever closes a thread. ⌘D opens the **Diff**: one turn, the latest
