@@ -223,7 +223,7 @@ pub fn diff(cwd: &Path, scope: DiffScope, ignore_whitespace: bool, against: Opti
             (fork, Some(base))
         }
     };
-    let mut args = vec!["diff", "--no-color", "--no-renames", "--no-ext-diff"];
+    let mut args = vec!["diff", "--no-color", "--find-renames", "--no-ext-diff"];
     if ignore_whitespace {
         args.push("-w");
     }
@@ -413,8 +413,9 @@ pub fn editors(home: &Path, path: Option<&str>) -> Vec<Editor> {
     EDITORS.iter().filter(|e| editor_at(e.0, home, path).is_some()).map(|&(id, n, ..)| Editor { id, name: name(id, n) }).collect()
 }
 
-/// Opens `cwd`, or `file` inside its repository, in the editor `id`.
-pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, home: &Path, path: Option<&str>) -> Result<(), String> {
+/// Opens `cwd`, or `file` inside its repository, in the editor `id`. The file manager opens a file
+/// in its default app, or with `reveal` shows it selected in its folder.
+pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, reveal: bool, home: &Path, path: Option<&str>) -> Result<(), String> {
     let editor = editor_at(id, home, path).ok_or_else(|| format!("{id} isn't installed on this machine"))?;
     let target = match file {
         None => cwd.to_owned(),
@@ -427,20 +428,27 @@ pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, home: &Path, path: Opti
             top.join(rel)
         }
     };
-    let mut command = if cfg!(target_os = "macos") {
-        let mut open = Command::new("open");
-        open.arg("-a").arg(&editor);
-        open
-    } else {
-        Command::new(&editor)
-    };
-    command.arg(&target).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let (program, args) = open_command(cfg!(target_os = "macos"), id, &editor, &target, reveal);
+    let mut command = Command::new(program);
+    command.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(path) = path {
         command.env("PATH", path);
     }
     let mut child = command.spawn().map_err(|e| format!("could not start {id}: {e}"))?;
     std::thread::spawn(move || child.wait());
     Ok(())
+}
+
+/// The program and arguments that open `target` in the editor `id`, found at `editor`.
+fn open_command(mac: bool, id: &str, editor: &Path, target: &Path, reveal: bool) -> (PathBuf, Vec<PathBuf>) {
+    let finder = id == "finder";
+    match (mac, finder, reveal) {
+        (true, true, true) => ("open".into(), vec!["-R".into(), target.to_owned()]),
+        (true, true, false) => ("open".into(), vec![target.to_owned()]),
+        (true, false, _) => ("open".into(), vec!["-a".into(), editor.to_owned(), target.to_owned()]),
+        (false, true, true) => (editor.to_owned(), vec![target.parent().unwrap_or(target).to_owned()]),
+        (false, _, _) => (editor.to_owned(), vec![target.to_owned()]),
+    }
 }
 
 pub(crate) enum Failure {
@@ -553,6 +561,11 @@ mod tests {
         let trimmed = diff(repo, DiffScope::Uncommitted, true, None).unwrap();
         assert!(!trimmed.patch.contains("+    fn b() {}") && trimmed.patch.contains("+fn c() {}"), "{}", trimmed.patch);
         assert_eq!((all.base, all.truncated), (None, false));
+
+        commit(repo, "second");
+        std::fs::rename(repo.join("untracked.md"), repo.join("moved.md")).unwrap();
+        let moved = diff(repo, DiffScope::Uncommitted, false, None).unwrap();
+        assert!(moved.patch.contains("rename from untracked.md\nrename to moved.md"), "{}", moved.patch);
     }
 
     #[test]
@@ -611,14 +624,29 @@ mod tests {
     fn editors_open_only_known_ids_and_paths_inside_the_project() {
         let dir = tempfile::tempdir().unwrap();
         let empty = dir.path().to_str().unwrap();
-        assert!(open_in(dir.path(), "notepad", None, dir.path(), Some(empty)).unwrap_err().contains("isn't installed"));
+        assert!(open_in(dir.path(), "notepad", None, false, dir.path(), Some(empty)).unwrap_err().contains("isn't installed"));
         for path in ["../secret", "/etc/passwd", "a/../../b"] {
-            let err = open_in(dir.path(), "finder", Some(path), dir.path(), Some(empty));
+            let err = open_in(dir.path(), "finder", Some(path), false, dir.path(), Some(empty));
             if cfg!(target_os = "macos") {
                 assert!(err.unwrap_err().contains("not a path inside"), "{path}");
             }
         }
         assert!(pr_action(dir.path(), "--admin", PrAction::Merge, None).unwrap_err().contains("is not a pull request"));
+    }
+
+    #[test]
+    fn the_file_manager_opens_a_file_in_its_app_or_reveals_it() {
+        let file = Path::new("/w/src/a.rs");
+        let run = |mac, id, editor: &str, reveal| {
+            let (program, args) = open_command(mac, id, Path::new(editor), file, reveal);
+            [program].into_iter().chain(args).map(|a| a.display().to_string()).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(run(true, "finder", "/System/Library/CoreServices/Finder.app", true), "open -R /w/src/a.rs");
+        assert_eq!(run(true, "finder", "/System/Library/CoreServices/Finder.app", false), "open /w/src/a.rs");
+        assert_eq!(run(true, "zed", "/Applications/Zed.app", false), "open -a /Applications/Zed.app /w/src/a.rs");
+        assert_eq!(run(false, "finder", "/usr/bin/xdg-open", true), "/usr/bin/xdg-open /w/src");
+        assert_eq!(run(false, "finder", "/usr/bin/xdg-open", false), "/usr/bin/xdg-open /w/src/a.rs");
+        assert_eq!(run(false, "zed", "/usr/bin/zed", true), "/usr/bin/zed /w/src/a.rs");
     }
 
     #[test]
