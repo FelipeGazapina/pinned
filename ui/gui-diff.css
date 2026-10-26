@@ -74,3 +74,34 @@
 .file-tree .leaf[data-git="renamed"] { --git: var(--g-tree-renamed); }
 .file-tree .leaf[data-git="deleted"] { --git: var(--g-tree-deleted); }
 .file-tree .leaf :is(.name, .git) { color: var(--git); }
+
+/* PanelAnimationsPreview.tsx and the Motion row's slider. */
+#panel-animation-row .contrast-head { display: flex; align-items: center; gap: 6px; }
+#panel-animation-row .reset { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border-radius: 6px; color: var(--muted); }
+#panel-animation-row .reset:hover { background: var(--g-hover); color: var(--fg); }
+#panel-animation-row .reset[hidden] { display: none; }
+#panel-animation-row .reset .i { width: 12px; height: 12px; }
+#panel-animation-row .motion-control { display: grid; grid-template-columns: 7rem 13rem; align-items: center; gap: 16px; }
+#panel-animation-row .contrast-control { display: flex; align-items: center; gap: 12px; }
+#panel-animation-row output { min-width: 64px; padding: 4px 8px; border-radius: 6px; background: var(--g-accent); text-align: center; font: 500 12px var(--g-mono); font-variant-numeric: tabular-nums; color: var(--g-fg); }
+#settings #panel-animation-row .settings-slider { flex: 1; min-width: 0; width: auto; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.motion-preview { display: flex; height: 40px; width: 100%; padding: 4px; overflow: hidden; border: 1px solid var(--g-border); border-radius: 8px; background: var(--g-canvas); cursor: pointer; }
+.motion-preview > span, .motion-preview .bottom { transition: width var(--preview-duration) ease-out, height var(--preview-duration) ease-out, border-width var(--preview-duration) ease-out; }
+.motion-preview .side { width: 0; height: 100%; flex: none; border-radius: 6px; background: var(--g-raised); overflow: hidden; }
+.motion-preview .right { width: 0; height: 100%; flex: none; border-radius: 6px; background: var(--g-accent); overflow: hidden; }
+.motion-preview.open .side { width: 16px; }
+.motion-preview.open .right { width: 20px; }
+.motion-preview .main { display: flex; flex: 1; min-width: 0; flex-direction: column; padding: 0 4px; }
+.motion-preview .lines { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 4px; padding-top: 4px; }
+.motion-preview .lines span { height: 2px; border-radius: 999px; background: rgb(var(--g-muted-rgb) / 0.25); }
+.motion-preview .lines span:nth-child(2) { width: 80%; background: rgb(var(--g-muted-rgb) / 0.2); }
+.motion-preview .lines span:nth-child(3) { width: 60%; background: rgb(var(--g-muted-rgb) / 0.15); }
+.motion-preview .bottom { display: flex; align-items: center; flex: none; height: 0; overflow: hidden; padding: 0 8px; border-top: 0 solid var(--g-border); background: rgb(var(--g-fg-rgb) / 0.05); }
+.motion-preview.open .bottom { height: 8px; border-top-width: 1px; }
+.motion-preview .bottom span { width: 66%; height: 1px; border-radius: 999px; background: rgb(var(--g-muted-rgb) / 0.25); }
+@media (prefers-reduced-motion: reduce) {
+  .motion-preview > span, .motion-preview .bottom { transition: none; }
+}
+@media (max-width: 640px) {
+  #panel-animation-row .motion-control { grid-template-columns: 5rem minmax(0, 1fr); gap: 12px; }
+}

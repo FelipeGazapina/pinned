@@ -385,12 +385,6 @@ function animatePanel(open) {
   clearTimeout(animationTimer);
   animationTimer = setTimeout(() => document.body.classList.remove("panel-animating"), ms + 50);
 }
-const panelSettingsHtml = () => `<h2 class="looks-title">Right panel</h2><div class="look"><label for="panel-animation">Panel animation</label><p class="meta">How long the right panel takes to open and close.</p>
-  <select id="panel-animation">${[0, 100, 150, 200, 250, 300, 400].map((ms) => `<option value="${ms}"${ms === panelAnimation() ? " selected" : ""}>${ms ? `${ms} ms` : "Off"}</option>`).join("")}</select></div>`;
-function bindPanelSettings() {
-  const select = settingsPage.querySelector("#panel-animation");
-  if (select) select.onchange = () => save("gui-panel-animation", select.value);
-}
 
 function renderPanel() {
   const tab = active;

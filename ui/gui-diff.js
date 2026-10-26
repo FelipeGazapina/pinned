@@ -93,3 +93,42 @@ panelBody.addEventListener("contextmenu", (e) => {
   ];
   if (items.length) showMenu(items, { x: e.clientX, y: e.clientY });
 });
+
+/** AppearanceSettingsPanel.tsx's Motion section: how long panels take to open and close, 0 to 400
+ * ms in 25 ms steps, with a preview that replays it and a reset to the default, off. */
+const PANEL_ANIMATION = { min: 0, max: 400, step: 25 };
+function panelSettingsHtml() {
+  return `<h2 class="looks-title">Motion</h2><div class="look" id="panel-animation-row"><div class="contrast-head"><label for="panel-animation">Panel animations</label><button type="button" class="reset" data-panel-animation-reset aria-label="Reset panel animations to default" title="Reset to default">${icon("undo-2")}</button></div>
+    <p class="meta">Set how fast panels open and close.</p>
+    <div class="motion-control"><button type="button" class="motion-preview open" data-panel-animation-preview aria-label="Replay panel animation preview"><span class="side"></span><span class="main"><span class="lines"><span></span><span></span><span></span></span><span class="bottom"><span></span></span></span><span class="right"></span></button>
+    <div class="contrast-control"><output for="panel-animation"></output><input type="range" class="settings-slider" id="panel-animation" aria-label="Panel animation duration" min="${PANEL_ANIMATION.min}" max="${PANEL_ANIMATION.max}" step="${PANEL_ANIMATION.step}"></div></div></div>`;
+}
+function showPanelAnimation() {
+  const row = document.getElementById("panel-animation-row");
+  if (!row) return;
+  const ms = panelAnimation();
+  const ratio = (ms - PANEL_ANIMATION.min) / (PANEL_ANIMATION.max - PANEL_ANIMATION.min);
+  const input = row.querySelector("input");
+  input.value = ms;
+  input.style.setProperty("--settings-slider-progress", `${ratio * 100}%`);
+  input.style.setProperty("--settings-slider-fill-offset", `${0.5 - ratio}rem`);
+  row.querySelector("output").textContent = `${ms} ms`;
+  row.querySelector("[data-panel-animation-reset]").hidden = ms === 0;
+  row.querySelector("[data-panel-animation-preview]").style.setProperty("--preview-duration", `${ms}ms`);
+}
+function bindPanelSettings() {
+  const row = document.getElementById("panel-animation-row");
+  if (!row) return;
+  row.querySelector("input").oninput = (e) => {
+    const ms = Number(e.target.value);
+    if (!Number.isInteger(ms) || ms < PANEL_ANIMATION.min || ms > PANEL_ANIMATION.max) return;
+    save("gui-panel-animation", ms ? String(ms) : null);
+    showPanelAnimation();
+  };
+  row.querySelector("[data-panel-animation-reset]").onclick = () => {
+    save("gui-panel-animation", null);
+    showPanelAnimation();
+  };
+  row.querySelector("[data-panel-animation-preview]").onclick = (e) => e.currentTarget.classList.toggle("open");
+  showPanelAnimation();
+}

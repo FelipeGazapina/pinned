@@ -2429,6 +2429,36 @@ async function sweep(profileName) {
     return `${lines().length - before} opens`;
   }
 
+  await step("app view: Settings' Motion row sets panel animations on a 25 ms slider with a readout, preview and reset", async () => {
+    await closePanelIfOpen();
+    await page.evaluate(() => toggleSettings());
+    try {
+      await motionRow();
+    } finally {
+      await page.evaluate(() => save("gui-panel-animation", null));
+      await page.evaluate(() => toggleSettings());
+    }
+  });
+  async function motionRow() {
+    await tapOrClick('#settings-nav [data-page="general"]');
+    await waitFor("the Motion row", () => page.locator("#panel-animation-row").isVisible());
+    const slider = await page.locator("#panel-animation").evaluate((el) => [el.type, el.min, el.max, el.step].join(" "));
+    check(slider === "range 0 400 25", `the control is ${slider}`);
+    check((await text("#panel-animation-row label")) === "Panel animations" && (await page.locator("#panel-animation-row").evaluate((el) => el.previousElementSibling?.textContent)) === "Motion", "the row isn't Motion › Panel animations");
+    check((await text("#panel-animation-row output")) === "0 ms" && (await page.locator("[data-panel-animation-reset]").isHidden()), "at the default the readout isn't 0 ms with no reset");
+    await page.locator("#panel-animation").evaluate((el) => {
+      el.value = "225";
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    check((await text("#panel-animation-row output")) === "225 ms" && (await page.evaluate(() => load("gui-panel-animation"))) === "225", `set to 225 the readout is ${await text("#panel-animation-row output")}`);
+    const duration = await page.locator("[data-panel-animation-preview] .side").evaluate((el) => getComputedStyle(el).transitionDuration);
+    check(duration.split(", ").every((d) => d === "0.225s"), `the preview takes ${duration}`);
+    await press(gui("[data-panel-animation-preview]"));
+    check(!(await page.locator("[data-panel-animation-preview].open").count()), "the preview didn't close");
+    await press(gui("[data-panel-animation-reset]"));
+    check((await text("#panel-animation-row output")) === "0 ms" && (await page.evaluate(() => load("gui-panel-animation"))) === null, "reset didn't return to 0 ms");
+  }
+
   await step("app view: the diff steps clean up", async () => {
     await closePanelIfOpen();
     if (diff3.head) alphaGit("update-ref", "-d", `refs/heads/${diff3.head}`);
@@ -2708,7 +2738,10 @@ async function sweep(profileName) {
     await closePanelIfOpen();
     await page.evaluate(() => toggleSettings());
     await tapOrClick('#settings-nav [data-page="general"]');
-    await page.selectOption("#panel-animation", "200");
+    await page.locator("#panel-animation").evaluate((el) => {
+      el.value = "200";
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
     await page.evaluate(() => toggleSettings());
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
     await tapOrClick("#toggle-panel");
