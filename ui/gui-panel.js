@@ -2491,15 +2491,26 @@ const CHECK_ICONS = { ok: "circle-check", fail: "circle-alert", pending: "circle
 
 /** Pull requests as gh answered for them, by `tab.key:url`. */
 const prCache = new Map();
+/** The latest load asked for each pull request, so an older answer that lands after it is dropped. */
+const prLoads = new Map();
 async function loadPr(tab, url, quiet = false) {
   const key = `${tab.key}:${url}`;
+  const load = (prLoads.get(key) ?? 0) + 1;
+  prLoads.set(key, load);
   prCache.set(key, { ...prCache.get(key), loading: true });
   if (!prCache.get(key).data && !quiet) renderPanel();
+  let data, error;
   try {
-    prCache.set(key, { data: await callOn(tab.machine, { cmd: "pull_request", tab: tab.view.id, pr: url }), at: Date.now() });
-    notePrView(url, prCache.get(key).data);
+    data = await callOn(tab.machine, { cmd: "pull_request", tab: tab.view.id, pr: url });
   } catch (e) {
-    prCache.set(key, { error: String(e), data: prCache.get(key)?.data });
+    error = String(e);
+  }
+  if (prLoads.get(key) !== load) return;
+  if (error === undefined) {
+    prCache.set(key, { data, at: Date.now() });
+    notePrView(url, data);
+  } else {
+    prCache.set(key, { error, data: prCache.get(key)?.data });
   }
   const s = shownSurface(tab);
   if (tab === active && (s?.url === url || s?.kind === "prs")) renderPanel();
