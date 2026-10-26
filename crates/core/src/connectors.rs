@@ -658,6 +658,26 @@ fn page_text(group: &str, category: &Category) -> String {
     format!("{} {}: {}", slack::group_mention(group), category.name, category.description.trim())
 }
 
+/// How far each thread `followed` holds in `channel` was read, by thread ts.
+fn cursors(followed: &BTreeMap<String, Followed>, channel: &str) -> BTreeMap<String, slack::Cursor> {
+    let prefix = thread_key(channel, "");
+    followed
+        .iter()
+        .filter_map(|(key, f)| {
+            let read = f.seen.clone().unwrap_or_else(|| f.cursor.clone());
+            Some((key.strip_prefix(&prefix)?.to_owned(), slack::Cursor { given: f.cursor.clone(), read }))
+        })
+        .collect()
+}
+
+/// The channels of the threads `followed` holds, other than `own`.
+fn followed_channels(followed: &BTreeMap<String, Followed>, own: Option<&str>) -> Vec<String> {
+    let mut channels: Vec<String> =
+        followed.keys().filter_map(|key| key.split_once(':')).map(|(channel, _)| channel).filter(|c| Some(*c) != own).map(str::to_owned).collect();
+    channels.dedup();
+    channels
+}
+
 /// A Slack connector's channel as the user typed it, without the `#`.
 fn channel_name(name: &str) -> &str {
     name.trim().trim_start_matches('#')
@@ -886,12 +906,22 @@ impl Connectors {
     /// newest message it was given.
     async fn fallback(&self, d: &Delivery) -> Result<(Run, String), String> {
         let c = self.store.lock().unwrap().connector(&d.connector)?.clone();
-        let Trigger::SlackMention { channel: name } = &c.trigger else { return Err("the workflow no longer watches Slack".into()) };
+        let watched = match &c.trigger {
+            Trigger::SlackMention { channel } => Some(channel.as_str()),
+            Trigger::Called => None,
+            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } => return Err("the workflow no longer answers Slack threads".into()),
+        };
         let token = self.key(SLACK_KEY).ok_or("Slack is not connected")?;
+        // A thread a message workflow handed on may be in a channel other than the one this watches.
+        let own = watched.filter(|name| self.channels.lock().unwrap().get(*name) == Some(&d.channel));
+        let name = match own {
+            Some(name) => channel_name(name).to_owned(),
+            None => slack::channel_name(&token, &d.channel).await?,
+        };
         let posts = slack::thread(&token, &d.channel, &d.thread).await?;
         let newest = posts.last().map_or_else(|| d.cursor.clone(), |p| p.ts.clone());
         let note = c.created.get(&thread_key(&d.channel, &d.thread)).map(filed_note);
-        let run = slack_run(&c, &d.channel, channel_name(name), &d.thread, &posts, note.as_deref(), &self.exe);
+        let run = slack_run(&c, &d.channel, &name, &d.thread, &posts, note.as_deref(), &self.exe);
         Ok((Run { mentioned: d.mentioned.clone(), ..run }, newest))
     }
 
@@ -915,16 +945,7 @@ impl Connectors {
                 let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
                 let channel = self.channel_id(&token, name).await?;
                 let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
-                let prefix = thread_key(&channel, "");
-                let cursors = c
-                    .followed
-                    .iter()
-                    .filter_map(|(key, f)| {
-                        let read = f.seen.clone().unwrap_or_else(|| f.cursor.clone());
-                        Some((key.strip_prefix(&prefix)?.to_owned(), slack::Cursor { given: f.cursor.clone(), read }))
-                    })
-                    .collect();
-                let activity = slack::activity(&token, &channel, &bot, since, &cursors).await?;
+                let activity = slack::activity(&token, &channel, &bot, since, &cursors(&c.followed, &channel)).await?;
                 let mut found: Vec<Found> = vec![];
                 // Oldest first, so a thread's first new mention is the one its session answers.
                 for mention in activity.mentions {
@@ -937,6 +958,7 @@ impl Connectors {
                     found.push(Found::Mention { channel: channel.clone(), channel_name, mention, posts });
                 }
                 found.extend(activity.replies.into_iter().map(|replies| Found::Replies { channel: channel.clone(), replies }));
+                found.extend(self.follow_ups(&token, &bot, c, Some(&channel), now).await?);
                 Ok(Some(found))
             }
             Trigger::SlackMessage { channel: name, decide } => {
@@ -973,8 +995,23 @@ impl Connectors {
                 }
                 Ok(Some(found))
             }
-            Trigger::Called => Ok(Some(vec![])),
+            Trigger::Called => {
+                let bot = self.store.lock().unwrap().slack.as_ref().map(|a| a.user_id.clone());
+                let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
+                Ok(Some(self.follow_ups(&token, &bot, c, None, now).await?))
+            }
         }
+    }
+
+    /// New messages in the threads `c` follows outside `own`, the channel its trigger reads anyway.
+    /// Reading from `now` finds no new thread there: those belong to the workflows that watch it.
+    async fn follow_ups(&self, token: &str, bot: &str, c: &Connector, own: Option<&str>, now: DateTime<Utc>) -> Result<Vec<Found>, String> {
+        let mut found = vec![];
+        for channel in followed_channels(&c.followed, own) {
+            let activity = slack::activity(token, &channel, bot, now, &cursors(&c.followed, &channel)).await?;
+            found.extend(activity.replies.into_iter().map(|replies| Found::Replies { channel: channel.clone(), replies }));
+        }
+        Ok(found)
     }
 
     /// The page each of `decide`'s categories posts, by category. A handle that doesn't resolve
@@ -2216,6 +2253,44 @@ mod tests {
         assert_eq!(store.connectors[0].since, "2026-10-19T10:00:00+00:00", "and still sees the message");
         let (started, _) = runs(&settle(&mut store, vec![("c5", routed("error", "c2", None))]));
         assert_eq!(started, [("c2".to_owned(), thread_subject(), vec!["1792400050.000200".to_owned()])]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_workflow_follows_up_on_threads_outside_the_channel_it_watches() {
+        let at = |cursor: &str| Followed { cursor: cursor.into(), seen: None, replied: false };
+        let followed = BTreeMap::from([
+            ("C0123ABCD:1792400050.000200".to_owned(), at("1792400060.000000")),
+            ("C0123ABCD:1792400070.000000".to_owned(), Followed { seen: Some("1792400090.000000".into()), ..at("1792400080.000000") }),
+            ("C0999WXYZ:1792400100.000000".to_owned(), at("1792400100.000000")),
+        ]);
+        assert_eq!(followed_channels(&followed, Some("C0123ABCD")), ["C0999WXYZ"]);
+        assert_eq!(followed_channels(&followed, None), ["C0123ABCD", "C0999WXYZ"], "a called workflow follows every thread it was handed");
+        let read: Vec<(String, String, String)> =
+            cursors(&followed, "C0123ABCD").into_iter().map(|(thread, c)| (thread, c.given, c.read)).collect();
+        assert_eq!(
+            read,
+            [
+                ("1792400050.000200".to_owned(), "1792400060.000000".to_owned(), "1792400060.000000".to_owned()),
+                ("1792400070.000000".to_owned(), "1792400080.000000".to_owned(), "1792400090.000000".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_delivery_no_tab_took_needs_a_workflow_that_answers_threads() {
+        let delivery = Delivery {
+            connector: "c5".into(),
+            channel: "C0123ABCD".into(),
+            thread: "1792400050.000200".into(),
+            messages: vec!["any news?".into()],
+            cursor: "1792400090.000000".into(),
+            mentioned: vec![],
+        };
+        let (connectors, dir) = stored("fallback", vec![router(), called()]);
+        assert_eq!(block_on(connectors.fallback(&delivery)).err(), Some("the workflow no longer answers Slack threads".into()));
+        let called = Delivery { connector: "c6".into(), ..delivery };
+        assert_eq!(block_on(connectors.fallback(&called)).err(), Some("Slack is not connected".into()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
