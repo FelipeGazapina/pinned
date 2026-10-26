@@ -12,7 +12,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
 use tokio::sync::Notify;
 
 const LINEAR_KEY: &str = "linear-key";
@@ -1486,6 +1485,8 @@ impl Connectors {
                 None => self.storage.remove_key(name),
             }
         }
+        // Sessions this Mac ran signed out stay its own tabs; the account would take them for lost and start them again.
+        imported.runs.retain(|_, job| job.machine().map(String::as_str) != Some(runs::THIS_MAC));
         self.channels.lock().unwrap().clear();
         *current = imported;
         self.save(&current)?;
@@ -1503,6 +1504,7 @@ impl Connectors {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn block_on<F: Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(future)
@@ -1605,6 +1607,23 @@ mod tests {
             Err("this run moved to another machine after this one went offline: stop working on it here".into())
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_signed_out_macs_own_runs_stay_behind_when_it_signs_in() {
+        let (local, dir) = stored("import-runs", vec![quiet_linear()]);
+        assert_eq!(block_on(local.hand_over(Work::Run(run(&quiet_linear(), &issue(), "/bin/pinned")), &|_| async { Some(runs::THIS_MAC.to_owned()) })), Ok(()));
+        let mut queued = local.store.lock().unwrap().runs["c1/uuid"].clone();
+        queued.subject = Subject::LinearIssue { issue: "uuid-2".into() };
+        queued.phase = runs::Phase::Queued { after: 0 };
+        local.store.lock().unwrap().runs.insert("c1/uuid-2".into(), queued);
+        let (store, keys) = local.export();
+        let (account, account_dir) = stored("import-runs-account", vec![]);
+        assert_eq!(account.import(store, keys), Ok(true));
+        let kept: Vec<String> = account.get_settings().runs.into_iter().map(|r| r.key).collect();
+        assert_eq!(kept, ["c1/uuid-2"], "the queued run moves; the one running on this Mac stays its own");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(account_dir);
     }
 
     #[test]

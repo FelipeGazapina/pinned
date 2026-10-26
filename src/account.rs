@@ -2,6 +2,7 @@ use pinned_core::account::{self, Credentials};
 use pinned_core::connectors::{self, Connectors, Keys};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::Machine;
+use pinned_core::runs;
 use pinned_core::wire::HubCall;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -66,9 +67,6 @@ fn connect(creds: &Credentials, machine: Arc<Machine>) -> Link {
     link::spawn(creds.clone(), machine, env!("CARGO_PKG_VERSION"))
 }
 
-/// The machine id runs record while this signed-out Mac runs its own workflows.
-const LOCAL: &str = "this-mac";
-
 fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         // This Mac is the only machine, so a run resumes here, where its transcript already is.
@@ -79,9 +77,9 @@ fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
                 connectors::Work::Prompt { text, .. } => machine.deliver(&work.env(), text),
                 connectors::Work::Close { tab, .. } => machine.close_tab(tab),
             };
-            async move { taken.then(|| LOCAL.to_owned()) }
+            async move { taken.then(|| runs::THIS_MAC.to_owned()) }
         };
-        let online = || vec![(LOCAL.to_owned(), machine.tabs())];
+        let online = || vec![(runs::THIS_MAC.to_owned(), machine.tabs())];
         let checked = |check: &connectors::Check| drop(app.emit("connectors-checked", check));
         app.state::<Connectors>().watch(open, online, checked).await
     })

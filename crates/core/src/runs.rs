@@ -23,6 +23,10 @@ impl Default for Timing {
 /// Starts a run gets, its first included, before it stops and reports why: one per machine
 /// lost under it and one per failed turn.
 pub const ATTEMPTS: u32 = 3;
+/// The machine a signed-out Mac records its own runs on.
+pub const THIS_MAC: &str = "this-mac";
+/// Runs the runs list carries, so the settings each check sends stay small.
+const LISTED: usize = 200;
 /// A run that ended this long ago leaves the store.
 const KEEP: u64 = 30 * 24 * 3600;
 const EVENTS: usize = 40;
@@ -131,6 +135,7 @@ pub fn views<'a>(runs: impl IntoIterator<Item = (&'a String, &'a Job)>) -> Vec<V
         })
         .collect();
     views.sort_by_key(|v| std::cmp::Reverse(v.updated));
+    views.truncate(LISTED);
     views
 }
 
