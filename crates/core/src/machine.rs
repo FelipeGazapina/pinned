@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::stats::{ThreadStats, Tally};
-use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
+use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, Shells};
 use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, process, projects, pty, pulls, reminders, scaffold, scripts, sessions, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
@@ -365,7 +365,14 @@ impl Machine {
                 json(created)
             }
             Call::PublishProject { path } => json(scaffold::publish(Path::new(&path), self.launch.path_env.as_deref())?),
-            Call::Clone { repo, token } => json(self.find_folder("", Some(&repo), token.as_deref())?),
+            Call::Clone { repo, token, dest: None } => json(self.find_folder("", Some(&repo), token.as_deref())?),
+            Call::Clone { repo, token, dest: Some(dest) } => json(self.clone_into(&repo, &dest, token.as_deref())?),
+            Call::MakeFolder { path } => {
+                let dir = projects::expand(&path, &home());
+                std::fs::create_dir_all(&dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
+                json(std::fs::canonicalize(&dir).map_err(|e| e.to_string())?)
+            }
+            Call::SearchThreads { query } => json(self.search_threads(&query)),
             Call::Run { run } => json(self.run(&run)?),
             Call::Deliver { env, text } => json(self.deliver(&env, &text)),
             Call::Upload { name, data } => {
@@ -1222,6 +1229,35 @@ impl Machine {
         });
     }
 
+    /// Clones `repo` into `dest`, as T3 Code's Add project clones to the folder picked, and opens it as a project.
+    fn clone_into(&self, repo: &str, dest: &str, token: Option<&str>) -> Result<PathBuf, String> {
+        let target = projects::expand(dest, &home());
+        if std::fs::read_dir(&target).is_ok_and(|mut entries| entries.next().is_some()) {
+            return Err(format!("{} already holds files", target.display()));
+        }
+        clone(repo, &target, token)?;
+        Ok(self.open_project(target))
+    }
+
+    /// The tabs whose conversations hold `query`, as T3 Code's thread search: a prompt's match before
+    /// an answer's, then the tab that heard from its session last.
+    pub fn search_threads(&self, query: &str) -> Vec<ThreadMatch> {
+        if query.trim().chars().count() < 2 {
+            return vec![];
+        }
+        let sessions: Vec<(TabId, String, u64)> = self.tabs.lock().unwrap().iter().filter_map(|(id, t)| Some((id.clone(), t.claude_session.clone()?, t.view(id).updated.unwrap_or(0)))).collect();
+        let projects = thread::projects_dir(&home());
+        let mut found: Vec<(ThreadMatch, u64)> = sessions
+            .into_iter()
+            .filter_map(|(tab, session, updated)| {
+                let found = thread::search(&thread::find(&projects, &session)?, query).ok()??;
+                Some((ThreadMatch { tab, found }, updated))
+            })
+            .collect();
+        found.sort_by_key(|(m, updated)| (m.found.source != "user", std::cmp::Reverse(*updated)));
+        found.into_iter().take(50).map(|(m, _)| m).collect()
+    }
+
     fn find_folder(&self, folder: &str, repo: Option<&str>, token: Option<&str>) -> Result<PathBuf, String> {
         let dir = PathBuf::from(folder);
         if !folder.is_empty() && dir.is_dir() {
@@ -1785,6 +1821,18 @@ mod tests {
         m.record_event(AgentEvent { status: AgentStatus::NeedsInput, ..working });
         assert_eq!(m.call(checkout), Ok(Value::Null));
         assert_eq!(m.call(Call::Workspace { tab }).unwrap()["branch"], "other");
+    }
+
+    #[test]
+    fn make_folder_makes_the_missing_parents_and_clone_into_a_folder_with_files_is_refused() {
+        let m = machine();
+        let dir = temp("make-folder");
+        let made = dir.join("a").join("b");
+        assert_eq!(m.call(Call::MakeFolder { path: made.display().to_string() }), Ok(json!(made)));
+        assert!(made.is_dir());
+        std::fs::write(made.join("file"), "x").unwrap();
+        let refused = m.call(Call::Clone { repo: "https://example.invalid/o/r.git".into(), token: None, dest: Some(made.display().to_string()) });
+        assert_eq!(refused, Err(format!("{} already holds files", made.display())));
     }
 
     #[test]

@@ -1265,15 +1265,8 @@ panelBody.addEventListener("input", (e) => {
 panelBody.addEventListener("scroll", (e) => {
   if (!e.target.matches?.(".code-edit")) return;
 }, true);
-/** ⌘S saves the file being edited; elsewhere it keeps doing what the composer gave it, stashing the
- * draft. The app view finds a key's first registration, so this one goes first. */
-const saveKey = {
-  keys: ["s"],
-  shift: false,
-  alt: false,
-  run: (e) => (e.target.closest?.(".code-edit") ? saveFile(shownSurface(active)) : guiKeys.find((k) => k !== saveKey && k.keys.includes("s") && !k.shift && !k.alt)?.run(e)),
-};
-guiKeys.unshift(saveKey);
+/** ⌘S saves the file being edited; elsewhere it keeps doing what the composer gave it, stashing the draft. */
+onGuiKey("s", () => saveFile(shownSurface(active)), { when: () => !!document.activeElement?.closest?.(".code-edit") });
 panelBody.addEventListener("keydown", (e) => {
   if (e.target.matches(".code-edit")) {
     if (e.key === "Tab" && !e.shiftKey) {

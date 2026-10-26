@@ -599,7 +599,7 @@ function prMenu(s) {
     ] : []),
     { label: "Open on GitHub", icon: "arrow-up-right", run: () => openOutside(d.url) },
     { label: "Copy link", icon: "link-2", kbd: `${IS_MAC ? "⌘⇧" : "Ctrl+Shift+"}C`, run: () => copyText(d.url, "PR link copied") },
-    { label: "Copy PR number", icon: "copy", kbd: `${IS_MAC ? "⌘⇧" : "Ctrl+Shift+"}K`, run: () => copyText(`#${d.number}`, "PR number copied") },
+    { label: "Copy PR number", icon: "copy", kbd: bindingLabel("pullRequest.copyNumber"), run: () => copyText(`#${d.number}`, "PR number copied") },
     ...(state === "open" || state === "draft" ? ["-", { label: "Close pull request", icon: "circle-x", danger: true, confirm: "Confirm close?", run: () => prAct(s, "close") }]
       : state === "closed" ? ["-", { label: "Reopen pull request", icon: "rotate-ccw", run: () => prAct(s, "reopen") }]
       : state === "merged" ? ["-", { label: "Revert changes", icon: "rotate-ccw", confirm: "Confirm revert?", run: () => prAct(s, "revert") }] : []),
@@ -643,7 +643,7 @@ function renderPrPanel(s) {
       ${st.canMerge && ["open", "draft"].includes(st.selected.state) ? `<button type="button" class="primary" data-stack-merge${st.mergeDisabled ? " disabled" : ""} title="Merge stack through #${d.number} into ${esc(st.stack.base)} (${st.mergeLayers.length} ${st.mergeLayers.length === 1 ? "pull request" : "pull requests"})">${icon("git-merge")}Merge stack</button>` : ""}`
     : chained ? `<button type="button" class="icon" data-pr-stack title="Stack">${icon("layers")}</button>` : "";
   const actions = `<span class="spacer"></span>${stackButtons}
-      ${linked.length ? `<button type="button" class="ghost small" data-pr-threads aria-label="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}" title="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}">${icon("message-square")}${linked.length}</button>` : ""}
+      ${linked.length ? `<button type="button" class="ghost small" data-pr-threads aria-label="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}" title="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}. Search in the command palette.">${icon("message-square")}${linked.length}</button>` : ""}
       ${primary}<button type="button" class="icon" data-pr-more aria-label="More pull request actions" title="More pull request actions">${icon("ellipsis")}</button>`;
   const title = s.editing === "title"
     ? `<div class="edit-title"><input data-pr-edit="title" value="${esc(s.drafts?.title ?? d.title)}" aria-label="Pull request title"><div class="row end"><button type="button" class="ghost" data-edit-cancel>Cancel</button><button type="button" class="outline" data-edit-save="title"${(s.drafts?.title ?? d.title).trim() ? "" : " disabled"}>Save</button></div></div>`
@@ -1063,7 +1063,7 @@ function prClick(e) {
     toggleMenu(at("[data-pr-stack]"), [{ group: "Stack" }, ...d.stack.above.map((pr) => row(pr, "above")), { label: `#${d.number} ${d.title}`, checked: true, run: () => {} }, ...d.stack.below.map((pr) => row(pr, "below"))]);
     return true;
   } else if (at("[data-pr-threads]")) {
-    toggleMenu(at("[data-pr-threads]"), [{ group: "Linked threads" }, ...threadsOn(d.url).map((t) => ({ label: threadTitle(t), hint: projectName(t), checked: t === tab, run: () => activate(t) }))]);
+    openPalette({ query: d.url, linkedThreads: threadsOn(d.url) });
     return true;
   } else return false;
   renderPanel();

@@ -726,6 +726,7 @@ function stepTab(step) {
 
 // Caught before xterm, which would otherwise swallow them.
 window.addEventListener("keydown", (e) => {
+  if (e.target.closest?.("[data-keybinding-capture]")) return;
   if (pickerOpen() && e.target.closest?.(".type-path")) {
     if (e.key === "Escape") showProjects(picking);
     else if (e.key in PICKER_STEP) choose(chosen + PICKER_STEP[e.key]);
@@ -747,8 +748,8 @@ window.addEventListener("keydown", (e) => {
   }
   if (e.shiftKey || e.altKey) return;
   const tabKey = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-  // In settings the arrows keep their text-editing meaning.
-  if (tabKey && e.key in TAB_STEP && active && !settingsOpen()) {
+  // The app view's chords are gui.js's; there, as in settings, the arrows keep their text-editing meaning.
+  if (tabKey && e.key in TAB_STEP && active && !settingsOpen() && !guiOn()) {
     stepTab(TAB_STEP[e.key]);
     e.preventDefault();
     e.stopPropagation();
@@ -756,11 +757,10 @@ window.addEventListener("keydown", (e) => {
   }
   if (!e.metaKey || e.ctrlKey) return;
   if (e.key === ",") toggleSettings();
-  else if (e.key === "t" && guiOn() && ui.panelOpen) document.getElementById("panel-add").click();
+  else if (guiOn()) return;
   else if (e.key === "t") toggleProjects();
-  else if (e.key === "w" && guiOn() && ui.panelOpen) closeSurface();
   else if (e.key === "w" && active) closeTab(active);
-  else if (/^[1-9]$/.test(e.key) && !guiOn() && tabs[e.key - 1]) activate(tabs[e.key - 1]);
+  else if (/^[1-9]$/.test(e.key) && tabs[e.key - 1]) activate(tabs[e.key - 1]);
   else return;
   e.preventDefault();
   e.stopPropagation();

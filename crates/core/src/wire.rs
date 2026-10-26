@@ -126,13 +126,20 @@ pub enum Call {
     CreateProject { name: String },
     /// The URL of the private GitHub repository the project at `path` is now pushed to.
     PublishProject { path: String },
-    /// The folder of a clone of `repo`, found among the machine's projects or cloned into `~/pinned`.
+    /// The folder of a clone of `repo`, found among the machine's projects or cloned into `~/pinned`,
+    /// or cloned into `dest` when given, which must not hold files yet.
     /// The hub adds the account's GitHub token, for a private repository.
     Clone {
         repo: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dest: Option<String>,
     },
+    /// The folder `path`, canonical, made first with its parents when it doesn't exist.
+    MakeFolder { path: String },
+    /// `Vec<ThreadMatch>`: the tabs whose conversations hold `query`, prompts' matches first.
+    SearchThreads { query: String },
     /// The new tab's id, with claude already running. Refused when the folder can't be found or cloned.
     Run { run: RunSpec },
     /// `true` when a live tab whose environment holds every pair took `text` as a prompt.
@@ -407,8 +414,17 @@ impl Call {
                 | Call::CreateProject { .. }
                 | Call::PublishProject { .. }
                 | Call::BusyShells { .. }
+                | Call::SearchThreads { .. }
         )
     }
+}
+
+/// A tab whose conversation holds what a `SearchThreads` asked for.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ThreadMatch {
+    pub tab: TabId,
+    #[serde(flatten)]
+    pub found: thread::Found,
 }
 
 /// A step of a tab's conversation. A client holding items of another `session`, or getting a
@@ -485,8 +501,14 @@ pub enum HubCall {
     DisconnectGithub,
     /// `Vec<github::Repo>`, most recently pushed first.
     GithubRepos,
-    /// The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has none.
-    Clone { machine: MachineId, repo: String },
+    /// The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has
+    /// none, or into `dest` when given.
+    Clone {
+        machine: MachineId,
+        repo: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dest: Option<String>,
+    },
     /// `Vec<sync::Project>`: the account's projects, most recently shared first.
     SharedProjects,
     /// From a machine: a project it syncs, which other machines then offer to clone.
@@ -703,6 +725,10 @@ mod tests {
         round_trip(Call::PullRequestStack { repo: "o/r".into(), number: 7 }, json!({ "cmd": "pull_request_stack", "repo": "o/r", "number": 7 }));
         round_trip(Call::CreateProject { name: "My App".into() }, json!({ "cmd": "create_project", "name": "My App" }));
         round_trip(Call::PublishProject { path: "/p".into() }, json!({ "cmd": "publish_project", "path": "/p" }));
+        round_trip(Call::SearchThreads { query: "flaky".into() }, json!({ "cmd": "search_threads", "query": "flaky" }));
+        round_trip(Call::MakeFolder { path: "~/new".into() }, json!({ "cmd": "make_folder", "path": "~/new" }));
+        round_trip(Call::Clone { repo: "https://h/o/r.git".into(), token: None, dest: Some("~/src/r".into()) }, json!({ "cmd": "clone", "repo": "https://h/o/r.git", "dest": "~/src/r" }));
+        assert_eq!(serde_json::from_value::<Call>(json!({ "cmd": "clone", "repo": "o/r" })).unwrap(), Call::Clone { repo: "o/r".into(), token: None, dest: None });
         round_trip(
             Call::RestartClaude { tab: "tab-1".into(), cols: 120, rows: 32 },
             json!({ "cmd": "restart_claude", "tab": "tab-1", "cols": 120, "rows": 32 }),

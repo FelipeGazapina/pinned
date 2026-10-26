@@ -160,6 +160,60 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
     Ok(Page { items, next, reset: replaced, context })
 }
 
+/// A message of a transcript that holds a query, as T3 Code's thread search reports one.
+#[derive(Serialize, Debug, PartialEq, Clone)]
+pub struct Found {
+    /// `user` or `assistant`.
+    pub source: &'static str,
+    pub snippet: String,
+}
+
+/// The prompt that holds `query`, else the answer, the latest of each, with ASCII letters in either
+/// case, as T3 Code's server searches messages.
+pub fn search(file: &Path, query: &str) -> std::io::Result<Option<Found>> {
+    let needle = query.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    if needle.is_empty() {
+        return Ok(None);
+    }
+    let len = std::fs::metadata(file)?.len();
+    let (mut user, mut assistant) = (None, None);
+    let mut from = 0;
+    loop {
+        let page = read(file, from)?;
+        for item in &page.items {
+            let (slot, text) = match item {
+                Item::User { text, .. } | Item::Steer { text, .. } => (&mut user, text),
+                Item::Text { text, .. } => (&mut assistant, text),
+                _ => continue,
+            };
+            if text.to_ascii_lowercase().contains(&needle) {
+                *slot = Some(text.clone());
+            }
+        }
+        if page.next <= from || page.next >= len {
+            break;
+        }
+        from = page.next;
+    }
+    Ok(user.map(|text| ("user", text)).or(assistant.map(|text| ("assistant", text))).map(|(source, text)| Found { source, snippet: snippet(&text, query) }))
+}
+
+/// T3 Code's buildSearchSnippet: the message on one line, cut to about 240 characters around the match.
+fn snippet(text: &str, query: &str) -> String {
+    let text: Vec<char> = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().collect();
+    if text.len() <= 240 {
+        return text.into_iter().collect();
+    }
+    let needle: Vec<char> = query.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase().chars().collect();
+    let lower: Vec<char> = text.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let at = (0..=lower.len().saturating_sub(needle.len())).find(|&i| lower[i..].starts_with(&needle)).unwrap_or(0);
+    let body = 236;
+    let start = at.saturating_sub(72).min(text.len() - body);
+    let end = (start + body).min(text.len());
+    let cut: String = text[start..end].iter().collect();
+    format!("{}{cut}{}", if start > 0 { "…" } else { "" }, if end < text.len() { "…" } else { "" })
+}
+
 /// What an answer's usage says the next request starts from: the prompt it read, cached or not, and what it wrote.
 fn context_of(line: &Value) -> Option<Context> {
     let at = line["timestamp"].as_str().unwrap_or_default().to_owned();
@@ -398,6 +452,26 @@ mod tests {
             writeln!(file, "{line}").unwrap();
         }
         read(file.path(), 0).unwrap()
+    }
+
+    #[test]
+    fn search_finds_the_latest_prompt_before_an_answer_with_an_excerpt_around_the_match() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let long = format!("{} the Flaky Test fails on CI {}", "words ".repeat(30), "more ".repeat(30));
+        for line in [
+            r#"{"type":"user","uuid":"u1","timestamp":"t1","message":{"role":"user","content":"look at the flaky test"}}"#.to_owned(),
+            r#"{"type":"assistant","uuid":"a1","timestamp":"t2","message":{"content":[{"type":"text","text":"The flaky test is fixed."}]}}"#.to_owned(),
+            format!(r#"{{"type":"user","uuid":"u2","timestamp":"t3","message":{{"role":"user","content":"{long}"}}}}"#),
+        ] {
+            writeln!(file, "{line}").unwrap();
+        }
+        let found = search(file.path(), "flaky  TEST").unwrap().unwrap();
+        assert_eq!(found.source, "user");
+        assert!(found.snippet.starts_with('…') && found.snippet.ends_with('…'), "{}", found.snippet);
+        assert!(found.snippet.contains("the Flaky Test fails on CI"), "{}", found.snippet);
+        assert_eq!(found.snippet.chars().count(), 238);
+        assert_eq!(search(file.path(), "is fixed").unwrap(), Some(Found { source: "assistant", snippet: "The flaky test is fixed.".into() }));
+        assert_eq!(search(file.path(), "nowhere").unwrap(), None);
     }
 
     #[test]

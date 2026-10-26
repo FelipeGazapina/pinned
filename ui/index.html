@@ -24,6 +24,7 @@
 <link rel="stylesheet" href="gui-shell.css">
 <link rel="stylesheet" href="gui-usage.css">
 <link rel="stylesheet" href="gui-settings.css">
+<link rel="stylesheet" href="gui-keybindings.css">
 </head>
 <body data-view="expanded" data-tabs="top">
   <main id="expanded">
@@ -45,7 +46,7 @@
         <div class="brand" data-tauri-drag-region><button id="sidebar-toggle" class="icon" title="Toggle sidebar (⌘B)"><i data-icon="panel-left"></i></button><b data-tauri-drag-region>pinned</b></div>
         <div class="side-head">
           <div class="row"><label class="search"><i data-icon="search"></i><input id="thread-search" placeholder="Search" autocomplete="off" spellcheck="false"><button id="search-clear" class="clear" title="Clear search" hidden><i data-icon="x"></i></button></label>
-            <button id="new-thread" class="icon" aria-label="New thread" data-tip="New thread (⌘N)"><i data-icon="square-pen"></i></button></div>
+            <button id="new-thread" class="icon" aria-label="New thread" data-tip="New thread (⌘N), here with Shift (⇧⌘N)"><i data-icon="square-pen"></i></button></div>
           <div class="row"><button id="project-filter" class="projects" type="button" aria-haspopup="listbox" aria-expanded="false"></button>
             <button id="add-project" class="icon" aria-label="Add project" data-tip="Add project"></button></div>
         </div>
@@ -68,8 +69,8 @@
           <span id="git-action" hidden><button class="main"></button><button class="more" title="Git actions"><i data-icon="chevron-down"></i></button></span>
           <div id="header-menu" hidden></div>
           <button id="head-more" class="icon" title="Options" aria-label="Options"><i data-icon="ellipsis"></i></button>
-          <span class="controls"><button id="panel-expand" class="icon" title="Maximize panel"><i data-icon="maximize-2"></i></button><button id="toggle-details" class="icon" title="Thread details (⌘⇧B)" aria-label="Thread details"></button><button id="toggle-terminal" class="icon" title="Terminal (⌘J)"><i data-icon="panel-bottom"></i></button>
-          <button id="toggle-panel" class="icon" title="Side panel (⌘⌥B)"><i data-icon="panel-right"></i></button>
+          <span class="controls"><button id="panel-expand" class="icon" title="Maximize panel"><i data-icon="maximize-2"></i></button><button id="toggle-details" class="icon" title="Thread details (⇧⌘B)" aria-label="Thread details"></button><button id="toggle-terminal" class="icon" title="Terminal (⌘J)"><i data-icon="panel-bottom"></i></button>
+          <button id="toggle-panel" class="icon" title="Side panel (⌥⌘B)"><i data-icon="panel-right"></i></button>
           <button id="gui-minimize" class="icon" title="Shrink to pill"><i data-icon="minus"></i></button></span>
         </header>
         <div id="thread"></div>
@@ -85,9 +86,9 @@
             <div id="attachments" hidden></div>
             <textarea id="prompt" rows="1" placeholder="Ask anything"></textarea>
             <div class="tools">
-              <span class="controls"><button type="button" id="model-button" class="pick" title="Model (⌘⇧M)"><i data-icon="claude"></i><span class="name">Default</span><i data-icon="chevron-down"></i></button>
-                <span class="block" id="traits-block" hidden><span class="sep"></span><button type="button" id="traits-button" class="pick" title="Reasoning (⌘⇧E)"></button></span>
-                <span class="block" id="mode-block" hidden><span class="sep"></span><button type="button" id="mode-button" class="pick" title="Access (⌘⇧A)"></button><span class="sep"></span><button type="button" id="plan-toggle" class="pick"></button></span>
+              <span class="controls"><button type="button" id="model-button" class="pick" title="Model (⇧⌘M)"><i data-icon="claude"></i><span class="name">Default</span><i data-icon="chevron-down"></i></button>
+                <span class="block" id="traits-block" hidden><span class="sep"></span><button type="button" id="traits-button" class="pick" title="Reasoning (⇧⌘E)"></button></span>
+                <span class="block" id="mode-block" hidden><span class="sep"></span><button type="button" id="mode-button" class="pick" title="Access (⇧⌘A)"></button><span class="sep"></span><button type="button" id="plan-toggle" class="pick"></button></span>
                 <button type="button" id="more-button" class="pick" aria-label="More composer controls" title="More composer controls" hidden><i data-icon="ellipsis"></i></button></span>
               <span class="spacer"></span>
               <button type="button" id="context-meter" class="icon" hidden></button>
@@ -130,6 +131,7 @@
           <button data-page="general"><i data-icon="settings"></i>General</button>
           <button data-page="integrations"><i data-icon="plug"></i>Connectors</button>
           <button data-page="projects"><i data-icon="folder"></i>Projects</button>
+          <button data-page="keybindings"><i data-icon="keyboard"></i>Keybindings</button>
           <button data-page="connectors"><i data-icon="workflow"></i>Workflows</button>
           <button data-page="account"><i data-icon="circle-user"></i>Account</button>
           <button data-page="machines"><i data-icon="server"></i>Machines</button>
@@ -179,6 +181,9 @@
 <script src="gui-panel.js"></script>
 <script src="gui-pr.js"></script>
 <script src="gui-shell.js"></script>
+<script src="gui-add-project.js"></script>
+<script src="gui-keybindings.js"></script>
+<script src="gui-settings-search.js"></script>
 <script src="gui-links.js"></script>
 <script src="gui-usage.js"></script>
 <script src="vendor/theme-palettes.js"></script>

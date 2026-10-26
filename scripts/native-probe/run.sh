@@ -45,7 +45,8 @@ probe 2 $gui
 node -e '
   const lines = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
   for (const r of lines) console.log(`${r.ok ? "PASS" : "FAIL"}  ${r.check}  ${JSON.stringify(r.seen)}`);
-  const want = 18;
+  // One report per step() in probe.js, so a branch that adds a check needs no count bumped here.
+  const want = require("fs").readFileSync(process.argv[3], "utf8").match(/await step\(/g).length;
   if (lines.length < want) console.log(`only ${lines.length} of ${want} checks reported; see ${process.argv[2]}`);
   process.exit(lines.length === want && lines.every((r) => r.ok) ? 0 : 1);
-' "$DIR/reports.jsonl" "$DIR/app.log"
+' "$DIR/reports.jsonl" "$DIR/app.log" "$REPO/scripts/native-probe/probe.js"

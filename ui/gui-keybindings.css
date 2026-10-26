@@ -1,0 +1,80 @@
+#keybindings { max-width: 720px; }
+#settings-page h2:has(.kb-note) { display: flex; align-items: center; gap: 6px; }
+#settings-page h2 .kb-note { display: inline-flex; color: var(--g-warning); cursor: help; }
+#settings-page h2 .kb-note .i { width: 14px; height: 14px; }
+#keybindings .i { width: 14px; height: 14px; flex: none; }
+#keybindings .kb-tools { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 16px; }
+#keybindings .kb-search { position: relative; display: flex; align-items: center; flex: 1 1 240px; min-width: 0; }
+#keybindings .kb-search .i { position: absolute; left: 10px; color: var(--g-muted); pointer-events: none; }
+body[data-mode="gui"] #settings-page #keybindings .kb-search input { width: 100%; height: 32px; padding: 0 10px 0 30px; border-radius: 8px; border: 1px solid var(--g-input); background: transparent; color: var(--g-fg); font: inherit; font-size: 14px; }
+#keybindings .kb-group { margin-bottom: 24px; border: 1px solid var(--g-border); border-radius: 12px; overflow: hidden; }
+#keybindings .kb-group h3 { margin: 0; padding: 10px 16px; font-size: 13px; font-weight: 600; border-bottom: 1px solid var(--g-border); }
+#keybindings .kb-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--g-border); }
+#keybindings .kb-group h3 + .kb-row, #keybindings .kb-row:first-child { border-top: 0; }
+#keybindings .kb-row.new { background: color-mix(in srgb, var(--g-fg) 2.5%, transparent); flex-wrap: wrap; }
+#keybindings .kb-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+#keybindings .kb-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 500; }
+#keybindings .kb-badge { padding: 0 6px; border-radius: 6px; border: 1px solid var(--g-border); color: var(--g-muted); font-size: 11px; font-weight: 500; line-height: 18px; }
+#keybindings .kb-when { display: flex; align-items: center; gap: 6px; height: 24px; min-width: 0; }
+#keybindings .kb-when-label { color: var(--g-muted); opacity: 0.7; font-size: 12px; }
+#keybindings .kb-when-button { display: inline-flex; align-items: center; gap: 4px; min-width: 0; height: 22px; padding: 0 6px; border-radius: 6px; color: var(--g-fg); font: 12px var(--g-mono); }
+#keybindings .kb-when-button.muted { color: var(--g-muted); }
+#keybindings .kb-when-button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#keybindings .kb-when-button:hover { background: var(--g-hover); }
+#keybindings .kb-control { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+#keybindings .kb-key { display: inline-flex; align-items: center; height: 28px; margin-right: -6px; padding: 0 6px; border-radius: 6px; border: 1px solid transparent; }
+#keybindings .kb-key:hover { border-color: var(--g-border); background: var(--g-hover); }
+.kb-pill { display: inline-flex; gap: 2px; }
+.kb-pill kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 4px; border-radius: 4px; background: color-mix(in srgb, var(--g-fg) 8%, transparent); color: var(--g-fg); font: 12px var(--g-mono); }
+#keybindings .kb-input { width: 176px; height: 28px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--g-input); background: transparent; color: var(--g-fg); font: 13px var(--g-mono); }
+#keybindings .kb-input:focus { outline: 2px solid color-mix(in srgb, var(--g-primary) 40%, transparent); }
+#keybindings .kb-select { height: 28px; max-width: 224px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--g-input); background: transparent; color: var(--g-fg); font: inherit; font-size: 13px; color-scheme: var(--g-scheme); }
+.kb-button { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--g-input); background: transparent; color: var(--g-fg); font-size: 13px; font-weight: 500; }
+.kb-button .i { width: 14px; height: 14px; }
+.kb-button:hover:not(:disabled) { background: var(--g-hover); }
+.kb-button.primary { border-color: var(--g-primary); background: var(--g-primary); color: var(--g-on-primary); }
+.kb-button:disabled { opacity: 0.5; }
+#keybindings .kb-row .kb-button { height: 28px; }
+.kb-icon, #keybindings .kb-menu { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; color: var(--g-muted); }
+.kb-icon:hover, #keybindings .kb-menu:hover { background: var(--g-hover); color: var(--g-fg); }
+#keybindings .kb-menu { opacity: 0; }
+#keybindings .kb-row:is(:hover, :focus-within) .kb-menu { opacity: 1; }
+@media (pointer: coarse) { #keybindings .kb-menu { opacity: 1; } }
+.kb-warn { display: inline-grid; place-items: center; width: 20px; height: 20px; color: var(--g-warning); cursor: help; }
+.kb-warn .i { width: 14px; height: 14px; }
+#keybindings .kb-empty { margin: 0; padding: 48px 16px; text-align: center; color: var(--g-muted); font-size: 14px; }
+.kb-popover { position: fixed; z-index: 90; padding: 12px; border-radius: 12px; border: 1px solid var(--g-border); background: var(--g-raised); color: var(--g-fg); box-shadow: 0 16px 40px -16px rgb(var(--g-shadow-rgb) / 0.6); font-size: 13px; }
+.kb-popover .kb-actions { display: flex; flex-direction: column; margin: -6px; }
+.kb-popover .kb-actions button { padding: 6px 10px; border-radius: 6px; text-align: left; color: var(--g-fg); }
+.kb-popover .kb-actions button:hover { background: var(--g-hover); }
+.kb-popover .kb-actions .danger { color: var(--g-error); }
+.kb-when-builder { display: flex; flex-direction: column; gap: 10px; width: min(544px, calc(100vw - 32px)); }
+.kb-builder-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.kb-builder-head span, .kb-empty-when { display: flex; flex-wrap: wrap; gap: 8px; }
+.kb-when-builder .kb-button { height: 26px; padding: 0 8px; font-size: 12px; }
+.kb-expr { display: flex; align-items: center; gap: 4px; height: 28px; padding: 0 4px 0 8px; border-radius: 8px; border: 1px solid var(--g-input); }
+.kb-expr input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--g-fg); font: 12px var(--g-mono); }
+.kb-expr:has(input[aria-invalid="true"]) { border-color: var(--g-error); }
+.kb-error { display: flex; align-items: center; gap: 6px; margin: -4px 0 0; color: var(--g-error); font-size: 11px; }
+.kb-error .i { width: 14px; height: 14px; }
+.kb-tree { position: relative; }
+.kb-blocked { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; padding: 16px; border-radius: 10px; border: 1px solid rgb(var(--g-error-rgb) / 0.3); background: color-mix(in srgb, var(--g-raised) 75%, transparent); color: var(--g-error); font-size: 12px; text-align: center; }
+.kb-empty-when { padding: 12px; border-radius: 8px; border: 1px dashed var(--g-border); }
+.kb-cond { display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 8px; border: 1px solid var(--g-border); background: color-mix(in srgb, var(--g-bg) 60%, transparent); }
+.kb-cond select, .kb-group-head select { flex: 1; min-width: 0; height: 26px; padding: 0 6px; border-radius: 6px; border: 1px solid var(--g-input); background: transparent; color: var(--g-fg); font: inherit; font-size: 12px; color-scheme: var(--g-scheme); }
+.kb-group-head select { flex: 0 0 96px; }
+.kb-group-node { display: flex; flex-direction: column; gap: 8px; padding: 8px; border-radius: 10px; border: 1px solid var(--g-border); background: color-mix(in srgb, var(--g-fg) 2%, transparent); }
+.kb-group-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.kb-group-head .kb-icon { margin-left: auto; }
+.kb-branch { position: relative; padding-left: 16px; }
+.kb-branch::before { content: ""; position: absolute; top: 0; bottom: 0; left: 6px; width: 1px; background: var(--g-border); }
+.kb-branch::after { content: ""; position: absolute; top: 16px; left: 6px; width: 10px; height: 1px; background: var(--g-border); }
+.kb-toggle { min-width: 40px; height: 26px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--g-input); color: var(--g-muted); font-size: 12px; font-weight: 500; }
+.kb-toggle[aria-pressed="true"] { background: var(--g-hover); color: var(--g-fg); }
+@media (max-width: 640px) {
+  #keybindings .kb-row { flex-direction: column; align-items: stretch; }
+  #keybindings .kb-control { justify-content: flex-start; }
+}
+#settings-page .setting-found { animation: setting-found 1.6s ease-out; border-radius: 8px; }
+@keyframes setting-found { from { background: color-mix(in srgb, var(--g-primary) 18%, transparent); } }
+#composer-menu .model .jump { display: inline-flex; align-items: center; justify-content: center; flex: none; height: 20px; min-width: 20px; padding: 0 4px; border-radius: 4px; background: rgb(var(--g-ink-rgb) / 0.06); color: var(--g-muted); font-family: inherit; font-size: 12px; font-weight: 500; }

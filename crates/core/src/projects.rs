@@ -68,6 +68,14 @@ pub struct Folder {
     pub repo: bool,
 }
 
+/// `path` with a leading `~` as the home folder.
+pub fn expand(path: &str, home: &Path) -> PathBuf {
+    match path.trim().strip_prefix('~') {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None => PathBuf::from(path.trim()),
+    }
+}
+
 /// The subfolders matching `typed`, a path as typed so far: `~/pro` lists the folders of `~`
 /// starting with `pro`, and `~/projetos/` every folder in it. A path without a leading `/` or `~`
 /// starts at `home`. Hidden folders show only once the typed name starts with a dot.
@@ -113,6 +121,14 @@ mod tests {
 
     fn temp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("pinned-projects-test-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn expand_reads_a_leading_tilde_as_home() {
+        let home = Path::new("/home/me");
+        assert_eq!(expand("~", home), PathBuf::from("/home/me"));
+        assert_eq!(expand(" ~/src/app ", home), PathBuf::from("/home/me/src/app"));
+        assert_eq!(expand("/srv/app", home), PathBuf::from("/srv/app"));
     }
 
     #[test]
