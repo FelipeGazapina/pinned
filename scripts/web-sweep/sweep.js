@@ -4208,9 +4208,17 @@ async function sweep(profileName) {
     await tapOrClick("#page-view .side-toggle");
     await waitFor("the sidebar", () => page.locator("#sidebar").isVisible());
   };
+  // At phone width the metric and period are T3 Code's selects: a button and its menu.
+  const USAGE_LABELS = { cost: "Cost", tokens: "Tokens", limits: "Limits", 1: "Past 24h", 7: "7 days", 30: "30 days", 90: "90 days" };
   const usagePick = async (seg, value) => {
-    if (touch) await page.selectOption(`#page-view select.seg-select[data-seg="${seg}"]`, value);
-    else await page.click(`#page-view .seg[data-seg="${seg}"] button[data-value="${value}"]`);
+    if (touch && (await page.locator("#sidebar").isVisible())) {
+      await tapOrClick("#sidebar-toggle");
+      await waitFor("the sidebar to close", async () => !(await page.locator("#sidebar").isVisible()));
+    }
+    if (await page.locator(`#page-view .seg[data-seg="${seg}"]`).isVisible()) return press(page.locator(`#page-view .seg[data-seg="${seg}"] button[data-value="${value}"]`));
+    await press(page.locator(`#page-view .pick[data-pick="${seg}"]`));
+    await press(page.locator("#usage-menu button", { hasText: USAGE_LABELS[value] }));
+    await waitFor(`${USAGE_LABELS[value]} picked`, async () => (await text(`#page-view .pick[data-pick="${seg}"]`)) === USAGE_LABELS[value]);
   };
   const tile = (label) => text(`#page-view .tiles div:has(dt:text-is("${label}")) dd`);
   await step("shell: the Usage page shows limits, cost and tokens from the transcripts", async () => {
@@ -4222,15 +4230,20 @@ async function sweep(profileName) {
     check(!(await page.locator("#chat").isVisible()), "the thread still shows beside Usage");
     await pageSidebar();
     check(await page.locator("#sidebar footer .back").isVisible(), "the footer has no Back button");
-    await waitFor("two limit windows", async () => (await page.locator("#page-view .limit-card").count()) === 2);
+    await waitFor("four limit windows", async () => (await page.locator("#page-view .limit-card").count()) === 4, 15000);
     const left = await page.locator("#page-view .limit-card .figure b").allTextContents();
-    check(left.join() === "77%,26%", `limits left: ${left.join()}`);
+    check(left.join() === "77%,26%,60%,75%", `limits left: ${left.join()}`);
+    const labels = await page.locator("#page-view .limit-card .limit-text .label").allTextContents();
+    check(labels.join() === "Session,Weekly,Weekly · Fable,Monthly spend", `windows: ${labels.join()}`);
     check(/↻ \d+[hm]/.test(await text('#page-view .limit-card[data-window="five_hour"] .chip')), "the session window has no reset time");
     if (touch) await usagePick("metric", "cost");
     else await page.keyboard.press("c");
     await waitFor("the total cost", async () => (await text("#page-view .total")) === "$3.13", 15000);
-    check((await text("#page-view .lead > p")) === "2 sessions · API estimate", `under the total: ${await text("#page-view .lead > p")}`);
-    check(/33\.3% unpriced/.test(await page.getAttribute("#page-view .info", "title")), "the unpriced share is missing");
+    check((await text("#page-view .headline > p")) === "2 sessions · API estimate", `under the total: ${await text("#page-view .headline > p")}`);
+    await press(page.locator("#page-view .info"));
+    await waitFor("the unpriced note", async () => /^API estimate excludes 33\.3% unpriced records\.$/.test(await text("#usage-pop")));
+    await press(page.locator("#page-view .info"));
+    check(!(await page.locator("#usage-pop").isVisible()), "a second click left the unpriced note open");
     check((await page.locator("#page-view .x-axis span").count()) === 3, "the chart has no three x labels");
     check((await page.locator("#page-view .plot path.line").getAttribute("d")).startsWith("M"), "the chart has no line");
     const tiles = [await tile("Processed tokens"), await tile("Cached input"), await tile("Uncached input"), await tile("Output"), await tile("Cache savings")];
@@ -4259,7 +4272,7 @@ async function sweep(profileName) {
       await tapOrClick("#sidebar footer .back");
     } else await page.keyboard.press("Escape");
     await waitFor("the thread again", () => page.locator("#chat").isVisible());
-    return "limits 77%/26%, $3.13 in 30 days, $2.88 and 2.15M in 24h";
+    return "limits 77%/26%/60%/75%, $3.13 in 30 days, $2.88 and 2.15M in 24h";
   });
 
   await step("shell: ⌘U opens Usage, and ⌘[ comes back", async () => {
@@ -4296,6 +4309,8 @@ async function sweep(profileName) {
     await page.fill('#shell-dialog tbody tr:last-child [data-field="input"]', "2");
     await page.fill('#shell-dialog tbody tr:last-child [data-field="output"]', "10");
     await press(page.locator("#shell-dialog [data-save]"));
+    await waitFor("the save to land", async () => (await text("#shell-dialog .save-status")) === "sweep-nodeSaved");
+    await press(page.locator("#shell-dialog .close"));
     await waitFor("the priced total", async () => (await text("#page-view .total")) === "$3.14", 15000);
     check(!(await page.locator("#page-view .info").count()), "the unpriced note stayed");
     await press(page.locator('#page-view tr[data-model="claude-mystery-1"]'));
@@ -4304,10 +4319,12 @@ async function sweep(profileName) {
     else await page.keyboard.press("Escape");
     check(!(await page.locator("#shell-dialog").isVisible()), "the details stayed open");
     check(await page.locator("#page-view h1", { hasText: "Usage" }).isVisible(), "closing the details left Usage");
-    await press(page.locator("#page-view .machine-filter"));
-    await press(page.locator("#side-menu button", { hasText: "Model prices" }));
-    await press(page.locator("#shell-dialog tbody tr:first-child [data-remove]"));
+    await press(page.locator("#page-view .env-filter"));
+    await press(page.locator("#usage-menu button", { hasText: "Model prices" }));
+    await press(page.locator('#shell-dialog tr[data-row="model:claude-mystery-1"] [data-reset]'));
     await press(page.locator("#shell-dialog [data-save]"));
+    await waitFor("the reset to land", async () => (await text("#shell-dialog .save-status")) === "sweep-nodeSaved");
+    await press(page.locator("#shell-dialog .close"));
     await waitFor("the list price again", async () => (await text("#page-view .total")) === "$3.13", 15000);
     const bad = await overflowing();
     check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
@@ -4317,6 +4334,294 @@ async function sweep(profileName) {
     } else await page.keyboard.press("Escape");
     await waitFor("the thread again", () => page.locator("#chat").isVisible());
     return "Unpriced, then $0.01 at $2/$10 per 1M";
+  });
+
+  const openUsage = async (metric, days) => {
+    if (!(await page.locator("#page-view h1", { hasText: "Usage" }).isVisible())) {
+      await showSidebar();
+      await tapOrClick('#sidebar footer [data-open-page="usage"]');
+      await waitFor("the Usage page", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
+    }
+    await usagePick("metric", metric);
+    if (days) await usagePick("days", days);
+  };
+  const leaveUsage = async () => {
+    if (touch) {
+      await pageSidebar();
+      await tapOrClick("#sidebar footer .back");
+    } else await page.keyboard.press("Escape");
+    await waitFor("the thread again", () => page.locator("#chat").isVisible());
+  };
+  const seedDir = path.join(HOME, ".claude", "projects", "-sweep-usage");
+  await step("usage: the chart's axis, scale and labels are T3 Code's, and an empty window draws one 0 line", async () => {
+    await openUsage("cost", "30");
+    await waitFor("the 30-day cost", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    const ticks = await page.locator("#page-view .y-axis span").allTextContents();
+    check(ticks[0] === "0" && ticks.length >= 4 && ticks.length <= 6 && ticks.slice(1).every((t) => /^\$[\d,]+\.\d\d$/.test(t)), `y labels: ${ticks.join(" ")}`);
+    check((await page.locator("#page-view .plot line.grid").count()) === ticks.length, "a gridline per label");
+    const xs = await page.locator("#page-view .x-axis span").allTextContents();
+    const want = await page.evaluate(() => [0, 15, 29].map((i) => monthDay(usageBuckets(30)[i])));
+    check(xs.join() === want.join(), `x labels: ${xs.join()} where T3 Code's middle is the 16th day: ${want.join()}`);
+    check((await page.locator("#page-view .provider-row .line").textContent()).trim() === "100.0% of cost · 2.16M tokens", `provider line: ${await text("#page-view .provider-row .line")}`);
+    // With the transcripts gone, Refresh reads an empty window: one gridline at 0, no provider row, the tables' headers kept.
+    fs.renameSync(seedDir, path.join(HOME, "usage-away"));
+    try {
+      await page.evaluate(() => {
+        window.sawBusy = false;
+        new MutationObserver(() => (window.sawBusy ||= !!document.querySelector('#page-view .refresh.spinning[aria-busy="true"]:disabled'))).observe(document.getElementById("page-view"), { subtree: true, childList: true, attributes: true });
+      });
+      await press(page.locator("#page-view .controls:not([hidden]) .refresh").filter({ visible: true }));
+      await waitFor("the empty window", async () => (await text("#page-view .total")) === "$0.00", 15000);
+      check(await page.evaluate(() => window.sawBusy), "Refresh didn't spin or disable while it read");
+      check(!(await page.locator("#page-view .refresh.spinning").count()), "Refresh still spins");
+      const empty = await page.locator("#page-view .y-axis span").allTextContents();
+      check(empty.join() === "0" && (await page.locator("#page-view .plot line.grid").count()) === 1, `empty axis: ${empty.join()}`);
+      check(!(await page.locator("#page-view .provider-row").count()), "the provider row shows with no usage");
+      check((await page.locator("#page-view table.by-model th").count()) === 5 && (await text("#page-view table.by-model tbody")) === "No activity in this window.", "the model table lost its headers");
+      await usagePick("breakdown", "day");
+      const heads = await page.locator("#page-view table.by-time th").allTextContents();
+      check(heads.join() === "Day,Total,Tokens" && (await text("#page-view table.by-time tbody")) === "No activity in this window.", `day table: ${heads.join()}`);
+      await usagePick("breakdown", "model");
+    } finally {
+      fs.renameSync(path.join(HOME, "usage-away"), seedDir);
+    }
+    await press(page.locator("#page-view .refresh").filter({ visible: true }));
+    await waitFor("the usage back", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    return `${ticks.join(" ")}; ${xs.join(", ")}`;
+  });
+
+  await step("usage: share bars list parts above zero with tooltips, and Tokens shows token shares", async () => {
+    await openUsage("tokens", "30");
+    await waitFor("tokens", async () => (await text("#page-view .total")) === "2.16M", 15000);
+    const share = (model) => page.locator(`#page-view tr[data-model="${model}"] td.share-col`).textContent();
+    check((await share("claude-mystery-1")) === "<0.1%" && (await share("claude-opus-5-5")) === "100.0%", `token shares: ${await share("claude-opus-5-5")}, ${await share("claude-mystery-1")}`);
+    check((await page.locator("#page-view td.model .i.claude").count()) === 2, "model names lack the provider's icon");
+    check(/max\(8px/.test(await page.getAttribute('#page-view tr[data-model="claude-mystery-1"] td.model i', "style")), "a small model's bar has no minimum");
+    check((await text("#page-view .share h3")) === "Tokens by type" && (await page.locator("#page-view .share").count()) === 1, "Tokens mode shows cost shares");
+    await usagePick("metric", "cost");
+    check((await share("claude-mystery-1")) === "", `an unpriced model's cost share reads ${await share("claude-mystery-1")}`);
+    await press(page.locator('#page-view tr[data-model="claude-mystery-1"]'));
+    await waitFor("the model's details", () => page.locator("#shell-dialog .dialog-head", { hasText: "claude-mystery-1" }).isVisible());
+    const legend = await page.locator("#shell-dialog .share .legend span").allTextContents();
+    check(legend.join() === "Output1K", `legend: ${legend.join(" | ")}`);
+    const segment = page.locator("#shell-dialog .share-bar span").first();
+    if (touch) await segment.tap();
+    else await segment.hover();
+    await waitFor("the segment's tooltip", async () => (await text("#usage-pop")) === "Output · 1K · 100.0%");
+    if (touch) await press(page.locator("#shell-dialog .close"));
+    else await page.keyboard.press("Escape");
+    if (await page.locator("#shell-dialog").isVisible()) await press(page.locator("#shell-dialog .close"));
+    await waitFor("the details closed", async () => !(await page.locator("#shell-dialog").isVisible()));
+    return legend.join();
+  });
+
+  await step("usage: the header's controls name their keys, fold into menus when narrow, and the keys skip fields and dialogs", async () => {
+    await openUsage("cost", "30");
+    const wide = await page.locator("#page-view .controls.wide").isVisible();
+    if (wide) {
+      check((await page.getAttribute('#page-view .seg[data-seg="metric"] [data-value="cost"]', "title")) === "Cost (C)", "Cost has no key in its title");
+      check((await page.getAttribute('#page-view .seg[data-seg="days"] [data-value="7"]', "title")) === "7 days (⇧⌘2)", `7 days' title: ${await page.getAttribute('#page-view .seg[data-seg="days"] [data-value="7"]', "title")}`);
+    } else {
+      check(!(await page.locator("#page-view select").count()), "a native select in the header");
+      await press(page.locator('#page-view .pick[data-pick="days"]'));
+      check((await page.getAttribute("#usage-menu button >> nth=1", "title")) === "7 days (⇧⌘2)", "the period menu has no key titles");
+      check((await page.locator('#usage-menu [aria-checked="true"]').textContent()).trim() === "30 days", "the menu doesn't mark 30 days");
+      await press(page.locator("#usage-menu button", { hasText: "7 days" }));
+      await waitFor("7 days", async () => (await text('#page-view .pick[data-pick="days"]')) === "7 days");
+      await usagePick("days", "30");
+    }
+    const range = await page.locator("#page-view .range").isVisible();
+    check(!range, "the window's range shows on a header narrower than 1280px");
+    if (!touch) {
+      await press(page.locator("#page-view .env-filter"));
+      await press(page.locator("#usage-menu button", { hasText: "Model prices" }));
+      await waitFor("the prices dialog", () => page.locator("#shell-dialog table.prices").isVisible());
+      await press(page.locator("#shell-dialog [data-add]"));
+      await waitFor("the new row's field focused", () => page.evaluate(() => document.activeElement?.dataset.field === "model"));
+      await page.keyboard.press("Meta+Shift+1");
+      await page.keyboard.press("t");
+      check((await page.locator("#page-view .total").textContent()).trim() === "$3.13", "a key behind the dialog changed the page");
+      await page.keyboard.press("Escape");
+      await waitFor("the dialog to close", async () => !(await page.locator("#shell-dialog").isVisible()));
+      check(await page.locator("#page-view h1", { hasText: "Usage" }).isVisible(), "Escape in the dialog left Usage");
+      // T3 Code's useEscapeToGoBack: Escape in a focused field still goes back, and blurs it.
+      await page.evaluate(() => {
+        const field = document.createElement("input");
+        field.id = "usage-field";
+        document.querySelector("#page-view .page-wrap").prepend(field);
+        field.focus();
+      });
+      await page.keyboard.press("Escape");
+      await waitFor("Escape from a field to leave Usage", () => page.locator("#chat").isVisible());
+      check(await page.evaluate(() => document.activeElement?.id !== "usage-field"), "the field kept focus");
+      await openUsage("cost");
+    }
+    const bad = await overflowing();
+    check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    return wide ? "segments with key titles" : "menus at phone width";
+  });
+
+  await step("usage: the environment filter checks machines, shows each one's status, and the page says when none is chosen or none can read", async () => {
+    await openUsage("cost", "30");
+    await waitFor("the 30-day cost", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    check((await text("#page-view .env-filter")) === "All environments", `filter label: ${await text("#page-view .env-filter")}`);
+    await press(page.locator("#page-view .env-filter"));
+    const node = page.locator("#usage-menu button", { hasText: "sweep-node" });
+    check((await node.getAttribute("aria-checked")) === "true" && (await node.locator(".status").textContent()) === "Ready", `sweep-node: ${await node.textContent()}`);
+    await press(page.locator("#usage-menu button", { hasText: "All environments" }));
+    check(await page.locator("#usage-menu").isVisible(), "a checkbox closed the menu");
+    await waitFor("no environment", async () => (await text("#page-view .usage")) === "Select an environment to see usage.");
+    // Checking every machine again reads as all of them.
+    const label = (await page.evaluate(() => machines.size > 1)) ? "sweep-node" : "All environments";
+    await press(page.locator("#usage-menu button", { hasText: "sweep-node" }));
+    await waitFor("sweep-node alone", async () => (await text("#page-view .env-filter")) === label && (await text("#page-view .total")) === "$3.13");
+    if (label !== "All environments") {
+      await press(page.locator("#usage-menu button", { hasText: "All environments" }));
+      await waitFor("all again", async () => (await text("#page-view .env-filter")) === "All environments");
+    }
+    await page.keyboard.press("Escape").catch(() => {});
+    if (await page.locator("#usage-menu").isVisible()) await press(page.locator("#page-view .env-filter"));
+    // A machine that can't answer: the hub refuses a malformed read, and the page shows that environment's error.
+    const id = await page.evaluate(() => {
+      const id = onlineMachines().find((m) => machineName(m) === "sweep-node");
+      const t = machines.get(id).transport;
+      t.realCall = t.call;
+      t.call = (call) => t.realCall(call.cmd === "token_usage" ? { ...call, since: "never" } : call);
+      return id;
+    });
+    try {
+      await press(page.locator("#page-view .refresh").filter({ visible: true }));
+      await waitFor("the error", async () => /can't answer that/.test(await text("#page-view .env-errors")), 15000);
+      check(await page.locator("#page-view .env-filter .alert").isVisible(), "no alert on the filter");
+      await press(page.locator("#page-view .env-filter"));
+      check((await page.locator("#usage-menu button", { hasText: "sweep-node" }).locator(".status").textContent()) === "Update required", "the status isn't Update required");
+      check(/sweep-node: .*can't answer that/.test(await text("#usage-menu .note.notes")), "no coverage note");
+      await press(page.locator("#page-view .env-filter"));
+    } finally {
+      await page.evaluate((m) => {
+        const t = machines.get(m).transport;
+        t.call = t.realCall;
+      }, id);
+    }
+    await press(page.locator("#page-view .refresh").filter({ visible: true }));
+    await waitFor("the usage back", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    await leaveUsage();
+    return `filtered to ${label}`;
+  });
+
+  await step("usage: Limits shows every window claude reports, checks again on Refresh, and a segment's popover names the account", async () => {
+    const checks = () => readLog("claude-control.log").split("\n").filter((l) => l === "get_usage").length;
+    await openUsage("limits");
+    await waitFor("four limit windows", async () => (await page.locator("#page-view .limit-card").count()) === 4, 15000);
+    check(checks() >= 1, "opening Limits didn't ask claude for its limits");
+    const before = checks();
+    await press(page.locator("#page-view .refresh").filter({ visible: true }));
+    await waitFor("Refresh to check the limits again", async () => checks() > before, 15000);
+    await waitFor("the check to finish", async () => !(await page.locator("#page-view .refresh.spinning").count()), 15000);
+    check(await page.locator('#page-view .limit-card[data-window="five_hour"] .pace').count() === 1, "the session window has no pace icon");
+    check(!(await page.locator('#page-view .limit-card[data-window="monthly_spend"] :is(.tick, .pace)').count()), "the spend budget shows a pace");
+    await press(page.locator('#page-view .limit-card[data-window="five_hour"] .segments > :is(.segment, .legend-row)').filter({ visible: true }).first());
+    await waitFor("the segment's popover", () => page.locator("#usage-pop .segment-pop").isVisible());
+    const rows = await page.locator("#usage-pop .pop-row").evaluateAll((els) => els.map((el) => [...el.children].map((c) => c.textContent).join(": ")));
+    check(rows[0] === "Plan: Claude Max Subscription" && rows[1] === "Signed in: sweep-node" && rows[2] === "Left: 77%", `popover: ${rows.join(" | ")}`);
+    check(/^Resets: .+ · in (\d+d )?(\d+h )?\d+[hm]$/.test(rows[3]) && /^Even pace: \d+% left by now$/.test(rows[4]), `popover times: ${rows.slice(3).join(" | ")}`);
+    const email = page.locator("#usage-pop .redacted");
+    check((await email.textContent()) !== "sweep@example.test" && (await email.textContent()).length === "sweep@example.test".length, "the email isn't hidden");
+    await press(email);
+    check((await email.textContent()) === "sweep@example.test" && (await email.getAttribute("title")) === "Click to hide email", "a click didn't reveal the email");
+    await press(page.locator("#page-view .limit-card .label").first());
+    await waitFor("the popover to close", async () => !(await page.locator("#usage-pop").isVisible()));
+    return rows.slice(0, 3).join(", ");
+  });
+
+  await step("usage: the prices dialog maps a model to another, flags a bad row, and resets one to automatic", async () => {
+    const models = () => page.locator("#page-view table.by-model tbody td.model span").allTextContents();
+    const openPrices = async () => {
+      await press(page.locator("#page-view .env-filter"));
+      await press(page.locator("#usage-menu button", { hasText: "Model prices" }));
+      await waitFor("the prices dialog", () => page.locator("#shell-dialog table.prices").isVisible(), 15000);
+    };
+    await openUsage("cost", "30");
+    await waitFor("the 30-day cost", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    await openPrices();
+    check((await text("#shell-dialog tbody")) === "No custom prices or mappings. Add a row to set one.", `empty table: ${await text("#shell-dialog tbody")}`);
+    check((await text("#shell-dialog .unit")) === "USD / million tokens" && (await text("#shell-dialog .apply-to")) === "All environments", "no unit or Apply to");
+    check(await page.locator("#shell-dialog [data-save]").isDisabled() && !(await page.locator("#shell-dialog [data-discard]").count()), "Save is on with nothing changed");
+    await press(page.locator("#shell-dialog [data-add]"));
+    await page.fill('#shell-dialog tbody tr:last-child [data-field="model"]', "claude-mystery-1");
+    await page.fill('#shell-dialog tbody tr:last-child [data-field="alias"]', "claude-mystery-1");
+    await waitFor("the row's error", async () => (await text("#shell-dialog .row-error")) === "Map to a different model.");
+    check(await page.locator("#shell-dialog [data-save]").isDisabled(), "Save is on with a bad row");
+    await page.fill('#shell-dialog tbody tr:last-child [data-field="alias"]', "claude-opus-5-5");
+    await waitFor("the mapping", async () => (await text("#shell-dialog tbody tr:last-child .counted")) === "Counted as claude-opus-5-5");
+    check((await text("#shell-dialog .dialog-foot .muted")) === "Changes apply to sweep-node", `destination: ${await text("#shell-dialog .dialog-foot .muted")}`);
+    check((await text("#shell-dialog [data-discard]")) === "Discard changes" && (await text("#shell-dialog [data-save]")) === "Save changes", "the buttons aren't T3 Code's");
+    await press(page.locator("#shell-dialog [data-save]"));
+    await waitFor("the save to land", async () => (await text("#shell-dialog .save-status")) === "sweep-nodeSaved", 15000);
+    await press(page.locator("#shell-dialog .close"));
+    await waitFor("one model left", async () => (await models()).join() === "claude-opus-5-5", 15000);
+    check(!(await page.locator("#page-view .info").count()), "the mapped model still counts as unpriced");
+    await openPrices();
+    check((await page.inputValue('#shell-dialog tr[data-row="model:claude-mystery-1"] [data-field="alias"]')) === "claude-opus-5-5", "the saved mapping isn't shown");
+    const reset = page.locator('#shell-dialog tr[data-row="model:claude-mystery-1"] [data-reset]');
+    await press(reset);
+    check((await text('#shell-dialog tr[data-row="model:claude-mystery-1"]')) === "claude-mystery-1Automatic pricing after saving", `reset row: ${await text('#shell-dialog tr[data-row="model:claude-mystery-1"]')}`);
+    check((await reset.getAttribute("aria-label")) === "Undo reset for claude-mystery-1", "no Undo on the reset row");
+    await press(reset);
+    check((await reset.getAttribute("aria-label")) === "Reset price for claude-mystery-1 to automatic" && (await page.locator("#shell-dialog [data-save]").isDisabled()), "Undo didn't restore the row");
+    await press(reset);
+    await press(page.locator("#shell-dialog [data-save]"));
+    await waitFor("the reset to land", async () => (await text("#shell-dialog .save-status")) === "sweep-nodeSaved", 15000);
+    await press(page.locator("#shell-dialog .close"));
+    await waitFor("both models again", async () => (await models()).join() === "claude-opus-5-5,claude-mystery-1", 15000);
+    return "mapped, then reset to automatic";
+  });
+
+  await step("usage: a first read draws T3 Code's skeleton, a refresh fades the figures, and with no environment the page says to connect one", async () => {
+    await openUsage("cost", "30");
+    await waitFor("the 30-day cost", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    const id = await page.evaluate(() => {
+      const id = onlineMachines().find((m) => machineName(m) === "sweep-node");
+      const t = machines.get(id).transport;
+      t.realCall = t.call;
+      t.call = async (call) => {
+        if (call.cmd === "token_usage") await new Promise((r) => setTimeout(r, 2500));
+        return t.realCall(call);
+      };
+      return id;
+    });
+    try {
+      await press(page.locator("#page-view .refresh").filter({ visible: true }));
+      await waitFor("the figures to fade", async () => Number(await page.locator("#page-view .headline > p .fig").evaluate((el) => getComputedStyle(el).opacity)) < 0.5);
+      check(Number(await page.locator("#page-view .shares").evaluate((el) => getComputedStyle(el).opacity)) < 0.5, "the share bars don't fade");
+      await waitFor("the refresh to end", async () => !(await page.locator("#page-view .usage[data-loading]").count()), 15000);
+      await page.evaluate(() => {
+        usageState.envs.clear();
+        fetchUsage();
+      });
+      await waitFor("the skeleton", () => page.locator("#page-view .overview.skeleton").isVisible());
+      const labels = await page.locator("#page-view .tiles dt").allTextContents();
+      check(labels.join() === "Processed tokens,Cached input,Uncached input,Output,Cache savings", `skeleton totals: ${labels.join()}`);
+      check(await page.locator("#page-view .skeleton .provider-row").count() === 1 && (await text("#page-view .breakdown-head h2")) === "Breakdown" && (await page.locator("#page-view .shares .ghost").count()) === 3, "the skeleton lacks the provider row, share bar or Breakdown");
+      await waitFor("the usage back", async () => (await text("#page-view .total")) === "$3.13", 15000);
+    } finally {
+      await page.evaluate((m) => {
+        const t = machines.get(m).transport;
+        t.call = t.realCall;
+      }, id);
+    }
+    const none = await page.evaluate(() => {
+      const saved = [...machines];
+      machines.clear();
+      renderUsagePage();
+      const shown = document.querySelector("#page-view .usage").textContent.trim();
+      for (const [k, v] of saved) machines.set(k, v);
+      renderUsagePage();
+      return shown;
+    });
+    check(none === "Connect an environment to see usage.", `with no environment: ${none}`);
+    await leaveUsage();
+    return none;
   });
 
   const prNumbers = (group) => page.locator(`#page-view ${group ? `.pr-group[data-group="${group}"] ` : ""}.pr-row[data-url] .num`).allTextContents();

@@ -411,7 +411,16 @@ impl Machine {
                 json(pulls::list(&home(), path, repos, state, involvement, &query, limit)?)
             }
             Call::PullRequestStack { repo, number } => json(pulls::stack(&home(), self.launch.path_env.as_deref(), &repo, number)?),
-            Call::TokenUsage { since, prices } => json(usage::read(&thread::projects_dir(&home()), since, &usage::rates(self.rates_file.as_deref()), &prices)),
+            Call::TokenUsage { since } => json(usage::read(&thread::projects_dir(&home()), since, &usage::rates(self.rates_file.as_deref()), &usage::PriceBook::load(self.prices_file().as_deref()))),
+            Call::UsagePrices => json(usage::PriceBook::load(self.prices_file().as_deref())),
+            Call::SetUsagePrices { prices, aliases } => {
+                let file = self.prices_file().ok_or("this machine keeps no settings")?;
+                let mut book = usage::PriceBook::load(Some(&file));
+                book.apply(prices, aliases)?;
+                book.save(&file)?;
+                json(book)
+            }
+            Call::UsageLimits => json(usage::limits(&self.launch.claude, &home(), self.launch.path_env.as_deref())?),
             Call::PageMeta { url } => json(panel::page_meta(&url)?),
             Call::Refs { tab } => json(panel::refs(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
             Call::ReadFile { tab, path, root, rev } => json(panel::read_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, root, rev.as_deref())?),
@@ -1122,6 +1131,13 @@ impl Machine {
 
 pub(crate) fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+}
+
+impl Machine {
+    /// Beside the price list, in the machine's settings folder.
+    fn prices_file(&self) -> Option<PathBuf> {
+        self.rates_file.as_ref().map(|f| f.with_file_name("usage-prices.json"))
+    }
 }
 
 fn json<T: Serialize>(value: T) -> Result<Value, String> {

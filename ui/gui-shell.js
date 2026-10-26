@@ -96,9 +96,12 @@ function goBack(step) {
 onGuiKey("[", () => goBack(-1));
 onGuiKey("]", () => goBack(1));
 
+// As T3 Code's useEscapeToGoBack, Usage leaves a focused field too.
 window.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape" || !guiOn() || !shellPage() || !paletteEl.hidden || !sideMenu.hidden || !shellDialog.hidden || e.target.closest?.("input, textarea, select, #panel")) return;
+  if (e.key !== "Escape" || e.defaultPrevented || e.repeat || e.isComposing || !guiOn() || !shellPage() || !paletteEl.hidden || !sideMenu.hidden || !shellDialog.hidden) return;
+  if (e.target.closest?.(shellPage() === "usage" ? "#panel" : "input, textarea, select, #panel")) return;
   e.preventDefault();
+  document.activeElement?.blur();
   goBack(-1) || closePage();
 });
 
