@@ -77,11 +77,11 @@ pub async fn github_repos(connectors: State<'_, Connectors>) -> Result<Vec<githu
 
 /// Clones on this Mac while it's signed out, with this Mac's own GitHub token.
 #[tauri::command]
-pub async fn clone_repo(connectors: State<'_, Connectors>, machine: State<'_, Arc<Machine>>, repo: String) -> Result<Value, String> {
+pub async fn clone_repo(connectors: State<'_, Connectors>, machine: State<'_, Arc<Machine>>, repo: String, dest: Option<String>) -> Result<Value, String> {
     let repo = github::clone_url(&repo);
     let token = connectors.github_token().filter(|_| github::hosts(&repo));
     let machine = machine.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || machine.call(Call::Clone { repo, token })).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || machine.call(Call::Clone { repo, token, dest })).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

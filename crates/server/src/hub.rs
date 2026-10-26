@@ -335,10 +335,10 @@ impl Hub {
             HubCall::ConnectGithub { token } => (json(c().await?.connect_github(&token).await?), true),
             HubCall::DisconnectGithub => (json(c().await?.disconnect_github()?), true),
             HubCall::GithubRepos => (json(c().await?.github_repos().await?), false),
-            HubCall::Clone { machine, repo } => {
+            HubCall::Clone { machine, repo, dest } => {
                 let repo = github::clone_url(&repo);
                 let token = c().await?.github_token().filter(|_| github::hosts(&repo));
-                return Ok(self.call_machine(account, &machine, Call::Clone { repo, token }, RUN_WAIT).await?);
+                return Ok(self.call_machine(account, &machine, Call::Clone { repo, token, dest }, RUN_WAIT).await?);
             }
             HubCall::Stage { connector, subject, stage } => (json(c().await?.stage(&connector, &subject, stage).await?), false),
             HubCall::SlackReply { connector, channel, thread, text } => {
