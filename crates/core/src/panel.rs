@@ -812,7 +812,7 @@ fn cascade_rebase(cwd: &Path, path: Option<&str>, remote: &str, base: &str, laye
         env.push((format!("GIT_CONFIG_VALUE_{i}"), v));
     }
     let git = |args: &[&str]| {
-        let mut command = Command::new("git");
+        let mut command = crate::process::command("git");
         command.args(args).current_dir(dir.path()).stdin(Stdio::null()).envs(env.iter().map(|(k, v)| (k, v)));
         if let Some(path) = path {
             command.env("PATH", path);
