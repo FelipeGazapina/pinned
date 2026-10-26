@@ -1,6 +1,7 @@
 pub mod account;
 pub mod agent;
 pub mod branches;
+pub mod checkpoint;
 pub mod cli;
 pub mod commands;
 pub mod connectors;
