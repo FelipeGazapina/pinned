@@ -1,4 +1,5 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
+use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
 use crate::{branches, commands, files, github, history, hooks, plugin, projects, pty, reminders, sessions, sync, thread, uploads, workspace};
 use portable_pty::{CommandBuilder, PtySize};
@@ -170,6 +171,8 @@ struct Tab {
     bypass: bool,
     /// Claude Code's id for the conversation in progress, known once a hook reports it.
     claude_session: Option<String>,
+    /// `claude_session`'s transcript as read so far, which starts over whenever the session changes.
+    tally: Tally,
     /// A turn is running, or died on an error: the session has work left if pinned quits now.
     interrupted: bool,
     /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
@@ -213,6 +216,7 @@ impl Tab {
             opened: tab_number(id).into(),
             updated: self.updated,
             session: self.claude_session.clone(),
+            stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
         }
     }
 }
@@ -436,6 +440,7 @@ impl Machine {
             // Without launch arguments this is a fresh conversation, not the one recorded before.
             if t.launch.is_empty() {
                 t.claude_session = None;
+                t.tally = Tally::default();
             }
             (t.cwd.clone(), std::mem::take(&mut t.launch), t.env.clone(), t.bypass)
         })?;
@@ -636,6 +641,14 @@ impl Machine {
             })
             .collect();
         self.emit_tabs();
+        // A resumed session reports no new id, so its transcript is read here, off the caller's thread.
+        if let (Some(machine), false) = (self.me.upgrade(), ids.is_empty()) {
+            let restored = ids.clone();
+            std::thread::spawn(move || {
+                restored.iter().for_each(|id| machine.read_stats(id));
+                machine.emit_tabs();
+            });
+        }
         ids
     }
 
@@ -676,11 +689,12 @@ impl Machine {
 
     fn record_event(&self, event: AgentEvent) {
         if let Some(tab) = &event.tab {
-            if let Some(session) = &event.session {
-                self.record_session(tab, session.clone(), event.cwd.as_deref());
-            }
+            let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
             self.record_status(tab, &event);
             self.record_turn(tab, &event);
+            if new_session || matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
+                self.read_stats(tab);
+            }
             self.continue_when_limit_lifts(tab);
             self.emit_tabs();
         }
@@ -701,6 +715,7 @@ impl Machine {
             env,
             bypass,
             claude_session,
+            tally: Tally::default(),
             interrupted: false,
             resume_at: None,
             turn: None,
@@ -750,18 +765,39 @@ impl Machine {
     }
 
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
-    fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) {
-        let changed = self.tab(tab, |t| {
-            let mut changed = t.claude_session.as_ref() != Some(&session);
+    /// True when the session is new to the tab.
+    fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) -> bool {
+        let Ok((new, changed)) = self.tab(tab, |t| {
+            let new = t.claude_session.as_ref() != Some(&session);
+            if new {
+                t.tally = Tally::default();
+            }
+            let mut changed = new;
             if let Some(worktree) = reported_cwd.and_then(|c| sessions::worktree(&t.cwd, Path::new(c))) {
                 t.cwd = worktree;
                 changed = true;
             }
             t.claude_session = Some(session);
-            changed
-        });
-        if changed == Ok(true) {
+            (new, changed)
+        }) else {
+            return false;
+        };
+        if changed {
             self.save_sessions();
+        }
+        new
+    }
+
+    /// Reads what the tab's transcript gained since the last read, outside the tabs lock.
+    fn read_stats(&self, tab: &str) {
+        let Ok(Some((session, mut tally))) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone()))) else { return };
+        let Some(file) = thread::find(&thread::projects_dir(&home()), &session) else { return };
+        if tally.advance(&file).is_ok() {
+            let _ = self.tab(tab, |t| {
+                if t.claude_session.as_ref() == Some(&session) {
+                    t.tally = tally;
+                }
+            });
         }
     }
 
@@ -822,7 +858,11 @@ impl Machine {
             return;
         }
         let _ = self.tab(tab, |t| (t.interrupted, t.resume_at) = (false, None));
-        if self.tab(tab, |t| t.claude_session.take()).ok().flatten().is_some() {
+        let ended = self.tab(tab, |t| {
+            t.tally = Tally::default();
+            t.claude_session.take()
+        });
+        if ended.ok().flatten().is_some() {
             self.save_sessions();
         }
     }
