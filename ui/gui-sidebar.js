@@ -13,9 +13,17 @@ Object.assign(ICON_PATHS, {
   "mail-open": `<path d="M21.2 8.4c.5.38.8.97.8 1.6v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V10a2 2 0 0 1 .8-1.6l8-6a2 2 0 0 1 2.4 0l8 6Z"/><path d="m22 10-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 10"/>`,
   hash: `<line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/>`,
   timer: `<line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/>`,
+  "git-pull-request-arrow": `<circle cx="5" cy="6" r="3"/><path d="M5 9v12"/><circle cx="19" cy="18" r="3"/><path d="m15 9-3-3 3-3"/><path d="M12 6h5a2 2 0 0 1 2 2v7"/>`,
+  "git-pull-request-draft": `<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M18 6V5"/><path d="M18 11v-1"/><line x1="6" x2="6" y1="9" y2="21"/>`,
+  "git-pull-request-closed": `<path d="m15.5 3.5 5 5"/><path d="m15.5 8.5 5-5"/><path d="M18 11.62V15"/><path d="M6 9v12"/><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>`,
+  "git-merge": `<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>`,
+  "refresh-cw": `<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>`,
+  archive: `<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>`,
+  "archive-x": `<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="m9.5 17 5-5"/><path d="m9.5 12 5 5"/>`,
+  gear: `<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>`,
+  trash: `<path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>`,
 });
 
-const SETTLE_AFTER_S = 3 * 86400;
 const SETTLED_FIRST = 10;
 const SETTLED_PAGE = 25;
 const SIDEBAR_WIDTH = 256;
@@ -25,17 +33,17 @@ const MOD_LABEL = IS_MAC ? "⌘" : "Ctrl+";
 const MONOGRAM_COLORS = ["#9ca3af", "#f87171", "#fb923c", "#fbbf24", "#facc15", "#a3e635", "#4ade80", "#34d399", "#2dd4bf",
   "#22d3ee", "#38bdf8", "#60a5fa", "#818cf8", "#a78bfa", "#c084fc", "#e879f9", "#f472b6", "#fb7185"];
 
-/** What the user did to threads, by `threadKey`: pins in order, manual settles and un-settles, snoozes,
- * renames, and threads kept out of auto-settle. */
-const sideMarks = { pins: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, noAutoSettle: {} };
+/** What the user did to threads, by `threadKey`: pins in order, active threads dragged into an order,
+ * manual settles and un-settles, snoozes, renames, and threads kept out of auto-settle. */
+const sideMarks = { pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, noAutoSettle: {} };
 try {
   const saved = JSON.parse(load("gui-marks")) ?? {};
   for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) sideMarks[m] = sessionsOnly(saved[m]);
-  sideMarks.pins = (saved.pins ?? []).filter((k) => k.startsWith("session:"));
+  for (const m of ["pins", "order"]) sideMarks[m] = (saved[m] ?? []).filter((k) => k.startsWith("session:"));
 } catch {}
 const saveMarks = () => save("gui-marks", JSON.stringify(sideMarks));
 onRekey((from, to) => {
-  sideMarks.pins = sideMarks.pins.map((k) => (k === from ? to : k));
+  for (const m of ["pins", "order"]) sideMarks[m] = sideMarks[m].map((k) => (k === from ? to : k));
   for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) {
     if (!(from in sideMarks[m])) continue;
     sideMarks[m][to] = sideMarks[m][from];
@@ -43,11 +51,24 @@ onRekey((from, to) => {
   }
   saveMarks();
 });
-Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
+Object.assign(ui, { snoozedOpen: load("gui-snoozed-open") === "true", workingOpen: load("gui-working-open") === "true", settledShown: SETTLED_FIRST, renaming: null, hit: 0 });
 /** When this page first saw each tab, which orders the active rows newest first. */
 const firstSeen = new Map();
-/** Sessions closed here, newest last, for ⌘⇧T. */
-const closedThreads = [];
+/** What ⌘⇧T brings back, newest last, as T3 Code's closed views: `{ thread }` for a closed thread and
+ * `{ tab, surface }` for a closed panel tab. */
+const closedViews = [];
+const pushClosed = (view) => closedViews.splice(0, closedViews.push(view) - 20);
+/** Threads archived here, which Settings lists to bring back. */
+let archived = [];
+try {
+  archived = JSON.parse(load("gui-archived")) ?? [];
+} catch {}
+const saveArchived = () => save("gui-archived", JSON.stringify(archived));
+/** Rows picked with ⌘-click and Shift-click, by tab key, and where a Shift-click range starts. */
+const selected = new Set();
+let selectFrom = null;
+/** Threads whose title claude is rewriting. */
+const titling = new Set();
 
 const nowS = () => Date.now() / 1000;
 const unixOf = (iso) => Date.parse(iso) / 1000 || 0;
@@ -58,20 +79,116 @@ const canSnooze = (tab) => !["asking", "input"].includes(phaseOf(tab));
 const raisedHand = (tab) => !canSnooze(tab) || (phaseOf(tab) === "failed" && (tab.view.updated ?? 0) > (sideMarks.snoozed[threadKey(tab)]?.at ?? 0));
 const snoozedNow = (tab) => !!sideMarks.snoozed[threadKey(tab)] && sideMarks.snoozed[threadKey(tab)].until > nowS() && !raisedHand(tab);
 const wokeNow = (tab) => !!sideMarks.snoozed[threadKey(tab)] && !snoozedNow(tab);
-/** A manual settle holds until the next prompt. Auto-settle takes threads idle for 3 days, but not
- * pinned or running ones, nor one un-settled since. */
+/** The sidebar's settings, as T3 Code's: the Working shelf, and when threads settle on their own. */
+const sideSettings = { working: false, onMerge: true, days: 3, keepPrs: false };
+try {
+  Object.assign(sideSettings, JSON.parse(load("gui-sidebar-settings")));
+} catch {}
+/** A manual settle holds until the next prompt. Auto-settle, as T3 Code's ThreadSettlementService, takes
+ * a thread whose pull request closed, or merged, since its last prompt, or one idle for the set days,
+ * but not a pinned or live one, one with a PR still open, nor one un-settled since. */
 function settled(tab) {
   const at = sideMarks.settled[threadKey(tab)];
   if (at) return at >= unixOf(lastPrompt(tab)?.at);
-  if (isPinned(tab) || sideMarks.noAutoSettle[threadKey(tab)] || !tab.view.updated || !["idle", "done"].includes(statusOf(tab))) return false;
-  return nowS() - Math.max(tab.view.updated, sideMarks.unsettled[threadKey(tab)] ?? 0) > SETTLE_AFTER_S;
+  if (isPinned(tab) || sideMarks.noAutoSettle[threadKey(tab)] || !tab.view.updated || turnLive(tab)) return false;
+  const statuses = prsOf(tab).map((pr) => prStatus(tab, pr));
+  if (statuses.some((s) => !s || s.state === "open" || s.state === "draft")) return false;
+  const unsettledAt = sideMarks.unsettled[threadKey(tab)] ?? 0;
+  const ended = (s) => unixOf(s.state === "merged" ? s.merged_at : s.closed_at);
+  const last = statuses.reduce((a, b) => (!a || ended(b) > ended(a) ? b : a), null);
+  if (last && (last.state === "closed" || sideSettings.onMerge) && ended(last) >= Math.max(latestUserAt(tab), unsettledAt)) return true;
+  if ((sideSettings.keepPrs && statuses.length) || !sideSettings.days) return false;
+  return nowS() - Math.max(tab.view.updated, unsettledAt) > sideSettings.days * 86400;
 }
-const sectionOf = (tab) => (snoozedNow(tab) ? "snoozed" : settled(tab) ? "settled" : isPinned(tab) ? "pinned" : "active");
+const saveSideSettings = () => save("gui-sidebar-settings", JSON.stringify(sideSettings));
+/** The settings page's Organization section, T3 Code's labels and limits. */
+function sidebarSettingsHtml() {
+  const row = (key, title, about, control) => `<div class="side-setting" data-setting="${key}"><div><label for="side-${key}">${title}</label><p class="meta">${about}</p></div>${control}</div>`;
+  const toggle = (key, on, title, about) => row(key, title, about, `<label class="switch"><input type="checkbox" id="side-${key}" aria-label="${title}"${on ? " checked" : ""}><span></span></label>`);
+  return `<section id="side-settings"><h2 class="looks-title">Organization</h2>
+    ${toggle("working", sideSettings.working, "Working section (beta)", "Fold working and monitoring threads into a Working section. They return to the top of the inbox when they need you.")}
+    ${toggle("onMerge", sideSettings.onMerge, "Auto-settle merged threads", "Settle a thread when its pull request merges. Closed pull requests still settle automatically.")}
+    ${toggle("inactive", !!sideSettings.days, "Auto-settle inactive threads", "Sidebar threads with no activity for this long settle automatically.")}
+    ${sideSettings.days ? row("days", "Days of inactivity before auto-settle", "Any new activity un-settles a thread automatically.", `<input type="number" id="side-days" min="1" max="90" value="${sideSettings.days}" aria-label="Days of inactivity before auto-settle">`) : ""}
+    ${sideSettings.days ? toggle("keepPrs", sideSettings.keepPrs, "Keep threads with a PR", "Inactivity does not settle threads with a pull request. Merge and close still do.") : ""}</section>`;
+}
+/** T3 Code's Archive settings page: archived threads by project, newest first, each brought back
+ * with Unarchive, or from its context menu, which also deletes. */
+function showArchive() {
+  const since = (at) => (ago(at) === "now" ? "just now" : `${ago(at)} ago`);
+  const machinesShown = new Set(archived.map((a) => a.machine)).size > 1;
+  const order = archived.map((a, i) => [a, i]).sort(([a], [b]) => b.at - a.at);
+  const projects = [...new Set(order.map(([a]) => a.project))];
+  settingsPage.innerHTML = `<h2>Archive</h2><section id="archive-settings">${!archived.length
+    ? `<div class="side-setting"><div><label>${icon("archive")}No archived threads</label><p class="meta">Archived threads will appear here.</p></div></div>`
+    : projects.map((project) => `<h3 class="archived-project">${projectIcon(project)}${esc(project)}</h3>${order.filter(([a]) => a.project === project).map(([a, i]) => `
+      <div class="side-setting archived" data-archived="${i}"><div><label>${esc(a.name)}</label><p class="meta">${machinesShown ? `${esc(machineName(a.machine))} · ` : ""}Archived ${since(a.at)}${a.created ? ` · Created ${since(a.created)}` : ""}</p></div>
+        <button type="button" class="outline" data-unarchive="${i}">${icon("archive-x")}Unarchive</button></div>`).join("")}`).join("")}</section>`;
+  const root = document.getElementById("archive-settings");
+  const unarchive = (i) => resumeThread(archived[i], () => {
+    archived.splice(i, 1);
+    saveArchived();
+    showArchive();
+  });
+  root.onclick = (e) => e.target.closest("[data-unarchive]") && unarchive(Number(e.target.closest("[data-unarchive]").dataset.unarchive));
+  root.oncontextmenu = (e) => {
+    const row = e.target.closest("[data-archived]");
+    if (!row) return;
+    e.preventDefault();
+    const i = Number(row.dataset.archived);
+    showMenu([
+      { label: "Unarchive", icon: "archive-x", run: () => unarchive(i) },
+      { label: "Delete", icon: "trash", danger: true, run: () => {
+        archived.splice(i, 1);
+        saveArchived();
+        showArchive();
+      } },
+    ], { x: e.clientX, y: e.clientY });
+  };
+}
+function bindSidebarSettings() {
+  const root = document.getElementById("side-settings");
+  if (!root) return;
+  const change = (apply) => {
+    apply();
+    saveSideSettings();
+    if (guiOn()) renderSidebar();
+  };
+  const rebuild = () => {
+    root.outerHTML = sidebarSettingsHtml();
+    bindSidebarSettings();
+  };
+  const on = (key) => root.querySelector(`#side-${key}`);
+  on("working").onchange = (e) => change(() => (sideSettings.working = e.target.checked));
+  on("onMerge").onchange = (e) => change(() => (sideSettings.onMerge = e.target.checked));
+  on("inactive").onchange = (e) => {
+    change(() => (sideSettings.days = e.target.checked ? 3 : null));
+    rebuild();
+  };
+  if (on("keepPrs")) on("keepPrs").onchange = (e) => change(() => (sideSettings.keepPrs = e.target.checked));
+  const days = on("days");
+  if (!days) return;
+  days.oninput = () => {
+    const n = Number(days.value);
+    if (Number.isInteger(n) && n >= 1 && n <= 90) change(() => (sideSettings.days = n));
+  };
+  days.onblur = () => (days.value = sideSettings.days);
+}
+const sectionOf = (tab) =>
+  snoozedNow(tab) ? "snoozed" : settled(tab) ? "settled" : isPinned(tab) ? "pinned" : sideSettings.working && phaseOf(tab) === "working" ? "working" : "active";
+/** With the Working shelf on, when each thread last left it, which puts it back on top of the inbox. */
+const returnedAt = new Map();
+let workingKeys = new Set();
+function noteReturns() {
+  const now = new Set(tabs.filter((t) => phaseOf(t) === "working").map((t) => t.key));
+  for (const key of workingKeys) if (!now.has(key)) returnedAt.set(key, nowS());
+  workingKeys = now;
+}
 const rowTabs = () => [...threadList.querySelectorAll(".thread-row")].map((r) => tabByKey(r.dataset.tab)).filter(Boolean);
 
 function markThreadSeen(tab) {
   if (!tab || !guiOn() || document.hidden) return;
-  seenAt[threadKey(tab)] = tab.view.updated ?? 0;
+  seenAt[threadKey(tab)] = lastActivity(tab);
   save("gui-seen", JSON.stringify(seenAt));
   if (wokeNow(tab)) {
     delete sideMarks.snoozed[threadKey(tab)];
@@ -97,10 +214,10 @@ function statusSlot(tab) {
   const phase = phaseOf(tab);
   if (phase === "asking") return { icon: "shield-question", text: "Approval", tone: "warning" };
   if (phase === "working") return { icon: "circle-dashed", text: "Working", tone: "info", since: unixOf(lastPrompt(tab)?.at) };
+  if (phase === "delegating") return { icon: "bot", text: agentsWorking(runningAgents(tab).length), tone: "info", since: delegatedSince(tab) / 1000 || 0 };
   if (phase === "input") return { icon: "message-circle-question", text: "Input", tone: "input" };
   if (phase === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "warning" } : { icon: "circle-alert", text: "Failed", tone: "error" };
   if (wokeNow(tab) && tab !== active) return { icon: "alarm-clock", text: "Woke", tone: "warning", woke: true };
-  if (unseenDone(tab)) return { icon: "circle-check", text: "Done", tone: "success" };
   return null;
 }
 
@@ -112,7 +229,30 @@ function monogram(name) {
   const second = glyphs.slice(1).find((g) => /\p{N}/u.test(g)) ?? (words.length > 1 ? [...words.at(-1)][0] : glyphs.at(-1));
   return [...`${glyphs[0]}${second}`.toUpperCase()].slice(0, 2).join("");
 }
-function projectIcon(name) {
+/** Project icons the machines found, by machine and project folder: `{ url, at }`, `url` a data URL or null. */
+const favicons = new Map();
+function faviconOf(tab) {
+  const project = threadOf(tab).workspace?.project;
+  if (!project) return null;
+  const key = `${tab.machine}:${project}`;
+  const known = favicons.get(key);
+  // As T3 Code's cache: a found icon is kept ten minutes, a miss one.
+  if (!known || Date.now() - known.at > (known.url ? 600e3 : 60e3)) askFavicon(tab, key);
+  return known?.url ?? null;
+}
+async function askFavicon(tab, key) {
+  const was = favicons.get(key)?.url ?? null;
+  favicons.set(key, { url: was, at: Date.now() });
+  const url = await callOn(tab.machine, { cmd: "favicon", tab: tab.view.id }).catch(() => was);
+  favicons.set(key, { url, at: Date.now() });
+  if (url === was || !guiOn()) return;
+  renderSidebar();
+  if (active && !crumbEl.querySelector("input.rename")) crumbEl.innerHTML = crumbHtml(active);
+}
+/** T3 Code's project icon: the project's favicon, or else a monogram of its name. */
+function projectIcon(name, tab) {
+  const url = tab && faviconOf(tab);
+  if (url?.startsWith("data:image/")) return `<img class="favicon" src="${esc(url)}" alt="" aria-hidden="true">`;
   let hash = 0;
   for (const c of name.normalize("NFKC").trim().toLowerCase() || "project") hash = (hash * 31 + c.codePointAt(0)) % MONOGRAM_COLORS.length;
   const text = monogram(name);
@@ -120,39 +260,42 @@ function projectIcon(name) {
 }
 
 function renderSidebar() {
-  if (document.activeElement?.matches("#thread-list input.rename")) return;
+  if (document.activeElement?.matches("#thread-list input.rename") || rowDrag?.started) return;
   for (const tab of tabs) if (!firstSeen.has(tab.key)) firstSeen.set(tab.key, nowS());
-  const projects = [...new Set(tabs.map(projectName))].sort();
-  if (ui.project && !projects.includes(ui.project)) ui.project = "";
-  const filter = document.getElementById("project-filter");
-  const options = ["", ...projects].map((p) => `<option value="${esc(p)}"${p === ui.project ? " selected" : ""}>${p ? esc(p) : "All projects"}</option>`).join("");
-  if (filter.dataset.built !== options) {
-    filter.innerHTML = options;
-    filter.dataset.built = options;
-  }
+  for (const key of selected) if (!tabByKey(key)) selected.delete(key);
+  noteReturns();
+  if (ui.project && !projectNames().includes(ui.project)) ui.project = "";
+  const trigger = `${ui.project ? projectIcon(ui.project, tabOfProject(ui.project)) : icon("folder")}<span class="label">${esc(ui.project || "All projects")}</span>${icon("chevron-down")}`;
+  if (projectFilter.innerHTML !== trigger) projectFilter.innerHTML = trigger;
+  projectFilter.setAttribute("aria-label", ui.project ? `Filter threads by project: ${ui.project}` : "Filter threads by project");
   const inScope = tabs.filter((t) => !ui.project || projectName(t) === ui.project);
   const needle = ui.search.trim().toLowerCase();
   document.getElementById("search-clear").hidden = !ui.search;
   const rows = needle ? searchRows(inScope, needle) : shelfRows(inScope);
   threadList.replaceChildren(...rows);
-  if (!rows.length) threadList.innerHTML = `<p class="empty">${tabs.length ? "No threads found" : "No threads yet"}</p>`;
+  if (!rows.length) threadList.innerHTML = `<p class="empty" role="status">${tabs.length ? "No threads found" : "No threads yet"}</p>`;
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
   tickDurations();
   scheduleWake();
 }
 
 function shelfRows(list) {
-  const by = { pinned: [], active: [], snoozed: [], settled: [] };
+  const by = { pinned: [], active: [], working: [], snoozed: [], settled: [] };
   for (const tab of list) by[sectionOf(tab)].push(tab);
-  const anchor = (t) => Math.max(firstSeen.get(t.key) ?? 0, sideMarks.unsettled[threadKey(t)] ?? 0);
+  const anchor = (t) => Math.max(firstSeen.get(t.key) ?? 0, sideMarks.unsettled[threadKey(t)] ?? 0, sideSettings.working ? Math.max(latestUserAt(t), returnedAt.get(t.key) ?? 0) : 0);
   by.pinned.sort((a, b) => sideMarks.pins.indexOf(threadKey(a)) - sideMarks.pins.indexOf(threadKey(b)));
-  by.active.sort((a, b) => anchor(b) - anchor(a) || b.view.opened - a.view.opened);
+  // As T3 Code's: threads never dragged, new or re-opened, come first, newest on top; then the dragged
+  // order, which the Working shelf sets aside for the order threads come back in.
+  const dragged = (t) => sideMarks.order.indexOf(threadKey(t));
+  const rank = (t) => (sideSettings.working || dragged(t) < 0 ? -1 : dragged(t));
+  by.active.sort((a, b) => rank(a) - rank(b) || anchor(b) - anchor(a) || b.view.opened - a.view.opened);
+  by.working.sort((a, b) => Math.max(firstSeen.get(b.key) ?? 0, latestUserAt(b)) - Math.max(firstSeen.get(a.key) ?? 0, latestUserAt(a)));
   by.snoozed.sort((a, b) => sideMarks.snoozed[threadKey(a)].until - sideMarks.snoozed[threadKey(b)].until);
   const settledAt = (t) => sideMarks.settled[threadKey(t)] || latestUserAt(t);
   by.settled.sort((a, b) => settledAt(b) - settledAt(a));
   const rows = [...by.pinned, ...by.active].map(cardRow);
   let sink = true;
-  const shelf = (kind, list, label, open, visible, action) => {
+  const shelf = (kind, list, label, open, visible, rowOf) => {
     if (!list.length) return;
     const head = document.createElement("button");
     head.className = "settled-head";
@@ -161,12 +304,13 @@ function shelfRows(list) {
     head.dataset.shelf = kind;
     head.dataset.open = open;
     head.innerHTML = `<span>${open ? label : `${label} (${list.length})`}</span><span class="line"></span>${icon("chevron-down")}`;
-    rows.push(head, ...(open ? visible : list.filter((t) => t === active)).map((t) => slimRow(t, action)));
+    rows.push(head, ...(open ? visible : list.filter((t) => t === active)).map(rowOf));
   };
-  shelf("snoozed", by.snoozed, "Snoozed", ui.snoozedOpen, by.snoozed, "wake");
+  shelf("working", by.working, "Working", ui.workingOpen, by.working, cardRow);
+  shelf("snoozed", by.snoozed, "Snoozed", ui.snoozedOpen, by.snoozed, (t) => slimRow(t, "wake"));
   const shownSettled = by.settled.slice(0, ui.settledShown);
   if (by.settled.includes(active) && !shownSettled.includes(active)) shownSettled.push(active);
-  shelf("settled", by.settled, "Settled", ui.settledOpen, shownSettled, "unsettle");
+  shelf("settled", by.settled, "Settled", ui.settledOpen, shownSettled, (t) => slimRow(t, "unsettle"));
   const hidden = by.settled.length - shownSettled.length;
   if (ui.settledOpen && hidden > 0) {
     const more = document.createElement("button");
@@ -184,13 +328,55 @@ function rowShell(tab, cls) {
   row.tabIndex = 0;
   row.dataset.tab = tab.key;
   row.classList.toggle("active", tab === active);
-  const ws = threadOf(tab).workspace;
-  row.title = [threadTitle(tab), `${projectName(tab)} · ${machineName(tab.machine)}`, ws?.branch && `Branch ${ws.branch}`, `Model ${modelName(tab)}`, statsLabel(tab), tilde(tab.view.cwd), threadOf(tab).error]
-    .filter(Boolean).join("\n");
+  row.classList.toggle("selected", selected.has(tab.key));
+  row.classList.toggle("titling", titling.has(tab.key));
+  row.setAttribute("aria-label", threadTitle(tab));
   return row;
 }
 
-const prBadge = (pr) => (pr ? `<span class="pr" data-pr="${esc(pr.url)}" title="Open pull request #${pr.number}">${icon("git-pull-request")}#${pr.number}</span>` : "");
+/** What gh last said of each pull request, by url: `{ status, at }`, `status` being `workspace::PrStatus`. */
+const prStatuses = new Map();
+const PR_LOOKS = {
+  open: { label: "Open", icon: "git-pull-request-arrow" },
+  draft: { label: "Draft", icon: "git-pull-request-draft" },
+  merged: { label: "Merged", icon: "git-merge" },
+  closed: { label: "Closed", icon: "git-pull-request-closed" },
+};
+/** The thread's pull request as gh last reported it (`state` open, draft, merged or closed, `title`,
+ * `merged_at`, `closed_at`), or null before gh answers. It asks again each minute until the PR merges. */
+function prStatus(tab, pr = prOf(tab)) {
+  if (!pr) return null;
+  const known = prStatuses.get(pr.url);
+  if (!document.hidden && known?.status?.state !== "merged" && Date.now() - (known?.at ?? 0) > 60e3) askPrStatus(tab, pr.url);
+  return known?.status ?? null;
+}
+async function askPrStatus(tab, url) {
+  const was = prStatuses.get(url)?.status ?? null;
+  prStatuses.set(url, { status: was, at: Date.now() });
+  const status = await callOn(tab.machine, { cmd: "pr_status", tab: tab.view.id, pr: url }).catch(() => was);
+  notePrStatus(url, status);
+}
+// Back in the window, a PR merged or closed on GitHub meanwhile shows at once, as does a new favicon.
+addEventListener("focus", () => {
+  for (const known of [...prStatuses.values(), ...favicons.values()]) known.at = 0;
+  if (guiOn()) renderSidebar();
+});
+function notePrStatus(url, status) {
+  const was = prStatuses.get(url)?.status;
+  prStatuses.set(url, { status, at: Date.now() });
+  if (!guiOn() || (was?.state === status?.state && was?.title === status?.title)) return;
+  renderSidebar();
+  if (active && prOf(active)) renderComposer(active);
+}
+/** The PR panel's fuller answer from gh says the same of the state. */
+const notePrView = (url, d) =>
+  notePrStatus(url, { state: d.state === "OPEN" && d.isDraft ? "draft" : d.state.toLowerCase(), title: d.title, merged_at: d.mergedAt, closed_at: d.closedAt });
+/** A pull request's glyph and number in its state's color, as T3 Code's badge. */
+function prBadge(tab, tag = "span", pr = prOf(tab)) {
+  if (!pr) return "";
+  const state = prStatus(tab, pr)?.state;
+  return `<${tag}${tag === "button" ? ' type="button"' : ""} class="pr" data-pr="${esc(pr.url)}"${state ? ` data-state="${state}"` : ""} aria-label="PR #${pr.number}${state ? ` ${state}` : ""}">${icon(PR_LOOKS[state]?.icon ?? "git-pull-request-arrow")}#${pr.number}</${tag}>`;
+}
 const pinMark = (tab) => (isPinned(tab) ? `<span class="pin" role="button" data-act="unpin" title="Unpin thread">${icon("pin")}${icon("pin-off")}</span>` : "");
 const titleHtml = (tab) =>
   ui.renaming === tab.key ? `<input class="rename" value="${esc(threadTitle(tab))}" aria-label="Thread title" spellcheck="false">` : esc(threadTitle(tab));
@@ -201,9 +387,9 @@ function cardRow(tab) {
   const phase = phaseOf(tab);
   const woke = !!slot?.woke;
   const row = rowShell(tab, "tall");
-  row.classList.toggle("receded", tab !== active && (phase === "working" || (["asking", "done", "idle"].includes(phase) && !unseenDone(tab) && !woke)));
+  row.classList.toggle("receded", tab !== active && (["working", "delegating"].includes(phase) || (["asking", "done", "idle"].includes(phase) && !unseenDone(tab) && !woke)));
   row.classList.toggle("bright", unseenDone(tab) || woke || phase === "input");
-  row.classList.toggle("working", phase === "working" && tab !== active);
+  row.classList.toggle("working", ["working", "delegating"].includes(phase) && tab !== active);
   const draft = tab !== active && hasDraft(tab);
   row.classList.toggle("draft", draft);
   const ws = threadOf(tab).workspace;
@@ -214,11 +400,11 @@ function cardRow(tab) {
   const account = tab.view.account !== DEFAULT_ACCOUNT ? `<span class="account" title="Runs under the ${esc(accountName(tab.machine, tab.view.account))} account">${esc(accountName(tab.machine, tab.view.account))}</span>` : "";
   const state = slot
     ? `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : ""}>${icon(slot.icon)}${slot.text}${slot.since ? ` <span class="since" data-since="${slot.since}"></span>` : ""}</span>`
-    : `<span class="stamp when">${esc(ago(latestUserAt(tab)))}</span>`;
-  const acts = `<span class="acts">${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${MOD_LABEL}⇧S)">${icon("check")}Settle</span></span>`;
-  row.innerHTML = `<span class="l1">${projectIcon(projectName(tab))}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>
-    <span class="l2">${draft ? `<span class="draft-pen" title="Unsent draft">${icon("square-pen")}</span>` : ""}${titleHtml(tab)}</span>
-    <span class="l3">${where}${prBadge(prOf(tab))}<span class="right">${statsHtml(tab)}${remote}${account}<span class="provider">${icon("claude")}</span></span></span>`;
+    : `<span class="stamp when${unseenDone(tab) ? " unread" : ""}">${esc(ago(latestUserAt(tab)))}</span>`;
+  const acts = `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${MOD_LABEL}⇧S)">${icon("check")}Settle</span></span>`;
+  row.innerHTML = `<span class="l1">${draft ? `<span class="draft-pen" role="img" title="Unsent draft" aria-label="Unsent draft">${icon("square-pen")}</span>` : ""}${projectIcon(projectName(tab), tab)}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>
+    <span class="l2">${titleHtml(tab)}</span>
+    <span class="l3">${where}${prBadge(tab)}<span class="right">${statsHtml(tab)}${remote}${account}<span class="provider">${icon("claude")}</span></span></span>`;
   return row;
 }
 
@@ -229,9 +415,102 @@ function slimRow(tab, action) {
   const act = action === "wake"
     ? `<span role="button" data-act="wake" title="Wake thread now">${icon("alarm-clock-off")}</span>`
     : `<span role="button" data-act="unsettle" title="Un-settle thread">${icon("undo-2")}</span>`;
-  row.innerHTML = `${projectIcon(projectName(tab))}<span class="l2">${titleHtml(tab)}</span>${pinMark(tab)}${prBadge(prOf(tab))}<span class="slot">${time}<span class="acts">${act}</span></span>`;
+  row.innerHTML = `${projectIcon(projectName(tab), tab)}<span class="l2">${titleHtml(tab)}</span>${pinMark(tab)}${prBadge(tab)}<span class="slot">${time}<span class="acts">${act}</span></span>`;
   return row;
 }
+
+/** The pull requests a thread linked, newest first, each once. */
+const prsOf = (tab) => [...new Map([...threadOf(tab).items].reverse().filter((i) => i.kind === "pr").map((p) => [p.url, p])).values()];
+/** A pull request's line in a hover card; the PR badge's card links it, the row's only lists it. */
+const prItem = (tab, pr, link = true) => {
+  const status = prStatus(tab, pr);
+  const tag = link ? `a href="${esc(pr.url)}" data-card-pr="${esc(pr.url)}"` : "span";
+  return `<li><${tag}${status ? ` data-state="${status.state}"` : ""}>${icon(PR_LOOKS[status?.state]?.icon ?? "git-pull-request-arrow")}<span class="num">#${pr.number}</span><span class="what">${esc(status?.title ?? "Pull request")}</span></${link ? "a" : "span"}></li>`;
+};
+function rowCardHtml(tab) {
+  const ws = threadOf(tab).workspace;
+  const line = (glyph, text, cls = "") => `<div class="${cls}">${glyph}<span>${text}</span></div>`;
+  const failed = phaseOf(tab) === "failed";
+  const prs = prsOf(tab);
+  return `<div class="card-title">${esc(threadTitle(tab))}</div><div class="card-lines">
+    ${line(projectIcon(projectName(tab), tab), esc(projectName(tab)))}
+    ${line(icon("monitor"), esc(machineName(tab.machine)))}
+    ${ws?.branch ? line(icon("git-branch"), middle(ws.branch, 30), "branch") : ""}
+    ${line(icon("claude"), esc(modelName(tab)))}
+    ${statsLabel(tab) ? line(icon("clock"), statsHtml(tab), "stats") : ""}
+    ${failed ? line(icon("circle-alert"), tab.view.resume_at ? "Usage limit reached" : "Error occurred", tab.view.resume_at ? "warning" : "error") : ""}
+  </div>${prs.length ? `<ul class="card-foot">${prs.map((p) => prItem(tab, p, false)).join("")}</ul>` : ""}`;
+}
+
+/** T3 Code's hover cards: a row's details at its right after 150ms, and a PR badge's pull request
+ * above it, which the pointer can move into to open it. Once one shows, the next opens at once. */
+const hoverCard = document.createElement("div");
+hoverCard.id = "hover-card";
+hoverCard.hidden = true;
+document.body.append(hoverCard);
+let card = null;
+let cardTimer;
+let cardClosedAt = 0;
+function cardTarget(el) {
+  const pr = el.closest("#thread-list .pr[data-pr], #composer-footer .pr[data-pr]");
+  const row = el.closest("#thread-list .thread-row:not(.result)");
+  const tab = row ? tabByKey(row.dataset.tab) : pr && active;
+  if (!tab || ui.renaming === tab.key) return null;
+  if (pr) return { key: `pr:${tab.key}:${pr.dataset.pr}`, anchor: pr, tab, side: "top", delay: row ? 150 : 600, html: () => `<ul>${prItem(tab, prsOf(tab).find((p) => p.url === pr.dataset.pr) ?? prOf(tab))}</ul>` };
+  return { key: `row:${tab.key}`, anchor: row, tab, side: "right", delay: 150, html: () => rowCardHtml(tab) };
+}
+function hideCard() {
+  clearTimeout(cardTimer);
+  if (!hoverCard.hidden) cardClosedAt = Date.now();
+  hoverCard.hidden = true;
+  card = null;
+}
+function showCard(target) {
+  card = target;
+  hoverCard.className = target.side;
+  hoverCard.innerHTML = target.html();
+  hoverCard.hidden = false;
+  const a = target.anchor.getBoundingClientRect();
+  const r = hoverCard.getBoundingClientRect();
+  const x = target.side === "right" ? a.right + 4 : a.left + a.width / 2 - r.width / 2;
+  const y = target.side === "right" ? a.top : a.top - r.height;
+  hoverCard.style.left = `${Math.max(8, Math.min(x, innerWidth - r.width - 8))}px`;
+  hoverCard.style.top = `${Math.max(8, Math.min(y, innerHeight - r.height - 8))}px`;
+}
+document.addEventListener("pointerover", (e) => {
+  if (!guiOn() || settingsOpen()) return hideCard();
+  if (e.pointerType !== "mouse") return;
+  if (e.target.closest("#hover-card")) return clearTimeout(cardTimer);
+  const target = sideMenu.hidden && !document.body.classList.contains("dragging-row") ? cardTarget(e.target) : null;
+  if (target?.key === card?.key) {
+    if (target) card.anchor = target.anchor;
+    return clearTimeout(cardTimer);
+  }
+  const wasPr = card?.side === "top" && !hoverCard.hidden;
+  clearTimeout(cardTimer);
+  const open = () => {
+    hideCard();
+    if (target?.anchor.isConnected) showCard(target);
+  };
+  if (!target) return wasPr ? (cardTimer = setTimeout(hideCard, 100)) : hideCard();
+  card = target;
+  cardTimer = setTimeout(open, !hoverCard.hidden || Date.now() - cardClosedAt < 400 ? 0 : target.delay);
+});
+document.addEventListener("pointerdown", (e) => !e.target.closest("#hover-card") && hideCard(), true);
+threadList.addEventListener("scroll", hideCard);
+addEventListener("blur", hideCard);
+addEventListener("keydown", hideCard, true);
+hoverCard.addEventListener("click", (e) => {
+  const link = e.target.closest("[data-card-pr]");
+  if (!link) return;
+  e.preventDefault();
+  const tab = card?.tab;
+  hideCard();
+  if (e.metaKey || e.ctrlKey) return openOutside(link.dataset.cardPr);
+  if (!tab) return;
+  if (tab !== active) activate(tab);
+  openPr(tab, link.dataset.cardPr);
+});
 
 const wakeLabel = (until) => {
   const s = until - nowS();
@@ -268,8 +547,7 @@ function searchRows(list, needle) {
     const row = rowShell(tab, "result");
     row.classList.toggle("hit", i === ui.hit);
     row.classList.toggle("settled", settled(tab));
-    const pr = prOf(tab);
-    row.innerHTML = `${projectIcon(projectName(tab))}<span class="body"><span class="top"><span class="l2">${esc(threadTitle(tab))}</span>${pr ? `<span class="pr">#${pr.number}</span>` : ""}<span class="when">${esc(ago(latestUserAt(tab)))}</span></span>${item ? `<span class="snippet">${snippet(item.text, needle)}</span>` : ""}</span>`;
+    row.innerHTML = `${projectIcon(projectName(tab), tab)}<span class="body"><span class="top"><span class="l2">${esc(threadTitle(tab))}</span>${prBadge(tab)}<span class="when">${esc(ago(latestUserAt(tab)))}</span></span>${item ? `<span class="snippet">${snippet(item.text, needle)}</span>` : ""}</span>`;
     return row;
   });
 }
@@ -332,13 +610,14 @@ sideNotice.onclick = (e) => e.target.closest("[data-undo]") && undoLast();
 
 /** Runs `change` on the marks and returns a function that puts back what it touched. */
 function changeMarks(key, change) {
-  const before = JSON.stringify({ pins: sideMarks.pins, ...Object.fromEntries(["settled", "unsettled", "snoozed", "titles", "noAutoSettle"].map((m) => [m, sideMarks[m][key]])) });
+  const before = JSON.stringify({ pins: sideMarks.pins, order: sideMarks.order, ...Object.fromEntries(["settled", "unsettled", "snoozed", "titles", "noAutoSettle"].map((m) => [m, sideMarks[m][key]])) });
   change();
   saveMarks();
   renderSidebar();
   return () => {
     const was = JSON.parse(before);
     sideMarks.pins = was.pins;
+    sideMarks.order = was.order;
     for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) {
       if (was[m] === undefined) delete sideMarks[m][key];
       else sideMarks[m][key] = was[m];
@@ -358,6 +637,7 @@ function unsettle(tab) {
   changeMarks(threadKey(tab), () => {
     delete sideMarks.settled[threadKey(tab)];
     sideMarks.unsettled[threadKey(tab)] = nowS();
+    sideMarks.order = sideMarks.order.filter((k) => k !== threadKey(tab));
   });
 }
 function pin(tab) {
@@ -375,6 +655,11 @@ function snooze(tab, until) {
   noteUndo("Snoozed", changeMarks(threadKey(tab), () => (sideMarks.snoozed[threadKey(tab)] = { until, at: nowS() })));
 }
 const wake = (tab) => changeMarks(threadKey(tab), () => delete sideMarks.snoozed[threadKey(tab)]);
+function discardDraft(tab) {
+  saveDraft(tab, "");
+  threadOf(tab).attachments = [];
+  renderSidebar();
+}
 function markUnread(tab) {
   seenAt[threadKey(tab)] = 0;
   save("gui-seen", JSON.stringify(seenAt));
@@ -398,24 +683,59 @@ function snoozePresets(now = new Date()) {
   return list.map(([label, date, when]) => ({ label, when: when ?? time(date), until: date / 1000 }));
 }
 
-const snoozeItems = (tab) => [
-  ...snoozePresets().map((p) => ({ label: p.label, hint: p.when, run: () => snooze(tab, p.until) })),
-  { label: "Custom…", sep: true, form: (menu) => customSnooze(menu, tab) },
+/** The snooze presets for `list`, labelled as T3 Code's clock menu, or with the time in the label as its context menu. */
+const snoozeItems = (list, inLabel = false) => [
+  ...snoozePresets().map((p) => ({ label: inLabel ? `${p.label} (${p.when})` : p.label, hint: inLabel ? "" : p.when, run: () => list.forEach((t) => snooze(t, p.until)) })),
+  { label: "Custom…", sep: true, run: () => customSnooze(list) },
 ];
 
-function customSnooze(menu, tab) {
+const sideDialog = document.createElement("dialog");
+sideDialog.id = "side-dialog";
+document.body.append(sideDialog);
+/** A modal form, as T3 Code's dialogs. `submit` returns the answer, or undefined to keep the dialog open;
+ * Cancel and Esc answer null. */
+function askDialog(html, submit, bind = () => {}) {
+  sideDialog.innerHTML = `<form novalidate>${html}</form>`;
+  const form = sideDialog.querySelector("form");
+  bind(form);
+  return new Promise((resolve) => {
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const answer = submit(form);
+      if (answer === undefined) return;
+      resolve(answer);
+      sideDialog.close();
+    };
+    form.querySelector("[data-cancel]").onclick = () => sideDialog.close();
+    sideDialog.onclose = () => resolve(null);
+    sideDialog.showModal();
+  });
+}
+
+async function customSnooze(list) {
   const soon = new Date(Date.now() + 3600e3);
-  const local = new Date(soon - soon.getTimezoneOffset() * 60e3).toISOString().slice(0, 16);
-  menu.innerHTML = `<form class="custom-snooze"><label>Snooze until<input type="datetime-local" value="${local}" required></label><p class="error"></p><button class="primary">Snooze</button></form>`;
-  const form = menu.querySelector("form");
-  form.querySelector("input").focus();
-  form.onsubmit = (e) => {
-    e.preventDefault();
-    const until = Date.parse(form.querySelector("input").value) / 1000;
-    if (!(until > nowS())) return (form.querySelector(".error").textContent = "Pick a time in the future.");
-    closeSideMenu();
-    snooze(tab, until);
-  };
+  const pad = (n) => String(n).padStart(2, "0");
+  const until = await askDialog(`<h3>Custom snooze</h3><p class="about">Choose when snoozed threads return to your inbox.</p>
+    <div class="modes" role="group" aria-label="Schedule type"><button type="button" data-mode="date" aria-pressed="true">Date and time</button><button type="button" data-mode="duration" aria-pressed="false">Duration</button></div>
+    <div class="pair" data-for="date"><label>Date<input type="date" name="date" value="${soon.getFullYear()}-${pad(soon.getMonth() + 1)}-${pad(soon.getDate())}"></label>
+      <label>Time<input type="time" name="time" value="${pad(soon.getHours())}:${pad(soon.getMinutes())}"></label></div>
+    <div class="pair" data-for="duration" hidden><label>Snooze for<input type="number" name="amount" value="2" step="1"></label>
+      <label>Unit<select name="unit"><option value="60">Minutes</option><option value="3600" selected>Hours</option><option value="86400">Days</option></select></label></div>
+    <p class="error" role="alert"></p>
+    <div class="actions"><button type="button" class="outline" data-cancel>Cancel</button><button class="primary">Snooze</button></div>`,
+  (form) => {
+    const f = form.elements;
+    const byDate = form.querySelector('[data-mode="date"]').getAttribute("aria-pressed") === "true";
+    const at = byDate ? Date.parse(`${f.date.value}T${f.time.value}`) / 1000 : nowS() + Number(f.amount.value) * Number(f.unit.value);
+    if (byDate ? at > nowS() : Number(f.amount.value) > 0) return at;
+    form.querySelector(".error").textContent = byDate ? "Choose a valid date and time in the future." : "Enter a positive duration.";
+  },
+  (form) => form.querySelectorAll("[data-mode]").forEach((b) => (b.onclick = () => {
+    for (const m of form.querySelectorAll("[data-mode]")) m.setAttribute("aria-pressed", String(m === b));
+    for (const pair of form.querySelectorAll("[data-for]")) pair.hidden = pair.dataset.for !== b.dataset.mode;
+    form.querySelector(".error").textContent = "";
+  })));
+  if (until) list.forEach((t) => snooze(t, until));
 }
 
 async function copyAndTell(text, what) {
@@ -438,10 +758,11 @@ function rowMenuItems(tab) {
     settled(tab) ? { label: "Un-settle thread", icon: "circle-check", run: () => unsettle(tab) } : { label: "Settle thread", icon: "circle-check", hint: `${MOD_LABEL}⇧S`, run: () => settle(tab) },
     sideMarks.snoozed[threadKey(tab)] && snoozedNow(tab)
       ? { label: "Wake thread", icon: "clock", run: () => wake(tab) }
-      : { label: "Snooze", icon: "clock", disabled: !canSnooze(tab), children: () => snoozeItems(tab) },
+      : { label: "Snooze", icon: "clock", disabled: !canSnooze(tab), children: () => snoozeItems([tab], true) },
     { label: "Rename thread", icon: "pencil", sep: true, run: () => startRename(tab) },
+    { label: titling.has(tab.key) ? "Regenerating…" : "Regenerate title", icon: "refresh-cw", disabled: titling.has(tab.key) || !lastPrompt(tab), run: () => regenerateTitles([tab]) },
     { label: "Mark unread", icon: "mail-open", disabled: phaseOf(tab) !== "done", run: () => markUnread(tab) },
-    { label: ui.project === project ? "Show all projects" : `Filter by ${project}`, icon: "folder", run: () => setProjectFilter(ui.project === project ? "" : project) },
+    { label: ui.project === project ? "Show all projects" : `Filter by ${project}`, icon: "folder-tree", run: () => setProjectFilter(ui.project === project ? "" : project) },
     { label: "Auto-settle behavior", icon: "timer", children: () => [
       { label: "Enabled", checked: !sideMarks.noAutoSettle[threadKey(tab)], run: () => changeMarks(threadKey(tab), () => delete sideMarks.noAutoSettle[threadKey(tab)]) },
       { label: "Disabled", checked: !!sideMarks.noAutoSettle[threadKey(tab)], run: () => changeMarks(threadKey(tab), () => (sideMarks.noAutoSettle[threadKey(tab)] = true)) },
@@ -449,11 +770,51 @@ function rowMenuItems(tab) {
     { label: "Copy", icon: "copy", sep: true, children: () => [
       { label: "Path", icon: "folder", run: () => copyAndTell(tab.view.cwd, "path") },
       ...(ws?.branch ? [{ label: "Branch", icon: "git-branch", run: () => copyAndTell(ws.branch, "branch") }] : []),
-      { label: "Session ID", icon: "hash", disabled: !session, run: () => copyAndTell(session, "session ID") },
-      { label: "Resume command", icon: "terminal", hint: `${MOD_LABEL}⇧C`, disabled: !session, run: () => copyAndTell(resumeCommand(tab), "resume command") },
+      { label: "Thread ID", icon: "hash", disabled: !session, run: () => copyAndTell(session, "thread ID") },
+      { label: "Resume command", icon: "terminal", disabled: !session, run: () => copyAndTell(resumeCommand(tab), "resume command") },
     ] },
-    { label: "Close thread", icon: "x", sep: true, danger: true, run: () => closeTab(tab) },
+    { label: "Project settings", icon: "gear", run: () => openProjectSettings(tab) },
+    ...(switchItems(tab).length ? [{ label: "Move to account", icon: "user-round", children: () => switchItems(tab).map(({ label, run }) => ({ label, run })) }] : []),
+    { label: "Archive thread", icon: "archive", sep: true, disabled: turnLive(tab), run: () => archiveThread(tab) },
+    { label: "Delete", icon: "trash", danger: true, run: () => deleteThreads([tab]) },
   ];
+}
+
+/** T3 Code's menu for a multi-selection: each action counts the threads it applies to. */
+function bulkMenuItems(list) {
+  const pinned = list.filter(isPinned);
+  const settling = list.filter((t) => !settled(t));
+  const titled = list.filter((t) => !titling.has(t.key) && lastPrompt(t));
+  return [
+    ...(pinned.length ? [{ label: `Unpin (${pinned.length})`, icon: "pin-off", run: () => pinned.forEach(pin) }] : []),
+    { label: `Settle (${list.length})`, icon: "circle-check", disabled: !settling.length, run: () => settling.forEach(settle) },
+    ...(list.every(canSnooze) ? [{ label: `Snooze (${list.length})`, icon: "clock", children: () => snoozeItems(list, true) }] : []),
+    titled.length ? { label: `Regenerate titles (${titled.length})`, icon: "refresh-cw", run: () => regenerateTitles(titled) } : { label: `Regenerating… (${list.length})`, icon: "refresh-cw", disabled: true },
+    { label: `Mark unread (${list.length})`, icon: "mail-open", run: () => list.forEach(markUnread) },
+    { label: `Delete (${list.length})`, icon: "trash", danger: true, run: () => deleteThreads(list) },
+  ];
+}
+
+/** The desktop app shows menus natively, as T3 Code's does; the web keeps the HTML menu. */
+async function showMenu(items, at) {
+  if (!TAURI?.menu) return openSideMenu(items, at);
+  const { Menu, Submenu, MenuItem, CheckMenuItem, PredefinedMenuItem } = TAURI.menu;
+  const build = async (list) => {
+    const out = [];
+    for (const item of list) {
+      if (item.sep && out.length) out.push(await PredefinedMenuItem.new({ item: "Separator" }));
+      if (item.children) out.push(await Submenu.new({ text: item.label, enabled: !item.disabled, items: await build(item.children()) }));
+      else if (item.checked !== undefined) out.push(await CheckMenuItem.new({ text: item.label, checked: item.checked, action: () => item.run() }));
+      else out.push(await MenuItem.new({ text: item.label, enabled: !item.disabled, action: () => item.run() }));
+    }
+    return out;
+  };
+  try {
+    await (await Menu.new({ items: await build(items) })).popup();
+  } catch (e) {
+    console.warn("native menu", e);
+    openSideMenu(items, at);
+  }
 }
 
 const sideMenu = document.createElement("div");
@@ -477,10 +838,9 @@ function openSideMenu(items, at) {
       const b = document.createElement("button");
       b.className = `${item.danger ? "danger" : ""}${item.children ? " sub" : ""}`;
       b.disabled = !!item.disabled;
-      b.innerHTML = `<span class="ic">${item.checked ? icon("check") : item.icon ? icon(item.icon) : ""}</span><span class="label">${esc(item.label)}</span>${item.hint ? `<span class="hint">${esc(item.hint)}</span>` : ""}${item.children ? icon("chevron-right") : ""}`;
+      b.innerHTML = `<span class="ic">${item.iconHtml ?? (item.checked ? icon("check") : item.icon ? icon(item.icon) : "")}</span><span class="label">${esc(item.label)}</span>${item.hint ? `<span class="hint">${esc(item.hint)}</span>` : ""}${item.trail ?? ""}${item.children ? icon("chevron-right") : ""}`;
       b.onclick = () => {
         if (item.children) return show(item.children(), item.label);
-        if (item.form) return item.form(sideMenu);
         closeSideMenu();
         item.run();
       };
@@ -501,6 +861,7 @@ function openSideMenu(items, at) {
 }
 const closeSideMenu = () => (sideMenu.hidden = true);
 window.addEventListener("mousedown", (e) => !sideMenu.hidden && !e.target.closest("#side-menu") && closeSideMenu(), true);
+window.addEventListener("keydown", (e) => e.key === "Escape" && sideMenu.hidden && !sideDialog.open && guiOn() && clearSelection());
 window.addEventListener("keydown", (e) => {
   if (sideMenu.hidden || e.key !== "Escape") return;
   closeSideMenu();
@@ -564,9 +925,9 @@ function editTitle(tab, input) {
 threadList.addEventListener("click", (e) => {
   const head = e.target.closest(".settled-head");
   if (head) {
-    const key = head.dataset.shelf === "snoozed" ? "snoozedOpen" : "settledOpen";
-    ui[key] = !ui[key];
-    save(head.dataset.shelf === "snoozed" ? "gui-snoozed-open" : "gui-settled-open", String(ui[key]));
+    const shelf = head.dataset.shelf;
+    ui[`${shelf}Open`] = !ui[`${shelf}Open`];
+    save(`gui-${shelf}-open`, String(ui[`${shelf}Open`]));
     return renderSidebar();
   }
   if (e.target.closest(".show-more")) {
@@ -578,10 +939,14 @@ threadList.addEventListener("click", (e) => {
   if (!tab || e.target.closest("input.rename")) return;
   if (row.classList.contains("result")) return openResult(tab);
   const act = e.target.closest("[data-act]")?.dataset.act;
-  if (act === "snooze") return openSideMenu(snoozeItems(tab), e.target.closest("[data-act]"));
-  if (act) return { settle, unsettle, wake, unpin: pin, dismiss: wake }[act](tab);
-  activate(tab);
+  if (act === "snooze") return openSideMenu(snoozeItems([tab]), e.target.closest("[data-act]"));
+  if (act) return { settle, unsettle, wake, unpin: pin, dismiss: wake, discard: discardDraft }[act](tab);
   const pr = e.target.closest("[data-pr]");
+  if (pr && isModClick(e)) return openOutside(pr.dataset.pr);
+  if (!pr && isModClick(e)) return toggleSelected(tab);
+  if (!pr && e.shiftKey) return selectRange(tab);
+  clearSelection();
+  activate(tab);
   if (pr) openPr(tab, pr.dataset.pr);
   if (narrow(768)) toggleSidebar(false);
 });
@@ -594,7 +959,14 @@ threadList.addEventListener("contextmenu", (e) => {
   const tab = row && tabByKey(row.dataset.tab);
   if (!tab || e.target.closest("input")) return;
   e.preventDefault();
-  openSideMenu(rowMenuItems(tab), { x: e.clientX, y: e.clientY });
+  const at = { x: e.clientX, y: e.clientY };
+  if (selected.size > 1 && selected.has(tab.key)) {
+    const list = [...selected].map(tabByKey).filter(Boolean);
+    const done = (items) => items.map((item) => ({ ...item, run: item.run && (() => (item.run(), clearSelection())), children: item.children && (() => done(item.children())) }));
+    return showMenu(done(bulkMenuItems(list)), at);
+  }
+  clearSelection();
+  showMenu(rowMenuItems(tab), at);
 });
 threadList.addEventListener("keydown", (e) => {
   const row = e.target.closest(".thread-row");
@@ -633,6 +1005,146 @@ threadList.addEventListener("drop", (e) => {
   activate(tab);
   attachFiles(tab, [...e.dataTransfer.files]);
 });
+/** T3 Code's row dragging, with the mouse past 6px: rows reorder within Pinned and Active, and a drop
+ * across a boundary pins, unpins, settles, un-settles or wakes the thread; the Working and Snoozed
+ * shelves take no drops. Pressing Settle, Un-settle or Wake and sweeping over rows does it to each. */
+const DROP_VERBS = { pin: ["pin", "Pin"], unpin: ["pin-off", "Unpin"], settle: ["circle-check", "Settle"], unsettle: ["undo-2", "Un-settle"], wake: ["alarm-clock-off", "Wake"] };
+const dropVerb = (from, to) =>
+  !to || to === from || to === "working" || to === "snoozed" ? null : to === "pinned" ? "pin" : to === "settled" ? "settle" : from === "pinned" ? "unpin" : from === "settled" ? "unsettle" : "wake";
+function showVerb(row, verb) {
+  row.querySelector(".drop-verb")?.remove();
+  row.classList.toggle("verb", !!verb);
+  if (verb) row.querySelector(".slot")?.insertAdjacentHTML("beforeend", `<span class="drop-verb" role="status">${icon(DROP_VERBS[verb][0])}${DROP_VERBS[verb][1]}</span>`);
+}
+let rowDrag = null;
+let dragEndedAt = 0;
+threadList.addEventListener("pointerdown", (e) => {
+  if (e.pointerType !== "mouse" || e.button !== 0 || ui.search || isModClick(e) || e.shiftKey) return;
+  const row = e.target.closest(".thread-row:not(.result)");
+  const act = e.target.closest("[data-act]")?.dataset.act;
+  if (!row || e.target.closest("input, .pr, .pin, .woke") || (act && !["settle", "unsettle", "wake"].includes(act))) return;
+  rowDrag = { row, key: row.dataset.tab, x: e.clientX, y: e.clientY, sweep: act ?? null, started: false };
+});
+addEventListener("pointermove", (e) => {
+  if (!rowDrag) return;
+  if (!rowDrag.started) {
+    if (Math.hypot(e.clientX - rowDrag.x, e.clientY - rowDrag.y) < 6) return;
+    rowDrag.started = true;
+    rowDrag.from = sectionOf(tabByKey(rowDrag.key));
+    hideCard();
+    document.body.classList.add("dragging-row");
+    if (!rowDrag.sweep) startRowDrag(rowDrag);
+  }
+  if (rowDrag.sweep) sweepTo(rowDrag, e.clientY);
+  else dragTo(rowDrag, e.clientY);
+});
+addEventListener("pointerup", () => {
+  const drag = rowDrag;
+  rowDrag = null;
+  if (!drag?.started) return;
+  document.body.classList.remove("dragging-row");
+  dragEndedAt = Date.now();
+  if (drag.sweep) endSweep(drag);
+  else endRowDrag(drag);
+});
+// A drag ends with a click where it let go, which mustn't open or settle anything more.
+threadList.addEventListener("click", (e) => Date.now() - dragEndedAt < 300 && e.stopPropagation(), true);
+
+function startRowDrag(drag) {
+  const rows = [...threadList.querySelectorAll(".thread-row")];
+  const inSection = (section) => rows.filter((r) => sectionOf(tabByKey(r.dataset.tab)) === section);
+  const marker = (cls, section, html) => {
+    const el = document.createElement("div");
+    el.className = cls;
+    el.dataset.mark = section;
+    el.innerHTML = html;
+    return el;
+  };
+  const mark = (section, label) => marker("drag-mark", section, `<span>${label}</span><span class="line"></span>`);
+  const hint = (section, label) => marker("drag-hint", section, label);
+  threadList.prepend(mark("pinned", "Pinned"));
+  const activeMark = mark("active", "Active");
+  (inSection("pinned").at(-1) ?? threadList.firstElementChild).after(activeMark);
+  if (!inSection("active").some((r) => r !== drag.row)) activeMark.after(hint("active", "Active"));
+  const settledHead = threadList.querySelector('.settled-head[data-shelf="settled"]');
+  if (!settledHead) threadList.append(marker("drag-mark sink", "settled", `<span>Settled</span><span class="line"></span>`), hint("settled", "Settled"));
+  else if (!inSection("settled").some((r) => r !== drag.row)) settledHead.after(hint("settled", "Settled"));
+  drag.row.classList.add("dragging");
+  dragTo(drag, drag.y);
+}
+/** The section a spot in the list belongs to, by the last boundary above it. */
+function sectionAt(el) {
+  for (let prev = el.previousElementSibling; prev; prev = prev.previousElementSibling) {
+    const found = prev.classList.contains("drag-mark") ? prev.dataset.mark : prev.classList.contains("settled-head") && prev.dataset.shelf;
+    if (found) return found;
+  }
+  return "pinned";
+}
+function dragTo(drag, y) {
+  const others = [...threadList.children].filter((el) => el !== drag.row);
+  const before = others.find((el) => {
+    const r = el.getBoundingClientRect();
+    return y < r.top + r.height / 2;
+  });
+  if (before?.dataset.mark === "pinned" && !before.previousElementSibling) before.after(drag.row);
+  else if (before) before.before(drag.row);
+  else threadList.append(drag.row);
+  drag.to = sectionAt(drag.row);
+  const verb = dropVerb(drag.from, drag.to);
+  showVerb(drag.row, verb);
+  for (const el of threadList.querySelectorAll("[data-mark], .settled-head")) el.classList.toggle("drop-target", (el.dataset.mark ?? el.dataset.shelf) === drag.to && !!(verb || drag.to === drag.from));
+}
+function endRowDrag(drag) {
+  const tab = tabByKey(drag.key);
+  const key = threadKey(tab);
+  const keysIn = (section) => [...threadList.querySelectorAll(".thread-row")].filter((r) => sectionAt(r) === section).map((r) => threadKey(tabByKey(r.dataset.tab)));
+  const verb = dropVerb(drag.from, drag.to);
+  if (verb === "settle") return settle(tab);
+  if (drag.to === "pinned" || drag.to === "active") {
+    const order = keysIn(drag.to);
+    const list = drag.to === "pinned" ? "pins" : "order";
+    const undo = changeMarks(key, () => {
+      sideMarks[list] = [...order, ...sideMarks[list].filter((k) => !order.includes(k))];
+      if (drag.to === "active") sideMarks.pins = sideMarks.pins.filter((k) => k !== key);
+      if (verb === "unsettle" || drag.from === "settled") {
+        delete sideMarks.settled[key];
+        sideMarks.unsettled[key] = nowS();
+      }
+      if (drag.from === "snoozed") delete sideMarks.snoozed[key];
+    });
+    if (verb === "unpin") noteUndo("Unpinned", undo);
+    return;
+  }
+  renderSidebar();
+}
+
+function rowAtY(y) {
+  return [...threadList.querySelectorAll(".thread-row")].find((r) => {
+    const box = r.getBoundingClientRect();
+    return y >= box.top && y < box.bottom;
+  });
+}
+function sweepTo(drag, y) {
+  const order = [...threadList.querySelectorAll(".thread-row")];
+  const under = rowAtY(y);
+  if (!under) return;
+  const [i, j] = [order.indexOf(drag.row), order.indexOf(under)];
+  const section = sectionOf(tabByKey(drag.key));
+  drag.keys = order.slice(Math.min(i, j), Math.max(i, j) + 1).filter((r) => sectionOf(tabByKey(r.dataset.tab)) === section).map((r) => r.dataset.tab);
+  const verb = drag.sweep === "wake" ? "wake" : drag.sweep;
+  for (const row of order) {
+    const swept = drag.keys.includes(row.dataset.tab);
+    row.classList.toggle("swept", swept);
+    if (swept !== !!row.querySelector(".drop-verb")) showVerb(row, swept ? verb : null);
+  }
+}
+function endSweep(drag) {
+  const list = (drag.keys ?? []).map(tabByKey).filter(Boolean);
+  const run = { settle, unsettle, wake }[drag.sweep];
+  if (list.length) list.forEach(run);
+  else renderSidebar();
+}
+
 /** The row under a point the app's window reports in physical pixels, for a drop from Finder. */
 function threadAt(position) {
   const row = guiOn() && position && document.elementFromPoint(position.x / devicePixelRatio, position.y / devicePixelRatio)?.closest("#thread-list .thread-row");
@@ -674,7 +1186,84 @@ function setProjectFilter(project) {
   save("gui-project", ui.project);
   renderSidebar();
 }
-document.getElementById("project-filter").onchange = (e) => setProjectFilter(e.target.value);
+const projectNames = () => [...new Set(tabs.map(projectName))].sort();
+const tabOfProject = (name) => tabs.find((t) => projectName(t) === name);
+const projectFilter = document.getElementById("project-filter");
+const projectMenu = document.createElement("div");
+projectMenu.id = "project-menu";
+projectMenu.hidden = true;
+document.body.append(projectMenu);
+/** T3 Code's project scope combobox: a searchable list under the search field, each project with its
+ * settings gear, "All projects" first. */
+function openProjectMenu() {
+  projectMenu.innerHTML = `<input type="text" aria-label="Search projects" placeholder="Search projects..." spellcheck="false" autocomplete="off"><div class="list" role="listbox"></div>`;
+  const input = projectMenu.querySelector("input");
+  const list = projectMenu.querySelector(".list");
+  let hit = 0;
+  let shown = [];
+  const draw = () => {
+    const q = input.value.trim().toLowerCase();
+    shown = ["", ...projectNames()].filter((name) => !q || (name || "All projects").toLowerCase().includes(q));
+    hit = Math.min(hit, Math.max(0, shown.length - 1));
+    list.innerHTML = shown.length
+      ? shown.map((name, i) => `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(name)}" aria-selected="${name === ui.project}">${name ? projectIcon(name, tabOfProject(name)) : icon("folder")}<span class="label">${esc(name || "All projects")}</span>${name ? `<button type="button" class="gear" data-gear="${esc(name)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(name)}">${icon("gear")}</button>` : ""}</div>`).join("")
+      : `<p class="empty">No matching projects.</p>`;
+  };
+  const pick = (name) => {
+    closeProjectMenu();
+    setProjectFilter(name);
+  };
+  input.oninput = () => {
+    hit = 0;
+    draw();
+  };
+  input.onkeydown = (e) => {
+    if (e.isComposing) return;
+    if (e.key === "Escape") return (e.stopPropagation(), closeProjectMenu());
+    if (e.key === "Enter" && shown.length) return (e.preventDefault(), pick(shown[hit]));
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    hit = (hit + (e.key === "ArrowDown" ? 1 : -1) + shown.length) % Math.max(1, shown.length);
+    draw();
+  };
+  list.onmousemove = (e) => {
+    const i = [...list.children].indexOf(e.target.closest(".item"));
+    if (i >= 0 && i !== hit) {
+      hit = i;
+      list.querySelectorAll(".item").forEach((el, j) => el.classList.toggle("hit", j === i));
+    }
+  };
+  list.onclick = (e) => {
+    const gear = e.target.closest("[data-gear]");
+    if (gear) {
+      closeProjectMenu();
+      return openProjectSettings(tabOfProject(gear.dataset.gear));
+    }
+    const item = e.target.closest("[data-project]");
+    if (item) pick(item.dataset.project);
+  };
+  list.oncontextmenu = (e) => {
+    const item = e.target.closest("[data-project]");
+    if (!item?.dataset.project) return;
+    e.preventDefault();
+    closeProjectMenu();
+    openProjectSettings(tabOfProject(item.dataset.project));
+  };
+  draw();
+  const anchor = document.querySelector("#sidebar .search").getBoundingClientRect();
+  projectMenu.hidden = false;
+  projectMenu.style.left = `${anchor.left}px`;
+  projectMenu.style.top = `${anchor.bottom + 4}px`;
+  projectMenu.style.width = `${Math.min(288, innerWidth - anchor.left - 8)}px`;
+  projectFilter.setAttribute("aria-expanded", "true");
+  input.focus();
+}
+function closeProjectMenu() {
+  projectMenu.hidden = true;
+  projectFilter.setAttribute("aria-expanded", "false");
+}
+projectFilter.onclick = () => (projectMenu.hidden ? openProjectMenu() : closeProjectMenu());
+window.addEventListener("mousedown", (e) => !projectMenu.hidden && !e.target.closest("#project-menu, #project-filter") && closeProjectMenu(), true);
 
 const projectCount = () => new Set(tabs.map((t) => `${t.machine}:${threadOf(t).workspace?.project ?? t.view.cwd}`)).size;
 /** A new session in the thread's folder, on its machine, without the picker. */
@@ -702,36 +1291,47 @@ function newThreadWithoutProject() {
   if (pickerOpen()) closeProjects();
   openTab(machine, null).catch((e) => tell(`Couldn't open a thread: ${esc(e)}`, 6000));
 }
-async function addProject() {
+async function addProject(machine = active?.machine) {
   if (narrow(768)) toggleSidebar(false);
-  await showProjects({ machine: active?.machine });
+  await showProjects({ machine });
   if (pickerOpen() && picker.querySelector(".choices")) browseFolders();
 }
 document.getElementById("new-thread").onclick = (e) => newThread(e.shiftKey);
 document.getElementById("add-project").onclick = () => addProject();
 
-/** Called as a tab closes, so ⌘⇧T can bring its conversation back. */
+const closedEntry = (tab) => ({ machine: tab.machine, cwd: tab.view.cwd, session: threadOf(tab).session, title: sideMarks.titles[threadKey(tab)], pinned: isPinned(tab) });
+/** Called as a tab closes, so ⌘⇧T can bring its conversation back, unless it was archived or deleted. */
 function rememberClosed(tab) {
-  const t = threadOf(tab);
-  closedThreads.push({ machine: tab.machine, cwd: tab.view.cwd, session: t.session, title: sideMarks.titles[threadKey(tab)], pinned: isPinned(tab) });
-  closedThreads.splice(0, closedThreads.length - 20);
+  if (!tab.forget) pushClosed({ thread: closedEntry(tab) });
   for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) delete sideMarks[m][threadKey(tab)];
-  sideMarks.pins = sideMarks.pins.filter((k) => k !== threadKey(tab));
+  for (const m of ["pins", "order"]) sideMarks[m] = sideMarks[m].filter((k) => k !== threadKey(tab));
   saveMarks();
 }
+/** Called as a panel tab closes. */
+const rememberClosedSurface = (tab, surface) => surface && pushClosed({ tab: tab.key, surface });
 
 async function reopenClosed() {
-  const last = closedThreads.at(-1);
-  if (!last) return tell("No closed thread to reopen");
-  if (!machines.get(last.machine)?.view.online) return tell(`${esc(machineName(last.machine))} is offline`);
-  closedThreads.pop();
+  for (let last = closedViews.at(-1); last; last = closedViews.at(-1)) {
+    if (last.thread) return resumeThread(last.thread, () => closedViews.pop());
+    closedViews.pop();
+    const tab = tabByKey(last.tab);
+    if (!tab) continue;
+    if (tab !== active) activate(tab);
+    return addSurface(tab, last.surface);
+  }
+  tell("Nothing closed to reopen");
+}
+/** Starts `entry`'s conversation again with --resume; `taken` runs once the machine is there to take it. */
+async function resumeThread(entry, taken) {
+  if (!machines.get(entry.machine)?.view.online) return tell(`${esc(machineName(entry.machine))} is offline`);
+  taken();
   try {
-    const args = last.session ? ["--resume", last.session] : [];
-    const id = await callOn(last.machine, { cmd: "run", run: { folder: last.cwd, args, env: [] } });
-    await refreshTabs(last.machine);
-    const tab = tabByKey(keyOf(last.machine, id));
-    if (last.title) sideMarks.titles[threadKey(tab)] = last.title;
-    if (last.pinned) sideMarks.pins.push(threadKey(tab));
+    const args = entry.session ? ["--resume", entry.session] : [];
+    const id = await callOn(entry.machine, { cmd: "run", run: { folder: entry.cwd, args, env: [] } });
+    await refreshTabs(entry.machine);
+    const tab = tabByKey(keyOf(entry.machine, id));
+    if (entry.title) sideMarks.titles[threadKey(tab)] = entry.title;
+    if (entry.pinned) sideMarks.pins.push(threadKey(tab));
     saveMarks();
     activate(tab);
   } catch (e) {
@@ -739,10 +1339,83 @@ async function reopenClosed() {
   }
 }
 
-function copyResume() {
+function forget(tab) {
+  tab.forget = true;
+  selected.delete(tab.key);
+  closeTab(tab);
+}
+/** T3 Code's Archive: the session closes and Settings keeps it, to bring back with Unarchive. */
+function archiveThread(tab) {
+  if (turnLive(tab)) return;
+  archived.push({ ...closedEntry(tab), name: threadTitle(tab), project: projectName(tab), at: nowS(), created: unixOf(threadOf(tab).items[0]?.at) || undefined });
+  saveArchived();
+  forget(tab);
+}
+async function deleteThreads(list) {
+  const one = list.length === 1;
+  const sure = await askDialog(`<h3>${one ? `Delete thread "${esc(threadTitle(list[0]))}"?` : `Delete ${list.length} threads?`}</h3>
+    <p class="about">This closes ${one ? "its session" : "their sessions"} and removes ${one ? "it" : "them"} from pinned for good. Claude Code keeps ${one ? "its transcript" : "their transcripts"}.</p>
+    <div class="actions"><button type="button" class="outline" data-cancel>Cancel</button><button class="destructive">Delete</button></div>`, () => true);
+  if (sure) list.forEach(forget);
+}
+
+const threadText = (tab) => {
+  const text = threadOf(tab).items.filter((i) => i.kind === "user" || i.kind === "text").map((i) => `${i.kind === "user" ? "USER" : "ASSISTANT"}: ${i.text}`).join("\n\n");
+  return text.length > 8000 ? `[Earlier content truncated]\n${text.slice(-8000)}` : text;
+};
+/** T3 Code's Regenerate title: claude reads the thread and names it again, as a rename would. */
+function regenerateTitles(list) {
+  return Promise.all(list.filter((tab) => !titling.has(tab.key)).map(async (tab) => {
+    titling.add(tab.key);
+    renderSidebar();
+    try {
+      const title = await callOn(tab.machine, { cmd: "regenerate_title", tab: tab.view.id, previous: threadTitle(tab), thread: threadText(tab) });
+      if (title !== threadTitle(tab)) changeMarks(threadKey(tab), () => (sideMarks.titles[threadKey(tab)] = title));
+    } catch (e) {
+      tell(`Couldn't regenerate the title: ${esc(e)}`, 6000);
+    }
+    titling.delete(tab.key);
+    renderSidebar();
+    if (tab === active) renderThread();
+  }));
+}
+
+async function openProjectSettings(tab) {
+  if (!settingsOpen()) await toggleSettings();
+  projectsMachine = tab.machine;
+  await showPage("projects");
+  await showProjectHistory(threadOf(tab).workspace?.project ?? tab.view.cwd);
+}
+
+const isModClick = (e) => (IS_MAC ? e.metaKey : e.ctrlKey);
+function toggleSelected(tab) {
+  if (!selected.delete(tab.key)) selected.add(tab.key);
+  selectFrom = tab.key;
+  renderSidebar();
+}
+function selectRange(tab) {
+  const order = rowTabs().map((t) => t.key);
+  const from = order.indexOf(selectFrom ?? active?.key);
+  const to = order.indexOf(tab.key);
+  if (from < 0) return toggleSelected(tab);
+  for (const key of order.slice(Math.min(from, to), Math.max(from, to) + 1)) selected.add(key);
+  renderSidebar();
+}
+function clearSelection() {
+  if (!selected.size) return;
+  selected.clear();
+  selectFrom = null;
+  renderSidebar();
+}
+
+/** T3 Code's thread reference: the pull request open in the panel, else the thread's latest, else its ID. */
+function copyThreadReference() {
   if (!active) return;
-  const command = resumeCommand(active);
-  if (command) copyAndTell(command, command);
+  const shown = ui.panelOpen && shownSurface(active)?.kind === "pr" ? shownSurface(active).url : null;
+  const pr = shown ?? prOf(active)?.url;
+  if (pr) return copyAndTell(pr, "PR link");
+  const session = threadOf(active).session;
+  if (session) copyAndTell(session, "thread ID");
   else tell("This thread has no session yet");
 }
 
@@ -766,7 +1439,7 @@ onGuiKey("n", () => newThread(true), { shift: true });
 onGuiKey("n", () => newThreadWithoutProject(), { alt: true });
 onGuiKey("s", () => active && (settled(active) ? unsettle(active) : settle(active)), { shift: true });
 onGuiKey("p", () => active && pin(active), { shift: true });
-onGuiKey("c", () => copyResume(), { shift: true });
+onGuiKey("c", () => copyThreadReference(), { shift: true });
 onGuiKey("t", () => reopenClosed(), { shift: true });
 onGuiKey(["1", "2", "3", "4", "5", "6", "7", "8", "9"], (e) => jumpToRow(Number(e.key)));
 document.getElementById("workspace").addEventListener("click", (e) => {
@@ -821,7 +1494,7 @@ sidebarRail.ondblclick = () => save("gui-sidebar-width", String(setSidebarWidth(
 /** The header's project crumb opens a new thread there; a double-click on the title renames it. */
 function crumbHtml(tab) {
   const name = projectName(tab);
-  return `<button class="project" data-new-here title="New thread in ${esc(name)}">${projectIcon(name)}<span>${esc(name)}</span></button><span class="sep">/</span><span class="title" title="${esc(threadTitle(tab))}">${esc(threadTitle(tab))}</span>${statsHtml(tab)}`;
+  return `<button class="project" data-new-here title="New thread in ${esc(name)}">${projectIcon(name, tab)}<span>${esc(name)}</span></button><span class="sep">/</span><span class="title" title="${esc(threadTitle(tab))}">${esc(threadTitle(tab))}</span>${statsHtml(tab)}`;
 }
 const crumbEl = document.querySelector("#chat-head .crumb");
 crumbEl.addEventListener("click", (e) => e.target.closest("[data-new-here]") && newThreadIn(active));
@@ -829,5 +1502,5 @@ crumbEl.addEventListener("dblclick", (e) => active && e.target.closest(".title")
 document.getElementById("chat-head").addEventListener("contextmenu", (e) => {
   if (!active || e.target.closest("input, button:not([data-new-here])")) return;
   e.preventDefault();
-  openSideMenu(rowMenuItems(active), { x: e.clientX, y: e.clientY });
+  showMenu(rowMenuItems(active), { x: e.clientX, y: e.clientY });
 });

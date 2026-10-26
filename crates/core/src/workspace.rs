@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const DIFF_LIMIT: usize = 400_000;
-const PR_FIELDS: &str = "number,title,state,isDraft,url,body,author,createdAt,updatedAt,mergedAt,closedAt,headRefName,baseRefName,additions,deletions,changedFiles,reviewDecision,mergeable,statusCheckRollup,reviews,comments,commits,labels,reviewRequests";
+const PR_FIELDS: &str = "number,title,state,isDraft,url,body,author,createdAt,updatedAt,mergedAt,closedAt,headRefName,baseRefName,headRefOid,baseRefOid,additions,deletions,changedFiles,reviewDecision,mergeable,statusCheckRollup,reviews,comments,commits,labels,reviewRequests,autoMergeRequest";
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -42,7 +42,70 @@ pub fn pull_request(cwd: &Path, pr: &str, path: Option<&str>) -> Result<Value, S
         view["truncated"] = true.into();
     }
     view["diff"] = diff.into();
+    if let Value::Object(extras) = crate::panel::pr_extras(cwd, pr, &view, path) {
+        for (key, value) in extras {
+            view[key] = value;
+        }
+    }
     Ok(view)
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    Open,
+    Draft,
+    Merged,
+    Closed,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct PrStatus {
+    pub state: PrState,
+    pub title: String,
+    pub merged_at: Option<String>,
+    pub closed_at: Option<String>,
+}
+
+pub fn pr_status(cwd: &Path, pr: &str, path: Option<&str>) -> Result<PrStatus, String> {
+    check_pr(pr)?;
+    parse_pr_status(&gh(cwd, path, &["pr", "view", "--json", "state,isDraft,title,mergedAt,closedAt", "--", pr])?)
+}
+
+fn parse_pr_status(view: &str) -> Result<PrStatus, String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct View {
+        state: String,
+        #[serde(default)]
+        is_draft: bool,
+        #[serde(default)]
+        title: String,
+        merged_at: Option<String>,
+        closed_at: Option<String>,
+    }
+    let view: View = serde_json::from_str(view).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+    let state = match view.state.as_str() {
+        "MERGED" => PrState::Merged,
+        "CLOSED" => PrState::Closed,
+        _ if view.is_draft => PrState::Draft,
+        _ => PrState::Open,
+    };
+    Ok(PrStatus { state, title: view.title, merged_at: view.merged_at, closed_at: view.closed_at })
+}
+
+/// Checks out the pull request `pr`, a number or URL, in `cwd` with gh.
+pub fn checkout_pr(cwd: &Path, pr: &str, path: Option<&str>) -> Result<(), String> {
+    check_pr(pr)?;
+    gh(cwd, path, &["pr", "checkout", "--", pr]).map(|_| ())
+}
+
+/// The repository's pull requests, open ones first and then the newest, for the composer's `#` menu.
+pub fn pull_requests(cwd: &Path, path: Option<&str>) -> Result<Value, String> {
+    let list = gh(cwd, path, &["pr", "list", "--state", "all", "--limit", "50", "--json", "number,title,state,isDraft,url,headRefName"])?;
+    let mut list: Vec<Value> = serde_json::from_str(&list).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+    list.sort_by_key(|pr| (pr["state"] != "OPEN", std::cmp::Reverse(pr["number"].as_u64())));
+    Ok(Value::Array(list))
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -53,15 +116,45 @@ pub enum PrAction {
     Rebase,
     /// Marks a draft ready for review.
     Ready,
+    /// Turns an open pull request back into a draft.
+    Draft,
+    Close,
+    Reopen,
+    /// Opens a pull request that undoes this merged one.
+    Revert,
+    /// Merges once the required checks and reviews pass, by the method named.
+    AutoMerge,
+    AutoSquash,
+    AutoRebase,
+    DisableAuto,
+    /// Deletes a merged pull request's branch on GitHub.
+    DeleteBranch,
 }
 
 pub fn pr_action(cwd: &Path, pr: &str, action: PrAction, path: Option<&str>) -> Result<(), String> {
     check_pr(pr)?;
+    if action == PrAction::DeleteBranch {
+        let view: Value = serde_json::from_str(&gh(cwd, path, &["pr", "view", "--json", "headRefName,headRepository,headRepositoryOwner", "--", pr])?).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+        let (owner, repo, branch) = (view["headRepositoryOwner"]["login"].as_str().unwrap_or(""), view["headRepository"]["name"].as_str().unwrap_or(""), view["headRefName"].as_str().unwrap_or(""));
+        if owner.is_empty() || repo.is_empty() || branch.is_empty() {
+            return Err("gh didn't say which branch this pull request is on".into());
+        }
+        return gh(cwd, path, &["api", "-X", "DELETE", &format!("repos/{owner}/{repo}/git/refs/heads/{branch}")]).map(drop);
+    }
     let args: &[&str] = match action {
         PrAction::Merge => &["pr", "merge", "--merge", "--", pr],
         PrAction::Squash => &["pr", "merge", "--squash", "--", pr],
         PrAction::Rebase => &["pr", "merge", "--rebase", "--", pr],
         PrAction::Ready => &["pr", "ready", "--", pr],
+        PrAction::Draft => &["pr", "ready", "--undo", "--", pr],
+        PrAction::Close => &["pr", "close", "--", pr],
+        PrAction::Reopen => &["pr", "reopen", "--", pr],
+        PrAction::Revert => &["pr", "revert", "--", pr],
+        PrAction::AutoMerge => &["pr", "merge", "--auto", "--merge", "--", pr],
+        PrAction::AutoSquash => &["pr", "merge", "--auto", "--squash", "--", pr],
+        PrAction::AutoRebase => &["pr", "merge", "--auto", "--rebase", "--", pr],
+        PrAction::DisableAuto => &["pr", "merge", "--disable-auto", "--", pr],
+        PrAction::DeleteBranch => unreachable!("answered above"),
     };
     gh(cwd, path, args).map(drop)
 }
@@ -107,15 +200,23 @@ pub struct Diff {
     pub truncated: bool,
     /// The ref `DiffScope::Base` compared with, such as `origin/main`.
     pub base: Option<String>,
+    /// The working tree's snapshot the diff ends on, a git tree, to read its files from.
+    pub tree: String,
 }
 
-pub fn diff(cwd: &Path, scope: DiffScope, ignore_whitespace: bool) -> Result<Diff, String> {
+pub fn diff(cwd: &Path, scope: DiffScope, ignore_whitespace: bool, against: Option<&str>) -> Result<Diff, String> {
     let git = |args: &[&str]| run(cwd, None, "git", args).ok().map(|out| out.trim().to_owned()).filter(|out| !out.is_empty());
     let tree = history::snapshot(cwd).ok_or("this folder is not a git repository")?;
     let (from, base) = match scope {
         DiffScope::Uncommitted => (git(&["rev-parse", "--verify", "-q", "HEAD"]).unwrap_or_else(|| EMPTY_TREE.to_owned()), None),
         DiffScope::Base => {
-            let base = git(&["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"])
+            let chosen = match against {
+                Some(b) if b.starts_with('-') || b.is_empty() => return Err(format!("{b:?} is not a branch")),
+                Some(b) => Some(git(&["rev-parse", "--verify", "-q", b]).map(|_| b.to_owned()).ok_or_else(|| format!("there is no branch {b}"))?),
+                None => None,
+            };
+            let base = chosen
+                .or_else(|| git(&["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]))
                 .or_else(|| ["origin/main", "origin/master", "main", "master"].into_iter().find(|b| git(&["rev-parse", "--verify", "-q", b]).is_some()).map(str::to_owned))
                 .ok_or("there is no default branch to compare with: no origin/HEAD, main or master")?;
             let fork = git(&["merge-base", "HEAD", &base]).ok_or_else(|| format!("this branch shares no history with {base}"))?;
@@ -132,7 +233,7 @@ pub fn diff(cwd: &Path, scope: DiffScope, ignore_whitespace: bool) -> Result<Dif
         Failure::Said(said) => format!("git: {said}"),
     })?;
     let truncated = clip(&mut patch);
-    Ok(Diff { patch, truncated, base })
+    Ok(Diff { patch, truncated, base, tree })
 }
 
 /// A TCP port a process on the machine listens on and that answers HTTP with a page.
@@ -390,6 +491,21 @@ mod tests {
         assert_eq!((wt.branch.as_deref(), wt.worktree, wt.project), (Some("fix-it"), true, repo.display().to_string()));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn pull_requests_list_open_ones_first_then_the_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        let list = r#"[{"number":3,"state":"MERGED"},{"number":5,"state":"CLOSED"},{"number":2,"state":"OPEN"},{"number":4,"state":"OPEN"}]"#;
+        std::fs::write(&gh, format!("#!/bin/sh\necho \"$@\" > args\necho '{list}'\n")).unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path = format!("{}:/usr/bin:/bin", dir.path().display());
+        let prs = pull_requests(dir.path(), Some(&path)).unwrap();
+        let order: Vec<u64> = prs.as_array().unwrap().iter().map(|p| p["number"].as_u64().unwrap()).collect();
+        assert_eq!(order, [4, 2, 5, 3]);
+        assert_eq!(std::fs::read_to_string(dir.path().join("args")).unwrap().trim(), "pr list --state all --limit 50 --json number,title,state,isDraft,url,headRefName");
+    }
+
     #[test]
     fn a_pull_request_must_be_a_number_or_url() {
         let dir = tempfile::tempdir().unwrap();
@@ -398,6 +514,20 @@ mod tests {
         }
         let missing = pull_request(dir.path(), "7", Some(dir.path().to_str().unwrap())).unwrap_err();
         assert!(missing.contains("isn't installed"), "{missing}");
+        assert!(pr_status(dir.path(), "--web", None).unwrap_err().contains("is not a pull request"));
+    }
+
+    #[test]
+    fn a_pull_request_status_reads_gh_states() {
+        let status = |json: &str| parse_pr_status(json).unwrap();
+        assert_eq!(status(r#"{"state":"OPEN","isDraft":false,"title":"Add notes","mergedAt":null,"closedAt":null}"#).state, PrState::Open);
+        assert_eq!(status(r#"{"state":"OPEN","isDraft":true,"title":"t","mergedAt":null,"closedAt":null}"#).state, PrState::Draft);
+        assert_eq!(status(r#"{"state":"CLOSED","isDraft":true,"title":"t","mergedAt":null,"closedAt":"2026-01-02T00:00:00Z"}"#).state, PrState::Closed);
+        assert_eq!(
+            status(r#"{"state":"MERGED","isDraft":false,"title":"Add notes","mergedAt":"2026-01-01T10:40:00Z","closedAt":"2026-01-01T10:40:00Z"}"#),
+            PrStatus { state: PrState::Merged, title: "Add notes".into(), merged_at: Some("2026-01-01T10:40:00Z".into()), closed_at: Some("2026-01-01T10:40:00Z".into()) }
+        );
+        assert!(parse_pr_status("not json").unwrap_err().contains("bad answer"));
     }
 
     fn commit(dir: &Path, message: &str) {
@@ -411,16 +541,16 @@ mod tests {
         let repo = dir.path();
         git(repo, &["init", "-q", "-b", "main"]);
         std::fs::write(repo.join("new.txt"), "fresh\n").unwrap();
-        let before_any_commit = diff(repo, DiffScope::Uncommitted, false).unwrap();
+        let before_any_commit = diff(repo, DiffScope::Uncommitted, false, None).unwrap();
         assert!(before_any_commit.patch.contains("+++ b/new.txt"), "{}", before_any_commit.patch);
 
         std::fs::write(repo.join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
         commit(repo, "first");
         std::fs::write(repo.join("a.rs"), "fn a() {}\n    fn b() {}\nfn c() {}\n").unwrap();
         std::fs::write(repo.join("untracked.md"), "hi\n").unwrap();
-        let all = diff(repo, DiffScope::Uncommitted, false).unwrap();
+        let all = diff(repo, DiffScope::Uncommitted, false, None).unwrap();
         assert!(all.patch.contains("+    fn b() {}") && all.patch.contains("+++ b/untracked.md"), "{}", all.patch);
-        let trimmed = diff(repo, DiffScope::Uncommitted, true).unwrap();
+        let trimmed = diff(repo, DiffScope::Uncommitted, true, None).unwrap();
         assert!(!trimmed.patch.contains("+    fn b() {}") && trimmed.patch.contains("+fn c() {}"), "{}", trimmed.patch);
         assert_eq!((all.base, all.truncated), (None, false));
     }
@@ -436,14 +566,19 @@ mod tests {
         std::fs::write(repo.join("feature.txt"), "two\n").unwrap();
         commit(repo, "feature");
         std::fs::write(repo.join("wip.txt"), "three\n").unwrap();
-        let changes = diff(repo, DiffScope::Base, false).unwrap();
+        let changes = diff(repo, DiffScope::Base, false, None).unwrap();
         assert_eq!(changes.base.as_deref(), Some("main"));
+        let against_feature = diff(repo, DiffScope::Base, false, Some("feature")).unwrap();
+        assert_eq!(against_feature.base.as_deref(), Some("feature"));
+        assert!(against_feature.patch.contains("b/wip.txt") && !against_feature.patch.contains("b/feature.txt"), "{}", against_feature.patch);
+        assert!(diff(repo, DiffScope::Base, false, Some("--output=x")).unwrap_err().contains("is not a branch"));
+        assert!(diff(repo, DiffScope::Base, false, Some("nope")).unwrap_err().contains("no branch nope"));
         assert!(changes.patch.contains("b/feature.txt") && changes.patch.contains("b/wip.txt") && !changes.patch.contains("main.txt"), "{}", changes.patch);
 
         let lone = tempfile::tempdir().unwrap();
         git(lone.path(), &["init", "-q", "-b", "trunk"]);
-        assert!(diff(lone.path(), DiffScope::Base, false).unwrap_err().contains("no default branch"));
-        assert!(diff(&lone.path().join(".git"), DiffScope::Uncommitted, false).is_err());
+        assert!(diff(lone.path(), DiffScope::Base, false, None).unwrap_err().contains("no default branch"));
+        assert!(diff(&lone.path().join(".git"), DiffScope::Uncommitted, false, None).is_err());
     }
 
     #[test]

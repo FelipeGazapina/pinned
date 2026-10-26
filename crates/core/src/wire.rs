@@ -4,13 +4,16 @@
 use crate::accounts::{self, AccountId, Provider};
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
+use crate::branches::GitStep;
+use crate::scripts::Script;
+use crate::panel::{ReviewComment, ReviewEvent};
 use crate::workspace::{DiffScope, PrAction};
 use crate::stats::ThreadStats;
-use crate::{sync, thread};
+use crate::{pulls, subagents, sync, thread, usage};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// A tab's id, unique within its machine, such as `tab-3`.
 pub type TabId = String;
@@ -111,6 +114,12 @@ pub enum Call {
     /// The folder claude runs in. Restarts claude with `bypass` turned `on` or off, resuming the
     /// tab's conversation; a session already running that way is left alone.
     SetBypass { tab: TabId, on: bool, cols: u16, rows: u16 },
+    /// The folder claude runs in. Restarts claude on the tab's conversation with `--model model`,
+    /// which picks it for that conversation alone.
+    SetModel { tab: TabId, model: String, cols: u16, rows: u16 },
+    /// The folder claude runs in. Restarts claude on the tab's conversation, so its skills,
+    /// plugins and MCP servers load again.
+    RestartClaude { tab: TabId, cols: u16, rows: u16 },
     /// `null`. Keystrokes as xterm reports them.
     WriteInput { tab: TabId, data: String },
     /// `null`.
@@ -132,6 +141,11 @@ pub enum Call {
     GitRemote { path: String },
     /// `projects::Folders`: the subfolders matching a path as typed so far, such as `~/pro`.
     Browse { path: String },
+    /// `scaffold::Created`: a new folder named after `name` in `~/pinned`, a git repository with
+    /// a first commit, opened as a project.
+    CreateProject { name: String },
+    /// The URL of the private GitHub repository the project at `path` is now pushed to.
+    PublishProject { path: String },
     /// The folder of a clone of `repo`, found among the machine's projects or cloned into `~/pinned`.
     /// The hub adds the account's GitHub token, for a private repository.
     Clone {
@@ -167,6 +181,15 @@ pub enum Call {
     Workspace { tab: TabId },
     /// What `gh pr view` answers for `pr`, a number or URL, run in the tab's folder, plus `diff`.
     PullRequest { tab: TabId, pr: String },
+    /// `workspace::PrStatus`: whether `pr` is open, a draft, merged or closed, without its diff.
+    PrStatus { tab: TabId, pr: String },
+    /// `Option<String>`: the icon of the tab's project, where T3 Code looks for one, as a data URL.
+    Favicon { tab: TabId },
+    /// `String`: a new title for the tab's conversation, which `claude -p` writes from `thread`, its
+    /// messages, and the `previous` title.
+    RegenerateTitle { tab: TabId, previous: String, thread: String },
+    /// What `gh pr list` answers in the tab's folder: number, title, state, isDraft, url, headRefName.
+    PrList { tab: TabId },
     /// `null`. Merges `pr`, or marks it ready, through gh in the tab's folder.
     PrAction { tab: TabId, pr: String, action: PrAction },
     /// `workspace::Diff`: the tab's working tree against HEAD or the default branch.
@@ -175,6 +198,9 @@ pub enum Call {
         scope: DiffScope,
         #[serde(default)]
         ignore_whitespace: bool,
+        /// The branch `DiffScope::Base` compares with, instead of the default one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
     },
     /// `Vec<workspace::Listener>`: the machine's web servers, the tab's session's own first.
     Ports { tab: TabId },
@@ -199,7 +225,143 @@ pub enum Call {
         branch: String,
         #[serde(default)]
         create: bool,
+        /// Makes or resets `branch` at this ref instead, fetched first when it is `origin/…`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
     },
+    /// `pulls::PullRequests` of the GitHub repositories of the machine's folders `paths`, through gh.
+    PullRequests {
+        paths: Vec<String>,
+        state: pulls::ListState,
+        involvement: pulls::Involvement,
+        #[serde(default)]
+        query: String,
+        /// Rows per search at most; the page asks for more 100 at a time.
+        #[serde(default = "pulls_limit")]
+        limit: usize,
+    },
+    /// `pulls::Stack` the pull request `number` of github.com's `repo` (`owner/name`) sits in, or `null`.
+    PullRequestStack { repo: String, number: u64 },
+    /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since` on.
+    /// `prices` are the user's, per model, which win over LiteLLM's list.
+    TokenUsage {
+        since: u64,
+        #[serde(default)]
+        prices: HashMap<String, usage::Price>,
+    },
+    /// `panel::PageMeta` of the web page at `url`, fetched from this machine.
+    PageMeta { url: String },
+    /// `panel::Refs`: the tab's folder's local and remote branches, for picking what to compare with.
+    Refs { tab: TabId },
+    /// What a step of the header's Git action answers: a commit message, a pull request URL, or
+    /// `null`. Refused while claude works in the tab's folder.
+    Git { tab: TabId, step: GitStep },
+    /// `scripts::ProjectScripts` of the tab's project.
+    ProjectScripts { tab: TabId },
+    /// `null`. Replaces the scripts of the tab's project.
+    SaveProjectScripts { tab: TabId, scripts: Vec<Script> },
+    /// `null`. Checks out the pull request `pr`, a number or URL, in the tab's folder with gh. Refused while claude works there.
+    CheckoutPr { tab: TabId, pr: String },
+    /// The tab's new folder. Moves a tab whose conversation hasn't begun to a worktree of its
+    /// project, `"new"` for one made from what it has checked out, or a path, or back to the
+    /// project's own checkout with `null`, and restarts claude there. Refused while claude works.
+    SetWorkspace {
+        tab: TabId,
+        #[serde(default)]
+        worktree: Option<String>,
+        cols: u16,
+        rows: u16,
+    },
+    /// `panel::FileText` of `path` in the tab's folder, or in its repository when `root`, as of `rev` when given.
+    ReadFile {
+        tab: TabId,
+        path: String,
+        #[serde(default)]
+        root: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+    /// The saved file's new hash. Refused when the file changed since the read that answered `since`.
+    WriteFile {
+        tab: TabId,
+        path: String,
+        #[serde(default)]
+        root: bool,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<String>,
+    },
+    /// `Vec<panel::Hit>`: the lines of the tab's folder that hold `query`.
+    Search {
+        tab: TabId,
+        query: String,
+        #[serde(default)]
+        case: bool,
+        #[serde(default)]
+        regex: bool,
+    },
+    /// `null`. Retitles `pr` or rewrites its description.
+    PrEdit {
+        tab: TabId,
+        pr: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+    },
+    /// `null`. Comments on `pr`, or answers its review thread `reply_to`.
+    PrComment {
+        tab: TabId,
+        pr: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
+    },
+    /// `null`. Submits a review of `pr` with its line comments.
+    PrReview {
+        tab: TabId,
+        pr: String,
+        event: ReviewEvent,
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        comments: Vec<ReviewComment>,
+    },
+    /// `null`. Runs the check at `check`, a GitHub Actions link, again.
+    PrRerun { tab: TabId, check: String },
+    /// `{guide, run}`: the review guide kept for `pr` and the run writing one. `write` starts a run.
+    PrGuide {
+        tab: TabId,
+        pr: String,
+        #[serde(default)]
+        write: bool,
+    },
+    /// The id of a new login shell in the tab's folder, which `attach`, `write_input`, `resize_pty`
+    /// and `close_shell` take as a tab id.
+    OpenShell { tab: TabId, cols: u16, rows: u16 },
+    /// `null`. Ends the shell `shell`.
+    CloseShell { shell: String },
+    /// The address of the machine's device hub, which mirrors its simulators and emulators. It
+    /// starts on the first call; `embed` is the origin of a page that frames it.
+    DeviceHub {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        embed: Option<String>,
+    },
+    /// `Vec<thread::Item>`: the conversation of the subagent the tab's `Agent` tool call `tool` started.
+    Subagent { tab: TabId, tool: String },
+    /// The folder claude runs in. Restarts the tab's claude on a copy of its conversation that stops before
+    /// the prompt `before`, after putting the folder's files back as they were then when `files`.
+    Rewind { tab: TabId, before: String, files: bool, cols: u16, rows: u16 },
+    /// The new tab's id, not yet started: its claude resumes a copy of the tab's conversation through
+    /// the message `through`.
+    Fork { tab: TabId, through: String },
+    /// The path saved, relative to the tab's folder. Writes `text` to `path` inside that folder.
+    SaveFile { tab: TabId, path: String, text: String },
+}
+
+fn pulls_limit() -> usize {
+    100
+
 }
 
 impl Call {
@@ -210,6 +372,10 @@ impl Call {
             self,
             Call::Run { .. }
                 | Call::PullRequest { .. }
+                | Call::PrStatus { .. }
+                | Call::Favicon { .. }
+                | Call::RegenerateTitle { .. }
+                | Call::PrList { .. }
                 | Call::PrAction { .. }
                 | Call::Thread { .. }
                 | Call::Workspace { .. }
@@ -226,6 +392,29 @@ impl Call {
                 | Call::AddAccount { .. }
                 | Call::SignIn { .. }
                 | Call::SwitchAccount { .. }
+                | Call::TokenUsage { .. }
+                | Call::PullRequests { .. }
+                | Call::PullRequestStack { .. }
+                | Call::PageMeta { .. }
+                | Call::Refs { .. }
+                | Call::CheckoutPr { .. }
+                | Call::Git { .. }
+                | Call::SetWorkspace { .. }
+                | Call::ReadFile { .. }
+                | Call::WriteFile { .. }
+                | Call::Search { .. }
+                | Call::PrEdit { .. }
+                | Call::PrComment { .. }
+                | Call::PrReview { .. }
+                | Call::PrRerun { .. }
+                | Call::PrGuide { .. }
+                | Call::DeviceHub { .. }
+                | Call::Subagent { .. }
+                | Call::Rewind { .. }
+                | Call::Fork { .. }
+                | Call::SaveFile { .. }
+                | Call::CreateProject { .. }
+                | Call::PublishProject { .. }
         )
     }
 }
@@ -238,6 +427,10 @@ pub struct ThreadPage {
     pub items: Vec<thread::Item>,
     pub next: u64,
     pub reset: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<thread::Context>,
+    /// Every agent the session spawned, whole on each page. A machine on an older pinned leaves it out.
+    pub agents: Vec<subagents::Subagent>,
 }
 
 /// A connector's session, the same on any machine.
@@ -525,6 +718,13 @@ mod tests {
             Call::SetBypass { tab: "tab-1".into(), on: true, cols: 120, rows: 32 },
             json!({ "cmd": "set_bypass", "tab": "tab-1", "on": true, "cols": 120, "rows": 32 }),
         );
+        round_trip(Call::PullRequestStack { repo: "o/r".into(), number: 7 }, json!({ "cmd": "pull_request_stack", "repo": "o/r", "number": 7 }));
+        round_trip(Call::CreateProject { name: "My App".into() }, json!({ "cmd": "create_project", "name": "My App" }));
+        round_trip(Call::PublishProject { path: "/p".into() }, json!({ "cmd": "publish_project", "path": "/p" }));
+        round_trip(
+            Call::RestartClaude { tab: "tab-1".into(), cols: 120, rows: 32 },
+            json!({ "cmd": "restart_claude", "tab": "tab-1", "cols": 120, "rows": 32 }),
+        );
         round_trip(
             Call::Run {
                 run: RunSpec {
@@ -568,8 +768,30 @@ mod tests {
             json!({ "cmd": "upload", "name": "photo.jpg", "data": "/9g=" }),
         );
         round_trip(
-            Call::Diff { tab: "tab-1".into(), scope: DiffScope::Base, ignore_whitespace: true },
+            Call::Diff { tab: "tab-1".into(), scope: DiffScope::Base, ignore_whitespace: true, base: None },
             json!({ "cmd": "diff", "tab": "tab-1", "scope": "base", "ignore_whitespace": true }),
+        );
+        round_trip(
+            Call::Diff { tab: "tab-1".into(), scope: DiffScope::Base, ignore_whitespace: false, base: Some("origin/dev".into()) },
+            json!({ "cmd": "diff", "tab": "tab-1", "scope": "base", "ignore_whitespace": false, "base": "origin/dev" }),
+        );
+        round_trip(
+            Call::ReadFile { tab: "tab-1".into(), path: "src/a.rs".into(), root: true, rev: Some("HEAD".into()) },
+            json!({ "cmd": "read_file", "tab": "tab-1", "path": "src/a.rs", "root": true, "rev": "HEAD" }),
+        );
+        round_trip(
+            Call::PrReview {
+                tab: "tab-1".into(),
+                pr: "https://github.com/o/r/pull/7".into(),
+                event: ReviewEvent::RequestChanges,
+                body: "".into(),
+                comments: vec![ReviewComment { path: "a.rs".into(), line: 3, side: "RIGHT".into(), start_line: None, body: "why".into() }],
+            },
+            json!({ "cmd": "pr_review", "tab": "tab-1", "pr": "https://github.com/o/r/pull/7", "event": "REQUEST_CHANGES", "body": "", "comments": [{ "path": "a.rs", "line": 3, "side": "RIGHT", "body": "why" }] }),
+        );
+        round_trip(
+            Call::PrAction { tab: "tab-1".into(), pr: "7".into(), action: PrAction::AutoSquash },
+            json!({ "cmd": "pr_action", "tab": "tab-1", "pr": "7", "action": "auto_squash" }),
         );
         round_trip(
             Call::PrAction { tab: "tab-1".into(), pr: "7".into(), action: PrAction::Ready },

@@ -3,11 +3,11 @@ members = [".", "crates/core", "crates/server"]
 
 # scripts/release.sh bumps every `version = ` line in this file, this one included.
 [workspace.package]
-version = "0.10.0"
+version = "0.11.1"
 
 [package]
 name = "pinned"
-version = "0.10.0"
+version = "0.11.1"
 edition = "2021"
 default-run = "pinned"
 
@@ -16,7 +16,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 pinned-core = { path = "crates/core" }
-tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "unstable", "devtools"] }
 serde = { version = "1", features = ["derive"] }
 # tauri::generate_context! expands to code that names serde_json.
 serde_json = "1"
@@ -26,3 +26,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel = "2.1.1"
+# Already in the build through wry; the browser panel calls WKWebView for what tauri doesn't wrap.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData", "NSDate", "NSDictionary", "NSError", "NSSet", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", features = ["NSAppearance", "NSApplication", "NSBitmapImageRep", "NSEvent", "NSImage", "NSImageRep", "NSResponder", "NSView", "NSWindow", "block2"] }
+objc2-web-kit = { version = "0.3", features = ["WKNavigation", "WKSnapshotConfiguration", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataRecord", "WKWebsiteDataStore", "block2", "objc2-app-kit"] }

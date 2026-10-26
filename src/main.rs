@@ -1,5 +1,6 @@
 mod account;
 mod awake;
+mod browser;
 mod commands;
 
 use pinned_core::machine::{Launch, Machine};
@@ -11,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow, Window};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 const OPACITIES: [u8; 6] = [100, 90, 80, 60, 40, 20];
@@ -77,7 +78,7 @@ fn restore_tabs(machine: State<Arc<Machine>>) -> Vec<TabId> {
 }
 
 #[tauri::command]
-fn set_view(window: WebviewWindow, panel: State<Panel>, view: View) -> Result<(), String> {
+fn set_view(window: Window, panel: State<Panel>, view: View) -> Result<(), String> {
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
     let current = window.inner_size().map_err(|e| e.to_string())?.to_logical(scale);
     let (leaving, entering, min) = match view {
@@ -104,7 +105,7 @@ fn set_view(window: WebviewWindow, panel: State<Panel>, view: View) -> Result<()
 }
 
 /// Moves the window so a `size`-sized frame at its position fits inside the monitor's work area.
-fn keep_on_screen(window: &WebviewWindow, size: LogicalSize<f64>, scale: f64) -> tauri::Result<()> {
+fn keep_on_screen(window: &Window, size: LogicalSize<f64>, scale: f64) -> tauri::Result<()> {
     let Some(monitor) = window.current_monitor()? else { return Ok(()) };
     let area = monitor.work_area();
     let size = size.to_physical::<i32>(scale);
@@ -123,7 +124,7 @@ fn keep_on_screen(window: &WebviewWindow, size: LogicalSize<f64>, scale: f64) ->
 /// A nonactivating panel never becomes key on its own, so keystrokes would go to the app
 /// underneath. Called on every click and on start so the terminal receives typing.
 #[tauri::command]
-fn focus_panel(app: AppHandle, window: WebviewWindow) {
+fn focus_panel(app: AppHandle, window: Window) {
     #[cfg(target_os = "macos")]
     {
         use tauri_nspanel::ManagerExt;
@@ -302,7 +303,19 @@ fn main() {
             account::account,
             account::sign_in,
             account::change_password,
-            account::sign_out
+            account::sign_out,
+            browser::browser_show,
+            browser::browser_place,
+            browser::browser_hide,
+            browser::browser_close,
+            browser::browser_state,
+            browser::browser_do,
+            browser::browser_eval,
+            browser::browser_snapshot,
+            browser::browser_window,
+            browser::save_capture,
+            browser::reveal_file,
+            browser::browser_debug_key
         ])
         .setup(move |app| {
             let config = app.path().app_config_dir().ok();

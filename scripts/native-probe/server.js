@@ -8,7 +8,11 @@ const server = http.createServer((req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   if (url.pathname === "/frame") {
     res.setHeader("Content-Type", "text/html");
-    return res.end(`<!doctype html><title>probe</title><h1>pinned probe</h1><script>fetch("/hit?what=frame-ran")</script>`);
+    return res.end(`<!doctype html><title>pinned probe page</title><h1>pinned probe</h1><a href="/two">two</a><script>fetch("/hit?what=frame-ran")</script>`);
+  }
+  if (url.pathname === "/two") {
+    res.setHeader("Content-Type", "text/html");
+    return res.end(`<!doctype html><title>probe two</title><h1>two</h1>`);
   }
   if (url.pathname === "/opened") {
     seen.add("opened");

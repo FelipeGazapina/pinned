@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeader;
 use uuid::Uuid;
 
@@ -57,10 +57,13 @@ pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, open_signup: bool)
         .route("/api/password", post(change_password))
         .route("/api/machines", post(register))
         .route("/api/pair", post(pair))
+        .route("/api/version", get(|| async { env!("CARGO_PKG_VERSION") }))
         .route("/ws/client", get(client_socket))
         .route("/ws/machine", get(machine_socket))
         .route("/install.sh", get(install))
         .route("/download/{file}", get(download))
+        // A prompt link, /new?prompt=…, is the app itself, which reads the link from its address.
+        .route_service("/new", SetResponseHeader::overriding(ServeFile::new(ui.join("index.html")), header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
         // Without it a browser guesses the files stay fresh for hours, and runs an old UI after a deploy.
         .fallback_service(SetResponseHeader::overriding(ServeDir::new(ui), header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
         .with_state(server)

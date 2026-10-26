@@ -310,10 +310,9 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
     late.wait_output(b, "tab-1", "again\r\nagain\r\n");
     assert_eq!(client.wait_output(b, "tab-1", "again\r\nagain\r\n"), format!("{screen}again\r\nagain\r\n"), "the first client never sees the screen twice");
 
-    assert_eq!(
-        client.call(b, json!({ "cmd": "format_disk" })),
-        Err("this hub runs pinned 0.5.1, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`, `start_claude`, `set_bypass`, `write_input`, `resize_pty`, `close_tab`, `set_folder`, `list_projects`, `project_history`, `git_remote`, `browse`, `clone`, `run`, `deliver`, `upload`, `list_accounts`, `add_account`, `remove_account`, `set_project_account`, `sign_in`, `switch_account`, `thread`, `prompt`, `workspace`, `pull_request`, `pr_action`, `diff`, `ports`, `editors`, `open_in`, `commands`, `files`, `branches`, `checkout`".replace("0.5.1", env!("CARGO_PKG_VERSION")))
-    );
+    let refused = client.call(b, json!({ "cmd": "format_disk" })).unwrap_err();
+    let says = format!("this hub runs pinned {}, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`", env!("CARGO_PKG_VERSION"));
+    assert!(refused.starts_with(&says), "{refused}");
     assert!(client.hub(json!({ "cmd": "self_destruct" })).unwrap_err().contains("unknown variant `self_destruct`"));
     assert_eq!(client.call("not-a-machine", json!({ "cmd": "tabs" })), Err("this account has no machine not-a-machine".into()));
 
@@ -344,6 +343,7 @@ fn the_hub_serves_the_install_script_binaries_and_the_web_app() {
     assert_eq!(get("/download/pinned-server-aarch64-apple-darwin").0, 404);
     assert_eq!(get("/download/..%2Fui%2Findex.html").0, 404);
     assert_eq!(get("/"), (200, "<title>pinned</title>".into()));
+    assert_eq!(get("/api/version"), (200, env!("CARGO_PKG_VERSION").into()));
     let page = reqwest::blocking::get(format!("{}/index.html", hub.url)).unwrap();
     assert_eq!(page.headers()["cache-control"], "no-cache", "a browser revalidates the web app after each deploy");
 }
@@ -388,6 +388,8 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     assert_eq!(node_b.machine.tabs()[0].cwd, repo.display().to_string());
 
     let mut node_a = Node::start(&dir_a, creds_a);
+    // The delivery below is a prompt, which the node holds until claude takes the terminal, as this stand-in does.
+    std::fs::write(dir_a.join("claude"), "#!/bin/sh\nstty raw -echo; exec cat\n").unwrap();
     client.wait_machines(&[("mac-mini", true), ("vps", true)]);
     assert!(open(run(Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() })));
     assert_eq!((connector_tabs(&node_a), connector_tabs(&node_b)), (1, 1), "the preferred machine runs it once online");

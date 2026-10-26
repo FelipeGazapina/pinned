@@ -100,7 +100,7 @@ const middle = (text, over = 14) => (text.length > over ? `<span class="head">${
 const prOf = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kind === "pr");
 /** claude's hooks report no answer to a permission menu, so a permission notice with no menu on
  * screen means the turn went on. It sends "waiting for your input" a while after a turn ends. */
-function phaseOf(tab) {
+function hookPhase(tab) {
   if (tab.menu) return "asking";
   const status = statusOf(tab);
   const message = tab.view.message ?? "";
@@ -108,8 +108,13 @@ function phaseOf(tab) {
   if (/permission/i.test(message)) return "working";
   return /waiting for your input/i.test(message) ? "done" : "input";
 }
+/** Agents outlive the turn that spawned them, so the thread is in progress while one runs. */
+function phaseOf(tab) {
+  const phase = hookPhase(tab);
+  return ["done", "idle"].includes(phase) && runningAgents(tab).length ? "delegating" : phase;
+}
 const turnLive = (tab) => ["working", "asking", "input"].includes(phaseOf(tab));
-const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && (tab.view.updated ?? 0) > (seenAt[threadKey(tab)] ?? 0);
+const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && lastActivity(tab) > (seenAt[threadKey(tab)] ?? 0);
 
 async function fetchThread(tab) {
   const t = threadOf(tab);
@@ -128,11 +133,16 @@ async function fetchThread(tab) {
     t.unsupported = false;
     const grew = page.items.length > 0 || !t.loaded;
     if (page.items.some((i) => i.kind === "model")) t.picked = null;
+    if (page.context) t.context = page.context;
     t.items.push(...page.items);
     t.next = page.next;
     t.loaded = true;
-    if (grew && guiOn()) {
-      if (tab === active) renderThread();
+    const moved = takeAgents(t, page.agents);
+    if ((grew || moved) && guiOn()) {
+      if (tab === active) {
+        renderThread();
+        markThreadSeen(tab);
+      }
       renderSidebar();
     }
     if (grew && t.session && !t.history && tab === active) fetchHistory(tab);
@@ -200,7 +210,7 @@ function renderGui() {
       t.watching = true;
       watchMenu(tab);
     }
-    tab.menu = terminalMenu(tab);
+    tab.menu = tab.answering ? null : terminalMenu(tab);
     if (terminalOnly(tab)) continue;
     if (!t.loaded) fetchThread(tab);
     fetchWorkspace(tab);
@@ -208,6 +218,7 @@ function renderGui() {
   }
   for (const key of threads.keys()) if (!tabByKey(key)) threads.delete(key);
   markThreadSeen(active);
+  noteVisit();
   renderSidebar();
   const only = !!active && terminalOnly(active);
   document.getElementById("chat").dataset.terminalOnly = only;
@@ -215,21 +226,14 @@ function renderGui() {
   else if (active && threadOf(active).unsupported) renderUnsupported();
   else renderThread();
   renderPanel();
-  renderGuiUsage();
 }
 
 setInterval(() => {
   if (!guiOn() || document.hidden) return;
-  for (const tab of tabs) if ((tab === active || turnLive(tab)) && !terminalOnly(tab)) fetchThread(tab);
+  for (const tab of tabs) if ((tab === active || turnLive(tab) || phaseOf(tab) === "delegating") && !terminalOnly(tab)) fetchThread(tab);
 }, POLL_MS);
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
 document.addEventListener("visibilitychange", () => markThreadSeen(active));
-
-function renderGuiUsage() {
-  const meter = document.getElementById("gui-usage");
-  meter.replaceChildren(...[...usageMeter.children].map((c) => c.cloneNode(true)));
-  meter.title = usageMeter.title;
-}
 
 function stepThread(step) {
   const order = [...threadList.querySelectorAll(".thread-row")].map((r) => tabByKey(r.dataset.tab));
@@ -239,9 +243,9 @@ function stepThread(step) {
 
 /** The app view's shortcuts, which each part of it adds with `onGuiKey`. They are ⌘ chords, Ctrl ones
  * off the Mac, where a shell in the terminal needs Ctrl+E to end the line. With Option a key goes by
- * position, since Option turns B into ∫ on a Mac. */
+ * position, since Option turns B into ∫ on a Mac. A chord given `when` overrides the others while `when()` holds. */
 const guiKeys = [];
-const onGuiKey = (key, run, { shift = false, alt = false } = {}) => guiKeys.push({ keys: [key].flat(), run, shift, alt });
+const onGuiKey = (key, run, { shift = false, alt = false, when = null } = {}) => guiKeys.push({ keys: [key].flat(), run, shift, alt, when });
 
 window.addEventListener("keydown", (e) => {
   if (settingsOpen() || pickerOpen()) return;
@@ -252,7 +256,8 @@ window.addEventListener("keydown", (e) => {
   if (switchView) setMode(guiOn() ? "terminal" : "gui");
   else if (!guiOn() || (!IS_MAC && e.target.closest?.("#terms"))) return;
   else {
-    const hit = guiKeys.find((k) => k.keys.includes(key) && k.shift === e.shiftKey && k.alt === e.altKey);
+    const hits = guiKeys.filter((k) => k.keys.includes(key) && k.shift === e.shiftKey && k.alt === e.altKey && k.when?.() !== false);
+    const hit = hits.find((k) => k.when) ?? hits[0];
     if (!hit) return;
     hit.run(e);
   }

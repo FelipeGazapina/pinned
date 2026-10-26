@@ -55,9 +55,13 @@ function placeTabs() {
   save("tab-order", JSON.stringify(order.slice(-200)));
 }
 
+// Tabs closed here whose close the machine hasn't answered: a tabs event sent before it still lists them.
+const closing = new Set();
+
 function setTabs(machine, views, { forget = true } = {}) {
   const m = machines.get(machine);
   if (!m) return;
+  views = views.filter((v) => !closing.has(keyOf(machine, v.id)));
   m.tabs = views;
   const keep = new Set(views.map((v) => keyOf(machine, v.id)));
   for (const tab of tabs.filter((t) => t.machine === machine && !keep.has(t.key))) removeTab(tab, forget);
@@ -387,19 +391,9 @@ async function pickFolder(path) {
   }
 }
 
-/** True while a native folder or file dialog is up: it takes focus from the panel, which shouldn't shrink for it. */
-let choosingFolder = false;
-async function chooseFolder(start) {
-  choosingFolder = true;
-  try {
-    return await invoke("pick_folder", { start });
-  } finally {
-    choosingFolder = false;
-  }
-}
 
 async function pickLocalFolder() {
-  const path = await chooseFolder(picking.tab?.view.cwd ?? null);
+  const path = await invoke("pick_folder", { start: picking.tab?.view.cwd ?? null });
   if (path) pickFolder(path);
 }
 
@@ -430,6 +424,7 @@ function addTab(machine, view) {
   const term = new Terminal({
     fontFamily: "ui-monospace, Menlo, monospace",
     fontSize: 12,
+    ...(typeof terminalLook === "function" ? terminalLook() : {}),
     cursorBlink: true,
     allowTransparency: true,
     theme: { background: "#00000000" },
@@ -523,9 +518,10 @@ function closeTab(tab) {
   rememberClosed(tab);
   removeTab(tab, true);
   render();
+  closing.add(tab.key);
   // The app quits with its last tab while signed out, so the local close goes through its own command.
-  if (tab.machine === LOCAL) invoke("close_tab", { tab: tab.view.id });
-  else callOn(tab.machine, { cmd: "close_tab", tab: tab.view.id }).catch(console.warn);
+  const closed = tab.machine === LOCAL ? invoke("close_tab", { tab: tab.view.id }) : callOn(tab.machine, { cmd: "close_tab", tab: tab.view.id });
+  closed.catch(console.warn).finally(() => closing.delete(tab.key));
 }
 
 function removeTab(tab, forget) {
@@ -569,9 +565,15 @@ function focusInput() {
   else active.term.focus();
 }
 
+// The window's minimum height leaves no room for a terminal; a fit there would reflow the
+// buffer into a few cells and claude would redraw at that size, so such a size is ignored.
+const MIN_TERM_COLS = 20;
+const MIN_TERM_ROWS = 4;
 // A hidden terminal can't measure itself, so each tab fits when it is shown.
 function refit(tab) {
   if (!tab || tab.el.hidden || document.body.dataset.view !== "expanded") return;
+  const dims = tab.fit.proposeDimensions();
+  if (!dims || dims.cols < MIN_TERM_COLS || dims.rows < MIN_TERM_ROWS) return;
   tab.fit.fit();
   if (tab.view.running) callOn(tab.machine, { cmd: "resize_pty", tab: tab.view.id, cols: tab.term.cols, rows: tab.term.rows }).catch(() => {});
 }
@@ -617,21 +619,23 @@ const carousel = document.getElementById("carousel");
 const track = document.getElementById("track");
 // A card's three lines need this much height; below it the pill shows one compact row.
 const CARDS_FROM_HEIGHT = 64;
-const CAROUSEL_SPEED = 40;
-const stillMotion = matchMedia("(prefers-reduced-motion: reduce)");
 /** What the track was last built for; items are rebuilt only when this changes. */
 let builtFor = "";
 
-/** Loops every tab through the pill. Status and title changes update the items in place so the scroll doesn't jump. */
+/** The pill lists the sidebar's active threads, leaving settled and snoozed ones out. */
+const pillTabs = () => tabs.filter((t) => !["settled", "snoozed"].includes(sectionOf(t)));
+
+/** Lays the active threads out in a row to scroll through. Status and title changes update the items in place so the scroll doesn't jump. */
 function renderCarousel() {
   const { width } = carousel.getBoundingClientRect();
   if (!width) return;
   const mode = pill.getBoundingClientRect().height >= CARDS_FROM_HEIGHT ? "cards" : "compact";
-  const key = JSON.stringify([mode, Math.round(width), stillMotion.matches, tabs.map((t) => [t.key, tabName(t)])]);
+  const shown = pillTabs();
+  const key = JSON.stringify([mode, shown.map((t) => [t.key, tabName(t)])]);
   if (key !== builtFor) {
     builtFor = key;
     pill.dataset.mode = mode;
-    buildTrack(width);
+    buildTrack(shown);
   }
   for (const item of track.querySelectorAll(".item")) {
     const tab = tabByKey(item.dataset.tab);
@@ -642,25 +646,18 @@ function renderCarousel() {
   }
 }
 
-function buildTrack(width) {
-  if (!tabs.length) return track.replaceChildren();
-  const set = document.createElement("div");
-  set.className = "set";
-  for (const tab of tabs) {
-    const item = document.createElement("button");
-    item.className = "item";
-    item.dataset.tab = tab.key;
-    item.innerHTML = `<span class="dot"></span><span class="name"></span><span class="status"></span><span class="title"></span>`;
-    item.querySelector(".name").textContent = tabName(tab);
-    set.append(item);
-  }
-  track.replaceChildren(set);
-  const setWidth = set.getBoundingClientRect().width;
-  // Enough copies that the track still covers the pill when shifted by one whole set.
-  const copies = stillMotion.matches ? 1 : Math.ceil(width / setWidth) + 1;
-  for (let i = 1; i < copies; i++) track.append(set.cloneNode(true));
-  track.style.setProperty("--set-width", `${setWidth}px`);
-  track.style.setProperty("--period", `${setWidth / CAROUSEL_SPEED}s`);
+function buildTrack(shown) {
+  if (!shown.length) return track.replaceChildren(Object.assign(document.createElement("span"), { className: "none", textContent: "No active threads" }));
+  track.replaceChildren(
+    ...shown.map((tab) => {
+      const item = document.createElement("button");
+      item.className = "item";
+      item.dataset.tab = tab.key;
+      item.innerHTML = `<span class="dot"></span><span class="name"></span><span class="status"></span><span class="title"></span>`;
+      item.querySelector(".name").textContent = tabName(tab);
+      return item;
+    }),
+  );
 }
 
 /** Calls `move` while the mouse is dragged past a few pixels from `down`, then `drop` on release. */
@@ -894,18 +891,15 @@ let attachTo = null;
 document.getElementById("attach").onclick = () => {
   if (!active) return;
   attachTo = active;
-  choosingFolder = true;
   attachInput.click();
 };
-attachInput.oncancel = () => (choosingFolder = false);
 attachInput.onchange = () => {
-  choosingFolder = false;
   attachFiles(attachTo, [...attachInput.files]);
   attachInput.value = "";
 };
 
 TAURI?.webview.getCurrentWebview().onDragDropEvent(async ({ payload }) => {
-  if (payload.type !== "drop" || !active) return;
+  if (payload.type !== "drop" || !active || dialogOpen()) return;
   const tab = threadAt(payload.position) ?? active;
   if (tab.machine === LOCAL) return tab.view.running && pastePaths(tab, payload.paths);
   try {
@@ -941,7 +935,8 @@ document.addEventListener("paste", (e) => {
   e.preventDefault();
   e.stopPropagation();
   // A clipboard image has no text for xterm to paste; on this Mac, Ctrl+V makes Claude Code read the image itself.
-  if (active.machine === LOCAL) callOn(LOCAL, { cmd: "write_input", tab: active.view.id, data: "\x16" });
+  // The app view attaches it instead, so it shows in the composer before it's sent.
+  if (active.machine === LOCAL && !guiOn()) callOn(LOCAL, { cmd: "write_input", tab: active.view.id, data: "\x16" });
   else attachFiles(active, [...e.clipboardData.files]);
 }, true);
 
@@ -999,26 +994,50 @@ function renderUsage() {
 }
 setInterval(renderUsage, 60 * 1000);
 
+// set_view resizes the native window. The panel is hidden before the window shrinks and shown
+// after it grows, so it is never laid out in a window too small for it: the terminals would fit
+// to a few cells and claude would redraw at that size.
 async function setView(view) {
   document.body.classList.remove("alert");
-  await invoke("set_view", { view });
+  const previous = document.body.dataset.view;
+  if (view === "pill") document.body.dataset.view = view;
+  try {
+    await invoke("set_view", { view });
+  } catch (e) {
+    document.body.dataset.view = previous;
+    throw e;
+  }
   document.body.dataset.view = view;
 }
 document.getElementById("new-tab").onclick = () => toggleProjects();
 document.getElementById("minimize").onclick = () => setView("pill");
-// Clicking outside the expanded panel shrinks it to the pill, as the minimize button does.
-window.addEventListener("blur", () => {
-  // Focus moving into the side panel's browser blurs the window too.
-  if (TAURI && document.body.dataset.view === "expanded" && !choosingFolder && document.activeElement?.tagName !== "IFRAME") setView("pill");
-});
+// The row scrolls sideways: a trackpad swipes it, a mouse wheel turns into a sideways scroll, and a
+// drag pulls it along without opening the thread it started on.
+let dragged = false;
+carousel.addEventListener("wheel", (e) => {
+  if (Math.abs(e.deltaX) >= Math.abs(e.deltaY)) return;
+  e.preventDefault();
+  carousel.scrollLeft += e.deltaY;
+}, { passive: false });
+carousel.onmousedown = (e) => {
+  if (e.button !== 0) return;
+  const from = carousel.scrollLeft;
+  dragged = false;
+  drag(e, {
+    move: (m) => {
+      dragged = true;
+      carousel.scrollLeft = from - (m.clientX - e.clientX);
+    },
+  });
+};
 track.onclick = async (e) => {
+  if (dragged) return (dragged = false);
   const tab = tabByKey(e.target.closest(".item")?.dataset.tab);
   if (!tab) return;
   await setView("expanded");
   activate(tab);
 };
 new ResizeObserver(renderCarousel).observe(pill);
-stillMotion.addEventListener("change", renderCarousel);
 const resizeFrom = (direction) => (e) => {
   e.preventDefault();
   win.startResizeDragging(direction);
@@ -1031,7 +1050,7 @@ document.getElementById("folder").onclick = async () => {
   const tab = active;
   if (!tab) return;
   if (tab.machine !== LOCAL) return pickerOpen() ? closeProjects() : showProjects({ machine: tab.machine, tab });
-  const path = await chooseFolder(tab.view.cwd);
+  const path = await invoke("pick_folder", { start: tab.view.cwd });
   if (path) await moveTab(tab, path);
 };
 
@@ -1154,6 +1173,11 @@ if (TAURI) {
   checkUpdate().then((version) => version && installUpdate());
   setInterval(checkUpdate, 6 * 60 * 60 * 1000);
 }
+
+// A browser runs the UI its hub serves, so it shows the hub's version.
+(TAURI ? TAURI.app.getVersion() : fetch("/api/version").then((r) => (r.ok ? r.text() : "")))
+  .then((version) => (document.getElementById("version").textContent = version && `v${version}`))
+  .catch(() => {});
 
 new ResizeObserver(() => refit(active)).observe(terms);
 
