@@ -110,7 +110,15 @@ async function sweep(profileName) {
   page.on("requestfailed", (r) => seen.push(`requestfailed: ${r.method()} ${r.url()} ${r.failure()?.errorText}`));
   page.on("response", (r) => r.status() >= 400 && seen.push(`HTTP ${r.status()}: ${r.request().method()} ${r.url()}`));
 
-  const tapOrClick = (selector) => (touch ? page.tap(selector) : page.click(selector));
+  // On a phone the chat header folds these into its Options menu, so a hidden one is reached there.
+  const HEAD_MENU = { "#toggle-panel": /side panel$/, "#toggle-terminal": /terminal$/, "#pr-chip": /^Open PR #/ };
+  const tapOrClick = async (selector) => {
+    if (HEAD_MENU[selector] && !(await page.locator(selector).isVisible())) {
+      await tapOrClick("#head-more");
+      return press(page.locator("#panel-menu button", { hasText: HEAD_MENU[selector] }));
+    }
+    return touch ? page.tap(selector) : page.click(selector);
+  };
   const press = async (locator) => (touch ? locator.tap() : locator.click());
   const visible = (selector) => page.locator(selector).filter({ visible: true });
   const text = async (selector) => (await page.locator(selector).first().textContent())?.trim() ?? "";
@@ -827,11 +835,12 @@ async function sweep(profileName) {
 
   await step("app view: appearance: grain, pressed buttons, chat width, diff colors, code size", async () => {
     check(/svg/.test(await page.evaluate(() => getComputedStyle(document.getElementById("expanded")).backgroundImage)), "the app view has no grain");
-    const r = await rect("#toggle-panel");
+    const pressable = touch ? "head-more" : "toggle-panel";
+    const r = await rect(`#${pressable}`);
     await page.mouse.move(r.left + r.width / 2, r.top + r.height / 2);
     await page.mouse.down();
     await sleep(200);
-    const pressed = await page.evaluate(() => getComputedStyle(document.getElementById("toggle-panel")).scale);
+    const pressed = await page.evaluate((id) => getComputedStyle(document.getElementById(id)).scale, pressable);
     await page.mouse.move(0, 0);
     await page.mouse.up();
     check(pressed === "0.97", `a pressed button scales to ${pressed}`);
@@ -884,7 +893,11 @@ async function sweep(profileName) {
   });
 
   await step("app view: the PR link opens the pull request panel", async () => {
-    check(await page.locator("#pr-chip").isVisible(), "the header has no PR chip after the session linked #42");
+    if (touch) {
+      await tapOrClick("#head-more");
+      check(await page.locator("#panel-menu button", { hasText: "Open PR #42" }).isVisible(), "the Options menu has no Open PR #42 after the session linked it");
+      await tapOrClick("#head-more");
+    } else check(await page.locator("#pr-chip").isVisible(), "the header has no PR chip after the session linked #42");
     check(/#42/.test(await text("#composer-footer .pr")), "the composer footer doesn't show #42");
     await tapOrClick("#pr-chip");
     const prPanelSettled = async () => /#42/.test(await text("#panel-body")) && !/Loading/.test(await text("#panel-body"));
@@ -1131,14 +1144,17 @@ async function sweep(profileName) {
   });
 
   await step("app view: Open in an editor from the header", async () => {
-    await waitFor("the Open button", () => page.locator("#open-in").isVisible());
-    await tapOrClick("#open-in .pick");
+    await waitFor("the Open button", () => page.locator(touch ? "#head-more" : "#open-in").isVisible());
+    await tapOrClick(touch ? "#head-more" : "#open-in .pick");
     const editors = await page.locator("#panel-menu button .label").allTextContents();
     check(editors.includes("Zed") && editors.includes("Finder"), `editors: ${editors.join(" | ")}`);
     await press(gui('#panel-menu button:has-text("Zed")'));
-    await sleep(300);
-    check(!readLog("open.log"), "picking an editor opened it");
-    await tapOrClick("#open-in .main");
+    // The phone's Options menu opens the editor it names; the desktop's picker only picks one.
+    if (!touch) {
+      await sleep(300);
+      check(!readLog("open.log"), "picking an editor opened it");
+      await tapOrClick("#open-in .main");
+    }
     const opened = new RegExp(`^-a .*/home/Applications/Zed\\.app ${HOME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/work/alpha$`, "m");
     await waitFor("the folder to open in Zed", async () => opened.test(readLog("open.log")));
     if (!touch) {
@@ -1509,12 +1525,19 @@ async function sweep(profileName) {
     await press(page.locator('#composer-menu [data-create="try-this"]'));
     await waitFor("try-this in the footer", async () => (await text("#composer-footer .branch")) === "try-this");
     await waitFor("the Git action", async () => (await text("#git-action .main")) === "Push & create PR");
-    await tapOrClick("#git-action .main");
+    if (touch) {
+      await tapOrClick("#head-more");
+      const options = await page.locator("#panel-menu button .label").allTextContents();
+      check(options.join("|").includes("Push & create PR|Commit|Push|Create PR"), `Options menu: ${options.join("|")}`);
+      await press(page.locator("#panel-menu button", { hasText: "Push & create PR" }));
+    } else await tapOrClick("#git-action .main");
     await waitTerm(/echo: Push the current branch, then open a pull request with gh pr create\./);
-    await tapOrClick("#git-action .more");
-    const actions = await page.locator("#git-menu .label").allTextContents();
-    check(actions.join("|") === "Commit|Push|Create PR", `Git menu: ${actions.join("|")}`);
-    await tapOrClick("#git-action .more");
+    if (!touch) {
+      await tapOrClick("#git-action .more");
+      const actions = await page.locator("#git-menu .label").allTextContents();
+      check(actions.join("|") === "Commit|Push|Create PR", `Git menu: ${actions.join("|")}`);
+      await tapOrClick("#git-action .more");
+    }
     await page.evaluate(() => closeTab(active));
     await waitFor("two threads", async () => (await page.locator("#thread-list .thread-row").count()) === 2);
     await showSidebar();

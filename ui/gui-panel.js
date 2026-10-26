@@ -1055,3 +1055,22 @@ openIn.querySelector(".pick").onclick = (e) => {
     : [{ label: "No installed editors found", disabled: true }]);
 };
 for (const el of openIn.querySelectorAll("[data-ic]")) el.outerHTML = icon(el.dataset.ic);
+
+/** On a phone the header's actions fold into one menu, so the thread's title keeps the row. */
+document.getElementById("head-more").onclick = (e) => {
+  const tab = active;
+  if (!tab) return;
+  const pr = prOf(tab);
+  const chosen = !openIn.hidden && editorFor(tab.machine);
+  const pick = (ed) => () => (save(`gui-editor:${tab.machine}`, ed.id), renderOpenIn(tab), openInEditor());
+  const quick = gitAction.querySelector(".main").dataset.action;
+  const git = gitAction.hidden ? [] : [...new Set([quick, "commit", "push", ...(pr ? [] : ["create_pr"])])].filter(Boolean);
+  const sections = [
+    pr ? [{ label: `Open PR #${pr.number}`, icon: "github", run: () => openPr(tab, pr.url) }] : [],
+    chosen ? [{ group: "Open in" }, ...editorsOn(tab.machine).map((ed) => ({ label: ed.name, checked: ed.id === chosen.id, run: pick(ed) }))] : [],
+    git.length ? [{ group: "Git" }, ...git.map((a) => ({ label: GIT_ACTIONS[a].label, icon: GIT_ACTIONS[a].icon, run: () => askGit(a) }))] : [],
+    [{ label: ui.drawer ? "Hide terminal" : "Show terminal", icon: "panel-bottom", run: () => toggleDrawer() },
+      { label: panelOf(tab).open ? "Hide side panel" : "Show side panel", icon: "panel-right", run: togglePanel }],
+  ];
+  toggleMenu(e.currentTarget, sections.filter((s) => s.length).flatMap((s, i) => (i ? ["-", ...s] : s)));
+};

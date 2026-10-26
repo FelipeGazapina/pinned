@@ -24,8 +24,11 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 #chat-head .split .pick { border-radius: 0 8px 8px 0; border-left: 0; padding: 0 4px; }
 #chat-head .split .pick .i { width: 16px; height: 16px; }
 #chat-head .split .outline:hover { background: var(--g-input); }
+#chat-head #head-more { display: none; }
 @media (max-width: 768px) {
   #chat-head .split .label { display: none; }
+  #chat-head :is(#pr-chip, #open-in, #git-action, .controls) { display: none; }
+  #chat-head #head-more { display: grid; }
 }
 
 #panel-menu { position: fixed; z-index: 60; min-width: 208px; max-width: min(320px, calc(100vw - 16px)); padding: 4px; border-radius: 12px;
