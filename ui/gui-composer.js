@@ -676,7 +676,7 @@ function insertPaths(paths, files = []) {
   const t = threadOf(active);
   t.attachments = [...(t.attachments ?? []), ...paths.map((path, i) => ({
     path,
-    name: files[i]?.name ?? path.split("/").pop(),
+    name: files[i]?.name ?? path.split(/[\\/]/).pop(),
     url: files[i]?.type.startsWith("image/") ? URL.createObjectURL(files[i]) : null,
     size: files[i]?.size ?? null,
     file: files[i] ?? null,
