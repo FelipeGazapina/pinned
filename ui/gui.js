@@ -239,20 +239,21 @@ function stepThread(step) {
 
 /** The app view's shortcuts, which each part of it adds with `onGuiKey`. They are ⌘ chords, Ctrl ones
  * off the Mac, where a shell in the terminal needs Ctrl+E to end the line. With Option a key goes by
- * position, since Option turns B into ∫ on a Mac. A chord given `when` overrides the others while `when()` holds. */
+ * position, since Option turns B into ∫ on a Mac. A chord given `when` overrides the others while
+ * `when(e)` holds. An `anywhere` chord also works over Settings and the projects picker. */
 const guiKeys = [];
-const onGuiKey = (key, run, { shift = false, alt = false, when = null } = {}) => guiKeys.push({ keys: [key].flat(), run, shift, alt, when });
+const onGuiKey = (key, run, { shift = false, alt = false, when = null, anywhere = false } = {}) => guiKeys.push({ keys: [key].flat(), run, shift, alt, when, anywhere });
 
 window.addEventListener("keydown", (e) => {
-  if (settingsOpen() || pickerOpen()) return;
+  const covered = settingsOpen() || pickerOpen();
   const mod = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
   if (!mod) return;
   const key = (e.altKey ? e.code.replace(/^Key/, "") : e.key).toLowerCase();
-  const switchView = key === "e" && !e.altKey && e.shiftKey === !IS_MAC;
+  const switchView = !covered && key === "e" && !e.altKey && e.shiftKey === !IS_MAC;
   if (switchView) setMode(guiOn() ? "terminal" : "gui");
   else if (!guiOn() || (!IS_MAC && e.target.closest?.("#terms"))) return;
   else {
-    const hits = guiKeys.filter((k) => k.keys.includes(key) && k.shift === e.shiftKey && k.alt === e.altKey && k.when?.() !== false);
+    const hits = guiKeys.filter((k) => (!covered || k.anywhere) && k.keys.includes(key) && k.shift === e.shiftKey && k.alt === e.altKey && k.when?.(e) !== false);
     const hit = hits.find((k) => k.when) ?? hits[0];
     if (!hit) return;
     hit.run(e);

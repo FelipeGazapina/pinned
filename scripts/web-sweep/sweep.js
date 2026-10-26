@@ -189,7 +189,14 @@ async function sweep(profileName) {
   }
   const settingsPage = async (name) => {
     if (!(await page.evaluate(() => document.body.dataset.page === "settings"))) await tapOrClick("#settings-toggle");
-    await tapOrClick(`#settings-nav [data-page="${name}"]`);
+    await settingsNav(name);
+  };
+  const settingsNav = (name) => tapOrClick(`#settings-nav [data-page="${name}"]`);
+  // The theme toast's bold title and its description, as "title · description".
+  const toastText = () => page.evaluate(() => [...document.querySelectorAll("#g-toast:not([hidden]) :is(b, p)")].map((el) => el.textContent).join(" · "));
+  const pickOption = async (selector, value) => {
+    await press(page.locator(selector));
+    await press(page.locator(`#g-select-popup [data-value="${value}"]`));
   };
   const action = (name, nth = 0) => press(page.locator(`#settings-page [data-action="${name}"]`).nth(nth));
   const hubCall = (call) => page.evaluate((c) => hub.hub(c), call);
@@ -906,10 +913,10 @@ async function sweep(profileName) {
     await page.mouse.up();
     check(pressed === "0.97", `a pressed button scales to ${pressed}`);
     await page.evaluate(() => toggleSettings());
-    await tapOrClick('#settings-nav [data-page="general"]');
-    await page.selectOption("#look-chat-width", "wide");
-    await page.selectOption("#look-diff-colors", "blue-orange");
-    await page.selectOption("#look-code-size", "16px");
+    await settingsNav("appearance");
+    await pickOption("#look-chat-width", "wide");
+    await pickOption("#look-diff-colors", "blue-orange");
+    await pickOption("#look-code-size", "16px");
     // The thread draws only the turns on screen, so a count and a code block are drawn here to read their styles.
     const looks = await page.evaluate(() => {
       const probe = Object.assign(document.createElement("div"), { innerHTML: '<span class="add">+1</span><div class="md"><pre><code>x</code></pre></div>' });
@@ -919,11 +926,11 @@ async function sweep(profileName) {
       return read;
     });
     check(looks.join("|") === "1152px|rgb(81, 162, 255)|16px", `looks: ${looks.join(" | ")}`);
-    await page.selectOption("#look-chat-width", "full");
+    await pickOption("#look-chat-width", "full");
     check((await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--lane").trim())) === "100%", "Full doesn't widen the lane");
     const bad = await overflowing();
     check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
-    for (const name of ["chat-width", "diff-colors", "code-size"]) await page.selectOption(`#look-${name}`, "");
+    for (const name of ["chat-width", "diff-colors", "code-size"]) await pickOption(`#look-${name}`, "");
     await page.evaluate(() => toggleSettings());
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
     await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
@@ -1033,29 +1040,38 @@ async function sweep(profileName) {
 
   await step("app view: typography sets the interface, prompt, code and terminal fonts, and the lane keeps 48px gutters down to 640px", async () => {
     await page.evaluate(() => toggleSettings());
-    await tapOrClick('#settings-nav [data-page="general"]');
+    await settingsNav("appearance");
     const resetTypography = () =>
       page.evaluate(() => {
         for (const name of ["ui-size", "prompt-size", "terminal-size", "sans-font", "mono-font", "advanced", "smoothing", "word-wrap"]) save(`look-${name}`, "");
         applyLooks();
         if (settingsOpen()) toggleSettings();
       });
+    // Settings covers the thread, which draws its turns again once it shows.
+    const inThread = async (read) => {
+      await page.evaluate(() => toggleSettings());
+      await waitFor("the thread's code", () => page.evaluate(() => !!document.querySelector("#thread .codeblock:has([data-run-code]) pre code")));
+      const got = await page.evaluate(read);
+      await page.evaluate(() => toggleSettings());
+      await page.locator("#settings-page #typography").waitFor();
+      return got;
+    };
     try {
       check((await page.locator("#look-terminal-size").count()) === 0, "the terminal row shows without Advanced");
-      check((await text('label[for="look-mono-font"]')) === "Monospace font", `the simple code row reads ${await text('label[for="look-mono-font"]')}`);
-      await page.selectOption("#look-ui-size", "18px");
+      check((await text("#code-font h4")) === "Monospace font", `the simple code row reads ${await text("#code-font h4")}`);
+      await pickOption("#look-ui-size", "18px");
       const zoom = await page.evaluate(() => getComputedStyle(document.getElementById("chat")).zoom);
       check(zoom === "1.125", `the interface zooms ${zoom}`);
       await page.fill("#look-sans-font", "Georgia");
       await page.press("#look-sans-font", "Enter");
       await page.fill("#look-mono-font", "Courier New");
       await page.press("#look-mono-font", "Enter");
-      const fonts = await page.evaluate(() => [getComputedStyle(document.body).fontFamily, getComputedStyle(document.querySelector("#thread .md pre code")).fontFamily, active.term.options.fontFamily, active.term.options.fontSize].map((f) => String(f).split(",")[0].replaceAll('"', "")));
+      const fonts = await inThread(() => [getComputedStyle(document.body).fontFamily, getComputedStyle(document.querySelector("#thread .md pre code")).fontFamily, active.term.options.fontFamily, active.term.options.fontSize].map((f) => String(f).split(",")[0].replaceAll('"', "")));
       check(fonts.join("|") === "Georgia|Courier New|Courier New|12", `fonts: ${fonts.join(" | ")}`);
       await page.locator("#look-advanced").setChecked(true);
       await waitFor("the advanced rows", () => page.locator("#look-terminal-size").isVisible());
-      await page.selectOption("#look-terminal-size", "15px");
-      await page.selectOption("#look-prompt-size", "18px");
+      await pickOption("#look-terminal-size", "15px");
+      await pickOption("#look-prompt-size", "18px");
       const sizes = await page.evaluate(() => [active.term.options.fontSize, getComputedStyle(prompt).fontSize, active.term.options.fontFamily.split(",")[0]]);
       check(sizes.join("|") === "15|18px|ui-monospace", `advanced sizes: ${sizes.join(" | ")}`);
       if (await page.evaluate(() => IS_MAC)) {
@@ -1065,9 +1081,9 @@ async function sweep(profileName) {
         await page.locator("#look-smoothing").setChecked(true);
       }
       await page.locator("#look-word-wrap").setChecked(false);
-      check((await page.evaluate(() => document.querySelector("#thread .codeblock:has([data-run-code])")?.dataset.wrap)) === "false", "Word wrap off still wraps code");
+      check((await inThread(() => document.querySelector("#thread .codeblock:has([data-run-code])")?.dataset.wrap)) === "false", "Word wrap off still wraps code");
       await page.locator("#look-word-wrap").setChecked(true);
-      for (const id of ["#look-terminal-size", "#look-prompt-size", "#look-ui-size"]) await page.selectOption(id, "");
+      for (const id of ["#look-terminal-size", "#look-prompt-size", "#look-ui-size"]) await pickOption(id, "");
       for (const id of ["#look-sans-font", "#look-mono-font"]) {
         await page.fill(id, "");
         await page.press(id, "Enter");
@@ -1183,7 +1199,7 @@ async function sweep(profileName) {
       const seen = [];
       for (let i = 0; i < 3; i++) {
         await themeKey("A", true);
-        seen.push(`${await page.evaluate(() => themeState().mode)}:${await appearance()}:${await text("#panel-note span")}`);
+        seen.push(`${await page.evaluate(() => themeState().mode)}:${await appearance()}:${await toastText()}`);
       }
       check(seen.join(" ") === "light:light|:Appearance: Light dark:dark|:Appearance: Dark system:dark|:Appearance: System", `cycle: ${seen.join(" ")}`);
       await themeKey("A");
@@ -1193,8 +1209,14 @@ async function sweep(profileName) {
       check((await page.locator("#palette .item").first().locator(".current").textContent()) === "Current", "T3 Code isn't marked current");
       await press(page.locator("#palette .item", { hasText: "Grove" }));
       await waitFor("Grove", async () => (await appearance()) === "dark|grove");
-      const canvas = await page.evaluate(() => [colorHex(getComputedStyle(document.querySelector("#composer .box")).backgroundColor), colorHex(colorsFor(themeById("grove"), "dark").surface)]);
-      check(canvas[0] === `${canvas[1]}cc`, `the composer is ${canvas[0]}, Grove's dark surface ${canvas[1]}`);
+      const canvas = await page.evaluate(() => {
+        const probe = Object.assign(document.createElement("div"), { style: `background: color-mix(in srgb, ${colorsFor(themeById("grove"), "dark").surfaceRaised} 80%, transparent)` });
+        document.body.append(probe);
+        const read = [getComputedStyle(document.querySelector("#composer .box")).backgroundColor, getComputedStyle(probe).backgroundColor];
+        probe.remove();
+        return read;
+      });
+      check(canvas[0] === canvas[1], `the composer is ${canvas[0]}, Grove's dark raised surface at 80% ${canvas[1]}`);
       await themeKey("A", true);
       check((await appearance()) === "light|grove", `Grove in light is ${await appearance()}`);
     } finally {
@@ -1230,7 +1252,7 @@ async function sweep(profileName) {
   await step("app view: Settings' Color scheme tiles and theme cards pick the appearance, a palette, and one half", async () => {
     await resetTheme();
     await page.evaluate(() => toggleSettings());
-    await tapOrClick('#settings-nav [data-page="general"]');
+    await settingsNav("appearance");
     try {
       const tiles = await page.locator("#theme-section .mode-tile .label").allTextContents();
       check(tiles.join(",") === "System,Light,Dark", `tiles: ${tiles.join(", ")}`);
@@ -1274,13 +1296,14 @@ async function sweep(profileName) {
       await press(page.locator('#theme-editor [data-te="save"]'));
       await waitFor("the saved theme", async () => (await appearance()) === "dark|harbor");
       check((await page.locator("#theme-editor").count()) === 0, "the editor stayed open");
-      check(/Harbor created/.test(await text("#panel-note span")), `the toast reads ${await text("#panel-note span")}`);
+      check(/Harbor created/.test(await toastText()), `the toast reads ${await toastText()}`);
       await page.evaluate(() => toggleSettings());
-      await tapOrClick('#settings-nav [data-page="general"]');
+      await settingsNav("appearance");
       const card = page.locator('#theme-section .theme-card[data-theme-card="harbor"]');
       check((await card.locator("[data-theme-action]").count()) === 4, "Harbor's card lacks Duplicate, Edit, Export, Remove");
       await press(card.locator('[data-theme-action="edit"]'));
       await waitFor("the edit panel", async () => (await text("#theme-editor .te-title b")) === "Edit theme");
+      await page.evaluate(() => toggleSettings());
       await page.locator('#theme-editor [data-te="advanced"]').setChecked(true);
       check((await page.locator("#theme-editor .te-group h4").allTextContents()).join(",") === "Foundation,Brand & content,Search,Context,Status", "advanced lacks T3's families");
       await press(page.locator('#theme-editor [data-te="inspect"]'));
@@ -1295,13 +1318,14 @@ async function sweep(profileName) {
       await waitFor("the picked family", async () => (await page.locator("#theme-editor .te-field.selected").getAttribute("data-theme-color-role").catch(() => "")) === "messageSurface");
       check((await page.evaluate(() => document.activeElement?.dataset.role)) === "messageSurface", "the picked field isn't focused");
       await page.fill("#theme-editor .te-filter", "sidebar");
-      check((await page.locator("#theme-editor .te-label").allTextContents()).join(",") === "Sidebar background,Sidebar controls,Sidebar selection", "the filter doesn't narrow to the sidebar");
+      check((await page.locator("#theme-editor .te-label").allTextContents()).join(",") === "Muted text,Border,Sidebar background,Sidebar controls,Sidebar selection", "the filter doesn't find the sidebar's families and roles");
       await page.fill('#theme-editor .te-value[data-role="sidebar"]', "#000000");
       await press(page.locator('#theme-editor [data-te="save"]'));
       await waitFor("the saved edit", async () => (await page.evaluate(() => colorHex(customThemes[0].colors.sidebar))) === "#000000");
       check((await appearance()) === "dark|harbor", `after the edit: ${await appearance()}`);
       const file = await page.evaluate(() => JSON.parse(themeFile(customThemes[0])));
       check(file.version === 1 && file.name === "Harbor" && file.appearance === "dark" && /^oklch\(/.test(file.colors.canvas), `the export: ${JSON.stringify(file).slice(0, 80)}`);
+      await page.evaluate(() => toggleSettings());
       await press(card.locator('[data-theme-action="remove"]'));
       await press(page.locator("#shell-dialog [data-dialog-remove]"));
       await waitFor("the removal", async () => (await page.locator('#theme-section .theme-card[data-theme-card="harbor"]').count()) === 0);
@@ -1342,7 +1366,7 @@ async function sweep(profileName) {
       await audit("palette", "#palette");
       await page.evaluate(() => closePalette());
       await page.evaluate(() => toggleSettings());
-      await tapOrClick('#settings-nav [data-page="general"]');
+      await settingsNav("appearance");
       await audit("settings", "#settings");
       await page.evaluate(() => toggleSettings());
       check(!bad.length, bad.slice(0, 5).join("; "));
@@ -1373,12 +1397,12 @@ async function sweep(profileName) {
   await step("app view: Settings' Contrast slider runs 50 to 200% by 5, sharpens or fades text and borders in both appearances, and resets, as appearanceContrast.ts", async () => {
     await resetTheme();
     await page.evaluate(() => toggleSettings());
-    await tapOrClick('#settings-nav [data-page="general"]');
+    await settingsNav("appearance");
     const slider = page.locator("#appearance-contrast");
-    const shown = () => page.evaluate(() => [document.getElementById("appearance-contrast").value, document.querySelector("#contrast-row output").textContent, document.querySelector("[data-contrast-reset]").hidden, document.documentElement.dataset.contrast ?? "", localStorage.getItem("gui-contrast") ?? ""].join("|"));
-    const looks = async () => ({ side: (await paintOf("#sidebar", "color"))[0], meta: (await paintOf("#contrast-row .meta", "color"))[0], title: (await paintOf("#thread-list .thread-row .l2", "color"))[0], border: await paintOf("#theme-section .theme-card", "borderTopColor") });
+    const shown = () => page.evaluate(() => [document.getElementById("appearance-contrast").value, document.querySelector("#setting-appearance-contrast output").textContent, document.querySelector('[data-reset="contrast"]').hidden, document.documentElement.dataset.contrast ?? "", localStorage.getItem("gui-contrast") ?? ""].join("|"));
+    const looks = async () => ({ side: (await paintOf("#sidebar", "color"))[0], meta: (await paintOf("#setting-appearance-contrast .row-text p", "color"))[0], title: (await paintOf("#settings-nav .links button:not(.active)", "color"))[0], border: await paintOf("#theme-section .theme-card", "borderTopColor") });
     try {
-      check((await text("#contrast-row label")) === "Contrast", `the row is ${await text("#contrast-row label")}`);
+      check((await text("#setting-appearance-contrast h4")) === "Contrast", `the row is ${await text("#setting-appearance-contrast h4")}`);
       const range = await slider.evaluate((i) => [i.min, i.max, i.step].join("|"));
       check(range === "50|200|5", `the range is ${range}`);
       check((await shown()) === "100|100%|true||", `at rest: ${await shown()}`);
@@ -1396,7 +1420,7 @@ async function sweep(profileName) {
       await waitFor("the light appearance", async () => (await appearance()) === "light|");
       await page.keyboard.press("End");
       const lightSharp = await looks();
-      await press(page.locator("[data-contrast-reset]"));
+      await press(page.locator('[data-reset="contrast"]'));
       check((await shown()) === "100|100%|true||", `after Reset: ${await shown()}`);
       const lightBase = await looks();
       check(lightSharp.side < lightBase.side && lightSharp.meta < lightBase.meta && lightSharp.title < lightBase.title && lightSharp.border[0] < lightBase.border[0], `200% in light: ${JSON.stringify(lightSharp)} against ${JSON.stringify(lightBase)}`);
@@ -1525,7 +1549,7 @@ async function sweep(profileName) {
   };
   const openAddTheme = async () => {
     if (!(await page.evaluate(() => settingsOpen()))) await page.evaluate(() => toggleSettings());
-    await tapOrClick('#settings-nav [data-page="general"]');
+    await settingsNav("appearance");
     await press(page.locator('#theme-section [data-theme-action="import"]'));
     await waitFor("the Add a theme dialog", async () => (await text("#shell-dialog .dialog-head h2")) === "Add a theme");
   };
@@ -1546,11 +1570,13 @@ async function sweep(profileName) {
         const cards = await page.locator("#shell-dialog .ti-card h4").allTextContents();
         check(cards.join(",") === "Aurora Themes", `results (the proprietary one left out): ${cards.join(", ")}`);
         check(/^fixture · 1\.2K downloads$/i.test(await text("#shell-dialog .ti-card .muted")), `the byline is ${await text("#shell-dialog .ti-card .muted")}`);
-        check((await page.locator("#shell-dialog .ti-sort option").allTextContents()).join(",") === "Most downloaded,Best rated,Newest,Most relevant", "the Sort menu is missing");
+        await press(page.locator("#ti-sort"));
+        check((await page.locator("#g-select-popup [role=option]").allTextContents()).join(",") === "Most downloaded,Best rated,Newest,Most relevant", "the Sort menu is missing");
+        await press(page.locator('#g-select-popup [data-value="downloadCount"]'));
         check((await page.locator('#shell-dialog .ti-source[href="https://github.com/example/aurora-themes"] .github').count()) === 1, "no GitHub source link");
         await press(page.locator('#shell-dialog [data-ti-install="fixture.aurora-themes"]'));
         await waitFor("the install", async () => (await page.locator("#shell-dialog").isHidden()) && (await collection.count()) === 1, 10000);
-        check(/^2 themes added · Aurora, Aurora Midnight$/.test(await text("#panel-note span")), `the toast reads ${await text("#panel-note span")}`);
+        check(/^2 themes added · Aurora, Aurora Midnight$/.test(await toastText()), `the toast reads ${await toastText()}`);
         check(fixture.hits.some((h) => h.endsWith(".vsix") && h.startsWith("GET")) && fixture.hits.some((h) => h.endsWith(".sha256")), `fetched: ${fixture.hits.join(", ")}`);
         const installed = await page.evaluate(() => customThemes.map((t) => `${t.label}:${modesOf(t).join("+")}:${colorHex(colorsFor(t, modesOf(t).at(-1)).canvas)}:${t.collection.label}`));
         check(installed.join(" ") === "Aurora:light+dark:#1a1b26:Aurora Themes Aurora Midnight:dark:#0b0c14:Aurora Themes", `installed: ${installed.join(" ")}`);
@@ -1572,7 +1598,7 @@ async function sweep(profileName) {
         await press(page.locator('#shell-dialog [data-ti-install="fixture.aurora-themes"]'));
         check((await text("#ti-update-title")) === "Update “Aurora Themes”?", `the confirm reads ${await text("#ti-update-title")}`);
         await press(page.locator("#shell-dialog [data-ti-update]"));
-        await waitFor("the update", async () => /^2 themes updated/.test(await text("#panel-note span")), 10000);
+        await waitFor("the update", async () => /^2 themes updated/.test(await toastText()), 10000);
         await press(collection.locator('[data-theme-action="remove"]'));
         check((await text("#shell-dialog .dialog-head h2")) === "Remove themes from “Aurora Themes”?", `the removal asks ${await text("#shell-dialog .dialog-head h2")}`);
         const remove = page.locator("#shell-dialog [data-dialog-remove]");
@@ -1600,7 +1626,7 @@ async function sweep(profileName) {
       check((await page.locator("#shell-dialog .ti-editor pre .key").count()) > 3, "the JSON isn't highlighted");
       await press(page.locator("#shell-dialog [data-ti-add]"));
       await waitFor("the pasted theme", async () => (await appearance()) === "dark|night-owl-test");
-      check((await text("#panel-note span")) === "Night Owl Test added · It’s now your dark theme.", `the toast reads ${await text("#panel-note span")}`);
+      check((await toastText()) === "Night Owl Test added · It’s now your dark theme.", `the toast reads ${await toastText()}`);
       const owlColors = await page.evaluate(() => ["canvas", "messageAction", "sidebar"].map((r) => colorHex(themeById("night-owl-test").colors[r])).join(" "));
       check(owlColors === "#011627 #7e57c2 #011627", `converted: ${owlColors}`);
       await openAddTheme();
@@ -1622,11 +1648,308 @@ async function sweep(profileName) {
       await waitFor("the paired files", async () => (await page.locator("#shell-dialog").isHidden()) && (await page.evaluate(() => !!themeById("ayu"))));
       const pair = await page.evaluate(() => `${modesOf(themeById("ayu")).join("+")} ${colorHex(colorsFor(themeById("ayu"), "light").canvas)} ${colorHex(colorsFor(themeById("ayu"), "dark").canvas)}`);
       check(pair === "light+dark #fcfcfc #0d1017", `Ayu: ${pair}`);
-      check((await text("#panel-note span")) === "Ayu added · Ayu", `the toast reads ${await text("#panel-note span")}`);
+      check((await toastText()) === "Ayu added · Ayu", `the toast reads ${await toastText()}`);
     } finally {
       await page.evaluate(() => (themeImport ? endThemeImport() : dialogOpen() && closeDialog()));
       await resetTheme();
       await page.evaluate(() => settingsOpen() && toggleSettings());
+    }
+  });
+
+  const openSettingsFromSidebar = async () => {
+    if (touch) await page.evaluate(() => settingsOpen() || toggleSettings());
+    else if (!(await page.evaluate(() => settingsOpen()))) await press(page.locator("#gui-settings"));
+    await waitFor("Settings", () => page.evaluate(() => settingsOpen()));
+  };
+
+  await step("app view: Settings covers the window with Back, Search settings over the sections, and a page per section", async () => {
+    await page.evaluate(() => (page = "general"));
+    await openSettingsFromSidebar();
+    try {
+      const cover = await page.evaluate(() => [Object.values(document.getElementById("settings").getBoundingClientRect().toJSON()).slice(0, 4).map(Math.round).join(","), `${innerWidth},${innerHeight}`]);
+      check(cover[0].startsWith("0,0,") && cover[0].endsWith(cover[1]), `Settings doesn't cover the window: ${cover.join(" in ")}`);
+      const sections = await page.locator("#settings-nav .links button").allTextContents();
+      check(sections.join(",") === "General,Appearance,Projects,Connectors,Workflows,Account,Machines,Archive", `sections: ${sections.join(", ")}`);
+      check((await page.locator("#settings-nav .links button svg").count()) === sections.length, "a section lacks its icon");
+      check((await page.locator('#settings-nav [data-page="general"].active').count()) === 1, "General isn't marked");
+      check((await page.locator("#settings-nav .settings-search input").getAttribute("placeholder")) === "Search", "no Search settings box");
+      if (!touch) {
+        await page.locator("#settings-page").click({ position: { x: 5, y: 5 } });
+        await page.keyboard.press("/");
+        await waitFor("/ to focus Search settings", () => page.evaluate(() => document.activeElement === document.querySelector("#settings-nav .settings-search input")), 2000);
+      }
+      await page.fill("#settings-nav .settings-search input", "zzqx");
+      check((await text("#settings-nav .settings-none")) === "No settings found" && (await page.locator("#settings-nav .settings-none").isVisible()), "no empty state");
+      check(await page.locator("#settings-nav .links").isHidden(), "the sections show beside the results");
+      await page.fill("#settings-nav .settings-search input", "font");
+      const results = await page.locator("#settings-nav .settings-results [data-result] .title").allTextContents();
+      const fonts = `${(await page.evaluate(() => IS_MAC)) ? "Font smoothing," : ""}Interface font,Prompt font,Code font,Terminal font`;
+      check(results.join(",") === fonts, `font finds ${results.join(", ")}`);
+      await page.fill("#settings-nav .settings-search input", "glass");
+      check((await text("#settings-nav .settings-results [data-result] .sub")) === "Appearance", "a result doesn't name its section");
+      await page.press("#settings-nav .settings-search input", "Enter");
+      await waitFor("the Appearance page", async () => (await text("#settings-page h2")) === "Appearance");
+      await waitFor("the glass row in focus", () => page.evaluate(() => document.activeElement?.id === "setting-glass-opacity"));
+      check((await page.inputValue("#settings-nav .settings-search input")) === "", "picking a result keeps the query");
+      check((await page.locator('#settings-nav [data-page="appearance"].active').count()) === 1, "Appearance isn't marked");
+      if (!touch) {
+        await page.keyboard.press("Escape");
+        await waitFor("Escape back to the thread", async () => !(await page.evaluate(() => settingsOpen())));
+        await openSettingsFromSidebar();
+      }
+      await press(page.locator("#settings-back"));
+      await waitFor("Back to the thread", async () => !(await page.evaluate(() => settingsOpen())));
+      return results.join(", ");
+    } finally {
+      await page.evaluate(() => settingsOpen() && toggleSettings());
+    }
+  });
+
+  await step("app view: Appearance is T3's page: themes, Interface (contrast, glass opacity, diff colors, chat width), Motion and Typography, each row resetting to its default", async () => {
+    await openSettingsFromSidebar();
+    await settingsNav("appearance");
+    try {
+      const heads = await page.locator("#settings-page .settings-section .section-head h3").allTextContents();
+      check(heads.join(",") === "Interface,Motion,Typography", `sections: ${heads.join(", ")}`);
+      check((await page.locator("#settings-page #appearance #theme-section .mode-tile").count()) === 3, "Colors & themes doesn't lead the page");
+      check((await page.locator("#settings-page [data-reset]:not([hidden])").count()) === 0, "a reset shows at the defaults");
+      await page.locator("#glass-opacity").fill("60");
+      const glass = await page.evaluate(() => [getComputedStyle(document.documentElement).getPropertyValue("--g-glass-opacity").trim(), document.querySelector("#setting-glass-opacity output").textContent, document.querySelector('[data-reset="glass"]').hidden].join("|"));
+      check(glass === "60%|60%|false", `glass at 60: ${glass}`);
+      await press(page.locator('[data-reset="glass"]'));
+      check((await page.inputValue("#glass-opacity")) === "80" && (await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--g-glass-opacity").trim())) === "80%", "Reset leaves glass off 80%");
+      await press(page.locator("#look-chat-width"));
+      const options = await page.locator("#g-select-popup [role=option]").allTextContents();
+      check(options.join(",") === "Comfortable (default),Wide,Full", `chat width offers ${options.join(", ")}`);
+      await press(page.locator('#g-select-popup [data-value="wide"]'));
+      check((await text("#look-chat-width")) === "Wide" && (await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--lane").trim())) === "1152px", "Wide doesn't take");
+      await press(page.locator('[data-reset="chat-width"]'));
+      check((await text("#look-chat-width")) === "Comfortable", `after Reset the trigger reads ${await text("#look-chat-width")}`);
+      check(/Red & green/.test(await text("#look-diff-colors")) && (await page.locator("#look-diff-colors .diff-dots i").count()) === 2, "Diff colors lacks its dots");
+      const motion = page.locator("#panel-animation-duration");
+      check((await motion.evaluate((i) => [i.min, i.max, i.step, i.value].join("|"))) === "0|400|25|0", "the motion slider isn't 0 to 400 by 25");
+      await motion.fill("175");
+      check((await text("#panel-animations output")) === "175 ms" && (await page.evaluate(() => localStorage.getItem("gui-panel-animation"))) === "175", "175 ms isn't kept");
+      await press(page.locator(".motion-preview"));
+      check(await page.evaluate(() => document.querySelector(".motion-preview").classList.contains("closed") && getComputedStyle(document.querySelector(".motion-preview .side")).transitionDuration.startsWith("0.175s")), "the preview doesn't fold at 175 ms");
+      if (!touch) {
+        await press(page.locator("#settings-back"));
+        await press(page.locator("#sidebar-toggle"));
+        const animating = await page.evaluate(() => [document.body.classList.contains("sidebar-animating"), getComputedStyle(document.getElementById("workspace")).transitionDuration].join("|"));
+        check(animating === "true|0.175s", `the sidebar collapses with ${animating}`);
+        await page.evaluate(() => toggleSidebar(true));
+        await openSettingsFromSidebar();
+      }
+      await press(page.locator('[data-reset="motion"]'));
+      check((await motion.inputValue()) === "0", "Reset leaves the motion on");
+      await pickOption("#look-ui-size", "18px");
+      check(!(await page.locator('[data-reset="interface"]').isHidden()), "a changed font size shows no reset");
+      await press(page.locator('[data-reset="interface"]'));
+      check((await text("#look-ui-size")) === "16 px", `after Reset the size reads ${await text("#look-ui-size")}`);
+      const bad = await overflowing();
+      check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
+    } finally {
+      await page.evaluate(() => {
+        for (const key of ["gui-glass-opacity", "gui-panel-animation", "look-chat-width", "look-ui-size"]) localStorage.removeItem(key);
+        applyLooks();
+        if (settingsOpen()) toggleSettings();
+      });
+    }
+  });
+
+  await step("app view: a control's title shows in T3's styled tooltip with its shortcut, theme toasts stack a bold title over a description, and ⌘⌥⇧A works over Settings, once per press, but not in a terminal", async () => {
+    await resetTheme();
+    try {
+      if (!touch) {
+        await page.mouse.move(600, 400);
+        await page.locator("#sidebar-toggle").hover();
+        await waitFor("the tooltip", () => page.locator("#g-tooltip").isVisible(), 3000);
+        const tip = await page.evaluate(() => {
+          const t = document.getElementById("g-tooltip");
+          const b = document.getElementById("sidebar-toggle");
+          const [tr, br] = [t.getBoundingClientRect(), b.getBoundingClientRect()];
+          return [t.textContent, b.hasAttribute("title"), tr.bottom <= br.top || tr.top >= br.bottom, getComputedStyle(t).fontSize, getComputedStyle(t).borderTopLeftRadius].join("|");
+        });
+        check(tip === "Toggle sidebar (⌘B)|false|true|12px|6px", `the tooltip: ${tip}`);
+        await page.mouse.move(600, 400);
+        await waitFor("the tooltip to go", async () => (await page.locator("#g-tooltip").isHidden()) && (await page.getAttribute("#sidebar-toggle", "title")) === "Toggle sidebar (⌘B)", 3000);
+        await page.evaluate(() => toggleSettings());
+        await settingsNav("appearance");
+        await page.locator('#theme-section .pick[data-theme-half="light"]').first().hover();
+        await waitFor("the card's tooltip", async () => (await page.locator("#g-tooltip").isVisible()) && (await text("#g-tooltip")) === "Use for light mode only", 3000);
+        await page.mouse.move(5, 5);
+      } else await page.evaluate(() => toggleSettings());
+      await waitFor("Settings", () => page.evaluate(() => settingsOpen()));
+      if (!touch) {
+        await themeKey("A", true);
+        await waitFor("Light over Settings", async () => (await appearance()) === "light|");
+        const toast = await page.evaluate(() => [document.querySelector("#g-toast b")?.textContent, document.querySelectorAll("#g-toast .title svg").length, document.querySelector("#g-toast p")?.textContent ?? ""].join("|"));
+        check(toast === "Appearance: Light|0|", `the appearance toast: ${toast}`);
+        await waitFor("the toast to leave after 1.5s", () => page.locator("#g-toast").isHidden(), 4000);
+        await page.evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "A", code: "KeyA", altKey: true, shiftKey: true, metaKey: IS_MAC, ctrlKey: !IS_MAC, repeat: true, bubbles: true })));
+        check((await appearance()) === "light|", "a held ⌘⌥⇧A keeps cycling");
+        await page.evaluate(() => toggleSettings());
+        await page.evaluate(() => active.term.textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "A", code: "KeyA", altKey: true, shiftKey: true, metaKey: IS_MAC, ctrlKey: !IS_MAC, bubbles: true })));
+        check((await appearance()) === "light|", "⌘⌥⇧A cycles from a focused terminal");
+      }
+      await page.evaluate(() => themesImported([{ label: "Aurora" }, { label: "Aurora Midnight" }], false));
+      await waitFor("the toast to slide in", () => page.evaluate(() => !document.getElementById("g-toast").getAnimations().length), 3000);
+      const stacked = await page.evaluate(() => {
+        const t = document.getElementById("g-toast");
+        const r = t.getBoundingClientRect();
+        return [t.querySelector("b").textContent, t.querySelector("p").textContent, !!t.querySelector(".title svg.success"), Math.round(document.documentElement.clientWidth - r.right) === (document.documentElement.clientWidth >= 640 ? 32 : 16), r.width <= 360, !!t.querySelector(".dismiss")].join("|");
+      });
+      check(stacked === "2 themes added|Aurora, Aurora Midnight|true|true|true|true", `the stacked toast: ${stacked}`);
+      await press(page.locator("#g-toast .dismiss"));
+      await waitFor("the dismissed toast", () => page.locator("#g-toast").isHidden(), 3000);
+    } finally {
+      await page.evaluate(() => settingsOpen() && toggleSettings());
+      await resetTheme();
+    }
+  });
+
+  await step("app view: the theme editor filters by family and role, keeps a bad hex marked, re-derives an imported theme, moves a taken name to the free appearance, merges a renamed theme whole, and Cancel clears the pick", async () => {
+    await resetTheme();
+    try {
+      await page.evaluate(() => {
+        customThemes = [{ id: "solo", label: "Solo", appearance: "dark", colors: colorsFor(themeById("grove"), "dark") }, { id: "pair", label: "Pair", appearance: "light", colors: colorsFor(themeById("grove"), "light") }];
+        saveCustomThemes();
+        openThemeEditor({ appearance: "dark" });
+      });
+      await page.fill("#theme-name", "Solo");
+      await waitFor("the free appearance", async () => (await text("#theme-editor .te-seg .on")) === "Light");
+      check((await text('#theme-editor [data-te="save"]')) === "Add light palette", `save reads ${await text('#theme-editor [data-te="save"]')}`);
+      check((await page.evaluate(() => document.activeElement?.id)) === "theme-name", "typing lost the name field");
+      await press(page.locator('#theme-editor [data-te-usage="accent"]'));
+      await waitFor("the role's uses", async () => /^Accent color · \d+ uses?$/.test(await text("#theme-editor .te-title span")));
+      await press(page.locator('#theme-editor [data-te="inspect"]'));
+      await press(page.locator('#theme-editor [data-te="inspect"]'));
+      check((await text("#theme-editor .te-title span")) === "Select a color below" && (await page.locator("#theme-editor .te-field.selected").count()) === 0, "Cancel kept the selection");
+      await page.locator('#theme-editor [data-te="advanced"]').setChecked(true);
+      await page.fill("#theme-editor .te-filter", "sidebar");
+      const found = await page.locator("#theme-editor .te-field .te-label").allTextContents();
+      check(found.join(",") === "Muted text,Border,Sidebar background,Sidebar controls,Sidebar selection", `sidebar finds ${found.join(", ")}`);
+      await page.fill("#theme-editor .te-filter", "");
+      const hex = page.locator('#theme-editor [data-theme-color-role="canvas"] .te-value');
+      await hex.fill("#zz12");
+      check((await hex.getAttribute("aria-invalid")) === "true" && (await hex.inputValue()) === "#zz12", "a bad hex isn't kept and marked");
+      await press(page.locator('#theme-editor [data-te="save"]'));
+      check(/must be a literal CSS color/.test(await text("#theme-editor .te-error")), `saving a bad hex says ${await text("#theme-editor .te-error")}`);
+      await page.locator('#theme-editor [data-theme-color-role="canvas"] .te-value').fill("#101820");
+      check((await page.locator('#theme-editor [data-theme-color-role="canvas"] .te-value').getAttribute("aria-invalid")) === null, "a good hex stays marked");
+      await page.evaluate(() => {
+        closeThemeEditor();
+        openThemeEditor({ editingId: "solo" });
+      });
+      check(await page.locator('#theme-editor [data-te="advanced"]').isChecked(), "an imported theme opens in simple mode");
+      const before = await page.evaluate(() => themeEditor.colors.dark.messageSurface);
+      await page.locator('#theme-editor [data-te="advanced"]').setChecked(false);
+      const after = await page.evaluate(() => [themeEditor.colors.dark.messageSurface, themeEditor.colors.light.messageSurface === colorsFor(themeById("grove"), "light").messageSurface || themeEditor.colors.light.messageSurface === standardColors("light").messageSurface]);
+      check(after[0] !== before && after[1], `turning Advanced off: ${before} to ${after.join(" | ")}`);
+      await page.fill("#theme-name", "Pair");
+      check((await text('#theme-editor [data-te="save"]')) === "Merge into “Pair”", `save reads ${await text('#theme-editor [data-te="save"]')}`);
+      await press(page.locator('#theme-editor [data-te="save"]'));
+      await waitFor("the merge", () => page.evaluate(() => !themeEditor));
+      const merged = await page.evaluate(() => [customThemes.map((t) => t.id).join(","), modesOf(themeById("pair")).join(",")].join("|"));
+      check(merged === "pair|light,dark", `after the merge: ${merged}`);
+      check((await toastText()) === "Pair updated · Its dark palette was added.", `the toast reads ${await toastText()}`);
+    } finally {
+      await resetTheme();
+    }
+  });
+
+  await step("app view: font fields take only installed fonts (monospace for code), name the default face, and turn into T3's font list once the browser lists installed fonts; panel and drawer terminals follow the terminal font", async () => {
+    await page.evaluate(() => toggleSettings());
+    await settingsNav("appearance");
+    try {
+      const sans = page.locator("#look-sans-font");
+      await sans.fill("NoSuchFontXyz");
+      await sans.press("Enter");
+      check((await sans.getAttribute("aria-invalid")) === "true" && (await page.evaluate(() => localStorage.getItem("look-sans-font"))) === null, "a missing font was taken");
+      await sans.press("Escape");
+      const mono = page.locator("#look-mono-font");
+      await mono.fill("Georgia");
+      await mono.press("Enter");
+      check((await mono.getAttribute("aria-invalid")) === "true" && (await page.evaluate(() => localStorage.getItem("look-mono-font"))) === null, "a proportional code font was taken");
+      await mono.press("Escape");
+      const placeholders = await page.evaluate(() => [document.getElementById("look-sans-font").placeholder, document.getElementById("look-mono-font").placeholder]);
+      check(await page.evaluate((names) => names.every((p) => /^SF /.test(p) || fontAvailable(p)), placeholders), `the default faces read ${placeholders.join(" | ")}`);
+      await page.evaluate(() => {
+        window.queryLocalFonts = async () => [{ family: "Georgia" }, { family: "Courier New" }, { family: ".SF NS" }, { family: "Menlo" }, { family: "Georgia" }];
+        Object.assign(installedFonts, { status: "unknown", families: [] });
+      });
+      await sans.focus();
+      await waitFor("the font list", () => page.locator("#font-picker").isVisible(), 5000);
+      const listed = await page.locator("#font-picker [role=option] .name").allTextContents();
+      check(listed.slice(1).join(",") === "Courier New,Georgia,Menlo" && listed[0] === placeholders[0], `the list: ${listed.join(", ")}`);
+      check((await page.locator("#font-picker [role=option] .default").count()) === 1, "the default row isn't marked");
+      check((await page.evaluate(() => getComputedStyle(document.querySelectorAll("#font-picker .name")[2]).fontFamily.split(",")[0].replaceAll('"', ""))) === "Georgia", "a family isn't drawn in its own face");
+      await page.keyboard.type("geo");
+      check((await page.locator("#font-picker [role=option]").allTextContents()).join(",") === "Georgia", "the search doesn't narrow");
+      await page.keyboard.press("Enter");
+      await waitFor("Georgia", async () => (await page.evaluate(() => localStorage.getItem("look-sans-font"))) === "Georgia" && (await text("#look-sans-font")) === "Georgia");
+      await press(page.locator("#look-mono-font"));
+      await press(page.locator('#font-picker [data-font="Georgia"]'));
+      check((await toastText()) === "\"Georgia\" isn't monospace · Code and terminal need a fixed-width font, so the current font was kept." && (await page.evaluate(() => localStorage.getItem("look-mono-font"))) === null, `a proportional pick: ${await toastText()}`);
+      const sizes = await page.evaluate(() => {
+        setLook("advanced", "true");
+        setLook("terminal-size", "15px");
+        looksChanged();
+        const entry = shellTerm(active, { id: "terminal:font-probe" });
+        const first = entry.term.options.fontSize;
+        setLook("terminal-size", "17px");
+        looksChanged();
+        const second = entry.term.options.fontSize;
+        shellTerms.delete("terminal:font-probe");
+        entry.term.dispose();
+        return [first, second].join("|");
+      });
+      check(sizes === "15|17", `a panel terminal's font size: ${sizes}`);
+    } finally {
+      await page.evaluate(() => {
+        delete window.queryLocalFonts;
+        Object.assign(installedFonts, { status: "unavailable", families: [] });
+        for (const name of ["sans-font", "mono-font", "advanced", "terminal-size"]) setLook(name, "");
+        looksChanged();
+        if (settingsOpen()) toggleSettings();
+      });
+    }
+  });
+
+  await step("app view: T3's tokens: Working in blue-500, the default theme's wireframe colors, a palette's code surface and JSON colors, and the Sort menu as a styled select", async () => {
+    await resetTheme();
+    try {
+      const probe = (html, selector, prop) =>
+        page.evaluate(([html, selector, prop]) => {
+          const box = Object.assign(document.createElement("div"), { innerHTML: html });
+          document.body.append(box);
+          const read = getComputedStyle(box.querySelector(selector))[prop];
+          box.remove();
+          return read;
+        }, [html, selector, prop]);
+      check((await probe('<span class="status info">Working</span>', ".status", "color")) === "rgb(43, 127, 255)", "Working isn't blue-500");
+      await page.evaluate(() => toggleSettings());
+      await settingsNav("appearance");
+      const wire = await page.evaluate(() => {
+        const pane = (mode) => document.querySelector(`#theme-section .mode-tile[data-theme-mode="${mode}"] .wire-pane`).style;
+        return [pane("dark").getPropertyValue("--w-sidebar"), pane("dark").getPropertyValue("--w-action"), pane("light").getPropertyValue("--w-message")].join("|");
+      });
+      check(wire === "#0f0f10|#8b9cff|#e4e4e7", `the wireframe: ${wire}`);
+      const json = '<div class="theme-import"><div class="ti-editor"><span class="key">"a"</span></div></div>';
+      check((await probe(json, ".key", "color")) === "rgb(21, 93, 252)", "a key isn't blue-600");
+      await page.evaluate(() => toggleSettings());
+      await page.evaluate(() => setTheme("grove"));
+      await waitFor("Grove", async () => (await appearance()).endsWith("|grove"));
+      const accent = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--app-theme-accent").trim());
+      const key = await probe(json, ".key", "color");
+      const accentRgb = await probe(`<span style="color: ${accent}">x</span>`, "span", "color");
+      check(key === accentRgb, `under Grove a key is ${key}, the accent ${accentRgb}`);
+      const code = await probe('<div class="codeblock">x</div>', ".codeblock", "backgroundColor");
+      const codeBg = await probe(`<span style="background: ${await page.evaluate(() => colorsFor(themeById("grove"), resolvedAppearance()).codeBackground)}">x</span>`, "span", "backgroundColor");
+      check(code === codeBg, `under Grove a code block is ${code}, its code surface ${codeBg}`);
+    } finally {
+      await page.evaluate(() => settingsOpen() && toggleSettings());
+      await resetTheme();
     }
   });
 
@@ -2520,8 +2843,8 @@ async function sweep(profileName) {
     }
     await closePanelIfOpen();
     await page.evaluate(() => toggleSettings());
-    await tapOrClick('#settings-nav [data-page="general"]');
-    await page.selectOption("#panel-animation", "200");
+    await settingsNav("appearance");
+    await page.locator("#panel-animation-duration").fill("200");
     await page.evaluate(() => toggleSettings());
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
     await tapOrClick("#toggle-panel");
@@ -2846,7 +3169,7 @@ async function sweep(profileName) {
   await step("composer: the send shortcut setting: Enter, ⌘Enter for multiline prompts, ⌘Enter always", async () => {
     const pick = async (value) => {
       await page.evaluate(() => toggleSettings());
-      await tapOrClick('#settings-nav [data-page="general"]');
+      await settingsNav("general");
       const options = await page.locator("#send-shortcut option").allTextContents();
       await page.selectOption("#send-shortcut", value);
       await page.evaluate(() => toggleSettings());
@@ -3905,7 +4228,7 @@ async function sweep(profileName) {
   const prState = (selector) => attr(selector, "data-state");
   const sideSetting = async (id, on) => {
     await page.evaluate(() => document.body.dataset.page === "settings" || toggleSettings());
-    await tapOrClick('#settings-nav [data-page="general"]');
+    await settingsNav("general");
     if (on !== undefined) await page.locator(`#side-${id}`).setChecked(on);
   };
   const closeSettings = () => page.evaluate(() => document.body.dataset.page === "settings" && toggleSettings());
@@ -4068,7 +4391,7 @@ async function sweep(profileName) {
     await menuPick("Archive thread");
     await waitFor("the archived thread gone", async () => (await rows()) === 2);
     await page.evaluate(() => document.body.dataset.page === "settings" || toggleSettings());
-    await tapOrClick('#settings-nav [data-page="archive"]');
+    await settingsNav("archive");
     await waitFor("it on the Archive page", async () => /to archive/.test(await text("#archive-settings .archived")));
     await press(gui("#archive-settings [data-unarchive]"));
     await waitFor("Unarchive to bring it back", async () => (await rows()) === 3 && (await text("#chat-head .crumb .title")) === "to archive", 15000);
@@ -4079,7 +4402,7 @@ async function sweep(profileName) {
     await press(gui("#side-dialog .destructive"));
     await waitFor("the deleted thread gone", async () => (await rows()) === 2);
     await page.evaluate(() => document.body.dataset.page === "settings" || toggleSettings());
-    await tapOrClick('#settings-nav [data-page="archive"]');
+    await settingsNav("archive");
     check(/No archived threads/.test(await text("#archive-settings")), "the archive isn't empty");
     await closeSettings();
     await openRow(alpha);
@@ -4745,7 +5068,7 @@ async function sweep(profileName) {
     });
     if (touch) {
       await page.evaluate(() => document.body.dataset.page === "settings" || toggleSettings());
-      await tapOrClick('#settings-nav [data-page="archive"]');
+      await settingsNav("archive");
     } else {
       await page.keyboard.press("Meta+k");
       await page.keyboard.type("archive");
@@ -4753,7 +5076,7 @@ async function sweep(profileName) {
       await page.keyboard.press("Enter");
     }
     await waitFor("the Archive page", async () => (await text("#settings-page h2")) === "Archive");
-    check(await page.locator('#settings-nav [data-page="archive"].active').isVisible(), "the nav doesn't mark Archive");
+    check((await page.locator('#settings-nav [data-page="archive"].active').count()) === 1, "the nav doesn't mark Archive");
     check((await page.locator("#archive-settings .archived label").allTextContents()).join() === "Newer archive,Older archive", "not newest first");
     check((await text("#archive-settings .archived .meta")) === "Archived 2m ago · Created 2h ago", `meta: ${await text("#archive-settings .archived .meta")}`);
     check(!(await page.locator("#side-settings .archived").count()), "General still lists archived threads");

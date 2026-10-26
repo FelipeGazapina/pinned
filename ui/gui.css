@@ -91,7 +91,7 @@ button.outline .i { width: 14px; height: 14px; }
 .thread-row .when { min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
 .thread-row .status { display: flex; align-items: center; gap: 4px; font-weight: 500; }
 .thread-row .status .i { width: 16px; height: 16px; }
-.status.info { color: var(--g-info); }
+.status.info { color: var(--g-info-base); }
 .status.warning { color: var(--g-warning-fg); }
 .status.input { color: var(--g-input-tone); }
 .status.error { color: var(--g-error); }

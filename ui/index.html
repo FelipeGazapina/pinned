@@ -123,19 +123,14 @@
       </div>
     </div>
     <div id="settings">
-      <nav id="settings-nav">
-        <div class="head" data-tauri-drag-region><button id="settings-back" class="icon" title="Back to the app (⌘,)"><i data-icon="arrow-left"></i></button><b data-tauri-drag-region>Settings</b></div>
-        <div class="links">
-          <button data-page="general"><i data-icon="settings"></i>General</button>
-          <button data-page="integrations"><i data-icon="plug"></i>Connectors</button>
-          <button data-page="projects"><i data-icon="folder"></i>Projects</button>
-          <button data-page="connectors"><i data-icon="workflow"></i>Workflows</button>
-          <button data-page="account"><i data-icon="circle-user"></i>Account</button>
-          <button data-page="machines"><i data-icon="server"></i>Machines</button>
-          <button data-page="archive"><i data-icon="archive"></i>Archive</button>
-        </div>
+      <nav id="settings-nav" aria-label="Settings">
+        <div class="head" data-tauri-drag-region><button id="settings-back" class="icon" title="Back to the app (⌘,)" aria-label="Back to the app"><i data-icon="arrow-left"></i></button><b data-tauri-drag-region>Settings</b></div>
+        <label class="settings-search"><i data-icon="search"></i><input type="search" placeholder="Search" aria-label="Search settings" role="combobox" aria-autocomplete="list" aria-expanded="false" autocomplete="off" spellcheck="false"><kbd>/</kbd><button type="button" class="clear" aria-label="Clear settings search" hidden><i data-icon="x"></i></button></label>
+        <p class="settings-none" role="status" hidden>No settings found</p>
+        <div class="settings-results" id="settings-search-results" role="listbox" aria-label="Settings search results" hidden></div>
+        <div class="links"></div>
       </nav>
-      <section id="settings-page"></section>
+      <section id="settings-page" data-settings-page-scroll></section>
     </div>
     <div id="grip" title="Resize"></div>
     <span id="version"></span>
@@ -171,6 +166,9 @@
 <script src="terminal-menu.js"></script>
 <script src="diff.js"></script>
 <script src="gui.js"></script>
+<script src="gui-settings.js"></script>
+<script src="gui-tooltip.js"></script>
+<script src="gui-appearance.js"></script>
 <script src="gui-sidebar.js"></script>
 <script src="gui-timeline.js"></script>
 <script src="gui-agents.js"></script>

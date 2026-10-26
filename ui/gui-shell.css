@@ -58,7 +58,7 @@ body[data-sidebar="open"] #page-view .page-head .side-toggle { display: none; }
 #palette .item .hint { margin-left: auto; color: var(--g-muted); font-size: 12px; font-weight: 500; letter-spacing: 0.1em; line-height: 20px; flex: none; }
 #palette .item .chev { color: var(--g-muted); margin-top: 2px; }
 #palette .status { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--g-muted); }
-#palette .status[data-tone="info"] { background: var(--g-info); }
+#palette .status[data-tone="info"] { background: var(--g-info-base); }
 #palette .status[data-tone="warning"] { background: var(--g-warning); }
 #palette .status[data-tone="error"] { background: var(--g-error); }
 #palette .status[data-tone="success"] { background: var(--g-success); }

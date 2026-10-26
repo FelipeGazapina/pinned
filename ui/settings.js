@@ -45,8 +45,19 @@ const GITHUB_TOKENS = "https://github.com/settings/tokens/new?scopes=repo&descri
 
 /** Mirrors the backend's `get_settings`. Unsaved connectors carry an empty id. */
 let settings = { linear: null, slack: null, connectors: [], checked: null };
-const PAGES = ["general", "integrations", "projects", "connectors", "account", "machines", "archive"];
-let page = PAGES.includes(load("settings-page")) ? load("settings-page") : "integrations";
+/** The settings sections in the nav's order, T3 Code's where it has the section. A file adds its own
+ * with `settingsSection({ page, label, icon, show, search })`: `show` draws the page into settingsPage,
+ * and `search` lists the settings it holds as `{ title, terms, id }`. A result scrolls to the element
+ * `id`, or else to the heading or label on the page that reads `title`. */
+const SETTINGS_ORDER = ["general", "appearance", "projects", "keybindings", "integrations", "connectors", "account", "machines", "archive"];
+const settingsSections = [];
+function settingsSection(section) {
+  const rank = (p) => (SETTINGS_ORDER.includes(p) ? SETTINGS_ORDER.indexOf(p) : SETTINGS_ORDER.length - 1.5);
+  const at = settingsSections.findIndex((s) => rank(s.page) > rank(section.page));
+  settingsSections.splice(at < 0 ? settingsSections.length : at, 0, section);
+}
+const settingsSectionOf = (name) => settingsSections.find((s) => s.page === name);
+let page = load("settings-page") || "general";
 /** Names from the connected Linear workspace and Slack channels, for the connector form's suggestions. */
 let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [] };
 
@@ -58,6 +69,7 @@ async function toggleSettings() {
   if (settingsOpen()) return active ? activate(active) : delete document.body.dataset.page;
   document.body.dataset.page = "settings";
   picker.hidden = true;
+  renderSettingsNav();
   try {
     settings = await connectorCall("get_settings");
   } catch (e) {
@@ -74,10 +86,17 @@ function onHubSettings(latest) {
   if (line) line.textContent = checkedText();
 }
 
+function renderSettingsNav() {
+  document.querySelector("#settings-nav .links").innerHTML = settingsSections
+    .map((s) => `<button type="button" data-page="${s.page}"${s.page === page ? ' class="active" aria-current="page"' : ""}>${icon(s.icon)}<span>${esc(s.label)}</span></button>`)
+    .join("");
+}
+
 function showPage(name) {
-  page = name;
+  const section = settingsSectionOf(name) ?? settingsSections[0];
+  name = page = section.page;
   save("settings-page", name);
-  for (const b of document.querySelectorAll("#settings-nav [data-page]")) b.classList.toggle("active", b.dataset.page === name);
+  renderSettingsNav();
   if (name === "connectors" && settings.linear && !suggestions.labels.length) {
     connectorCall("linear_suggestions").then((found) => {
       Object.assign(suggestions, found);
@@ -98,13 +117,8 @@ function showPage(name) {
       fillList("github-repos", suggestions.repos);
     }, console.warn);
   }
-  if (name === "projects") return showProjectsPage();
-  if (name === "general") return showGeneral();
-  if (name === "account") return showAccount();
-  if (name === "machines") return showMachinesPage();
-  if (name === "archive") return showArchive();
-  if (name === "integrations") settingsPage.innerHTML = integrationsHtml();
-  else redraw();
+  settingsPage.scrollTop = 0;
+  return section.show();
 }
 
 function fillList(id, names) {
@@ -764,7 +778,25 @@ settingsPage.addEventListener("change", async (e) => {
   e.target.closest(".flow-card").dataset.on = e.target.checked;
 });
 
-for (const b of document.querySelectorAll("#settings-nav [data-page]")) b.onclick = () => showPage(b.dataset.page);
+document.querySelector("#settings-nav .links").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-page]");
+  if (b) showPage(b.dataset.page);
+});
+settingsSection({ page: "general", label: "General", icon: "settings", show: () => showGeneral(), search: [
+  { title: "Keep this Mac awake", terms: ["sleep display power"] },
+  { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
+  { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
+] });
+settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => (settingsPage.innerHTML = integrationsHtml()), search: [
+  { title: "Linear", terms: ["api key issues labels connector"] },
+  { title: "Slack", terms: ["bot token channels mentions connector"] },
+  { title: "GitHub", terms: ["token repositories clone connector"] },
+] });
+settingsSection({ page: "projects", label: "Projects", icon: "folder", show: () => showProjectsPage(), search: [{ title: "Projects", terms: ["history turns changed files"] }] });
+settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show: () => redraw(), search: [{ title: "Workflows", terms: ["linear label slack mention automation trigger"] }] });
+settingsSection({ page: "account", label: "Account", icon: "circle-user", show: () => showAccount(), search: [{ title: "Password", terms: ["account change sign in out email"] }] });
+settingsSection({ page: "machines", label: "Machines", icon: "server", show: () => showMachinesPage(), search: [{ title: "Machines", terms: ["pair rename remove server node computer"] }] });
+settingsSection({ page: "archive", label: "Archive", icon: "archive", show: () => showArchive(), search: [{ title: "Archive", terms: ["archived threads unarchive delete restore"] }] });
 document.getElementById("settings-toggle").onclick = toggleSettings;
 document.getElementById("settings-back").onclick = toggleSettings;
 

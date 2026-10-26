@@ -21,7 +21,12 @@ const APPEARANCE_OPTIONS = [
   ["dark", "Dark", "moon"],
 ];
 const RESERVED_THEME_IDS = new Set(["system", "light", "dark", "default", THEME_PREVIEW_ID, ...THEME_PALETTES.builtIn.map((t) => t.id)]);
-const STANDARD_PREVIEW = { light: { canvas: "#fcfcfc", accent: "#f4f4f5", messageAction: "#4f46e5" }, dark: { canvas: "#0a0a0a", accent: "#1c1c1f", messageAction: "#8b9cff" } };
+/** ThemePreviewCircles.tsx's STANDARD_THEME_PREVIEW_COLORS: how the T3 Code card and the Color scheme
+ * tiles draw the default theme. */
+const STANDARD_PREVIEW = {
+  light: { sidebar: "#fafafa", surface: "#ffffff", accentSurface: "#f4f4f5", messageSurface: "#e4e4e7", canvas: "#fcfcfc", accent: "#f4f4f5", messageAction: "#4f46e5" },
+  dark: { sidebar: "#0f0f10", surface: "#121212", accentSurface: "#27272a", messageSurface: "#27272a", canvas: "#0a0a0a", accent: "#1c1c1f", messageAction: "#8b9cff" },
+};
 const TERMINAL_ANSI = {
   light: ["#000000", "#cd3131", "#107c10", "#949800", "#0451a5", "#bc05bc", "#0598bc", "#555555", "#666666", "#cd3131", "#14ce14", "#b5ba00", "#0451a5", "#bc05bc", "#0598bc", "#a5a5a5"],
   dark: ["#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5", "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#e5e5e5"],
@@ -74,20 +79,46 @@ function replaceThemeCollection(collectionId, themes, expected) {
   applyTheme();
   return themes;
 }
+/** components/ui/toast.tsx at the window's top right: a glass card with a bold title, the type's icon
+ * and a muted description, gone after `timeout` ms unless the pointer rests on it. A new one takes
+ * the place of the last. */
+const themeToastEl = Object.assign(document.createElement("div"), { id: "g-toast", role: "status", hidden: true });
+themeToastEl.setAttribute("aria-live", "polite");
+document.body.append(themeToastEl);
+let themeToastTimer = 0;
+function themeToast({ title, description = "", type = "", timeout = 5000 }) {
+  const mark = { success: "circle-check", error: "circle-alert" }[type];
+  themeToastEl.innerHTML = `<button type="button" class="dismiss" aria-label="Dismiss notification">${icon("x")}</button>
+    <div class="title">${mark ? icon(mark, type) : ""}<b>${esc(title)}</b></div>${description ? `<p>${esc(description)}</p>` : ""}`;
+  themeToastEl.hidden = false;
+  themeToastEl.classList.remove("leaving");
+  const close = () => {
+    themeToastEl.classList.add("leaving");
+    themeToastTimer = setTimeout(() => (themeToastEl.hidden = true), 300);
+  };
+  clearTimeout(themeToastTimer);
+  themeToastTimer = setTimeout(close, timeout);
+  themeToastEl.onpointerenter = () => clearTimeout(themeToastTimer);
+  themeToastEl.onpointerleave = () => (themeToastTimer = setTimeout(close, timeout));
+  themeToastEl.querySelector(".dismiss").onclick = () => {
+    clearTimeout(themeToastTimer);
+    close();
+  };
+}
 /** The toast T3 shows after an import: one theme by name, or how many, then their names. */
 function themesImported(themes, updated) {
   const verb = updated ? "updated" : "added";
-  flash(`${themes.length === 1 ? `${themes[0].label} ${verb}` : `${themes.length} themes ${verb}`} · ${themes.map((t) => t.label).join(", ")}`);
+  themeToast({ type: "success", title: themes.length === 1 ? `${themes[0].label} ${verb}` : `${themes.length} themes ${verb}`, description: themes.map((t) => t.label).join(", ") });
 }
 /** A pasted or single file theme is put to use: its one appearance, or the whole theme. */
 function useImportedTheme(theme) {
   const modes = modesOf(theme);
   if (modes.length === 1) {
     setThemeHalf(modes[0], theme.id);
-    flash(`${theme.label} added · It’s now your ${modes[0]} theme.`);
+    themeToast({ type: "success", title: `${theme.label} added`, description: `It’s now your ${modes[0]} theme.` });
   } else {
     setTheme(theme.id);
-    flash(`${theme.label} added · It’s now active.`);
+    themeToast({ type: "success", title: `${theme.label} added`, description: "It’s now active." });
   }
 }
 const themeById = (id) => (id ? THEME_PALETTES.builtIn.find((t) => t.id === id) ?? customThemes.find((t) => t.id === id) ?? null : null);
@@ -231,7 +262,7 @@ function setThemeHalf(appearance, id) {
 function cycleAppearance() {
   const next = { system: "light", light: "dark", dark: "system" }[themeState().mode];
   setAppearanceMode(next);
-  flash(`Appearance: ${APPEARANCE_OPTIONS.find(([m]) => m === next)[1]}`);
+  themeToast({ title: `Appearance: ${APPEARANCE_OPTIONS.find(([m]) => m === next)[1]}`, timeout: 1500 });
 }
 
 /** The cards Settings and ⌘K offer: T3 Code (the standard light and dark), then each palette. */
@@ -291,9 +322,11 @@ function openThemePicker() {
   renderPalette();
 }
 
-onGuiKey("a", () => openThemePicker(), { alt: true });
-onGuiKey("a", () => cycleAppearance(), { alt: true, shift: true });
-onGuiKey("t", () => toggleThemeEditor(), { alt: true, shift: true });
+// T3 takes these anywhere in the app except in a focused terminal (keybindings.ts), once per press.
+const themeKeyOptions = (shift) => ({ alt: true, shift, anywhere: true, when: (e) => !e.target.closest?.(".xterm") });
+onGuiKey("a", (e) => e.repeat || openThemePicker(), themeKeyOptions(false));
+onGuiKey("a", (e) => e.repeat || cycleAppearance(), themeKeyOptions(true));
+onGuiKey("t", (e) => e.repeat || toggleThemeEditor(), themeKeyOptions(true));
 
 /** appearanceContrast.ts: 50 to 200%. Under 100 the text and borders fade toward their surface, over
  * 100 the text moves toward black or white and the borders toward the text (gui-theme.css). */
@@ -338,23 +371,16 @@ function setContrast(c) {
   applyContrast();
 }
 
-/** AppearanceSettingsPanel.tsx's Interface row. */
-function contrastSettingsHtml() {
-  return `<div class="look" id="contrast-row"><div class="contrast-head"><label for="appearance-contrast">Contrast</label><button type="button" class="reset" data-contrast-reset aria-label="Reset contrast to default" title="Reset to default">${icon("undo-2")}</button></div>
-    <p class="meta">Adjust the contrast of colors and borders across the interface.</p>
-    <div class="contrast-control"><output for="appearance-contrast"></output><input type="range" class="settings-slider" id="appearance-contrast" aria-label="Contrast" min="${CONTRAST.min}" max="${CONTRAST.max}" step="5"></div></div>`;
-}
+/** AppearanceSettingsPanel.tsx's Contrast row. */
+resettable("contrast", { changed: () => contrastLevel() !== CONTRAST.standard, reset: () => setContrast(CONTRAST.standard) });
+const contrastRowHtml = () => settingsRowHtml({ id: "setting-appearance-contrast", title: "Contrast", about: "Adjust the contrast of colors and borders across the interface.", reset: "contrast",
+  control: sliderHtml({ id: "appearance-contrast", label: "Contrast", min: CONTRAST.min, max: CONTRAST.max, step: 5, value: contrastLevel(), unit: "%" }) });
 function showContrast() {
-  const row = document.getElementById("contrast-row");
-  if (!row) return;
-  const c = contrastLevel();
-  const ratio = (c - CONTRAST.min) / (CONTRAST.max - CONTRAST.min);
-  const input = row.querySelector("input");
-  input.value = c;
-  input.style.setProperty("--settings-slider-progress", `${ratio * 100}%`);
-  input.style.setProperty("--settings-slider-fill-offset", `${0.5 - ratio}rem`);
-  row.querySelector("output").textContent = `${c}%`;
-  row.querySelector("[data-contrast-reset]").hidden = c === CONTRAST.standard;
+  const input = document.getElementById("appearance-contrast");
+  if (!input) return;
+  input.value = contrastLevel();
+  paintSlider(input, `${contrastLevel()}%`);
+  refreshResets();
 }
 document.addEventListener("input", (e) => {
   if (e.target.id !== "appearance-contrast") return;
@@ -363,19 +389,13 @@ document.addEventListener("input", (e) => {
   setContrast(c);
   showContrast();
 });
-document.addEventListener("click", (e) => {
-  if (!e.target.closest?.("[data-contrast-reset]")) return;
-  setContrast(CONTRAST.standard);
-  showContrast();
-});
 
 /** ThemeSettings.tsx: the Color scheme tiles, then the theme library. */
 function themeSettingsHtml() {
-  return `<section id="theme-section" aria-label="Colors &amp; themes"></section>`;
+  return settingsSectionHtml({ id: "appearance", title: "Colors & themes", plain: true, rows: `<div id="theme-section"></div>` });
 }
 function bindThemeSettings() {
   renderThemeSection();
-  showContrast();
 }
 
 const WIREFRAME_LINE = "rgb(127 127 127 / 0.25)";
@@ -395,7 +415,7 @@ function renderThemeSection() {
   const owners = { light: activeThemeId("light", s), dark: activeThemeId("dark", s) };
   const ownerColors = (mode) => {
     const t = themeById(owners[mode]);
-    return (t && colorsFor(t, mode)) ?? (t && t.colors) ?? standardColors(mode);
+    return (t && colorsFor(t, mode)) ?? (t && t.colors) ?? { ...standardColors(mode), ...STANDARD_PREVIEW[mode] };
   };
   const tiles = APPEARANCE_OPTIONS.map(([mode, label]) => {
     const frame = mode === "system" ? wireframePane(ownerColors("light"), "left") + wireframePane(ownerColors("dark"), "right") : wireframePane(ownerColors(mode));
@@ -634,7 +654,8 @@ function openThemeEditor({ editingId = null, seedId = null, seedName = "", appea
     appearance: source && !colorsFor(source, appearance) ? source.appearance : appearance,
     colors,
     advanced: !!source && !source.managed,
-    regenerate: false,
+    regenerate: !!source && !source.managed,
+    invalid: { light: {}, dark: {} },
     filter: "",
     error: "",
     minimized: false,
@@ -685,12 +706,13 @@ function previewThemeEditor() {
 /** ThemeColorPicker.tsx's ThemeColorField: the label toggles where the color is used, the swatch opens
  * the picker, and the hex field types a value. */
 function themeField(role, label) {
-  const value = themeEditor.colors[themeEditor.appearance][role];
+  const invalid = themeEditor.invalid[themeEditor.appearance][role];
+  const value = invalid === undefined ? themeEditor.colors[themeEditor.appearance][role] : "#000000";
   const selected = themeEditor.selected === role;
   return `<div class="te-field${selected ? " selected" : ""}" data-theme-color-role="${role}">
     <button type="button" class="te-label" data-te-usage="${role}" aria-pressed="${selected}" aria-label="${selected ? "Hide" : "Show"} ${esc(label)} usage" title="${selected ? "Hide" : "Show"} where ${esc(label)} is used">${esc(label)}</button>
     <button type="button" class="te-swatch" data-te-pick="${role}" aria-label="Choose ${esc(label)} color" title="Choose ${esc(label)} color"><span style="background:${esc(value)}"></span></button>
-    <input class="te-value" value="${esc(colorHex(value) ?? value)}" data-role="${role}" spellcheck="false" autocomplete="off" aria-label="${esc(label)} hex value"></div>`;
+    <input class="te-value" value="${esc(invalid ?? colorHex(value) ?? value)}" data-role="${role}" spellcheck="false" autocomplete="off" aria-label="${esc(label)} hex value"${invalid === undefined ? "" : ' aria-invalid="true"'}></div>`;
 }
 
 function renderThemeEditor() {
@@ -700,7 +722,7 @@ function renderThemeEditor() {
   const editing = editingTheme();
   const filter = ed.filter.trim().toLowerCase();
   const groups = ed.advanced
-    ? THEME_FAMILIES.map(([group, fields]) => [group, fields.filter(([, label]) => !filter || label.toLowerCase().includes(filter) || group.toLowerCase().includes(filter))]).filter(([, f]) => f.length)
+    ? THEME_FAMILIES.map(([group, fields]) => [group, fields.filter(([role, label]) => !filter || [label, ...(FAMILY_PROBES[role] ?? [role]).map(roleLabel)].join(" ").toLowerCase().includes(filter))]).filter(([, f]) => f.length)
     : [["", [["canvas", "Background"], ["accent", "Accent"]]]];
   const fields = groups.length
     ? groups.map(([group, f]) => `<div class="te-group">${group ? `<h4>${esc(group)}</h4>` : ""}${f.map(([role, label]) => themeField(role, label)).join("")}</div>`).join("")
@@ -737,7 +759,7 @@ const editorSubtitle = () => {
   if (ed.inspecting) return "Select an element · Esc to cancel";
   if (!ed.selected) return "Select a color below";
   const n = usageWatch?.count ?? 0;
-  return `${familyLabel(ed.selected)} · ${n} ${n === 1 ? "use" : "uses"}`;
+  return `${ed.advanced ? familyLabel(ed.selected) : roleLabel(ed.selected)} · ${n} ${n === 1 ? "use" : "uses"}`;
 };
 
 /** What the name decides, kept in place while typing: the save label and the locked appearances. */
@@ -746,6 +768,20 @@ function refreshThemeEditorControls() {
   const ed = themeEditor;
   const editing = editingTheme();
   const target = mergeTarget();
+  // A new theme named after a one-palette theme moves to the free appearance, once per name, as T3.
+  const mergeKey = !editing && target ? `${target.id}:${modesOf(target).join(",")}` : null;
+  if (mergeKey !== ed.mergeKey) {
+    ed.mergeKey = mergeKey;
+    const taken = target ? modesOf(target) : [];
+    if (mergeKey && taken.length === 1 && taken[0] === ed.appearance) {
+      ed.appearance = ed.appearance === "light" ? "dark" : "light";
+      previewThemeEditor();
+      const typing = document.activeElement?.id === "theme-name";
+      renderThemeEditor();
+      if (typing) panel.querySelector("#theme-name").focus();
+      return;
+    }
+  }
   const save = panel.querySelector('[data-te="save"]');
   save.innerHTML = editing ? (target ? `Merge into “${esc(target.label)}”` : "Save changes") : target ? `${icon("plus")}Add ${ed.appearance} palette` : `${icon("paintbrush")}Create theme`;
   save.disabled = !ed.name.trim();
@@ -788,7 +824,7 @@ function bindThemeEditor(panel) {
       return renderThemeEditor();
     }
     if (act === "save") return saveThemeEditor();
-    if (act === "inspect") return setInspecting(!ed.inspecting);
+    if (act === "inspect") return ed.inspecting ? clearInspectorSelection() : setInspecting(true);
     const usage = e.target.closest("[data-te-usage]")?.dataset.teUsage;
     if (usage) {
       ed.selected = ed.selected === usage ? null : usage;
@@ -822,8 +858,13 @@ function bindThemeEditor(panel) {
     }
     const role = e.target.dataset.role;
     if (!role) return;
-    setThemeEditorColor(role, e.target.value);
-    e.target.closest(".te-field").querySelector(".te-swatch span").style.background = themeEditor.colors[ed.appearance][role];
+    const valid = !!parseColor(e.target.value);
+    if (valid) delete ed.invalid[ed.appearance][role];
+    else ed.invalid[ed.appearance][role] = e.target.value;
+    if (valid) e.target.removeAttribute("aria-invalid");
+    else e.target.setAttribute("aria-invalid", "true");
+    if (valid) setThemeEditorColor(role, e.target.value);
+    e.target.closest(".te-field").querySelector(".te-swatch span").style.background = valid ? themeEditor.colors[ed.appearance][role] : "#000000";
     if (colorPicker?.role === role) syncColorPicker(true);
   });
   panel.addEventListener("change", (e) => {
@@ -833,7 +874,9 @@ function bindThemeEditor(panel) {
       if (!ed.advanced && !["canvas", "accent"].includes(ed.selected)) ed.selected = null;
       closeColorPicker();
       if (!ed.advanced && ed.regenerate) {
-        for (const m of ["light", "dark"]) ed.colors[m] = vividThemeColors(chatColors(m), ed.colors[m].canvas, ed.colors[m].accent, m);
+        const editing = editingTheme();
+        const modes = editing && modesOf(editing).length > 1 ? ["light", "dark"] : [ed.appearance];
+        for (const m of modes) ed.colors[m] = vividThemeColors(chatColors(m), ed.colors[m].canvas, ed.colors[m].accent, m);
         ed.regenerate = false;
         previewThemeEditor();
       }
@@ -882,14 +925,19 @@ function saveThemeEditor() {
   const target = mergeTarget();
   const managed = !ed.advanced;
   try {
+    const invalid = Object.entries(ed.invalid[mode])[0];
+    if (invalid) throw new Error(`The color for "${invalid[0]}" must be a literal CSS color such as oklch(0.62 0.2 280).`);
     if (target) {
-      if (colorsFor(target, mode)) throw new Error(`“${target.label}” already has ${modesOf(target).length === 2 ? "light and dark palettes" : `a ${mode} palette`}. Pick another name.`);
-      const merged = { ...target, variants: { ...target.variants, [mode]: ed.colors[mode] } };
+      // An edited theme renamed onto another brings all its palettes; a new one brings the one it shows.
+      const modes = editing ? modesOf(editing) : [mode];
+      const taken = modes.find((m) => colorsFor(target, m));
+      if (taken) throw new Error(editing ? `“${target.label}” already has a ${taken} palette. Pick another name.` : `“${target.label}” already has ${modesOf(target).length === 2 ? "light and dark palettes" : `a ${mode} palette`}. Pick another name.`);
+      const merged = { ...target, variants: { ...target.variants, ...Object.fromEntries(modes.map((m) => [m, ed.colors[m]])) } };
       customThemes = customThemes.filter((t) => t.id !== editing?.id).map((t) => (t.id === target.id ? merged : t));
       saveCustomThemes();
       closeThemeEditor();
       setTheme(target.id);
-      flash(`${target.label} updated · Its ${mode} palette was added.`);
+      themeToast({ type: "success", title: `${target.label} updated`, description: `Its ${modes[0]} palette was added.` });
       return;
     }
     if (editing) {
@@ -901,7 +949,7 @@ function saveThemeEditor() {
       const s = themeState();
       const active = s.theme === editing.id || s.halves.light === editing.id || s.halves.dark === editing.id;
       closeThemeEditor();
-      flash(`${name} saved · ${active ? "Your changes are now active." : "Your changes are saved."}`);
+      themeToast({ type: "success", title: `${name} saved`, description: active ? "Your changes are now active." : "Your changes are saved." });
       return;
     }
     const id = themeIdFromName(name);
@@ -910,7 +958,7 @@ function saveThemeEditor() {
     saveCustomThemes();
     closeThemeEditor();
     setTheme(id);
-    flash(`${name} created · It’s now active.`);
+    themeToast({ type: "success", title: `${name} created`, description: "It’s now active." });
   } catch (err) {
     ed.error = err.message || (editing ? "Could not save the theme." : "Could not create the theme.");
     renderThemeEditor();
@@ -962,6 +1010,11 @@ function familyAt(el) {
   });
   return found.find(Boolean) ?? null;
 }
+/** ThemeColorPicker.tsx's getThemeRoleLabel. */
+const ROLE_LABELS = { canvas: "Background", toolbar: "Toolbar background", toolbarForeground: "Toolbar text", toolbarBorder: "Toolbar border", toolbarControl: "Toolbar control",
+  toolbarControlForeground: "Toolbar control text", toolbarControlHover: "Toolbar control hover", accent: "Accent color", errorForeground: "Error text", errorSurface: "Error background",
+  warningForeground: "Warning text", warningSurface: "Warning background", updateForeground: "Update text", updateSurface: "Update background" };
+const roleLabel = (role) => ROLE_LABELS[role] ?? role.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase());
 const familyLabel = (role) => THEME_FAMILIES.flatMap(([, f]) => f).find(([r]) => r === role)?.[1] ?? role;
 
 let inspectHover = null;
@@ -1015,9 +1068,13 @@ document.addEventListener("keydown", (e) => {
   if (!inspecting() || e.key !== "Escape") return;
   e.preventDefault();
   e.stopPropagation();
-  setInspecting(false);
+  clearInspectorSelection();
 }, true);
 
+function clearInspectorSelection() {
+  themeEditor.selected = null;
+  setInspecting(false);
+}
 function setInspecting(on) {
   themeEditor.inspecting = on;
   if (!on) clearInspectHover();
