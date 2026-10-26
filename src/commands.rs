@@ -1,7 +1,7 @@
 use pinned_core::connectors::{Connector, Connectors, Settings, Suggestions};
 use pinned_core::machine::Machine;
 use pinned_core::wire::Call;
-use pinned_core::{github, linear, slack};
+use pinned_core::{github, linear, slack, vercel};
 use serde_json::Value;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
@@ -45,6 +45,21 @@ pub fn disconnect_slack(connectors: State<Connectors>) -> Result<(), String> {
 #[tauri::command]
 pub async fn slack_suggestions(connectors: State<'_, Connectors>) -> Result<Vec<String>, String> {
     connectors.slack_suggestions().await
+}
+
+#[tauri::command]
+pub async fn connect_vercel(connectors: State<'_, Connectors>, key: String) -> Result<vercel::Account, String> {
+    connectors.connect_vercel(&key).await
+}
+
+#[tauri::command]
+pub fn disconnect_vercel(connectors: State<Connectors>) -> Result<(), String> {
+    connectors.disconnect_vercel()
+}
+
+#[tauri::command]
+pub async fn vercel_models(connectors: State<'_, Connectors>) -> Result<Vec<String>, String> {
+    connectors.vercel_models().await
 }
 
 #[tauri::command]

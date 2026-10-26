@@ -297,8 +297,9 @@ impl Hub {
             HubCall::SlackSuggestions => (json(c().await?.slack_suggestions().await?), false),
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
-            HubCall::Import { store, linear_key, slack_key, github_key } => {
-                let imported = c().await?.import(store, Keys { linear: linear_key, slack: slack_key, github: github_key })?;
+            HubCall::Import { store, linear_key, slack_key, github_key, vercel_key } => {
+                let keys = Keys { linear: linear_key, slack: slack_key, github: github_key, vercel: vercel_key };
+                let imported = c().await?.import(store, keys)?;
                 (json(imported), imported)
             }
             HubCall::SharedProjects => return json(self.db.shared_projects(account.id).await?),
@@ -335,6 +336,9 @@ impl Hub {
             HubCall::ConnectGithub { token } => (json(c().await?.connect_github(&token).await?), true),
             HubCall::DisconnectGithub => (json(c().await?.disconnect_github()?), true),
             HubCall::GithubRepos => (json(c().await?.github_repos().await?), false),
+            HubCall::ConnectVercel { key } => (json(c().await?.connect_vercel(&key).await?), true),
+            HubCall::DisconnectVercel => (json(c().await?.disconnect_vercel()?), true),
+            HubCall::VercelModels => (json(c().await?.vercel_models().await?), false),
             HubCall::Clone { machine, repo } => {
                 let repo = github::clone_url(&repo);
                 let token = c().await?.github_token().filter(|_| github::hosts(&repo));

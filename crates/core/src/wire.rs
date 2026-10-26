@@ -456,6 +456,11 @@ pub enum HubCall {
     DisconnectGithub,
     /// `Vec<github::Repo>`, most recently pushed first.
     GithubRepos,
+    /// `vercel::Account`.
+    ConnectVercel { key: String },
+    DisconnectVercel,
+    /// The ids of the gateway's decision models.
+    VercelModels,
     /// The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has none.
     Clone { machine: MachineId, repo: String },
     /// `Vec<sync::Project>`: the account's projects, most recently shared first.
@@ -484,6 +489,8 @@ pub enum HubCall {
         slack_key: Option<String>,
         #[serde(default)]
         github_key: Option<String>,
+        #[serde(default)]
+        vercel_key: Option<String>,
     },
     Stage {
         connector: String,
@@ -782,9 +789,17 @@ mod tests {
             json!({ "cmd": "linear_take", "connector": "c2", "channel": "C1", "thread": "1.2", "issue": "ENG-7" }),
         );
         round_trip(
-            HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None },
-            json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": "lin_api_1", "slack_key": null, "github_key": null }),
+            HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None, vercel_key: Some("vck_1".into()) },
+            json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": "lin_api_1", "slack_key": null, "github_key": null, "vercel_key": "vck_1" }),
         );
+        round_trip(HubCall::ConnectVercel { key: "vck_1".into() }, json!({ "cmd": "connect_vercel", "key": "vck_1" }));
+        round_trip(HubCall::DisconnectVercel, json!({ "cmd": "disconnect_vercel" }));
+        round_trip(HubCall::VercelModels, json!({ "cmd": "vercel_models" }));
+        let before_vercel = json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": null, "slack_key": "xoxb-1" });
+        match serde_json::from_value::<HubCall>(before_vercel).unwrap() {
+            HubCall::Import { slack_key, github_key, vercel_key, .. } => assert_eq!((slack_key.as_deref(), github_key, vercel_key), (Some("xoxb-1"), None, None)),
+            _ => panic!("not an import"),
+        }
     }
 
     #[test]
@@ -830,8 +845,8 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, connectors: vec![], checked: None } },
-            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "connectors": [], "checked": null } }),
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, connectors: vec![], checked: None } },
+            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "connectors": [], "checked": null } }),
         );
     }
 
