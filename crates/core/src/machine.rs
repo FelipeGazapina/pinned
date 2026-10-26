@@ -16,6 +16,8 @@ pub const OUTPUT_KEEP: usize = 256 * 1024;
 /// Slack after a usage limit's reset time before the session is told to continue.
 const LIMIT_MARGIN_SECS: u64 = 5;
 const UNWATCHED: (u16, u16) = (120, 32);
+/// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
+const TURN_LOG_WAIT: (u32, std::time::Duration) = (25, std::time::Duration::from_millis(200));
 
 pub type Event = MachineEvent;
 /// Names a viewer of a tab, such as `local` for the app's own webview; attaching again replaces it.
@@ -641,13 +643,9 @@ impl Machine {
             })
             .collect();
         self.emit_tabs();
-        // A resumed session reports no new id, so its transcript is read here, off the caller's thread.
-        if let (Some(machine), false) = (self.me.upgrade(), ids.is_empty()) {
-            let restored = ids.clone();
-            std::thread::spawn(move || {
-                restored.iter().for_each(|id| machine.read_stats(id));
-                machine.emit_tabs();
-            });
+        // A resumed session reports no new id, so its transcript is read here.
+        for id in &ids {
+            self.refresh_stats(id, false);
         }
         ids
     }
@@ -692,8 +690,9 @@ impl Machine {
             let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
             self.record_status(tab, &event);
             self.record_turn(tab, &event);
-            if new_session || matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
-                self.read_stats(tab);
+            let turn_ended = matches!(event.status, AgentStatus::Done | AgentStatus::Failed);
+            if new_session || turn_ended {
+                self.refresh_stats(tab, turn_ended);
             }
             self.continue_when_limit_lifts(tab);
             self.emit_tabs();
@@ -788,17 +787,37 @@ impl Machine {
         new
     }
 
-    /// Reads what the tab's transcript gained since the last read, outside the tabs lock.
-    fn read_stats(&self, tab: &str) {
-        let Ok(Some((session, mut tally))) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone()))) else { return };
-        let Some(file) = thread::find(&thread::projects_dir(&home()), &session) else { return };
-        if tally.advance(&file).is_ok() {
-            let _ = self.tab(tab, |t| {
-                if t.claude_session.as_ref() == Some(&session) {
-                    t.tally = tally;
+    /// Reads what the tab's transcript gained, off the caller's thread, then sends the tabs again.
+    /// After a turn ends it reads again until that turn's duration shows up, or gives up.
+    fn refresh_stats(&self, tab: &str, turn_ended: bool) {
+        let (Some(machine), tab) = (self.me.upgrade(), tab.to_owned()) else { return };
+        std::thread::spawn(move || {
+            let before = machine.tab(&tab, |t| t.tally.turns).ok();
+            for _ in 0..TURN_LOG_WAIT.0 {
+                let after = machine.read_stats(&tab);
+                if !turn_ended || after.is_none() || after != before {
+                    break;
                 }
-            });
-        }
+                std::thread::sleep(TURN_LOG_WAIT.1);
+            }
+            machine.emit_tabs();
+        });
+    }
+
+    /// Reads what the tab's transcript gained since the last read, outside the tabs lock, and
+    /// returns the turns counted so far. `None` when the tab has no transcript to read.
+    fn read_stats(&self, tab: &str) -> Option<u32> {
+        let (session, mut tally) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone()))).ok()??;
+        let file = thread::find(&thread::projects_dir(&home()), &session)?;
+        tally.advance(&file).ok()?;
+        let turns = tally.turns;
+        self.tab(tab, |t| {
+            if t.claude_session.as_ref() == Some(&session) {
+                t.tally = tally;
+            }
+        })
+        .ok()?;
+        Some(turns)
     }
 
     fn record_status(&self, tab: &str, event: &AgentEvent) {
