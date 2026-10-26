@@ -77,7 +77,7 @@ function onHubSettings(latest) {
 function showPage(name) {
   page = name;
   save("settings-page", name);
-  for (const b of document.querySelectorAll("#settings-nav button")) b.classList.toggle("active", b.dataset.page === name);
+  for (const b of document.querySelectorAll("#settings-nav [data-page]")) b.classList.toggle("active", b.dataset.page === name);
   if (name === "connectors" && settings.linear && !suggestions.labels.length) {
     connectorCall("linear_suggestions").then((found) => {
       Object.assign(suggestions, found);
@@ -681,7 +681,7 @@ const actions = {
     showStep(null);
   },
   async "pick-folder"() {
-    const picked = await chooseFolder(view.draft.folder);
+    const picked = await invoke("pick_folder", { start: view.draft.folder });
     if (!picked) return;
     view.draft.folder = picked;
     redraw();
@@ -764,8 +764,9 @@ settingsPage.addEventListener("change", async (e) => {
   e.target.closest(".flow-card").dataset.on = e.target.checked;
 });
 
-for (const b of document.querySelectorAll("#settings-nav button")) b.onclick = () => showPage(b.dataset.page);
+for (const b of document.querySelectorAll("#settings-nav [data-page]")) b.onclick = () => showPage(b.dataset.page);
 document.getElementById("settings-toggle").onclick = toggleSettings;
+document.getElementById("settings-back").onclick = toggleSettings;
 
 listen("connectors-checked", (payload) => {
   settings.checked = payload;

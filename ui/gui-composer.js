@@ -558,7 +558,7 @@ function branchBanner(tab) {
   if (!ws?.branch || ws.worktree || !t.branch || t.branch === ws.branch) return null;
   const id = `branch:${threadKey(tab)}:${t.branch}:${ws.branch}`;
   if (bannerDismissed.has(id)) return null;
-  const busy = phaseOf(tab) === "working" || !!tab.menu || restoringBranch === tab;
+  const busy = ["working", "delegating"].includes(phaseOf(tab)) || !!tab.menu || restoringBranch === tab;
   return {
     id, variant: "info", icon: "git-branch", dismiss: "Dismiss branch change notice",
     title: `<span class="muted">Branch changed from</span><code title="This thread last ran on ${esc(t.branch)}. Sending will continue on ${esc(ws.branch)}.">${esc(t.branch)}</code>`,
@@ -812,6 +812,7 @@ async function send() {
     return clearComposer(tab);
   }
   if (!text || sendBlocked(tab)) return;
+  prompts++;
   const draft = prompt.value;
   const chips = { ...chipsOf(tab) };
   const compactFirst = !!compactOffer(tab) && !t.keepHistory && !/^\/compact\b/.test(text);
@@ -863,7 +864,22 @@ function clearComposer(tab, revoke = true) {
   }
 }
 
-const stop = () => active && writeTo(active, "\x1b");
+// Esc ends the turn but leaves background agents and workflows running, so claude's ctrl+x ctrl+k
+// stops them first. Their "stopped by the user" notices then wake claude for a turn of its own,
+// which a second Esc ends, unless a prompt went out in between.
+const KILL_AGENTS = "\x18\x0b";
+let prompts = 0;
+async function stop() {
+  const tab = active;
+  if (!tab) return;
+  const sent = prompts;
+  for (const keys of [KILL_AGENTS, KILL_AGENTS, "\x1b"]) {
+    await writeTo(tab, keys);
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  await new Promise((r) => setTimeout(r, 1200));
+  if (prompts === sent) writeTo(tab, "\x1b");
+}
 
 const escapePath = (p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&");
 
@@ -2101,7 +2117,8 @@ async function openBranches(anchor) {
     return;
   }
   threadOf(tab).git = git;
-  const busy = phaseOf(tab) === "working" || !!tab.menu;
+  const delegating = phaseOf(tab) === "delegating";
+  const busy = phaseOf(tab) === "working" || !!tab.menu || delegating;
   // A fresh worktree, as T3 Code's draft one, picks the ref it starts from, which may be the remote's.
   const base = threadOf(tab).madeWorktree === tab.view.cwd && workspaceOpen(tab);
   const current = git.refs.find((r) => r.current)?.name;
@@ -2115,7 +2132,7 @@ async function openBranches(anchor) {
       ${r.current ? `<span class="badge">current</span>` : r.worktree ? `<span class="badge">worktree</span>` : r.remote ? `<span class="badge">remote</span>` : r.name === git.default ? `<span class="badge">default</span>` : ""}</button>`);
     if (pr) rows.unshift(`<button type="button" data-pr-checkout="${esc(pr)}"${busy ? " disabled" : ""}>${icon("git-pull-request", "lead")}<span class="label">Checkout PR ${/^\d+$/.test(pr) ? `#${pr}` : esc(pr)}</span></button>`);
     if (fresh) rows.push(`<button type="button" data-create="${esc(needle)}"${busy ? " disabled" : ""}>${icon("plus", "lead")}<span class="label">Create new ref "${esc(needle)}"</span></button>`);
-    composerMenu.querySelector(".refs").innerHTML = (busy ? `<p class="none">claude is working. Switch branches when the turn ends.</p>` : "") + (rows.join("") || `<p class="none">No refs found.</p>`)
+    composerMenu.querySelector(".refs").innerHTML = (busy ? `<p class="none">${delegating ? "claude's agents are working. Switch branches when they finish." : "claude is working. Switch branches when the turn ends."}</p>` : "") + (rows.join("") || `<p class="none">No refs found.</p>`)
       + (base ? `<label class="from-remote"><span>Start from remote</span><input type="checkbox" role="switch"${fromRemote ? " checked" : ""}></label>` : "");
     const toggle = composerMenu.querySelector(".from-remote input");
     if (toggle) toggle.onchange = () => (fromRemote = toggle.checked);
@@ -2823,7 +2840,7 @@ function toggleDetails(open = detailsCard.hidden) {
 }
 detailsButton.onclick = () => toggleDetails();
 onGuiKey("b", () => toggleDetails(), { shift: true });
-window.addEventListener("mousedown", (e) => !detailsCard.hidden && !e.target.closest("#details-card, #toggle-details, #header-menu, #composer-menu, #panel-menu, #composer-dialog") && toggleDetails(false), true);
+window.addEventListener("mousedown", (e) => !detailsCard.hidden && !e.target.closest("#details-card, #toggle-details, #head-more, #header-menu, #composer-menu, #panel-menu, #composer-dialog") && toggleDetails(false), true);
 window.addEventListener("keydown", (e) => e.key === "Escape" && !detailsCard.hidden && headerMenu.hidden && composerSheet.hidden && (toggleDetails(false), e.stopPropagation()), true);
 function renderDetails(tab) {
   if (detailsCard.hidden || !tab) return;

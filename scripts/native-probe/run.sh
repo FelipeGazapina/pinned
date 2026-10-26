@@ -28,7 +28,7 @@ probe() {
   node "$REPO/scripts/native-probe/server.js" "$PORT" >>"$DIR/reports.jsonl" &
   local server=$!
   GH_TOKEN="$(gh auth token)" HOME="$DIR/home" SHELL="$DIR/bin/shell" PATH="$DIR/bin:$PATH" PINNED_PROBE="$DIR/probe.js" \
-    "$REPO/target/debug/pinned" >>"$DIR/app.log" 2>&1 &
+    "${CARGO_TARGET_DIR:-$REPO/target}/debug/pinned" >>"$DIR/app.log" 2>&1 &
   local app=$!
   for _ in $(seq 1 90); do
     kill -0 $server 2>/dev/null || break

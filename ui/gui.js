@@ -100,7 +100,7 @@ const middle = (text, over = 14) => (text.length > over ? `<span class="head">${
 const prOf = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kind === "pr");
 /** claude's hooks report no answer to a permission menu, so a permission notice with no menu on
  * screen means the turn went on. It sends "waiting for your input" a while after a turn ends. */
-function phaseOf(tab) {
+function hookPhase(tab) {
   if (tab.menu) return "asking";
   const status = statusOf(tab);
   const message = tab.view.message ?? "";
@@ -108,8 +108,13 @@ function phaseOf(tab) {
   if (/permission/i.test(message)) return "working";
   return /waiting for your input/i.test(message) ? "done" : "input";
 }
+/** Agents outlive the turn that spawned them, so the thread is in progress while one runs. */
+function phaseOf(tab) {
+  const phase = hookPhase(tab);
+  return ["done", "idle"].includes(phase) && runningAgents(tab).length ? "delegating" : phase;
+}
 const turnLive = (tab) => ["working", "asking", "input"].includes(phaseOf(tab));
-const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && (tab.view.updated ?? 0) > (seenAt[threadKey(tab)] ?? 0);
+const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && lastActivity(tab) > (seenAt[threadKey(tab)] ?? 0);
 
 async function fetchThread(tab) {
   const t = threadOf(tab);
@@ -134,8 +139,12 @@ async function fetchThread(tab) {
     t.items.push(...page.items);
     t.next = page.next;
     t.loaded = true;
-    if (grew && guiOn()) {
-      if (tab === active) renderThread();
+    const moved = takeAgents(t, page.agents);
+    if ((grew || moved) && guiOn()) {
+      if (tab === active) {
+        renderThread();
+        markThreadSeen(tab);
+      }
       renderSidebar();
     }
     if (grew && t.session && !t.history && tab === active) fetchHistory(tab);
@@ -219,7 +228,7 @@ function renderGui() {
 
 setInterval(() => {
   if (!guiOn() || document.hidden) return;
-  for (const tab of tabs) if (tab === active || turnLive(tab)) fetchThread(tab);
+  for (const tab of tabs) if (tab === active || turnLive(tab) || phaseOf(tab) === "delegating") fetchThread(tab);
 }, POLL_MS);
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
 document.addEventListener("visibilitychange", () => markThreadSeen(active));

@@ -115,7 +115,15 @@ async function sweep(profileName) {
   page.on("requestfailed", (r) => seen.push(`requestfailed: ${r.method()} ${r.url()} ${r.failure()?.errorText}`));
   page.on("response", (r) => r.status() >= 400 && seen.push(`HTTP ${r.status()}: ${r.request().method()} ${r.url()}`));
 
-  const tapOrClick = (selector) => (touch ? page.tap(selector) : page.click(selector));
+  // On a phone the chat header folds these into its Options menu, so a hidden one is reached there.
+  const HEAD_MENU = { "#toggle-panel": /side panel$/, "#toggle-terminal": /terminal$/, "#toggle-details": /^Thread details$/, "#pr-chip": /^Open PR #/ };
+  const tapOrClick = async (selector) => {
+    if (HEAD_MENU[selector] && !(await page.locator(selector).isVisible())) {
+      await tapOrClick("#head-more");
+      return press(page.locator("#panel-menu button", { hasText: HEAD_MENU[selector] }));
+    }
+    return touch ? page.tap(selector) : page.click(selector);
+  };
   const press = async (locator) => (touch ? locator.tap() : locator.click());
   const visible = (selector) => page.locator(selector).filter({ visible: true });
   const text = async (selector) => (await page.locator(selector).first().textContent())?.trim() ?? "";
@@ -739,6 +747,97 @@ async function sweep(profileName) {
     await waitFor("the compacted note", async () => (await page.locator("#thread .note", { hasText: "The conversation was compacted." }).count()) > 0, 10000);
   });
 
+  await step("app view: Stop ends the background agents before the turn, and the turn they wake", async () => {
+    await sendPrompt("build");
+    await waitFor("the running command", async () => (await text("#thread .live-tool .label")) === "Running npm", 6000);
+    await tapOrClick("#stop");
+    await waitTerm(/\[ctrl-x\]\[ctrl-k\]\[ctrl-x\]\[ctrl-k\]\[esc\]/, 3000);
+    await waitTerm(/\[ctrl-x\]\[ctrl-k\]\[ctrl-x\]\[ctrl-k\]\[esc\][^[]*\[esc\]/, 4000);
+    await answered("Built.");
+  });
+
+  // The fake claude logs each turn's length after its Stop hook returns, and $0.42 a turn.
+  await step("app view: the header and the row read the thread's active time and cost, ticking while it works", async () => {
+    const readouts = () =>
+      page.evaluate(() => {
+        const row = document.querySelector("#thread-list .thread-row.active");
+        return { head: document.querySelector("#chat-head .crumb .stats")?.textContent ?? "", row: row?.querySelector(".stats")?.textContent ?? "", status: active.view.status };
+      });
+    const parse = (s) => {
+      const m = /^(\d+)s · \$(\d+\.\d\d)$/.exec(s);
+      return m && { secs: Number(m[1]), cost: m[2] };
+    };
+    await waitFor("the last turn to end", async () => (await readouts()).status === "done" && parse((await readouts()).head));
+    await sleep(1000);
+    const before = await readouts();
+    check(before.row === before.head, `the row reads "${before.row}", the header "${before.head}"`);
+    if (!touch) {
+      await page.hover("#thread-list .thread-row.active .l2");
+      await waitFor("the row's hover card", () => page.locator("#hover-card").isVisible(), 3000);
+      const card = await text("#hover-card .card-lines .stats");
+      await page.mouse.move(0, 0);
+      check(card === before.head, `the row's hover card reads "${card}", the header "${before.head}"`);
+    }
+    const placed = await page.evaluate(() =>
+      [["#chat-head .crumb .stats", "#chat-head .crumb"], ["#thread-list .thread-row.active .stats", "#thread-list .thread-row.active .l3"]].map(([inner, outer]) => {
+        const box = document.querySelector(inner).getBoundingClientRect();
+        if (!box.width) return "hidden";
+        return box.right <= document.querySelector(outer).getBoundingClientRect().right + 0.5 ? "inside" : "spills";
+      }));
+    check(placed[0] === (touch ? "hidden" : "inside"), `the header readout is ${placed[0]}`);
+    check(placed[1] !== "spills", "the row readout spills out of its line");
+    await sendPrompt("think");
+    await waitFor("the turn to start", async () => (await readouts()).status === "working");
+    await sleep(2500);
+    const during = await readouts();
+    check(parse(during.head)?.secs >= parse(before.head).secs + 2, `while working it read "${during.head}" after "${before.head}"`);
+    const cost = (Number(parse(before.head).cost) + 0.42).toFixed(2);
+    await waitFor(`$${cost}`, async () => parse((await readouts()).head)?.cost === cost, 8000);
+    const after = await readouts();
+    check(after.status === "done" && parse(after.head).secs >= parse(before.head).secs + 4, `after the turn it read "${after.head}", status ${after.status}`);
+    check(after.row === after.head, `the row reads "${after.row}", the header "${after.head}"`);
+    return `${before.head} then ${during.head} then ${after.head}`;
+  });
+
+  await step("app view: spawned agents show as live cards, and the thread reads in progress until they finish", async () => {
+    const beta = await page.evaluate(() => active.key);
+    const card = (name) => page.locator("#thread .turn:last-of-type .agents .agent-card", { hasText: name });
+    const stepLine = (name) => card(name).locator(".agent-step .label").textContent();
+    const rowStatus = () => page.locator(`#thread-list .thread-row[data-tab="${beta}"] .stamp.status`).textContent().catch(() => "");
+    await sendPrompt("spawn agents");
+    await waitFor("two agent cards", async () => (await page.locator("#thread .turn:last-of-type .agents .agent-card").count()) === 2, 6000);
+    check((await card("Map the parser").locator(".chip").textContent()) === "Explore · haiku", `the first card's chip reads ${await card("Map the parser").locator(".chip").textContent()}`);
+    check((await card("Check the tests").getAttribute("data-state")) === "running", "the second card is not running");
+    const first = await stepLine("Check the tests");
+    await waitFor("the card's step to move on", async () => (await stepLine("Check the tests")) !== first, 5000);
+    const later = await stepLine("Check the tests");
+    check(/^Run test batch \d$/.test(later), `the step line reads ${later}`);
+    await waitFor("claude's turn to end", () => page.evaluate(() => statusOf(active) === "done"), 5000);
+    check((await page.evaluate(() => phaseOf(active))) === "delegating", `the phase is ${await page.evaluate(() => phaseOf(active))}`);
+    check(/^Worked for /.test(await lastTurn(".work > summary").textContent()), "the turn's own work did not settle");
+    const footer = (await text("#thread .agents-working")).replace(/\s+/g, " ");
+    check(/^2 agents working \d/.test(footer), `the footer reads ${footer}`);
+    check(/2 agents working/.test(await rowStatus()), `the sidebar row reads ${await rowStatus()}`);
+    check((await page.locator("#composer").getAttribute("data-working")) === "false", "the composer acts as if claude's turn were running");
+    await card("Check the tests").screenshot({ path: path.join(shots, "agent-card-running.png") });
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+    await waitFor("one agent left", async () => /1 agent working/.test(await rowStatus()), 8000);
+    check(!(await page.evaluate((k) => unseenDone(tabByKey(k)), beta)), "the row read Done while an agent still worked");
+    await waitFor("the row to show an unread finish", () => page.evaluate((k) => unseenDone(tabByKey(k)), beta), 12000);
+    check((await page.locator(`#thread-list .thread-row[data-tab="${beta}"] .stamp.status`).count()) === 0, "the finished row still shows a status");
+    await page.evaluate((k) => activate(tabByKey(k)), beta);
+    await waitFor("both cards done", async () => (await page.locator('#thread .agent-card[data-state="done"]').count()) === 2, 4000);
+    check((await page.locator("#thread .agents-working").count()) === 0, "the agents footer outlived the agents");
+    const done = await stepLine("Check the tests");
+    check(done === "Check the tests: all clear.", `the finished card's step reads ${done}`);
+    await press(card("Check the tests").locator(".agent-head"));
+    const rows = await card("Check the tests").locator(".agent-steps .tool").count();
+    check(rows === 5, `the open card shows ${rows} tool rows`);
+    await card("Check the tests").screenshot({ path: path.join(shots, "agent-card-done.png") });
+    await press(card("Check the tests").locator(".agent-head"));
+    return `${first} → ${later}`;
+  });
+
   await step("app view: changed files show as a folder tree with 1.2k counts", async () => {
     await sendPrompt("tree");
     await answered("Wrote the tree.");
@@ -798,11 +897,12 @@ async function sweep(profileName) {
 
   await step("app view: appearance: grain, pressed buttons, chat width, diff colors, code size", async () => {
     check(/svg/.test(await page.evaluate(() => getComputedStyle(document.getElementById("expanded")).backgroundImage)), "the app view has no grain");
-    const r = await rect("#toggle-panel");
+    const pressable = touch ? "head-more" : "toggle-panel";
+    const r = await rect(`#${pressable}`);
     await page.mouse.move(r.left + r.width / 2, r.top + r.height / 2);
     await page.mouse.down();
     await sleep(200);
-    const pressed = await page.evaluate(() => getComputedStyle(document.getElementById("toggle-panel")).scale);
+    const pressed = await page.evaluate((id) => getComputedStyle(document.getElementById(id)).scale, pressable);
     await page.mouse.move(0, 0);
     await page.mouse.up();
     check(pressed === "0.97", `a pressed button scales to ${pressed}`);
@@ -863,7 +963,11 @@ async function sweep(profileName) {
     await answered("echo: Continue from where you left off.");
     check((await text("#thread .turn:last-of-type .sent-by")) === "Sent by Pinned", "pinned's own prompt isn't marked");
     check((await page.locator("#thread .turn:nth-last-of-type(2) .sent-by").count()) === 0, "a typed prompt is marked as pinned's");
+    // A tabs event, such as the turn's stats arriving, replaces the view, so the faked connector rides on each one.
     await page.evaluate(() => {
+      const plain = updateView;
+      window.updateView = (tab, view) => plain(tab, tab === active ? { ...view, connector: "sweep-workflow" } : view);
+      window.updateView.plain = plain;
       active.view.connector = "sweep-workflow";
       rerender();
       threadView.scrollTop = 0;
@@ -875,6 +979,7 @@ async function sweep(profileName) {
     await waitFor("the automation's text", () => gui("#thread .user.automation .body").isVisible());
     check(await gui("#thread .user.automation [data-open-automation]").isVisible(), "no Open automation link");
     await page.evaluate(() => {
+      window.updateView = updateView.plain;
       delete active.view.connector;
       rerender();
       threadView.scrollTop = threadView.scrollHeight;
@@ -1681,7 +1786,11 @@ async function sweep(profileName) {
   });
 
   await step("app view: the PR link opens the pull request panel", async () => {
-    check(await page.locator("#pr-chip").isVisible(), "the header has no PR chip after the session linked #42");
+    if (touch) {
+      await tapOrClick("#head-more");
+      check(await page.locator("#panel-menu button", { hasText: "Open PR #42" }).isVisible(), "the Options menu has no Open PR #42 after the session linked it");
+      await tapOrClick("#head-more");
+    } else check(await page.locator("#pr-chip").isVisible(), "the header has no PR chip after the session linked #42");
     check(/#42/.test(await text("#composer-footer .pr")), "the composer footer doesn't show #42");
     await tapOrClick("#pr-chip");
     const prPanelSettled = async () => /#42/.test(await text("#panel-body")) && !/Loading/.test(await text("#panel-body"));
@@ -2424,19 +2533,30 @@ async function sweep(profileName) {
   });
 
   await step("app view: Open in an editor from the header", async () => {
-    // A phone's header leaves Open to the thread details card, as T3 Code's does.
-    if (touch) await tapOrClick("#toggle-details");
-    await waitFor("the Open button", () => page.locator(touch ? '#details-card [data-act="open-in"]' : "#open-in").isVisible());
-    await tapOrClick(touch ? '#details-card [data-act="editors"]' : "#open-in .pick");
-    const editors = await page.locator(touch ? "#header-menu button .label" : "#panel-menu button .label").allTextContents();
+    await waitFor("the Open button", () => page.locator(touch ? "#head-more" : "#open-in").isVisible());
+    await tapOrClick(touch ? "#head-more" : "#open-in .pick");
+    const editors = await page.locator("#panel-menu button .label").allTextContents();
     check(editors.includes("Zed") && editors.includes("Finder"), `editors: ${editors.join(" | ")}`);
-    await press(gui(touch ? '#header-menu button:has-text("Zed")' : '#panel-menu button:has-text("Zed")'));
-    await sleep(300);
-    check(!readLog("open.log"), "picking an editor opened it");
-    await tapOrClick(touch ? '#details-card [data-act="open-in"]' : "#open-in .main");
-    if (touch) await tapOrClick("#toggle-details");
+    await press(gui('#panel-menu button:has-text("Zed")'));
+    // The phone's Options menu opens the editor it names; the desktop's picker only picks one.
+    if (!touch) {
+      await sleep(300);
+      check(!readLog("open.log"), "picking an editor opened it");
+      await tapOrClick("#open-in .main");
+    }
     const opened = new RegExp(`^-a .*/home/Applications/Zed\\.app ${HOME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/work/alpha$`, "m");
     await waitFor("the folder to open in Zed", async () => opened.test(readLog("open.log")));
+    if (touch) {
+      // The thread details card holds Open too, as T3 Code's does.
+      await tapOrClick("#toggle-details");
+      await tapOrClick('#details-card [data-act="editors"]');
+      const listed = await page.locator("#header-menu button .label").allTextContents();
+      check(listed.includes("Zed") && listed.includes("Finder"), `the card's editors: ${listed.join(" | ")}`);
+      await press(gui('#header-menu button:has-text("Zed")'));
+      await tapOrClick('#details-card [data-act="open-in"]');
+      await waitFor("the card to open it again", async () => readLog("open.log").trim().split("\n").length === 2);
+      await tapOrClick("#toggle-details");
+    }
     if (!touch) {
       await page.focus("#prompt");
       await page.keyboard.press("Meta+o");
@@ -2751,7 +2871,8 @@ async function sweep(profileName) {
       await page.press("#prompt", "Enter");
       await waitTerm(/echo: one line/);
       await page.fill("#prompt", "a second\nline");
-      check((await page.getAttribute("#send", "title")) === "Send (⌘Enter)", "a multiline prompt doesn't ask for ⌘Enter");
+      // Until the last turn ends, the button offers to queue the prompt instead.
+      await waitFor("a multiline prompt to ask for ⌘Enter", async () => (await page.getAttribute("#send", "title")) === "Send (⌘Enter)");
       await page.press("#prompt", "Enter");
       check((await page.inputValue("#prompt")) === "a second\nline\n", `Enter on a multiline prompt left ${JSON.stringify(await page.inputValue("#prompt"))}`);
       await page.press("#prompt", "Meta+Enter");
@@ -2884,7 +3005,14 @@ async function sweep(profileName) {
     await press(page.locator('#composer-menu [data-create="try-this"]'));
     await waitFor("try-this in the footer", async () => (await text("#composer-footer .branch")) === "try-this");
     await waitFor("the Git action", async () => (await text("#git-action .main")) === "Push & create PR");
-    if (touch) await tapOrClick("#toggle-details");
+    if (touch) {
+      await tapOrClick("#head-more");
+      const options = await page.locator("#panel-menu button .label").allTextContents();
+      check(options.join("|").includes("Push & create PR|Commit|Push|Create PR"), `Options menu: ${options.join("|")}`);
+      await page.screenshot({ path: path.join(shots, "options-menu.png") });
+      await tapOrClick("#head-more");
+      await tapOrClick("#toggle-details");
+    }
     await tapOrClick(touch ? '#details-card [data-act="git-menu"]' : "#git-action .more");
     const actions = await page.locator("#header-menu .label").allTextContents();
     check(actions.join("|") === "Commit|Push|Create PR", `Git menu: ${actions.join("|")}`);
@@ -3439,10 +3567,16 @@ async function sweep(profileName) {
       fs.writeFileSync(path.join(beta, "leave.txt"), "left out");
       await page.evaluate(() => Object.assign(threadOf(active), { gitFor: null }) && renderComposer(active));
       await waitFor("the Git action", async () => (await text("#git-action .main")) === "Commit, push & PR");
-      // A phone runs the Git action from the thread details card, as T3 Code's.
-      if (touch) await tapOrClick("#toggle-details");
-      await tapOrClick(touch ? '#details-card [data-act="git-menu"]' : "#git-action .more");
-      await press(page.locator("#header-menu button", { hasText: "Commit" }));
+      // The label reads the same before the files were written, so the status that lists them is waited for.
+      await waitFor("the written files in the Git status", () => page.evaluate(() => !!threadOf(active).git?.changed.includes("leave.txt")));
+      // A phone commits from its Options menu and runs the Git action from the thread details card, as T3 Code's.
+      if (touch) {
+        await tapOrClick("#head-more");
+        await press(page.locator("#panel-menu button", { hasText: /^Commit$/ }));
+      } else {
+        await tapOrClick("#git-action .more");
+        await press(page.locator("#header-menu button", { hasText: "Commit" }));
+      }
       await waitFor("the commit dialog", async () => (await text("#composer-dialog h2")) === "Commit changes");
       await page.uncheck('#composer-dialog .files label:has-text("leave.txt") input');
       await page.fill("#composer-dialog [name=message]", "Keep the kept file");
@@ -4089,6 +4223,10 @@ async function sweep(profileName) {
     check(lead === "draft-pen", `line 1 starts with ${lead}`);
     check(!(await page.locator(`${rowSel(alpha)} .l2 .draft-pen`).count()), "the pen is still on the title line");
     if (!touch) {
+      await page.hover(`${rowSel(alpha)} .l2`);
+      await waitFor("the row's hover card", () => page.locator("#hover-card").isVisible(), 3000);
+      const [row, card] = [await rect(rowSel(alpha)), await rect("#hover-card")];
+      await page.screenshot({ path: path.join(shots, "row-draft-pr-stats.png"), clip: { x: 0, y: row.top - 8, width: card.right + 8, height: Math.max(row.bottom, card.bottom) - row.top + 16 } });
       await rowAct(alpha, "discard");
       await waitFor("the draft gone", async () => !(await page.locator(`${rowSel(alpha)} .draft-pen`).count()));
       await openRow(alpha);

@@ -414,10 +414,6 @@ body[data-mode="gui"][data-drawer="open"] #terms:has(#drawer-tabs:not([hidden]))
 #toggle-details[aria-pressed="true"] { background: var(--g-input); }
 @media (max-width: 640px) {
   #details-card { left: 8px; right: 8px; width: auto; }
-  /* A phone's header has no room for them; the thread details card (⌘⇧B) holds them, as T3 Code's does. */
-  #scripts-control, #open-in, #git-action { display: none !important; }
-  /* Shrinking to the pill is for a desktop window; the room goes to the thread title. */
-  #gui-minimize { display: none !important; }
 }
 
 /* T3 Code's --shadow-composer under the input and its context strip in light themes, and
