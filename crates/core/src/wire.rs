@@ -213,12 +213,23 @@ pub enum Call {
         involvement: pulls::Involvement,
         #[serde(default)]
         query: String,
+        #[serde(default)]
+        filters: pulls::Filters,
         /// Rows per search at most; the page asks for more 100 at a time.
         #[serde(default = "pulls_limit")]
         limit: usize,
     },
     /// `pulls::Stack` the pull request `number` of github.com's `repo` (`owner/name`) sits in, or `null`.
     PullRequestStack { repo: String, number: u64 },
+    /// `pulls::FilterOptions` of `kind` matching `query` in the GitHub repositories of the folders `paths`.
+    PullRequestFilterOptions {
+        paths: Vec<String>,
+        kind: pulls::OptionKind,
+        #[serde(default)]
+        query: String,
+    },
+    /// `Vec<pulls::FileStat>` of pull request `number` of `repo` on `host`, or `null` when it changes too many files.
+    PullRequestFiles { host: String, repo: String, number: u64 },
     /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since`
     /// on, priced with the machine's `usage::PriceBook` over LiteLLM's list.
     TokenUsage { since: u64 },
@@ -393,6 +404,8 @@ impl Call {
                 | Call::UsageLimits
                 | Call::PullRequests { .. }
                 | Call::PullRequestStack { .. }
+                | Call::PullRequestFilterOptions { .. }
+                | Call::PullRequestFiles { .. }
                 | Call::PageMeta { .. }
                 | Call::Refs { .. }
                 | Call::CheckoutPr { .. }
@@ -726,6 +739,11 @@ mod tests {
             json!({ "cmd": "set_bypass", "tab": "tab-1", "on": true, "cols": 120, "rows": 32 }),
         );
         round_trip(Call::PullRequestStack { repo: "o/r".into(), number: 7 }, json!({ "cmd": "pull_request_stack", "repo": "o/r", "number": 7 }));
+        round_trip(
+            Call::PullRequestFilterOptions { paths: vec!["/w/a".into()], kind: pulls::OptionKind::Authors, query: "oc".into() },
+            json!({ "cmd": "pull_request_filter_options", "paths": ["/w/a"], "kind": "authors", "query": "oc" }),
+        );
+        round_trip(Call::PullRequestFiles { host: "github.com".into(), repo: "o/r".into(), number: 7 }, json!({ "cmd": "pull_request_files", "host": "github.com", "repo": "o/r", "number": 7 }));
         round_trip(Call::CreateProject { name: "My App".into() }, json!({ "cmd": "create_project", "name": "My App" }));
         round_trip(Call::PublishProject { path: "/p".into() }, json!({ "cmd": "publish_project", "path": "/p" }));
         round_trip(Call::SearchThreads { query: "flaky".into() }, json!({ "cmd": "search_threads", "query": "flaky" }));

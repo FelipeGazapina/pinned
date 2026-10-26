@@ -2,7 +2,8 @@
 // Stands in for `gh` on the sweep's node, which has no GitHub login: it answers `pr view`, `pr list`,
 // `pr checkout`, `pr create`, `repo create`, `pr diff`, `pr merge`, `pr ready` and the right panel's
 // other pull request work for the pull requests fake claude links, #41 a draft and the others open,
-// the Pull requests page's `api graphql` search, and logs every call to $HOME/gh.log so a test can
+// the Pull requests page's `api graphql` search, its filter pickers' labels and authors and a pull
+// request's changed files, and logs every call to $HOME/gh.log so a test can
 // read them back. Edits, comments and reviews land in $HOME/.fake-gh-<n>.json.
 const fs = require("fs");
 const path = require("path");
@@ -109,14 +110,22 @@ if (cmd === "pr" && sub === "view") {
   // The Pull requests page's search: #42 the viewer's, #41 awaiting their review, #43 someone else's
   // with failing checks and a conflict, and #40 merged, across example/alpha and example/beta.
   const q = (args.find((a) => a.startsWith("q=")) ?? "q=").slice(2);
+  // "slowly" in a search takes two seconds, so a step can see the page wait; "failhard" fails.
+  if (q.includes("slowly")) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+  if (q.includes("failhard")) {
+    process.stderr.write("HTTP 502: Bad Gateway (https://api.github.com/graphql)\n");
+    process.exit(1);
+  }
+  const AUTHOR_NAMES = { hubot: "Hubot Robot", octocat: "The Octocat" };
   const pr = (number, repo, title, author, extra = {}) => ({
     number, title, url: `https://github.com/${repo}/pull/${number}`, isDraft: false, state: "OPEN", mergeable: "MERGEABLE", reviewDecision: "REVIEW_REQUIRED",
     additions: 2, deletions: 0, createdAt: at(number - 40), updatedAt: at(50 - number), headRefName: `sweep/notes-${number}`, baseRefName: "main",
-    author: { login: author, avatarUrl: "" }, repository: { nameWithOwner: repo }, labels: { nodes: [] }, reviewRequests: { nodes: [] },
+    author: { login: author, name: AUTHOR_NAMES[author] ?? null, avatarUrl: "" },
+    repository: { nameWithOwner: repo, mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: repo !== "example/beta" }, labels: { nodes: [] }, reviewRequests: { nodes: [] },
     commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] }, ...extra,
   });
   // #42 and #41 make up GitHub stack 7, and ghe.example.test's example/delta has #44.
-  const all = flag("--hostname") === "ghe.example.test" ? [pr(44, "example/delta", "Tune the delta cache", "hubot", { url: "https://ghe.example.test/example/delta/pull/44" })] : [
+  const all = flag("--hostname") === "ghe.example.test" ? [pr(44, "example/delta", "Tune the delta cache", "hubot", { url: "https://ghe.example.test/example/delta/pull/44", additions: 1234, deletions: 5678 })] : [
     pr(42, "example/alpha", "Add notes", "sweeper", { reviewDecision: "APPROVED", body: "Adds notes.md, and fixes the flaky login.", stack: { number: 7, size: 2, baseRefName: "main" }, stackEntry: { position: 1 } }),
     pr(41, "example/alpha", "Draft the notes", "octocat", { isDraft: true, reviewRequests: { nodes: [{ requestedReviewer: { login: "sweeper" } }] }, stack: { number: 7, size: 2, baseRefName: "main" }, stackEntry: { position: 2 } }),
     pr(43, "example/beta", "Rework the beta build", "hubot", { mergeable: "CONFLICTING", additions: 120, deletions: 30,
@@ -125,19 +134,32 @@ if (cmd === "pr" && sub === "view") {
     pr(40, "example/alpha", "Seed the notes", "sweeper", { state: "MERGED" }),
   ];
   // "label:many" finds 150, two pages of GitHub's 100.
-  if (q.includes("label:many")) {
+  if (/label:"?many/.test(q)) {
     const after = args.find((a) => a.startsWith("after="))?.slice(6);
-    const many = Array.from({ length: after ? 50 : 100 }, (_, i) => pr(1000 + i + (after ? 100 : 0), "example/alpha", `Bulk change ${i + (after ? 100 : 0)}`, "hubot"));
+    const many = Array.from({ length: after ? 50 : 100 }, (_, i) => pr(1000 + i + (after ? 100 : 0), "example/alpha", `Bulk change ${i + (after ? 100 : 0)}`, "hubot", { labels: { nodes: [{ name: "many", color: "ededed" }] } }));
     process.stdout.write(JSON.stringify({ data: { viewer: { login: "sweeper" }, search: { pageInfo: { hasNextPage: !after, endCursor: after ? null : "page-2" }, nodes: many } } }));
     process.exit(0);
   }
-  const words = q.split(" ").filter((w) => w && !w.includes(":")).map((w) => w.toLowerCase());
+  // The typed text arrives as one quoted phrase; the filters as label:"a","b", author:"x", draft:, review: and status:.
+  const tokens = q.match(/(?:[^\s"]|"(?:[^"\\]|\\.)*")+/g) ?? [];
+  const words = tokens.filter((t) => t.startsWith('"')).flatMap((t) => t.slice(1, -1).toLowerCase().split(/\s+/)).filter(Boolean);
+  const labelGroups = [...q.matchAll(/(?<!-)label:((?:"[^"]*",?)+)/g)].map((m) => [...m[1].matchAll(/"([^"]*)"/g)].map((l) => l[1].toLowerCase()));
+  const author = q.match(/author:"([^"]*)"/)?.[1];
+  const draft = q.match(/draft:(true|false)/)?.[1];
+  const review = q.match(/review:(\w+)/)?.[1];
+  const status = q.match(/status:(\w+)/)?.[1];
+  const REVIEWS = { approved: "APPROVED", changes_requested: "CHANGES_REQUESTED", required: "REVIEW_REQUIRED" };
   const repos = [...q.matchAll(/repo:(\S+)/g)].map((m) => m[1]);
   const nodes = all.filter((n) =>
     repos.includes(n.repository.nameWithOwner) &&
     (q.includes("is:open") ? n.state === "OPEN" : q.includes("is:merged") ? n.state === "MERGED" : q.includes("is:closed") ? n.state === "CLOSED" : true) &&
     (!q.includes("author:@me") || n.author.login === "sweeper") &&
     (!q.includes("review-requested:@me") || n.reviewRequests.nodes.some((r) => r.requestedReviewer.login === "sweeper")) &&
+    labelGroups.every((g) => n.labels.nodes.some((l) => g.includes(l.name.toLowerCase()))) &&
+    (author === undefined || n.author.login === author) &&
+    (draft === undefined || n.isDraft === (draft === "true")) &&
+    (review === undefined || (review === "none" ? !n.reviewDecision : n.reviewDecision === REVIEWS[review])) &&
+    (status === undefined || n.commits.nodes[0].commit.statusCheckRollup.state === status.toUpperCase()) &&
     words.every((w) => `${n.title} ${n.body ?? ""}`.toLowerCase().includes(w)));
   process.stdout.write(JSON.stringify({ data: { viewer: { login: "sweeper" }, search: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } }));
 } else if (cmd === "pr" && sub === "edit") {
@@ -151,6 +173,22 @@ if (cmd === "pr" && sub === "view") {
   fs.writeFileSync(stateFile, sub === "close" ? "closed" : "open");
 } else if (cmd === "pr" && sub === "revert") {
   process.stdout.write(`https://github.com/example/alpha/pull/${number + 100}\n`);
+} else if (cmd === "api" && sub === "graphql" && /labels\(first: 100, query|mentionableUsers/.test(field("query") ?? "")) {
+  // The filter pickers' search: example/alpha's labels, or the people who can be mentioned there.
+  const typed = (field("search") ?? "").toLowerCase();
+  const labels = [["build", "fbca04"], ["beta", "0e8a16"], ["ci", "1d76db"], ["slow", "d93f0b"], ["documentation", "0075ca"], ["triage", "c5def5"]].map(([name, color]) => ({ name, color }));
+  const people = [["sweeper", "Sweep Er"], ["octocat", "The Octocat"], ["hubot", "Hubot Robot"], ["monalisa", "Mona Lisa"]].map(([login, name]) => ({ login, name, avatarUrl: "" }));
+  const repository = /mentionableUsers/.test(field("query"))
+    ? { mentionableUsers: { nodes: people.filter((p) => `${p.login} ${p.name}`.toLowerCase().includes(typed)) } }
+    : { labels: { nodes: labels.filter((l) => l.name.includes(typed)) } };
+  process.stdout.write(JSON.stringify({ data: { repository } }));
+} else if (cmd === "api" && sub === "graphql" && /files\(first: 100/.test(field("query") ?? "")) {
+  // A pull request's changed files: #43's split into code, tests and a lockfile, the rest one note.
+  const n = Number(field("number"));
+  const files = n === 43
+    ? [{ path: "src/build.rs", additions: 80, deletions: 20 }, { path: "tests/build_test.rs", additions: 30, deletions: 5 }, { path: "Cargo.lock", additions: 10, deletions: 5 }]
+    : [{ path: "notes.md", additions: 2, deletions: 0 }];
+  process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: { files: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: files } } } } }));
 } else if (cmd === "api" && args.includes("graphql")) {
   const n = Number(field("number"));
   const threadFile = path.join(process.env.HOME, ".fake-gh-42.json");

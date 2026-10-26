@@ -66,8 +66,13 @@ const SURFACES = {
 /** Each thread's right panel: its open surfaces, the one shown, open or closed, maximized, width. */
 const panelStates = new Map();
 const noPanel = { open: false, surfaces: [], active: null, max: false, width: 0 };
+/** Pages with a right panel of their own, shown in place of the thread's and never saved, as T3 Code
+ * keeps the Pull requests page's: page name → panel. */
+const PAGE_PANELS = {};
+const pagePanel = (tab) => (tab && tab === active ? PAGE_PANELS[document.body.dataset.page] : undefined);
 function panelOf(tab) {
   if (!tab) return noPanel;
+  if (pagePanel(tab)) return pagePanel(tab);
   if (!panelStates.has(tab.key)) {
     let saved = null;
     try {
@@ -86,7 +91,7 @@ onRekey((from, to) => {
   save(`gui-panel:${to}`, saved);
   save(`gui-panel:${from}`, null);
 });
-const savePanel = (tab) => tab && save(`gui-panel:${threadKey(tab)}`, JSON.stringify(panelOf(tab)));
+const savePanel = (tab) => tab && !pagePanel(tab) && save(`gui-panel:${threadKey(tab)}`, JSON.stringify(panelOf(tab)));
 const shownSurface = (tab) => {
   const p = panelOf(tab);
   return p.surfaces.find((s) => s.id === p.active) ?? null;
