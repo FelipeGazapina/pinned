@@ -11,9 +11,10 @@
 #chat-head .crumb .project:hover { color: var(--g-fg); }
 #chat-head .crumb .project > span { overflow: hidden; text-overflow: ellipsis; }
 #chat-head .crumb .monogram { width: 14px; height: 14px; }
+#chat-head .crumb .stats { flex: none; margin-left: -4px; font-size: 12px; font-weight: 400; color: var(--g-muted); font-variant-numeric: tabular-nums; }
 
 .thread-row .slot { margin-left: auto; height: 20px; min-width: 32px; display: flex; align-items: center; justify-content: flex-end; flex: none; }
-.thread-row .since { font-variant-numeric: tabular-nums; }
+.thread-row .since, .thread-row .stats { font-variant-numeric: tabular-nums; }
 .thread-row .woke { cursor: pointer; }
 .thread-row .woke:hover { text-decoration: underline; }
 .thread-row .pin { display: flex; color: rgb(129 129 129 / 0.65); cursor: pointer; }
