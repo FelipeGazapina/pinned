@@ -2338,7 +2338,7 @@ function renderDrawer() {
   const tab = active;
   const own = scriptShells.filter((s) => s.tab === tab);
   const open = tab && document.body.dataset.drawer === "open";
-  const shown = open ? threadOf(tab).drawerShell : null;
+  const shown = open ? threadOf(tab).drawerShell ?? null : null;
   const group = open ? (shown ? shown.group : threadOf(tab).claudeGroup) : null;
   const visible = group?.members ?? [shown];
   for (const s of scriptShells) s.el.hidden = !visible.includes(s);

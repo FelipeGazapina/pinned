@@ -77,3 +77,4 @@ body[data-mode="gui"] #settings-page #keybindings .kb-search input { width: 100%
 }
 #settings-page .setting-found { animation: setting-found 1.6s ease-out; border-radius: 8px; }
 @keyframes setting-found { from { background: color-mix(in srgb, var(--g-primary) 18%, transparent); } }
+#composer-menu .model .jump { display: inline-flex; align-items: center; justify-content: center; flex: none; height: 20px; min-width: 20px; padding: 0 4px; border-radius: 4px; background: rgb(var(--g-ink-rgb) / 0.06); color: var(--g-muted); font-family: inherit; font-size: 12px; font-weight: 500; }

@@ -4739,6 +4739,361 @@ async function sweep(profileName) {
     return full;
   });
 
+  const threadRows = () => page.locator("#thread-list .thread-row").count();
+  // A step that failed may leave the palette or Settings over the app, which would block the next one's clicks.
+  const focusClaudeTerm = () => waitFor("claude's terminal focused", () => page.evaluate(() => (active.term.focus(), !!document.activeElement?.closest(".xterm"))));
+  const calm = () => page.evaluate(() => {
+    closePalette();
+    if (settingsOpen()) toggleSettings();
+    composerMenu.hidden = true;
+  });
+  const paletteRow = (title) => page.locator("#palette .item", { has: page.locator(`.name:text-is("${title}")`) }).first();
+  const openPaletteKeys = async () => {
+    await page.keyboard.press("Meta+k");
+    await waitFor("the palette", () => page.locator("#palette").isVisible());
+  };
+  await step("palette: T3's actions in its order, with its icons and ⇧⌘ hints; another chord or the backdrop closes it", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    await openRow(await keyFor("alpha"));
+    await openPaletteKeys();
+    const actions = await page.locator("#palette .group").first().locator(".item .name").allTextContents();
+    const at = (t) => actions.indexOf(t);
+    check(at("Change theme") > 0 && at("Change theme") < at("Open pull requests") && at("Open usage") < at("Open settings") && at("Open settings") < at("Project settings"), `order: ${actions.join(" | ")}`);
+    check(!actions.includes("Switch to terminal view"), "Pinned's own Switch to terminal view is listed");
+    const copy = actions.filter((a) => a === "Copy PR link" || a === "Copy thread ID");
+    check(copy.length === 1, `copy rows: ${actions.join(" | ")}`);
+    const hint = async (title) => (await paletteRow(title).locator(".hint").allTextContents()).join();
+    check((await hint(copy[0])) === "⇧⌘C", `${copy[0]}'s hint: ${await hint(copy[0])}`);
+    check((await hint("Change theme")) === "⌥⌘A", `Change theme's hint: ${await hint("Change theme")}`);
+    check((await hint("New thread without a project")) === "⌥⌘N", `New thread without a project's hint: ${await hint("New thread without a project")}`);
+    check((await hint("Open settings")) === "", `Open settings has a hint: ${await hint("Open settings")}`);
+    const icons = await page.evaluate((copy) => {
+      const want = { "New thread without a project": "message-square-dashed", "Find in current thread": "text-search", [copy]: "link", "Link pull request to thread": "link-2", "Open pull requests": "git-pull-request-arrow", "Open usage": "chart-no-axes-column" };
+      const drawn = (html) => Object.assign(document.createElement("span"), { innerHTML: html }).innerHTML;
+      return Object.entries(want).filter(([title, name]) => [...document.querySelectorAll("#palette .item")].find((el) => el.querySelector(".name").textContent === title)?.querySelector(".ic").innerHTML !== drawn(icon(name))).map(([title]) => title);
+    }, copy[0]);
+    check(!icons.length, `icons unlike T3's: ${icons.join(", ")}`);
+    check((await page.locator("#palette footer").textContent()).replace(/\s+/g, "") === "NavigateEnterSelectEscClose", `footer: ${await page.locator("#palette footer").textContent()}`);
+    const sidebar = await page.evaluate(() => document.body.dataset.sidebar);
+    await page.keyboard.press("Meta+b");
+    await waitFor("⌘B to close the palette and toggle the sidebar", async () => !(await page.locator("#palette").isVisible()) && (await page.evaluate(() => document.body.dataset.sidebar)) !== sidebar);
+    await page.keyboard.press("Meta+b");
+    await waitFor("the sidebar back", async () => (await page.evaluate(() => document.body.dataset.sidebar)) === sidebar);
+    await openPaletteKeys();
+    await page.mouse.click(8, 8);
+    await waitFor("the backdrop to close the palette", async () => !(await page.locator("#palette").isVisible()));
+    check(await page.evaluate(() => document.activeElement === prompt), "the composer didn't get the focus back");
+    return actions.join(" | ");
+  });
+
+  await step("palette: search terms, thread rows' status, subtitle and PR number, and a thread found by its messages with the excerpt", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    const alpha = await keyFor("alpha");
+    await openRow(alpha);
+    await openPaletteKeys();
+    for (const [query, title] of [["clone", "Add project"], ["github", "Add project"], ["keybindings", "Open settings"], ["draft", "New thread in alpha"]]) {
+      await page.fill("#palette input", query);
+      await waitFor(`“${query}” to find ${title}`, async () => (await page.locator("#palette .group").first().locator(".item .name").allTextContents()).includes(title));
+    }
+    await page.fill("#palette input", "");
+    const title = await page.evaluate((k) => threadTitle(tabByKey(k)), alpha);
+    const row = page.locator("#palette .group:has(.label:text-is('Recent Threads')) .item", { has: page.locator(`.name:text-is("${title}")`) }).first();
+    const sub = (await row.locator(".sub").textContent()).replace(/\s+/g, "");
+    const machine = await page.evaluate((k) => machineLabel(tabByKey(k).machine), alpha);
+    check(sub.startsWith(`AAalpha·${machine}·`) && sub.endsWith("··Currentthread"), `subtitle: ${sub}`);
+    check(await row.locator(".sub .agent").isVisible(), "no Claude icon in the subtitle");
+    await page.fill("#palette input", "#42");
+    await waitFor("#42's thread with its PR number", async () => (await page.locator("#palette .item .pr-num").allTextContents()).includes("#42"));
+    await page.fill("#palette input", "one check failed");
+    await waitFor("a thread found by its answer", () => page.locator("#palette .item .excerpt").first().isVisible(), 10000);
+    const excerpt = (await text("#palette .item .excerpt")).replace(/\s+/g, " ");
+    check(excerpt === "Agent: Looked around; one check failed.", `excerpt: ${excerpt}`);
+    check((await text("#palette .item .excerpt mark")) === "one check failed", "the match isn't marked");
+    await page.keyboard.press("Escape");
+    return excerpt;
+  });
+
+  await step("palette: arrows pass over a disabled row, and ⌘K opens over Settings", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    const beta = await keyFor("beta");
+    await openRow(beta);
+    check(await page.evaluate((k) => !linkedPrs(tabByKey(k)).length, beta), "beta has linked pull requests");
+    await openPaletteKeys();
+    await page.keyboard.type(">pull request");
+    await waitFor("the disabled row", () => paletteRow("Show linked pull requests").evaluate((el) => el.getAttribute("aria-disabled") === "true"));
+    const items = await paletteItems();
+    const lit = [];
+    for (let i = 0; i < items.length + 1; i++) {
+      await page.keyboard.press("ArrowDown");
+      lit.push(...(await page.locator("#palette .item.hi .name").allTextContents()));
+    }
+    check(lit.length === items.length + 1 && !lit.includes("Show linked pull requests"), `highlighted: ${lit.join(", ")} among ${items.join(" | ")}`);
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => toggleSettings());
+    await waitFor("Settings", () => page.locator("#settings-page").isVisible());
+    await page.keyboard.press("Meta+k");
+    await waitFor("the palette over Settings", () => page.locator("#palette").isVisible());
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => settingsOpen() && toggleSettings());
+  });
+
+  await step("palette: ⌘N with several projects lists them with ⌘1, ⌥⌘N and the rest, numbered before a query", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    await openRow(await keyFor("alpha"));
+    const before = await threadRows();
+    await page.keyboard.press("Meta+n");
+    await waitFor("New thread in…", async () => (await page.getAttribute("#palette input", "placeholder")) === "Search..." && (await paletteItems()).length > 2);
+    const names = await paletteItems();
+    const hints = await page.locator("#palette .item .hint").allTextContents();
+    check(names[1] === "No project" && hints.slice(0, 3).join(" ") === "⌘1 ⌥⌘N ⌘2", `rows: ${names.join(" | ")} hints: ${hints.join(" ")}`);
+    const last = names.at(-1);
+    const lastHint = await paletteRow(last).locator(".hint").textContent();
+    await page.keyboard.type(last);
+    await waitFor("the query", async () => (await paletteItems())[0] === last);
+    check((await paletteRow(last).locator(".hint").textContent()) === lastHint, `${last} renumbered from ${lastHint}`);
+    await page.keyboard.press("Escape");
+    check((await threadRows()) === before, "⌘N started a thread instead of asking where");
+    return names.join(" | ");
+  });
+
+  await step("palette: Add project lists T3's sources and clones a Git URL into the folder picked in the palette", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    const { execFileSync } = require("child_process");
+    const source = path.join(HOME, "remotes", "widget");
+    fs.mkdirSync(source, { recursive: true });
+    execFileSync("git", ["init", "-q", source]);
+    execFileSync("git", ["-C", source, "-c", "user.name=Sweep", "-c", "user.email=sweep@example.test", "commit", "-q", "--allow-empty", "-m", "first"]);
+    const opened = await page.evaluate(() => tabs.map((t) => t.key));
+    try {
+      await runFromPalette("add project", "Add project");
+      await waitFor("the Sources", async () => (await paletteGroups()).join() === "Sources");
+      check((await paletteItems()).join() === "New project,Local folder,Git URL,GitHub repository", `sources: ${(await paletteItems()).join(" | ")}`);
+      await press(paletteRow("Git URL"));
+      await waitFor("the URL field", async () => (await page.getAttribute("#palette input", "placeholder")) === "Enter Git clone URL");
+      await page.keyboard.type(`file://${source}`);
+      await page.keyboard.press("Enter");
+      await waitFor("the destination", async () => (await page.inputValue("#palette input")) === "~/widget");
+      check((await text("#palette .summary-head")) === "Repository", "no Repository summary");
+      await waitFor("Create & Clone", async () => (await text("#palette .accessory [data-submit]")).startsWith("Create & Clone"));
+      await page.keyboard.press("Enter");
+      await waitFor("a thread in the clone", async () => (await crumbProject()) === "widget", 20000);
+      check(fs.existsSync(path.join(HOME, "widget", ".git")), "nothing cloned in ~/widget");
+      await runFromPalette("add project", "Add project");
+      await press(paletteRow("Local folder"));
+      await page.fill("#palette input", "~/fresh/app");
+      await waitFor("Create & Add", async () => (await text("#palette .accessory [data-submit]")).startsWith("Create & Add"));
+      await page.keyboard.press("Enter");
+      await waitFor("a thread in the made folder", async () => (await crumbProject()) === "app", 20000);
+      check(fs.statSync(path.join(HOME, "fresh", "app")).isDirectory(), "~/fresh/app wasn't made");
+      return execFileSync("git", ["-C", path.join(HOME, "widget"), "log", "--format=%s"], { encoding: "utf8" }).trim();
+    } finally {
+      await page.evaluate((keep) => tabs.filter((t) => !keep.includes(t.key)).forEach((t) => closeTab(t)), opened);
+    }
+  });
+
+  await step("palette: New project's Add existing project opens the Sources, and the theme pages search as T3's", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    await runFromPalette("new project", "New project");
+    await waitFor("the name field", async () => (await page.getAttribute("#palette input", "placeholder")) === "Project name");
+    check((await text("#palette .accessory [data-submit]")).replace(/\s+/g, " ") === "CreateEnter", `Create: ${await text("#palette .accessory [data-submit]")}`);
+    await press(paletteRow("Add existing project"));
+    await waitFor("the Sources", async () => (await paletteGroups()).join() === "Sources");
+    await page.keyboard.press("Escape");
+    for (const view of ["Change theme", "Change appearance"]) {
+      await runFromPalette(view.toLowerCase(), view);
+      await waitFor(`${view}'s page`, async () => (await page.getAttribute("#palette input", "placeholder")) === "Search...");
+      await page.keyboard.press("Escape");
+    }
+  });
+
+  await step("palette: a pull request's linked-thread count opens the palette on its link with Linked thread rows", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    await openRow(await keyFor("alpha"));
+    await page.evaluate(() => openPr(active, "https://github.com/example/alpha/pull/42"));
+    await waitFor("#42's thread links", () => gui("#panel-body [data-pr-threads]").isVisible(), 15000);
+    await press(gui("#panel-body [data-pr-threads]"));
+    await waitFor("the palette on the link", async () => (await page.inputValue("#palette input")) === "https://github.com/example/alpha/pull/42");
+    await waitFor("a Linked thread row", async () => (await page.locator("#palette .item .sub").allTextContents()).includes("Linked thread"));
+    check((await paletteGroups()).join() === "Threads", `groups: ${(await paletteGroups()).join()}`);
+    await page.keyboard.press("Escape");
+    await closePanelIfOpen();
+  });
+
+  await step("palette: settings search opens a setting where it sits", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    await openPaletteKeys();
+    await page.keyboard.type("chat width");
+    await waitFor("the setting", async () => (await page.locator("#palette .group:has(.label:text-is('Settings')) .item .name").allTextContents())[0] === "Chat width");
+    check((await text("#palette .group:has(.label:text-is('Settings')) .item .sub")) === "Settings · General", `subtitle: ${await text("#palette .group:has(.label:text-is('Settings')) .item .sub")}`);
+    await press(paletteRow("Chat width"));
+    await waitFor("General with Chat width marked", () => page.locator("#settings-page .setting-found").first().isVisible());
+    await page.evaluate(() => settingsOpen() && toggleSettings());
+  });
+
+  await step("shortcuts: ⌘T and ⌘W leave a closed panel alone and work an open one, ⌘← stays in the composer, labels read ⇧⌘", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    const alpha = await keyFor("alpha");
+    await openRow(alpha);
+    await closePanelIfOpen();
+    const before = await threadRows();
+    await page.keyboard.press("Meta+t");
+    await page.keyboard.press("Meta+w");
+    await page.waitForTimeout(300);
+    check(!(await page.locator("#projects").isVisible()), "⌘T opened the project picker");
+    check((await threadRows()) === before && (await page.evaluate(() => active.key)) === alpha, "⌘W closed the thread");
+    await openPanelTo("files", "Files");
+    const surfaces = () => page.evaluate(() => panelOf(active).surfaces.length);
+    const open = await surfaces();
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.keyboard.press("Meta+w");
+    await waitFor("⌘W to close the panel's tab", async () => (await surfaces()) < open);
+    await closePanelIfOpen();
+    await page.fill("#prompt", "hello world");
+    await page.focus("#prompt");
+    await page.keyboard.press("Meta+ArrowLeft");
+    check((await page.evaluate(() => [active.key, prompt.selectionStart])).join() === `${alpha},0`, "⌘← left the composer's line start");
+    await page.fill("#prompt", "");
+    await page.dispatchEvent("#prompt", "input");
+    const hints = await page.evaluate(() => rowMenuItems(active).map((i) => i.hint).filter(Boolean));
+    check(hints.includes("⇧⌘P") && hints.includes("⇧⌘S"), `row menu hints: ${hints.join(" ")}`);
+  });
+
+  await step("shortcuts: a focused terminal keeps its keys: ⌘K stays out, ⌘D and ⌘⇧D split it, ⌘N opens another, ⌘W closes it", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    await openRow(await keyFor("alpha"));
+    await closePanelIfOpen();
+    const before = await threadRows();
+    const shells = () => page.evaluate(() => scriptShells.filter((s) => s.tab === active).map((s) => ({ hidden: s.el.hidden, box: s.el.getBoundingClientRect().toJSON() })));
+    const claudeBox = () => page.evaluate(() => (active.el.hidden ? null : active.el.getBoundingClientRect().toJSON()));
+    await page.keyboard.press("Meta+j");
+    await waitFor("the drawer", async () => (await page.evaluate(() => document.body.dataset.drawer)) === "open");
+    await focusClaudeTerm();
+    await page.keyboard.press("Meta+k");
+    await page.waitForTimeout(300);
+    check(!(await page.locator("#palette").isVisible()), "⌘K opened the palette over a focused terminal");
+    await page.keyboard.press("Meta+d");
+    await waitFor("a terminal beside claude's", async () => (await shells()).filter((s) => !s.hidden).length === 1 && !!(await claudeBox()));
+    const [a, b] = [await claudeBox(), (await shells()).find((s) => !s.hidden).box];
+    check(Math.abs(a.width - b.width) < 24 && b.left >= a.right - 2 && Math.abs(a.top - b.top) < 2, `not side by side: ${JSON.stringify([a, b])}`);
+    check(!(await page.evaluate(() => panelOf(active).open)), "⌘D opened the Diff");
+    await waitFor("the new terminal focused", () => page.evaluate(() => !!document.activeElement?.closest(".term.shell")));
+    await page.keyboard.press("Meta+w");
+    await waitFor("the split closed", async () => !(await shells()).length);
+    await focusClaudeTerm();
+    await page.keyboard.press("Meta+Shift+d");
+    await waitFor("a terminal under claude's", async () => (await shells()).filter((s) => !s.hidden).length === 1 && !!(await claudeBox()));
+    const [c, d] = [await claudeBox(), (await shells()).find((s) => !s.hidden).box];
+    check(d.top >= c.bottom - 2 && Math.abs(c.left - d.left) < 2, `not stacked: ${JSON.stringify([c, d])}`);
+    await waitFor("the stacked terminal focused", () => page.evaluate(() => !!document.activeElement?.closest(".term.shell")));
+    await page.keyboard.press("Meta+w");
+    await waitFor("the stacked one closed", async () => !(await shells()).length);
+    await focusClaudeTerm();
+    await page.keyboard.press("Meta+n");
+    await waitFor("another terminal", async () => (await shells()).length === 1 && !(await claudeBox()));
+    check((await threadRows()) === before, "⌘N in a terminal started a thread");
+    await waitFor("it has the focus", () => page.evaluate(() => !!document.activeElement?.closest(".term.shell")));
+    await page.keyboard.press("Meta+w");
+    await waitFor("it closed", async () => !(await shells()).length);
+    await page.evaluate(() => toggleDrawer(false));
+  });
+
+  await step("shortcuts: ⌘1-9 pick a model in the open model picker, each row showing its key", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    const alpha = await keyFor("alpha");
+    await openRow(alpha);
+    const model = () => text("#model-button .name");
+    const was = await model();
+    await page.keyboard.press("Meta+Shift+m");
+    await waitFor("the model picker", () => page.locator('#composer-menu[data-kind="models"]').isVisible());
+    const jumps = await page.locator("#composer-menu .model .jump").allTextContents();
+    check(jumps[0] === "⌘1" && jumps[1] === "⌘2", `keys: ${jumps.join(" ")}`);
+    const names = await page.locator("#composer-menu .list .model[data-row]:not(.legacy) .name > span:first-child").allTextContents();
+    const pick = names[0].endsWith(was) ? 2 : 1;
+    await page.keyboard.press(`Meta+${pick}`);
+    await waitFor("the model picked", async () => names[pick - 1].endsWith(await model()) && !(await page.locator("#composer-menu").isVisible()), 10000);
+    check((await page.evaluate(() => active.key)) === alpha, "⌘1-9 jumped to another thread");
+    if (!names.some((n) => n.endsWith(was))) return `${names[pick - 1]}, after ${was}`;
+    await page.keyboard.press("Meta+Shift+m");
+    await waitFor("the model picker again", () => page.locator('#composer-menu[data-kind="models"]').isVisible());
+    await page.evaluate((name) => [...composerMenu.querySelectorAll(".list .model[data-row]:not(.legacy)")].find((row) => row.querySelector(".name > span").textContent.endsWith(name)).click(), was);
+    await waitFor("the model back", async () => (await model()) === was, 10000);
+    return `${names[pick - 1]}, then ${was}`;
+  });
+
+  await step("shortcuts: ⌘⇧H opens T3's Run on picker of the machines", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    await openRow(await keyFor("alpha"));
+    const opened = await page.evaluate(() => tabs.map((t) => t.key));
+    try {
+      await page.evaluate(() => newThreadIn(active));
+      await waitFor("a new thread", async () => (await page.evaluate(() => active && workspaceOpen(active))), 15000);
+      await page.keyboard.press("Meta+Shift+h");
+      await waitFor("the Run on picker", () => page.locator('#composer-menu[data-kind="hosts"]').isVisible());
+      check((await text("#composer-menu .heading")) === "Run on", `heading: ${await text("#composer-menu .heading")}`);
+      check((await page.locator("#composer-menu button.checked .label").allTextContents()).join() === "sweep-node", "this machine isn't checked");
+      await page.keyboard.press("Escape");
+    } finally {
+      await page.evaluate((keep) => tabs.filter((t) => !keep.includes(t.key)).forEach((t) => closeTab(t)), opened);
+    }
+  });
+
+  await step("settings: Keybindings records a shortcut, takes a when clause and resets to the default", async () => {
+    if (touch) return "touch: no keyboard";
+    await calm();
+    const showPage = async () => {
+      await page.evaluate(() => settingsOpen() || toggleSettings());
+      await press(page.locator('#settings-nav [data-page="keybindings"]'));
+      await waitFor("the Keybindings page", async () => (await text("#settings-page h2")) === "Keybindings");
+      await page.fill("#keybindings .kb-search input", "command palette");
+      await waitFor("its one row", async () => (await page.locator("#keybindings .kb-row .kb-title").allTextContents()).map((t) => t.replace(/Custom$/, "")).join() === "Command Palette: Toggle");
+    };
+    const row = '#keybindings .kb-row:has(.kb-title:text("Command Palette: Toggle"))';
+    const paletteFrom = async (keys) => {
+      await page.evaluate(() => settingsOpen() && toggleSettings());
+      await page.focus("#prompt");
+      await page.keyboard.press(keys);
+      await page.waitForTimeout(300);
+      const open = await page.locator("#palette").isVisible();
+      if (open) await page.keyboard.press("Escape");
+      return open;
+    };
+    await showPage();
+    check((await page.locator(`${row} .kb-pill kbd`).allTextContents()).join("") === "⌘K", "⌘K isn't the default");
+    await press(page.locator(`${row} [data-kb-record]`));
+    await waitFor("recording", async () => (await page.getAttribute(`${row} [data-keybinding-capture]`, "placeholder")) === "Press shortcut");
+    await page.keyboard.press("Meta+Shift+y");
+    await press(page.locator(`${row} [data-kb-save]`));
+    await waitFor("the Custom rule", () => page.locator(`${row} .kb-badge`).isVisible());
+    check((await page.locator(`${row} .kb-pill kbd`).allTextContents()).join("") === "⌘⇧Y", "the recorded chord");
+    check(await paletteFrom("Meta+Shift+y"), "⌘⇧Y didn't open the palette");
+    check(!(await paletteFrom("Meta+k")), "⌘K still opens the palette");
+    await showPage();
+    await press(page.locator(`${row} [data-kb-when]`));
+    await page.fill(".kb-popover .kb-expr input", "false");
+    await page.keyboard.press("Escape");
+    await press(page.locator(`${row} [data-kb-save]`));
+    await waitFor("the when saved", async () => (await text(`${row} [data-kb-when] span`)) === "false");
+    check(!(await paletteFrom("Meta+Shift+y")), "a false when clause let ⌘⇧Y through");
+    await showPage();
+    await press(page.locator(`${row} [data-kb-menu]`));
+    await press(page.locator(".kb-popover button", { hasText: "Reset to default" }));
+    await waitFor("the default back", async () => !(await page.locator(`${row} .kb-badge`).count()) && (await text(`${row} [data-kb-when] span`)) === "!terminalFocus");
+    check(await paletteFrom("Meta+k"), "⌘K didn't come back");
+    await page.evaluate(() => settingsOpen() && toggleSettings());
+  });
+
   await step("follow: Archive is its own settings page, newest first, with when each thread was archived and created", async () => {
     await page.evaluate(() => {
       const base = { machine: active.machine, cwd: active.view.cwd, session: null, project: "alpha" };

@@ -257,5 +257,20 @@
     return [ok, seen];
   });
 
+  await step("the desktop palette browses a local folder with Open in Finder, and Keybindings has no browser warning", async () => {
+    openPalette({ mode: "add-project" });
+    runPaletteItem(palette.shown.find((i) => i.title === "Local folder"));
+    await sleep(800);
+    const footer = document.querySelector("#palette footer [data-footer-act]")?.textContent ?? null;
+    const folders = await callOn(LOCAL, { cmd: "search_threads", query: "zz" }).catch((e) => ({ error: String(e) }));
+    closePalette();
+    await openSettings("keybindings");
+    await sleep(500);
+    const note = !!document.querySelector("#settings-page h2 .kb-note");
+    const rows = document.querySelectorAll("#keybindings .kb-row").length;
+    await toggleSettings();
+    return [footer === "Open in Finder" && !note && rows > 40 && Array.isArray(folders), { footer, note, rows, search: folders.error ?? folders.length }];
+  });
+
   await fetch(`${base}/done`, { method: "POST" });
 })();

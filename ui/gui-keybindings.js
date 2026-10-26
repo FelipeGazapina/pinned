@@ -25,7 +25,7 @@ function commandTitle(command) {
   if (special[command]) return special[command];
   return command.split(".").map((part) => part.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[-_\s]+/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(" ")).join(": ");
 }
-const kbRuleKey = (rule) => `${rule.command}\0${rule.key}\0${rule.when ?? ""}`;
+const kbRuleKey = (rule) => JSON.stringify([rule.command, rule.key, rule.when ?? ""]);
 const kbSameRule = (a, b) => a.command === b.command && a.key === b.key && (a.when ?? "") === (b.when ?? "");
 /** whenAstToExpression: a node back as text, groups in parentheses. */
 function whenText(node) {
