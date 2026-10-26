@@ -1425,6 +1425,29 @@ mod tests {
         let _ = std::fs::remove_file(file);
     }
 
+    /// Until claude takes the terminal, the pty is in cooked mode: it echoes what is typed and
+    /// turns the submitting \r into \n, so a prompt typed that early never submits. The session
+    /// here draws first and takes the terminal a while later, as claude does, and the prompt still
+    /// arrives whole, and only then.
+    #[test]
+    fn a_prompt_typed_before_the_session_takes_the_terminal_waits_for_it() {
+        let file = std::env::temp_dir().join(format!("pinned-early-prompt-{}.bin", std::process::id()));
+        let m = machine();
+        let tab = running(&m, vec![], &format!("sleep 0.2; echo drawn; sleep 0.3; stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "typed early".into() }), Ok(json!(null)));
+        wait_for("the session to draw", || text(&seen).contains("drawn"));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "typed after drawing".into() }), Ok(json!(null)));
+        wait_for("stty", || text(&seen).contains("ready"));
+        let expected: &[u8] = b"\x1b[200~typed early\x1b[201~\r\x1b[200~typed after drawing\x1b[201~\r";
+        wait_for("cat to write", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
+        assert_eq!(std::fs::read(&file).unwrap(), expected);
+        assert!(text(&seen).starts_with("drawn\r\nready"), "the terminal echoed a prompt before the session took it: {:?}", text(&seen));
+        let _ = std::fs::remove_file(file);
+    }
+
     #[test]
     fn a_screen_keeps_only_the_last_256_kib_of_its_session() {
         let mut screen = Screen::default();
