@@ -184,7 +184,7 @@ struct Tab {
     /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
     resume_at: Option<u64>,
     /// The session doesn't continue by itself when its usage limit lifts.
-    held: bool,
+    held_at_limit: bool,
     /// The model every start of this tab passes as `--model`, picked for its conversation alone.
     model: Option<String>,
     /// The worktree made for this tab by `set_workspace`, dropped when the tab leaves it unused.
@@ -212,7 +212,7 @@ impl Tab {
             bypass: self.bypass,
             interrupted: self.interrupted,
             resume_at: self.resume_at,
-            held: self.held,
+            held: self.held_at_limit,
             model: self.model.clone(),
         })
     }
@@ -227,7 +227,7 @@ impl Tab {
             title: self.title.clone(),
             message: self.message.clone(),
             resume_at: self.resume_at,
-            held: self.held,
+            held: self.held_at_limit,
             connector: self.env.iter().find(|(k, _)| k == CONNECTOR_ENV).map(|(_, v)| v.clone()),
             subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
@@ -590,7 +590,7 @@ impl Machine {
 
     /// Lets the tab's session continue by itself once its usage limit lifts, or holds it.
     pub fn auto_resume(&self, tab: &str, on: bool) -> Result<(), String> {
-        self.tab(tab, |t| t.held = !on)?;
+        self.tab(tab, |t| t.held_at_limit = !on)?;
         self.save_sessions();
         if on {
             self.continue_when_limit_lifts(tab);
@@ -960,7 +960,7 @@ impl Machine {
             .map(|s| {
                 let (launch, resume_at) = s.reopen(now);
                 let id = self.add_tab(s.cwd, launch, s.env, s.bypass, Some(s.session));
-                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held, t.model) = (s.interrupted, resume_at, s.held, s.model));
+                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model) = (s.interrupted, resume_at, s.held, s.model));
                 id
             })
             .collect();
@@ -1041,7 +1041,7 @@ impl Machine {
             tally: Tally::default(),
             interrupted: false,
             resume_at: None,
-            held: false,
+            held_at_limit: false,
             model: None,
             made: None,
             turn: None,
@@ -1150,16 +1150,16 @@ impl Machine {
 
     fn record_status(&self, tab: &str, event: &AgentEvent) {
         let changed = self.tab(tab, |t| {
-            let before = (t.interrupted, t.resume_at, t.held);
+            let before = (t.interrupted, t.resume_at, t.held_at_limit);
             match event.status {
                 AgentStatus::Working | AgentStatus::Done => {
                     t.interrupted = event.status == AgentStatus::Working;
                     t.resume_at = None;
-                    t.held = false;
+                    t.held_at_limit = false;
                 }
                 AgentStatus::Failed => {
                     t.interrupted = true;
-                    t.held &= t.resume_at == event.resume_at;
+                    t.held_at_limit &= t.resume_at == event.resume_at;
                     t.resume_at = event.resume_at;
                 }
                 AgentStatus::NeedsInput => {}
@@ -1173,7 +1173,7 @@ impl Machine {
                 t.title = event.title.clone();
             }
             t.message = event.message.clone().filter(|_| event.status == AgentStatus::NeedsInput);
-            before != (t.interrupted, t.resume_at, t.held)
+            before != (t.interrupted, t.resume_at, t.held_at_limit)
         });
         if changed == Ok(true) {
             self.save_sessions();
@@ -1229,7 +1229,7 @@ impl Machine {
                     return;
                 }
             }
-            let fired = machine.tab(&tab, |t| !t.held && t.session.is_some() && t.resume_at == Some(at) && t.resume_at.take().is_some());
+            let fired = machine.tab(&tab, |t| !t.held_at_limit && t.session.is_some() && t.resume_at == Some(at) && t.resume_at.take().is_some());
             if fired != Ok(true) {
                 return;
             }
