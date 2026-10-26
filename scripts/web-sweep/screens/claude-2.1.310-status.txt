@@ -1,0 +1,22 @@
+ ▝▝   ▝▝   ~/work/app
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ● high · /effort ▔
+   Settings  Status   Config   Usage   Stats
+
+   Version:           2.1.310
+   Session name:      /rename to add a name
+   Session ID:        00000000-0000-4000-8000-000000000000
+   Session kind:      interactive
+   Peer address:      uds:/tmp/cc-socks/1.sock
+   cwd:               /Users/me/work/app
+   Login method:      Claude Max account
+   Organization:      Example
+   Email:             me@example.com
+   Cloud sessions:    GitHub connected
+
+   Model:             opus (claude-opus-5-5)
+   MCP servers:       10 connected, 11 need auth, 1 disabled, 8 failed · /mcp
+   Setting sources:   User settings
+   Auto mode server:  Enabled
+
+   Esc to cancel

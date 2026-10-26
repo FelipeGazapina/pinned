@@ -1,0 +1,40 @@
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ MCP server instructions: 3k tokens (0.3%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝   ⛁ Custom agents: 1.1k tokens (0.1%)
+                                               ⛁ Memory files: 182 tokens (0.0%)
+                                               ⛁ Skills: 10k tokens (1.0%)
+                                               ⛁ Messages: 392 tokens (0.0%)
+                                               ⛶ Free space: 932k (93.2%)
+                                               ⛝ Autocompact buffer: 33k tokens (3.3%)
+
+     Auto-compact window: 1m tokens
+
+     MCP tools · /mcp (loaded on-demand)
+     └ 264 tools · 620 tokens
+
+     Custom agents · .claude/agents/
+     └ 12 agents · 1.1k tokens
+
+     Memory files · /memory
+     └ 1 file · 182 tokens
+
+     Skills · /skills
+     └ 136 skills · 10k tokens
+
+     /context all to expand
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Select model
+   Switch between Claude models. Your pick becomes the default for new sessions. For
+   other/previous model names, specify with --model.
+
+     1. Default (recommended)  Opus 5.5 · Best for everyday, complex tasks
+   ❯ 2. Opus ✔                 Opus 5.5 · Best for everyday, complex tasks
+     3. Fable                  Fable 5.1 · Most capable for your hardest and longest-running
+                               tasks
+     4. Sonnet                 Sonnet 5.5 · Efficient for routine tasks
+     5. Haiku                  Haiku 5.5 · Fastest for quick answers
+
+   ● High effort ←/→ to adjust
+
+   Use /fast to turn on Fast mode (Opus 5.5).
+
+   Enter to set as default · s to use this session only · Esc to cancel

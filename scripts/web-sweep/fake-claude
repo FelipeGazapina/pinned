@@ -70,10 +70,34 @@ if (resumed) out(`resumed ${resumed}\r\n`);
 if (trusting) drawTrust();
 else greet();
 
+// Settings as claude 2.1 draws them for /usage: under a ▔ rule, with no transcript line. Tab
+// switches the shown tab and Esc closes it.
+const SETTINGS = { Status: ["Version:           2.1.310", "Model:             opus (claude-opus-5-5)"], Usage: ["Current session", "█▌                     3% used", "Resets 12:10pm"] };
+let showing = null;
+function drawSettings() {
+  out(`\x1b[2J\x1b[H${"▔".repeat(60)}\r\n   Settings  ${Object.keys(SETTINGS).map((k) => (k === showing ? `\x1b[7m ${k} \x1b[27m` : ` ${k} `)).join(" ")}\r\n\r\n`);
+  for (const row of SETTINGS[showing]) out(`   ${row}\r\n`);
+  out("\r\n   Esc to cancel");
+}
+function answerSettings(key) {
+  if (key === "\t") showing = showing === "Usage" ? "Status" : "Usage";
+  else if (key === "\x1b") {
+    showing = null;
+    out("\x1b[2J\x1b[H");
+    return prompt();
+  }
+  drawSettings();
+}
+
 let line = "";
 function submit() {
   out("\r\n");
   if (line === "/exit") process.exit(0);
+  if (line === "/usage") {
+    showing = "Usage";
+    line = "";
+    return drawSettings();
+  }
   hook("UserPromptSubmit", { prompt: line });
   said(line);
   if (line === "/modes") {
@@ -130,6 +154,12 @@ function submit() {
     used("AskUserQuestion", { questions: [{ question: "Which color should the button be?", header: "Color", multiSelect: false, options: [{ label: "Blue", description: "Calm" }, { label: "Red", description: "Loud" }] }] },
       'Your questions have been answered: "Which color should the button be?"="Blue". You can now continue with these answers in mind.');
     wrote([{ type: "text", text: "Blue it is." }]);
+  } else if (line === "artifact") {
+    const file = path.join(process.cwd(), "payouts.html");
+    used("Artifact", { file_path: file, icon: "flow", description: "Follows an invoice to the bank." },
+      `Published ${file} at https://claude.ai/artifact/PgGFrq1LMW2iDhYZThVQcD (Version 1, version id 1792690604-cdcc) Icon: "flow".\n\nTo update: publish the same file path here.`);
+    used("Artifact", { action: "quickstart", intent: "other" }, "Start from the Dashboard type.");
+    wrote([{ type: "text", text: "Published the page." }]);
   } else if (line === "oops") {
     record({ type: "assistant", isApiErrorMessage: true, message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "API Error: 529 Overloaded\nThe service is busy. Try again in a moment." }] } });
   } else if (line === "fail") {
@@ -325,6 +355,10 @@ process.stdin.on("data", (chunk) => {
   }
   if (questioning) {
     for (const key of text.match(/\x1b\[[AB]|[\s\S]/g)) answerQuestion(key);
+    return;
+  }
+  if (showing) {
+    for (const key of text.match(/\x1b\[[A-D]|[\s\S]/g)) answerSettings(key);
     return;
   }
   if (text === "\x1b[Z" && mode) {

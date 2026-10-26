@@ -1,0 +1,40 @@
+ ▝▝   ▝▝   ~/work/app
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Settings  Status   Config   Usage   Stats
+
+   Session
+
+   Total cost:            $0.0000
+   Total duration (API):  0s
+   Total duration (wall): 9s
+   Total code changes:    0 lines added, 0 lines removed
+   Usage:                 0 input, 0 output, 0 cache read, 0 cache write
+
+   Current session
+   ██                                                 4% used
+   Resets 12:10pm (America/Sao_Paulo)
+
+   Current week (all models)
+   ▌                                                  1% used
+   Resets Nov 2 at 1am (America/Sao_Paulo)
+
+   What's contributing to your limits usage?
+   Approximate · sessions on this machine only
+
+   Last 24h · shares overlap
+
+   87%  Give "kit" subagents a cheaper model
+   61%  Review the "kit" plugin
+   36%  Start fresh when you switch tasks · run /clear
+   21%  Turn off skills you don't use · 17k tokens per request
+   15%  Run fewer sessions at once · up to 5 at once
+
+   Skills                  % of usage
+   /kit            13%
+   /kit                     1%
+
+   Subagents               % of usage
+   kit            21%
+   kit             13%
+   kit                     13%                                                                                 ↓
