@@ -69,7 +69,6 @@ fn connect(creds: &Credentials, machine: Arc<Machine>) -> Link {
 
 fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
-        // This Mac is the only machine, so a run resumes here, where its transcript already is.
         let open = |work: connectors::Work| {
             let taken = match &work {
                 connectors::Work::Run(run) => machine.run(&run.resume_spec(None).unwrap_or_else(|| run.spec())).is_ok(),

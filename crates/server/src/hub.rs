@@ -241,7 +241,6 @@ impl Hub {
                     Work::Prompt { connector, subject, text } => (connector.clone(), subject.clone(), text.clone()),
                     _ => unreachable!(),
                 };
-                // Only the run's own session takes them, never an earlier attempt's on a machine that came back.
                 let holder = self.connectors(&account).await.ok().and_then(|c| c.holder(&connector, &subject));
                 let runs_connector = |tabs: &[TabView]| tabs.iter().any(|t| t.running && t.connector.as_deref() == Some(&connector));
                 let machines = account.dispatch_order("", runs_connector).into_iter().filter(|m| holder.as_ref().is_none_or(|h| h == m));

@@ -66,7 +66,6 @@ async function toggleSettings() {
   showPage(page);
 }
 
-/** Takes settings the hub pushed or a local check refetched. The editor keeps its draft and redraws only its runs. */
 function onSettings(latest) {
   settings = latest;
   if (!settingsOpen() || page !== "connectors") return;
@@ -395,7 +394,6 @@ function cardHtml(c, i) {
   </div>`;
 }
 
-/** A workflow card's one-line count of its runs that are moving or need a look, such as "2 running · 1 failed". */
 function runCountHtml(c) {
   const counts = ["running", "queued", "failed"]
     .map((state) => [state, (settings.runs ?? []).filter((r) => r.connector === c.id && r.state === state).length])
@@ -469,7 +467,6 @@ function stepHtml(c, id, edge) {
   </div>`;
 }
 
-/** How the runs list shows each run state, matching the backend's `Phase`, and the action each offers. */
 const RUN_STATES = {
   queued: { label: () => "queued", action: "cancel" },
   running: { label: (r) => `running on ${runMachineName(r.machine)}`, action: "cancel" },
@@ -479,14 +476,10 @@ const RUN_STATES = {
 };
 const RUN_ACTIONS = { retry: "Retry", cancel: "Cancel" };
 const STAGES = { picked: "picked up", coding: "coding", review: "pull request open" };
-/** Starts a run gets before it fails, matching the backend's `ATTEMPTS`. */
-const ATTEMPTS = 3;
 const RUNS_SHOWN = 20;
-/** Runs whose timeline is unfolded, by key. */
 const openRuns = new Set();
 
 const runMachineName = (id) => (machines.has(localIdOf(id)) ? machineName(localIdOf(id)) : id);
-/** An event's text with the machine ids the backend writes swapped for the machines' names. */
 const withMachineNames = (text) =>
   [...machines.keys()].map((id) => [hubIdOf(id), machineName(id)]).reduce((t, [id, name]) => (id ? t.replaceAll(id, name) : t), text);
 const runTime = (unix) => {
@@ -507,7 +500,7 @@ function runHtml(r) {
   const now = Date.now() / 1000;
   const since = ago(r.updated) === "now" ? "just now" : `${ago(r.updated)} ago`;
   const meta = [
-    r.attempt > 1 && `attempt ${r.attempt} of ${ATTEMPTS}`,
+    r.attempt > 1 && `attempt ${r.attempt} of ${r.maxAttempts}`,
     r.stage && STAGES[r.stage],
     r.status === "needs-input" && "needs input",
     r.limit > now && `waits for the usage limit until ${runTime(r.limit)}`,
@@ -871,6 +864,6 @@ listen("connectors-checked", async (payload) => {
   settings.checked = payload;
   const line = document.getElementById("checked");
   if (line) line.textContent = checkedText();
-  // Each check may move runs on; the hub pushes its own settings, so only a local check refetches them.
-  if (!hub && settingsOpen() && page === "connectors") onSettings(await connectorCall("get_settings"));
+  const pushedByHub = Boolean(hub);
+  if (!pushedByHub && settingsOpen() && page === "connectors") onSettings(await connectorCall("get_settings"));
 });

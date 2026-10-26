@@ -112,6 +112,7 @@ pub struct View {
     #[serde(flatten)]
     pub phase: Phase,
     pub attempt: u32,
+    pub max_attempts: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<AgentStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,6 +134,7 @@ pub fn views<'a>(runs: impl IntoIterator<Item = (&'a String, &'a Job)>) -> Vec<V
             title: j.title.clone(),
             phase: j.phase.clone(),
             attempt: j.attempt,
+            max_attempts: ATTEMPTS,
             status: j.status,
             stage: j.stage,
             limit: j.limit,
@@ -181,6 +183,11 @@ impl Job {
             Phase::Running { machine } | Phase::Idle { machine } => Some(machine),
             _ => None,
         }
+    }
+
+    /// Whether a signed-out Mac runs it in a tab of its own, which an account would take for lost.
+    pub fn ran_signed_out(&self) -> bool {
+        self.machine().map(String::as_str) == Some(THIS_MAC)
     }
 
     pub fn ended(&self) -> bool {
@@ -261,7 +268,6 @@ impl Job {
         let mut steps = vec![];
         match self.phase.clone() {
             Phase::Queued { after } => match tabs.first() {
-                // A machine already runs it, as when the hub restarted before the machines reconnected.
                 Some((machine, tab)) => {
                     self.set(Phase::Running { machine: (*machine).clone() }, now, format!("found running on {machine}"));
                     *seen = now;
@@ -279,7 +285,6 @@ impl Job {
                     .find(|t| !t.running && t.connector.as_deref() == Some(&self.connector) && t.subject.as_ref() == Some(&self.subject));
                 match (on(&machine), exited) {
                     (Some(tab), _) => steps.extend(self.observe(tab, now)),
-                    // claude died mid-turn and nothing will start it again in that tab.
                     (None, Some(tab)) if !finished(tab) => {
                         steps.extend(self.lost(format!("claude exited mid-turn on {machine}"), now));
                         steps.push(Step::Close { machine: machine.clone(), tab: tab.id.clone() });
@@ -334,7 +339,6 @@ impl Job {
                 self.set(Phase::Idle { machine }, now, "finished its turn");
                 vec![]
             }
-            // The machine continues the session itself once the limit lifts.
             Some(AgentStatus::Failed) if tab.resume_at.is_some() => {
                 if self.limit != tab.resume_at {
                     self.limit = tab.resume_at;

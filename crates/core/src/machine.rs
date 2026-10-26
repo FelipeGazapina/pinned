@@ -575,7 +575,6 @@ impl Machine {
         let cwd = self.find_folder(&run.folder, run.repo.as_deref(), run.token.as_deref())?;
         // A run resuming a conversation shows its transcript before claude's first hook names it.
         let resumed = run.args.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone());
-        // A resumed run goes on in its worktree, holding its own work or what the checkpoint carried.
         let cwd = match &run.worktree {
             Some(name) => crate::checkpoint::resume_in(&self.launch.home, &cwd, name, resumed.as_deref(), run.checkpoint.as_ref())?,
             None => cwd,

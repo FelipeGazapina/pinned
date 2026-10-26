@@ -18,6 +18,7 @@ use tungstenite::{Message, WebSocket};
 
 const POSTGRES: &str = "postgres://pinned@127.0.0.1:5499";
 const WAIT: Duration = Duration::from_secs(10);
+const TIMING: pinned_core::runs::Timing = pinned_core::runs::Timing { check: Duration::from_secs(1), grace: 3 };
 
 struct TestHub {
     runtime: tokio::runtime::Runtime,
@@ -57,7 +58,7 @@ impl TestHub {
             public_url: None,
             key_file: dir.join("hub.key"),
             open_signup,
-            runs: pinned_core::runs::Timing { check: Duration::from_secs(1), grace: 3 },
+            runs: TIMING,
         })
         .await
         .unwrap()
@@ -97,6 +98,16 @@ fn admin_on(database: &str, sql: &str) {
         tokio::spawn(connection);
         client.batch_execute(sql).await.unwrap();
     });
+}
+
+/// The one value `sql` selects from `database`, if any.
+fn query_on(database: &str, sql: &str) -> Option<String> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{POSTGRES}/{database}"), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.query_opt(sql, &[]).await.unwrap()?.get(0)
+    })
 }
 
 fn temp(name: &str) -> PathBuf {
@@ -499,7 +510,6 @@ fn a_run_whose_machine_goes_offline_resumes_on_another_machine_with_its_work() {
     wait_for("mac-mini to start the queued run", || tab_on(&node_a).is_some());
     assert!(tab_on(&node_b).is_none());
 
-    // The session names itself, then leaves work nobody committed.
     let tab = tab_on(&node_a).unwrap();
     node_a.machine.record_event(AgentEvent {
         status: AgentStatus::Working,
@@ -537,7 +547,6 @@ fn a_run_whose_machine_goes_offline_resumes_on_another_machine_with_its_work() {
     assert_eq!(args.windows(2).find(|w| w[0] == "--resume"), Some(&["--resume", "s1"][..]));
     assert!(args.last().unwrap().starts_with("pinned resumed this session after it stopped before finishing."), "{args:?}");
 
-    // mac-mini comes back with the old session: its callbacks are refused and its tab closes.
     node_a.reconnect(creds_a);
     wait_for("mac-mini back online", || node_a.online());
     assert_eq!(
@@ -585,14 +594,13 @@ fn a_hub_restart_keeps_every_run_where_it_was() {
     assert_eq!(client.hub(json!({ "cmd": "import", "store": store, "linear_key": null, "slack_key": null })), Ok(json!(true)));
     let tabs = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.connector.as_deref() == Some("c1") && t.running).count();
     wait_for("mac-mini to start the run", || tabs(&node_a) == 1);
-    // The store reaches Postgres behind the connectors' back; give that write a moment.
-    std::thread::sleep(Duration::from_millis(500));
+    let stored = "select store->'runs'->'c1/uuid-1'->>'state' from accounts";
+    wait_for("the started run in Postgres", || query_on(&hub.database, stored).as_deref() == Some("running"));
 
     hub.restart();
     wait_for("mac-mini back on the new hub", || node_a.online());
     wait_for("vps back on the new hub", || node_b.online());
-    // Past the grace period and a few checks: nothing may start the run a second time.
-    std::thread::sleep(Duration::from_secs(5));
+    std::thread::sleep(Duration::from_secs(TIMING.grace) + 2 * TIMING.check);
     assert_eq!((tabs(&node_a), tabs(&node_b)), (1, 0));
     let mut client = Client::connect(&url, &token);
     client.wait("hello", |f| f["type"] == "hello");

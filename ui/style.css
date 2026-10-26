@@ -296,7 +296,6 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .run-events { list-style: none; margin: 0; padding: 0 0 0 12px; display: flex; flex-direction: column; gap: 4px; border-left: 2px solid var(--s-line, #3d434d); }
 .run-events li { display: flex; gap: 10px; line-height: 1.45; }
 .run-events time { flex: none; min-width: 4.5em; color: var(--muted); font-variant-numeric: tabular-nums; }
-/* On a phone the state chip takes its own line under the title, so neither is cut short. */
 @media (max-width: 600px) {
   .run-head { flex-wrap: wrap; row-gap: 4px; }
   .run-head .who { flex-basis: calc(100% - 22px); }

@@ -368,9 +368,15 @@ pub struct Run {
     pub title: String,
     /// The worktree a machine that resumes the run restores its work into.
     pub worktree: String,
-    /// Arguments that resume the run's conversation, when it has one. `args` start the run over
-    /// on a machine that can't resume it.
-    pub resume: Option<Vec<String>>,
+    /// The run's conversation, when it has one. `args` start the run over on a machine that can't resume it.
+    pub resume: Option<Resume>,
+}
+
+/// A conversation to go on with: `claude --resume <session>`, then `args`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Resume {
+    pub session: String,
+    pub args: Vec<String>,
 }
 
 impl Run {
@@ -387,14 +393,10 @@ impl Run {
     }
 
     /// The spec that resumes the run's conversation, from `checkpoint` on a machine that hasn't it.
-    /// The checkpoint's conversation is the one resumed: its transcript is the one restored.
     pub fn resume_spec(&self, checkpoint: Option<Checkpoint>) -> Option<RunSpec> {
-        let mut args = self.resume.clone()?;
-        if let (Some(cp), Some(at)) = (&checkpoint, args.iter().position(|a| a == "--resume")) {
-            if let Some(session) = args.get_mut(at + 1) {
-                session.clone_from(&cp.session);
-            }
-        }
+        let resume = self.resume.as_ref()?;
+        let session = checkpoint.as_ref().map_or(&resume.session, |cp| &cp.session);
+        let args = ["--resume".to_owned(), session.clone()].into_iter().chain(resume.args.iter().cloned()).collect();
         Some(RunSpec { args, worktree: Some(self.worktree.clone()), checkpoint, ..self.spec() })
     }
 }
@@ -720,7 +722,6 @@ impl Connectors {
                 let cursor = if open(Work::Delivery(d.clone())).await.is_some() {
                     d.cursor.clone()
                 } else {
-                    // A run still on its way to a session gets the messages there, once it has one.
                     let key = runs::key(&d.connector, &d.subject());
                     if self.store.lock().unwrap().runs.get(&key).is_some_and(|job| matches!(job.phase, runs::Phase::Queued { .. } | runs::Phase::Running { .. })) {
                         return Err("a Slack thread's new messages wait for its run's machine; the next check passes them on".into());
@@ -818,12 +819,11 @@ impl Connectors {
                 }
             }
         }
-        // A run queued when the hub stopped may be starting on a machine that hasn't reconnected yet.
-        let settling = now < self.started + self.timing.grace;
+        let machines_reconnecting = now < self.started + self.timing.grace;
         let mut errors = vec![];
         for (job, step) in todo {
             let done = match step {
-                Step::Dispatch if settling => Ok(()),
+                Step::Dispatch if machines_reconnecting => Ok(()),
                 Step::Dispatch => match self.redispatch(&job) {
                     Ok(run) => self.hand_over(Work::Run(run), open).await,
                     Err(e) => Err(e),
@@ -965,7 +965,6 @@ impl Connectors {
         let note = c.created.get(&thread_key(&d.channel, &d.thread)).map(filed_note);
         let run = slack_run(&c, &d.channel, channel_name(name), &d.thread, &posts, note.as_deref(), &self.exe);
         let session = self.store.lock().unwrap().runs.get(&runs::key(&c.id, &run.subject)).and_then(|j| j.session.clone());
-        // The new messages wake the run's own conversation where a machine can resume it.
         let resume = session.map(|session| resume_args(&c, &session, d.text()));
         Ok((Run { mentioned: d.mentioned.clone(), resume, ..run }, newest))
     }
@@ -1149,12 +1148,11 @@ const RESUMED: &str = "pinned resumed this session after it stopped before finis
 const START_OVER: &str = "\n\nAn earlier attempt at this was lost with its machine before it could be resumed. \
     Look for its branch and pull request first, and carry that work on instead of starting a second one.";
 
-/// The `claude` arguments that resume the connector session `session` with `prompt`.
-fn resume_args(c: &Connector, session: &str, prompt: String) -> Vec<String> {
-    let mut args = vec!["--resume".to_owned(), session.to_owned()];
-    args.extend(flags(c));
+/// What resumes the connector session `session` with `prompt`.
+fn resume_args(c: &Connector, session: &str, prompt: String) -> Resume {
+    let mut args = flags(c);
     args.push(prompt);
-    args
+    Resume { session: session.to_owned(), args }
 }
 
 fn reply_hash(text: &str) -> String {
@@ -1519,8 +1517,7 @@ impl Connectors {
                 None => self.storage.remove_key(name),
             }
         }
-        // Sessions this Mac ran signed out stay its own tabs; the account would take them for lost and start them again.
-        imported.runs.retain(|_, job| job.machine().map(String::as_str) != Some(runs::THIS_MAC));
+        imported.runs.retain(|_, job| !job.ran_signed_out());
         self.channels.lock().unwrap().clear();
         *current = imported;
         self.save(&current)?;
@@ -1677,8 +1674,9 @@ mod tests {
         assert_eq!(block_on(connectors.reconcile(&[("m3".to_owned(), vec![])], &open)), None);
         let sent = sent.into_inner().unwrap();
         let resume = sent[0].0.clone().unwrap();
-        assert_eq!(resume[..6], ["--resume", "s1", "--model", "sonnet", "--effort", "xhigh"]);
-        assert_eq!(resume.last().map(String::as_str), Some(RESUMED));
+        assert_eq!(resume.session, "s1");
+        assert_eq!(resume.args[..4], ["--model", "sonnet", "--effort", "xhigh"]);
+        assert_eq!(resume.args.last().map(String::as_str), Some(RESUMED));
         assert!(sent[0].1.ends_with(START_OVER), "the arguments that start over say an attempt was lost");
         let view = &connectors.get_settings().runs[0];
         assert_eq!((&view.phase, view.attempt), (&runs::Phase::Running { machine: "m2".into() }, 2));
@@ -1751,7 +1749,7 @@ mod tests {
 
     #[test]
     fn a_resume_continues_the_conversation_its_checkpoint_holds() {
-        let started = Run { resume: Some(vec!["--resume".into(), "s1".into(), "go on".into()]), ..run(&quiet_linear(), &issue(), "/bin/pinned") };
+        let started = Run { resume: Some(Resume { session: "s1".into(), args: vec!["go on".into()] }), ..run(&quiet_linear(), &issue(), "/bin/pinned") };
         let checkpoint = Checkpoint { session: "s2".into(), transcript: crate::wire::Bytes(vec![]), worktree: None, code: None };
         assert_eq!(started.resume_spec(Some(checkpoint)).unwrap().args, ["--resume", "s2", "go on"]);
         assert_eq!(started.resume_spec(None).unwrap().args, ["--resume", "s1", "go on"]);

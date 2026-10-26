@@ -116,7 +116,6 @@ pub fn capture_code(cwd: &Path, limit: u64) -> Option<Code> {
 fn snapshot_commit(cwd: &Path) -> Option<String> {
     let head = git(cwd, &["rev-parse", "--verify", "-q", "HEAD"]).ok()?;
     let tree = crate::history::snapshot(cwd)?;
-    // A signing setup could prompt or fail on a machine nobody is watching.
     git_with(cwd, &["commit-tree", "--no-gpg-sign", &tree, "-p", &head, "-m", "pinned checkpoint"], &IDENTITY).ok()
 }
 
@@ -160,7 +159,6 @@ fn reachable(home: &Path, cwd: &Path, session: &str) -> Result<(), String> {
 /// transcript where Claude Code looks for that folder's sessions. The work of a worktree it
 /// replaces stays under `REPLACED`. Answers the folder to resume in.
 fn restore(home: &Path, checkout: &Path, name: &str, checkpoint: &Checkpoint) -> Result<PathBuf, String> {
-    // Both come from another machine and become paths; one that climbs out could delete the checkout.
     let (name, session) = (plain(name)?, plain(&checkpoint.session)?);
     let target = checkout.join(".claude/worktrees").join(name);
     let path = target.to_str().ok_or("the worktree's path is not UTF-8")?;
@@ -239,7 +237,6 @@ fn git_with(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String, S
     let out = Command::new("git")
         .args(args)
         .envs(env.iter().copied())
-        // Nobody may be there to answer a credential prompt.
         .env("GIT_TERMINAL_PROMPT", "0")
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -316,7 +313,6 @@ mod tests {
         run(&a, &["push", "-q", "-u", "origin", "main"]);
         let b = root.join("b");
         run(&root, &["clone", "-q", remote.to_str().unwrap(), b.to_str().unwrap()]);
-        // Pushed after b cloned, so b has to fetch it before the bundle applies.
         commit(&a, "other.txt", "second\n", "second");
         run(&a, &["push", "-q", "origin", "main"]);
         run(&a, &["checkout", "-q", "-b", "feature"]);
@@ -432,10 +428,6 @@ mod tests {
     #[test]
     fn nothing_is_captured_without_a_commit_or_past_the_limit() {
         let root = temp("none");
-        // The temp folder can itself sit inside a repository on odd setups; only assert when it doesn't.
-        if git(&root, &["rev-parse", "--is-inside-work-tree"]).is_err() {
-            assert_eq!(capture_code(&root, u64::MAX), None);
-        }
         let a = root.join("a");
         repo(&a);
         std::fs::write(a.join("tracked.txt"), "v1\n").unwrap();

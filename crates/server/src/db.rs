@@ -418,7 +418,6 @@ impl Db {
 
     /// Keeps the newest checkpoint of the run `run`, and drops checkpoints no run touched in a month.
     pub async fn save_checkpoint(&self, account: Uuid, run: &str, checkpoint: &Checkpoint) -> Result<(), String> {
-        // Transcripts hold whatever the session read or printed, secrets included.
         let data = self.sealer.seal_bytes(&serde_json::to_vec(checkpoint).map_err(|e| e.to_string())?);
         let db = self.client().await?;
         db.execute(
