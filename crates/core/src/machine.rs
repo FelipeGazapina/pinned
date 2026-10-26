@@ -175,6 +175,8 @@ struct Tab {
     interrupted: bool,
     /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
     resume_at: Option<u64>,
+    /// The session doesn't continue by itself when its usage limit lifts.
+    held: bool,
     /// The model every start of this tab passes as `--model`, picked for its conversation alone.
     model: Option<String>,
     /// The worktree made for this tab by `set_workspace`, dropped when the tab leaves it unused.
@@ -200,6 +202,7 @@ impl Tab {
             bypass: self.bypass,
             interrupted: self.interrupted,
             resume_at: self.resume_at,
+            held: self.held,
             model: self.model.clone(),
         })
     }
@@ -214,6 +217,7 @@ impl Tab {
             title: self.title.clone(),
             message: self.message.clone(),
             resume_at: self.resume_at,
+            held: self.held,
             connector: self.env.iter().find(|(k, _)| k == CONNECTOR_ENV).map(|(_, v)| v.clone()),
             subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
@@ -327,6 +331,7 @@ impl Machine {
             Call::Tabs => json(self.tabs()),
             Call::OpenTab { path, bypass } => json(self.open_tab(path, bypass)),
             Call::OpenScratch { bypass } => json(self.open_scratch(bypass)?),
+            Call::AutoResume { tab, on } => json(self.auto_resume(&tab, on)?),
             Call::StartClaude { tab, cols, rows } => json(self.start_claude(&tab, cols, rows)?),
             Call::SetBypass { tab, on, cols, rows } => json(self.set_bypass(&tab, on, cols, rows)?),
             Call::SetModel { tab, model, cols, rows } => json(self.set_model(&tab, &model, cols, rows)?),
@@ -533,9 +538,9 @@ impl Machine {
         match page {
             Some(page) => {
                 let page = page.map_err(|e| format!("could not read the transcript: {e}"))?;
-                Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context })
+                Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos })
             }
-            None => Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None }),
+            None => Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None }),
         }
     }
 
@@ -570,6 +575,17 @@ impl Machine {
         let id = self.add_tab(self.scratch.clone(), vec![], vec![], bypass, None);
         self.emit_tabs();
         Ok(id)
+    }
+
+    /// Lets the tab's session continue by itself once its usage limit lifts, or holds it.
+    pub fn auto_resume(&self, tab: &str, on: bool) -> Result<(), String> {
+        self.tab(tab, |t| t.held = !on)?;
+        self.save_sessions();
+        if on {
+            self.continue_when_limit_lifts(tab);
+        }
+        self.emit_tabs();
+        Ok(())
     }
 
     /// Adds a tab for a connector's run without starting it, and returns its id. Refused when
@@ -887,7 +903,7 @@ impl Machine {
             .map(|s| {
                 let (launch, resume_at) = s.reopen(now);
                 let id = self.add_tab(s.cwd, launch, s.env, s.bypass, Some(s.session));
-                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.model) = (s.interrupted, resume_at, s.model));
+                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held, t.model) = (s.interrupted, resume_at, s.held, s.model));
                 id
             })
             .collect();
@@ -960,6 +976,7 @@ impl Machine {
             claude_session,
             interrupted: false,
             resume_at: None,
+            held: false,
             model: None,
             made: None,
             turn: None,
@@ -1026,14 +1043,16 @@ impl Machine {
 
     fn record_status(&self, tab: &str, event: &AgentEvent) {
         let changed = self.tab(tab, |t| {
-            let before = (t.interrupted, t.resume_at);
+            let before = (t.interrupted, t.resume_at, t.held);
             match event.status {
                 AgentStatus::Working | AgentStatus::Done => {
                     t.interrupted = event.status == AgentStatus::Working;
                     t.resume_at = None;
+                    t.held = false;
                 }
                 AgentStatus::Failed => {
                     t.interrupted = true;
+                    t.held &= t.resume_at == event.resume_at;
                     t.resume_at = event.resume_at;
                 }
                 AgentStatus::NeedsInput => {}
@@ -1047,7 +1066,7 @@ impl Machine {
                 t.title = event.title.clone();
             }
             t.message = event.message.clone().filter(|_| event.status == AgentStatus::NeedsInput);
-            before != (t.interrupted, t.resume_at)
+            before != (t.interrupted, t.resume_at, t.held)
         });
         if changed == Ok(true) {
             self.save_sessions();
@@ -1099,7 +1118,7 @@ impl Machine {
                     return;
                 }
             }
-            let fired = machine.tab(&tab, |t| t.resume_at.take() == Some(at) && t.session.is_some());
+            let fired = machine.tab(&tab, |t| !t.held && t.session.is_some() && t.resume_at == Some(at) && t.resume_at.take().is_some());
             if fired != Ok(true) {
                 return;
             }
@@ -1642,6 +1661,24 @@ mod tests {
         assert_eq!(m.call(Call::Workspace { tab: other }).unwrap()["scratch"], false);
         assert_eq!(m.list_projects().iter().map(|p| p.path.clone()).collect::<Vec<_>>(), [project.display().to_string()], "the scratch folder joined the projects");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_session_held_at_its_usage_limit_stays_held_until_the_next_turn() {
+        let m = machine();
+        let tab = m.open_tab(None, false);
+        let failed = |resume_at| AgentEvent { status: AgentStatus::Failed, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at, prompt: None, snapshot: None };
+        m.record_status(&tab, &failed(Some(1792400000)));
+        m.call(Call::AutoResume { tab: tab.clone(), on: false }).unwrap();
+        assert!(m.view(&tab).unwrap().held);
+        m.record_status(&tab, &failed(Some(1792400000)));
+        assert!(m.view(&tab).unwrap().held, "the same limit reported again let it go");
+        m.record_status(&tab, &failed(Some(1792500000)));
+        assert!(!m.view(&tab).unwrap().held, "a new limit kept the old hold");
+        m.call(Call::AutoResume { tab: tab.clone(), on: false }).unwrap();
+        m.record_status(&tab, &AgentEvent { status: AgentStatus::Working, ..failed(None) });
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.held, view.resume_at), (false, None));
     }
 
     #[test]

@@ -51,6 +51,9 @@ pub struct TabView {
     pub message: Option<String>,
     /// Unix time a usage limit lifts, while one stopped the turn.
     pub resume_at: Option<u64>,
+    /// The session waits out its usage limit without continuing by itself when it lifts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
     pub connector: Option<String>,
     /// What the connector's session works on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,6 +90,9 @@ pub enum Call {
     OpenTab { path: Option<String>, bypass: bool },
     /// The new tab's id, in the machine's folder for threads without a project.
     OpenScratch { bypass: bool },
+    /// Null. Whether the tab's session continues by itself once the usage limit that stopped it
+    /// lifts, which it does unless turned off.
+    AutoResume { tab: TabId, on: bool },
     /// The folder claude runs in. Restarts claude when it is already running.
     StartClaude { tab: TabId, cols: u16, rows: u16 },
     /// The folder claude runs in. Restarts claude with `bypass` turned `on` or off, resuming the
@@ -390,6 +396,10 @@ pub struct ThreadPage {
     pub reset: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<thread::Context>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub todos: Option<thread::Todos>,
 }
 
 /// A connector's session, the same on any machine.
@@ -647,6 +657,7 @@ mod tests {
             title: Some("Fix the build".into()),
             message: Some("Claude needs your permission to use Bash".into()),
             resume_at: None,
+            held: false,
             connector: Some("c1".into()),
             subject: Some(Subject::LinearIssue { issue: "uuid".into() }),
             opened: 3,

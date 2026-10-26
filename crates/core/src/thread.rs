@@ -51,6 +51,24 @@ pub struct Page {
     pub reset: bool,
     /// How full the context window was after the last answer in these lines.
     pub context: Option<Context>,
+    /// The git branch claude last worked on in these lines.
+    pub branch: Option<String>,
+    /// The task list claude last wrote with `TodoWrite` in these lines.
+    pub todos: Option<Todos>,
+}
+
+/// A `TodoWrite` call, whose list replaces the one before it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Todos {
+    pub at: String,
+    pub steps: Vec<Todo>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Todo {
+    pub step: String,
+    /// `pending`, `in_progress` or `completed`, as claude writes it.
+    pub status: String,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -150,6 +168,8 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
     let lines: Vec<Value> = bytes[..whole].split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice(line).ok()).collect();
     let mut items: Vec<Item> = lines.iter().flat_map(items_of).collect();
     let context = lines.iter().rev().find_map(context_of);
+    let branch = lines.iter().rev().filter(|l| l["isSidechain"].as_bool() != Some(true)).find_map(|l| l["gitBranch"].as_str().filter(|b| !b.is_empty()).map(str::to_owned));
+    let todos = lines.iter().rev().find_map(todos_of);
     let mut next = from + whole as u64;
     if whole == 0 && bytes.len() as u64 == READ_LIMIT {
         if let Some(rest) = rest_of_line(&mut f)? {
@@ -157,8 +177,29 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
             items.push(Item::Note { id: format!("skipped:{from}"), at: String::new(), text: "An entry too large to show was left out.".into() });
         }
     }
-    Ok(Page { items, next, reset: replaced, context })
+    Ok(Page { items, next, reset: replaced, context, branch, todos })
 }
+
+/// The list of the last `TodoWrite` call of the main conversation on an assistant line.
+fn todos_of(line: &Value) -> Option<Todos> {
+    if line["type"] != "assistant" || line["isSidechain"].as_bool() == Some(true) {
+        return None;
+    }
+    let call = line["message"]["content"].as_array()?.iter().rev().find(|b| b["type"] == "tool_use" && b["name"] == TODO_TOOL)?;
+    let steps = call["input"]["todos"]
+        .as_array()?
+        .iter()
+        .filter_map(|todo| {
+            let step = todo["content"].as_str()?.trim();
+            let status = todo["status"].as_str().filter(|s| ["pending", "in_progress", "completed"].contains(s))?;
+            (!step.is_empty()).then(|| Todo { step: clip(step, SUMMARY_CHARS), status: status.to_owned() })
+        })
+        .collect();
+    Some(Todos { at: line["timestamp"].as_str().unwrap_or_default().to_owned(), steps })
+}
+
+/// Claude's task list tool, which the composer shows instead of the thread.
+const TODO_TOOL: &str = "TodoWrite";
 
 /// What an answer's usage says the next request starts from: the prompt it read, cached or not, and what it wrote.
 fn context_of(line: &Value) -> Option<Context> {
@@ -234,6 +275,7 @@ fn items_of(line: &Value) -> Vec<Item> {
                             let text = str_of(&block["thinking"]);
                             (!text.trim().is_empty()).then(|| Item::Thinking { id, at: at.clone(), text })
                         }
+                        "tool_use" if block["name"] == TODO_TOOL => None,
                         "tool_use" => {
                             let name = str_of(&block["name"]);
                             let (summary, detail) = describe_tool(&name, &block["input"]);
@@ -413,6 +455,22 @@ mod tests {
             r#"{"type":"user","uuid":"c","timestamp":"t2","isCompactSummary":true,"message":{"content":"This session is being continued."}}"#,
         ]);
         assert_eq!(compacted.context, Some(Context { tokens: 0, at: "t2".into() }), "a compaction empties the window");
+    }
+
+    #[test]
+    fn the_last_todo_list_leaves_the_items_for_the_page() {
+        let read = page(&[
+            r#"{"type":"user","uuid":"u1","timestamp":"t1","gitBranch":"main","message":{"content":"plan it"}}"#,
+            r#"{"type":"assistant","uuid":"a1","timestamp":"t2","gitBranch":"main","message":{"content":[{"type":"tool_use","id":"w1","name":"TodoWrite","input":{"todos":[{"content":"Read the parser","status":"in_progress","activeForm":"Reading the parser"},{"content":"Fix it","status":"pending"}]}}]}}"#,
+            r#"{"type":"user","uuid":"u2","timestamp":"t3","gitBranch":"feature","message":{"content":[{"type":"tool_result","tool_use_id":"w1","content":"Todos have been modified successfully."}]}}"#,
+            r#"{"type":"assistant","uuid":"a2","timestamp":"t4","gitBranch":"feature","message":{"content":[{"type":"tool_use","id":"w2","name":"TodoWrite","input":{"todos":[{"content":"Read the parser","status":"completed"},{"content":"Fix it","status":"in_progress"},{"content":"  ","status":"pending"},{"content":"Odd","status":"later"}]}}]}}"#,
+            r#"{"type":"assistant","uuid":"s1","isSidechain":true,"timestamp":"t5","gitBranch":"sub","message":{"content":[{"type":"tool_use","id":"w3","name":"TodoWrite","input":{"todos":[{"content":"A subagent's","status":"pending"}]}}]}}"#,
+        ]);
+        let step = |step: &str, status: &str| Todo { step: step.into(), status: status.into() };
+        assert_eq!(read.todos, Some(Todos { at: "t4".into(), steps: vec![step("Read the parser", "completed"), step("Fix it", "in_progress")] }));
+        assert_eq!(read.branch.as_deref(), Some("feature"));
+        assert!(read.items.iter().all(|i| !matches!(i, Item::Tool { .. })), "a TodoWrite call showed in the thread: {:?}", read.items);
+        assert_eq!(page(&[r#"{"type":"user","uuid":"u","message":{"content":"hi"}}"#]).todos, None);
     }
 
     #[test]
@@ -604,7 +662,7 @@ mod tests {
 
         let mut growing = tempfile::NamedTempFile::new().unwrap();
         write!(growing, "{}", &huge[..huge.len() - 2]).unwrap();
-        assert_eq!(read(growing.path(), 0).unwrap(), Page { items: vec![], next: 0, reset: false, context: None }, "a line still being written waits");
+        assert_eq!(read(growing.path(), 0).unwrap(), Page { items: vec![], next: 0, reset: false, context: None, branch: None, todos: None }, "a line still being written waits");
     }
 
     #[test]

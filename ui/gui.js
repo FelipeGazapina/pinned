@@ -119,16 +119,18 @@ async function fetchThread(tab) {
     let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: t.next });
     t.error = null;
     if (!page.session && t.session) return;
-    if (page.reset) t.items = [];
+    if (page.reset) Object.assign(t, { items: [], todos: null, branch: null });
     if (page.session !== t.session) {
       const restart = t.next > 0;
-      Object.assign(t, { session: page.session, items: [], next: 0, history: null });
+      Object.assign(t, { session: page.session, items: [], next: 0, history: null, todos: null, branch: null });
       if (restart) page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: 0 });
     }
     t.unsupported = false;
     const grew = page.items.length > 0 || !t.loaded;
     if (page.items.some((i) => i.kind === "model")) t.picked = null;
     if (page.context) t.context = page.context;
+    if (page.todos) t.todos = page.todos;
+    if (page.branch) t.branch = page.branch;
     t.items.push(...page.items);
     t.next = page.next;
     t.loaded = true;

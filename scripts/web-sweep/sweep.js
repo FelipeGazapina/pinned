@@ -3582,6 +3582,103 @@ async function sweep(profileName) {
     return `${actions.map((a) => a.trim() || "…").join(" | ")}; … ${entries.join(" | ")}`;
   }));
 
+  await step("composer: Claude's TodoWrite list is the Tasks tab, not a row in the thread", () => inNewThread(async () => {
+    await sendPrompt("todos");
+    await waitFor("the Tasks tab", () => page.locator("#composer-tasks").isVisible());
+    check((await text("#composer-tasks .name")) === "Tasks" && (await text("#composer-tasks .current")) === "Fix the off-by-one" && (await text("#composer-tasks .count")) === "1/3", `the tab reads ${await text("#composer-tasks .row")}`);
+    check((await page.getAttribute("#composer-tasks [data-tasks-toggle]", "aria-label")) === "Tasks: 1 of 3 complete. Current task: Fix the off-by-one", "the tab's label");
+    if (!touch) check((await page.locator("#composer-tasks .segments span").count()) === 3 && (await page.locator("#composer-tasks .segments").isVisible()), "no progress segments");
+    await waitFor("the answer", async () => /Working through the list/.test(await text("#thread")));
+    check(!/TodoWrite/.test(await page.locator("#thread").innerText()), "the TodoWrite call shows in the thread");
+    await press(page.locator("#composer-tasks [data-tasks-toggle]"));
+    await waitFor("the list", () => page.locator("#composer-tasks .steps").isVisible());
+    const steps = await page.locator("#composer-tasks .steps li").evaluateAll((els) => els.map((li) => `${li.dataset.status}:${li.querySelector(".text").textContent}`));
+    check(steps.join("|") === "completed:Completed: Read the parser|in_progress:Running: Fix the off-by-one|pending:Pending: Add a test", `steps: ${steps.join(" | ")}`);
+    await press(page.locator("#composer-tasks [data-tasks-toggle]"));
+    await waitFor("the list to fold", async () => !(await page.locator("#composer-tasks .steps").count()));
+    await sendPrompt("todos-done");
+    await waitFor("a finished list to go once the turn is over", async () => !(await page.locator("#composer-tasks").isVisible()));
+    await sendPrompt("todos-live");
+    await waitFor("the finished list while claude works", async () => (await page.locator("#composer-tasks").isVisible()) && (await text("#composer-tasks .count")) === "3/3", 4000);
+    check((await page.getAttribute("#composer-tasks .count", "class")) === "count done", "the finished count isn't green");
+    await waitFor("the list to go with the turn", async () => !(await page.locator("#composer-tasks").isVisible()), 8000);
+    return steps.join(" | ");
+  }));
+
+  await step("composer: a usage limit shows T3 Code's banner, which holds the resume or snoozes the thread", () => inNewThread(async () => {
+    const key = await page.evaluate(() => active.key);
+    await sendPrompt("limited");
+    await waitFor("the banner", () => page.locator("#composer-banners .banner").isVisible());
+    check((await text("#composer-banners .title")) === "Usage limit reached", `title: ${await text("#composer-banners .title")}`);
+    check(/^Resets /.test(await text("#composer-banners .description")), `description: ${await text("#composer-banners .description")}`);
+    check((await page.getAttribute("#composer-banners .banner", "data-variant")) === "warning", "the banner isn't a warning");
+    const buttons = async () => (await page.locator("#composer-banners .actions button").allTextContents()).map((b) => b.trim()).join("|");
+    check((await buttons()) === "Cancel auto-resume|Snooze until reset", `actions: ${await buttons()}`);
+    await press(page.locator('#composer-banners [data-banner-act="resume"]'));
+    await waitFor("the resume held", async () => (await buttons()) === "Resume at reset|Snooze until reset" && (await page.evaluate(() => active.view.held === true)));
+    await press(page.locator('#composer-banners [data-banner-act="resume"]'));
+    await waitFor("the resume back on", async () => (await buttons()) === "Cancel auto-resume|Snooze until reset" && (await page.evaluate(() => !active.view.held)));
+    await press(page.locator('#composer-banners [data-banner-act="snooze"]'));
+    await waitFor("the thread snoozed until the reset", () => page.evaluate((k) => sideMarks.snoozed[threadKey(tabByKey(k))]?.until === tabByKey(k).view.resume_at, key));
+    await page.evaluate((k) => {
+      wake(tabByKey(k));
+      activate(tabByKey(k));
+    }, key);
+    await waitFor("the thread back", () => page.evaluate((k) => active?.key === k, key));
+    await sendPrompt("spent");
+    await waitFor("a limit with no reset time", async () => (await text("#composer-banners .description")) === "Reset time unavailable; retry manually");
+    check(!(await page.locator("#composer-banners .actions").count()), "a limit with no reset time offers to resume at it");
+    await sendPrompt("after the limit");
+    await waitFor("the banner to go with the next turn", async () => !(await page.locator("#composer-banners").isVisible()), 8000);
+    return "Usage limit reached · Resets …";
+  }));
+
+  await step("composer: a checkout moved off the thread's branch shows Branch changed from, which Restore branch undoes", async () => {
+    const alphaDir = path.join(HOME, "work/alpha");
+    const git = (...args) => require("child_process").execFileSync("git", ["-C", alphaDir, "-c", "user.email=s@example.test", "-c", "user.name=s", ...args]).toString().trim();
+    const head = git("symbolic-ref", "--short", "HEAD");
+    const born = (() => { try { return !!git("rev-parse", "-q", "--verify", "HEAD"); } catch { return false; } })();
+    if (!born) git("commit", "-q", "--allow-empty", "-m", "base");
+    git("branch", "elsewhere");
+    const rows = await page.locator("#thread-list .thread-row").count();
+    const before = await page.evaluate(() => active?.key);
+    await page.evaluate(() => newThread(true));
+    await waitFor("a new thread in alpha", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1 && (await page.evaluate((key) => active?.key !== key && active.view.running, before)), 10000);
+    await waitTerm(/fake claude in .*work\/alpha/);
+    try {
+      await sendPrompt("elsewhere");
+      await waitFor("the branch notice", () => page.locator("#composer-banners .banner").isVisible());
+      const title = (await page.locator("#composer-banners .title").innerText()).replace(/\s+/g, " ").trim();
+      check(title === "Branch changed from elsewhere", `the notice reads ${title}`);
+      check((await page.getAttribute("#composer-banners .title code", "title")) === `This thread last ran on elsewhere. Sending will continue on ${head}.`, "the branch's tooltip");
+      check((await page.getAttribute('#composer-banners [data-banner-act="dismiss"]', "aria-label")) === "Dismiss branch change notice", "no dismiss button");
+      await press(page.locator('#composer-banners [data-banner-act="restore"]'));
+      if (await page.locator("#composer-dialog form").isVisible()) {
+        check((await text("#composer-dialog h2")) === "Switch to elsewhere?", `the confirm asks ${await text("#composer-dialog h2")}`);
+        await press(page.locator('#composer-dialog [data-answer="yes"]'));
+      }
+      await waitFor("the checkout back on the thread's branch", async () => git("symbolic-ref", "--short", "HEAD") === "elsewhere");
+      await waitFor("the notice to go", async () => !(await page.locator("#composer-banners").isVisible()));
+      git("checkout", "-q", head);
+      await page.evaluate(() => Object.assign(threadOf(active), { workspaceFor: null, gitFor: null }) && fetchWorkspace(active).then(() => renderComposer(active)));
+      await waitFor("the notice back", () => page.locator("#composer-banners .banner").isVisible());
+      await press(page.locator('#composer-banners [data-banner-act="dismiss"]'));
+      await waitFor("the notice dismissed", async () => !(await page.locator("#composer-banners").isVisible()));
+      return title;
+    } finally {
+      git("symbolic-ref", "HEAD", `refs/heads/${head}`);
+      git("branch", "-D", "elsewhere");
+      if (!born) git("update-ref", "-d", `refs/heads/${head}`);
+      await page.evaluate(() => closeTab(active));
+      await waitFor("the thread to close", async () => (await page.locator("#thread-list .thread-row").count()) === rows);
+      await page.evaluate(() => {
+        for (const t of tabs) Object.assign(threadOf(t), { workspaceFor: null, gitFor: null });
+        activate(tabs.find((t) => t.view.cwd.endsWith("/alpha")));
+      });
+      await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
+    }
+  });
+
   await step("app view: the terminal drawer shows the same session", async () => {
     await tapOrClick("#toggle-terminal");
     await waitFor("the drawer", () => page.locator(".term:not([hidden])").evaluate((el) => getComputedStyle(el).visibility === "visible" && el.getBoundingClientRect().height > 60));

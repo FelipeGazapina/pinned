@@ -13,6 +13,10 @@ Object.assign(ICON_PATHS, {
   star: `<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>`,
   "corner-up-right": `<path d="m15 14 5-5-5-5"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/>`,
   "chevron-left": `<path d="m15 18-6-6 6-6"/>`,
+  "list-todo": `<path d="M13 5h8"/><path d="M13 12h8"/><path d="M13 19h8"/><path d="m3 17 2 2 4-4"/><rect x="3" y="4" width="6" height="6" rx="1"/>`,
+  circle: `<circle cx="12" cy="12" r="10"/>`,
+  "circle-dot": `<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/>`,
+  gauge: `<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>`,
   "folder-git-2": `<path d="M18 19a5 5 0 0 1-5-5v8"/><path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"/><circle cx="13" cy="12" r="2"/><circle cx="20" cy="19" r="2"/>`,
 });
 
@@ -148,6 +152,8 @@ function renderComposer(tab) {
   send.title = blocked || (composer.dataset.sending === "true" ? "Submitting message" : compacting ? `Summarize ${formatTokens(compactOffer(tab))} tokens of history, then send` : working ? `Queue message (${keys})` : `Send (${keys})`);
   send.setAttribute("aria-label", send.title);
   renderApproval(tab);
+  renderBanners(tab);
+  renderTasks(tab);
   renderPills(tab);
   rest();
   renderAttachments(t);
@@ -524,6 +530,152 @@ async function implementInNewThread(tab) {
   setTimeout(() => fetchThread(next), 400);
   renderSidebar();
 }
+
+/** T3 Code's notices over the composer: the front one attached to it, the rest behind a cap that
+ * shows them on hover or a tap. */
+const composerBanners = Object.assign(document.createElement("div"), { id: "composer-banners", hidden: true });
+approval.before(composerBanners);
+const bannerDismissed = new Set();
+let bannersOpen = false;
+let restoringBranch = null;
+/** The usage limit that stopped the thread's turn, from the reset time claude wrote, or from its
+ * message when it wrote none, such as for a monthly spend limit. */
+function limitBanner(tab) {
+  if (phaseOf(tab) !== "failed") return null;
+  const at = tab.view.resume_at;
+  const last = threadOf(tab).items.findLast((i) => i.kind === "error" || i.kind === "user");
+  if (!at && !(last?.kind === "error" && /hit your .*limit|usage limit/i.test(last.text))) return null;
+  const key = threadKey(tab);
+  const snoozed = at && sideMarks.snoozed[key]?.until === at;
+  const actions = at && at > (tab.view.updated ?? 0) ? `<button type="button" class="ghost" data-banner-act="resume">${tab.view.held ? "Resume at reset" : "Cancel auto-resume"}</button>${snoozed ? "" : `<button type="button" class="ghost" data-banner-act="snooze"${at <= Date.now() / 1000 ? " disabled" : ""}>Snooze until reset</button>`}` : "";
+  return { id: `limit:${at}`, variant: "warning", icon: "gauge", title: esc("Usage limit reached"), description: esc(at ? `Resets ${new Date(at * 1000).toLocaleString()}` : "Reset time unavailable; retry manually"), actions };
+}
+/** As T3 Code: the local checkout moved off the branch the thread last ran on. */
+function branchBanner(tab) {
+  const t = threadOf(tab);
+  const ws = t.workspace;
+  if (!ws?.branch || ws.worktree || !t.branch || t.branch === ws.branch) return null;
+  const id = `branch:${threadKey(tab)}:${t.branch}:${ws.branch}`;
+  if (bannerDismissed.has(id)) return null;
+  const busy = phaseOf(tab) === "working" || !!tab.menu || restoringBranch === tab;
+  return {
+    id, variant: "info", icon: "git-branch", dismiss: "Dismiss branch change notice",
+    title: `<span class="muted">Branch changed from</span><code title="This thread last ran on ${esc(t.branch)}. Sending will continue on ${esc(ws.branch)}.">${esc(t.branch)}</code>`,
+    actions: `<button type="button" class="ghost" data-banner-act="restore"${busy ? " disabled" : ""}>${restoringBranch === tab ? "Restoring..." : "Restore branch"}</button>`,
+  };
+}
+const bannerHtml = (b, attached) => `<div class="banner${attached ? " attached" : ""}" role="alert" data-banner="${esc(b.id)}" data-variant="${b.variant}">${icon(b.icon, "lead")}<span class="content"><span class="title">${b.title}</span>${b.description ? `<span class="description">${b.description}</span>` : ""}</span>
+    ${b.actions || b.dismiss ? `<span class="actions">${b.actions ?? ""}${b.dismiss ? `<button type="button" class="ghost icon" data-banner-act="dismiss" aria-label="${esc(b.dismiss)}" title="${esc(b.dismiss)}">${icon("x")}</button>` : ""}</span>` : ""}</div>`;
+function renderBanners(tab) {
+  const items = tab ? [limitBanner(tab), branchBanner(tab)].filter(Boolean) : [];
+  // Warnings go in front, as T3 Code orders them.
+  items.sort((a, b) => (a.variant === "warning" ? 0 : 1) - (b.variant === "warning" ? 0 : 1));
+  if (items.length < 2) bannersOpen = false;
+  composerBanners.hidden = !items.length;
+  const [front, ...rest] = items;
+  const html = !front ? "" : `${rest.length ? `<div class="stack${bannersOpen ? " open" : ""}"><button type="button" class="peek" data-banner-act="peek" aria-label="Show other notices" aria-expanded="${bannersOpen}"></button><div class="others" role="group" aria-label="Other notices">${rest.map((b) => bannerHtml(b, false)).join("")}</div></div>` : ""}${bannerHtml(front, true)}`;
+  if (composerBanners.dataset.html !== html) {
+    composerBanners.dataset.html = html;
+    composerBanners.innerHTML = html;
+  }
+  composer.dataset.banners = items.length > 0;
+}
+composerBanners.addEventListener("pointerenter", (e) => e.pointerType !== "touch" && composerBanners.querySelector(".stack") && !bannersOpen && ((bannersOpen = true), renderBanners(active)));
+composerBanners.addEventListener("pointerleave", (e) => e.pointerType !== "touch" && bannersOpen && ((bannersOpen = false), renderBanners(active)));
+composerBanners.addEventListener("click", async (e) => {
+  const tab = active;
+  const b = e.target.closest("[data-banner-act]");
+  if (!tab || !b || b.disabled) return;
+  const act = b.dataset.bannerAct;
+  if (act === "peek") {
+    bannersOpen = !bannersOpen;
+    return renderBanners(tab);
+  }
+  if (act === "dismiss") {
+    bannerDismissed.add(b.closest("[data-banner]").dataset.banner);
+    return renderBanners(tab);
+  }
+  if (act === "snooze") return snooze(tab, tab.view.resume_at);
+  if (act === "resume") {
+    b.disabled = true;
+    b.textContent = "Saving...";
+    await callOn(tab.machine, { cmd: "auto_resume", tab: tab.view.id, on: !!tab.view.held }).catch((err) => showComposerNote(`Could not change auto-resume: ${err}`, true));
+    return refreshTabs(tab.machine);
+  }
+  if (act === "restore") restoreBranch(tab);
+});
+/** Switches the checkout back to the thread's branch, asking first while it has changes, as T3 Code does. */
+async function restoreBranch(tab) {
+  const t = threadOf(tab);
+  const branch = t.branch;
+  if (t.git?.dirty && !(await confirmRestore(branch))) return;
+  restoringBranch = tab;
+  renderBanners(tab);
+  try {
+    await callOn(tab.machine, { cmd: "checkout", tab: tab.view.id, branch, create: false });
+  } catch (err) {
+    showComposerNote(String(err), true);
+  } finally {
+    restoringBranch = null;
+    Object.assign(t, { workspaceFor: null, gitFor: null });
+    await fetchWorkspace(tab);
+    if (tab === active) renderComposer(tab);
+  }
+}
+function confirmRestore(branch) {
+  composerSheet.innerHTML = `<form class="sheet" role="alertdialog" aria-label="Switch to ${esc(branch)}?"><h2>Switch to <code>${esc(branch)}</code>?</h2><p class="about">You have uncommitted changes. They'll carry over to the other branch, or block the switch if they conflict.</p>
+    <footer><span class="spacer"></span><button type="button" class="outline" data-answer="">Cancel</button><button type="button" class="primary" data-answer="yes">Switch branch</button></footer></form>`;
+  composerSheet.hidden = false;
+  return new Promise((resolve) => {
+    composerSheet.querySelector("form").onclick = (e) => {
+      const b = e.target.closest("[data-answer]");
+      if (!b) return;
+      closeSheet();
+      resolve(!!b.dataset.answer);
+    };
+  });
+}
+
+/** T3 Code's Tasks tab under the notices: the list claude keeps with TodoWrite, while its turn runs
+ * or until every step is done, its current step and progress, and the whole list when opened. */
+const composerDock = Object.assign(document.createElement("div"), { id: "composer-dock" });
+const tasksTab = Object.assign(document.createElement("div"), { id: "composer-tasks", hidden: true });
+approval.after(composerDock);
+composerDock.append(tasksTab, document.getElementById("stash"));
+let tasksOpen = false;
+function tasksOf(tab) {
+  const t = threadOf(tab);
+  const todos = t.todos;
+  if (!todos?.steps.length) return null;
+  const since = t.items.findLast((i) => i.kind === "user")?.at ?? "";
+  const live = phaseOf(tab) === "working" && todos.at >= since;
+  if (!live && todos.steps.every((s) => s.status === "completed")) return null;
+  const done = todos.steps.filter((s) => s.status === "completed").length;
+  const current = todos.steps.find((s) => s.status === "in_progress") ?? todos.steps.find((s) => s.status === "pending") ?? todos.steps.at(-1);
+  return { steps: todos.steps, done, total: todos.steps.length, step: current.step, live };
+}
+const TASK_ICONS = { completed: "check", in_progress: "circle-dot", pending: "circle" };
+const TASK_LABELS = { completed: "Completed", in_progress: "Running", pending: "Pending" };
+function renderTasks(tab) {
+  const tasks = tab && approval.hidden ? tasksOf(tab) : null;
+  if (!tasks) tasksOpen = false;
+  tasksTab.hidden = !tasks;
+  const segments = tasks && tasks.total > 1 && tasks.total <= 10 ? `<span class="segments" aria-hidden="true">${tasks.steps.map((s) => `<span data-status="${s.status}"></span>`).join("")}</span>` : "";
+  const html = !tasks ? "" : `<button type="button" class="row" data-tasks-toggle aria-expanded="${tasksOpen}" aria-label="${tasksOpen ? "Collapse tasks" : "Tasks"}: ${tasks.done} of ${tasks.total} complete. Current task: ${esc(tasks.step)}">
+      ${icon("list-todo", "lead")}<span class="name">Tasks</span><span class="current">${esc(tasks.step)}</span><span class="count${tasks.done >= tasks.total ? " done" : ""}">${tasks.done}/${tasks.total}</span>${segments}${icon("chevron-down", `chev${tasksOpen ? "" : " up"}`)}</button>
+    ${tasksOpen ? `<ul class="steps" role="list" aria-label="Task list. ${tasks.done} of ${tasks.total} complete.">${tasks.steps.map((s) => `<li data-status="${s.status}">${icon(TASK_ICONS[s.status], "lead")}<span class="text"><span class="sr-only">${TASK_LABELS[s.status]}: </span>${esc(s.step)}</span><span class="when">${s.status === "in_progress" && tasks.live ? "now" : ""}</span></li>`).join("")}</ul>` : ""}`;
+  if (tasksTab.dataset.html !== html) {
+    tasksTab.dataset.html = html;
+    tasksTab.innerHTML = html;
+  }
+  tasksTab.toggleAttribute("data-open", tasksOpen);
+}
+tasksTab.addEventListener("pointerdown", (e) => e.target.closest("[data-tasks-toggle]") && e.preventDefault());
+tasksTab.addEventListener("click", (e) => {
+  if (!e.target.closest("[data-tasks-toggle]") || !active) return;
+  tasksOpen = !tasksOpen;
+  renderTasks(active);
+});
 
 /** With the thread scrolled up and a one-line prompt not being typed in, the composer rests as one
  * row, as T3 Code's does, to show more of the thread. Like T3's, it comes to rest on a scroll, not
