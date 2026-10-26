@@ -39,7 +39,7 @@ body[data-mode="terminal"] #mode-gui:hover { background: #ffffff14; color: var(-
 #chat-head, .file > header { border-bottom: 0; user-select: none; }
 
 body[data-mode="gui"] #expanded { background: var(--g-bg); }
-body[data-mode="gui"]:not([data-page]) #expanded > header,
+body[data-mode="gui"]:is(:not([data-page]), [data-page="settings"]) #expanded > header,
 body[data-mode="gui"] #tab-bar, body[data-mode="gui"] #keys,
 body[data-mode="gui"] #terms > #empty, body[data-mode="gui"] #actions { display: none; }
 body[data-mode="gui"] #workspace { display: grid; flex-direction: unset;

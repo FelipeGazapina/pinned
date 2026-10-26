@@ -163,6 +163,8 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 #settings { flex: 1; min-height: 0; display: flex; }
 #settings-nav { flex: none; width: 140px; display: flex; flex-direction: column; gap: 2px; padding: 8px 6px;
   border-right: 1px solid var(--border); }
+#settings-nav :is(.head, .i) { display: none; }
+#settings-nav .links { display: contents; }
 #settings-nav button { text-align: left; padding: 5px 8px; border-radius: 6px; color: var(--muted); }
 #settings-nav button:hover { background: #ffffff0a; }
 #settings-nav button.active { background: #ffffff14; color: var(--fg); }
