@@ -94,7 +94,9 @@ body[data-mode="gui"] #settings .editor { --line: rgb(var(--g-ink-rgb) / 0.24); 
 body[data-mode="gui"] #settings .flow .node { border-color: var(--g-input); border-radius: 16px; box-shadow: 0 1px 3px rgb(var(--g-shadow-rgb) / 0.08); }
 body[data-mode="gui"] #settings .flow .node.trigger { border-radius: 42px 16px 16px 42px; }
 body[data-mode="gui"] #settings .flow .node:hover { border-color: rgb(var(--g-ink-rgb) / 0.24); }
-body[data-mode="gui"] #settings .flow .step.open .node { border-color: rgb(var(--g-primary-rgb) / 0.9); box-shadow: 0 0 0 3px rgb(var(--g-primary-rgb) / 0.22); }
+body[data-mode="gui"] #settings .flow .open .node { border-color: rgb(var(--g-primary-rgb) / 0.9); box-shadow: 0 0 0 3px rgb(var(--g-primary-rgb) / 0.22); }
+body[data-mode="gui"] #settings .category { border-color: var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.02); }
+body[data-mode="gui"] #settings .flow .branch[data-branch="stop"] .node { background: rgb(var(--g-ink-rgb) / 0.04); box-shadow: none; }
 body[data-mode="gui"] #settings .flow .node.ghost { border-color: rgb(var(--g-ink-rgb) / 0.18); background: transparent; box-shadow: none; }
 body[data-mode="gui"] #settings .flow .node .warn { background: var(--g-error); }
 body[data-mode="gui"] #settings .flow .text b { font-size: 13px; }

@@ -5118,9 +5118,56 @@ async function sweep(profileName) {
     check((await hubCall({ cmd: "get_settings" })).connectors.length === 2, "the hub lacks the Slack workflow");
   });
 
-  await step("Workflows: delete both", async () => {
-    for (let i = 0; i < 2; i++) {
-      if ((await page.locator("#settings-page .editor-bar").count()) === 0) await press(page.locator("#settings-page .flow-card .open").first());
+  await step("Workflows: a Slack message workflow routes its categories", async () => {
+    await action("close-editor");
+    await action("new-connector");
+    await press(page.locator('#settings-page [data-action="pick-trigger"][data-kind="slack-message"]'));
+    await page.fill("#settings-page .editor-bar .title", "Route support");
+    await page.fill('#settings-page [data-bind="trigger.channel"]', "support");
+    await press(page.locator('#settings-page .step[data-step="decide"] .node'));
+    const names = await page.locator("#settings-page .category input.name").evaluateAll((els) => els.map((el) => el.value));
+    check(names.join() === "error,doubt,escalation,ignore", `the default categories are ${names}`);
+    check((await page.inputValue('#settings-page [data-bind="trigger.decide.categories.2.mention"]')) === "prod-engg", "escalation does not mention prod-engg");
+    await action("remove-category", 3);
+    await page.fill('#settings-page [data-bind="trigger.decide.categories.1.description"]', "");
+    await action("save-connector");
+    await waitFor("the description error", async () => /“doubt”/.test(await text("#editor-error")));
+    await page.fill('#settings-page [data-bind="trigger.decide.categories.1.description"]', "Someone asks a question");
+    await page.selectOption('#settings-page [data-bind="trigger.decide.categories.0.workflow"]', { label: "＋ New workflow for this category" });
+    await waitFor("the new workflow on the error branch", async () => (await text('#settings-page .branch[data-branch="route"] b')) === "Route support: error");
+    const ports = await page.locator("#settings-page .flow .port-label").allTextContents();
+    const branches = await page.locator("#settings-page .flow .branch b").allTextContents();
+    check(ports.join() === "error,doubt,escalation", `branch labels: ${ports}`);
+    check(branches.join(" | ") === "Route support: error | Stop | Mention @prod-engg", `branch nodes: ${branches.join(" | ")}`);
+    await action("save-connector");
+    await waitFor("Saved", async () => (await text("#save-connector")) === "Saved");
+    const saved = (await hubCall({ cmd: "get_settings" })).connectors;
+    const router = saved.find((k) => k.trigger.kind === "slack-message");
+    const called = saved.find((k) => k.trigger.kind === "called");
+    const [error, doubt, escalation] = router?.trigger.decide.categories ?? [];
+    check(called && error?.workflow === called.id && doubt.workflow === null, `routes: ${JSON.stringify(router?.trigger.decide.categories)}`);
+    check(escalation.mention === "prod-engg" && error.mention === null, `mentions: ${JSON.stringify(router.trigger.decide.categories)}`);
+    const over = await overflowing();
+    check(!over.length, `overflowing: ${over}`);
+    return branches.join(" | ");
+  });
+
+  await step("Workflows: the called workflow names the workflow that routes to it", async () => {
+    await press(page.locator('#settings-page .branch[data-branch="route"] .node'));
+    await action("open-route");
+    await waitFor("the called workflow", async () => (await page.inputValue("#settings-page .editor-bar .title")) === "Route support: error");
+    await press(page.locator('#settings-page .step[data-step="called-trigger"] .node'));
+    const said = await text("#settings-page .node-panel .details .hint");
+    check(/“Route support” sorts a message into “error”/.test(said), said);
+    check((await page.locator('#settings-page .step[data-step="reply"]').count()) === 1, "the called workflow does not reply in the thread");
+    return said;
+  });
+
+  await step("Workflows: delete them all", async () => {
+    if ((await page.locator("#settings-page .editor-bar").count()) > 0) await action("close-editor");
+    if ((await page.locator("#settings-page .editor-bar").count()) > 0) await action("close-editor");
+    for (let left = (await hubCall({ cmd: "get_settings" })).connectors.length; left > 0; left--) {
+      await press(page.locator("#settings-page .flow-card .open").first());
       await action("delete-connector");
       await action("delete-connector");
       await page.waitForSelector("#settings-page .new-card");

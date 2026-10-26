@@ -205,7 +205,9 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 [data-tone="slack"] { --tone: #611f69; }
 [data-tone="claude"] { --tone: #d97757; }
 [data-tone="proof"] { --tone: #2ead33; }
+[data-tone="called"] { --tone: #0e7c6b; }
 [data-tone="vercel"] { --tone: #000; }
+#settings .icon[data-tone="vercel"] { box-shadow: inset 0 0 0 1px rgb(var(--s-ink-rgb, 255 255 255) / 0.16); }
 #settings .icon { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; flex: none;
   background: var(--tone, rgb(var(--s-ink-rgb, 255 255 255) / 0.078)); color: #fff; font-size: 14px; }
 
@@ -256,7 +258,7 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .flow .edges path.dashed { stroke-dasharray: 5 4; }
 .flow .edges .arrow { fill: var(--line); stroke: none; }
 .flow .edges circle { fill: var(--ground); stroke: var(--line); stroke-width: 1.5; }
-.flow .step { position: absolute; width: 150px; color: var(--fg); display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; }
+.flow :is(.step, .branch) { position: absolute; width: 150px; color: var(--fg); display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; }
 .flow .node { position: relative; width: 84px; height: 84px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 14px;
   background: var(--tile); box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); transition: border-color 0.12s, box-shadow 0.12s; }
 .flow .node:hover { border-color: rgb(var(--s-ink-rgb, 255 255 255) / 0.35); }
@@ -264,18 +266,23 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .flow .node.trigger { border-radius: 40px 14px 14px 40px; }
 .flow .node.trigger .icon { border-radius: 50%; }
 .flow .node.trigger::before { content: "⚡"; position: absolute; left: -26px; top: 50%; transform: translateY(-50%); font-size: 14px; }
-.flow .step.open .node { border-color: var(--working); box-shadow: 0 0 0 3px color-mix(in srgb, var(--working) 30%, transparent); }
+.flow .open .node { border-color: var(--working); box-shadow: 0 0 0 3px color-mix(in srgb, var(--working) 30%, transparent); }
 .flow .node .warn { position: absolute; right: -7px; bottom: -7px; width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%;
   border: 2px solid var(--ground); background: var(--s-error, #ff6b6b); color: #fff; font-size: 11px; font-weight: 700; }
 .flow .node.ghost { border-style: dashed; background: transparent; box-shadow: none; color: var(--muted); }
-.flow .node.ghost .icon { background: none; color: var(--muted); font-size: 22px; }
+#settings .flow .node.ghost .icon { background: none; color: var(--muted); font-size: 22px; }
 .flow .node.ghost:hover { border-color: var(--working); color: var(--fg); }
+.flow .branch[data-branch="stop"] .node { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.05); box-shadow: none; }
+#settings .flow .branch[data-branch="stop"] .icon { background: none; color: var(--muted); font-size: 16px; }
+.flow .stub { position: absolute; width: 150px; display: flex; justify-content: center; }
+.flow .stub button { height: 32px; padding: 0 12px; border: 1px dashed var(--border); border-radius: 16px; background: var(--ground); color: var(--muted); font-size: 12px; }
+.flow .stub button:hover { border-color: var(--working); color: var(--fg); }
 .flow .text { width: 100%; display: flex; flex-direction: column; gap: 2px; line-height: 1.3; }
 .flow .text b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .flow .summary { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .flow .edge-label { position: absolute; z-index: 1; max-width: 120px; transform: translate(-50%, -50%); padding: 1px 8px; border: 1px solid var(--border);
   border-radius: 10px; background: var(--ground); color: var(--muted); font-size: 11px; line-height: 1.4; text-align: center; }
-.flow .port-label { position: absolute; z-index: 1; transform: translateY(calc(-100% - 2px)); max-width: 120px; overflow: hidden; text-overflow: ellipsis;
+.flow .port-label { position: absolute; z-index: 1; transform: translateY(-50%); max-width: 110px; padding: 0 3px; background: var(--ground); line-height: 1.3; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; color: var(--muted); font-size: 11px; }
 
 .node-panel { flex: none; width: 380px; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--tile); }
@@ -287,6 +294,13 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .details .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
 #settings-page .details p { margin: 0; }
 .details .actions { margin-top: 0; }
+.categories { display: flex; flex-direction: column; gap: 10px; }
+.category { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 10px; }
+#settings .category .row { margin: 0; }
+#settings .category input.name { font-weight: 600; }
+.category .mention-hint { font-size: 11px; }
+/* The paging guards only matter to a category that pings someone. */
+.category:has([data-bind$=".mention"]:placeholder-shown) .mention-hint { display: none; }
 @container (max-width: 720px) {
   .editor { flex-direction: column; }
   .canvas { min-height: 220px; }
