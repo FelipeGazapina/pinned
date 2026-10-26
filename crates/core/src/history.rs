@@ -215,6 +215,7 @@ mod tests {
         run(&dir, &["init", "-q"]);
         run(&dir, &["config", "user.email", "t@t"]);
         run(&dir, &["config", "user.name", "t"]);
+        run(&dir, &["config", "core.autocrlf", "false"]);
         dir
     }
 

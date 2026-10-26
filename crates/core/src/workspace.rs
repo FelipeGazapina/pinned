@@ -582,8 +582,11 @@ mod tests {
         for pr in ["--web", "-R other/repo", "", "12a", "http://github.com/o/r/pull/1"] {
             assert!(pull_request(dir.path(), pr, None).unwrap_err().contains("is not a pull request"), "{pr:?}");
         }
-        let missing = pull_request(dir.path(), "7", Some(dir.path().to_str().unwrap())).unwrap_err();
-        assert!(missing.contains("isn't installed"), "{missing}");
+        // Windows also looks for a program on pinned's own PATH, so an empty PATH can't hide gh there.
+        if cfg!(unix) {
+            let missing = pull_request(dir.path(), "7", Some(dir.path().to_str().unwrap())).unwrap_err();
+            assert!(missing.contains("isn't installed"), "{missing}");
+        }
         assert!(pr_status(dir.path(), "--web", None).unwrap_err().contains("is not a pull request"));
     }
 
