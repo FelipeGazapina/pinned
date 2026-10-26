@@ -63,6 +63,10 @@ The app view has three columns:
   those files. **Open diff** shows them in the side panel. Type below and press Enter to send.
   While Claude works, Enter queues your message and the red button stops the turn.
   The menu under the prompt picks the model.
+  A command that opens one of Claude's own screens, such as `/usage`, `/status`, `/mcp` or
+  `/model`, shows that screen live at the end of the thread. Keys you press on it reach Claude,
+  and on a touch screen its buttons send them; Esc or ✕ closes it. Sending a message closes it
+  first, so your words reach the prompt rather than the screen.
 - **Side panel.** Each thread keeps its own panel: its tabs, the one shown, its width, and
   whether it is open or maximized. **+** (⌘T while the panel is open) adds a tab, and ⌘W closes
   the shown tab before it ever closes a thread. ⌘D opens the **Diff**: one turn, the latest

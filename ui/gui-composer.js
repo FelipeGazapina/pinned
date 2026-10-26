@@ -103,7 +103,7 @@ function renderComposer(tab) {
   const empty = !prompt.value.trim() && !t?.attachments?.length;
   composer.dataset.working = working;
   composer.dataset.empty = empty;
-  document.getElementById("chat").dataset.hero = !!tab && t.loaded && !t.items.length && !tab.menu;
+  document.getElementById("chat").dataset.hero = !!tab && t.loaded && !t.items.length && !tab.menu && !tab.dialog;
   const send = document.getElementById("send");
   send.innerHTML = icon(composer.dataset.sending === "true" ? "loader-circle" : working && !empty ? "list-plus" : "arrow-up");
   const keys = sendWithMod ? "⌘Enter" : "Enter";
@@ -145,8 +145,16 @@ function watchMenu(tab) {
     requestAnimationFrame(() => {
       queued = false;
       const menu = terminalMenu(tab);
-      // claude hides its mode line while a menu is up.
-      const mode = terminalMode(tab) ?? (menu ? tab.mode ?? null : null);
+      const dialog = menu ? null : terminalDialog(tab);
+      // claude hides its mode line while a menu or a dialog is up.
+      const mode = terminalMode(tab) ?? (menu || dialog ? tab.mode ?? null : null);
+      if (dialog !== (tab.dialog ?? null)) {
+        tab.dialog = dialog;
+        if (tab === active) {
+          renderDialog(tab);
+          renderComposer(tab);
+        }
+      }
       if (JSON.stringify([menu, mode]) === JSON.stringify([tab.menu ?? null, tab.mode ?? null])) return;
       tab.menu = menu;
       tab.mode = mode;
@@ -160,6 +168,15 @@ const ARROW_DOWN = "\x1b[B";
 const ARROW_UP = "\x1b[A";
 const SHIFT_TAB = "\x1b[Z";
 const writeTo = (tab, data) => callOn(tab.machine, { cmd: "write_input", tab: tab.view.id, data });
+/** Presses Esc until claude's dialog closes, a few times at most for one opened from another. Keys
+ * typed into a dialog would move its cursor or pick an entry instead of reaching the prompt. */
+async function closeDialog(tab) {
+  for (let i = 0; i < 3 && terminalDialog(tab); i++) {
+    await writeTo(tab, "\x1b");
+    await until(() => !terminalDialog(tab), 1000);
+  }
+  return !terminalDialog(tab);
+}
 const arrowsTo = (menu, n) => {
   const from = menu.options.find((o) => o.chosen)?.n ?? 1;
   return (n > from ? ARROW_DOWN : ARROW_UP).repeat(Math.abs(n - from));
@@ -309,7 +326,7 @@ prompt.addEventListener("keydown", (e) => {
     stop();
   } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && recall(e.key === "ArrowUp" ? -1 : 1)) {
     e.preventDefault();
-  } else if (e.key === "Tab" && e.shiftKey && active?.view.running && !active.menu) {
+  } else if (e.key === "Tab" && e.shiftKey && active?.view.running && !active.menu && !active.dialog) {
     e.preventDefault();
     writeTo(active, SHIFT_TAB);
   }
@@ -363,6 +380,7 @@ async function send() {
     return clearComposer(tab);
   }
   if (!text) return;
+  if (!(await closeDialog(tab))) return showComposerNote("Claude's dialog didn't close. Your message is still here.", true);
   const draft = prompt.value;
   composer.dataset.sending = "true";
   clearComposer(tab, false);
@@ -478,7 +496,11 @@ window.addEventListener("keydown", (e) => {
 
 function sendSlash(tab, text) {
   if (!tab || waitsOnMenu(tab)) return false;
-  callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text }).then(() => setTimeout(() => fetchThread(tab), 400), (e) => showComposerNote(String(e), true));
+  (async () => {
+    if (!(await closeDialog(tab))) throw "Claude's dialog didn't close.";
+    await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });
+    setTimeout(() => fetchThread(tab), 400);
+  })().catch((e) => showComposerNote(String(e), true));
   return true;
 }
 
@@ -730,7 +752,7 @@ async function openBranches(anchor) {
     return;
   }
   threadOf(tab).git = git;
-  const busy = phaseOf(tab) === "working" || !!tab.menu;
+  const busy = phaseOf(tab) === "working" || !!tab.menu || !!tab.dialog;
   const list = () => {
     const needle = search.value.trim();
     const shown = git.refs.filter((r) => r.name.toLowerCase().includes(needle.toLowerCase())).slice(0, 80);

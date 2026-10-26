@@ -463,18 +463,62 @@ function renderThread() {
   const stick = threadView.dataset.tab !== tab.key || threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
   const liveRows = threadView.querySelector(".work.live .group[open] > .rows");
   const follow = !liveRows || liveRows.scrollHeight - liveRows.scrollTop - liveRows.clientHeight < 24;
-  threadView.innerHTML = `<div class="lane">${body}</div>`;
+  threadView.innerHTML = `<div class="lane">${body}<div id="dialog-slot"></div></div>`;
   threadView.dataset.key = key;
   threadView.dataset.tab = tab.key;
   for (const rows of threadView.querySelectorAll(".group > .rows")) {
     rows.classList.toggle("scrolls", rows.scrollHeight > rows.clientHeight + 1);
     if (follow && rows.closest(".work.live")) rows.scrollTop = rows.scrollHeight;
   }
+  renderDialog(tab);
   if (stick) threadView.scrollTop = threadView.scrollHeight;
   if (finder.open) findMatches();
   showScrollEnd();
   renderComposer(tab);
 }
+
+const DIALOG_KEYS = { "shift-tab": "\x1b[Z", tab: "\t", left: "\x1b[D", right: "\x1b[C", up: "\x1b[A", down: "\x1b[B", enter: "\r", esc: "\x1b" };
+const DIALOG_BUTTONS = [["shift-tab", "⇧Tab"], ["tab", "Tab"], ["left", "←"], ["right", "→"], ["up", "↑"], ["down", "↓"], ["enter", "Enter"]];
+const PRESSED = { Tab: "tab", ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down", Enter: "enter", Escape: "esc" };
+
+/** claude's dialog, such as /usage's, live at the end of the thread. Keys pressed on it reach
+ * claude, as do its buttons on a touch screen. It takes the focus when it opens from the composer. */
+function renderDialog(tab) {
+  const slot = document.getElementById("dialog-slot");
+  if (!slot) return;
+  if (tab !== active || !tab.dialog) {
+    const focused = slot.contains(document.activeElement);
+    slot.replaceChildren();
+    return focused && prompt.focus();
+  }
+  let card = slot.querySelector(".dialog-card");
+  const opened = !card;
+  if (opened) {
+    slot.innerHTML = `<div class="dialog-card" tabindex="0" aria-label="Claude's dialog. Keys pressed here go to Claude.">
+      <div class="head">${icon("square-terminal", "lead")}<span class="title">Claude</span>
+        <span class="keys">${DIALOG_BUTTONS.map(([key, label]) => `<button type="button" class="xs" data-dialog-key="${key}">${label}</button>`).join("")}</span>
+        <button type="button" class="xs outline" data-show-terminal>Terminal</button>
+        <button type="button" class="xs" data-dialog-key="esc" title="Close (Esc)">${icon("x")}</button></div>
+      <pre class="screen"></pre></div>`;
+    card = slot.firstElementChild;
+  }
+  const screen = card.querySelector(".screen");
+  if (screen.shown === tab.dialog) return;
+  const end = threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
+  screen.innerHTML = screen.shown = tab.dialog;
+  if (opened || end) threadView.scrollTop = threadView.scrollHeight;
+  if (opened && (document.activeElement === document.body || (document.activeElement === prompt && !prompt.value))) card.focus({ preventScroll: true });
+}
+
+threadView.addEventListener("keydown", (e) => {
+  if (!e.target.closest?.(".dialog-card") || !active?.dialog || e.metaKey || e.ctrlKey || e.altKey) return;
+  const name = e.key === "Tab" && e.shiftKey ? "shift-tab" : PRESSED[e.key];
+  const data = name ? DIALOG_KEYS[name] : e.key === "Backspace" ? "\x7f" : e.key.length === 1 ? e.key : null;
+  if (!data) return;
+  e.preventDefault();
+  e.stopPropagation();
+  writeTo(active, data);
+});
 
 const rerender = () => {
   threadView.dataset.key = "";
@@ -533,6 +577,12 @@ threadView.addEventListener("click", (e) => {
   if (e.target.closest("[data-new-thread]")) return toggleProjects();
   if (e.target.closest("[data-mode-terminal]")) return setMode("terminal");
   if (!active) return;
+  const dialogKey = e.target.closest("[data-dialog-key]");
+  if (dialogKey) {
+    dialogKey.closest(".dialog-card").focus({ preventScroll: true });
+    return writeTo(active, DIALOG_KEYS[dialogKey.dataset.dialogKey]);
+  }
+  if (e.target.closest(".dialog-card [data-show-terminal]")) return toggleDrawer(true);
   const t = threadOf(active);
   const toggle = e.target.closest("[data-toggle]");
   if (toggle) {

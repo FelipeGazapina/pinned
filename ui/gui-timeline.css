@@ -131,6 +131,19 @@ button.xs.copied { color: var(--g-success); }
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent); }
 .plan-foot { display: flex; justify-content: center; margin-top: 16px; }
 
+.dialog-card { margin: 4px 0 16px; border-radius: 16px; border: 1px solid rgb(255 255 255 / 0.08); background: #0a0a0a; outline: none; overflow: hidden; }
+.dialog-card:focus-within { border-color: rgb(81 162 255 / 0.5); }
+.dialog-card .head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--g-border); color: var(--g-muted); font-size: 12px; }
+.dialog-card .head .title { margin-right: auto; color: var(--g-fg); font-weight: 500; }
+.dialog-card .keys { display: flex; flex-wrap: wrap; gap: 2px; }
+.dialog-card .keys button { min-width: 24px; justify-content: center; font-family: var(--g-mono); }
+.dialog-card .screen { margin: 0; padding: 10px 12px; overflow-x: auto; color: #e5e5e5; font: 12px/1.35 var(--g-mono); white-space: pre; }
+.dialog-card .screen .inverse { color: #0a0a0a; background: #e5e5e5; }
+.dialog-card .screen .bold { font-weight: 600; }
+.dialog-card .screen .dim { opacity: 0.6; }
+.dialog-card .screen .italic { font-style: italic; }
+.dialog-card .screen .underline { text-decoration: underline; }
+
 .changes > summary { position: sticky; top: 8px; z-index: 2; border-radius: 10px 10px 0 0;
   background: linear-gradient(rgb(255 255 255 / 0.016), rgb(255 255 255 / 0.016)), #0a0a0a; }
 .changes:not([open]) > summary { border-radius: 10px; }
