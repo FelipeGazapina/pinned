@@ -72,18 +72,24 @@ else greet();
 
 // Settings as claude 2.1 draws them for /usage: under a ▔ rule, with no transcript line. Tab
 // switches the shown tab and Esc closes it.
-const SETTINGS = { Status: ["Version:           2.1.310", "Model:             opus (claude-opus-5-5)"], Usage: ["Current session", "█▌                     3% used", "Resets 12:10pm"] };
+const SETTINGS = { Status: ["Version: 2.1.310", "Model: opus"], Usage: ["Current session", "█▌        3% used", "Resets 12:10pm"] };
+// Like claude's renderer, a redraw erases only the lines the screen drew before. Every line fits a
+// phone's terminal, so none wraps and the count stays true.
 let showing = null;
+let drawn = 0;
+const eraseSettings = () => out(drawn ? `\x1b[${drawn}A\r\x1b[J` : "\r\x1b[J");
 function drawSettings() {
-  out(`\x1b[2J\x1b[H${"▔".repeat(60)}\r\n   Settings  ${Object.keys(SETTINGS).map((k) => (k === showing ? `\x1b[7m ${k} \x1b[27m` : ` ${k} `)).join(" ")}\r\n\r\n`);
-  for (const row of SETTINGS[showing]) out(`   ${row}\r\n`);
-  out("\r\n   Esc to cancel");
+  eraseSettings();
+  const rows = ["▔".repeat(30), `Settings ${Object.keys(SETTINGS).map((k) => (k === showing ? `\x1b[7m ${k} \x1b[27m` : ` ${k} `)).join(" ")}`, "", ...SETTINGS[showing], "", "Esc to cancel"];
+  out(rows.join("\r\n"));
+  drawn = rows.length - 1;
 }
 function answerSettings(key) {
   if (key === "\t") showing = showing === "Usage" ? "Status" : "Usage";
   else if (key === "\x1b") {
     showing = null;
-    out("\x1b[2J\x1b[H");
+    eraseSettings();
+    drawn = 0;
     return prompt();
   }
   drawSettings();
@@ -95,6 +101,7 @@ function submit() {
   if (line === "/exit") process.exit(0);
   if (line === "/usage") {
     showing = "Usage";
+    drawn = 0;
     line = "";
     return drawSettings();
   }

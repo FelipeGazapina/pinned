@@ -1209,6 +1209,8 @@ async function sweep(profileName) {
     check(/Select model/.test(model), `/model reads as ${JSON.stringify(model?.slice(0, 60))}`);
     const none = await page.evaluate((screens) => screens.map((lines) => dialogOn(lines)), ["idle", "permission", "question", "plan", "manual-mode"].map((s) => screen(`claude-2.1.310-${s}.txt`)));
     check(none.every((d) => d === null), `a prompt or menu read as a dialog: ${JSON.stringify(none)}`);
+    const shown = await page.evaluate((lines) => dialogOn(lines), [...screen("claude-2.1.310-usage.txt").slice(0, 10), ...screen("claude-2.1.310-manual-mode.txt").slice(-5)]);
+    check(shown === null, `a ▔ rule printed above claude's prompt box read as a dialog: ${JSON.stringify(shown)}`);
     return dialogs.map((d) => d.split("\n").length).join(" | ");
   });
 

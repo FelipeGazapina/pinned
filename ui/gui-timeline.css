@@ -146,6 +146,7 @@ button.xs.copied { color: var(--g-success); }
 .dialog-card .head .title { margin-right: auto; color: var(--g-fg); font-weight: 500; }
 .dialog-card .keys { display: flex; flex-wrap: wrap; gap: 2px; }
 .dialog-card .keys button { min-width: 24px; justify-content: center; font-family: var(--g-mono); }
+@media (max-width: 640px) { .dialog-card .head { flex-wrap: wrap; } .dialog-card .keys { order: 1; flex-basis: 100%; } }
 .dialog-card .screen { margin: 0; padding: 10px 12px; overflow-x: auto; color: #e5e5e5; font: 12px/1.35 var(--g-mono); white-space: pre; }
 .dialog-card .screen .inverse { color: #0a0a0a; background: #e5e5e5; }
 .dialog-card .screen .bold { font-weight: 600; }

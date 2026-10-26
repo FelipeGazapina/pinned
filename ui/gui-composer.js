@@ -149,9 +149,10 @@ function watchMenu(tab) {
       // claude hides its mode line while a menu or a dialog is up.
       const mode = terminalMode(tab) ?? (menu || dialog ? tab.mode ?? null : null);
       if (dialog !== (tab.dialog ?? null)) {
+        const opened = !tab.dialog;
         tab.dialog = dialog;
         if (tab === active) {
-          renderDialog(tab);
+          renderDialog(tab, opened);
           renderComposer(tab);
         }
       }
@@ -380,9 +381,12 @@ async function send() {
     return clearComposer(tab);
   }
   if (!text) return;
-  if (!(await closeDialog(tab))) return showComposerNote("Claude's dialog didn't close. Your message is still here.", true);
   const draft = prompt.value;
   composer.dataset.sending = "true";
+  if (!(await closeDialog(tab))) {
+    delete composer.dataset.sending;
+    return showComposerNote("Claude's dialog didn't close. Your message is still here.", true);
+  }
   clearComposer(tab, false);
   try {
     await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });

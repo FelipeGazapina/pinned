@@ -493,8 +493,9 @@ const DIALOG_BUTTONS = [["shift-tab", "⇧Tab"], ["tab", "Tab"], ["left", "←"]
 const PRESSED = { Tab: "tab", ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down", Enter: "enter", Escape: "esc" };
 
 /** claude's dialog, such as /usage's, live at the end of the thread. Keys pressed on it reach
- * claude, as do its buttons on a touch screen. It takes the focus when it opens from the composer. */
-function renderDialog(tab) {
+ * claude, as do its buttons on a touch screen. When it has just `opened` from the composer, it takes
+ * the focus; a thread drawn again around it leaves the focus where it is. */
+function renderDialog(tab, opened = false) {
   const slot = document.getElementById("dialog-slot");
   if (!slot) return;
   if (tab !== active || !tab.dialog) {
@@ -503,8 +504,7 @@ function renderDialog(tab) {
     return focused && prompt.focus();
   }
   let card = slot.querySelector(".dialog-card");
-  const opened = !card;
-  if (opened) {
+  if (!card) {
     slot.innerHTML = `<div class="dialog-card" tabindex="0" aria-label="Claude's dialog. Keys pressed here go to Claude.">
       <div class="head">${icon("square-terminal", "lead")}<span class="title">Claude</span>
         <span class="keys">${DIALOG_BUTTONS.map(([key, label]) => `<button type="button" class="xs" data-dialog-key="${key}">${label}</button>`).join("")}</span>
@@ -522,7 +522,7 @@ function renderDialog(tab) {
 }
 
 threadView.addEventListener("keydown", (e) => {
-  if (!e.target.closest?.(".dialog-card") || !active?.dialog || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (!e.target.closest?.(".dialog-card") || e.target.closest("button") || !active?.dialog || e.metaKey || e.ctrlKey || e.altKey) return;
   const name = e.key === "Tab" && e.shiftKey ? "shift-tab" : PRESSED[e.key];
   const data = name ? DIALOG_KEYS[name] : e.key === "Backspace" ? "\x7f" : e.key.length === 1 ? e.key : null;
   if (!data) return;

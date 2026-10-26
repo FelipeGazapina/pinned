@@ -70,11 +70,13 @@ function modeOn(lines) {
 }
 
 /** The dialog claude draws in place of its prompt for /usage, /status, /mcp and the like, if one is
- * up: the lines under the ▔ rule above it. These dialogs write nothing to the transcript. */
+ * up: the lines under the ▔ rule above it. These dialogs write nothing to the transcript. A ▔ rule
+ * with claude's prompt box under it is only output, such as a file shown in the terminal. */
 function dialogOn(lines) {
   const rule = lines.findLastIndex((l) => DIALOG_RULE.test(l));
   if (rule < 0) return null;
   const body = lines.slice(rule + 1);
+  if (body.some((l) => /^\s*─{20,}\s*$/.test(l))) return null;
   while (body.length && !body.at(-1).trim()) body.pop();
   return body.length ? body : null;
 }
