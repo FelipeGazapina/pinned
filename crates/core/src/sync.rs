@@ -96,8 +96,13 @@ struct Hashed {
 }
 
 impl State {
-    pub fn load(file: &Path) -> State {
-        std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    /// A state saved before accounts names no Claude home; its files were in `legacy_claude_home`.
+    pub fn load(file: &Path, legacy_claude_home: &Path) -> State {
+        let mut state: State = std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        for key in state.agreed.keys() {
+            state.claude_homes.entry(key.clone()).or_insert_with(|| legacy_claude_home.to_owned());
+        }
+        state
     }
 
     pub fn save(&self, file: &Path) {
@@ -480,6 +485,32 @@ mod tests {
         mac.checkout.claude_home = Some(root.join("mac/pinned/accounts/work"));
         assert_eq!(mac.sync(&hub).pulled, vec!["claude/memory/MEMORY.md"], "nothing is taken for deleted");
         assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "- deploys go through the VPS");
+        assert!(hub.0.borrow()["claude/memory/MEMORY.md"].data.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_state_from_before_accounts_had_its_claude_files_in_the_default_home() {
+        let root = root("legacy");
+        let hub = MemHub::default();
+        let mut mac = Side::new(&root, "mac", "app");
+        put(&mac.claude("memory/MEMORY.md"), "- deploys go through the VPS");
+        put(&mac.claude("s1.jsonl"), "{}");
+        mac.sync(&hub);
+        let file = root.join("sync.json");
+        let legacy = |side: &Side| {
+            let mut saved = serde_json::to_value(&side.state).unwrap();
+            saved.as_object_mut().unwrap().remove("claude_homes");
+            std::fs::write(&file, saved.to_string()).unwrap();
+            State::load(&file, &side.home.join(".claude"))
+        };
+        std::fs::remove_file(mac.claude("s1.jsonl")).unwrap();
+        mac.state = legacy(&mac);
+        assert_eq!(mac.sync(&hub).pushed, vec!["claude/s1.jsonl"], "a session deleted here is deleted on the hub");
+        assert!(hub.0.borrow()["claude/s1.jsonl"].data.is_none());
+        mac.state = legacy(&mac);
+        mac.checkout.claude_home = Some(root.join("mac/pinned/accounts/work"));
+        assert_eq!(mac.sync(&hub).pulled, vec!["claude/memory/MEMORY.md"], "a project moved to another account before its first sync deletes nothing");
         assert!(hub.0.borrow()["claude/memory/MEMORY.md"].data.is_some());
         let _ = std::fs::remove_dir_all(root);
     }

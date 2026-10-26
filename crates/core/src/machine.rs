@@ -369,7 +369,13 @@ impl Machine {
                 let account = self.accounts.add(provider, &name)?;
                 json(self.view_account(account))
             }
-            Call::RemoveAccount { account } => json(self.accounts.remove(&account)?),
+            Call::RemoveAccount { account } => {
+                // Its tabs would save sessions under an id the next start can't resume.
+                if self.tabs.lock().unwrap().values().any(|t| t.account.id == account) {
+                    return Err(format!("close the tabs that run under {account} before removing it"));
+                }
+                json(self.accounts.remove(&account)?)
+            }
             Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
             Call::SignIn { account } => json(self.sign_in(&account)?),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
@@ -1881,6 +1887,13 @@ mod tests {
         assert!(spare.join("s1.jsonl").is_file() && spare.join("s1/subagents/agent-a.jsonl").is_file(), "the transcript and its subagents follow the conversation");
         let kept: Value = serde_json::from_slice(&std::fs::read(root.join("config/sessions.json")).unwrap()).unwrap();
         assert_eq!(kept[0]["account"], json!("spare"), "a restart resumes it under the new account");
+        assert_eq!(
+            m.call(Call::RemoveAccount { account: "spare".into() }),
+            Err("close the tabs that run under spare before removing it".into()),
+            "its saved session would not resume after a restart"
+        );
+        m.close_tab(&tab);
+        assert_eq!(m.call(Call::RemoveAccount { account: "spare".into() }), Ok(Value::Null));
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -83,7 +83,12 @@ async function revealTab(machine, id) {
 /** The machine's accounts, asked once and kept for the tab badges and pickers; `fresh` asks again. Each ask runs every account's CLI. */
 function accountsOf(machine, fresh = false) {
   const m = machines.get(machine);
-  if (fresh || !m.accountsAsked) m.accountsAsked = callOn(machine, { cmd: "list_accounts" }).then((list) => setAccounts(machine, list));
+  if (fresh || !m.accountsAsked) {
+    // A list asked before a later ask or an add would undo it, so only the newest is kept.
+    const asked = callOn(machine, { cmd: "list_accounts" }).then((list) => (m.accountsAsked === asked ? setAccounts(machine, list) : m.accounts ?? list));
+    asked.catch(() => setTimeout(() => m.accountsAsked === asked && (m.accountsAsked = null), 30 * 1000));
+    m.accountsAsked = asked;
+  }
   return m.accountsAsked;
 }
 
@@ -583,7 +588,7 @@ function render() {
     badge.hidden = !remote;
     badge.textContent = remote ? initials(machineName(tab.machine)) : "";
     const other = tab.view.account !== DEFAULT_ACCOUNT;
-    if ((other || tab.view.resume_at) && !machines.get(tab.machine).accountsAsked) accountsOf(tab.machine).catch(console.warn);
+    if ((other || tab.view.resume_at || tab === active) && !machines.get(tab.machine).accountsAsked) accountsOf(tab.machine).catch(console.warn);
     const named = accountOf(tab.machine, tab.view.account);
     const accountBadge = tab.button.querySelector(".badge.account");
     accountBadge.hidden = !other;

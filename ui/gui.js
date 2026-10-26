@@ -209,7 +209,9 @@ function renderGui() {
   for (const key of threads.keys()) if (!tabByKey(key)) threads.delete(key);
   markThreadSeen(active);
   renderSidebar();
-  if (active && terminalOnly(active)) renderTerminalOnly();
+  const only = !!active && terminalOnly(active);
+  document.getElementById("chat").dataset.terminalOnly = only;
+  if (only) renderTerminalOnly();
   else if (active && threadOf(active).unsupported) renderUnsupported();
   else renderThread();
   renderPanel();

@@ -629,6 +629,8 @@ function renderUnsupported() {
 }
 
 function renderTerminalOnly() {
+  document.querySelector("#chat-head .crumb").innerHTML = crumbHtml(active);
+  document.getElementById("pr-chip").hidden = true;
   threadView.dataset.key = "";
   const what = active.view.program === "sign-in" ? "This sign-in runs" : `${esc(accountName(active.machine, active.view.account))} runs Codex, which`;
   threadView.innerHTML = `<div class="blank"><p>${what} in the terminal only.</p><button class="primary" data-mode-terminal>Terminal view</button></div>`;

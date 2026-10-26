@@ -148,7 +148,7 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
 /// Keeps the machine's projects in step with the account's while the link runs.
 fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<bool>) {
     let Some(file) = machine.sync_file().map(Path::to_path_buf) else { return };
-    let mut state = sync::State::load(&file);
+    let mut state = sync::State::load(&file, &crate::machine::home().join(".claude"));
     let mut shared_projects = HashSet::new();
     let mut wait = SYNC_FIRST;
     loop {

@@ -11,6 +11,7 @@
 #composer-note[hidden] { display: none; }
 #limit-note { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; padding: 8px 12px; border: 1px solid var(--g-border); border-radius: 10px; font-size: 12px; color: var(--g-warning-fg); }
 #limit-note[hidden] { display: none; }
+#chat[data-terminal-only="true"] #composer { display: none; }
 #limit-note > span { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 12em; }
 #limit-note button { font-size: 12px; color: var(--g-text); }
 

@@ -257,7 +257,7 @@ const STEPS = {
       [folderName(c.folder) || folderName(c.repo.replace(/\.git$/, "")) || "no folder", account && runOnName(c), connectorAccountName(c), c.model.trim() || "default model", c.effort, PERMISSIONS[c.permissionMode]]
         .filter(Boolean)
         .join(" · "),
-    issues: (c) => (c.folder.trim() || c.repo.trim() ? [] : ["Choose the folder or the repository the session opens in."]),
+    issues: (c) => [...(c.folder.trim() || c.repo.trim() ? [] : ["Choose the folder or the repository the session opens in."]), ...codexProjectIssues(c)],
     fields: (c) => `${account ? `<label>Run on ${runOnHtml(c)}</label>` : ""}
       <label>Folder${account ? ` on ${esc(machineName(folderMachine(c)))}` : ""}
         <span class="row">${input("folder", c.folder, 'list="folders" placeholder="/path/to/repo" spellcheck="false"')}
@@ -350,6 +350,14 @@ function runOnHtml(c) {
     <span class="hint">${c.machine ? "Falls back to another online machine while this one is offline." : "Each run goes to whichever machine is online."}</span>`;
 }
 
+/** A run under the project's account fails when that account is Codex, which can't run a workflow. */
+function codexProjectIssues(c) {
+  if (c.account) return [];
+  const project = suggestions.projects?.find((p) => p.path === c.folder.trim());
+  const account = project && accountOf(folderMachine(c), project.account);
+  return account?.provider === "codex" ? [`${folderName(c.folder)} runs under ${account.name}, a Codex account, which can't run a workflow. Pick a Claude Code account under Account.`] : [];
+}
+
 const connectorAccountName = (c) => c.account && accountName(folderMachine(c), c.account);
 
 /** The Claude Code accounts of the connector's machine; Codex can't run a connector, whose prompts rely on Claude Code's hooks. */
@@ -369,8 +377,10 @@ const repoHint = (c) =>
 async function loadFolders(c) {
   const machine = folderMachine(c);
   suggestions.folders = [];
+  suggestions.projects = [];
   try {
-    suggestions.folders = (await callOn(machine, { cmd: "list_projects" })).map((p) => p.path);
+    suggestions.projects = await callOn(machine, { cmd: "list_projects" });
+    suggestions.folders = suggestions.projects.map((p) => p.path);
   } catch {}
   fillList("folders", suggestions.folders);
   if (machine && !machines.get(machine)?.accounts) {

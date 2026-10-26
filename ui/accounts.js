@@ -69,7 +69,7 @@ async function addAccount(form) {
   const { machine } = accountsUi;
   try {
     const added = await callOn(machine, { cmd: "add_account", provider: form.provider.value, name });
-    setAccounts(machine, [...(machines.get(machine).accounts ?? []), added]);
+    setAccounts(machine, [...(machines.get(machine).accounts ?? []).filter((a) => a.id !== added.id), added]);
     form.name.value = "";
     drawAccountList();
   } catch (e) {
