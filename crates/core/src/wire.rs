@@ -5,7 +5,7 @@ use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
 use crate::branches::GitStep;
 use crate::scripts::Script;
-use crate::panel::{ReviewComment, ReviewEvent};
+use crate::panel::{Candidates, MergeMethod, PrChange, ReviewComment, ReviewEvent, StackAction, StackHead};
 use crate::workspace::{DiffScope, PrAction};
 use crate::stats::ThreadStats;
 use crate::{pulls, subagents, sync, thread, usage};
@@ -303,6 +303,21 @@ pub enum Call {
         #[serde(default)]
         write: bool,
     },
+    /// `null`. Reacts on `pr` or a remark on it, rewrites a comment, asks for or takes back a
+    /// review, puts a label on or off, or resolves a review thread.
+    PrChange { tab: TabId, pr: String, change: PrChange },
+    /// `{candidates, truncated}`: who `pr` may ask for a review, or the labels it may carry.
+    PrCandidates { tab: TabId, pr: String, of: Candidates },
+    /// `null`. Merges `pr` and the stack layers under it, or rebases its whole GitHub stack, if every
+    /// unmerged layer still has the head in `heads`.
+    PrStack {
+        tab: TabId,
+        pr: String,
+        action: StackAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<MergeMethod>,
+        heads: Vec<StackHead>,
+    },
     /// The id of a new login shell in the tab's folder, which `attach`, `write_input`, `resize_pty`
     /// and `close_shell` take as a tab id.
     OpenShell { tab: TabId, cols: u16, rows: u16 },
@@ -371,6 +386,9 @@ impl Call {
                 | Call::PrReview { .. }
                 | Call::PrRerun { .. }
                 | Call::PrGuide { .. }
+                | Call::PrChange { .. }
+                | Call::PrCandidates { .. }
+                | Call::PrStack { .. }
                 | Call::DeviceHub { .. }
                 | Call::Subagent { .. }
                 | Call::Rewind { .. }
@@ -717,6 +735,23 @@ mod tests {
         round_trip(
             Call::ReadFile { tab: "tab-1".into(), path: "src/a.rs".into(), root: true, rev: Some("HEAD".into()) },
             json!({ "cmd": "read_file", "tab": "tab-1", "path": "src/a.rs", "root": true, "rev": "HEAD" }),
+        );
+        round_trip(
+            Call::PrChange { tab: "tab-1".into(), pr: "https://github.com/o/r/pull/7".into(), change: PrChange::React { subject: "IC_1".into(), content: crate::panel::Reaction::ThumbsUp, on: true } },
+            json!({ "cmd": "pr_change", "tab": "tab-1", "pr": "https://github.com/o/r/pull/7", "change": { "kind": "react", "subject": "IC_1", "content": "THUMBS_UP", "on": true } }),
+        );
+        round_trip(
+            Call::PrChange { tab: "tab-1".into(), pr: "7".into(), change: PrChange::Reviewer { login: "acme/core".into(), team: true, on: false } },
+            json!({ "cmd": "pr_change", "tab": "tab-1", "pr": "7", "change": { "kind": "reviewer", "login": "acme/core", "team": true, "on": false } }),
+        );
+        round_trip(
+            Call::PrChange { tab: "tab-1".into(), pr: "7".into(), change: PrChange::Comment { id: "PRRC_1".into(), review: true, body: "Fixed.".into() } },
+            json!({ "cmd": "pr_change", "tab": "tab-1", "pr": "7", "change": { "kind": "comment", "id": "PRRC_1", "review": true, "body": "Fixed." } }),
+        );
+        round_trip(Call::PrCandidates { tab: "tab-1".into(), pr: "7".into(), of: Candidates::Labels }, json!({ "cmd": "pr_candidates", "tab": "tab-1", "pr": "7", "of": "labels" }));
+        round_trip(
+            Call::PrStack { tab: "tab-1".into(), pr: "7".into(), action: StackAction::Merge, method: Some(MergeMethod::Squash), heads: vec![StackHead { number: 7, sha: "abc".into() }] },
+            json!({ "cmd": "pr_stack", "tab": "tab-1", "pr": "7", "action": "merge", "method": "squash", "heads": [{ "number": 7, "sha": "abc" }] }),
         );
         round_trip(
             Call::PrReview {

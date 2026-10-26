@@ -189,7 +189,7 @@ onGuiKey("j", () => (panelOf(active).open && shownSurface(active)?.kind === "bro
 onGuiKey("k", () => {
   const s = shownSurface(active);
   const pr = s?.kind === "pr" ? { number: surfaceTitle(active, s).slice(1) } : active && shownPr(active);
-  if (pr) copyText(`#${pr.number}`, `PR #${pr.number} number copied`);
+  if (pr) copyText(`#${pr.number}`, "PR number copied");
 }, { shift: true });
 onGuiKey("o", () => openInEditor());
 document.getElementById("pr-chip").onclick = (e) => (e.metaKey || e.ctrlKey ? openOutside(prOf(active).url) : openPr(active, prOf(active).url));
@@ -460,9 +460,9 @@ let menuEntries = [];
 let menuAnchor = null;
 /** A menu under `anchor`. An entry with `confirm` asks again, in its place, before it runs. */
 const menuMark = (m) => (m.radio ? `<span class="i radio${m.checked ? " on" : ""}"></span>` : m.checked ? icon("check") : m.icon ? icon(m.icon) : `<span class="i"></span>`);
-const menuHtml = (entries) => entries.map((m, i) => (m === "-" ? `<hr>` : m.group ? `<p class="group">${esc(m.group)}${m.aside ? `<span>${esc(m.aside)}</span>` : ""}</p>`
+const menuHtml = (entries) => entries.map((m, i) => (m === "-" ? `<hr>` : m.group ? `<p class="group">${esc(m.group)}${m.aside ? `<span>${esc(m.aside)}</span>` : ""}</p>` : m.note ? `<p class="note">${esc(m.note)}</p>`
   : m.zoom ? `<div class="zoom"><span class="label">${esc(m.label)}</span><button type="button" class="step" data-zoom="-0.1" title="Zoom out">${icon("minus")}</button><span class="value">${esc(m.value)}</span><button type="button" class="step" data-zoom="0.1" title="Zoom in">${icon("plus")}</button><button type="button" class="step" data-zoom="0" title="Reset zoom">${icon("rotate-ccw")}</button></div>`
-  : `<button type="button" data-i="${i}"${m.disabled ? " disabled" : ""}${m.danger ? ` class="danger"` : ""}${m.sub ? ` data-sub` : ""}>${menuMark(m)}<span class="label">${esc(m.label)}</span>${m.hint ? `<span class="hint">${esc(m.hint)}</span>` : ""}${m.kbd ? `<kbd>${esc(m.kbd)}</kbd>` : ""}${m.toggle ? `<span class="switch${m.toggle.on ? " on" : ""}" role="switch" aria-checked="${m.toggle.on}" data-toggle title="${esc(m.toggle.title)}"></span>` : ""}${m.sub ? icon("chevron-right", "more") : ""}</button>`)).join("");
+  : `<button type="button" data-i="${i}"${m.disabled ? " disabled" : ""}${m.danger ? ` class="danger"` : ""}${m.sub ? ` data-sub` : ""}>${m.iconHtml ?? menuMark(m)}${m.detail ? `<span class="lines"><span class="label">${esc(m.label)}</span><small class="detail">${esc(m.detail)}</small></span>` : `<span class="label">${esc(m.label)}</span>`}${m.hint ? `<span class="hint">${esc(m.hint)}</span>` : ""}${m.kbd ? `<kbd>${esc(m.kbd)}</kbd>` : ""}${m.toggle ? `<span class="switch${m.toggle.on ? " on" : ""}" role="switch" aria-checked="${m.toggle.on}" data-toggle title="${esc(m.toggle.title)}"></span>` : ""}${m.sub ? icon("chevron-right", "more") : ""}${m.trail ? icon("check", "trail") : ""}</button>`)).join("");
 /** A menu under `anchor`. An entry with `sub` opens its entries beside it; one with `zoom` is a row of
  * steppers, one with `toggle` has a switch. With `search`, a field above the entries filters them. */
 function popMenu(anchor, entries, { search = "", empty = "Nothing found." } = {}) {
@@ -2489,15 +2489,26 @@ const CHECK_ICONS = { ok: "circle-check", fail: "circle-alert", pending: "circle
 
 /** Pull requests as gh answered for them, by `tab.key:url`. */
 const prCache = new Map();
+/** The latest load asked for each pull request, so an older answer that lands after it is dropped. */
+const prLoads = new Map();
 async function loadPr(tab, url, quiet = false) {
   const key = `${tab.key}:${url}`;
+  const load = (prLoads.get(key) ?? 0) + 1;
+  prLoads.set(key, load);
   prCache.set(key, { ...prCache.get(key), loading: true });
   if (!prCache.get(key).data && !quiet) renderPanel();
+  let data, error;
   try {
-    prCache.set(key, { data: await callOn(tab.machine, { cmd: "pull_request", tab: tab.view.id, pr: url }), at: Date.now() });
-    notePrView(url, prCache.get(key).data);
+    data = await callOn(tab.machine, { cmd: "pull_request", tab: tab.view.id, pr: url });
   } catch (e) {
-    prCache.set(key, { error: String(e), data: prCache.get(key)?.data });
+    error = String(e);
+  }
+  if (prLoads.get(key) !== load) return;
+  if (error === undefined) {
+    prCache.set(key, { data, at: Date.now() });
+    notePrView(url, data);
+  } else {
+    prCache.set(key, { error, data: prCache.get(key)?.data });
   }
   const s = shownSurface(tab);
   if (tab === active && (s?.url === url || s?.kind === "prs")) renderPanel();
@@ -2623,44 +2634,6 @@ function askAgent(s, d, kind, check = null) {
   flash(kind === "explain" ? "Asked claude to explain it" : "Asked claude to take it on");
 }
 
-function prMenu(s) {
-  const tab = active;
-  const d = prCache.get(`${tab.key}:${s.url}`)?.data;
-  const refresh = { label: "Refresh", icon: "rotate-cw", run: () => loadPr(tab, s.url) };
-  if (!d) return [refresh];
-  const state = prState(d);
-  const method = mergeMethod();
-  const primary = prPrimaryAction(d);
-  const guide = guides.get(`${tab.key}:${s.url}`)?.data;
-  const guideRunning = guide?.run?.state === "running";
-  return [
-    refresh,
-    { label: "Ask a question", icon: "message-circle-question", hint: "Adds the pull request to this thread's composer.", run: () => askAgent(s, d, "ask") },
-    { label: "Explain this PR", icon: "book-open", hint: "A walk through the diff and what to read closely.", run: () => askAgent(s, d, "explain") },
-    { label: "Fix findings", icon: "hammer", run: () => askAgent(s, d, "findings") },
-    { label: guideRunning ? "Writing guide..." : guide?.guide ? "Rewrite guide" : "Write guide", icon: "sparkles", disabled: guideRunning, run: () => writeGuide(tab, s) },
-    "-",
-    ...(state === "open" || state === "draft" ? [
-      ...(state === "draft" && primary?.action === "ready" ? [] : [{ label: state === "draft" ? "Ready for review" : "Convert to draft", icon: state === "draft" ? "git-pull-request" : "git-pull-request-draft", run: () => prAct(s, state === "draft" ? "ready" : "draft") }]),
-      ...(state === "open" ? [{ label: "Merge now", icon: "git-merge", confirm: "Confirm merge?", run: () => prAct(s, method) }] : []),
-      ...(d.autoMergeRequest ? [{ label: "Disable auto-merge", icon: "git-merge", run: () => prAct(s, "disable_auto") }]
-        : state === "open" ? [{ label: "Enable auto-merge", icon: "git-merge", confirm: "Confirm auto-merge?", run: () => prAct(s, AUTO[method]) }] : []),
-      "-",
-      ...Object.entries(MERGE_METHODS).map(([m, label]) => ({ label, icon: "git-merge", radio: true, checked: m === method, run: () => (save("gui-merge-method", m), renderPanel()) })),
-      "-",
-    ] : []),
-    linkedPrs(tab).some((pr) => pr.url === d.url)
-      ? { label: "Unlink from this thread", icon: "unlink", run: () => (unlinkPr(tab, d.url), renderPanel()) }
-      : { label: "Link to this thread", icon: "link-2", run: () => (linkPr(tab, d.url), renderPanel()) },
-    { label: "Open on GitHub", icon: "arrow-up-right", run: () => openOutside(d.url) },
-    { label: "Copy link", icon: "link-2", run: () => copyText(d.url, "Link copied") },
-    { label: "Copy PR number", icon: "copy", kbd: `${IS_MAC ? "⌘⇧" : "Ctrl+Shift+"}K`, run: () => copyText(`#${d.number}`, `PR #${d.number} number copied`) },
-    ...(state === "open" || state === "draft" ? ["-", { label: "Close pull request", icon: "circle-x", danger: true, confirm: "Confirm close?", run: () => prAct(s, "close") }]
-      : state === "closed" ? ["-", { label: "Reopen pull request", icon: "rotate-ccw", run: () => prAct(s, "reopen") }]
-      : state === "merged" ? ["-", { label: "Revert changes", icon: "rotate-ccw", confirm: "Confirm revert?", run: () => prAct(s, "revert") }, { label: "Delete branch", icon: "trash-2", confirm: "Confirm delete?", run: () => prAct(s, "delete_branch") }] : []),
-  ];
-}
-
 const login = (a) => a?.login || a?.name || a?.slug || "";
 const agoText = (iso) => (iso ? `${ago(Date.parse(iso) / 1000)}${ago(Date.parse(iso) / 1000) === "now" ? "" : " ago"}` : "");
 const took = (c) => {
@@ -2684,38 +2657,6 @@ function prTimeline(d) {
     <button type="button" class="outline" data-open-url="${esc(d.url)}">${icon("external-link")}Open activity on GitHub</button></div>`;
 }
 
-/** The Summary's conversation: issue comments, review threads and reviews with a body, filtered
- * and ordered as T3's are. */
-function conversation(d, s) {
-  const filter = { bots: false, resolved: false, ...JSON.parse(load("gui-pr-comment-filter") ?? "{}") };
-  const order = load("gui-pr-comment-order") === "oldest" ? "oldest" : "newest";
-  const items = [
-    ...(d.comments ?? []).map((c) => ({ kind: "comment", at: c.createdAt, author: login(c.author), body: c.body ?? "" })),
-    ...(d.reviews ?? []).filter((r) => r.body?.trim()).map((r) => ({ kind: "review", at: r.submittedAt, author: login(r.author), body: r.body, state: r.state, dismissed: r.state === "DISMISSED" })),
-    ...(d.threads ?? []).map((t) => ({ kind: "thread", at: t.comments?.nodes?.[0]?.createdAt, author: login(t.comments?.nodes?.[0]?.author), thread: t, resolved: t.isResolved })),
-  ].filter((i) => i.at);
-  const shown = items.filter((i) => (filter.bots || !BOTS.test(i.author)) && (filter.resolved || !(i.resolved || i.dismissed)));
-  shown.sort((a, b) => (order === "newest" ? -1 : 1) * (Date.parse(a.at) - Date.parse(b.at)));
-  const hidden = items.length - shown.length;
-  const comment = (author, at, body, extra = "") => `<div class="comment"><p class="who"><b>${esc(author)}</b> <span class="muted">${esc(agoText(at))}</span>${extra}</p><div class="md">${markdown(body)}</div></div>`;
-  const rows = shown.map((i) => {
-    if (i.kind !== "thread") return `<li class="${i.kind}">${comment(i.author, i.at, i.body, i.kind === "review" ? ` <span class="badge">${esc((i.state ?? "").toLowerCase().replace(/_/g, " "))}</span>` : "")}</li>`;
-    const t = i.thread;
-    const replying = s.replyTo === t.id;
-    return `<li class="thread${t.isResolved ? " resolved" : ""}"><p class="where">${icon("file-code")}<button type="button" class="link" data-thread-file="${esc(t.path)}" data-line="${t.line ?? t.originalLine ?? ""}">${esc(t.path)}${t.line || t.originalLine ? `:${t.line ?? t.originalLine}` : ""}</button>${t.isResolved ? `<span class="badge">Resolved</span>` : ""}${t.isOutdated ? `<span class="badge">Outdated</span>` : ""}</p>
-      ${(t.comments?.nodes ?? []).map((c) => comment(login(c.author), c.createdAt, c.body ?? "")).join("")}
-      ${replying ? `<div class="reply">${replyBox("reply")}</div>` : `<button type="button" class="ghost small" data-reply="${esc(t.id)}">${icon("reply")}Reply</button>`}</li>`;
-  }).join("");
-  const count = (d.comments ?? []).length + (d.threads ?? []).reduce((n, t) => n + (t.comments?.nodes?.length ?? 0), 0);
-  return `<details class="fold"${foldAttr("comments", true)} data-fold="comments"><summary><h4>Comments (${count})</h4>${icon("chevron-right")}<span class="spacer"></span>
-      <button type="button" class="ghost small" data-comment-filter aria-label="Filter comments">${icon("list-filter")}${hidden ? `${hidden} hidden` : "Filter"}</button>
-      <button type="button" class="ghost small" data-comment-order aria-label="${order === "newest" ? "Show oldest comments first" : "Show newest comments first"}">${icon("arrow-down-up")}${order === "newest" ? "Newest first" : "Oldest first"}</button></summary>
-    ${!items.length ? `<p class="muted small">No comments yet.</p>` : !shown.length ? `<p class="muted small">${hidden === 1 ? "The only comment is hidden by the filter." : `All ${hidden} comments are hidden by the filter.`}</p>` : `<ul class="conversation">${rows}</ul>`}
-    <div class="new-comment">${replyBox("comment")}</div></details>`;
-}
-const replyBox = (kind) => `<textarea rows="${kind === "reply" ? 2 : 3}" placeholder="${kind === "reply" ? "Reply…" : "Leave a comment"}" data-pr-text="${kind}"></textarea>
-  <div class="row"><span class="hint">${IS_MAC ? "⌘" : "Ctrl"} Enter to send</span><span class="spacer"></span>${kind === "reply" ? `<button type="button" class="outline" data-reply-cancel>Cancel</button>` : ""}<button type="button" class="primary" data-pr-send="${kind}">${kind === "reply" ? "Reply" : "Comment"}</button></div>`;
-
 async function prSend(s, kind) {
   const tab = active;
   const box = panelBody.querySelector(`[data-pr-text="${kind}"]`);
@@ -2731,33 +2672,6 @@ async function prSend(s, kind) {
     box.disabled = false;
     flash(String(e).replace(/^gh: /, ""));
   }
-}
-
-function checksHtml(d, rerun) {
-  const checks = d.statusCheckRollup ?? [];
-  if (!checks.length) return "";
-  return `<details class="fold checks-fold"${foldAttr("checks", false)} data-fold="checks"><summary><h4>Checks (${checks.length})</h4>${icon("chevron-right")}</summary><ul class="checks">${checks.map((c, i) => {
-    const link = c.detailsUrl || c.targetUrl || "";
-    const failed = checkState(c) === "fail";
-    return `<li class="${checkState(c)}">${icon(CHECK_ICONS[checkState(c)])}<span class="name">${esc(c.name || c.context || "check")}</span><span class="muted">${esc(took(c) || (c.conclusion || c.status || c.state || "").toLowerCase())}</span>
-      ${failed ? `<button type="button" class="icon" data-check-fix="${i}" title="Ask claude to fix it">${icon("hammer")}</button>${rerun && /\/actions\/runs\/\d+/.test(link) ? `<button type="button" class="icon" data-check-rerun="${i}" title="Re-run">${icon("rotate-cw")}</button>` : ""}` : ""}
-      ${WEB_URL.test(link) ? `<a href="${esc(link)}">Details</a>` : ""}</li>`;
-  }).join("")}</ul></details>`;
-}
-
-function prSummary(d, s) {
-  const reviewers = [...new Set([...(d.reviewRequests ?? []).map(login), ...(d.reviews ?? []).map((r) => login(r.author))].filter(Boolean))];
-  const latest = (who) => [...(d.reviews ?? [])].reverse().find((r) => login(r.author) === who)?.state;
-  const labels = d.labels ?? [];
-  const description = s.editing === "body"
-    ? `<div class="edit-body"><textarea rows="8" data-pr-edit="body">${esc(d.body ?? "")}</textarea><div class="row"><span class="spacer"></span><button type="button" class="outline" data-edit-cancel>Cancel</button><button type="button" class="primary" data-edit-save="body">Save</button></div></div>`
-    : `<div class="md">${d.body ? markdown(d.body) : `<p class="muted"><em>No description provided.</em></p>`}</div>`;
-  return `<div class="pr-body">
-      <dl class="meta"><dt>${icon("users")}Reviewers</dt><dd>${reviewers.length ? reviewers.map((r) => `<span class="chip">${esc(r)}${latest(r) ? ` <span class="muted">${esc(latest(r).toLowerCase().replace(/_/g, " "))}</span>` : ""}</span>`).join("") : `<span class="muted">None</span>`}</dd>
-        <dt>${icon("tag")}Labels</dt><dd>${labels.length ? labels.map((l) => `<span class="chip label"${/^[0-9a-f]{6}$/i.test(l.color ?? "") ? ` style="--label:#${l.color}"` : ""}>${esc(l.name)}</span>`).join("") : `<span class="muted">None</span>`}</dd></dl>
-      <details class="fold"${foldAttr("description", true)} data-fold="description"><summary><h4>Description</h4>${icon("chevron-right")}<span class="spacer"></span>${s.editing === "body" ? "" : `<button type="button" class="icon" data-edit="body" title="Edit description">${icon("pencil")}</button>`}</summary>${description}</details>
-      ${checksHtml(d, true)}
-      ${conversation(d, s)}</div>`;
 }
 
 /** A pull request's review guide, as T3 Code's Guide tab shows one: numbered stops through the
@@ -2783,46 +2697,6 @@ function writeGuide(tab, s) {
   loadGuide(tab, s, true);
 }
 
-function excerptHtml(d, x) {
-  const file = parseDiff(d.diff ?? "").find((f) => f.path === x.path);
-  const lines = file?.hunks.flatMap((h) => h.lines).filter((l) => (x.side === "old" ? l.old : l.new) >= x.start && (x.side === "old" ? l.old : l.new) <= x.end && (x.side === "old" ? l.type !== "add" : l.type !== "del")) ?? [];
-  const lang = langOf(x.path);
-  const code = lineHtml(lines, lang);
-  return `<figure class="excerpt">${x.caption ? `<figcaption>${esc(x.caption)}</figcaption>` : ""}<button type="button" class="where link" data-thread-file="${esc(x.path)}" data-line="${x.start}">${fileIcon(x.path)}${esc(x.path)}:${x.start}–${x.end}</button>
-    <div class="diff unified">${lines.length ? lines.map((l) => `<div class="dl ${l.type}"><span class="no">${(x.side === "old" ? l.old : l.new) ?? ""}</span><span class="code">${code(l)}</span></div>`).join("") : `<p class="muted small">These lines aren't in the diff anymore.</p>`}</div></figure>`;
-}
-
-function prGuide(tab, d, s) {
-  const key = `${tab.key}:${s.url}`;
-  const got = guides.get(key);
-  if (!got) loadGuide(tab, s);
-  const g = got?.data;
-  const running = g?.run?.state === "running";
-  const failed = g?.run?.state === "failed" ? g.run.detail : got?.error;
-  const stale = g?.guide && d.headRefOid && g.guide.headSha && g.guide.headSha !== d.headRefOid;
-  if (!g?.guide) {
-    return `<div class="pr-body guide-empty">${icon("sparkles", "big")}<p class="title">${running ? "Writing a review guide…" : "No review guide yet"}</p>
-      <p class="muted">${running ? "claude reads the diff and lays out the stops a reviewer walks through." : "A guide walks the diff in a few numbered stops: what changed, the code that carries it, and the calls only you can make."}</p>
-      ${failed ? `<p class="pr-error">${icon("circle-alert")}${esc(failed)}</p>` : ""}
-      ${running ? `<span class="spinner"></span>` : `<button type="button" class="outline" data-guide-write>${icon("sparkles")}Write guide</button>`}</div>`;
-  }
-  const stops = g.guide.stops ?? [];
-  const at = Math.min(s.guideStop ?? 0, Math.max(0, stops.length - 1));
-  const stop = stops[at];
-  const rail = `<ol class="guide-rail">${stops.map((x, i) => `<li><button type="button" data-guide-stop="${i}"${i === at ? ' class="on"' : ""}><span class="n">${i + 1}</span><span>${esc(x.title)}</span>${x.attention ? icon("circle-alert", "attention") : ""}</button></li>`).join("")}</ol>`;
-  return `<div class="pr-body guide">
-    ${stale || running || failed ? `<p class="guide-note">${running ? "Rewriting the guide…" : failed ? esc(failed) : "The pull request changed since this guide was written."}${running ? "" : ` <button type="button" class="link" data-guide-write>Rewrite guide</button>`}</p>` : ""}
-    ${rail}
-    ${stop ? `<section class="stop"><p class="step">Stop ${at + 1} of ${stops.length}</p><h4>${esc(stop.title)}</h4><div class="md">${markdown(stop.summary ?? "")}</div>
-      ${stop.attention ? `<p class="attention ${esc(stop.attention.kind)}">${icon("circle-alert")}<b>${esc(stop.attention.kind[0].toUpperCase() + stop.attention.kind.slice(1))}</b> ${esc(stop.attention.note)}</p>` : ""}
-      ${(stop.excerpts ?? []).map((x) => excerptHtml(d, x)).join("")}
-      ${(stop.notes ?? []).length ? `<ul class="guide-notes">${stop.notes.map((n) => `<li><button type="button" class="link" data-thread-file="${esc(n.path)}" data-line="${n.line}">${esc(n.path.split("/").pop())}:${n.line}</button> <b>${esc(n.title)}</b><div class="md">${markdown(n.body ?? "")}</div></li>`).join("")}</ul>` : ""}
-      ${(stop.files ?? []).length ? `<ul class="guide-files">${stop.files.map((f) => `<li>${fileIcon(f.path)}<button type="button" class="link" data-thread-file="${esc(f.path)}" data-line="">${esc(f.path)}</button>${f.note ? ` <span class="muted">${esc(f.note)}</span>` : ""}</li>`).join("")}</ul>` : ""}
-      ${(stop.questions ?? []).length ? `<ul class="guide-questions">${stop.questions.map((q) => `<li>${icon("message-circle-question")}${esc(q)}</li>`).join("")}</ul>` : ""}
-      <div class="row">${at > 0 ? `<button type="button" class="outline" data-guide-stop="${at - 1}">${icon("arrow-left")}Back</button>` : ""}<span class="spacer"></span>${at < stops.length - 1 ? `<button type="button" class="primary" data-guide-stop="${at + 1}">Next stop${icon("arrow-right")}</button>` : ""}</div></section>` : ""}
-    <p class="muted small">Written ${esc(agoText(g.guide.generatedAt))} for ${esc((g.guide.headSha ?? "").slice(0, 7))}.</p></div>`;
-}
-
 /** The Code tab's line comments wait as a pending review, by pull request, until the review form
  * submits them with an event, as GitHub's own review does. */
 const pendingReviews = new Map();
@@ -2839,239 +2713,11 @@ function deletePendingComment(id) {
   const s = shownSurface(active);
   pendingReviews.set(s.url, (pendingReviews.get(s.url) ?? []).filter((c) => c.id !== id));
 }
-function pendingByPath(url) {
-  const byPath = new Map();
-  for (const c of pendingReviews.get(url) ?? []) {
-    if (!byPath.has(c.path)) byPath.set(c.path, new Map());
-    const lines = byPath.get(c.path);
-    lines.set(`${c.side}:${c.end}`, [...(lines.get(`${c.side}:${c.end}`) ?? []), c]);
-  }
-  return byPath;
-}
-const reviewButton = (s) => {
-  const pending = pendingReviews.get(s.url) ?? [];
-  return `<button type="button" class="${pending.length ? "primary" : "outline"} review-open" data-review-open>${icon("message-square")}${pending.length ? `Finish review (${pending.length})` : "Review changes"}</button>`;
-};
-function reviewForm(s) {
-  const pending = pendingReviews.get(s.url) ?? [];
-  const events = [["COMMENT", "Comment", "Submit general feedback without explicit approval."], ["APPROVE", "Approve", "Give your approval to merge these changes."], ["REQUEST_CHANGES", "Request changes", "Submit feedback that must be addressed before merging."]];
-  const chosen = s.reviewEvent ?? "COMMENT";
-  return `<form class="review-form" data-review-form><h4>Finish your review</h4><textarea rows="4" placeholder="Leave a comment" data-review-body>${esc(s.reviewBody ?? "")}</textarea>
-    ${events.map(([v, label, about]) => `<label class="event"><input type="radio" name="event" value="${v}"${v === chosen ? " checked" : ""}><span><b>${label}</b><span class="muted">${about}</span></span></label>`).join("")}
-    <p class="muted small">${pending.length} pending comment${pending.length === 1 ? "" : "s"} will go with it.</p>
-    <div class="row"><span class="spacer"></span><button type="button" class="outline" data-review-cancel>Cancel</button><button type="button" class="primary" data-review-submit>Submit review</button></div></form>`;
-}
-async function submitReview(s) {
-  const tab = active;
-  const form = panelBody.querySelector("[data-review-form]");
-  const event = form.querySelector('input[name="event"]:checked')?.value ?? "COMMENT";
-  const body = form.querySelector("[data-review-body]").value.trim();
-  const comments = (pendingReviews.get(s.url) ?? []).map((c) => ({ path: c.path, line: c.end, side: c.side === "old" ? "LEFT" : "RIGHT", ...(c.start < c.end ? { start_line: c.start } : {}), body: c.text }));
-  if (event === "COMMENT" && !body && !comments.length) return flash("Write a comment, or pick Approve");
-  try {
-    await callOn(tab.machine, { cmd: "pr_review", tab: tab.view.id, pr: s.url, event, body, comments });
-    pendingReviews.delete(s.url);
-    Object.assign(s, { reviewing: false, reviewBody: "" });
-    flash(event === "APPROVE" ? "Approved" : event === "REQUEST_CHANGES" ? "Requested changes" : "Review submitted");
-    await loadPr(tab, s.url, true);
-  } catch (e) {
-    flash(String(e).replace(/^gh: /, ""));
-  }
-  renderPanel();
-}
-
-function prCode(tab, d, s) {
-  const files = ui.diffHideSpace ? withoutWhitespace(parseDiff(d.diff ?? "")) : parseDiff(d.diff ?? "");
-  const key = `pr:${s.url}`;
-  const opts = {
-    viewed: viewedOf(s.url, parseDiff(d.diff ?? "")),
-    comments: pendingByPath(s.url),
-    draft: ui.commentAt?.key === key ? ui.commentAt : null,
-    contents: (path) => contents.get(contentKey(tab, d.headRefOid, path))?.lines,
-    expanded: (path) => openGaps.get(`${key}:${path}`),
-    openTitle: "Open file",
-  };
-  const diff = `<div class="diff ${ui.diffView}${ui.diffWrap ? " wrap" : ""}" data-key="${esc(key)}" data-rev="${esc(d.headRefOid ?? "")}">${filesHtml(files, key, opts)}${d.truncated ? `<p class="panel-empty">This preview exceeds the size limit, so its end is cut.</p>` : ""}</div>`;
-  return `${diffToolbar(sum(files, "added"), sum(files, "removed"), `<span class="muted">${d.changedFiles} file${d.changedFiles === 1 ? "" : "s"}</span>${s.reviewing ? "" : reviewButton(s)}`)}
-    ${s.reviewing ? reviewForm(s) : ""}${ui.diffTree && files.length ? `<div class="diff-split">${diff}${fileTreeHtml(files)}</div>` : diff}`;
-}
-
 /** Other threads that link this pull request, and the pull requests stacked under and over it. */
 const threadsOn = (url) => tabs.filter((tab) => linkedPrs(tab).some((pr) => pr.url === url));
 const REVIEW_ICONS = { APPROVED: ["circle-check", "ok", "Approved"], CHANGES_REQUESTED: ["circle-x", "fail", "Changes requested"], REVIEW_REQUIRED: ["eye", "pending", "Review required"] };
 
-function renderPrPanel(s) {
-  const tab = active;
-  const key = `${tab.key}:${s.url}`;
-  const entry = prCache.get(key);
-  const number = surfaceTitle(tab, s);
-  if (!entry) return loadPr(tab, s.url);
-  if (!entry.data && entry.loading) return showPanel(`<div class="pr-ghost" aria-label="Loading ${esc(number)}"><span class="line" style="width:40%"></span><span class="line" style="width:80%"></span><span class="line" style="width:60%"></span></div>`);
-  if (!entry.data) return showPanel(`<div class="panel-empty"><p>${esc(entry.error)}</p><button class="outline" data-open-url="${esc(s.url)}">${icon("external-link")}Open ${number} on GitHub</button></div>`);
-  const d = entry.data;
-  const prTab = s.prTab ?? "summary";
-  const state = prState(d);
-  const checks = d.statusCheckRollup ?? [];
-  const failed = checks.filter((c) => checkState(c) === "fail").length;
-  const passed = checks.filter((c) => checkState(c) === "ok").length;
-  const p = prPrimaryAction(d);
-  const primary = !p ? `<span class="state ${state}">${icon(state === "merged" ? "git-merge" : state === "closed" ? "circle-x" : "git-pull-request")}${esc(state[0].toUpperCase() + state.slice(1))}</span>`
-    : p.armed ? `<span class="badge info" title="${esc(p.label)}: GitHub merges this on its own once its requirements are met">${icon("git-merge")}${esc(p.label)}</span>`
-    : `<button type="button" class="${prArmed?.button === p.action ? "primary armed" : "outline"}" data-pr-do="${esc(p.action)}"${entry.busy ? " disabled" : ""}>${entry.busy ? "Working…" : prArmed?.button === p.action ? p.confirm : p.label}</button>`;
-  const stack = d.stack && (d.stack.below.length || d.stack.above.length);
-  const linked = threadsOn(d.url);
-  const crumbs = `<div class="crumbs"><span class="repo muted">${esc(d.url.match(/github\.com\/([^/]+\/[^/]+)/)?.[1] ?? "")}</span><button class="num ${state}" data-open-url="${esc(d.url)}" title="Open on GitHub">#${d.number}${icon("external-link")}</button><span class="condensed-title">${esc(d.title)}</span>
-      <span class="spacer"></span>
-      ${stack ? `<button type="button" class="icon" data-pr-stack title="Stack">${icon("layers")}</button>` : ""}
-      ${linked.length ? `<button type="button" class="ghost small" data-pr-threads aria-label="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}" title="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}">${icon("message-square")}${linked.length}</button>` : ""}
-      ${primary}<button type="button" class="icon" data-pr-more title="More">${icon("ellipsis")}</button></div>`;
-  const title = s.editing === "title"
-    ? `<div class="edit-title"><input data-pr-edit="title" value="${esc(d.title)}" aria-label="Title"><button type="button" class="outline" data-edit-cancel>Cancel</button><button type="button" class="primary" data-edit-save="title">Save</button></div>`
-    : `<h3><button type="button" class="title-edit" data-edit="title" title="Edit title">${esc(d.title)}</button></h3>`;
-  const review = REVIEW_ICONS[d.reviewDecision];
-  const head = `${crumbs}<div class="pr-head">
-      ${entry.failed ? `<p class="pr-error">${icon("circle-alert")}${esc(entry.failed)}</p>` : ""}
-      ${title}
-      <p class="muted">${esc(login(d.author))}${d.updatedAt || d.createdAt ? ` · updated ${esc(agoText(d.updatedAt || d.createdAt))}` : ""}
-        <button type="button" class="checkout" data-copy="gh pr checkout ${d.number}" title="Copy the checkout command"><code>gh pr checkout ${d.number}</code></button></p>
-      <p class="refs"><code>${esc(d.baseRefName)}</code>${icon("arrow-left")}<code>${esc(d.headRefName)}</code><span class="spacer"></span>${icon("file-diff")}${d.changedFiles}<span class="add">+${d.additions}</span><span class="del">-${d.deletions}</span></p>
-      <div class="tabs"><span class="seg">${["summary", "guide", "timeline", "code"].map((t) => `<button data-pr-tab="${t}" class="${prTab === t ? "on" : ""}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</span>
-        <button type="button" class="checks-line ${failed ? "fail" : passed === checks.length ? "ok" : "pending"}" data-checks-pop${checks.length ? "" : " disabled"}>${checks.length ? `${icon(CHECK_ICONS[failed ? "fail" : passed === checks.length ? "ok" : "pending"])}${passed} passed${failed ? ` / ${failed} failed` : ""}` : "No checks"}</button>
-        <span class="spacer"></span>
-        <span class="muted count" title="Comments">${icon("message-square")}${(d.comments ?? []).length + (d.threads ?? []).length}</span><span class="muted count" title="Commits">${icon("git-commit")}${(d.commits ?? []).length}</span>
-        ${review ? `<span class="review-outcome ${review[1]}" title="${review[2]}" role="img" aria-label="${review[2]}">${icon(review[0])}</span>` : ""}</div></div>`;
-  const body = prTab === "code" ? prCode(tab, d, s) : prTab === "timeline" ? prTimeline(d) : prTab === "guide" ? prGuide(tab, d, s) : prSummary(d, s);
-  const changed = showPanel(`<div class="pr">${head}${body}</div>`);
-  if (prTab === "code") afterDiffRender(changed, null, `pr:${s.url}`);
-  if (s.editing) panelBody.querySelector("[data-pr-edit]")?.focus();
-  condensePr();
-}
 const sum = (files, key) => files.reduce((n, f) => n + Number(f[key]), 0);
-
-/** Past its title, the crumbs, which stay on top, read `#N title`, as T3's condense on scroll. */
-function condensePr() {
-  const crumbs = panelBody.querySelector(".pr > .crumbs");
-  const title = panelBody.querySelector(".pr-head h3, .pr-head .edit-title");
-  if (crumbs && title) crumbs.classList.toggle("condensed", title.getBoundingClientRect().bottom <= crumbs.getBoundingClientRect().bottom);
-}
-panelBody.addEventListener("scroll", () => shownSurface(active)?.kind === "pr" && condensePr(), { passive: true });
-
-async function prEdit(s, field) {
-  const tab = active;
-  const value = panelBody.querySelector(`[data-pr-edit="${field}"]`)?.value ?? "";
-  if (field === "title" && !value.trim()) return flash("A pull request needs a title");
-  try {
-    await callOn(tab.machine, { cmd: "pr_edit", tab: tab.view.id, pr: s.url, [field]: field === "title" ? value.trim() : value });
-    s.editing = null;
-    await loadPr(tab, s.url, true);
-  } catch (e) {
-    flash(String(e).replace(/^gh: /, ""));
-  }
-  renderPanel();
-}
-
-function prClick(e) {
-  const tab = active;
-  const s = shownSurface(tab);
-  const d = prCache.get(`${tab.key}:${s.url}`)?.data;
-  if (!d) return false;
-  const checks = d.statusCheckRollup ?? [];
-  const edit = e.target.closest("[data-edit]");
-  if (edit) {
-    e.preventDefault();
-    s.editing = edit.dataset.edit;
-  } else if (e.target.closest("[data-edit-cancel]")) {
-    s.editing = null;
-  } else if (e.target.closest("[data-edit-save]")) {
-    prEdit(s, e.target.closest("[data-edit-save]").dataset.editSave);
-    return true;
-  } else if (e.target.closest("[data-checks-pop]")) {
-    const b = e.target.closest("[data-checks-pop]");
-    toggleMenu(b, [{ group: `Checks · ${checks.filter((c) => checkState(c) === "ok").length} passed${checks.some((c) => checkState(c) === "fail") ? ` / ${checks.filter((c) => checkState(c) === "fail").length} failed` : ""}` },
-      ...checks.map((c) => ({ label: c.name || c.context || "check", icon: CHECK_ICONS[checkState(c)], hint: WEB_URL.test(c.detailsUrl || c.targetUrl || "") ? "Details" : took(c), run: () => WEB_URL.test(c.detailsUrl || c.targetUrl || "") && openOutside(c.detailsUrl || c.targetUrl) }))]);
-    return true;
-  } else if (e.target.closest("[data-check-fix]")) {
-    askAgent(s, d, "check", checks[e.target.closest("[data-check-fix]").dataset.checkFix]);
-    return true;
-  } else if (e.target.closest("[data-check-rerun]")) {
-    const c = checks[e.target.closest("[data-check-rerun]").dataset.checkRerun];
-    callOn(tab.machine, { cmd: "pr_rerun", tab: tab.view.id, check: c.detailsUrl || c.targetUrl }).then(() => flash(`Re-running ${c.name || "the check"}`), (err) => flash(String(err).replace(/^gh: /, "")));
-    return true;
-  } else if (e.target.closest("[data-comment-filter]")) {
-    const filter = { bots: false, resolved: false, ...JSON.parse(load("gui-pr-comment-filter") ?? "{}") };
-    const set = (k) => () => (save("gui-pr-comment-filter", JSON.stringify({ ...filter, [k]: !filter[k] })), renderPanel());
-    toggleMenu(e.target.closest("[data-comment-filter]"), [{ group: "Show" }, { label: "Bot comments", checked: filter.bots, run: set("bots") }, { label: "Resolved or dismissed", checked: filter.resolved, run: set("resolved") }]);
-    e.preventDefault();
-    return true;
-  } else if (e.target.closest("[data-comment-order]")) {
-    save("gui-pr-comment-order", load("gui-pr-comment-order") === "oldest" ? "newest" : "oldest");
-    e.preventDefault();
-  } else if (e.target.closest("[data-reply]")) {
-    s.replyTo = e.target.closest("[data-reply]").dataset.reply;
-  } else if (e.target.closest("[data-reply-cancel]")) {
-    s.replyTo = null;
-  } else if (e.target.closest("[data-pr-send]")) {
-    prSend(s, e.target.closest("[data-pr-send]").dataset.prSend);
-    return true;
-  } else if (e.target.closest("[data-thread-file]")) {
-    const b = e.target.closest("[data-thread-file]");
-    openFileSurface(b.dataset.threadFile, { root: true, line: Number(b.dataset.line) || null });
-    return true;
-  } else if (e.target.closest("[data-guide-write]")) {
-    writeGuide(tab, s);
-  } else if (e.target.closest("[data-guide-stop]")) {
-    s.guideStop = Number(e.target.closest("[data-guide-stop]").dataset.guideStop);
-    savePanel(tab);
-  } else if (e.target.closest("[data-review-open]")) {
-    s.reviewing = true;
-  } else if (e.target.closest("[data-review-cancel]")) {
-    s.reviewing = false;
-  } else if (e.target.closest("[data-review-submit]")) {
-    submitReview(s);
-    return true;
-  } else if (e.target.closest("[data-pr-stack]")) {
-    const row = (pr, where) => ({ label: `#${pr.number} ${pr.title}`, hint: where, icon: pr.state === "MERGED" ? "git-merge" : "git-pull-request", run: () => openPr(tab, pr.url) });
-    toggleMenu(e.target.closest("[data-pr-stack]"), [{ group: "Stack" }, ...d.stack.above.map((pr) => row(pr, "above")), { label: `#${d.number} ${d.title}`, checked: true, run: () => {} }, ...d.stack.below.map((pr) => row(pr, "below"))]);
-    return true;
-  } else if (e.target.closest("[data-pr-threads]")) {
-    toggleMenu(e.target.closest("[data-pr-threads]"), [{ group: "Linked threads" }, ...threadsOn(d.url).map((t) => ({ label: threadTitle(t), hint: projectName(t), checked: t === tab, run: () => activate(t) }))]);
-    return true;
-  } else return false;
-  renderPanel();
-  return true;
-}
-panelBody.addEventListener("click", (e) => {
-  if (e.target.closest(".pr") && !e.target.closest(".diff, .diff-bar .seg, .diff-bar [data-diff], .file-tree") && prClick(e)) e.stopImmediatePropagation();
-}, true);
-panelBody.addEventListener("input", (e) => {
-  const s = active && shownSurface(active);
-  if (s?.kind === "pr" && e.target.matches("[data-review-body]")) s.reviewBody = e.target.value;
-  if (s?.kind === "pr" && e.target.matches('input[name="event"]')) s.reviewEvent = e.target.value;
-});
-panelBody.addEventListener("change", (e) => {
-  const s = active && shownSurface(active);
-  if (s?.kind === "pr" && e.target.matches('input[name="event"]')) s.reviewEvent = e.target.value;
-});
-panelBody.addEventListener("keydown", (e) => {
-  const s = active && shownSurface(active);
-  if (s?.kind !== "pr") return;
-  const mod = IS_MAC ? e.metaKey : e.ctrlKey;
-  if (e.target.matches("[data-pr-text]") && e.key === "Enter" && mod) {
-    e.preventDefault();
-    prSend(s, e.target.dataset.prText);
-  } else if (e.target.matches("[data-pr-edit]")) {
-    if (e.key === "Escape") {
-      s.editing = null;
-      renderPanel();
-    } else if (e.key === "Enter" && (e.target.tagName === "INPUT" || mod)) {
-      e.preventDefault();
-      prEdit(s, e.target.dataset.prEdit);
-    }
-  }
-});
-panelBody.addEventListener("toggle", (e) => {
-  if (e.target.matches?.("details[data-fold]")) save(`gui-pr-fold-${e.target.dataset.fold}`, String(e.target.open));
-}, true);
 
 /** Editors each machine has, and the one picked there. */
 const editorLists = new Map();

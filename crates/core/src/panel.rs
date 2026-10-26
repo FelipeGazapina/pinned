@@ -460,19 +460,32 @@ pub fn pr_rerun(cwd: &Path, check: &str, path: Option<&str>) -> Result<(), Strin
     }
 }
 
-/// What the pull request's detail adds to `gh pr view`: its review threads and the pull requests
-/// stacked under and over it. Each part is left out when gh can't answer it.
+/// A reaction group as every reactable node reports it, with who reacted bounded rather than paged.
+const REACTIONS: &str = "reactionGroups { content viewerHasReacted reactors(first: 10) { totalCount nodes { ... on User { login } ... on Bot { login } ... on Organization { login } ... on Mannequin { login } } } }";
+
+/// What the pull request's detail adds to `gh pr view`: its review threads, reactions, reviewers
+/// with their faces, what the viewer may do, and the pull requests stacked under and over it. Each
+/// part is left out when gh can't answer it.
 pub fn pr_extras(cwd: &Path, pr: &str, view: &Value, path: Option<&str>) -> Value {
     let mut extras = json!({});
     if let Some((owner, repo, number)) = pr_parts(view["url"].as_str().unwrap_or(pr)) {
-        let query = "query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved isOutdated path line originalLine startLine diffSide comments(first: 50) { nodes { id body createdAt url author { login } } } } } } } }";
-        let threads = gh(cwd, path, &["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("repo={repo}"), "-F", &format!("number={number}")])
-            .ok()
-            .and_then(|out| serde_json::from_str::<Value>(&out).ok())
-            .map(|v| v["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"].clone())
-            .filter(Value::is_array);
-        if let Some(threads) = threads {
-            extras["threads"] = threads;
+        let vars = ["-f".to_owned(), format!("owner={owner}"), "-f".to_owned(), format!("repo={repo}"), "-F".to_owned(), format!("number={number}")];
+        let ask = |query: &str| {
+            let mut args = vec!["api".to_owned(), "graphql".to_owned(), "-f".to_owned(), format!("query={query}")];
+            args.extend(vars.iter().cloned());
+            gh(cwd, path, &args.iter().map(String::as_str).collect::<Vec<_>>()).ok().and_then(|out| serde_json::from_str::<Value>(&out).ok()).filter(|v| v["data"]["repository"]["pullRequest"].is_object())
+        };
+        let rich = format!("query($owner: String!, $repo: String!, $number: Int!) {{ viewer {{ login }} repository(owner: $owner, name: $repo) {{ viewerPermission pullRequest(number: $number) {{ id viewerCanUpdate {REACTIONS} comments(first: 100) {{ nodes {{ id viewerCanUpdate {REACTIONS} }} }} reviews(first: 100) {{ nodes {{ id {REACTIONS} }} }} latestReviews(first: 50) {{ nodes {{ state submittedAt author {{ login avatarUrl }} }} }} reviewRequests(first: 50) {{ nodes {{ requestedReviewer {{ ... on User {{ login name avatarUrl }} ... on Bot {{ login avatarUrl }} ... on Team {{ combinedSlug teamName: name teamAvatarUrl: avatarUrl }} }} }} }} reviewThreads(first: 100) {{ nodes {{ id isResolved isOutdated path line originalLine startLine diffSide comments(first: 50) {{ totalCount nodes {{ id body createdAt url viewerCanUpdate author {{ login avatarUrl }} {REACTIONS} }} }} }} }} }} }} }}");
+        let plain = "query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved isOutdated path line originalLine startLine diffSide comments(first: 50) { nodes { id body createdAt url author { login } } } } } } } }";
+        if let Some(answer) = ask(&rich).or_else(|| ask(plain)) {
+            if let Value::Object(read) = read_conversation(&answer["data"]) {
+                extras.as_object_mut().unwrap().extend(read);
+            }
+        }
+        if view["url"].as_str().is_some_and(|u| u.starts_with("https://github.com/")) {
+            if let Ok(Some(stack)) = crate::pulls::stack(cwd, path, &format!("{owner}/{repo}"), number) {
+                extras["ghStack"] = json!(stack);
+            }
         }
     }
     let list = |flag: &str, branch: &str| {
@@ -488,6 +501,352 @@ pub fn pr_extras(cwd: &Path, pr: &str, view: &Value, path: Option<&str>) -> Valu
         extras["stack"] = json!({ "below": below, "above": above });
     }
     extras
+}
+
+/// The parts of the conversation query's `data` the panel reads: review threads, reactions by the
+/// id of what they are on, the reviewers asked and their latest verdicts, and the viewer's access.
+fn read_conversation(data: &Value) -> Value {
+    let pr = &data["repository"]["pullRequest"];
+    let mut out = json!({ "threads": pr["reviewThreads"]["nodes"].as_array().cloned().unwrap_or_default() });
+    if let Some(login) = data["viewer"]["login"].as_str() {
+        out["viewer"] = login.into();
+    }
+    if let Some(id) = pr["id"].as_str() {
+        out["prId"] = id.into();
+        let mut reactions = serde_json::Map::new();
+        let mut editable = Vec::new();
+        let mut keep = |node: &Value| {
+            if let (Some(id), Some(groups)) = (node["id"].as_str(), node["reactionGroups"].as_array()) {
+                reactions.insert(id.to_owned(), reactions_of(groups));
+            }
+        };
+        keep(pr);
+        for node in pr["comments"]["nodes"].as_array().into_iter().chain(pr["reviews"]["nodes"].as_array()).flatten() {
+            keep(node);
+            if node["viewerCanUpdate"] == true {
+                editable.extend(node["id"].as_str().map(str::to_owned));
+            }
+        }
+        for thread in out["threads"].as_array_mut().into_iter().flatten() {
+            for c in thread["comments"]["nodes"].as_array_mut().into_iter().flatten() {
+                if let Some(groups) = c["reactionGroups"].as_array() {
+                    c["reactions"] = reactions_of(groups);
+                }
+                if c["viewerCanUpdate"] == true {
+                    editable.extend(c["id"].as_str().map(str::to_owned));
+                }
+            }
+        }
+        out["reactions"] = reactions.into();
+        out["editable"] = editable.into();
+        out["canUpdate"] = pr["viewerCanUpdate"].as_bool().unwrap_or(false).into();
+        out["permission"] = data["repository"]["viewerPermission"].as_str().unwrap_or("READ").into();
+        out["reviewers"] = pr["reviewRequests"]["nodes"].as_array().into_iter().flatten().filter_map(|n| {
+            let r = &n["requestedReviewer"];
+            let (login, team) = match r["combinedSlug"].as_str() {
+                Some(slug) => (slug, true),
+                None => (r["login"].as_str()?, false),
+            };
+            Some(json!({ "login": login, "name": r["name"].as_str().or(r["teamName"].as_str()), "avatarUrl": r["avatarUrl"].as_str().or(r["teamAvatarUrl"].as_str()), "team": team }))
+        }).collect();
+        out["latestReviews"] = pr["latestReviews"]["nodes"].as_array().cloned().unwrap_or_default().into();
+    }
+    out
+}
+
+/// GitHub's reaction groups as T3 Code keeps them: only those with someone in them, with who.
+fn reactions_of(groups: &[Value]) -> Value {
+    groups
+        .iter()
+        .filter(|g| g["reactors"]["totalCount"].as_u64().unwrap_or(0) > 0)
+        .map(|g| json!({ "content": g["content"], "count": g["reactors"]["totalCount"], "viewerHasReacted": g["viewerHasReacted"].as_bool().unwrap_or(false), "actors": g["reactors"]["nodes"].as_array().into_iter().flatten().filter_map(|n| n["login"].as_str()).collect::<Vec<_>>() }))
+        .collect()
+}
+
+/// GitHub's reactions, by the name its GraphQL API gives them.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Reaction {
+    ThumbsUp,
+    ThumbsDown,
+    Laugh,
+    Hooray,
+    Confused,
+    Heart,
+    Rocket,
+    Eyes,
+}
+
+/// A change to who is on a pull request, what is on it, and its review threads.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PrChange {
+    /// Adds or takes back the viewer's `content` on `subject`, a comment, review or the pull request.
+    React { subject: String, content: Reaction, on: bool },
+    /// Asks `login`, a person or a team's `org/slug`, for a review, or takes the request back.
+    Reviewer {
+        login: String,
+        #[serde(default)]
+        team: bool,
+        on: bool,
+    },
+    Label { name: String, on: bool },
+    /// Resolves the review thread `thread`, or opens it again.
+    Resolve { thread: String, on: bool },
+    /// Rewrites the comment `id`, a remark on the pull request or, with `review`, on a line.
+    Comment {
+        id: String,
+        #[serde(default)]
+        review: bool,
+        body: String,
+    },
+}
+
+pub fn pr_change(cwd: &Path, pr: &str, change: &PrChange, path: Option<&str>) -> Result<(), String> {
+    let (owner, repo, number) = check_url(pr)?;
+    let mutate = |query: &str, vars: &[(&str, &str)]| {
+        let mut args = vec!["api".to_owned(), "graphql".to_owned(), "-f".to_owned(), format!("query={query}")];
+        for (k, v) in vars {
+            args.extend(["-f".to_owned(), format!("{k}={v}")]);
+        }
+        gh(cwd, path, &args.iter().map(String::as_str).collect::<Vec<_>>()).map(drop)
+    };
+    match change {
+        PrChange::React { subject, content, on } => {
+            let name = if *on { "addReaction" } else { "removeReaction" };
+            let content = serde_json::to_value(content).unwrap();
+            mutate(&format!("mutation($subject: ID!, $content: ReactionContent!) {{ {name}(input: {{subjectId: $subject, content: $content}}) {{ reaction {{ content }} }} }}"), &[("subject", subject), ("content", content.as_str().unwrap())])
+        }
+        PrChange::Resolve { thread, on } => {
+            let name = if *on { "resolveReviewThread" } else { "unresolveReviewThread" };
+            mutate(&format!("mutation($thread: ID!) {{ {name}(input: {{threadId: $thread}}) {{ thread {{ isResolved }} }} }}"), &[("thread", thread)])
+        }
+        PrChange::Comment { id, review: false, body } => mutate("mutation($id: ID!, $body: String!) { updateIssueComment(input: {id: $id, body: $body}) { issueComment { id } } }", &[("id", id), ("body", body)]),
+        PrChange::Comment { id, review: true, body } => mutate("mutation($id: ID!, $body: String!) { updatePullRequestReviewComment(input: {pullRequestReviewCommentId: $id, body: $body}) { pullRequestReviewComment { id } } }", &[("id", id), ("body", body)]),
+        PrChange::Reviewer { login, team, on } => {
+            let body = if *team { json!({ "team_reviewers": [login.rsplit('/').next().unwrap_or(login)] }) } else { json!({ "reviewers": [login] }) };
+            gh_input(cwd, path, &["api", "-X", if *on { "POST" } else { "DELETE" }, &format!("repos/{owner}/{repo}/pulls/{number}/requested_reviewers"), "--input", "-"], Some(&body.to_string())).map(drop)
+        }
+        PrChange::Label { name, on: true } => gh_input(cwd, path, &["api", "-X", "POST", &format!("repos/{owner}/{repo}/issues/{number}/labels"), "--input", "-"], Some(&json!({ "labels": [name] }).to_string())).map(drop),
+        PrChange::Label { name, on: false } => gh(cwd, path, &["api", "-X", "DELETE", &format!("repos/{owner}/{repo}/issues/{number}/labels/{}", path_segment(name))]).map(drop),
+    }
+}
+
+fn path_segment(text: &str) -> String {
+    text.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Candidates {
+    Reviewers,
+    Labels,
+}
+
+/// `{candidates, truncated}`: who a review may be asked of, or the repository's labels, with those
+/// already on the pull request marked.
+pub fn pr_candidates(cwd: &Path, pr: &str, of: Candidates, path: Option<&str>) -> Result<Value, String> {
+    let (owner, repo, number) = check_url(pr)?;
+    let query = match of {
+        Candidates::Reviewers => "query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { assignableUsers(first: 100) { pageInfo { hasNextPage } nodes { login name avatarUrl } } pullRequest(number: $number) { author { login } reviewRequests(first: 100) { nodes { requestedReviewer { ... on User { login name avatarUrl } ... on Team { slug combinedSlug teamName: name teamAvatarUrl: avatarUrl } ... on Bot { login avatarUrl } } } } } } }",
+        Candidates::Labels => "query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { labels(first: 100, orderBy: {field: NAME, direction: ASC}) { pageInfo { hasNextPage } nodes { name color description } } pullRequest(number: $number) { labels(first: 100) { nodes { name } } } } }",
+    };
+    let out = gh(cwd, path, &["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("repo={repo}"), "-F", &format!("number={number}")])?;
+    let v: Value = serde_json::from_str(&out).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+    let repository = &v["data"]["repository"];
+    if !repository.is_object() {
+        return Err("GitHub can't find this repository".into());
+    }
+    Ok(match of {
+        Candidates::Reviewers => reviewer_candidates(repository),
+        Candidates::Labels => label_candidates(repository),
+    })
+}
+
+/// Whoever has been asked leads, so a request can be taken back; then the people with access, but
+/// not the author, since GitHub refuses a review request to whoever opened the pull request.
+fn reviewer_candidates(repository: &Value) -> Value {
+    let pr = &repository["pullRequest"];
+    let author = pr["author"]["login"].as_str().unwrap_or("");
+    let mut seen = std::collections::HashSet::new();
+    let mut candidates = Vec::new();
+    for n in pr["reviewRequests"]["nodes"].as_array().into_iter().flatten() {
+        let r = &n["requestedReviewer"];
+        let (login, team) = match (r["combinedSlug"].as_str(), r["login"].as_str()) {
+            (Some(slug), _) => (slug, true),
+            (None, Some(login)) => (login, false),
+            _ => continue,
+        };
+        if seen.insert((team, login.to_owned())) {
+            candidates.push(json!({ "login": login, "team": team, "name": r["name"].as_str().or(r["teamName"].as_str()), "avatarUrl": r["avatarUrl"].as_str().or(r["teamAvatarUrl"].as_str()), "requested": true }));
+        }
+    }
+    for u in repository["assignableUsers"]["nodes"].as_array().into_iter().flatten() {
+        let Some(login) = u["login"].as_str() else { continue };
+        if login != author && seen.insert((false, login.to_owned())) {
+            candidates.push(json!({ "login": login, "team": false, "name": u["name"], "avatarUrl": u["avatarUrl"], "requested": false }));
+        }
+    }
+    json!({ "candidates": candidates, "truncated": repository["assignableUsers"]["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false) })
+}
+
+fn label_candidates(repository: &Value) -> Value {
+    let on: std::collections::HashSet<&str> = repository["pullRequest"]["labels"]["nodes"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str()).collect();
+    let candidates: Vec<Value> = repository["labels"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| {
+            let name = l["name"].as_str()?;
+            Some(json!({ "name": name, "color": l["color"], "description": l["description"], "applied": on.contains(name) }))
+        })
+        .collect();
+    json!({ "candidates": candidates, "truncated": repository["labels"]["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false) })
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum StackAction {
+    /// Merges the pull request and the unmerged layers under it, as GitHub's merge-async does.
+    Merge,
+    /// Rebases every unmerged layer, bottom to top, onto the stack's base.
+    Rebase,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+/// A layer's head as the reader last saw it, so a stack that moved since is not acted on.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct StackHead {
+    pub number: u64,
+    pub sha: String,
+}
+
+/// Merges or rebases the GitHub stack the pull request `pr` is in, as T3 Code's stack menu does.
+pub fn pr_stack(cwd: &Path, pr: &str, action: StackAction, method: MergeMethod, heads: &[StackHead], path: Option<&str>) -> Result<(), String> {
+    let (owner, repo, number) = check_url(pr)?;
+    let changed = || "The stack changed. Refresh it before trying again.".to_owned();
+    let stack = crate::pulls::stack(cwd, path, &format!("{owner}/{repo}"), number)?.ok_or_else(changed)?;
+    let at = stack.layers.iter().position(|l| l.number == number).ok_or_else(changed)?;
+    let affected = match action {
+        StackAction::Merge => &stack.layers[..=at],
+        StackAction::Rebase => &stack.layers[..],
+    };
+    let open: Vec<_> = affected.iter().filter(|l| l.state != crate::pulls::State::Merged).collect();
+    let unchanged = open.len() == heads.len() && open.iter().all(|l| !l.head_sha.is_empty() && heads.iter().any(|h| h.number == l.number && h.sha == l.head_sha));
+    if !unchanged {
+        return Err(changed());
+    }
+    let unsupported = "This operation is not supported for this stack.".to_owned();
+    if open.is_empty() || open.iter().any(|l| l.state == crate::pulls::State::Closed) {
+        return Err(unsupported);
+    }
+    match action {
+        StackAction::Merge => {
+            let target = &stack.layers[at];
+            if target.state != crate::pulls::State::Open || open.iter().any(|l| l.state == crate::pulls::State::Draft) {
+                return Err(unsupported);
+            }
+            merge_async(cwd, path, &format!("repos/{owner}/{repo}/pulls/{number}/merge-async"), method, &target.head_sha)
+        }
+        StackAction::Rebase => {
+            let aliases: String = open.iter().enumerate().map(|(i, l)| format!("l{i}: repository(owner: $owner, name: $repo) {{ pullRequest(number: {}) {{ maintainerCanModify headRepository {{ viewerPermission }} }} }} ", l.number)).collect();
+            let access: Value = serde_json::from_str(&gh(cwd, path, &["api", "graphql", "-f", &format!("query=query($owner: String!, $repo: String!) {{ {aliases}}}"), "-f", &format!("owner={owner}"), "-f", &format!("repo={repo}")])?).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+            let writable = (0..open.len()).all(|i| {
+                let pr = &access["data"][format!("l{i}")]["pullRequest"];
+                pr["maintainerCanModify"].as_bool() == Some(true) || matches!(pr["headRepository"]["viewerPermission"].as_str(), Some("ADMIN" | "MAINTAIN" | "WRITE"))
+            });
+            if !writable {
+                return Err("You cannot update every branch in this stack. Check write access and fork maintainer permissions before retrying.".into());
+            }
+            let remote: Value = serde_json::from_str(&gh(cwd, path, &["api", &format!("repos/{owner}/{repo}")])?).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+            let remote = remote["clone_url"].as_str().ok_or("GitHub didn't say where the repository's branches live")?.to_owned();
+            let layers: Vec<(u64, &str, &str)> = open.iter().map(|l| (l.number, l.head.as_str(), l.head_sha.as_str())).collect();
+            cascade_rebase(cwd, path, &remote, &stack.base, &layers)
+        }
+    }
+}
+
+fn merge_async(cwd: &Path, path: Option<&str>, route: &str, method: MergeMethod, sha: &str) -> Result<(), String> {
+    let body = json!({ "merge_method": method, "merge_action": "default", "sha": sha });
+    let read = |out: String| serde_json::from_str::<Value>(&out).map_err(|_| "GitHub returned an unreadable stack operation response.".to_owned());
+    let mut answer = read(gh_input(cwd, path, &["api", "-X", "PUT", route, "--input", "-"], Some(&body.to_string()))?)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(300);
+    let mut wait = Duration::from_secs(1);
+    while answer["status"] == "pending" && std::time::Instant::now() < deadline {
+        let uuid = answer["details"]["uuid"].as_str().ok_or("GitHub returned an unreadable stack operation response.")?.to_owned();
+        std::thread::sleep(wait);
+        wait = (wait * 2).min(Duration::from_secs(10));
+        answer = read(gh(cwd, path, &["api", &format!("{route}/{}", path_segment(&uuid))])?)?;
+    }
+    match answer["status"].as_str() {
+        Some("merged" | "enqueued") => Ok(()),
+        Some("pending") => Err("The merge is still running on GitHub. Check its status there before submitting another request.".into()),
+        _ => Err(answer["details"]["message"].as_str().map_or_else(|| "GitHub refused the stack merge. Check the stack's branch rules and merge requirements.".to_owned(), |m| format!("GitHub refused the stack merge: {m}"))),
+    }
+}
+
+/// Moves each layer's own commits onto the rebased layer under it and force-pushes the branch,
+/// bottom to top, in a scratch clone: GitHub's own "Rebase stack" has no API, and its per-pull
+/// request "update branch" replays the old copy of every lower layer into the one above.
+fn cascade_rebase(cwd: &Path, path: Option<&str>, remote: &str, base: &str, layers: &[(u64, &str, &str)]) -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let host = remote.strip_prefix("https://").and_then(|r| r.split('/').next());
+    let token = host.and_then(|h| gh(cwd, path, &["auth", "token", "--hostname", h]).ok()).map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
+    let config = |key: &str| run(cwd, path, "git", &["config", key]).ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+    let mut env = vec![("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned())];
+    let mut settings = vec![("user.name".to_owned(), config("user.name").unwrap_or_else(|| "Pinned".into())), ("user.email".to_owned(), config("user.email").unwrap_or_else(|| "pinned@localhost".into()))];
+    if let Some(token) = token {
+        let basic = base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
+        settings.push((format!("http.{remote}.extraheader"), format!("AUTHORIZATION: basic {basic}")));
+    }
+    env.push(("GIT_CONFIG_COUNT".into(), settings.len().to_string()));
+    for (i, (k, v)) in settings.into_iter().enumerate() {
+        env.push((format!("GIT_CONFIG_KEY_{i}"), k));
+        env.push((format!("GIT_CONFIG_VALUE_{i}"), v));
+    }
+    let git = |args: &[&str]| {
+        let mut command = Command::new("git");
+        command.args(args).current_dir(dir.path()).stdin(Stdio::null()).envs(env.iter().map(|(k, v)| (k, v)));
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let out = command.output().map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+        }
+    };
+    let stopped = |number: u64, step: &'static str, done: usize| move |e: String| format!("Stack rebase stopped at PR #{number} while {step}. {done} layers were rebased. {e}").trim_end().to_owned();
+    let first = layers.first().map_or(0, |l| l.0);
+    git(&["init", "--quiet"]).map_err(stopped(first, "preparing", 0))?;
+    git(&["remote", "add", "origin", remote]).map_err(stopped(first, "preparing", 0))?;
+    let mut fetch = vec!["fetch".to_owned(), "--quiet".to_owned(), "--no-tags".to_owned(), "origin".to_owned(), format!("+refs/heads/{base}:refs/remotes/origin/{base}")];
+    fetch.extend(layers.iter().map(|(_, head, _)| format!("+refs/heads/{head}:refs/remotes/origin/{head}")));
+    git(&fetch.iter().map(String::as_str).collect::<Vec<_>>()).map_err(stopped(first, "fetching", 0))?;
+    let (mut parent_old, mut parent_new) = (format!("origin/{base}"), format!("origin/{base}"));
+    for (i, &(number, head, sha)) in layers.iter().enumerate() {
+        let upstream = if i == 0 { git(&["merge-base", &parent_old, sha]).map_err(stopped(number, "reading the fork point", i))? } else { parent_old.clone() };
+        git(&["checkout", "--quiet", "--detach", sha]).map_err(stopped(number, "checking out", i))?;
+        if git(&["rebase", "--quiet", "--onto", &parent_new, &upstream]).is_err() {
+            let _ = git(&["rebase", "--abort"]);
+            return Err(format!("PR #{number} conflicts with the layer below it. {i} layers were rebased; resolve #{number} with `gh stack rebase` and push."));
+        }
+        let rebased = git(&["rev-parse", "HEAD"]).map_err(stopped(number, "rebasing", i))?;
+        if rebased != sha {
+            git(&["push", "--quiet", &format!("--force-with-lease=refs/heads/{head}:{sha}"), "origin", &format!("{rebased}:refs/heads/{head}")]).map_err(stopped(number, "pushing", i))?;
+        }
+        parent_old = sha.to_owned();
+        parent_new = rebased;
+    }
+    Ok(())
 }
 
 /// A review guide for the pull request, as T3 Code writes one: numbered stops through the diff.
@@ -897,6 +1256,82 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(pr_edit(dir.path(), "42", Some("x"), None, None).unwrap_err().contains("not a pull request URL"));
         assert!(pr_rerun(dir.path(), "https://example.com/status", None).unwrap_err().contains("no GitHub Actions run"));
+    }
+
+    #[test]
+    fn the_conversation_query_is_read_into_reactions_reviewers_and_access() {
+        let group = |content: &str, n: u64, me: bool, who: &[&str]| json!({ "content": content, "viewerHasReacted": me, "reactors": { "totalCount": n, "nodes": who.iter().map(|l| json!({ "login": l })).collect::<Vec<_>>() } });
+        let data = json!({
+            "viewer": { "login": "ana" },
+            "repository": { "viewerPermission": "TRIAGE", "pullRequest": {
+                "id": "PR_1", "viewerCanUpdate": true,
+                "reactionGroups": [group("HEART", 2, true, &["bo"]), group("EYES", 0, false, &[])],
+                "comments": { "nodes": [{ "id": "IC_1", "viewerCanUpdate": true, "reactionGroups": [group("THUMBS_UP", 1, false, &["bo"])] }, { "id": "IC_2", "viewerCanUpdate": false, "reactionGroups": [] }] },
+                "reviews": { "nodes": [] },
+                "latestReviews": { "nodes": [{ "state": "APPROVED", "submittedAt": "2026-01-01T00:00:00Z", "author": { "login": "bo", "avatarUrl": "https://avatars.githubusercontent.com/u/2" } }] },
+                "reviewRequests": { "nodes": [{ "requestedReviewer": { "login": "cy", "name": "Cy", "avatarUrl": null } }, { "requestedReviewer": { "combinedSlug": "acme/core", "teamName": "Core", "teamAvatarUrl": null } }, { "requestedReviewer": null }] },
+                "reviewThreads": { "nodes": [{ "id": "T1", "comments": { "totalCount": 12, "nodes": [{ "id": "RC_1", "viewerCanUpdate": true, "reactionGroups": [group("ROCKET", 1, true, &[])] }] } }] },
+            } },
+        });
+        let read = read_conversation(&data);
+        assert_eq!(read["viewer"], "ana");
+        assert_eq!(read["prId"], "PR_1");
+        assert_eq!(read["permission"], "TRIAGE");
+        assert_eq!(read["reactions"]["PR_1"], json!([{ "content": "HEART", "count": 2, "viewerHasReacted": true, "actors": ["bo"] }]));
+        assert_eq!(read["reactions"]["IC_1"], json!([{ "content": "THUMBS_UP", "count": 1, "viewerHasReacted": false, "actors": ["bo"] }]));
+        assert_eq!(read["threads"][0]["comments"]["nodes"][0]["reactions"], json!([{ "content": "ROCKET", "count": 1, "viewerHasReacted": true, "actors": [] }]));
+        assert_eq!(read["threads"][0]["comments"]["totalCount"], 12);
+        assert_eq!(read["reviewers"], json!([{ "login": "cy", "name": "Cy", "avatarUrl": null, "team": false }, { "login": "acme/core", "name": "Core", "avatarUrl": null, "team": true }]));
+        assert_eq!(read["latestReviews"][0]["state"], "APPROVED");
+        assert_eq!(read["editable"], json!(["IC_1", "RC_1"]));
+        let plain = read_conversation(&json!({ "repository": { "pullRequest": { "reviewThreads": { "nodes": [{ "id": "T1" }] } } } }));
+        assert_eq!(plain, json!({ "threads": [{ "id": "T1" }] }));
+    }
+
+    #[test]
+    fn candidates_put_whoever_was_asked_first_and_leave_the_author_out() {
+        let repository = json!({
+            "assignableUsers": { "pageInfo": { "hasNextPage": true }, "nodes": [{ "login": "ana", "name": "Ana", "avatarUrl": "a" }, { "login": "bo", "name": null, "avatarUrl": "b" }, { "login": "cy", "name": "Cy", "avatarUrl": "c" }] },
+            "pullRequest": { "author": { "login": "ana" }, "reviewRequests": { "nodes": [{ "requestedReviewer": { "login": "cy", "name": "Cy", "avatarUrl": "c" } }, { "requestedReviewer": { "slug": "core", "combinedSlug": "acme/core", "teamName": "Core", "teamAvatarUrl": "t" } }] } },
+        });
+        assert_eq!(reviewer_candidates(&repository), json!({ "truncated": true, "candidates": [
+            { "login": "cy", "team": false, "name": "Cy", "avatarUrl": "c", "requested": true },
+            { "login": "acme/core", "team": true, "name": "Core", "avatarUrl": "t", "requested": true },
+            { "login": "bo", "team": false, "name": null, "avatarUrl": "b", "requested": false },
+        ] }));
+        let labels = json!({ "labels": { "pageInfo": { "hasNextPage": false }, "nodes": [{ "name": "bug", "color": "d73a4a", "description": "Something is wrong" }, { "name": "docs", "color": "0075ca", "description": null }] }, "pullRequest": { "labels": { "nodes": [{ "name": "docs" }] } } });
+        assert_eq!(label_candidates(&labels), json!({ "truncated": false, "candidates": [{ "name": "bug", "color": "d73a4a", "description": "Something is wrong", "applied": false }, { "name": "docs", "color": "0075ca", "description": null, "applied": true }] }));
+        assert_eq!(path_segment("good first issue/é"), "good%20first%20issue%2F%C3%A9");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stack_rebase_moves_each_layers_own_commits_onto_the_rebased_layer_below() {
+        let dir = tempfile::tempdir().unwrap();
+        let (origin, work) = (dir.path().join("origin.git"), dir.path().join("work"));
+        git(dir.path(), &["init", "--quiet", "--bare", origin.to_str().unwrap()]);
+        git(dir.path(), &["clone", "--quiet", origin.to_str().unwrap(), work.to_str().unwrap()]);
+        let commit = |file: &str| {
+            std::fs::write(work.join(file), file).unwrap();
+            git(&work, &["add", file]);
+            git(&work, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", file]);
+        };
+        let head = || run(&work, None, "git", &["rev-parse", "HEAD"]).ok().unwrap().trim().to_owned();
+        git(&work, &["checkout", "--quiet", "-b", "main"]);
+        commit("base");
+        git(&work, &["checkout", "--quiet", "-b", "one"]);
+        commit("one");
+        let one = head();
+        git(&work, &["checkout", "--quiet", "-b", "two"]);
+        commit("two");
+        let two = head();
+        git(&work, &["checkout", "--quiet", "main"]);
+        commit("later");
+        git(&work, &["push", "--quiet", "origin", "main", "one", "two"]);
+        cascade_rebase(&work, None, &format!("file://{}", origin.display()), "main", &[(1, "one", &one), (2, "two", &two)]).unwrap();
+        let log = |branch: &str| run(&origin, None, "git", &["log", "--format=%s", branch]).ok().unwrap();
+        assert_eq!(log("two"), "two\none\nlater\nbase\n");
+        assert_eq!(log("one"), "one\nlater\nbase\n");
     }
 
     #[cfg(unix)]
