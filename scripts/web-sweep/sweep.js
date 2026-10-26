@@ -86,9 +86,10 @@ async function seedConnectors(name) {
     linear: { name: "Sweep Bot", email: "bot@example.test", organization: "Acme" },
     slack: { team: "Acme", userId: "U1", name: "pinned-bot" },
     github: { login: "sweeper", name: "Sweep" },
+    vercel: { balance: "5.00" },
     connectors: [],
   };
-  ws.send(JSON.stringify({ type: "call", id: 1, call: { cmd: "import", store, linear_key: "lin_api_fake", slack_key: "xoxb-fake", github_key: "ghp_fake" } }));
+  ws.send(JSON.stringify({ type: "call", id: 1, call: { cmd: "import", store, linear_key: "lin_api_fake", slack_key: "xoxb-fake", github_key: "ghp_fake", vercel_key: "vck_fake" } }));
   const imported = await reply.finally(() => ws.close());
   if (!imported) throw new Error("the account already had connectors, so the seed was not imported");
 }
@@ -5036,7 +5037,7 @@ async function sweep(profileName) {
   await step("settings: Connectors bad keys show errors", async () => {
     await settingsPage("integrations");
     const errors = [];
-    for (const [field, button, error] of [["#linear-key", "connect-linear", "#linear-error"], ["#slack-token", "connect-slack", "#slack-error"], ["#github-token", "connect-github", "#github-error"]]) {
+    for (const [field, button, error] of [["#linear-key", "connect-linear", "#linear-error"], ["#slack-token", "connect-slack", "#slack-error"], ["#vercel-key", "connect-vercel", "#vercel-error"], ["#github-token", "connect-github", "#github-error"]]) {
       await page.fill(field, "definitely-not-a-key");
       await action(button);
       await waitFor(`${error}`, async () => (await text(error)) !== "", 15000);
@@ -5051,7 +5052,8 @@ async function sweep(profileName) {
     await seedConnectors(`seed-${profileName}`);
     await settingsPage("projects");
     await settingsPage("integrations");
-    await waitFor("connected badges", async () => (await page.locator('#settings-page .badge[data-on="true"]').count()) === 3);
+    await waitFor("connected badges", async () => (await page.locator('#settings-page .badge[data-on="true"]').count()) === 4);
+    check(/\$5\.00/.test(await text('#settings-page .card:has(.logo[data-tone=vercel]) .connected')), "the Vercel card lacks the balance");
     await tapOrClick("#settings-toggle");
     await tapOrClick("#new-tab");
     await page.waitForSelector("#projects .choices button");

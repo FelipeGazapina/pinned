@@ -42,13 +42,14 @@ const TRIGGERS = {
 const settingsPage = document.getElementById("settings-page");
 const LINEAR_KEYS = "https://linear.app/settings/account/security";
 const GITHUB_TOKENS = "https://github.com/settings/tokens/new?scopes=repo&description=pinned";
+const VERCEL_KEYS = "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys";
 
 /** Mirrors the backend's `get_settings`. Unsaved connectors carry an empty id. */
-let settings = { linear: null, slack: null, connectors: [], checked: null };
+let settings = { linear: null, slack: null, vercel: null, connectors: [], checked: null };
 const PAGES = ["general", "integrations", "projects", "connectors", "account", "machines", "archive"];
 let page = PAGES.includes(load("settings-page")) ? load("settings-page") : "integrations";
-/** Names from the connected Linear workspace and Slack channels, for the connector form's suggestions. */
-let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [] };
+/** Names from the connected Linear workspace, Slack channels and Vercel's decision models, for the connector form's suggestions. */
+let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [], decisionModels: [] };
 
 const settingsOpen = () => document.body.dataset.page === "settings";
 
@@ -138,6 +139,7 @@ function integrationsHtml() {
       ${body}
     </div>
     ${slackCardHtml()}
+    ${vercelCardHtml()}
     ${githubCardHtml()}`;
 }
 
@@ -156,6 +158,26 @@ function githubCardHtml() {
        <p class="error" id="github-error"></p>`;
   return `<div class="card">
       <div class="card-head"><span class="logo github">⎇</span><div><b>GitHub</b><div class="hint">Clones your repositories on any machine that lacks them, private ones too</div></div>
+        <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
+      ${body}
+    </div>`;
+}
+
+function vercelCardHtml() {
+  const account = settings.vercel;
+  const body = account
+    ? `<p class="connected">Connected. The team's AI Gateway balance is <b>$${esc(account.balance)}</b>.</p>
+       <div class="actions"><button class="secondary" data-action="disconnect-vercel">Disconnect</button></div>`
+    : `<ol class="steps">
+         <li>Create an AI Gateway API key in your Vercel team.
+           <button class="secondary" data-action="open-vercel-keys">Open Vercel ↗</button></li>
+         <li>Paste the key here.
+           <div class="row"><input id="vercel-key" type="password" placeholder="vck_…" autocomplete="off">
+           <button class="primary" data-action="connect-vercel">Connect</button></div></li>
+       </ol>
+       <p class="error" id="vercel-error"></p>`;
+  return `<div class="card">
+      <div class="card-head"><span class="logo" data-tone="vercel">▲</span><div><b>Vercel AI Gateway</b><div class="hint">Decision models that sort Slack messages into categories</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
@@ -732,6 +754,24 @@ const actions = {
     suggestions.repos = [];
     showPage("integrations");
   },
+  "open-vercel-keys": () => (TAURI ? invoke("open_url", { url: VERCEL_KEYS }) : window.open(VERCEL_KEYS, "_blank", "noopener")),
+  async "connect-vercel"() {
+    const key = document.getElementById("vercel-key").value;
+    if (!key.trim()) return;
+    try {
+      settings.vercel = await connectorCall("connect_vercel", { key });
+      suggestions.decisionModels = [];
+      showPage("integrations");
+    } catch (e) {
+      document.getElementById("vercel-error").textContent = e;
+    }
+  },
+  async "disconnect-vercel"() {
+    await connectorCall("disconnect_vercel");
+    settings.vercel = null;
+    suggestions.decisionModels = [];
+    showPage("integrations");
+  },
   async "disconnect-slack"() {
     await connectorCall("disconnect_slack");
     settings.slack = null;
@@ -822,6 +862,7 @@ settingsPage.addEventListener("click", (e) => {
 settingsPage.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "linear-key") actions["connect-linear"]();
   if (e.key === "Enter" && e.target.id === "slack-token") actions["connect-slack"]();
+  if (e.key === "Enter" && e.target.id === "vercel-key") actions["connect-vercel"]();
   if (view.name !== "edit" || page !== "connectors") return;
   if (e.key === "s" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();

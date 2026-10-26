@@ -185,6 +185,8 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 #settings .row select { width: auto; flex: none; }
 .logo.slack { background: #4a154b; }
 .logo.github { background: #24292f; }
+.logo[data-tone] { background: var(--tone); }
+.logo[data-tone="vercel"] { box-shadow: inset 0 0 0 1px rgb(var(--s-ink-rgb, 255 255 255) / 0.14); font-size: 14px; }
 .actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 10px; }
 .actions.start { justify-content: flex-start; }
 #settings button.primary, #settings button.secondary { padding: 4px 12px; border-radius: 6px; white-space: nowrap; }
@@ -203,6 +205,7 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 [data-tone="slack"] { --tone: #611f69; }
 [data-tone="claude"] { --tone: #d97757; }
 [data-tone="proof"] { --tone: #2ead33; }
+[data-tone="vercel"] { --tone: #000; }
 #settings .icon { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; flex: none;
   background: var(--tone, rgb(var(--s-ink-rgb, 255 255 255) / 0.078)); color: #fff; font-size: 14px; }
 
