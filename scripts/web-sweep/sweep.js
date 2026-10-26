@@ -823,7 +823,8 @@ async function sweep(profileName) {
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
     await waitFor("one agent left", async () => /1 agent working/.test(await rowStatus()), 8000);
     check(!(await page.evaluate((k) => unseenDone(tabByKey(k)), beta)), "the row read Done while an agent still worked");
-    await waitFor("the row to read Done", async () => /Done/.test(await rowStatus()), 12000);
+    await waitFor("the row to show an unread finish", () => page.evaluate((k) => unseenDone(tabByKey(k)), beta), 12000);
+    check((await page.locator(`#thread-list .thread-row[data-tab="${beta}"] .stamp.status`).count()) === 0, "the finished row still shows a status");
     await page.evaluate((k) => activate(tabByKey(k)), beta);
     await waitFor("both cards done", async () => (await page.locator('#thread .agent-card[data-state="done"]').count()) === 2, 4000);
     check((await page.locator("#thread .agents-working").count()) === 0, "the agents footer outlived the agents");
