@@ -1595,7 +1595,8 @@ onGuiKey("h", () => document.querySelector("#composer-footer button.where")?.cli
 onGuiKey("l", pickPreviousWorktree, { shift: true });
 
 /** T3 Code's empty-thread headline, "What should we build in <project>?", whose project opens a
- * new thread in another one. */
+ * new thread in another one; a thread without a project asks "What should we work on?" over its
+ * project picker. */
 const heroHead = Object.assign(document.createElement("div"), { id: "hero-head" });
 composer.prepend(heroHead);
 function renderHero(tab) {
@@ -1603,7 +1604,9 @@ function renderHero(tab) {
   heroHead.hidden = !on;
   if (!on) return;
   const name = projectName(tab);
-  const html = `<h1><span class="ask">What should we build<span class="q">?</span><span class="in"> in</span></span>
+  const html = threadOf(tab).workspace?.scratch
+    ? `<h1>What should we work on?</h1><p><button type="button" class="project picker" data-hero-project>No project${icon("chevron-down")}</button></p>`
+    : `<h1><span class="ask">What should we build<span class="q">?</span><span class="in"> in</span></span>
       <span class="where"><button type="button" class="project" data-hero-project title="${esc(name)}">${esc(name)}${icon("chevron-down")}</button><span class="in">?</span></span></h1>
     <p><button type="button" class="scratch" data-hero-scratch>or start without a project</button></p>`;
   if (heroHead.dataset.html !== html) {
@@ -1616,6 +1619,15 @@ heroHead.addEventListener("click", (e) => {
   const trigger = e.target.closest("[data-hero-project]");
   if (trigger) openHeroProjects(trigger);
 });
+/** Opens a thread in the machine's folder for threads without a project, as T3 Code's Scratch. */
+async function openScratchTab(machine) {
+  const id = await callOn(machine, { cmd: "open_scratch", bypass: false }).catch((e) => (/unknown variant/.test(String(e)) ? callOn(machine, { cmd: "open_tab", path: null, bypass: false }) : Promise.reject(e)));
+  await refreshTabs(machine);
+  const tab = tabByKey(keyOf(machine, id));
+  activate(tab);
+  await startTab(tab);
+  return tab;
+}
 async function openHeroProjects(anchor) {
   const tab = active;
   if (!tab) return;

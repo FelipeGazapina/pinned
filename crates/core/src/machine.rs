@@ -226,6 +226,8 @@ impl Tab {
 pub struct Machine {
     launch: Launch,
     default_cwd: PathBuf,
+    /// The folder threads started without a project run in.
+    scratch: PathBuf,
     tabs: Mutex<HashMap<TabId, Tab>>,
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
@@ -279,6 +281,7 @@ impl Machine {
         Arc::new_cyclic(|me| Machine {
             launch,
             default_cwd,
+            scratch: dir.as_ref().map(|d| d.join("scratch")).unwrap_or_else(|| std::env::temp_dir().join("pinned-scratch")),
             tabs: Mutex::new(HashMap::new()),
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
@@ -323,6 +326,7 @@ impl Machine {
         match call {
             Call::Tabs => json(self.tabs()),
             Call::OpenTab { path, bypass } => json(self.open_tab(path, bypass)),
+            Call::OpenScratch { bypass } => json(self.open_scratch(bypass)?),
             Call::StartClaude { tab, cols, rows } => json(self.start_claude(&tab, cols, rows)?),
             Call::SetBypass { tab, on, cols, rows } => json(self.set_bypass(&tab, on, cols, rows)?),
             Call::SetModel { tab, model, cols, rows } => json(self.set_model(&tab, &model, cols, rows)?),
@@ -359,7 +363,10 @@ impl Machine {
             }
             Call::Thread { tab, from } => json(self.thread(&tab, from)?),
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
-            Call::Workspace { tab } => json(workspace::of(&self.tab(&tab, |t| t.cwd.clone())?)),
+            Call::Workspace { tab } => {
+                let cwd = self.tab(&tab, |t| t.cwd.clone())?;
+                json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
+            }
             Call::RegenerateTitle { tab, previous, thread } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 json(titles::regenerate(&self.launch.claude, &cwd, self.launch.path_env.as_deref(), &previous, &thread)?)
@@ -547,12 +554,22 @@ impl Machine {
     /// With `bypass` the tab's claude never asks for permission.
     pub fn open_tab(&self, path: Option<String>, bypass: bool) -> TabId {
         let cwd = match path {
+            Some(path) if Path::new(&path) == self.scratch => self.scratch.clone(),
             Some(path) => self.open_project(path.into()),
             None => self.default_cwd.clone(),
         };
         let id = self.add_tab(cwd, vec![], vec![], bypass, None);
         self.emit_tabs();
         id
+    }
+
+    /// Adds a tab in the folder kept for threads without a project, which no project lists, and
+    /// returns its id.
+    pub fn open_scratch(&self, bypass: bool) -> Result<TabId, String> {
+        std::fs::create_dir_all(&self.scratch).map_err(|e| format!("could not make {}: {e}", self.scratch.display()))?;
+        let id = self.add_tab(self.scratch.clone(), vec![], vec![], bypass, None);
+        self.emit_tabs();
+        Ok(id)
     }
 
     /// Adds a tab for a connector's run without starting it, and returns its id. Refused when
@@ -1606,6 +1623,24 @@ mod tests {
         wait_for("claude's arguments", || text(&seen).ends_with("\r\n"));
         assert_eq!(text(&seen), "--settings|s|--plugin-dir|p|--resume|s1|--model|claude-opus-4-8|\r\n");
         assert_eq!(sessions::load(&dir.join("sessions.json"))[0].model.as_deref(), Some("claude-opus-4-8"), "a relaunch keeps the model");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_thread_without_a_project_runs_in_the_machines_scratch_folder() {
+        let dir = temp("scratch");
+        let project = dir.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(launch(), Some(dir.clone()), Some(project.clone()), |_| {});
+        let tab = m.call(Call::OpenScratch { bypass: false }).unwrap().as_str().unwrap().to_owned();
+        assert_eq!(m.view(&tab).unwrap().cwd, dir.join("scratch").display().to_string());
+        assert!(dir.join("scratch").is_dir());
+        assert_eq!(m.call(Call::Workspace { tab }).unwrap()["scratch"], true);
+        let again = m.open_tab(Some(dir.join("scratch").display().to_string()), false);
+        assert_eq!(m.call(Call::Workspace { tab: again }).unwrap()["scratch"], true);
+        let other = m.open_tab(None, false);
+        assert_eq!(m.call(Call::Workspace { tab: other }).unwrap()["scratch"], false);
+        assert_eq!(m.list_projects().iter().map(|p| p.path.clone()).collect::<Vec<_>>(), [project.display().to_string()], "the scratch folder joined the projects");
         let _ = std::fs::remove_dir_all(dir);
     }
 

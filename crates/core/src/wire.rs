@@ -85,6 +85,8 @@ pub enum Call {
     Tabs,
     /// The new tab's id. `path: null` opens the machine's default folder.
     OpenTab { path: Option<String>, bypass: bool },
+    /// The new tab's id, in the machine's folder for threads without a project.
+    OpenScratch { bypass: bool },
     /// The folder claude runs in. Restarts claude when it is already running.
     StartClaude { tab: TabId, cols: u16, rows: u16 },
     /// The folder claude runs in. Restarts claude with `bypass` turned `on` or off, resuming the

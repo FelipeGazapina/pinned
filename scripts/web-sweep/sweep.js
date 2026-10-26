@@ -3488,6 +3488,47 @@ async function sweep(profileName) {
     return rows.join(" | ");
   });
 
+  await step("composer: in light themes the input and its strip cast T3 Code's composer shadow", async () => {
+    const was = await page.evaluate(() => themeState().mode);
+    const shadows = () => page.evaluate(() => [getComputedStyle(document.querySelector("#composer .box")).boxShadow, getComputedStyle(document.getElementById("composer-footer")).boxShadow]);
+    try {
+      await page.evaluate(() => setAppearanceMode("light"));
+      const [box, strip] = await shadows();
+      check(/0px 12px 28px -18px/.test(box) && /rgba\(0, 0, 0, 0\.4\)/.test(box), `the light composer's shadow is ${box}`);
+      check(/0px 12px 28px -18px/.test(strip), `the light strip's shadow is ${strip}`);
+      await page.evaluate(() => setAppearanceMode("dark"));
+      const [darkBox, darkStrip] = await shadows();
+      check(!/12px 28px/.test(darkBox) && /0px 14px 32px -18px/.test(darkStrip) && /0\.75\)/.test(darkStrip), `dark: ${darkBox} / ${darkStrip}`);
+      return `${box} | ${strip}`;
+    } finally {
+      await page.evaluate((mode) => setAppearanceMode(mode), was);
+    }
+  });
+
+  await step("composer: a thread without a project asks what we should work on, over its project picker", async () => {
+    const rows = await page.locator("#thread-list .thread-row").count();
+    await page.evaluate(() => newThreadWithoutProject());
+    await waitFor("a thread without a project", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1 && (await page.evaluate(() => !!threadOf(active).workspace?.scratch)), 10000);
+    await waitFor("the headline", () => page.locator("#hero-head h1").isVisible());
+    const said = (await page.locator("#hero-head h1").innerText()).replace(/\s+/g, " ").trim();
+    check(said === "What should we work on?", `the headline reads ${said}`);
+    check((await text("#hero-head [data-hero-project]")) === "No project", `the picker reads ${await text("#hero-head [data-hero-project]")}`);
+    check(!(await page.locator("#hero-head [data-hero-scratch]").count()), "it still offers to start without a project");
+    const cwd = await page.evaluate(() => active.view.cwd);
+    check(/\/scratch$/.test(cwd) && !cwd.includes("/work/"), `the thread runs in ${cwd}`);
+    check(/No project/.test(await text("#chat-head .crumb")), `the header names ${await text("#chat-head .crumb")}`);
+    await press(page.locator("[data-hero-project]"));
+    await waitFor("the projects", () => page.locator('#composer-menu[data-kind="projects"] [data-path$="/alpha"]').isVisible());
+    check(!(await page.locator('#composer-menu[data-kind="projects"] [data-path$="/scratch"]').count()), "the scratch folder is listed as a project");
+    await press(page.locator('#composer-menu [data-path$="/alpha"]'));
+    await waitFor("alpha's thread in place of the empty one", async () => (await page.locator("#thread-list .thread-row").count()) === rows + 1 && /alpha/.test(await text("#chat-head .crumb")), 10000);
+    await page.evaluate(() => closeTab(active));
+    await waitFor("the thread to close", async () => (await page.locator("#thread-list .thread-row").count()) === rows);
+    await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
+    await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
+    return `${said} · ${cwd.split("/").slice(-2).join("/")}`;
+  });
+
   await step("app view: the terminal drawer shows the same session", async () => {
     await tapOrClick("#toggle-terminal");
     await waitFor("the drawer", () => page.locator(".term:not([hidden])").evaluate((el) => getComputedStyle(el).visibility === "visible" && el.getBoundingClientRect().height > 60));

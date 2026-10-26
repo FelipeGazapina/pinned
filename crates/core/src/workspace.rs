@@ -20,6 +20,8 @@ pub struct Workspace {
     pub repo: bool,
     pub branch: Option<String>,
     pub worktree: bool,
+    /// The folder is the machine's own for threads without a project.
+    pub scratch: bool,
 }
 
 pub fn of(cwd: &Path) -> Workspace {
@@ -28,7 +30,7 @@ pub fn of(cwd: &Path) -> Workspace {
     let branch = git(&["symbolic-ref", "--short", "-q", "HEAD"]);
     let dir = git(&["rev-parse", "--git-dir"]);
     let worktree = matches!((&dir, git(&["rev-parse", "--git-common-dir"])), (Some(dir), Some(common)) if *dir != common);
-    Workspace { project: history::project_of(cwd).display().to_string(), repo: dir.is_some(), branch, worktree }
+    Workspace { project: history::project_of(cwd).display().to_string(), repo: dir.is_some(), branch, worktree, scratch: false }
 }
 
 /// What `gh` knows of the pull request `pr`, a number or URL, with its diff under `diff`. `path` is
@@ -624,6 +626,6 @@ mod tests {
     #[test]
     fn a_plain_folder_has_no_branch() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(of(dir.path()), Workspace { project: dir.path().display().to_string(), repo: false, branch: None, worktree: false });
+        assert_eq!(of(dir.path()), Workspace { project: dir.path().display().to_string(), repo: false, branch: None, worktree: false, scratch: false });
     }
 }

@@ -419,3 +419,11 @@ body[data-mode="gui"][data-drawer="open"] #terms:has(#drawer-tabs:not([hidden]))
   /* Shrinking to the pill is for a desktop window; the room goes to the thread title. */
   #gui-minimize { display: none !important; }
 }
+
+/* T3 Code's --shadow-composer under the input and its context strip in light themes, and
+   --shadow-composer-dark under the strip in dark ones (ComposerSurface.tsx). */
+html[data-appearance="light"] #composer .box { box-shadow: 0 0 0 1px rgb(var(--g-ink-rgb) / 0.05), inset 0 1px rgb(var(--g-ink-rgb) / 0.03), 0 12px 28px -18px rgb(var(--g-shadow-rgb) / 0.4); }
+#composer-footer { box-shadow: 0 14px 32px -18px rgb(var(--g-shadow-rgb) / 0.75); }
+html[data-appearance="light"] #composer-footer { box-shadow: 0 12px 28px -18px rgb(var(--g-shadow-rgb) / 0.4); }
+
+#hero-head .project.picker { font-size: 14px; font-weight: 500; color: var(--g-fg); }
