@@ -185,6 +185,8 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 #settings .row select { width: auto; flex: none; }
 .logo.slack { background: #4a154b; }
 .logo.github { background: #24292f; }
+.logo[data-tone] { background: var(--tone); }
+.logo[data-tone="vercel"] { box-shadow: inset 0 0 0 1px rgb(var(--s-ink-rgb, 255 255 255) / 0.14); font-size: 14px; }
 .actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 10px; }
 .actions.start { justify-content: flex-start; }
 #settings button.primary, #settings button.secondary { padding: 4px 12px; border-radius: 6px; white-space: nowrap; }
@@ -203,6 +205,9 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 [data-tone="slack"] { --tone: #611f69; }
 [data-tone="claude"] { --tone: #d97757; }
 [data-tone="proof"] { --tone: #2ead33; }
+[data-tone="called"] { --tone: #0e7c6b; }
+[data-tone="vercel"] { --tone: #000; }
+#settings .icon[data-tone="vercel"] { box-shadow: inset 0 0 0 1px rgb(var(--s-ink-rgb, 255 255 255) / 0.16); }
 #settings .icon { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; flex: none;
   background: var(--tone, rgb(var(--s-ink-rgb, 255 255 255) / 0.078)); color: #fff; font-size: 14px; }
 
@@ -238,40 +243,69 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 #settings .editor-bar input.title { flex: 1; min-width: 0; font-weight: 600; }
 #settings .editor-bar button.secondary { padding: 4px 9px; }
 
-.flow { padding: 14px 12px 16px; border: 1px solid var(--border); border-radius: 10px;
-  background: radial-gradient(circle, rgb(var(--s-ink-rgb, 255 255 255) / 0.078) 1px, transparent 1.3px) 0 0 / 14px 14px, var(--s-field, #00000033); }
-.node { position: relative; width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 10px; text-align: left;
-  border: 1px solid var(--border); border-radius: 10px; background: var(--s-raised, rgb(25 28 34)); transition: border-color 0.12s; }
-.node:hover { border-color: rgb(var(--s-ink-rgb, 255 255 255) / 0.239); }
-.node.trigger { border-radius: 22px 10px 10px 22px; }
-.node.trigger .icon { border-radius: 50%; }
-.node.trigger::before { content: "⚡"; position: absolute; left: -7px; top: -7px; font-size: 11px; }
-.step.open .node { border-color: var(--working); border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
-.node .text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.node .app { font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
-.node .summary { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.node .warn { width: 16px; height: 16px; flex: none; display: grid; place-items: center; border-radius: 50%;
-  background: var(--needs-input); color: #0f1115; font-size: 11px; font-weight: 700; }
-.node .warn[hidden] { display: none; }
-.node .chevron { color: var(--muted); font-size: 15px; transition: transform 0.15s; }
-.step.open .chevron { transform: rotate(90deg); }
-.node.ghost { padding: 6px 10px; border-style: dashed; background: rgb(var(--s-bg-rgb, 15 17 21) / 0.6); color: var(--muted); }
-.node.ghost .icon { width: 22px; height: 22px; margin: 0 3px; border: 1px dashed var(--s-line, #4a515c); background: none; color: var(--muted); font-size: 12px; }
-.node.ghost:hover { color: var(--fg); border-color: var(--working); }
-.details { display: flex; flex-direction: column; gap: 10px; padding: 10px; border: 1px solid var(--working); border-top: 0;
-  border-radius: 0 0 10px 10px; background: var(--s-raised, rgb(20 23 28)); }
+/* The workflow editor: the bar, then a canvas that scrolls both ways beside the selected node's panel. */
+#settings-page[data-view="edit"] { display: flex; flex-direction: column; padding: 0; overflow: hidden; container-type: inline-size; }
+#settings-page[data-view="edit"] .editor-bar { position: static; margin: 0; }
+.editor { position: relative; flex: 1; min-height: 0; display: flex;
+  --line: rgb(var(--s-ink-rgb, 255 255 255) / 0.28); --dot: rgb(var(--s-ink-rgb, 255 255 255) / 0.09); --tile: var(--s-raised, rgb(25 28 34)); --ground: var(--s-bg, rgb(15 17 21)); }
+.editor > .error { position: absolute; z-index: 3; left: 12px; top: 12px; max-width: min(480px, calc(100% - 24px)); padding: 6px 10px;
+  border: 1px solid currentColor; border-radius: 8px; background: var(--ground); }
+.canvas { flex: 1; min-width: 0; display: flex; overflow: auto; overscroll-behavior: contain; background: radial-gradient(circle, var(--dot) 1px, transparent 1.3px) 0 0 / 20px 20px local, var(--ground); }
+/* Auto margins centre a small flow and start a big one at the edge, where it scrolls. */
+.flow { position: relative; flex: none; margin: auto; }
+.flow .edges { position: absolute; inset: 0; pointer-events: none; }
+.flow .edges path { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.flow .edges path.dashed { stroke-dasharray: 5 4; }
+.flow .edges .arrow { fill: var(--line); stroke: none; }
+.flow .edges circle { fill: var(--ground); stroke: var(--line); stroke-width: 1.5; }
+.flow :is(.step, .branch) { position: absolute; width: 150px; color: var(--fg); display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; }
+.flow .node { position: relative; width: 84px; height: 84px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 14px;
+  background: var(--tile); box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); transition: border-color 0.12s, box-shadow 0.12s; }
+.flow .node:hover { border-color: rgb(var(--s-ink-rgb, 255 255 255) / 0.35); }
+.flow .node .icon { width: 40px; height: 40px; border-radius: 10px; font-size: 20px; }
+.flow .node.trigger { border-radius: 40px 14px 14px 40px; }
+.flow .node.trigger .icon { border-radius: 50%; }
+.flow .node.trigger::before { content: "⚡"; position: absolute; left: -26px; top: 50%; transform: translateY(-50%); font-size: 14px; }
+.flow .open .node { border-color: var(--working); box-shadow: 0 0 0 3px color-mix(in srgb, var(--working) 30%, transparent); }
+.flow .node .warn { position: absolute; right: -7px; bottom: -7px; width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%;
+  border: 2px solid var(--ground); background: var(--s-error, #ff6b6b); color: #fff; font-size: 11px; font-weight: 700; }
+.flow .node.ghost { border-style: dashed; background: transparent; box-shadow: none; color: var(--muted); }
+#settings .flow .node.ghost .icon { background: none; color: var(--muted); font-size: 22px; }
+.flow .node.ghost:hover { border-color: var(--working); color: var(--fg); }
+.flow .branch[data-branch="stop"] .node { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.05); box-shadow: none; }
+#settings .flow .branch[data-branch="stop"] .icon { background: none; color: var(--muted); font-size: 16px; }
+.flow .stub { position: absolute; width: 150px; display: flex; justify-content: center; }
+.flow .stub button { height: 32px; padding: 0 12px; border: 1px dashed var(--border); border-radius: 16px; background: var(--ground); color: var(--muted); font-size: 12px; }
+.flow .stub button:hover { border-color: var(--working); color: var(--fg); }
+.flow .text { width: 100%; display: flex; flex-direction: column; gap: 2px; line-height: 1.3; }
+.flow .text b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow .summary { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.flow .edge-label { position: absolute; z-index: 1; max-width: 120px; transform: translate(-50%, -50%); padding: 1px 8px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--ground); color: var(--muted); font-size: 11px; line-height: 1.4; text-align: center; }
+.flow .port-label { position: absolute; z-index: 1; transform: translateY(-50%); max-width: 110px; padding: 0 3px; background: var(--ground); line-height: 1.3; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--muted); font-size: 11px; }
+
+.node-panel { flex: none; width: 380px; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--tile); }
+.node-panel-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px 10px 14px; border-bottom: 1px solid var(--border); }
+.node-panel-head .text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.node-panel-head .app { font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.details { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 14px; }
 .details label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); }
 .details .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
 #settings-page .details p { margin: 0; }
 .details .actions { margin-top: 0; }
-/* The line sits under the icon's center: the node's padding and border plus half the icon. */
-.edge { position: relative; height: 30px; margin-left: 24px; border-left: 2px solid var(--s-line, #3d434d); }
-.edge::before { content: ""; position: absolute; left: -6px; top: -5px; width: 10px; height: 10px; border-radius: 50%;
-  background: var(--s-line, #3d434d); }
-.edge::after { content: ""; position: absolute; left: -6px; bottom: 0; border: 5px solid transparent; border-bottom: 0;
-  border-top: 6px solid var(--s-line, #3d434d); }
-.edge span { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); padding: 1px 7px; white-space: nowrap;
-  border: 1px solid var(--border); border-radius: 9px; background: var(--s-bg, rgb(15 17 21)); color: var(--muted); font-size: 11px; }
+.categories { display: flex; flex-direction: column; gap: 10px; }
+.category { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 10px; }
+#settings .category .row { margin: 0; }
+#settings .category input.name { font-weight: 600; }
+.category .mention-hint { font-size: 11px; }
+/* The paging guards only matter to a category that pings someone. */
+.category:has([data-bind$=".mention"]:placeholder-shown) .mention-hint { display: none; }
+@container (max-width: 720px) {
+  .editor { flex-direction: column; }
+  .canvas { min-height: 220px; }
+  .node-panel { width: auto; max-height: 62%; border-left: 0; border-top: 1px solid var(--border); }
+}
 
 #settings-page .projects { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
 #settings-page .project { display: flex; justify-content: space-between; gap: 12px; text-align: left; padding: 6px 8px; border-radius: 6px; }
