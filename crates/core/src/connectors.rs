@@ -6,6 +6,7 @@ use crate::wire::RunSpec;
 use crate::{github, linear, slack, vercel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -74,21 +75,70 @@ fn fix_or_auto_fix<'de, D: Deserializer<'de>>(d: D) -> Result<Fix, D::Error> {
     })
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Trigger {
     /// A Linear issue created with this label.
     LinearLabel { label: String },
     /// A Slack message in this channel, by name or id, that mentions the bot.
     SlackMention { channel: String },
+    /// Every new message people start in this channel, by name or id, which a decision model sorts
+    /// into one of `decide`'s categories. The workflow has no session of its own.
+    SlackMessage { channel: String, decide: Decide },
+    /// A Slack thread a message workflow's category hands it, which its session answers as a
+    /// mention's session would. It watches no channel of its own.
+    Called,
 }
 
 impl Trigger {
     fn integration(&self) -> &'static str {
         match self {
             Trigger::LinearLabel { .. } => "Linear",
-            Trigger::SlackMention { .. } => "Slack",
+            Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } | Trigger::Called => "Slack",
         }
+    }
+
+    /// Whether the workflow's sessions answer Slack threads, so a category can hand it one.
+    fn answers_threads(&self) -> bool {
+        match self {
+            Trigger::SlackMention { .. } | Trigger::Called => true,
+            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } => false,
+        }
+    }
+}
+
+/// How a message workflow sorts each message, and where each category sends it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Decide {
+    /// A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.
+    pub model: String,
+    pub instructions: String,
+    pub categories: Vec<Category>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Category {
+    pub name: String,
+    /// What the decision model reads to tell this category from the others.
+    pub description: String,
+    /// The id of the `slack-mention` or `called` workflow that then owns the thread. None stops
+    /// at the category.
+    pub workflow: Option<String>,
+    /// A Slack user group, by handle or id, paged in the thread of each message in the category.
+    #[serde(default)]
+    pub mention: Option<String>,
+}
+
+impl Decide {
+    /// The categories as the decision model is asked to choose among them.
+    fn choices(&self, workflow: &str) -> Result<Vec<(&str, &str)>, String> {
+        if self.model.trim().is_empty() {
+            return Err(format!("workflow {workflow:?} has no decision model: pick one in its settings"));
+        }
+        if self.categories.is_empty() {
+            return Err(format!("workflow {workflow:?} has no categories to sort messages into: add one in its settings"));
+        }
+        Ok(self.categories.iter().map(|c| (c.name.as_str(), c.description.as_str())).collect())
     }
 }
 
@@ -221,12 +271,16 @@ impl Connector {
     }
 
     /// Moves a Slack connector's watermark up to `watermark`, and answers whether it moved. A check
-    /// that found a mention leaves it where it is: the mention's run may find no machine, and
-    /// `unclaim` alone doesn't bring back a mention the watermark has passed. Once a session takes
-    /// the mention it is handled, and the next check moves the watermark on.
-    fn advance(&mut self, watermark: DateTime<Utc>, mentioned: bool) -> bool {
+    /// that found a message to open a session for leaves it where it is: the run may find no
+    /// machine, and `unclaim` alone doesn't bring back a message the watermark has passed. Once a
+    /// session takes the message it is handled, and the next check moves the watermark on.
+    fn advance(&mut self, watermark: DateTime<Utc>, opening: bool) -> bool {
+        let watched = match self.trigger {
+            Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } => true,
+            Trigger::LinearLabel { .. } | Trigger::Called => false,
+        };
         let behind = DateTime::parse_from_rfc3339(&self.since).map_or(true, |since| since < watermark);
-        if !matches!(self.trigger, Trigger::SlackMention { .. }) || !behind || mentioned {
+        if !watched || !behind || opening {
             return false;
         }
         self.since = watermark.to_rfc3339();
@@ -291,6 +345,45 @@ impl Store {
         self.connectors.iter().find(|c| c.id == id).ok_or_else(|| "the workflow was deleted".into())
     }
 
+    /// Whether any connector has the Slack thread `key`. A thread gets one session across
+    /// workflows, so a message that both mentions the bot and lands in a routed category starts one.
+    fn handled(&self, key: &str) -> bool {
+        self.connectors.iter().any(|c| c.handled.iter().any(|h| h == key))
+    }
+
+    /// Marks the Slack thread `key` handled by `connector` and answers it, or None when a connector
+    /// already has the thread.
+    fn claim_thread(&mut self, connector: &str, key: &str) -> Option<&mut Connector> {
+        if self.handled(key) {
+            return None;
+        }
+        let c = self.connectors.iter_mut().find(|c| c.id == connector)?;
+        c.handled.push(key.to_owned());
+        Some(c)
+    }
+
+    /// Why `router`'s `category` can't hand its threads to `workflow`, if it can't.
+    fn route(&self, router: &str, category: &str, workflow: &str) -> Result<(), String> {
+        let Some(target) = self.connectors.iter().find(|c| c.id == workflow) else {
+            return Err(format!(
+                "workflow {router:?} hands {category:?} messages to a workflow that was deleted: pick another one for the category in its settings"
+            ));
+        };
+        if !target.enabled {
+            return Err(format!(
+                "workflow {router:?} hands {category:?} messages to workflow {:?}, which is off: turn it on, or pick another one for the category",
+                target.name
+            ));
+        }
+        if !target.trigger.answers_threads() {
+            return Err(format!(
+                "workflow {router:?} hands {category:?} messages to workflow {:?}, which does not answer Slack threads: pick a Slack mention or called workflow for the category",
+                target.name
+            ));
+        }
+        Ok(())
+    }
+
     /// The connector whose session works on the Linear issue `id`, with the thread it answers when a
     /// Slack thread's session filed or took the issue. An issue gets one session across connectors.
     fn working_on(&self, id: &str) -> Option<(&Connector, Option<&str>)> {
@@ -332,8 +425,8 @@ impl Store {
         let mut settled = Settled::default();
         let watermark = now - SLACK_OVERLAP;
         for connector in self.connectors.iter_mut().filter(|c| checked.contains(&c.id)) {
-            let mentioned = found.iter().any(|(id, f)| *id == connector.id && matches!(f, Found::Mention { .. }));
-            settled.changed |= connector.advance(watermark, mentioned);
+            let opening = found.iter().any(|(id, f)| *id == connector.id && f.opens_session());
+            settled.changed |= connector.advance(watermark, opening);
         }
         for (id, found) in found {
             // A Slack thread's session filed or took the issue, or another connector started it.
@@ -353,15 +446,39 @@ impl Store {
                     }
                 }
                 Found::Mention { channel, channel_name, mention, posts } => {
-                    if !connector.claim(key.clone()) {
-                        continue;
-                    }
+                    let Some(connector) = self.claim_thread(&id, &key) else { continue };
                     // The session starts with these messages, so only later ones are passed on.
                     let cursor = posts.last().map_or_else(|| mention.thread.clone(), |p| p.ts.clone());
                     connector.followed.insert(key, Followed { cursor, seen: None, replied: false });
                     let note = mention_note(&mention, now);
                     let run = slack_run(connector, &channel, &channel_name, &mention.thread, &posts, note, exe);
                     settled.work.push(Work::Run(Run { mentioned: vec![mention.ts], ..run }));
+                    settled.changed = true;
+                }
+                Found::Stopped { channel, thread, page } => {
+                    if self.claim_thread(&id, &key).is_some() {
+                        settled.pages.extend(page.map(|text| Page { channel, thread, text, react: true }));
+                        settled.changed = true;
+                    }
+                }
+                Found::Routed { channel, channel_name, thread, category, workflow, posts, page } => {
+                    let router = connector.name.clone();
+                    if let Err(e) = self.route(&router, &category, &workflow) {
+                        // The router keeps the thread, so the error is reported once.
+                        if self.claim_thread(&id, &key).is_some() {
+                            settled.pages.extend(page.map(|text| Page { channel, thread, text, react: true }));
+                            settled.errors.push(e);
+                            settled.changed = true;
+                        }
+                        continue;
+                    }
+                    let Some(target) = self.claim_thread(&workflow, &key) else { continue };
+                    let cursor = posts.last().map_or_else(|| thread.clone(), |p| p.ts.clone());
+                    target.followed.insert(key, Followed { cursor, seen: None, replied: false });
+                    let note = routed_note(&router, &category);
+                    let run = slack_run(target, &channel, &channel_name, &thread, &posts, Some(&note), exe);
+                    settled.work.push(Work::Run(Run { mentioned: vec![thread.clone()], ..run }));
+                    settled.pages.extend(page.map(|text| Page { channel, thread, text, react: false }));
                     settled.changed = true;
                 }
                 Found::Replies { replies, .. } if replies.posts.is_empty() => {
@@ -390,6 +507,8 @@ impl Store {
 #[derive(Default)]
 struct Settled {
     work: Vec<Work>,
+    /// Posted before `work` is handed out, so a category's user group hears first.
+    pages: Vec<Page>,
     /// Whether the store needs saving.
     changed: bool,
     errors: Vec<String>,
@@ -485,6 +604,19 @@ enum Found {
     Mention { channel: String, channel_name: String, mention: slack::Mention, posts: Vec<slack::Post> },
     /// New messages in a thread that already started a session.
     Replies { channel: String, replies: slack::Replies },
+    /// A new message the decision model put in a category without a workflow, which stops there.
+    /// `page` is the reply that pages the category's user group.
+    Stopped { channel: String, thread: String, page: Option<String> },
+    /// A new message the decision model put in `category`, whose `workflow` then owns the thread.
+    Routed {
+        channel: String,
+        channel_name: String,
+        thread: String,
+        category: String,
+        workflow: String,
+        posts: Vec<slack::Post>,
+        page: Option<String>,
+    },
 }
 
 impl Found {
@@ -494,12 +626,36 @@ impl Found {
             Found::Issue(issue) => issue.id.clone(),
             Found::Mention { channel, mention, .. } => thread_key(channel, &mention.thread),
             Found::Replies { channel, replies } => thread_key(channel, &replies.thread),
+            Found::Stopped { channel, thread, .. } | Found::Routed { channel, thread, .. } => thread_key(channel, thread),
+        }
+    }
+
+    /// Whether it starts a session, which a tab may not take.
+    fn opens_session(&self) -> bool {
+        match self {
+            Found::Issue(_) | Found::Mention { .. } | Found::Routed { .. } => true,
+            Found::Replies { .. } | Found::Stopped { .. } => false,
         }
     }
 }
 
 fn thread_key(channel: &str, thread: &str) -> String {
     format!("{channel}:{thread}")
+}
+
+/// A reply that pages a category's Slack user group in the thread of the message it sorted.
+#[derive(Debug, PartialEq)]
+struct Page {
+    channel: String,
+    thread: String,
+    text: String,
+    /// Reacts to the message too, when no session will once a tab takes it.
+    react: bool,
+}
+
+/// What a category's page says: the group's mention, then why it was paged.
+fn page_text(group: &str, category: &Category) -> String {
+    format!("{} {}: {}", slack::group_mention(group), category.name, category.description.trim())
 }
 
 /// A Slack connector's channel as the user typed it, without the `#`.
@@ -631,16 +787,34 @@ impl Connectors {
             }
         }
 
-        let _filing = self.filing.lock().await;
-        let mut store = self.store.lock().unwrap();
-        let settled = store.settle(&checked, found, now, &self.exe);
+        let settled = {
+            let _filing = self.filing.lock().await;
+            let mut store = self.store.lock().unwrap();
+            let settled = store.settle(&checked, found, now, &self.exe);
+            if settled.changed {
+                if let Err(e) = self.save(&store) {
+                    errors.push(e);
+                }
+            }
+            settled
+        };
         errors.extend(settled.errors);
-        if settled.changed {
-            if let Err(e) = self.save(&store) {
+        // The threads are recorded already, so a page that fails is reported, never posted twice.
+        for page in &settled.pages {
+            if let Err(e) = self.page(page).await {
                 errors.push(e);
             }
         }
         (settled.work, (!errors.is_empty()).then(|| errors.join("; ")))
+    }
+
+    async fn page(&self, page: &Page) -> Result<(), String> {
+        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
+        slack::post(&token, &page.channel, &page.thread, &page.text).await?;
+        if page.react {
+            slack::react(&token, &page.channel, &page.thread, slack::WORKING).await?;
+        }
+        Ok(())
     }
 
     /// Gives `work` to the tabs. A thread's cursor moves only once its messages reached a session,
@@ -755,7 +929,7 @@ impl Connectors {
                 // Oldest first, so a thread's first new mention is the one its session answers.
                 for mention in activity.mentions {
                     let key = thread_key(&channel, &mention.thread);
-                    if c.handled.contains(&key) || found.iter().any(|f| f.key() == key) {
+                    if self.store.lock().unwrap().handled(&key) || found.iter().any(|f| f.key() == key) {
                         continue;
                     }
                     let posts = slack::thread(&token, &channel, &mention.thread).await?;
@@ -765,7 +939,67 @@ impl Connectors {
                 found.extend(activity.replies.into_iter().map(|replies| Found::Replies { channel: channel.clone(), replies }));
                 Ok(Some(found))
             }
+            Trigger::SlackMessage { channel: name, decide } => {
+                let bot = self.store.lock().unwrap().slack.as_ref().map(|a| a.user_id.clone());
+                let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
+                let channel = self.channel_id(&token, name).await?;
+                let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
+                let mut messages = slack::messages(&token, &channel, &bot, since).await?;
+                messages.retain(|m| !self.store.lock().unwrap().handled(&thread_key(&channel, &m.ts)));
+                if messages.is_empty() {
+                    return Ok(Some(vec![]));
+                }
+                let key = self.key(VERCEL_KEY).ok_or("the Vercel AI Gateway is not connected: connect it in pinned's Connectors settings")?;
+                let choices = decide.choices(&c.name)?;
+                let pages = self.pages(&token, c, decide).await?;
+                let channel_name = channel_name(name);
+                let mut found = vec![];
+                for message in messages {
+                    let state = json!({ "channel": format!("#{channel_name}"), "author": message.author, "message": message.text });
+                    let chosen = vercel::choose(&key, decide.model.trim(), &decide.instructions, &choices, &state).await?;
+                    let (category, page) = (&decide.categories[chosen], pages[chosen].clone());
+                    found.push(match &category.workflow {
+                        None => Found::Stopped { channel: channel.clone(), thread: message.ts, page },
+                        Some(workflow) => Found::Routed {
+                            posts: slack::thread(&token, &channel, &message.ts).await?,
+                            channel: channel.clone(),
+                            channel_name: channel_name.to_owned(),
+                            thread: message.ts,
+                            category: category.name.clone(),
+                            workflow: workflow.clone(),
+                            page,
+                        },
+                    });
+                }
+                Ok(Some(found))
+            }
+            Trigger::Called => Ok(Some(vec![])),
         }
+    }
+
+    /// The page each of `decide`'s categories posts, by category. A handle that doesn't resolve
+    /// fails the whole check, so no message is recorded before its group can be paged.
+    async fn pages(&self, token: &str, c: &Connector, decide: &Decide) -> Result<Vec<Option<String>>, String> {
+        let mut groups: HashMap<String, String> = HashMap::new();
+        let mut pages = vec![];
+        for category in &decide.categories {
+            let Some(group) = category.mention.as_deref().map(str::trim).filter(|g| !g.is_empty()) else {
+                pages.push(None);
+                continue;
+            };
+            let id = match groups.get(group) {
+                Some(id) => id.clone(),
+                None => {
+                    let id = slack::group_id(token, group)
+                        .await
+                        .map_err(|e| format!("workflow {:?} could not page category {:?}'s group: {e}", c.name, category.name))?;
+                    groups.insert(group.to_owned(), id.clone());
+                    id
+                }
+            };
+            pages.push(Some(page_text(&id, category)));
+        }
+        Ok(pages)
     }
 
     async fn channel_id(&self, token: &str, name: &str) -> Result<String, String> {
@@ -1015,6 +1249,11 @@ fn reply_header(author: &str) -> String {
 /// A later message of the thread, as its session receives it.
 fn reply_block(post: &slack::Post) -> String {
     format!("{}\n{}", reply_header(&post.author), post.text)
+}
+
+/// The note a session opens with when a message workflow's category handed it the thread.
+fn routed_note(router: &str, category: &str) -> String {
+    format!("\n\nWorkflow {router:?} handed you this thread: its decision model put the first message in the category {category:?}.")
 }
 
 /// The note a thread's new session gets when an earlier session of it filed an issue.
@@ -1788,6 +2027,242 @@ mod tests {
             )
         );
         assert!(!prompt(false).contains("Proof"));
+    }
+
+    const THREAD: &str = "C0123ABCD:1792400050.000200";
+    const ROUTED: &str = "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Keep every answer short. Before each `slack reply`, invoke the `pinned:bro` skill on your draft and post the message it gives you, not the draft. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\nThis workflow only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here\n\nWorkflow \"Support router\" handed you this thread: its decision model put the first message in the category \"error\".";
+
+    fn category(name: &str, description: &str, workflow: Option<&str>, mention: Option<&str>) -> Category {
+        Category { name: name.into(), description: description.into(), workflow: workflow.map(Into::into), mention: mention.map(Into::into) }
+    }
+
+    fn router() -> Connector {
+        let decide = Decide {
+            model: "typesafe-ai/jev".into(),
+            instructions: "Categorize this Slack message.".into(),
+            categories: vec![
+                category("error", "Someone reports a bug or an error", Some("c2"), None),
+                category("doubt", "Someone asks a question", Some("c6"), None),
+                category("escalation", "Someone needs an engineer on support now", None, Some("prod-engg")),
+                category("ignore", "Anything else", None, None),
+            ],
+        };
+        Connector {
+            id: "c5".into(),
+            name: "Support router".into(),
+            trigger: Trigger::SlackMessage { channel: "#support".into(), decide },
+            since: "2026-10-19T10:00:00+00:00".into(),
+            ..slack_connector()
+        }
+    }
+
+    fn called() -> Connector {
+        Connector { id: "c6".into(), name: "Answer".into(), trigger: Trigger::Called, ..slack_connector() }
+    }
+
+    fn routed(category: &str, workflow: &str, page: Option<&str>) -> Found {
+        Found::Routed {
+            channel: "C0123ABCD".into(),
+            channel_name: "support".into(),
+            thread: "1792400050.000200".into(),
+            category: category.into(),
+            workflow: workflow.into(),
+            posts: posts().into(),
+            page: page.map(Into::into),
+        }
+    }
+
+    fn stopped(page: Option<&str>) -> Found {
+        Found::Stopped { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), page: page.map(Into::into) }
+    }
+
+    fn mentioned() -> Found {
+        let at = DateTime::parse_from_rfc3339("2026-10-19T10:00:00Z").unwrap().with_timezone(&Utc);
+        let mention = slack::Mention { thread: "1792400050.000200".into(), ts: "1792400050.000200".into(), at };
+        Found::Mention { channel: "C0123ABCD".into(), channel_name: "support".into(), mention, posts: posts().into() }
+    }
+
+    fn checked_at() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-10-19T10:01:00Z").unwrap().with_timezone(&Utc)
+    }
+
+    fn settle(store: &mut Store, found: Vec<(&str, Found)>) -> Settled {
+        let checked: Vec<String> = found.iter().map(|(id, _)| id.to_string()).collect();
+        store.settle(&checked, found.into_iter().map(|(id, f)| (id.to_owned(), f)).collect(), checked_at(), "/bin/pinned")
+    }
+
+    /// The (connector, thread, mentioned) of each run, and the prompt of the last one.
+    fn runs(settled: &Settled) -> (Vec<(String, Subject, Vec<String>)>, String) {
+        let mut prompt = String::new();
+        let runs = settled
+            .work
+            .iter()
+            .map(|w| match w {
+                Work::Run(run) => {
+                    prompt = run.args.last().unwrap().clone();
+                    (run.connector.clone(), run.subject.clone(), run.mentioned.clone())
+                }
+                Work::Delivery(d) => panic!("a delivery for {}", d.connector),
+            })
+            .collect();
+        (runs, prompt)
+    }
+
+    fn thread_subject() -> Subject {
+        Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() }
+    }
+
+    #[test]
+    fn a_routed_message_starts_a_session_of_the_workflow_its_category_names() {
+        let mut store = Store { connectors: vec![router(), slack_connector(), called()], ..Store::default() };
+        let settled = settle(&mut store, vec![("c5", routed("error", "c2", None))]);
+        let (started, prompt) = runs(&settled);
+        assert_eq!(started, [("c2".to_owned(), thread_subject(), vec!["1792400050.000200".to_owned()])]);
+        assert_eq!(prompt, ROUTED);
+        assert_eq!((settled.errors.len(), settled.pages.len(), settled.changed), (0, 0, true));
+        let [kept, target, _] = &store.connectors[..] else { unreachable!() };
+        assert_eq!(target.handled, [THREAD], "the target owns the thread");
+        assert_eq!(target.followed[THREAD], Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
+        assert_eq!((kept.handled.len(), kept.followed.len()), (0, 0), "the router keeps nothing it handed on");
+        assert_eq!(kept.since, "2026-10-19T10:00:00+00:00", "the watermark waits until a session takes the message");
+
+        let mut store = Store { connectors: vec![router(), slack_connector(), called()], ..Store::default() };
+        let (started, _) = runs(&settle(&mut store, vec![("c5", routed("doubt", "c6", None))]));
+        assert_eq!(started, [("c6".to_owned(), thread_subject(), vec!["1792400050.000200".to_owned()])], "a called workflow takes it too");
+        assert_eq!(store.connectors[2].handled, [THREAD]);
+    }
+
+    #[test]
+    fn a_category_without_a_workflow_stops_on_the_router() {
+        let mut store = Store { connectors: vec![router(), slack_connector()], ..Store::default() };
+        let settled = settle(&mut store, vec![("c5", stopped(None))]);
+        assert_eq!((settled.work.len(), settled.pages, settled.errors.len()), (0, vec![], 0));
+        assert_eq!(store.connectors[0].handled, [THREAD]);
+        assert!(!settle(&mut store, vec![("c5", stopped(None))]).changed, "a stopped thread is recorded once");
+    }
+
+    #[test]
+    fn a_category_that_mentions_a_group_pages_it_once() {
+        let escalation = category("escalation", " Someone needs an engineer on support now ", None, Some("prod-engg"));
+        let page = page_text("S0123ABC", &escalation);
+        assert_eq!(page, "<!subteam^S0123ABC> escalation: Someone needs an engineer on support now");
+
+        let mut store = Store { connectors: vec![router(), slack_connector()], ..Store::default() };
+        let settled = settle(&mut store, vec![("c5", stopped(Some(&page)))]);
+        let posted = Page { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), text: page.clone(), react: true };
+        assert_eq!((settled.work.len(), settled.pages, settled.errors.len()), (0, vec![posted], 0), "it stops, pages and reacts");
+        assert_eq!(store.connectors[0].handled, [THREAD]);
+        assert_eq!(settle(&mut store, vec![("c5", stopped(Some(&page)))]).pages, [], "the next check pages no one again");
+
+        let mut store = Store { connectors: vec![router(), slack_connector()], ..Store::default() };
+        let settled = settle(&mut store, vec![("c5", routed("error", "c2", Some(&page)))]);
+        let posted = Page { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), text: page, react: false };
+        assert_eq!((runs(&settled).0.len(), settled.pages), (1, vec![posted]), "the session reacts once a tab takes it");
+    }
+
+    #[test]
+    fn a_target_that_cannot_answer_the_thread_stops_it_on_the_router_with_an_error() {
+        let off = Connector { enabled: false, ..slack_connector() };
+        let linear = Connector { id: "c2".into(), name: "Resolve".into(), ..linear_connector() };
+        let cases = [
+            (vec![router()], "workflow \"Support router\" hands \"error\" messages to a workflow that was deleted: pick another one for the category in its settings"),
+            (vec![router(), off], "workflow \"Support router\" hands \"error\" messages to workflow \"Triage\", which is off: turn it on, or pick another one for the category"),
+            (vec![router(), linear], "workflow \"Support router\" hands \"error\" messages to workflow \"Resolve\", which does not answer Slack threads: pick a Slack mention or called workflow for the category"),
+        ];
+        for (connectors, error) in cases {
+            let mut store = Store { connectors, ..Store::default() };
+            let settled = settle(&mut store, vec![("c5", routed("error", "c2", None))]);
+            assert_eq!((settled.work.len(), settled.errors), (0, vec![error.to_owned()]));
+            assert_eq!(store.connectors[0].handled, [THREAD], "{error}");
+            assert!(store.connectors[1..].iter().all(|c| c.handled.is_empty()), "{error}");
+            assert_eq!(settle(&mut store, vec![("c5", routed("error", "c2", None))]).errors, Vec::<String>::new(), "reported once");
+        }
+        let mut store = Store { connectors: vec![router(), Connector { id: "c7".into(), ..router() }], ..Store::default() };
+        let settled = settle(&mut store, vec![("c5", routed("error", "c7", None))]);
+        assert_eq!(
+            settled.errors,
+            ["workflow \"Support router\" hands \"error\" messages to workflow \"Support router\", which does not answer Slack threads: pick a Slack mention or called workflow for the category"]
+        );
+    }
+
+    #[test]
+    fn a_message_that_mentions_the_bot_and_is_routed_starts_one_session() {
+        let watching = Connector { id: "c3".into(), name: "Mentions".into(), ..slack_connector() };
+        let store = || Store { connectors: vec![router(), slack_connector(), watching.clone()], ..Store::default() };
+
+        let mut routed_first = store();
+        let settled = settle(&mut routed_first, vec![("c5", routed("error", "c2", None)), ("c3", mentioned())]);
+        assert_eq!(runs(&settled).0, [("c2".to_owned(), thread_subject(), vec!["1792400050.000200".to_owned()])]);
+        assert_eq!(routed_first.connectors[2].handled.len(), 0);
+
+        let mut mention_first = store();
+        let settled = settle(&mut mention_first, vec![("c3", mentioned()), ("c5", routed("error", "c2", None))]);
+        assert_eq!(runs(&settled).0, [("c3".to_owned(), thread_subject(), vec!["1792400050.000200".to_owned()])]);
+        assert_eq!(mention_first.connectors[1].handled.len(), 0);
+        assert_eq!(runs(&settle(&mut mention_first, vec![("c5", routed("error", "c2", None))])).0, [], "and later checks start none");
+    }
+
+    #[test]
+    fn a_routed_run_no_tab_took_is_classified_again() {
+        let (connectors, dir) = stored("routed-unclaim", vec![router(), slack_connector()]);
+        let settled = settle(&mut connectors.store.lock().unwrap(), vec![("c5", routed("error", "c2", None))]);
+        let work = settled.work.into_iter().next().unwrap();
+        assert_eq!(
+            block_on(connectors.hand_over(work, &|_| async { false })),
+            Err("could not open a session in /repo; the next check tries again".into())
+        );
+        let mut store = connectors.store.lock().unwrap();
+        assert!(!store.handled(THREAD), "the router's next check asks the decision model again");
+        assert_eq!(store.connectors[0].since, "2026-10-19T10:00:00+00:00", "and still sees the message");
+        let (started, _) = runs(&settle(&mut store, vec![("c5", routed("error", "c2", None))]));
+        assert_eq!(started, [("c2".to_owned(), thread_subject(), vec!["1792400050.000200".to_owned()])]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn message_and_called_triggers_round_trip() {
+        let message = serde_json::json!({
+            "kind": "slack-message", "channel": "support",
+            "decide": { "model": "typesafe-ai/jev", "instructions": "Categorize this Slack message.", "categories": [
+                { "name": "error", "description": "Someone reports a bug or an error", "workflow": "c1793" },
+                { "name": "escalation", "description": "Someone needs an engineer on support now", "workflow": null, "mention": "prod-engg" },
+                { "name": "ignore", "description": "Anything else", "workflow": null },
+            ] },
+        });
+        let trigger: Trigger = serde_json::from_value(message).unwrap();
+        let decide = Decide {
+            model: "typesafe-ai/jev".into(),
+            instructions: "Categorize this Slack message.".into(),
+            categories: vec![
+                category("error", "Someone reports a bug or an error", Some("c1793"), None),
+                category("escalation", "Someone needs an engineer on support now", None, Some("prod-engg")),
+                category("ignore", "Anything else", None, None),
+            ],
+        };
+        assert_eq!(trigger, Trigger::SlackMessage { channel: "support".into(), decide });
+        assert_eq!(
+            serde_json::to_value(&trigger).unwrap()["decide"]["categories"][2],
+            serde_json::json!({ "name": "ignore", "description": "Anything else", "workflow": null, "mention": null })
+        );
+        let json = serde_json::to_value(&trigger).unwrap();
+        assert_eq!(serde_json::from_value::<Trigger>(json).unwrap(), trigger);
+        assert_eq!(serde_json::to_value(Trigger::Called).unwrap(), serde_json::json!({ "kind": "called" }));
+        assert_eq!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "called" })).unwrap(), Trigger::Called);
+        assert!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "slack-message", "channel": "support" })).is_err(), "a message trigger needs its decision");
+    }
+
+    #[test]
+    fn a_decision_needs_a_model_and_categories() {
+        let Trigger::SlackMessage { decide, .. } = router().trigger else { unreachable!() };
+        assert_eq!(decide.choices("Support router").unwrap()[2], ("escalation", "Someone needs an engineer on support now"));
+        assert_eq!(
+            Decide { model: " ".into(), ..decide.clone() }.choices("Support router"),
+            Err("workflow \"Support router\" has no decision model: pick one in its settings".into())
+        );
+        assert_eq!(
+            Decide { categories: vec![], ..decide }.choices("Support router"),
+            Err("workflow \"Support router\" has no categories to sort messages into: add one in its settings".into())
+        );
     }
 
     #[test]
