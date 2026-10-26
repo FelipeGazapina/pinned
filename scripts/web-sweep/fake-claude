@@ -146,23 +146,28 @@ else greet();
 // Settings as claude 2.1 draws them for /usage: under a ▔ rule, with no transcript line. Tab
 // switches the shown tab and Esc closes it.
 const SETTINGS = { Status: ["Version: 2.1.310", "Model: opus"], Usage: ["Current session", "█▌        3% used", "Resets 12:10pm"] };
-// Like claude's renderer, a redraw erases only the lines the screen drew before. Every line fits a
-// phone's terminal, so none wraps and the count stays true.
-let showing = null;
+// Like claude's renderer, a screen under a ▔ rule redraws over the rows it drew before, wrapped
+// ones included, and closing it erases them, so the rule never outlives its screen.
 let drawn = 0;
-const eraseSettings = () => out(drawn ? `\x1b[${drawn}A\r\x1b[J` : "\r\x1b[J");
+const rowsOf = (line) => Math.max(1, Math.ceil(line.replace(/\x1b\[[0-9;]*m/g, "").length / (process.stdout.columns || 80)));
+function eraseScreen() {
+  out(drawn ? `\x1b[${drawn}A\r\x1b[J` : "\r\x1b[J");
+  drawn = 0;
+}
+function drawScreen(lines) {
+  eraseScreen();
+  out(lines.join("\r\n"));
+  drawn = lines.reduce((n, l) => n + rowsOf(l), 0) - 1;
+}
+let showing = null;
 function drawSettings() {
-  eraseSettings();
-  const rows = ["▔".repeat(30), `Settings ${Object.keys(SETTINGS).map((k) => (k === showing ? `\x1b[7m ${k} \x1b[27m` : ` ${k} `)).join(" ")}`, "", ...SETTINGS[showing], "", "Esc to cancel"];
-  out(rows.join("\r\n"));
-  drawn = rows.length - 1;
+  drawScreen(["▔".repeat(30), `Settings ${Object.keys(SETTINGS).map((k) => (k === showing ? `\x1b[7m ${k} \x1b[27m` : ` ${k} `)).join(" ")}`, "", ...SETTINGS[showing], "", "Esc to cancel"]);
 }
 function answerSettings(key) {
   if (key === "\t") showing = showing === "Usage" ? "Status" : "Usage";
   else if (key === "\x1b") {
     showing = null;
-    eraseSettings();
-    drawn = 0;
+    eraseScreen();
     return prompt();
   }
   drawSettings();
@@ -174,7 +179,6 @@ function submit() {
   if (line === "/exit") process.exit(0);
   if (line === "/usage") {
     showing = "Usage";
-    drawn = 0;
     line = "";
     return drawSettings();
   }
@@ -444,9 +448,16 @@ function answerEffort(key) {
 const MODEL_ROWS = [["Default (recommended) ✔", "Sonnet 5.5"], ["Sonnet", "Sonnet 5.5"], ["Fable", "Fable 5.1"], ["Opus", "Opus 5.5"], ["Haiku", "Haiku 5.5"]];
 let modelMenu = 0;
 function drawModels() {
-  out(`${"▔".repeat(60)}\r\n   Select model\r\n   Switch between Claude models. Your pick becomes the default for new sessions.\r\n\r\n`);
-  MODEL_ROWS.forEach(([name, model], i) => out(`   ${i + 1 === modelMenu ? "❯" : " "} ${i + 1}. ${name.padEnd(24)} ${model}\r\n`));
-  out(`\r\n   ${GLYPHS[traits?.effort ?? "medium"]} ${traits?.effort ?? "medium"} effort ←/→ to adjust\r\n   Enter to set as default · s to use this session only · Esc to cancel\r\n`);
+  drawScreen([
+    "▔".repeat(60),
+    "   Select model",
+    "   Switch between Claude models. Your pick becomes the default for new sessions.",
+    "",
+    ...MODEL_ROWS.map(([name, model], i) => `   ${i + 1 === modelMenu ? "❯" : " "} ${i + 1}. ${name.padEnd(24)} ${model}`),
+    "",
+    `   ${GLYPHS[traits?.effort ?? "medium"]} ${traits?.effort ?? "medium"} effort ←/→ to adjust`,
+    "   Enter to set as default · s to use this session only · Esc to cancel",
+  ]);
 }
 function answerModels(key) {
   if (key === "\x1b[B" || key === "\x1b[A") {
@@ -454,6 +465,7 @@ function answerModels(key) {
     return drawModels();
   }
   if (key !== "s" && key !== "\r" && key !== "\x1b") return;
+  eraseScreen();
   if (key !== "\x1b") {
     const name = MODEL_ROWS[modelMenu - 1][1];
     record({ type: "attachment", attachment: { type: "model", identity: { modelId: name, marketingName: name } } });
