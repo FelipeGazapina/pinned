@@ -65,7 +65,7 @@ if (settings.statusLine?.command) {
   });
 }
 
-const KEYS = { "\x1b": "[esc]", "\t": "[tab]", "\x1b[Z": "[shift-tab]", "\x1b[A": "[up]", "\x1b[B": "[down]", "\x1bOA": "[up]", "\x1bOB": "[down]", "\x03": "[ctrl-c]" };
+const KEYS = { "\x1b": "[esc]", "\t": "[tab]", "\x1b[Z": "[shift-tab]", "\x1b[A": "[up]", "\x1b[B": "[down]", "\x1bOA": "[up]", "\x1bOB": "[down]", "\x03": "[ctrl-c]", "\x18": "[ctrl-x]", "\x0b": "[ctrl-k]" };
 const out = (text) => process.stdout.write(text);
 const UNTRUSTED_MARKER = ".untrusted";
 let trusting = fs.existsSync(UNTRUSTED_MARKER) ? 1 : 0;

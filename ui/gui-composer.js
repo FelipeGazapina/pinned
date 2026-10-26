@@ -363,6 +363,7 @@ async function send() {
     return clearComposer(tab);
   }
   if (!text) return;
+  prompts++;
   const draft = prompt.value;
   composer.dataset.sending = "true";
   clearComposer(tab, false);
@@ -393,7 +394,22 @@ function clearComposer(tab, revoke = true) {
   }
 }
 
-const stop = () => active && writeTo(active, "\x1b");
+// Esc ends the turn but leaves background agents and workflows running, so claude's ctrl+x ctrl+k
+// stops them first. Their "stopped by the user" notices then wake claude for a turn of its own,
+// which a second Esc ends, unless a prompt went out in between.
+const KILL_AGENTS = "\x18\x0b";
+let prompts = 0;
+async function stop() {
+  const tab = active;
+  if (!tab) return;
+  const sent = prompts;
+  for (const keys of [KILL_AGENTS, KILL_AGENTS, "\x1b"]) {
+    await writeTo(tab, keys);
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  await new Promise((r) => setTimeout(r, 1200));
+  if (prompts === sent) writeTo(tab, "\x1b");
+}
 
 const escapePath = (p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&");
 
