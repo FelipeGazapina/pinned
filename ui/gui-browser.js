@@ -704,6 +704,7 @@ function renderPip(tab) {
     pipFrame.innerHTML = "";
     return;
   }
+  if (s.kind === "device") return renderDevicePip(tab, s, surfaceTitle(tab, s));
   const own = s.window ? "Close separate window" : "Pop into separate window";
   const controls = `<button type="button" class="icon" data-pip="panel" title="Open in right panel" aria-label="Open in right panel">${icon("panel-right")}</button>
     ${NATIVE_PAGES ? `<button type="button" class="icon${s.window ? " on" : ""}" data-pip="window" title="${own}" aria-label="${own}">${icon("picture-in-picture-2")}</button>` : ""}

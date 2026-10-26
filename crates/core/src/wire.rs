@@ -188,13 +188,16 @@ pub enum Call {
     Ports { tab: TabId },
     /// `Vec<workspace::Editor>` installed on the machine.
     Editors,
-    /// `null`. Opens the tab's folder, or `path` inside its repository, in the editor `editor`.
-    /// With `reveal`, the file manager shows `path` in its folder instead of opening it.
+    /// `null`. Opens the tab's folder, or `path` inside its repository, in the editor `editor`;
+    /// `default` opens it in the app the system picks. `folder` takes `path` from the tab's folder
+    /// instead, and `reveal` shows it in the file manager.
     OpenIn {
         tab: TabId,
         editor: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        folder: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         reveal: bool,
     },
@@ -284,6 +287,24 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// The tab's watched pull request URLs, after starting or stopping the watch on `pr` when given.
+    /// A watched pull request wakes the tab's claude when its checks finish, someone comments, or
+    /// its branch starts to conflict.
+    WatchPr {
+        tab: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pr: Option<String>,
+        #[serde(default)]
+        watching: bool,
+    },
+    /// A loopback URL that serves `path` with the folder around it, for a page that loads its own
+    /// styles and scripts.
+    FileUrl {
+        tab: TabId,
+        path: String,
+        #[serde(default)]
+        root: bool,
+    },
     /// The saved file's new hash. Refused when the file changed since the read that answered `since`.
     WriteFile {
         tab: TabId,
@@ -367,6 +388,18 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         embed: Option<String>,
     },
+    /// Whether new sessions may drive the machine's simulators and emulators, after setting it to
+    /// `allow` when given.
+    DeviceAgents {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow: Option<bool>,
+    },
+    /// What `op` answers, run against the machine's device hub, which starts first when it isn't
+    /// running, and its simulator and emulator tools.
+    Device {
+        #[serde(flatten)]
+        op: crate::device::DeviceOp,
+    },
     /// `Vec<thread::Item>`: the conversation of the subagent the tab's `Agent` tool call `tool` started.
     Subagent { tab: TabId, tool: String },
     /// The folder claude runs in. Restarts the tab's claude on a copy of its conversation that stops before
@@ -420,6 +453,8 @@ impl Call {
                 | Call::Git { .. }
                 | Call::SetWorkspace { .. }
                 | Call::ReadFile { .. }
+                | Call::FileUrl { .. }
+                | Call::WatchPr { .. }
                 | Call::WriteFile { .. }
                 | Call::Search { .. }
                 | Call::PrEdit { .. }
@@ -431,6 +466,8 @@ impl Call {
                 | Call::PrCandidates { .. }
                 | Call::PrStack { .. }
                 | Call::DeviceHub { .. }
+                | Call::Device { .. }
+                | Call::DeviceAgents { .. }
                 | Call::Subagent { .. }
                 | Call::Rewind { .. }
                 | Call::Fork { .. }
@@ -842,8 +879,17 @@ mod tests {
             Call::PrAction { tab: "tab-1".into(), pr: "7".into(), action: PrAction::Ready },
             json!({ "cmd": "pr_action", "tab": "tab-1", "pr": "7", "action": "ready" }),
         );
-        round_trip(Call::OpenIn { tab: "tab-1".into(), editor: "zed".into(), path: None, reveal: false }, json!({ "cmd": "open_in", "tab": "tab-1", "editor": "zed" }));
-        round_trip(Call::OpenIn { tab: "tab-1".into(), editor: "finder".into(), path: Some("src/a.rs".into()), reveal: true }, json!({ "cmd": "open_in", "tab": "tab-1", "editor": "finder", "path": "src/a.rs", "reveal": true }));
+        round_trip(Call::OpenIn { tab: "tab-1".into(), editor: "zed".into(), path: None, folder: false, reveal: false }, json!({ "cmd": "open_in", "tab": "tab-1", "editor": "zed" }));
+        round_trip(
+            Call::Device { op: crate::device::DeviceOp::Screenshot { platform: crate::device::Platform::Android, id: "emulator-5554".into() } },
+            json!({ "cmd": "device", "op": "screenshot", "platform": "android", "id": "emulator-5554" }),
+        );
+        round_trip(Call::Device { op: crate::device::DeviceOp::List }, json!({ "cmd": "device", "op": "list" }));
+        round_trip(
+            Call::OpenIn { tab: "tab-1".into(), editor: "default".into(), path: Some("src/a.rs".into()), folder: true, reveal: true },
+            json!({ "cmd": "open_in", "tab": "tab-1", "editor": "default", "path": "src/a.rs", "folder": true, "reveal": true }),
+        );
+        round_trip(Call::OpenIn { tab: "tab-1".into(), editor: "finder".into(), path: Some("src/a.rs".into()), folder: false, reveal: true }, json!({ "cmd": "open_in", "tab": "tab-1", "editor": "finder", "path": "src/a.rs", "reveal": true }));
     }
 
     #[test]

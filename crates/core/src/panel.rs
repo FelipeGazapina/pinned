@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-const READ_LIMIT: usize = 2_000_000;
+const READ_LIMIT: usize = 1024 * 1024;
 const IMAGE_LIMIT: usize = 8_000_000;
 const PAGE_LIMIT: u64 = 512 * 1024;
 const ICON_LIMIT: u64 = 200 * 1024;
@@ -288,6 +288,7 @@ const IMAGES: &[(&str, &str)] = &[("png", "image/png"), ("jpg", "image/jpeg"), (
 /// The file at `rel`, or as it was at `rev` when one is given.
 pub fn read_file(cwd: &Path, rel: &str, root: bool, rev: Option<&str>) -> Result<FileText, String> {
     let (path, base) = inside(cwd, rel, root)?;
+    let mut size = None;
     let bytes = match rev {
         Some(rev) => {
             check_rev(rev)?;
@@ -307,11 +308,13 @@ pub fn read_file(cwd: &Path, rel: &str, root: bool, rev: Option<&str>) -> Result
                 return Err(format!("{rel} is a folder"));
             }
             let mut bytes = vec![];
-            std::fs::File::open(&real).and_then(|f| f.take(IMAGE_LIMIT as u64 + 1).read_to_end(&mut bytes)).map_err(|e| format!("could not read {rel}: {e}"))?;
+            let file = std::fs::File::open(&real).map_err(|e| format!("could not read {rel}: {e}"))?;
+            size = file.metadata().ok().map(|m| m.len());
+            file.take(IMAGE_LIMIT as u64 + 1).read_to_end(&mut bytes).map_err(|e| format!("could not read {rel}: {e}"))?;
             bytes
         }
     };
-    let size = bytes.len() as u64;
+    let size = size.unwrap_or(bytes.len() as u64);
     let ext = rel.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     if let Some((_, mime)) = IMAGES.iter().find(|(e, _)| *e == ext) {
         return Ok(FileText {
@@ -1035,10 +1038,15 @@ impl DeviceHub {
     /// The hub's address, starting it first when it isn't running. `embed` is the origin of a page
     /// that frames the dashboard, which the hub must allow. The first start downloads the hub.
     pub fn url(&self, embed: Option<&str>, path: Option<&str>) -> Result<String, String> {
+        Ok(format!("http://localhost:{}/", self.port(embed, path)?))
+    }
+
+    /// The hub's port, starting it first when it isn't running.
+    pub fn port(&self, embed: Option<&str>, path: Option<&str>) -> Result<u16, String> {
         let mut running = self.running.lock().unwrap();
         if let Some((child, port)) = running.as_mut() {
             if child.try_wait().ok().flatten().is_none() {
-                return Ok(format!("http://localhost:{port}/"));
+                return Ok(*port);
             }
         }
         let port = std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map_err(|e| e.to_string())?.port();
@@ -1057,7 +1065,7 @@ impl DeviceHub {
         for _ in 0..600 {
             if std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(200)).is_ok() {
                 *running = Some((child, port));
-                return Ok(format!("http://localhost:{port}/"));
+                return Ok(port);
             }
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(format!("the device hub stopped before it started ({status})"));
@@ -1074,6 +1082,148 @@ impl DeviceHub {
             let _ = child.wait();
         }
     }
+}
+
+/// Serves a folder's files over loopback HTTP, so a File tab draws an HTML file with its styles and
+/// scripts, and the Browser opens it, as T3's workspace asset URLs do. Each folder gets a token of
+/// its own as the first part of its URLs, so no page reaches a folder it wasn't handed.
+#[derive(Default)]
+pub struct FileServer {
+    state: std::sync::Arc<std::sync::Mutex<Served>>,
+}
+
+#[derive(Default)]
+struct Served {
+    port: Option<u16>,
+    roots: std::collections::HashMap<String, PathBuf>,
+}
+
+const MIME: &[(&str, &str)] = &[
+    ("html", "text/html; charset=utf-8"),
+    ("htm", "text/html; charset=utf-8"),
+    ("css", "text/css; charset=utf-8"),
+    ("js", "text/javascript; charset=utf-8"),
+    ("mjs", "text/javascript; charset=utf-8"),
+    ("json", "application/json"),
+    ("svg", "image/svg+xml"),
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("webp", "image/webp"),
+    ("ico", "image/x-icon"),
+    ("pdf", "application/pdf"),
+    ("woff", "font/woff"),
+    ("woff2", "font/woff2"),
+    ("txt", "text/plain; charset=utf-8"),
+    ("md", "text/plain; charset=utf-8"),
+    ("wasm", "application/wasm"),
+    ("mp4", "video/mp4"),
+    ("webm", "video/webm"),
+    ("mp3", "audio/mpeg"),
+];
+
+impl FileServer {
+    /// The URL that serves `rel` from the tab's folder, or its repository when `root`.
+    pub fn url(&self, cwd: &Path, rel: &str, root: bool) -> Result<String, String> {
+        let (path, base) = inside(cwd, rel, root)?;
+        let base = base.canonicalize().map_err(|e| e.to_string())?;
+        if !path.canonicalize().map_err(|e| format!("could not read {rel}: {e}"))?.starts_with(&base) {
+            return Err(format!("{rel:?} leads outside the project"));
+        }
+        let mut served = self.state.lock().unwrap();
+        let token = match served.roots.iter().find(|(_, b)| **b == base) {
+            Some((token, _)) => token.clone(),
+            None => {
+                use std::hash::{BuildHasher, Hasher};
+                let part = || {
+                    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+                    h.write(base.as_os_str().as_encoded_bytes());
+                    h.finish()
+                };
+                let token = format!("{:016x}{:016x}", part(), part());
+                served.roots.insert(token.clone(), base);
+                token
+            }
+        };
+        let port = match served.port {
+            Some(port) => port,
+            None => {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+                let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+                let state = self.state.clone();
+                std::thread::spawn(move || {
+                    for stream in listener.incoming().flatten() {
+                        let state = state.clone();
+                        std::thread::spawn(move || serve_file(stream, &state));
+                    }
+                });
+                served.port = Some(port);
+                port
+            }
+        };
+        let path: Vec<String> = rel.split('/').map(percent_encode).collect();
+        Ok(format!("http://127.0.0.1:{port}/{token}/{}", path.join("/")))
+    }
+}
+
+fn percent_encode(part: &str) -> String {
+    part.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+fn percent_decode(part: &str) -> Option<String> {
+    let bytes = part.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            out.push(u8::from_str_radix(part.get(i + 1..i + 3)?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn serve_file(mut stream: std::net::TcpStream, state: &std::sync::Mutex<Served>) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && head.len() < 16 * 1024 {
+        match stream.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => return,
+        }
+    }
+    let head = String::from_utf8_lossy(&head);
+    let target = head.split_whitespace().nth(1).unwrap_or("/");
+    let target = target.split(['?', '#']).next().unwrap_or("/");
+    let mut parts = target.trim_start_matches('/').splitn(2, '/');
+    let token = parts.next().unwrap_or("");
+    let rel = parts.next().and_then(percent_decode).unwrap_or_default();
+    let base = state.lock().unwrap().roots.get(token).cloned();
+    let found = base.and_then(|base| {
+        let rel = if rel.is_empty() || rel.ends_with('/') { format!("{rel}index.html") } else { rel };
+        if !Path::new(&rel).components().all(|c| matches!(c, Component::Normal(_))) {
+            return None;
+        }
+        let real = base.join(&rel).canonicalize().ok()?;
+        let real = if real.is_dir() { real.join("index.html") } else { real };
+        (real.starts_with(&base) && real.is_file()).then_some(real)
+    });
+    let reply = match found.and_then(|f| std::fs::read(&f).ok().map(|b| (f, b))) {
+        Some((file, body)) => {
+            let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            let mime = MIME.iter().find(|(e, _)| *e == ext).map_or("application/octet-stream", |(_, m)| m);
+            let mut reply = format!("HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+            reply.extend(body);
+            reply
+        }
+        None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot found".to_vec(),
+    };
+    let _ = stream.write_all(&reply);
 }
 
 const SHELL_KEEP: usize = 256 * 1024;
@@ -1328,6 +1478,44 @@ mod tests {
         assert_eq!(std::fs::read_to_string(src.join("a.rs")).unwrap(), "fn a() { 2 }\n");
         assert!(write_file(&src, "a.rs", false, "lost", Some(&now.hash)).unwrap_err().contains("changed on disk"));
         assert_eq!(write_file(&src, "a.rs", false, "fn a() { 3 }\n", Some(&saved)).map(drop), Ok(()));
+    }
+
+    #[test]
+    fn the_file_server_serves_a_folder_only_by_its_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let site = dir.path().join("site");
+        std::fs::create_dir_all(site.join("css")).unwrap();
+        std::fs::write(site.join("page one.html"), "<link href=css/a.css>").unwrap();
+        std::fs::write(site.join("css/a.css"), "b{}").unwrap();
+        std::fs::write(dir.path().join("secret"), "no").unwrap();
+        let get = |url: &str| {
+            let rest = url.strip_prefix("http://").unwrap();
+            let (host, path) = rest.split_at(rest.find('/').unwrap());
+            let mut stream = std::net::TcpStream::connect(host).unwrap();
+            write!(stream, "GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n").unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            reply
+        };
+        let server = FileServer::default();
+        let page = server.url(&site, "page one.html", false).unwrap();
+        assert!(page.ends_with("/page%20one.html"), "{page}");
+        let reply = get(&page);
+        assert!(reply.starts_with("HTTP/1.1 200") && reply.contains("text/html") && reply.ends_with("<link href=css/a.css>"), "{reply}");
+        assert!(get(&page.replace("page%20one.html", "css/a.css")).ends_with("b{}"));
+        assert!(get(&page.replace("page%20one.html", "../secret")).starts_with("HTTP/1.1 404"));
+        assert!(get(&page.replace("page%20one.html", "%2E%2E/secret")).starts_with("HTTP/1.1 404"));
+        let token = page.split('/').nth(3).unwrap();
+        assert!(get(&page.replace(token, "0000")).starts_with("HTTP/1.1 404"));
+        assert!(server.url(&site, "../secret", false).unwrap_err().contains("not a path inside"));
+    }
+
+    #[test]
+    fn a_file_past_a_megabyte_shows_its_first_megabyte_and_its_whole_size() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("big.log"), "x".repeat(3 * 1024 * 1024)).unwrap();
+        let big = read_file(dir.path(), "big.log", false, None).unwrap();
+        assert_eq!((big.truncated, big.size, big.text.map(|t| t.len())), (true, 3 * 1024 * 1024, Some(1024 * 1024)));
     }
 
     #[test]

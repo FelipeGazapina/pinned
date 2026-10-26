@@ -59,8 +59,8 @@ pub enum Item {
     Fork { id: String, at: String, source: String },
     /// Output of a local command such as `/model`, which claude shows without a turn.
     Note { id: String, at: String, text: String },
-    /// A pull request the session opened or worked on.
-    Pr { number: u64, url: String, repo: String },
+    /// A pull request the session opened or worked on, linked at `at`.
+    Pr { number: u64, url: String, repo: String, at: String },
     /// The model the session runs from here on, by its marketing name, such as `Haiku 5.5`.
     Model { name: String },
 }
@@ -321,7 +321,7 @@ pub(crate) fn items_of(line: &Value) -> Vec<Item> {
     let at = str_of(&line["timestamp"]);
     match line["type"].as_str() {
         Some("pr-link") => match line["prNumber"].as_u64() {
-            Some(number) => vec![Item::Pr { number, url: str_of(&line["prUrl"]), repo: str_of(&line["prRepository"]) }],
+            Some(number) => vec![Item::Pr { number, url: str_of(&line["prUrl"]), repo: str_of(&line["prRepository"]), at }],
             None => vec![],
         },
         Some("user") if line["isCompactSummary"].as_bool() == Some(true) => vec![],
@@ -608,7 +608,7 @@ mod tests {
             r#"{"type":"assistant","uuid":"a1","timestamp":"2026-10-23T10:00:05Z","message":{"content":[{"type":"thinking","thinking":""},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test","description":"Run the tests"}}]}}"#,
             r#"{"type":"user","uuid":"u2","timestamp":"2026-10-23T10:00:09Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok","is_error":false}]}}"#,
             r#"{"type":"assistant","uuid":"a2","timestamp":"2026-10-23T10:01:00Z","message":{"content":[{"type":"text","text":"Fixed."}]}}"#,
-            r#"{"type":"pr-link","prNumber":7,"prUrl":"https://github.com/o/r/pull/7","prRepository":"o/r"}"#,
+            r#"{"type":"pr-link","prNumber":7,"prUrl":"https://github.com/o/r/pull/7","prRepository":"o/r","timestamp":"2026-10-23T10:02:00Z"}"#,
             r#"{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"claude-haiku-5-5","marketingName":"Haiku 5.5"}}}"#,
             r#"{"type":"attachment","attachment":{"type":"hook_success","content":"x"}}"#,
         ])
@@ -620,7 +620,7 @@ mod tests {
                 Item::Tool { id: "t1".into(), at: "2026-10-23T10:00:05Z".into(), name: "Bash".into(), summary: "cargo test".into(), detail: "cargo test".into(), args: vec![] },
                 Item::Result { tool: "t1".into(), at: "2026-10-23T10:00:09Z".into(), error: false, text: "ok".into(), links: vec![] },
                 Item::Text { id: "a2:0".into(), at: "2026-10-23T10:01:00Z".into(), text: "Fixed.".into() },
-                Item::Pr { number: 7, url: "https://github.com/o/r/pull/7".into(), repo: "o/r".into() },
+                Item::Pr { number: 7, url: "https://github.com/o/r/pull/7".into(), repo: "o/r".into(), at: "2026-10-23T10:02:00Z".into() },
                 Item::Model { name: "Haiku 5.5".into() },
             ]
         );

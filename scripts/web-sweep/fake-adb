@@ -1,0 +1,29 @@
+#!/usr/bin/env node
+// Stands in for `adb` and `emulator` on the sweep's node: `emulator -list-avds` names a Pixel that
+// runs and a tablet that is off, and `adb -s <serial> shell ...` keeps the settings it is given in
+// $HOME/.fake-adb.json so a read answers what was set. Every call goes to $HOME/adb.log.
+const fs = require("fs");
+const path = require("path");
+
+const args = process.argv.slice(2);
+const tool = path.basename(process.argv[1]);
+fs.appendFileSync(path.join(process.env.HOME, "adb.log"), `${tool} ${args.join(" ")}\n`);
+if (tool === "emulator") {
+  if (args[0] === "-list-avds") process.stdout.write("Pixel_9\nTablet_10\n");
+  process.exit(0);
+}
+if (args[0] === "version") return process.stdout.write("Android Debug Bridge version 1.0.41\n");
+const file = path.join(process.env.HOME, ".fake-adb.json");
+const state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : { night: "no", font_scale: "1.0", animator_duration_scale: "1", wifi_on: "1" };
+const keep = () => fs.writeFileSync(file, JSON.stringify(state));
+const shell = args[0] === "-s" && args[2] === "shell" ? args.slice(3).join(" ") : "";
+let m;
+if (shell === "cmd uimode night") process.stdout.write(`Night mode: ${state.night}\n`);
+else if ((m = /^cmd uimode night (yes|no)$/.exec(shell))) (state.night = m[1]), keep();
+else if ((m = /^settings get (?:system|global) (\w+)$/.exec(shell))) process.stdout.write(`${state[m[1]] ?? "null"}\n`);
+else if ((m = /^settings put (?:system|global) (\w+) (\S+)$/.exec(shell))) (state[m[1]] = m[2]), keep();
+else if ((m = /^svc wifi (enable|disable)$/.exec(shell))) (state.wifi_on = m[1] === "enable" ? "1" : "0"), keep();
+else if (shell === "dumpsys window") process.stdout.write(`  mCurrentFocus=Window{4f2a u0 ${state.front ?? "com.android.launcher3"}/.Main}\n`);
+else if (shell === "wm size") process.stdout.write("Physical size: 1080x2400\n");
+else if ((m = /^monkey -p (\S+) /.exec(shell))) (state.front = m[1]), keep();
+else if ((m = /^am force-stop (\S+)$/.exec(shell)) && state.front === m[1]) delete state.front, keep();

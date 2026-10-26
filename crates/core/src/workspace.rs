@@ -490,10 +490,19 @@ pub fn editors(home: &Path, path: Option<&str>) -> Vec<Editor> {
     EDITORS.iter().filter(|e| editor_at(e.0, home, path).is_some()).map(|&(id, n, ..)| Editor { id, name: name(id, n) }).collect()
 }
 
-/// Opens `cwd`, or `file` inside its repository, in the editor `id`. The file manager opens a file
-/// in its default app, or with `reveal` shows it selected in its folder.
-pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, reveal: bool, home: &Path, path: Option<&str>) -> Result<(), String> {
-    let editor = editor_at(id, home, path).ok_or_else(|| format!("{id} isn't installed on this machine"))?;
+#[derive(Clone, Copy, Default)]
+pub struct OpenHow {
+    /// `file` is from `cwd` rather than its repository's top.
+    pub folder: bool,
+    /// Shows `file` in the file manager instead of opening it.
+    pub reveal: bool,
+}
+
+/// Opens `cwd`, or `file` inside its repository, in the editor `id`. `default` opens it with the
+/// app the system picks for it, and the file manager, `default` or `finder`, shows it selected in its
+/// folder with `how.reveal`.
+pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, how: OpenHow, home: &Path, path: Option<&str>) -> Result<(), String> {
+    let editor = if id == "default" { None } else { Some(editor_at(id, home, path).ok_or_else(|| format!("{id} isn't installed on this machine"))?) };
     let target = match file {
         None => cwd.to_owned(),
         Some(file) => {
@@ -501,11 +510,11 @@ pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, reveal: bool, home: &Pa
             if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
                 return Err(format!("{file:?} is not a path inside the project"));
             }
-            let top = run(cwd, None, "git", &["rev-parse", "--show-toplevel"]).map(|t| PathBuf::from(t.trim())).unwrap_or_else(|_| cwd.to_owned());
+            let top = if how.folder { cwd.to_owned() } else { run(cwd, None, "git", &["rev-parse", "--show-toplevel"]).map(|t| PathBuf::from(t.trim())).unwrap_or_else(|_| cwd.to_owned()) };
             top.join(rel)
         }
     };
-    let (program, args) = open_command(cfg!(target_os = "macos"), id, &editor, &target, reveal);
+    let (program, args) = open_command(cfg!(target_os = "macos"), cfg!(windows), id, editor.as_deref(), &target, how.reveal);
     let mut command = crate::process::command(program);
     command.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(path) = path {
@@ -516,16 +525,24 @@ pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, reveal: bool, home: &Pa
     Ok(())
 }
 
-/// The program and arguments that open `target` in the editor `id`, found at `editor`.
-fn open_command(mac: bool, id: &str, editor: &Path, target: &Path, reveal: bool) -> (PathBuf, Vec<PathBuf>) {
-    let finder = id == "finder";
-    match (mac, finder, reveal) {
-        (true, true, true) => ("open".into(), vec!["-R".into(), target.to_owned()]),
-        (true, true, false) => ("open".into(), vec![target.to_owned()]),
-        (true, false, _) => ("open".into(), vec!["-a".into(), editor.to_owned(), target.to_owned()]),
-        (false, true, true) => (editor.to_owned(), vec![target.parent().unwrap_or(target).to_owned()]),
-        (false, _, _) => (editor.to_owned(), vec![target.to_owned()]),
+/// The program and arguments that open `target` in the editor `id`, found at `editor`, or with no
+/// editor in the app the system picks. The file manager, `finder` or no editor, shows `target`
+/// selected in its folder with `reveal`.
+fn open_command(mac: bool, windows: bool, id: &str, editor: Option<&Path>, target: &Path, reveal: bool) -> (PathBuf, Vec<PathBuf>) {
+    let manager = editor.is_none() || id == "finder";
+    if mac {
+        return match editor {
+            _ if manager && reveal => ("open".into(), vec!["-R".into(), target.to_owned()]),
+            Some(editor) if !manager => ("open".into(), vec!["-a".into(), editor.to_owned(), target.to_owned()]),
+            _ => ("open".into(), vec![target.to_owned()]),
+        };
     }
+    if windows && manager {
+        let arg = if reveal { format!("/select,{}", target.display()) } else { target.display().to_string() };
+        return ("explorer".into(), vec![arg.into()]);
+    }
+    let program = editor.map_or_else(|| "xdg-open".into(), Path::to_owned);
+    (program, vec![if manager && reveal { target.parent().unwrap_or(target) } else { target }.to_owned()])
 }
 
 pub(crate) enum Failure {
@@ -717,12 +734,14 @@ mod tests {
     fn editors_open_only_known_ids_and_paths_inside_the_project() {
         let dir = tempfile::tempdir().unwrap();
         let empty = dir.path().to_str().unwrap();
-        assert!(open_in(dir.path(), "notepad", None, false, dir.path(), Some(empty)).unwrap_err().contains("isn't installed"));
+        assert!(open_in(dir.path(), "notepad", None, OpenHow::default(), dir.path(), Some(empty)).unwrap_err().contains("isn't installed"));
         for path in ["../secret", "/etc/passwd", "a/../../b"] {
-            let err = open_in(dir.path(), "finder", Some(path), false, dir.path(), Some(empty));
+            let err = open_in(dir.path(), "finder", Some(path), OpenHow::default(), dir.path(), Some(empty));
             if cfg!(target_os = "macos") {
                 assert!(err.unwrap_err().contains("not a path inside"), "{path}");
             }
+            let err = open_in(dir.path(), "default", Some(path), OpenHow { folder: true, reveal: true }, dir.path(), Some(empty));
+            assert!(err.unwrap_err().contains("not a path inside"), "{path}");
         }
         assert!(pr_action(dir.path(), "--admin", PrAction::Merge, None).unwrap_err().contains("is not a pull request"));
     }
@@ -731,7 +750,7 @@ mod tests {
     fn the_file_manager_opens_a_file_in_its_app_or_reveals_it() {
         let file = Path::new("/w/src/a.rs");
         let run = |mac, id, editor: &str, reveal| {
-            let (program, args) = open_command(mac, id, Path::new(editor), file, reveal);
+            let (program, args) = open_command(mac, false, id, Some(Path::new(editor)), file, reveal);
             [program].into_iter().chain(args).map(|a| a.display().to_string()).collect::<Vec<_>>().join(" ")
         };
         assert_eq!(run(true, "finder", "/System/Library/CoreServices/Finder.app", true), "open -R /w/src/a.rs");
@@ -740,6 +759,15 @@ mod tests {
         assert_eq!(run(false, "finder", "/usr/bin/xdg-open", true), "/usr/bin/xdg-open /w/src");
         assert_eq!(run(false, "finder", "/usr/bin/xdg-open", false), "/usr/bin/xdg-open /w/src/a.rs");
         assert_eq!(run(false, "zed", "/usr/bin/zed", true), "/usr/bin/zed /w/src/a.rs");
+        let default = |mac, windows, reveal| {
+            let (program, args) = open_command(mac, windows, "default", None, file, reveal);
+            [program].into_iter().chain(args).map(|a| a.display().to_string()).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(default(true, false, false), "open /w/src/a.rs");
+        assert_eq!(default(true, false, true), "open -R /w/src/a.rs");
+        assert_eq!(default(false, true, true), "explorer /select,/w/src/a.rs");
+        assert_eq!(default(false, false, false), "xdg-open /w/src/a.rs");
+        assert_eq!(default(false, false, true), "xdg-open /w/src");
     }
 
     #[test]
