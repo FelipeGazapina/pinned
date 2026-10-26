@@ -273,7 +273,10 @@ canvas, as in n8n: the trigger on the left, marked ⚡, then each step it runs, 
 event that leads to it. Click a step to set it up in the panel beside the canvas, and press
 Esc or ✕ to close the panel. A dashed **＋** step is optional and off: click it to add it, and
 **Remove step** turns it off again. A **!** marks a step that is missing something, and saving
-opens that step. ⌘S saves. **＋ New workflow** asks what starts the agent and opens a flow
+opens that step. ⌘S saves. Drag the empty canvas to move around it, and zoom with ⌘ and the
+wheel, a trackpad pinch, or the buttons in its bottom-left corner, where ⛶ fits the whole flow.
+A **＋** at the end of the flow lists the optional steps that are off, and a **＋** after a
+category that stops opens what that category does next. **＋ New workflow** asks what starts the agent and opens a flow
 filled with defaults: a Linear label, a Slack mention, any message in a Slack channel sorted by
 a decision model, or another workflow.
 
@@ -400,7 +403,13 @@ A mention reaches a whole team, so pinned sends one only when it is needed:
 - A thread is mentioned once, however often it is sorted again.
 - After a mention in a channel, the same workflow mentions no one there for 30 minutes. A new
   message in that category gets the reply `Already escalated to @prod-engg: <link>`, which
-  links the thread that was mentioned and notifies no one.
+  links the thread that was mentioned and notifies no one. A thread gets that reply once.
+
+**When the model is less than 60% sure**, under the categories, picks where a message goes when
+the model is unsure of its own choice. **Use its best guess**, the default, keeps the model's
+choice. A category sends unsure messages there instead, and the session it starts is told what
+the model guessed and how sure it was. The fallback can't mention a group: give the chosen
+category a mention, and saving sets the fallback back to **Use its best guess**.
 
 pinned checks the channel every minute and sorts each message once. A message that also
 mentions the bot in a channel that a Slack mention workflow watches starts one session, not
