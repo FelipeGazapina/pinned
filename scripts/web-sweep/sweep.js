@@ -839,7 +839,7 @@ async function sweep(profileName) {
     const first = await stepLine("Check the tests");
     await waitFor("the card's step to move on", async () => (await stepLine("Check the tests")) !== first, 5000);
     const later = await stepLine("Check the tests");
-    check(/^Run test batch \d$/.test(later), `the step line reads ${later}`);
+    check(/^cargo test batch_\d$/.test(later), `the step line reads ${later}`);
     await waitFor("claude's turn to end", () => page.evaluate(() => statusOf(active) === "done"), 5000);
     check((await page.evaluate(() => phaseOf(active))) === "delegating", `the phase is ${await page.evaluate(() => phaseOf(active))}`);
     check(/^Worked for /.test(await lastTurn(".work > summary").textContent()), "the turn's own work did not settle");
@@ -1074,7 +1074,7 @@ async function sweep(profileName) {
     await settingsNav("appearance");
     const resetTypography = () =>
       page.evaluate(() => {
-        for (const name of ["ui-size", "prompt-size", "terminal-size", "sans-font", "mono-font", "advanced", "smoothing", "word-wrap"]) save(`look-${name}`, "");
+        for (const name of ["ui-size", "prompt-size", "terminal-size", "sans-font", "mono-font", "advanced", "smoothing", "word-wrap"]) localStorage.removeItem(`look-${name}`);
         applyLooks();
         if (settingsOpen()) toggleSettings();
       });
@@ -1701,7 +1701,7 @@ async function sweep(profileName) {
       const cover = await page.evaluate(() => [Object.values(document.getElementById("settings").getBoundingClientRect().toJSON()).slice(0, 4).map(Math.round).join(","), `${innerWidth},${innerHeight}`]);
       check(cover[0].startsWith("0,0,") && cover[0].endsWith(cover[1]), `Settings doesn't cover the window: ${cover.join(" in ")}`);
       const sections = await page.locator("#settings-nav .links button").allTextContents();
-      check(sections.join(",") === "General,Appearance,Projects,Connectors,Workflows,Account,Machines,Archive", `sections: ${sections.join(", ")}`);
+      check(sections.join(",") === "General,Appearance,Projects,Keybindings,Connectors,Accounts,Workflows,Account,Machines,Archive", `sections: ${sections.join(", ")}`);
       check((await page.locator("#settings-nav .links button svg").count()) === sections.length, "a section lacks its icon");
       check((await page.locator('#settings-nav [data-page="general"].active').count()) === 1, "General isn't marked");
       check((await page.locator("#settings-nav .settings-search input").getAttribute("placeholder")) === "Search", "no Search settings box");
