@@ -257,5 +257,33 @@
     return [ok, seen];
   });
 
+  await step("a diff file's name opens a native menu with Open, Reveal in Finder and Open with", async () => {
+    const tab = active;
+    setDiffState(tab, { scope: "base", base: null });
+    openSurface("diff");
+    let title = null;
+    for (let i = 0; i < 60 && !(title = panelBody.querySelector(".diff[data-comments] .file > header .path")); i++) await sleep(250);
+    for (let i = 0; i < 20 && !editorsOn(tab.machine).length; i++) await sleep(250);
+    const { Menu } = TAURI.menu;
+    const make = Menu.new;
+    let built = null;
+    Menu.new = async (opts) => {
+      const menu = await make.call(Menu, opts);
+      menu.popup = async () => {};
+      return (built = menu);
+    };
+    try {
+      title?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
+      for (let i = 0; i < 40 && !built; i++) await sleep(100);
+    } finally {
+      Menu.new = make;
+    }
+    const items = built ? await built.items() : [];
+    const labels = await Promise.all(items.map((i) => i.text()));
+    const withList = items[2]?.items ? await Promise.all((await items[2].items()).map((i) => i.text())) : [];
+    const ok = labels.join("|") === "Open|Reveal in Finder|Open with" && withList.length > 0 && !withList.includes("Finder");
+    return [ok, { file: title?.textContent, labels, withList }];
+  });
+
   await fetch(`${base}/done`, { method: "POST" });
 })();

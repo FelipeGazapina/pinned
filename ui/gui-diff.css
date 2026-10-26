@@ -1,0 +1,76 @@
+/* The Diff surface as T3 Code draws it with @pierre/diffs and @pierre/trees. */
+#pierre-diffs-sprite { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
+
+/* createFileHeaderElement.js and StyledDiffCodeView.tsx: chevron, change icon, renamed-from, name. */
+.file > header .fold { display: grid; place-items: center; width: 20px; height: 20px; margin-left: -2px; flex: none; color: var(--g-blue); border-radius: 6px; }
+.file > header .fold .i { width: 16px; height: 16px; }
+.file > header .change { width: 16px; height: 16px; flex: none; fill: currentColor; color: var(--g-blue); }
+.file[data-status="added"] > header :is(.fold, .change) { color: var(--g-add); }
+.file[data-status="deleted"] > header :is(.fold, .change) { color: var(--g-del); }
+.file > header .from { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; line-height: 16px; opacity: 0.7; }
+.file > header .moved { width: 16px; height: 16px; flex: none; fill: currentColor; }
+.file > header .path { cursor: pointer; transition: color 120ms ease; }
+.file > header .path:hover { color: color-mix(in srgb, var(--g-fg) 84%, var(--g-primary)); }
+.file > header .partial { display: grid; place-items: center; width: 20px; height: 20px; flex: none; color: var(--g-muted); }
+.file > header .partial .i { width: 12px; height: 12px; }
+.file > header :is(.add, .del) { font: 11px/1 var(--g-mono); font-variant-numeric: tabular-nums; }
+.file > header .del + .add { margin-left: 1ch; }
+
+.file-waiting { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 10px 48px; }
+.file-waiting span { display: block; height: 12px; border-radius: 999px; background: var(--g-accent); animation: skeleton 1.4s ease-in-out infinite; }
+
+/* createSeparator.js: pierre's chevrons in the gutter, two stacked when a stretch has both sides. */
+.gap .gutter { gap: 0; }
+.gap .expand { width: 32px; height: 24px; border-radius: 0; }
+.gap .expand .i { width: 16px; height: 16px; fill: currentColor; stroke: none; }
+.gap .expand[data-expand="bottom"] .i { transform: scaleY(-1); }
+.gap .label { cursor: pointer; }
+@media (pointer: fine) {
+  .gap.multi .gutter { flex-direction: column; justify-content: stretch; align-self: stretch; }
+  .gap.multi .expand { height: 12px; }
+  .gap.multi .expand .i { width: 12px; height: 12px; }
+}
+
+#panel-body.line-selecting .diff { user-select: none; -webkit-user-select: none; }
+
+/* DiffCommentAnnotation.tsx: a saved comment, and the draft with no box of its own. */
+.dcomment > .i { width: 14px; height: 20px; margin-top: 0; color: rgb(var(--g-primary-rgb) / 0.7); }
+.dcomment.draft { margin: 0; padding: 8px 12px; border: 0; background: none; gap: 6px; }
+.dcomment.draft .hint { margin-right: auto; color: rgb(var(--g-muted-rgb) / 0.7); }
+.dcomment .row { gap: 4px; }
+.dcomment .row .ghost { padding: 0 8px; border-radius: 6px; color: var(--g-muted); background: none; }
+.dcomment .row .ghost:hover { background: var(--g-hover); color: var(--g-fg); }
+.dcomment .row .primary[disabled] { opacity: 0.5; pointer-events: none; }
+
+/* RefreshIcon.tsx spins while the diff is fetched again. */
+.diff-bar .refreshing .i { animation: diff-refresh 1s linear infinite; }
+@keyframes diff-refresh { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .diff-bar .refreshing .i { animation: none; }
+}
+
+/* @pierre/trees at the compact density, with T3's pierre-tree-theme.ts overrides. */
+.file-tree { padding: 0 12.8px 16px; color: var(--g-fg); font: 12px var(--g-sans); }
+.file-tree header { height: 40px; gap: 4px; padding: 0 8px; margin: 0 -12.8px; border-bottom: 1px solid rgb(var(--g-ink-rgb) / 0.036); color: var(--g-muted); font-weight: 400;
+  position: sticky; top: 0; z-index: 1; background: var(--g-canvas); }
+.file-tree header .title { padding: 0 4px; font-weight: 500; color: var(--g-fg); }
+.file-tree header .count { margin-left: auto; font-variant-numeric: tabular-nums; }
+.file-tree :is(.dir, .leaf) { position: relative; gap: 4.8px; height: 24px; margin: 0 1.6px; padding: 0 6.4px; border-radius: 6px; color: inherit; width: calc(100% - 3.2px); }
+.file-tree :is(.dir, .leaf):hover { background: color-mix(in srgb, currentColor 7%, transparent); }
+.file-tree .leaf.picked { background: color-mix(in srgb, currentColor 12%, transparent); }
+.file-tree .guides { display: flex; align-self: stretch; padding-left: 7.5px; }
+.file-tree .guides span { width: 0; border-left: 1px solid color-mix(in lab, var(--g-tree-muted) 25%, transparent); margin-right: 5.4px; opacity: 0; transition: opacity 0.15s; }
+.file-tree .guides span + span { margin-left: 12.3px; }
+.file-tree:hover .guides span { opacity: 0.75; }
+.file-tree .dir .chevron { width: 16px; height: 16px; flex: none; color: var(--g-tree-muted); fill: currentColor; stroke: none; transform: translateY(0.8px); }
+.file-tree .dir[aria-expanded="false"] .chevron { transform: rotate(-90deg); }
+.file-tree .leaf .ficon { width: 16px; height: 16px; flex: none; }
+.file-tree .name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.file-tree .git { flex: none; display: flex; align-items: center; justify-content: center; width: 12px; margin-left: auto; font-weight: 600; }
+.file-tree .dir .git { color: var(--g-tree-modified); opacity: 0.5; }
+.file-tree .dir .git svg { width: 6px; height: 6px; fill: currentColor; }
+.file-tree .leaf[data-git="added"] { --git: var(--g-tree-added); }
+.file-tree .leaf[data-git="modified"] { --git: var(--g-tree-modified); }
+.file-tree .leaf[data-git="renamed"] { --git: var(--g-tree-renamed); }
+.file-tree .leaf[data-git="deleted"] { --git: var(--g-tree-deleted); }
+.file-tree .leaf :is(.name, .git) { color: var(--git); }

@@ -588,7 +588,7 @@ function diffState(tab) {
     try {
       saved = JSON.parse(load(`gui-diff:${threadKey(tab)}`));
     } catch {}
-    t.diff = { scope: "turn", turn: null, base: null, ...saved };
+    t.diff = { scope: "base", turn: null, base: null, ...saved };
   }
   return t.diff;
 }
@@ -611,10 +611,11 @@ const shortTime = (unix) => {
   return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString([], { month: "short", day: "numeric" });
 };
 
-async function fetchGitDiff(tab, scope, base) {
+/** `again` asks once more while the diff on screen stays, as T3's Refresh does. */
+async function fetchGitDiff(tab, scope, base, again = false) {
   const t = threadOf(tab);
   const key = `${scope}:${base ?? ""}:${ui.diffHideSpace}`;
-  if (t.gitDiff?.key === key) return;
+  if (t.gitDiff?.key === key && (!again || t.gitDiff.loading)) return;
   t.gitDiff = { key, loading: true, data: t.gitDiff?.key === key ? t.gitDiff.data : null };
   try {
     t.gitDiff = { key, data: await callOn(tab.machine, { cmd: "diff", tab: tab.view.id, scope, ignore_whitespace: ui.diffHideSpace, ...(base ? { base } : {}) }) };
@@ -671,7 +672,7 @@ function scopeButton(tab) {
   const d = diffState(tab);
   const turns = threadOf(tab).history ?? [];
   const index = turns.findIndex((h) => h.ended === d.turn);
-  const label = d.scope === "base" ? "Changes" : d.scope === "uncommitted" ? "Uncommitted" : index >= 0 ? `Turn ${index + 1}` : "Latest turn";
+  const label = d.scope === "base" ? "Changes" : d.scope === "uncommitted" ? "Uncommitted" : index >= 0 && index < turns.length - 1 ? `Turn ${index + 1}` : "Latest turn";
   const data = threadOf(tab).gitDiff?.data;
   const base = d.scope === "base" && data?.base
     ? `<span class="refs" title="${esc(`${threadOf(tab).workspace?.branch ?? "HEAD"} → ${data.base}`)}"><span class="head">${esc(threadOf(tab).workspace?.branch ?? "HEAD")}</span>${icon("arrow-right")}<button type="button" class="base-pick" data-base-pick aria-label="Change comparison target. Currently ${esc(data.base)}">${esc(data.base)}${icon("chevron-down")}</button></span>`
@@ -682,16 +683,21 @@ function scopeButton(tab) {
 function scopeMenu(tab) {
   const d = diffState(tab);
   const turns = threadOf(tab).history ?? [];
+  // A git scope picked again is fetched again, keeping what it showed until the answer comes.
   const pick = (change) => () => {
     setDiffState(tab, change);
     ui.selection = null;
+    if (change.scope !== "turn") fetchGitDiff(tab, change.scope, change.scope === "base" ? d.base : null, true);
     renderPanel();
   };
+  const latest = turns.at(-1);
+  const chosen = d.scope === "turn" ? turns.find((h) => h.ended === d.turn) ?? latest : null;
+  // DiffPanel.tsx: the newest turn first; "Latest turn" picks it, and reads so while it is the newest.
   return [
     { label: "Changes", radio: true, checked: d.scope === "base", run: pick({ scope: "base" }) },
     { label: "Uncommitted", radio: true, checked: d.scope === "uncommitted", run: pick({ scope: "uncommitted" }) },
-    { label: "Latest turn", radio: true, checked: d.scope === "turn" && d.turn == null, disabled: !turns.length, run: pick({ scope: "turn", turn: null }) },
-    { label: "Turn", disabled: !turns.length, sub: turns.map((h, i) => ({ label: `Turn ${i + 1}`, radio: true, hint: shortTime(h.ended), checked: d.scope === "turn" && d.turn === h.ended, run: pick({ scope: "turn", turn: h.ended }) })) },
+    { label: "Latest turn", radio: true, checked: !!chosen && chosen === latest, disabled: !turns.length, run: pick({ scope: "turn", turn: latest?.ended ?? null }) },
+    { label: "Turn", disabled: !turns.length, sub: turns.map((h, i) => ({ label: `Turn ${i + 1}`, radio: true, hint: shortTime(h.ended), checked: chosen === h, run: pick({ scope: "turn", turn: h.ended }) })).reverse() },
   ];
 }
 
@@ -735,13 +741,14 @@ function renderDiffPanel() {
   let files = null;
   let note = "";
   let empty = "";
+  let cut = false;
   if (d.scope !== "turn") {
     fetchGitDiff(tab, d.scope, d.scope === "base" ? d.base : null);
     const g = t.gitDiff;
     if (g?.error) empty = esc(g.error);
     else if (g?.data) {
       files = parseDiff(g.data.patch);
-      if (g.data.truncated) note = "This preview exceeds the size limit, so its end is cut.";
+      cut = g.data.truncated;
       if (!files.length) empty = "No net changes in this selection.";
     }
   } else if (!history) fetchHistory(tab);
@@ -750,13 +757,15 @@ function renderDiffPanel() {
     const chosen = history.find((h) => h.ended === d.turn) ?? history.at(-1);
     files = parseDiff(chosen.patch);
     if (ui.diffHideSpace) files = withoutWhitespace(files);
-    if (chosen.truncated) note = "This preview exceeds the size limit, so its end is cut.";
+    cut = chosen.truncated;
   }
+  if (cut) note = "This preview exceeds the size limit, so its end is cut.";
   const source = diffSource(tab);
   const key = source.key;
   if (files && !empty) collapseNew(files, key);
-  const body = empty ? `<p class="panel-empty">${empty}</p>` : files ? diffBody(tab, files, key, source.rev) : skeleton;
-  const changed = showPanel(`${note ? `<p class="diff-note">${note}</p>` : ""}${diffToolbar(files ? sum(files, "added") : 0, files ? sum(files, "removed") : 0, scopeButton(tab), { refresh: source.git })}${body}`);
+  const body = empty ? `<p class="panel-empty">${empty}</p>` : files ? diffBody(tab, files, key, source.rev, cut ? { partial: files.at(-1) } : {}) : skeleton;
+  const shown = empty ? [] : files ?? [];
+  const changed = showPanel(`${note ? `<p class="diff-note">${note}</p>` : ""}${diffToolbar(shown, key, scopeButton(tab), { refresh: source.git, refreshing: !!t.gitDiff?.loading && source.git })}${body}`);
   afterDiffRender(changed, files, key);
 }
 
@@ -771,6 +780,7 @@ function afterDiffRender(changed, files, key) {
     }
   }
   if (ui.diffFile && files) {
+    ui.treePicked = ui.diffFile;
     panelBody.querySelector(`.file[data-id="${CSS.escape(`${key}:${ui.diffFile}`)}"]`)?.scrollIntoView({ block: "start" });
     ui.diffFile = null;
   }
@@ -784,7 +794,6 @@ function diffBody(tab, files, key, rev, extra = {}) {
   const opts = {
     comments: reviewComments(tab, key),
     draft: ui.commentAt?.key === key ? ui.commentAt : null,
-    openTitle: "Open file",
     contents: (path) => contents.get(contentKey(tab, rev, path))?.lines,
     expanded: (path) => openGaps.get(`${key}:${path}`),
     ...extra,
@@ -793,8 +802,9 @@ function diffBody(tab, files, key, rev, extra = {}) {
   return ui.diffTree && files.length ? `<div class="diff-split">${diff}${fileTreeHtml(files)}</div>` : diff;
 }
 
-/** Opens more of a gap: `top` and `bottom` reveal `EXPAND_STEP` lines on that side, `all` the rest. */
-async function expandGap(button) {
+/** Opens more of a gap: `top` and `bottom` reveal `EXPAND_STEP` lines on that side, `both` on each,
+ * `all` the rest. */
+async function expandGap(button, shift = false) {
   const tab = active;
   const diff = button.closest(".diff");
   const path = button.closest(".file").dataset.path;
@@ -805,8 +815,12 @@ async function expandGap(button) {
   const i = Number(button.dataset.gap);
   const shown = { top: 0, bottom: 0, ...gaps[i] };
   const how = button.dataset.expand;
-  if (how === "all") shown.top = Infinity;
-  else shown[how] += EXPAND_STEP;
+  // InteractionManager.js: Shift opens all of it, as "Expand all" and a short stretch's chevron do.
+  if (how === "all" || shift || button.hasAttribute("data-whole")) shown.top = Infinity;
+  else if (how === "both") {
+    shown.top += EXPAND_STEP;
+    shown.bottom += EXPAND_STEP;
+  } else shown[how] += EXPAND_STEP;
   gaps[i] = shown;
   openGaps.set(id, gaps);
   renderPanel();
@@ -919,7 +933,8 @@ function diffClick(e) {
     ui.diffTree = !ui.diffTree;
     save("gui-diff-tree", String(ui.diffTree));
   } else if (action === "refresh") {
-    threadOf(tab).gitDiff = null;
+    const d = diffState(tab);
+    fetchGitDiff(tab, d.scope, d.scope === "base" ? d.base : null, true);
   } else if (action === "collapse") {
     const ids = [...panelBody.querySelectorAll(".file")].map((f) => f.dataset.id);
     const all = ids.every((id) => ui.collapsed.has(id));
@@ -930,7 +945,7 @@ function diffClick(e) {
     const b = e.target.closest("[data-base-pick]");
     return baseMenu(tab).then((entries) => popMenu(b, entries, { search: "Search refs…", empty: "No matching refs." }));
   } else if (e.target.closest("[data-expand]")) {
-    return expandGap(e.target.closest("[data-expand]"));
+    return expandGap(e.target.closest("[data-expand]"), e.shiftKey);
   } else if (e.target.closest(".file > header .copy")) {
     const b = e.target.closest(".copy");
     navigator.clipboard?.writeText(b.dataset.copy);
@@ -950,6 +965,7 @@ function diffClick(e) {
   } else if (e.target.closest("[data-tree-file]")) {
     const path = e.target.closest("[data-tree-file]").dataset.treeFile;
     const key = panelBody.querySelector(".diff").dataset.key;
+    ui.treePicked = path;
     ui.collapsed.delete(`${key}:${path}`);
     renderPanel();
     panelBody.querySelector(`.file[data-id="${CSS.escape(`${key}:${path}`)}"]`)?.scrollIntoView({ block: "start" });
@@ -957,7 +973,7 @@ function diffClick(e) {
   } else if (e.target.closest("[data-viewed], label.viewed")) {
     return true;
   } else if (e.target.closest(".diff .no[data-line]")) {
-    lineClick(e, e.target.closest(".no[data-line]"));
+    return true;
   } else if (e.target.closest("[data-comment-cancel]")) {
     ui.commentAt = null;
   } else if (e.target.closest("[data-comment-save]")) {
@@ -2894,7 +2910,7 @@ function prCode(tab, d, s) {
     openTitle: "Open file",
   };
   const diff = `<div class="diff ${ui.diffView}${ui.diffWrap ? " wrap" : ""}" data-key="${esc(key)}" data-rev="${esc(d.headRefOid ?? "")}">${filesHtml(files, key, opts)}${d.truncated ? `<p class="panel-empty">This preview exceeds the size limit, so its end is cut.</p>` : ""}</div>`;
-  return `${diffToolbar(sum(files, "added"), sum(files, "removed"), `<span class="muted">${d.changedFiles} file${d.changedFiles === 1 ? "" : "s"}</span>${s.reviewing ? "" : reviewButton(s)}`)}
+  return `${diffToolbar(files, key, `<span class="muted">${d.changedFiles} file${d.changedFiles === 1 ? "" : "s"}</span>${s.reviewing ? "" : reviewButton(s)}`)}
     ${s.reviewing ? reviewForm(s) : ""}${ui.diffTree && files.length ? `<div class="diff-split">${diff}${fileTreeHtml(files)}</div>` : diff}`;
 }
 
