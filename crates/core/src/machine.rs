@@ -185,6 +185,8 @@ struct Tab {
     updated: Option<u64>,
     title: Option<String>,
     message: Option<String>,
+    /// Prompts typed before the session took the terminal, typed in once it does.
+    held: Vec<String>,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
     screen: Arc<Mutex<Screen>>,
@@ -697,6 +699,7 @@ impl Machine {
         // Dropping the old session kills it silently, so its exit can't be mistaken for the new one's.
         let screen = self.tab(tab, |t| {
             t.session = None;
+            t.held.clear();
             t.screen.clone()
         })?;
         let session = screen.lock().unwrap().restart();
@@ -714,7 +717,37 @@ impl Machine {
         self.tab(tab, |t| {
             t.session = Some(pty);
             (t.status, t.title, t.message) = (None, None, None);
-        })
+        })?;
+        self.type_held_once_raw(tab, session);
+        Ok(())
+    }
+
+    /// Watches the session until it takes the terminal, then types the prompts held for it. The
+    /// program says nothing when it does, so the poll asks the pty.
+    fn type_held_once_raw(&self, tab: &str, session: u64) {
+        let (me, tab) = (self.me.clone(), tab.to_owned());
+        std::thread::spawn(move || loop {
+            let Some(machine) = me.upgrade() else { return };
+            let Ok(screen) = machine.tab(&tab, |t| t.screen.clone()) else { return };
+            if screen.lock().unwrap().session != session {
+                return;
+            }
+            let done = machine.tab(&tab, |t| match t.session.as_mut() {
+                Some(s) if s.raw() => {
+                    for text in std::mem::take(&mut t.held) {
+                        let _ = s.write(&paste(&text));
+                    }
+                    true
+                }
+                Some(_) => false,
+                None => true,
+            });
+            if done.unwrap_or(true) {
+                return;
+            }
+            drop(machine);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        });
     }
 
     /// Replays the tab's screen to `sink`, then streams its output there until `detach`.
@@ -849,10 +882,22 @@ impl Machine {
         live.max_by_key(|(id, _)| tab_number(id)).map(|(id, _)| id.clone())
     }
 
-    /// Types `text` into the tab's session as one prompt and submits it.
+    /// Types `text` into the tab's session as one prompt and submits it. A session that has not
+    /// taken the terminal yet, as claude starting up, gets it once it does: typed earlier, the
+    /// pty's cooked mode would echo it and turn the submitting \r into \n, and claude would never
+    /// see a prompt.
     fn type_prompt(&self, tab: &str, text: &str) -> Result<(), String> {
         self.tab(tab, |t| match t.session.as_mut() {
-            Some(s) => s.write(&paste(text)).map_err(|e| e.to_string()),
+            Some(s) if s.raw() => {
+                for held in std::mem::take(&mut t.held) {
+                    s.write(&paste(&held)).map_err(|e| e.to_string())?;
+                }
+                s.write(&paste(text)).map_err(|e| e.to_string())
+            }
+            Some(_) => {
+                t.held.push(text.to_owned());
+                Ok(())
+            }
             None => Err(format!("tab {tab} has no running session")),
         })?
     }
@@ -950,6 +995,7 @@ impl Machine {
             updated: None,
             title: None,
             message: None,
+            held: vec![],
             screen: Arc::default(),
         };
         self.tabs.lock().unwrap().insert(id.clone(), tab);

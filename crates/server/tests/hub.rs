@@ -384,6 +384,8 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     assert_eq!(node_b.machine.tabs()[0].cwd, repo.display().to_string());
 
     let mut node_a = Node::start(&dir_a, creds_a);
+    // The delivery below is a prompt, which the node holds until claude takes the terminal, as this stand-in does.
+    std::fs::write(dir_a.join("claude"), "#!/bin/sh\nstty raw -echo; exec cat\n").unwrap();
     client.wait_machines(&[("mac-mini", true), ("vps", true)]);
     assert!(open(run(Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() })));
     assert_eq!((connector_tabs(&node_a), connector_tabs(&node_b)), (1, 1), "the preferred machine runs it once online");

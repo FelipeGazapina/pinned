@@ -2792,6 +2792,7 @@ dependencies = [
  "chrono",
  "flate2",
  "futures-util",
+ "libc",
  "portable-pty",
  "reqwest",
  "serde",

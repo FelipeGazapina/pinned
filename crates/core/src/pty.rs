@@ -52,6 +52,25 @@ impl Session {
         self.child.as_ref()?.process_id()
     }
 
+    /// Whether the program has taken the terminal out of canonical mode, as claude does once it
+    /// draws. Until then the tty itself echoes typed bytes and turns a \r into \n, so a prompt
+    /// typed that early is shown and never submitted.
+    #[cfg(unix)]
+    pub fn raw(&self) -> bool {
+        let Some(fd) = self.master.as_raw_fd() else { return true };
+        let mut term = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: fd is the open pty master, and tcgetattr fills the termios it is given.
+        if unsafe { libc::tcgetattr(fd, term.as_mut_ptr()) } != 0 {
+            return true;
+        }
+        unsafe { term.assume_init() }.c_lflag & libc::ICANON == 0
+    }
+
+    #[cfg(not(unix))]
+    pub fn raw(&self) -> bool {
+        true
+    }
+
     pub fn resize(&self, size: PtySize) -> Result<(), String> {
         self.master.resize(size).map_err(|e| e.to_string())
     }
