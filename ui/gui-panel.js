@@ -372,9 +372,8 @@ function showPanel(html) {
   return true;
 }
 
-/** How long the panel takes to open and close: T3's setting, 0 to 400 ms, off by default. Resizing
- * and maximizing never animate. */
-const panelAnimation = () => Math.min(400, Math.max(0, Number(load("gui-panel-animation")) || 0));
+/** The panel opens and closes over Appearance's Panel animations duration (gui-appearance.js).
+ * Resizing and maximizing never animate. */
 let animationTimer = null;
 function animatePanel(open) {
   const ms = panelAnimation();
@@ -384,13 +383,6 @@ function animatePanel(open) {
   clearTimeout(animationTimer);
   animationTimer = setTimeout(() => document.body.classList.remove("panel-animating"), ms + 50);
 }
-const panelSettingsHtml = () => `<h2 class="looks-title">Right panel</h2><div class="look"><label for="panel-animation">Panel animation</label><p class="meta">How long the right panel takes to open and close.</p>
-  <select id="panel-animation">${[0, 100, 150, 200, 250, 300, 400].map((ms) => `<option value="${ms}"${ms === panelAnimation() ? " selected" : ""}>${ms ? `${ms} ms` : "Off"}</option>`).join("")}</select></div>`;
-function bindPanelSettings() {
-  const select = settingsPage.querySelector("#panel-animation");
-  if (select) select.onchange = () => save("gui-panel-animation", select.value);
-}
-
 function renderPanel() {
   const tab = active;
   const p = panelOf(tab);
@@ -1548,7 +1540,7 @@ function shellTerm(tab, s) {
   if (shellTerms.has(s.id)) return shellTerms.get(s.id);
   const el = document.createElement("div");
   el.className = "shell-term";
-  const term = new Terminal({ fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, cursorBlink: true, allowTransparency: true, theme: { background: "#00000000" } });
+  const term = new Terminal({ ...terminalLook(), cursorBlink: true, allowTransparency: true, theme: { background: "#00000000" } });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   const entry = { el, term, fit, tab, shell: null, opened: false, typed: [] };

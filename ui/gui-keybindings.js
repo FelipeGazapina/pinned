@@ -88,6 +88,7 @@ function showKeybindings() {
   settingsPage.innerHTML = keybindingsSettingsHtml();
   bindKeybindingsSettings();
 }
+settingsSection({ page: "keybindings", label: "Keybindings", icon: "keyboard", show: () => showKeybindings(), search: [{ title: "Keybindings", terms: ["shortcuts keys chords commands keyboard"] }] });
 function keybindingsSettingsHtml() {
   const web = !TAURI ? `<span class="kb-note" role="img" tabindex="0" aria-label="The browser may claim some shortcuts first. The desktop app receives them all." title="The browser may claim some shortcuts first. The desktop app receives them all.">${icon("triangle-alert")}</span>` : "";
   return `<h2>Keybindings${web}</h2><section id="keybindings">

@@ -4,6 +4,7 @@ mod account;
 mod awake;
 mod browser;
 mod commands;
+mod fonts;
 
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::wire::{Call, MachineEvent, TabId};
@@ -290,6 +291,7 @@ fn main() {
             close_tab,
             awake::get_keep_awake,
             awake::set_keep_awake,
+            fonts::font_families,
             check_update,
             install_update,
             get_opacity,

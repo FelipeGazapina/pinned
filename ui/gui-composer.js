@@ -2337,7 +2337,7 @@ async function runScript(tab, script, cwd = null, group = null) {
   toggleDrawer(true);
   const el = Object.assign(document.createElement("div"), { className: "term shell" });
   document.getElementById("terms").append(el);
-  const term = new Terminal({ fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, cursorBlink: true, allowTransparency: true, theme: { background: "#00000000" } });
+  const term = new Terminal({ ...terminalLook(), cursorBlink: true, allowTransparency: true, theme: { background: "#00000000" } });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(el);

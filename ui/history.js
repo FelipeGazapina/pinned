@@ -5,15 +5,9 @@ async function showGeneral() {
     ${TAURI ? `<p><label class="toggle"><input type="checkbox" id="keep-awake"${awake ? " checked" : ""}> Keep this ${COMPUTER} awake</label></p>
     <p class="meta">While this is on, the ${COMPUTER} and its display don't go to sleep, so sessions keep working when you step away. It turns off when you switch it off or quit pinned.</p>
     <p class="error" id="awake-error"></p>` : ""}
-    ${themeSettingsHtml()}
-    ${contrastSettingsHtml()}
-    ${appearanceHtml()}
-    ${sidebarSettingsHtml()}${panelSettingsHtml()}
+    ${sidebarSettingsHtml()}
     ${sendShortcutHtml()}`;
-  bindThemeSettings();
-  bindAppearance();
   bindSidebarSettings();
-  bindPanelSettings();
   bindSendShortcut();
   if (!TAURI) return;
   document.getElementById("keep-awake").onchange = async (e) => {
@@ -27,11 +21,25 @@ async function showGeneral() {
   };
 }
 
+/** T3 Code's Appearance page: colors and themes, the interface, motion and typography. */
+function showAppearance() {
+  settingsPage.innerHTML = `<h2>Appearance</h2><div class="settings-sections">
+    ${themeSettingsHtml()}
+    ${interfaceSettingsHtml()}
+    ${motionSettingsHtml()}
+    ${appearanceHtml()}</div>`;
+  bindThemeSettings();
+  bindInterfaceSettings();
+  bindMotionSettings();
+  bindAppearance();
+}
+
 let projectsMachine = LOCAL;
 
 async function showProjectsPage() {
   if (!machines.get(projectsMachine)?.view.online) projectsMachine = onlineMachines()[0];
   const projects = projectsMachine ? await callOn(projectsMachine, { cmd: "list_projects" }).catch(() => []) : [];
+  if (page !== "projects") return;
   const chips = [...machines.entries()].map(([id, m]) =>
     `<button class="chip${id === projectsMachine ? " active" : ""}" data-action="projects-machine" data-machine="${esc(id)}"${m.view.online ? "" : " disabled"}>${esc(machineName(id))}</button>`);
   settingsPage.innerHTML = `<h2>Projects</h2>
@@ -45,6 +53,7 @@ async function showProjectsPage() {
 
 async function showProjectHistory(path) {
   const turns = await callOn(projectsMachine, { cmd: "project_history", path }).catch(() => []);
+  if (page !== "projects") return;
   const name = path.split(/[\\/]/).filter(Boolean).pop() ?? "/";
   settingsPage.innerHTML = `<button class="secondary" data-action="projects-back">← Projects</button>
     <h2>${esc(name)}</h2><p class="meta">${esc(tilde(path))}</p>

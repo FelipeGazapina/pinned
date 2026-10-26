@@ -323,5 +323,20 @@
     return [footer === "Open in Finder" && !note && rows > 40 && Array.isArray(folders), { footer, note, rows, search: folders.error ?? folders.length }];
   });
 
+  await step("Settings' font fields list the Mac's installed fonts, each drawn in its own face", async () => {
+    if (!settingsOpen()) await toggleSettings();
+    showPage("appearance");
+    for (let i = 0; i < 40 && !document.querySelector("#look-sans-font[data-font-pick]"); i++) await sleep(100);
+    const trigger = document.querySelector("#look-sans-font[data-font-pick]");
+    trigger?.click();
+    await sleep(200);
+    const names = [...document.querySelectorAll("#font-picker [role=option] .name")].map((el) => el.textContent);
+    const menlo = document.querySelector('#font-picker [data-font="Menlo"] .name');
+    const seen = { status: installedFonts.status, families: installedFonts.families.length, listed: names.length, menloFace: menlo && getComputedStyle(menlo).fontFamily };
+    closeFontPicker();
+    await toggleSettings();
+    return [!!trigger && installedFonts.families.includes("Menlo") && names.length > 10 && /^Menlo/.test(seen.menloFace ?? ""), seen];
+  });
+
   await fetch(`${base}/done`, { method: "POST" });
 })();

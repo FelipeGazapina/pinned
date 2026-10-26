@@ -465,7 +465,7 @@ const onGuiKey = (key, run, { shift = false, alt = false, when = null } = {}) =>
 };
 /** Runs `command` as its chord would, true when a handler took it. */
 function runGuiCommand(command, e) {
-  const live = (guiCommands.get(command) ?? []).filter((h) => h.when?.() !== false);
+  const live = (guiCommands.get(command) ?? []).filter((h) => h.when?.(e) !== false);
   const hit = live.find((h) => h.when) ?? live[0];
   hit?.run(e);
   return !!hit;

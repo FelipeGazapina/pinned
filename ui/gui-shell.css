@@ -69,7 +69,7 @@ body[data-sidebar="open"] #page-view .page-head .side-toggle { display: none; }
 #palette .status[data-pulse] i { animation: status-pulse 2s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { #palette .status[data-pulse] i { animation: none; } }
 @media (max-width: 767px) { #palette .status span { display: none; } }
-#palette .status[data-tone="info"] { color: var(--g-info); }
+#palette .status[data-tone="info"] { color: var(--g-info-base); }
 #palette .status[data-tone="warning"] { color: var(--g-warning); }
 #palette .status[data-tone="error"] { color: var(--g-error); }
 #palette .status[data-tone="success"] { color: var(--g-success); }

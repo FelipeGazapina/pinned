@@ -32,6 +32,8 @@
   --g-side: color-mix(in srgb, var(--g-sidebar) calc(var(--opacity) * 100%), transparent);
   --g-raised: rgb(var(--g-raised-rgb));
   --g-overlay: rgb(var(--g-overlay-rgb));
+  --g-popover: var(--g-raised);
+  --g-composer: var(--g-raised);
   --g-message: #141414;
   --g-fg: rgb(var(--g-fg-rgb));
   --g-text: rgb(var(--g-fg-rgb) / 0.86);
@@ -43,6 +45,7 @@
   --g-hover: rgb(var(--g-ink-rgb) / 0.06);
   --g-row-hover: rgb(var(--g-side-fg-rgb) / 0.08);
   --g-row-active: rgb(var(--g-side-fg-rgb) / 0.11);
+  --g-row-selected: rgb(var(--g-side-fg-rgb) / 0.07);
   --g-border-base: rgb(var(--g-ink-rgb) / 0.06);
   --g-input-base: rgb(var(--g-ink-rgb) / 0.08);
   --g-side-border-base: rgb(var(--g-ink-rgb) / 0.08);
@@ -69,6 +72,8 @@
   --g-warning: rgb(var(--g-warning-rgb));
   --g-warning-fg: #ffb900;
   --g-info: rgb(var(--g-info-rgb));
+  /* T3's --info (blue-500), for what it paints text-info or bg-info; --g-info is its --info-foreground. */
+  --g-info-base: #2b7fff;
   --g-input-tone: #a5b4fc;
   --g-link: rgb(129 166 255);
   --g-blue: #69b1ff;
@@ -139,6 +144,7 @@ html[data-appearance="light"] {
   --g-hover: #f4f4f5;
   --g-row-hover: #f4f4f5;
   --g-row-active: #ffffff;
+  --g-row-selected: #ffffff;
   --g-border-base: #e4e4e7;
   --g-input-base: #d4d4d8;
   --g-side-border-base: #e4e4e7;
@@ -201,16 +207,9 @@ html[data-contrast] {
   --g-input: color-mix(in srgb, color-mix(in srgb, var(--g-input-base) var(--g-contrast-base), transparent), rgb(var(--g-fg-rgb)) var(--g-contrast-border-boost));
   --g-side-border: color-mix(in srgb, color-mix(in srgb, var(--g-side-border-base) var(--g-contrast-base), transparent), rgb(var(--g-side-fg-rgb)) var(--g-contrast-border-boost));
 }
-/* Settings in the dark default keeps style.css's colors (--fg #d7dae0, --muted #7d8590, --border
-   #2b3038 on #0f1115), which the contrast moves the same way. */
-html[data-contrast] body[data-mode="gui"] {
-  --fg: color-mix(in oklab, color-mix(in oklab, #d7dae0 var(--g-contrast-base), #0f1115), var(--g-contrast-target) var(--g-contrast-boost));
-  --muted: color-mix(in oklab, color-mix(in oklab, #7d8590 var(--g-contrast-base), #0f1115), var(--g-contrast-target) var(--g-contrast-boost));
-  --border: color-mix(in srgb, color-mix(in srgb, #2b3038 var(--g-contrast-base), transparent), #d7dae0 var(--g-contrast-border-boost));
-}
-/* What the app view shows from style.css (Settings, its header) takes the theme in light mode and
-   under a palette; dark keeps the terminal view's look. */
-html[data-appearance="light"] body[data-mode="gui"], html[data-theme-id]:not([data-theme-id=""]) body[data-mode="gui"] {
+/* What the app view shows from style.css (Settings, the project picker) takes the app view's tokens,
+   as T3's settings sit on its own background. */
+body[data-mode="gui"] {
   --bg: var(--g-bg); --fg: var(--g-fg); --muted: var(--g-muted); --border: var(--g-border); --idle: var(--g-muted);
   --s-ink-rgb: var(--g-ink-rgb); --s-bg-rgb: var(--g-canvas-rgb); --s-field: var(--g-field); --s-bg: var(--g-canvas); --s-raised: var(--g-raised); --s-line: var(--g-input); --s-error: var(--g-error);
 }
@@ -220,6 +219,8 @@ html[data-theme-id]:not([data-theme-id=""]) {
   --g-canvas-rgb: var(--app-theme-canvas-rgb);
   --g-raised-rgb: var(--app-theme-surface-rgb);
   --g-overlay-rgb: var(--app-theme-surface-overlay-rgb);
+  --g-popover: var(--app-theme-surface-overlay);
+  --g-composer: var(--app-theme-surface-raised);
   --g-fg-rgb: var(--app-theme-text-rgb);
   --g-muted-rgb: var(--app-theme-muted-foreground-rgb);
   --g-side-fg-rgb: var(--app-theme-sidebar-foreground-rgb);
@@ -229,13 +230,13 @@ html[data-theme-id]:not([data-theme-id=""]) {
   --g-primary-rgb: var(--app-theme-message-action-rgb);
   --g-error-rgb: var(--app-theme-error-rgb);
   --g-warning-rgb: var(--app-theme-warning-rgb);
-  --g-info-rgb: var(--app-theme-accent-rgb);
   --g-sidebar: var(--app-theme-sidebar);
   --g-message: var(--app-theme-message-surface);
   --g-accent: var(--app-theme-accent-surface);
   --g-hover: var(--app-theme-accent-surface);
   --g-row-hover: var(--app-theme-sidebar-row-hover);
   --g-row-active: var(--app-theme-sidebar-row-active);
+  --g-row-selected: var(--app-theme-sidebar-row-selected);
   --g-border-base: var(--app-theme-border);
   --g-input-base: var(--app-theme-input);
   --g-side-border-base: var(--app-theme-sidebar-border);
@@ -256,6 +257,64 @@ html[data-theme-id]:not([data-theme-id=""]) {
 
 body[data-mode="gui"] #terms { background: var(--g-term-bg); }
 
+/* What a palette paints that the default theme draws from shared tokens, as T3's index.css does under
+   html[data-theme-id]: code surfaces, placeholders, the focus ring, status surfaces, the sidebar's
+   controls, and subtle surfaces in a light palette. */
+html[data-theme-id]:not([data-theme-id=""]) body[data-mode="gui"] :is(.codeblock, .md pre:not(.codeblock pre), .tool pre, #panel-body:is([data-kind="diff"], [data-kind="file"])) {
+  background: var(--app-theme-code-background); color: var(--app-theme-code-foreground); }
+html[data-theme-id]:not([data-theme-id=""]) body[data-mode="gui"] ::placeholder { color: var(--app-theme-placeholder); }
+html[data-theme-id]:not([data-theme-id=""]) body[data-mode="gui"] :focus-visible { outline-color: var(--app-theme-focus); }
+html[data-theme-id]:not([data-theme-id=""]) body[data-mode="gui"] #approval:not([data-kind="input"]) { background: var(--app-theme-warning-surface); }
+html[data-theme-id]:not([data-theme-id=""]) body[data-mode="gui"] :is(.status-row.error, .notice.error, .tl-error) { background: var(--app-theme-error-surface); }
+html[data-theme-id]:not([data-theme-id=""]) body[data-mode="gui"] .update { background: var(--app-theme-update-surface); color: var(--app-theme-update-foreground); }
+html[data-theme-id]:not([data-theme-id=""]) body[data-mode="gui"] #side-notice { background: var(--app-theme-sidebar-control-surface); border-color: var(--app-theme-sidebar-border); }
+html[data-theme-id][data-appearance="light"]:not([data-theme-id=""]) body[data-mode="gui"] :is(.changes, .changes > summary) { background: var(--app-theme-secondary); }
+
+/* T3's glass at the Glass opacity setting (index.css surface-glass, dropdown-glass, dialog-glass):
+   menus, popovers and cards over a mostly solid popover, the composer over the raised surface, and
+   dialogs over the canvas. gui-appearance.js sets --g-glass-opacity. */
+:root { --g-glass-opacity: 80%; --g-glass-blur: 16px; --g-glass-saturation: 1.08; }
+html[data-appearance="light"] { --g-glass-blur: 12px; --g-glass-saturation: 1.14; }
+:root :is(#g-toast, #side-menu, #project-menu, #hover-card, #composer-menu, .md .md-table .table-menu, .plan-menu, #pr-card, #minimap .preview, #g-select-popup) {
+  background: color-mix(in srgb, var(--g-popover) 18%, color-mix(in srgb, var(--g-popover) var(--g-glass-opacity), transparent));
+  backdrop-filter: blur(var(--g-glass-blur)) saturate(var(--g-glass-saturation)); -webkit-backdrop-filter: blur(var(--g-glass-blur)) saturate(var(--g-glass-saturation));
+  border: 1px solid color-mix(in srgb, var(--g-fg) 10%, transparent); }
+:root #composer .box { background: color-mix(in srgb, var(--g-composer) var(--g-glass-opacity), transparent);
+  backdrop-filter: blur(var(--g-glass-blur)) saturate(var(--g-glass-saturation)); -webkit-backdrop-filter: blur(var(--g-glass-blur)) saturate(var(--g-glass-saturation)); }
+:root :is(#palette .popup, #shell-dialog .popup, #theme-editor) { background: color-mix(in srgb, var(--g-canvas) var(--g-glass-opacity), transparent);
+  backdrop-filter: blur(var(--g-glass-blur)) saturate(var(--g-glass-saturation)); -webkit-backdrop-filter: blur(var(--g-glass-blur)) saturate(var(--g-glass-saturation)); }
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root :is(#g-toast, #side-menu, #project-menu, #hover-card, #composer-menu, .md .md-table .table-menu, .plan-menu, #pr-card, #minimap .preview, #g-select-popup, #composer .box, #palette .popup, #shell-dialog .popup, #theme-editor) { background: var(--g-popover); }
+}
+
+/* components/ui/tooltip.tsx's popup: a small bordered card on the popover color (gui-tooltip.js). */
+#g-tooltip { position: fixed; z-index: 140; max-width: 320px; padding: 4px 8px; border: 1px solid var(--g-border); border-radius: 6px; background: var(--g-popover);
+  color: var(--g-fg); font: 12px/1.375 var(--g-sans); text-wrap: balance; overflow-wrap: anywhere; pointer-events: none;
+  box-shadow: 0 4px 6px -1px rgb(var(--g-shadow-rgb) / 0.05), 0 2px 4px -2px rgb(var(--g-shadow-rgb) / 0.05); animation: g-tooltip-in 0.15s ease-out; }
+#g-tooltip[hidden] { display: none; }
+#g-tooltip[data-instant="true"] { animation: none; }
+@keyframes g-tooltip-in { from { opacity: 0; scale: 0.98; } }
+
+/* components/ui/toast.tsx: top right under the header, 360px at most, a glass card (gui-theme.js themeToast). */
+#g-toast { position: fixed; z-index: 100; top: calc(16px + var(--topbar, 52px)); right: 16px; width: min(360px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 2px;
+  padding: 10px 14px; border-radius: 8px; color: var(--g-fg); font: 14px/1.43 var(--g-sans); box-shadow: 0 20px 25px -5px rgb(var(--g-shadow-rgb) / 0.25), 0 8px 10px -6px rgb(var(--g-shadow-rgb) / 0.25);
+  transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.5s; }
+@starting-style { #g-toast { transform: translateX(calc(100% + 16px)); } }
+@media (min-width: 640px) { #g-toast { top: calc(32px + var(--topbar, 52px)); right: 32px; } }
+#g-toast[hidden] { display: none; }
+#g-toast.leaving { opacity: 0; transform: translateX(calc(100% + 16px)); }
+#g-toast .title { display: flex; gap: 8px; min-width: 0; padding-right: 20px; }
+#g-toast .title .i { width: 16px; height: 20px; flex: none; }
+#g-toast .title .success { color: var(--g-success); }
+#g-toast .title .error { color: var(--g-error); }
+#g-toast b { min-width: 0; font-weight: 500; overflow-wrap: anywhere; }
+#g-toast p { margin: 0; color: var(--g-muted); overflow-wrap: anywhere; user-select: text; }
+#g-toast .dismiss { position: absolute; top: -6px; right: -6px; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--g-border) 60%, transparent); background: color-mix(in srgb, var(--g-popover) 92%, transparent); color: var(--g-muted);
+  box-shadow: 0 1px 3px rgb(var(--g-shadow-rgb) / 0.1); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+#g-toast .dismiss:hover { background: var(--g-popover); color: var(--g-fg); }
+#g-toast .dismiss .i { width: 12px; height: 12px; stroke-width: 2.25; }
+
 /* ThemePreviewCircles.tsx */
 .theme-circle { position: relative; display: block; width: 56px; height: 56px; border-radius: 50%; overflow: hidden; border: 2px solid var(--g-canvas); flex: none; }
 .theme-circle.dark { box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.14), 0 1px 2px rgb(0 0 0 / 0.18); }
@@ -267,7 +326,7 @@ body[data-mode="gui"] #terms { background: var(--g-term-bg); }
 #palette .theme-trail .current { margin-right: 4px; font-size: 12px; color: color-mix(in srgb, var(--g-muted) 70%, transparent); }
 
 /* ThemeSettings.tsx */
-#theme-section { display: flex; flex-direction: column; gap: 12px; margin: 4px 0 20px; }
+#theme-section { display: flex; flex-direction: column; gap: 12px; }
 #theme-section h3 { margin: 0; font-size: 14px; font-weight: 400; color: color-mix(in srgb, var(--g-fg) 70%, transparent); }
 #theme-section .mode-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 #theme-section .mode-tile { display: flex; flex-direction: column; align-items: stretch; gap: 6px; padding: 8px; border-radius: 12px;
@@ -330,7 +389,6 @@ body[data-mode="gui"] #terms { background: var(--g-term-bg); }
 /* ThemeEditorPanel.tsx */
 #theme-editor { position: fixed; right: 16px; bottom: 16px; z-index: 110; display: flex; flex-direction: column; width: min(416px, calc(100vw - 32px));
   max-height: min(672px, calc(100dvh - 96px)); border-radius: 12px; border: 1px solid var(--g-border); color: var(--g-fg); font-size: 14px;
-  background: color-mix(in srgb, var(--g-overlay) 80%, transparent); backdrop-filter: blur(16px) saturate(1.08); -webkit-backdrop-filter: blur(16px) saturate(1.08);
   box-shadow: 0 12px 28px -12px var(--g-shadow); font-family: var(--g-sans); }
 #theme-editor .te-head { display: flex; align-items: center; gap: 4px; padding: 8px 12px; border-bottom: 1px solid color-mix(in srgb, var(--g-border) 70%, transparent); cursor: grab; user-select: none; touch-action: none; }
 #theme-editor[data-minimized="true"] .te-head { border-bottom: 0; }
@@ -372,6 +430,8 @@ body[data-mode="gui"] #terms { background: var(--g-term-bg); }
 #theme-editor .te-swatch:focus-visible { outline: 2px solid var(--g-primary); outline-offset: -2px; }
 #theme-editor .te-swatch span { position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 1px 2px color-mix(in srgb, var(--g-shadow) 20%, transparent); }
 #theme-editor .te-value { width: 112px; flex: none; font-family: var(--g-mono); font-size: 12px; }
+#theme-editor .te-value[aria-invalid="true"] { border-color: rgb(var(--g-error-rgb) / 0.36); }
+#theme-editor .te-value[aria-invalid="true"]:focus { border-color: rgb(var(--g-error-rgb) / 0.64); box-shadow: 0 0 0 3px rgb(var(--g-error-rgb) / 0.16); }
 #theme-editor .te-empty { margin: 0; color: var(--g-muted); }
 #theme-editor .te-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 8px 12px; border-top: 1px solid color-mix(in srgb, var(--g-border) 70%, transparent); }
 #theme-editor .te-foot button { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 8px; font-size: 13px; }
@@ -501,7 +561,7 @@ html[data-theme-token-probe], html[data-theme-token-probe] *, html[data-theme-to
 .theme-import .ti-chip:hover:not(:disabled) { background: var(--g-hover); }
 .theme-import .ti-chip:disabled, .theme-import button:disabled { opacity: 0.5; cursor: default; }
 .theme-import .ti-sort { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex: none; }
-.theme-import .ti-sort select { width: 160px; height: 28px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--g-input); background: var(--g-field); color: var(--g-fg); font: inherit; font-size: 13px; }
+.theme-import .ti-sort .g-select { width: 160px; }
 .theme-import .ti-alert { padding: 10px 12px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--g-error) 32%, transparent); background: color-mix(in srgb, var(--g-error) 6%, transparent); color: var(--g-error); font-size: 13px; }
 .theme-import .ti-search-error:empty, .theme-import .ti-error:empty, .theme-import .ti-results:empty, .theme-import .ti-confirm:empty { display: none; }
 .theme-import .ti-wait { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 80px; color: var(--g-muted); font-size: 14px; }
@@ -543,10 +603,14 @@ html[data-theme-token-probe], html[data-theme-token-probe] *, html[data-theme-to
 .theme-import .ti-editor textarea.plain { color: var(--g-fg); }
 .theme-import .ti-editor textarea::placeholder { color: var(--g-muted); }
 .theme-import .ti-editor textarea::selection { background: var(--g-primary); color: var(--g-on-primary); }
-.theme-import .ti-editor .key { color: var(--g-link); }
-.theme-import .ti-editor .str { color: var(--g-success); }
-.theme-import .ti-editor .num { color: var(--g-warning-fg); }
-.theme-import .ti-editor .lit { color: var(--hl-function); }
+/* ThemeImportDialog.tsx's JSON colors: Tailwind's 600 shades, or the palette's own roles. */
+.theme-import .ti-editor { --json-key: #155dfc; --json-string: #009966; --json-number: #e17100; --json-literal: #7f22fe; }
+html[data-theme-id]:not([data-theme-id=""]) .theme-import .ti-editor { --json-key: var(--app-theme-accent); --json-string: var(--app-theme-message-action);
+  --json-number: var(--app-theme-secondary-foreground); --json-literal: var(--app-theme-accent-surface-foreground); }
+.theme-import .ti-editor .key { color: var(--json-key); }
+.theme-import .ti-editor .str { color: var(--json-string); }
+.theme-import .ti-editor .num { color: var(--json-number); }
+.theme-import .ti-editor .lit { color: var(--json-literal); }
 .theme-import .ti-actions { display: flex; flex-direction: column-reverse; gap: 8px; }
 @media (min-width: 640px) { .theme-import .ti-actions { flex-direction: row; justify-content: flex-end; } .theme-import .ti-actions.start { justify-content: flex-start; } }
 .theme-import .ti-actions.start { flex-direction: row; flex-wrap: wrap; }
