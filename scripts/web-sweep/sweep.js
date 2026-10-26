@@ -5095,6 +5095,21 @@ async function sweep(profileName) {
     check(saved.columns.picked === "" && saved.trigger.label === "sweep", JSON.stringify(saved.columns));
   });
 
+  await step("Workflows: the ＋ after the last step adds a step that is off", async () => {
+    await action("open-add-menu");
+    const offered = await page.locator("#settings-page .flow .add-menu button").allTextContents();
+    check(offered.join() === "Move the issue when pinned picks it up", `the menu offers ${offered}`);
+    await press(page.locator('#settings-page .add-menu [data-step="picked"]'));
+    check((await page.locator("#settings-page .flow .add-menu").count()) === 0, "the menu stays open");
+    await page.fill('#settings-page .node-panel [data-bind="columns.picked"]', "Analyzing");
+    check((await page.locator('#settings-page [data-action="open-add-menu"]').count()) === 0, "the ＋ stays with no step left to add");
+    await action("save-connector");
+    await waitFor("Saved", async () => (await text("#save-connector")) === "Saved");
+    const saved = (await hubCall({ cmd: "get_settings" })).connectors[0];
+    check(saved.columns.picked === "Analyzing", JSON.stringify(saved.columns));
+    return offered.join();
+  });
+
   await step("Workflows: the list's switch turns it off", async () => {
     await action("close-editor");
     await page.waitForSelector("#settings-page .flow-card");
@@ -5150,6 +5165,90 @@ async function sweep(profileName) {
     const over = await overflowing();
     check(!over.length, `overflowing: ${over}`);
     return branches.join(" | ");
+  });
+
+  const zoom = () => page.evaluate(() => Number(document.querySelector("#settings-page .flow").style.zoom));
+  await step("Workflows: zoom in, out and fit, ⌘-wheel zooms and a drag pans", async () => {
+    const opened = await zoom();
+    await action("zoom-in");
+    const zoomedIn = await zoom();
+    await action("zoom-out");
+    await action("zoom-out");
+    const zoomedOut = await zoom();
+    check(zoomedIn > opened && zoomedOut < zoomedIn - 0.15, `zoom ${opened} -> in ${zoomedIn} -> out ${zoomedOut}`);
+    await action("zoom-fit");
+    const fits = await page.evaluate(() => {
+      const canvas = document.querySelector("#settings-page .canvas").getBoundingClientRect();
+      const flow = document.querySelector("#settings-page .flow").getBoundingClientRect();
+      return flow.left >= canvas.left - 1 && flow.right <= canvas.right + 1 && flow.top >= canvas.top - 1 && flow.bottom <= canvas.bottom + 1;
+    });
+    check(fits || (await zoom()) === 0.5, `Fit leaves the flow outside the canvas at ${await zoom()}`);
+    const fitted = await zoom();
+    if (touch) return `${opened} -> ${zoomedIn} -> ${zoomedOut} -> fit ${fitted}`;
+    const canvas = await rect("#settings-page .canvas");
+    await page.mouse.move(canvas.left + canvas.width / 2, canvas.top + canvas.height / 2);
+    await page.keyboard.down("Control");
+    await page.mouse.wheel(0, -300);
+    await page.keyboard.up("Control");
+    await waitFor("the wheel to zoom", async () => (await zoom()) > fitted);
+    for (let i = 0; i < 12 && !(await page.locator('#settings-page [data-action="zoom-in"]').isDisabled()); i++) await action("zoom-in");
+    check((await zoom()) === 1.5, `zoom in stops at ${await zoom()}`);
+    const ground = await page.evaluate(() => {
+      const box = document.querySelector("#settings-page .canvas").getBoundingClientRect();
+      for (let y = box.top + 20; y < box.bottom - 80; y += 20) {
+        for (let x = box.left + 20; x < box.right - 20; x += 20) {
+          if (!document.elementFromPoint(x, y)?.closest("button, .step, .branch, .zoom")) return [x, y];
+        }
+      }
+    });
+    const before = await page.evaluate(() => [document.querySelector("#settings-page .canvas").scrollLeft, document.querySelector("#settings-page .canvas").scrollTop]);
+    await page.mouse.move(...ground);
+    await page.mouse.down();
+    await page.mouse.move(ground[0] - 120, ground[1] - 80, { steps: 6 });
+    await page.mouse.up();
+    const after = await page.evaluate(() => [document.querySelector("#settings-page .canvas").scrollLeft, document.querySelector("#settings-page .canvas").scrollTop]);
+    check(after[0] > before[0] && after[1] > before[1], `the drag scrolled ${before} to ${after}`);
+    await action("zoom-fit");
+    return `${opened} -> ${zoomedIn} -> ${zoomedOut} -> fit ${fitted}, panned ${before} -> ${after}`;
+  });
+
+  await step("Workflows: the ＋ after a category that stops picks its route", async () => {
+    const ends = await page.locator('#settings-page .flow [data-action="choose-route"]').evaluateAll((els) => els.map((el) => el.dataset.category));
+    check(ends.join() === "1,2", `open ends after categories ${ends}`);
+    await action("choose-route");
+    const focused = await page.evaluate(() => document.activeElement?.dataset.bind);
+    check(focused === "trigger.decide.categories.1.workflow", `the ＋ focused ${focused}`);
+    return focused;
+  });
+
+  await step("Workflows: the unsure fallback offers categories that ping no one, follows a rename, saves and reloads", async () => {
+    const fallback = '#settings-page [data-bind="trigger.decide.fallback"]';
+    const offered = await page.locator(`${fallback} option`).evaluateAll((els) => els.map((el) => el.textContent));
+    check(offered.join() === "Use its best guess,error,doubt", `the fallback offers ${offered}`);
+    await page.selectOption(fallback, "doubt");
+    await page.fill('#settings-page [data-bind="trigger.decide.categories.1.name"]', "question");
+    check((await page.inputValue(fallback)) === "question", `after a rename the fallback is ${await page.inputValue(fallback)}`);
+    await page.fill('#settings-page [data-bind="trigger.decide.categories.1.name"]', "doubt");
+    await action("save-connector");
+    await waitFor("Saved", async () => (await text("#save-connector")) === "Saved");
+    const router = () => hubCall({ cmd: "get_settings" }).then((s) => s.connectors.find((k) => k.trigger.kind === "slack-message"));
+    check((await router()).trigger.decide.fallback === "doubt", `the hub has the fallback ${(await router()).trigger.decide.fallback}`);
+    await action("close-editor");
+    await press(page.locator("#settings-page .flow-card .open").filter({ has: page.locator("b", { hasText: /^Route support$/ }) }));
+    await press(page.locator('#settings-page .step[data-step="decide"] .node'));
+    check((await page.inputValue(fallback)) === "doubt", `reopened, the fallback is ${await page.inputValue(fallback)}`);
+    await page.fill('#settings-page [data-bind="trigger.decide.categories.1.mention"]', "support-team");
+    const issue = await page.getAttribute('#settings-page .step[data-step="decide"] .warn', "title");
+    check(/can't ping a group/.test(issue ?? ""), `the Decide step says ${issue}`);
+    await action("save-connector");
+    await waitFor("Saved", async () => (await text("#save-connector")) === "Saved");
+    const pinged = (await router()).trigger.decide;
+    check(pinged.fallback === null && pinged.categories[1].mention === "support-team", `saved ${JSON.stringify(pinged)}`);
+    check((await page.inputValue(fallback)) === "", "the select still shows the cleared fallback");
+    await page.fill('#settings-page [data-bind="trigger.decide.categories.1.mention"]', "");
+    await action("save-connector");
+    await waitFor("Saved", async () => (await text("#save-connector")) === "Saved");
+    return offered.join();
   });
 
   await step("Workflows: the called workflow names the workflow that routes to it", async () => {
