@@ -39,6 +39,7 @@ let projectsMachine = LOCAL;
 async function showProjectsPage() {
   if (!machines.get(projectsMachine)?.view.online) projectsMachine = onlineMachines()[0];
   const projects = projectsMachine ? await callOn(projectsMachine, { cmd: "list_projects" }).catch(() => []) : [];
+  if (page !== "projects") return;
   const chips = [...machines.entries()].map(([id, m]) =>
     `<button class="chip${id === projectsMachine ? " active" : ""}" data-action="projects-machine" data-machine="${esc(id)}"${m.view.online ? "" : " disabled"}>${esc(machineName(id))}</button>`);
   settingsPage.innerHTML = `<h2>Projects</h2>
@@ -52,6 +53,7 @@ async function showProjectsPage() {
 
 async function showProjectHistory(path) {
   const turns = await callOn(projectsMachine, { cmd: "project_history", path }).catch(() => []);
+  if (page !== "projects") return;
   const name = path.split("/").filter(Boolean).pop() ?? "/";
   settingsPage.innerHTML = `<button class="secondary" data-action="projects-back">← Projects</button>
     <h2>${esc(name)}</h2><p class="meta">${esc(tilde(path))}</p>

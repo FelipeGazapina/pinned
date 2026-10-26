@@ -1879,7 +1879,8 @@ async function sweep(profileName) {
       const mono = page.locator("#look-mono-font");
       await mono.fill("Georgia");
       await mono.press("Enter");
-      check((await mono.getAttribute("aria-invalid")) === "true" && (await page.evaluate(() => localStorage.getItem("look-mono-font"))) === null, "a proportional code font was taken");
+      const monoState = await page.evaluate(() => [document.getElementById("look-mono-font").tagName, document.getElementById("look-mono-font").getAttribute("aria-invalid"), localStorage.getItem("look-mono-font"), fontAvailable("Georgia"), fontMonospace("Georgia")].join("|"));
+      check(/^INPUT\|true\|null\|/.test(monoState), `a proportional code font was taken: ${monoState}`);
       await mono.press("Escape");
       const placeholders = await page.evaluate(() => [document.getElementById("look-sans-font").placeholder, document.getElementById("look-mono-font").placeholder]);
       check(await page.evaluate((names) => names.every((p) => /^SF /.test(p) || fontAvailable(p)), placeholders), `the default faces read ${placeholders.join(" | ")}`);
