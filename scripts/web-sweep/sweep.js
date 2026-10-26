@@ -747,6 +747,15 @@ async function sweep(profileName) {
     await waitFor("the compacted note", async () => (await page.locator("#thread .note", { hasText: "The conversation was compacted." }).count()) > 0, 10000);
   });
 
+  await step("app view: Stop ends the background agents before the turn, and the turn they wake", async () => {
+    await sendPrompt("build");
+    await waitFor("the running command", async () => (await text("#thread .live-tool .label")) === "Running npm", 6000);
+    await tapOrClick("#stop");
+    await waitTerm(/\[ctrl-x\]\[ctrl-k\]\[ctrl-x\]\[ctrl-k\]\[esc\]/, 3000);
+    await waitTerm(/\[ctrl-x\]\[ctrl-k\]\[ctrl-x\]\[ctrl-k\]\[esc\][^[]*\[esc\]/, 4000);
+    await answered("Built.");
+  });
+
   // The fake claude logs each turn's length after its Stop hook returns, and $0.42 a turn.
   await step("app view: the header and the row read the thread's active time and cost, ticking while it works", async () => {
     const readouts = () =>
