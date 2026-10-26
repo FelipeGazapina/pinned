@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 /// What a session started while agents may drive devices is told, as T3 hands its agents the same
@@ -447,7 +447,7 @@ impl Host<'_> {
             Action::TerminateApp { app_id } => self.simctl(udid, &["terminate", &app_id]).map(drop),
             Action::SendPush { app_id, text } => {
                 let payload = json!({ "aps": { "alert": text } }).to_string();
-                let mut command = Command::new("xcrun");
+                let mut command = crate::process::command("xcrun");
                 command.args(["simctl", "push", udid, &app_id, "-"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
                 if let Some(path) = self.path {
                     command.env("PATH", path);
@@ -497,7 +497,7 @@ impl Host<'_> {
 
     /// `None` when `program` isn't installed, else its output or exit code.
     fn tool(&self, program: &str, args: &[&str]) -> Option<Result<String, i32>> {
-        let mut command = Command::new(program);
+        let mut command = crate::process::command(program);
         command.args(args).stdin(Stdio::null()).stderr(Stdio::null());
         if let Some(path) = self.path {
             command.env("PATH", path);
@@ -596,6 +596,7 @@ mod tests {
         (port, asked)
     }
 
+    #[cfg(unix)]
     fn tools(dir: &Path, scripts: &[(&str, &str)]) -> String {
         use std::os::unix::fs::PermissionsExt;
         for (name, script) in scripts {
@@ -607,6 +608,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_list_joins_the_hubs_devices_with_avds_that_are_off() {
         let dir = tempfile::tempdir().unwrap();
         let path = tools(dir.path(), &[("emulator", "printf 'Pixel_9\\nTablet\\n'")]);
@@ -634,7 +636,7 @@ mod tests {
         let host = Host { port, path: None };
         assert_eq!(host.open(Platform::Android, "Pixel_9", "Pixel_9", false), Ok("emulator-5556".into()));
         assert_eq!(host.open(Platform::Android, "Pixel_9", "Pixel_9", false), Err("boot failed\n\nno space left on device".into()));
-        assert_eq!(asked.lock().unwrap()[0], r#"POST /api/devices/boot HTTP/1.1 {"id":"Pixel_9","name":"Pixel_9","platform":"android"}"#);
+        assert_eq!(asked.lock().unwrap()[0], r#"POST /api/devices/boot HTTP/1.1 {"platform":"android","id":"Pixel_9","name":"Pixel_9"}"#);
     }
 
     #[test]
@@ -650,12 +652,13 @@ mod tests {
             vec![
                 r#"POST /vendor/serve-emu/api/tap?device=emulator-5554 HTTP/1.1 {"type":"tap","x":0.5,"y":0.25}"#.to_owned(),
                 r#"POST /vendor/serve-emu/api/key?device=emulator-5554 HTTP/1.1 {"key":"home"}"#.to_owned(),
-                r#"POST /vendor/serve-emu/api/text?device=emulator-5554 HTTP/1.1 {"text":"hi","type":"text"}"#.to_owned(),
+                r#"POST /vendor/serve-emu/api/text?device=emulator-5554 HTTP/1.1 {"type":"text","text":"hi"}"#.to_owned(),
             ]
         );
     }
 
     #[test]
+    #[cfg(unix)]
     fn android_settings_run_t3s_adb_commands_and_read_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = tools(

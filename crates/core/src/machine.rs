@@ -2341,6 +2341,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_run_opens_in_its_folder_with_this_machines_binary() {
         let dir = temp("run-folder");
         let m = Machine::new(Launch { bins: fake_bins(&dir.join(".bin")), ..launch() }, None, Some("/repo".into()), |_| {});
@@ -2399,6 +2400,7 @@ mod tests {
     /// Fake `claude` and `codex` that answer their status command like the real ones, signed in on
     /// the default home and on a home holding a `signed-in` file, and otherwise print what they
     /// were started with.
+    #[cfg(unix)]
     fn fake_bins(dir: &Path) -> BTreeMap<Provider, PathBuf> {
         std::fs::create_dir_all(dir).unwrap();
         let script = |name: &str, status: &str, home: &str, signed_in: &str, signed_out: &str| {
@@ -2420,11 +2422,13 @@ mod tests {
         ])
     }
 
+    #[cfg(unix)]
     fn accounts_machine(root: &Path) -> Arc<Machine> {
         Machine::new(Launch { bins: fake_bins(&root.join("bin")), ..launch() }, Some(root.join("config")), None, |_| {})
     }
 
     /// Starts the tab and returns the first line its session printed.
+    #[cfg(unix)]
     fn first_line(m: &Machine, tab: &str) -> String {
         let (seen, sink) = viewer();
         m.attach(tab, "test".into(), sink).unwrap();
@@ -2434,6 +2438,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_tab_runs_its_projects_account_in_that_accounts_home() {
         let root = temp("account-tabs");
         let m = accounts_machine(&root);
@@ -2459,6 +2464,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_headless_claude_runs_under_the_tabs_claude_account() {
         let root = temp("account-headless");
         let claude = root.join("claude");
@@ -2477,6 +2483,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn account_calls_answer_with_the_json_a_client_reads() {
         let root = temp("account-calls");
         let app = root.join("app");
@@ -2517,6 +2524,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_run_starts_only_under_a_claude_account_signed_in_here_and_in_its_home() {
         let root = temp("run-account");
         let app = root.join("app");
@@ -2549,6 +2557,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn usage_is_kept_for_each_account_its_sessions_report() {
         use std::io::{BufRead, Write};
         let root = temp("usage");
@@ -2577,6 +2586,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_project_syncs_the_claude_files_of_its_account() {
         let root = temp("sync-account");
         let m = accounts_machine(&root);
@@ -2603,6 +2613,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn signing_in_runs_the_providers_login_in_the_accounts_home_and_is_never_resumed() {
         let root = temp("sign-in");
         let m = accounts_machine(&root);
@@ -2631,6 +2642,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn files_from_v0_7_0_load_and_run_under_the_default_account() {
         let root = temp("v070");
         let app = root.join("app");
@@ -2651,6 +2663,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_limited_session_moves_to_another_signed_in_account_and_continues_there() {
         let root = temp("switch-account");
         let app = root.join("app");
@@ -2700,6 +2713,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_session_resumes_in_the_account_it_ran_under() {
         let root = temp("resume-account");
         let app = root.join("app");
@@ -2732,6 +2746,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_run_without_its_folder_takes_the_project_cloned_from_the_same_origin() {
         let root = temp("run-origin");
         let (ours, other) = (root.join("app-checkout"), root.join("site"));

@@ -390,8 +390,8 @@ const LIMITS_TIMEOUT: Duration = Duration::from_secs(25);
 /// protocol, as T3 Code's capability probe does, without hooks, MCP servers or a saved session.
 pub fn limits(claude: &Path, home: &Path, path: Option<&str>) -> Result<Limits, String> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut command = Command::new(claude);
+    use std::process::Stdio;
+    let mut command = crate::process::command(claude);
     command
         .args(["-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--no-session-persistence", "--strict-mcp-config", "--tools", ""])
         .args(["--settings", r#"{"disableAllHooks":true}"#])

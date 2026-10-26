@@ -1,14 +1,13 @@
 //! The installed font families, for Settings' font list. WKWebView has no `queryLocalFonts`, so the
 //! app asks AppKit through JavaScript for Automation, as T3's Electron build asks Chromium.
 
-use std::process::Command;
 
 const LIST_FAMILIES: &str =
     "ObjC.import('AppKit'); $.NSFontManager.sharedFontManager.availableFontFamilies.js.map((f) => f.js).join('\\n')";
 
 /// Sorted, without duplicates or macOS's dot-prefixed UI faces.
 pub fn families() -> Result<Vec<String>, String> {
-    let out = Command::new("/usr/bin/osascript")
+    let out = pinned_core::process::command("/usr/bin/osascript")
         .args(["-l", "JavaScript", "-e", LIST_FAMILIES])
         .output()
         .map_err(|e| format!("could not list fonts: {e}"))?;

@@ -2,6 +2,7 @@
 //! its own, so two subscriptions of one provider coexist on one Mac.
 
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -171,9 +172,12 @@ impl Accounts {
             return Err(format!("an account {id} already exists"));
         }
         let account = Account { id, provider, name: name.into() };
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
+        let mut folder = std::fs::DirBuilder::new();
+        folder.recursive(true);
+        // The home holds the CLI's login, so only its owner reads it.
+        #[cfg(unix)]
+        folder.mode(0o700);
+        folder
             .create(self.home(&account))
             .map_err(|e| format!("could not make {}'s folder: {e}", account.id))?;
         added.push(account.clone());
@@ -216,7 +220,7 @@ impl Accounts {
     /// Asks the account's CLI, at `bin`, who is signed in.
     pub fn status(&self, account: &Account, bin: &Path, path_env: Option<&str>) -> Status {
         let spec = account.provider.spec();
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process::command(bin);
         cmd.args(spec.status).envs(self.env(account)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(path) = path_env {
             cmd.env("PATH", path);
@@ -284,6 +288,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -330,6 +335,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn only_an_added_account_points_its_cli_at_another_home() {
         let dir = temp("env");
         let accounts = Accounts::load(Some(&dir), "/Users/ana".into());
@@ -351,6 +357,7 @@ mod tests {
     /// The fake CLIs print what the real ones printed on this Mac, signed in on the default home
     /// and signed out on any other.
     #[test]
+    #[cfg(unix)]
     fn status_is_what_each_cli_reports_for_the_accounts_home() {
         let dir = temp("status");
         let claude = script(
