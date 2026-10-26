@@ -141,12 +141,45 @@ impl Decide {
         Ok(self.categories.iter().map(|c| (c.name.as_str(), c.description.as_str())).collect())
     }
 
-    fn pick(&self, chosen: &vercel::Chosen) -> Option<usize> {
+    fn pick(&self, chosen: &vercel::Chosen) -> Pick {
         let quiet = |i: &usize| self.categories[*i].group().is_none();
         if quiet(&chosen.index) || chosen.probabilities[chosen.index] >= MIN_CONFIDENCE_TO_PAGE {
-            return Some(chosen.index);
+            return Pick::Sure(chosen.index);
         }
-        (0..self.categories.len()).filter(quiet).reduce(|best, i| if chosen.probabilities[i] > chosen.probabilities[best] { i } else { best })
+        match (0..self.categories.len()).filter(quiet).reduce(|best, i| if chosen.probabilities[i] > chosen.probabilities[best] { i } else { best }) {
+            Some(quiet) => Pick::Downgraded(quiet),
+            None => Pick::Nowhere,
+        }
+    }
+}
+
+/// Where a message goes once the decision model answered, by category position.
+#[derive(Debug, PartialEq)]
+enum Pick {
+    /// The category the model chose.
+    Sure(usize),
+    /// The model chose a category that pages without being sure enough to page, so the likeliest
+    /// category that pages no one takes the message.
+    Downgraded(usize),
+    /// Every category pages and the model was not sure enough to page, so the message stops.
+    Nowhere,
+}
+
+impl Pick {
+    fn category(&self) -> Option<usize> {
+        match *self {
+            Pick::Sure(i) | Pick::Downgraded(i) => Some(i),
+            Pick::Nowhere => None,
+        }
+    }
+
+    /// What the routed run's prompt says about how its thread got here. A message that stops is
+    /// routed nowhere, so it gets none.
+    fn note(&self, categories: &[Category], router: &str) -> String {
+        match *self {
+            Pick::Sure(i) | Pick::Downgraded(i) => routed_note(router, &categories[i].name),
+            Pick::Nowhere => String::new(),
+        }
     }
 }
 
@@ -301,6 +334,24 @@ impl Connector {
         true
     }
 
+    /// What the router posts in a thread whose category pages a group: nothing once it posted
+    /// there, a link to the thread it paged within the cooldown, or else the ping.
+    fn escalation_reply(&self, channel: &str, thread: &str, paging: Paging, now: DateTime<Utc>) -> Option<Reply> {
+        if self.paged.contains_key(&thread_key(channel, thread)) {
+            return None;
+        }
+        Some(match self.recent_page(channel, now) {
+            Some(paged) => Reply::Already { handle: paging.handle, thread: paged },
+            None => Reply::Ping(paging.ping),
+        })
+    }
+
+    fn record_escalation(&mut self, channel: &str, thread: &str, reply: &Reply, now: DateTime<Utc>) {
+        if let Reply::Ping(_) = reply {
+            self.paged.insert(thread_key(channel, thread), now.to_rfc3339());
+        }
+    }
+
     fn recent_page(&self, channel: &str, now: DateTime<Utc>) -> Option<String> {
         let prefix = thread_key(channel, "");
         self.paged
@@ -439,19 +490,9 @@ impl Store {
     }
 
     fn page(&mut self, router: &str, channel: String, thread: String, paging: Option<Paging>, now: DateTime<Utc>, react: bool) -> Option<Page> {
-        let paging = paging?;
         let c = self.connectors.iter_mut().find(|c| c.id == router)?;
-        let key = thread_key(&channel, &thread);
-        if c.paged.contains_key(&key) {
-            return None;
-        }
-        let reply = match c.recent_page(&channel, now) {
-            Some(paged) => Reply::Already { handle: paging.handle, thread: paged },
-            None => {
-                c.paged.insert(key, now.to_rfc3339());
-                Reply::Ping(paging.ping)
-            }
-        };
+        let reply = c.escalation_reply(&channel, &thread, paging?, now)?;
+        c.record_escalation(&channel, &thread, &reply, now);
         Some(Page { channel, thread, reply, react })
     }
 
@@ -460,7 +501,7 @@ impl Store {
         let watermark = now - SLACK_OVERLAP;
         for connector in self.connectors.iter_mut().filter(|c| checked.contains(&c.id)) {
             let opening = found.iter().any(|(id, f)| *id == connector.id && f.opens_session());
-            settled.changed |= connector.advance(watermark, opening);
+            settled.needs_save |= connector.advance(watermark, opening);
         }
         for (id, found) in found {
             if let Found::Issue(issue) = &found {
@@ -474,7 +515,7 @@ impl Store {
                 Found::Issue(issue) => {
                     if connector.claim(key) {
                         settled.work.push(Work::Run(run(connector, &issue, exe)));
-                        settled.changed = true;
+                        settled.needs_save = true;
                     }
                 }
                 Found::Mention { channel, channel_name, mention, posts } => {
@@ -484,37 +525,36 @@ impl Store {
                     let note = mention_note(&mention, now);
                     let run = slack_run(connector, &channel, &channel_name, &mention.thread, &posts, note, exe);
                     settled.work.push(Work::Run(Run { mentioned: vec![mention.ts], ..run }));
-                    settled.changed = true;
+                    settled.needs_save = true;
                 }
                 Found::Stopped { channel, thread, page } => {
                     if self.claim_thread(&id, &key).is_some() {
                         settled.pages.extend(self.page(&id, channel, thread, page, now, true));
-                        settled.changed = true;
+                        settled.needs_save = true;
                     }
                 }
-                Found::Routed { channel, channel_name, thread, category, workflow, posts, page } => {
+                Found::Routed { channel, channel_name, thread, category, workflow, note, posts, page } => {
                     let router = connector.name.clone();
                     if let Err(e) = self.check_route(&router, &category, &workflow) {
                         if self.claim_thread(&id, &key).is_some() {
                             settled.pages.extend(self.page(&id, channel, thread, page, now, true));
                             settled.errors.push(e);
-                            settled.changed = true;
+                            settled.needs_save = true;
                         }
                         continue;
                     }
                     let Some(target) = self.claim_thread(&workflow, &key) else { continue };
                     let cursor = posts.last().map_or_else(|| thread.clone(), |p| p.ts.clone());
                     target.followed.insert(key, Followed { cursor, seen: None, replied: false });
-                    let note = routed_note(&router, &category);
                     let run = slack_run(target, &channel, &channel_name, &thread, &posts, Some(&note), exe);
                     settled.work.push(Work::Run(Run { mentioned: vec![thread.clone()], ..run }));
                     settled.pages.extend(self.page(&id, channel, thread, page, now, false));
-                    settled.changed = true;
+                    settled.needs_save = true;
                 }
                 Found::Replies { replies, .. } if replies.posts.is_empty() => {
                     if let Some(followed) = connector.followed.get_mut(&key) {
                         followed.seen = Some(replies.newest);
-                        settled.changed = true;
+                        settled.needs_save = true;
                     }
                 }
                 Found::Replies { channel, replies } => settled.work.push(Work::Delivery(Delivery {
@@ -535,7 +575,7 @@ impl Store {
 struct Settled {
     work: Vec<Work>,
     pages: Vec<Page>,
-    changed: bool,
+    needs_save: bool,
     errors: Vec<String>,
 }
 
@@ -636,6 +676,8 @@ enum Found {
         thread: String,
         category: String,
         workflow: String,
+        /// What the run's prompt says about how the thread got here.
+        note: String,
         posts: Vec<slack::Post>,
         page: Option<Paging>,
     },
@@ -845,7 +887,7 @@ impl Connectors {
             let _filing = self.filing.lock().await;
             let mut store = self.store.lock().unwrap();
             let settled = store.settle(&checked, found, now, &self.exe);
-            if settled.changed {
+            if settled.needs_save {
                 if let Err(e) = self.save(&store) {
                     errors.push(e);
                 }
@@ -1015,7 +1057,8 @@ impl Connectors {
                 for message in messages {
                     let state = json!({ "channel": format!("#{channel_name}"), "author": message.author, "message": message.text });
                     let chosen = vercel::choose(&key, decide.model.trim(), &decide.instructions, &choices, &state).await?;
-                    let Some(chosen) = decide.pick(&chosen) else {
+                    let pick = decide.pick(&chosen);
+                    let Some(chosen) = pick.category() else {
                         found.push(Found::Stopped { channel: channel.clone(), thread: message.ts, page: None });
                         continue;
                     };
@@ -1029,6 +1072,7 @@ impl Connectors {
                             thread: message.ts,
                             category: category.name.clone(),
                             workflow: workflow.clone(),
+                            note: pick.note(&decide.categories, &c.name),
                             page,
                         },
                     });
@@ -2144,6 +2188,7 @@ mod tests {
             thread: "1792400050.000200".into(),
             category: category.into(),
             workflow: workflow.into(),
+            note: routed_note("Support router", category),
             posts: posts().into(),
             page,
         }
@@ -2208,7 +2253,7 @@ mod tests {
         let (started, prompt) = runs(&settled);
         assert_eq!(started, [("c2".to_owned(), thread_subject(), vec!["1792400050.000200".to_owned()])]);
         assert_eq!(prompt, ROUTED);
-        assert_eq!((settled.errors.len(), settled.pages.len(), settled.changed), (0, 0, true));
+        assert_eq!((settled.errors.len(), settled.pages.len(), settled.needs_save), (0, 0, true));
         let [kept, target, _] = &store.connectors[..] else { unreachable!() };
         assert_eq!(target.handled, [THREAD], "the target owns the thread");
         assert_eq!(target.followed[THREAD], Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
@@ -2227,7 +2272,7 @@ mod tests {
         let settled = settle(&mut store, vec![("c5", stopped(None))]);
         assert_eq!((settled.work.len(), settled.pages, settled.errors.len()), (0, vec![], 0));
         assert_eq!(store.connectors[0].handled, [THREAD]);
-        assert!(!settle(&mut store, vec![("c5", stopped(None))]).changed, "a stopped thread is recorded once");
+        assert!(!settle(&mut store, vec![("c5", stopped(None))]).needs_save, "a stopped thread is recorded once");
     }
 
     #[test]
@@ -2268,7 +2313,7 @@ mod tests {
     fn a_category_that_pages_wins_only_when_the_model_is_sure() {
         let Trigger::SlackMessage { decide, .. } = router().trigger else { unreachable!() };
         let picked = |index, probabilities: [f64; 4]| {
-            decide.pick(&vercel::Chosen { index, probabilities: probabilities.into() }).map(|i| decide.categories[i].name.clone())
+            decide.pick(&vercel::Chosen { index, probabilities: probabilities.into() }).category().map(|i| decide.categories[i].name.clone())
         };
         assert_eq!(picked(2, [0.03, 0.10, 0.84, 0.03]), Some("doubt".into()), "the likeliest category that pages no one");
         assert_eq!(picked(2, [0.04, 0.03, 0.90, 0.03]), Some("escalation".into()));
@@ -2277,8 +2322,8 @@ mod tests {
         assert_eq!(picked(2, [0.0, 0.0, 0.0, 0.0]), Some("error".into()), "an answer without probabilities pages no one");
 
         let paging_only = Decide { categories: vec![category("escalation", "Production is down", None, Some("prod-engg"))], ..decide.clone() };
-        assert_eq!(paging_only.pick(&vercel::Chosen { index: 0, probabilities: vec![0.6] }), None);
-        assert_eq!(paging_only.pick(&vercel::Chosen { index: 0, probabilities: vec![0.9] }), Some(0));
+        assert_eq!(paging_only.pick(&vercel::Chosen { index: 0, probabilities: vec![0.6] }), Pick::Nowhere);
+        assert_eq!(paging_only.pick(&vercel::Chosen { index: 0, probabilities: vec![0.9] }), Pick::Sure(0));
     }
 
     #[test]
