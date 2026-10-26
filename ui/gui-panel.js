@@ -1616,24 +1616,6 @@ function closeGoneShells() {
   }
 }
 
-/** A plain click on a terminal's web link opens it as the timeline's links do, a local server in the
- * preview; with ⌘ or Ctrl it goes to the system browser. */
-const TERMINAL_URL = /https?:\/\/[^\s"'`<>()[\]{}]+[^\s"'`<>()[\]{}.,;:!?]/g;
-function wireTerminalLinks(term) {
-  if (term.pinnedLinks) return;
-  term.pinnedLinks = true;
-  term.registerLinkProvider({
-    provideLinks(y, callback) {
-      const line = term.buffer.active.getLine(y - 1)?.translateToString(true) ?? "";
-      const links = [...line.matchAll(TERMINAL_URL)].map((m) => ({
-        text: m[0],
-        range: { start: { x: m.index + 1, y }, end: { x: m.index + m[0].length, y } },
-        activate: (e, url) => (guiOn() ? openLink(url, e.metaKey || e.ctrlKey) : openOutside(url)),
-      }));
-      callback(links.length ? links : undefined);
-    },
-  });
-}
 setInterval(() => tabs.forEach((tab) => wireTerminalLinks(tab.term)), 1000);
 
 /** The thread's pull requests: the ones claude opened, and the ones linked by hand. */
@@ -1770,16 +1752,6 @@ function seenUrls(tab) {
   return [...found];
 }
 
-let recentUrls = [];
-try {
-  recentUrls = JSON.parse(load("gui-browser-recent")) ?? [];
-} catch {}
-function remember(url) {
-  if (!url) return;
-  recentUrls = [url, ...recentUrls.filter((u) => u !== url)].slice(0, 8);
-  save("gui-browser-recent", JSON.stringify(recentUrls));
-}
-
 /** Points the thread's browser tab at `url`, opening one when it has none; `openPanel("browser")` shows it. */
 function setBrowserUrl(url) {
   const tab = active;
@@ -1789,7 +1761,7 @@ function setBrowserUrl(url) {
   if (!s) p.surfaces.push((s = newBrowser()));
   Object.assign(s, { url, title: "" });
   p.active = s.id;
-  remember(url);
+  rememberVisit(url);
   savePanel(tab);
 }
 
@@ -1812,23 +1784,7 @@ setInterval(() => {
   if (guiOn() && !document.hidden && s?.kind === "browser" && !s.url) fetchPorts(active);
 }, 3000);
 
-const DEVICES = [
-  ["Responsive", 0, 0],
-  ["iPhone SE", 375, 667],
-  ["iPhone 15 Pro", 393, 852],
-  ["Pixel 7", 412, 915],
-  ["iPad mini", 768, 1024],
-  ["iPad Pro 11″", 834, 1194],
-  ["Laptop", 1280, 800],
-];
-
 const MOD = IS_MAC ? "⌘" : "Ctrl+";
-
-function frameStyle(s) {
-  const zoom = s.zoom ?? 1;
-  const [w, h] = s.device ? [s.device.w, s.device.h] : [null, null];
-  return `width:${w ? `${w}px` : `${100 / zoom}%`};height:${h ? `${h}px` : `${100 / zoom}%`};transform:scale(${zoom})`;
-}
 
 /** A browser tab, or a Device tab showing its hub's dashboard: both draw a page. */
 const isPage = (s) => s?.kind === "browser" || (s?.kind === "device" && !!s.url);
@@ -1843,55 +1799,36 @@ function browserChrome(s) {
   const forward = native ? s.forward : s.frameForward > 0;
   return `<form class="url-bar">
       <span class="nav"><button type="button" class="icon" data-nav="back" title="Back"${back ? "" : " disabled"}>${icon("arrow-left")}</button><button type="button" class="icon" data-nav="forward" title="Forward"${forward ? "" : " disabled"}>${icon("arrow-right")}</button>
-      <button type="button" class="icon" data-nav="reload" title="${s.loading ? "Stop" : `Reload (${MOD}R)`}"${s.url ? "" : " disabled"}>${icon(s.loading ? "x" : "rotate-cw")}</button></span>
+      <button type="button" class="icon${s.loading ? " spinning" : ""}" data-nav="reload" title="${s.loading ? "Loading…" : "Refresh"}" aria-label="${s.loading ? "Stop" : "Refresh"}"${s.url ? "" : " disabled"}>${icon("refresh-cw")}</button></span>
       <label class="address"><input name="url" value="${esc(s.url)}" placeholder="Search or enter URL" spellcheck="false" autocomplete="off" autocapitalize="off">
         <button type="button" class="icon" data-nav="external" title="Open in system browser">${icon("external-link")}</button></label>
       ${NATIVE_PAGES ? `<button type="button" class="icon${s.picking ? " on" : ""}" data-nav="pick" title="${s.picking ? "Cancel annotation (Esc)" : "Annotate elements, regions, and drawings"}"${s.url ? "" : " disabled"}>${icon("mouse-pointer-click")}</button>
       <button type="button" class="icon${recording?.id === s.id ? " on recording" : ""}" data-nav="capture" title="${recording?.id === s.id ? "Stop recording" : "Screenshot · Shift-click to record"}"${s.url ? "" : " disabled"}>${icon("camera")}</button>` : ""}
       <button type="button" class="icon${panelOf(active).pip === s.id ? " on" : ""}" data-nav="pip" title="${panelOf(active).pip === s.id ? "Close floating preview" : "Float preview over chat"}"${s.url ? "" : " disabled"}>${icon("picture-in-picture-2")}</button>
       <button type="button" class="icon" data-nav="more" title="More">${icon("ellipsis-vertical")}</button>
-      <span class="loading-bar"${s.loading ? "" : " hidden"}></span></form>`;
-}
-
-function deviceBar(s) {
-  const device = s.device;
-  return `<div class="device-bar"><label class="scope"><select data-device aria-label="Device">${DEVICES.map(([name, w, h]) => `<option value="${name}"${(device?.name ?? "Responsive") === name ? " selected" : ""}>${esc(name)}${w ? ` · ${w}×${h}` : ""}</option>`).join("")}</select>${icon("chevron-down")}</label>
-      <input data-size="w" inputmode="numeric" value="${device?.w ?? ""}" placeholder="Width" aria-label="Width"><span class="muted">×</span><input data-size="h" inputmode="numeric" value="${device?.h ?? ""}" placeholder="Height" aria-label="Height">
-      <button type="button" class="icon${s.aspectLock ? " on" : ""}" data-nav="lock" title="${s.aspectLock ? "Unlock aspect ratio" : "Lock aspect ratio"}"${device ? "" : " disabled"}>${icon(s.aspectLock ? "lock" : "lock-open")}</button>
-      <button type="button" class="icon" data-nav="rotate" title="Rotate"${device ? "" : " disabled"}>${icon("rotate-ccw-square")}</button></div>`;
+      <span class="loading-bar" aria-hidden="true" data-loading="${!!s.loading}"></span></form>`;
 }
 
 function pageHtml(s) {
+  if (s.failure) return failureHtml(s);
   if (panelOf(active).pip === s.id) return `<div class="viewport floating"><p class="muted">This page is floating over the chat.</p><button type="button" class="outline" data-nav="pip">${icon("picture-in-picture-2")}Return it to the panel</button></div>`;
-  if (NATIVE_PAGES) return `<div class="viewport native${s.device ? " device" : ""}"><div class="page" data-page="${esc(s.id)}"></div></div>`;
-  return `<div class="viewport${s.device ? " device" : ""}"><iframe src="${esc(s.url)}" title="Preview" style="${frameStyle(s)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"></iframe></div>`;
+  const handles = s.device ? resizeHandlesHtml() : "";
+  if (NATIVE_PAGES) return `<div class="viewport native${s.device ? " device" : ""}"><div class="frame"><div class="page" data-page="${esc(s.id)}"></div>${handles}</div></div>`;
+  return `<div class="viewport${s.device ? " device" : ""}"><div class="frame"><div class="page"><iframe src="${esc(s.url)}" title="Preview" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"></iframe></div>${handles}</div></div>`;
 }
 
 function renderBrowser(s, servers = false) {
   const tab = active;
-  const shown = `${s.id}\n${NATIVE_PAGES ? !!s.url : s.url}\n${JSON.stringify(s.device)}\n${s.devices}\n${panelOf(tab).pip === s.id}`;
+  const shown = `${s.id}\n${NATIVE_PAGES ? !!s.url : s.url}\n${JSON.stringify(s.device)}\n${s.aspect}\n${panelOf(tab).pip === s.id}\n${s.failure?.kind}`;
   if (panelBody.querySelector(".browser") && panelBody.dataset.url === shown && !servers) return syncChrome(s);
   if (servers && panelBody.dataset.url !== shown) return;
   panelBody.dataset.url = shown;
-  const t = tab && threadOf(tab);
-  if (tab && !s.url && !t.ports && t.ports !== null) fetchPorts(tab);
-  const ports = t?.ports;
-  // The session's own servers, as T3 lists; the machine's others only while it has none.
-  const own = ports?.filter((p) => p.own);
-  const local = ports ? (own.length ? own : ports).map((p) => ({ url: `http://localhost:${p.port}`, name: p.own ? p.command : "Listening" })) : tab ? seenUrls(tab).map((url) => ({ url, name: "Listening" })) : [];
-  const remote = tab && tab.machine !== LOCAL;
-  const cards = (rows, ic) => `<div class="servers">${rows.map((r) => `<button type="button" data-url="${esc(r.url)}">${icon(ic)}<span><b>${esc(r.name)}</b><span>${esc(r.url.replace(/^https?:\/\//, ""))}</span></span></button>`).join("")}</div>`;
-  const recent = recentUrls.map((url) => ({ url, name: hostOf(url) || url }));
-  const changed = showPanel(`<div class="browser">${browserChrome(s)}${s.devices ? deviceBar(s) : ""}
-    ${s.url
-      ? pageHtml(s)
-      : `<div class="browser-empty">${icon("globe", "big")}<p class="title">No preview yet</p><p>Type a URL above, or start a dev server in this thread.</p>
-        ${recent.length ? `<p class="group">Recently used</p>${cards(recent, "history")}` : ""}
-        ${local.length ? `<p class="group">Local servers</p>${cards(local, "radio-tower")}` : ""}
-        ${remote ? `<p class="hint">This thread runs on ${esc(machineName(tab.machine))}, so its local servers are that machine's, not this device's.</p>` : ""}</div>`}</div>`);
+  const changed = showPanel(`<div class="browser">${browserChrome(s)}${s.device && s.url ? deviceBarHtml(s) : ""}
+    ${s.url ? pageHtml(s) : browserEmptyHtml(tab)}</div>`);
   if (!changed) return;
   const frame = panelBody.querySelector(".browser iframe");
   if (frame) mountFrame(tab, s, frame);
+  fitShownPage();
   placePages();
 }
 
@@ -1903,8 +1840,13 @@ function syncChrome(s) {
   if (form.dataset.html === html) return;
   const input = form.url;
   const typing = document.activeElement === input && [input.value, input.selectionStart, input.selectionEnd];
-  form.outerHTML = html;
-  const next = panelBody.querySelector(".url-bar");
+  // The bar stays in the page, so it can sweep to full width and fade when the page is in.
+  const bar = form.querySelector(".loading-bar");
+  const fresh = Object.assign(document.createElement("template"), { innerHTML: html }).content.firstElementChild;
+  for (const node of [...form.childNodes]) if (node !== bar) node.remove();
+  form.prepend(...[...fresh.childNodes].filter((node) => !node.classList?.contains("loading-bar")));
+  bar.dataset.loading = String(!!s.loading);
+  const next = form;
   next.dataset.html = html;
   if (!typing) return;
   next.url.value = typing[0];
@@ -1913,6 +1855,7 @@ function syncChrome(s) {
 }
 
 function mountFrame(tab, s, frame) {
+  fetchPageMeta(tab, s);
   s.loading = true;
   s.frameBack = 0;
   s.frameForward = 0;
@@ -1954,11 +1897,13 @@ async function fetchPageMeta(tab, s) {
   metaFetched.set(s.id, url);
   const meta = await callOn(tab.machine, { cmd: "page_meta", url }).catch(() => null);
   if (meta && s.url === url) setPageMeta(tab, s, meta);
+  if (s.url === url) pageMetaFailure(s, url, meta);
 }
 
 function setPageMeta(tab, s, { title = s.title ?? "", icon: favicon = s.icon ?? "" }) {
   if (title === (s.title ?? "") && favicon === (s.icon ?? "")) return;
   Object.assign(s, { title, icon: favicon });
+  rememberPage(s.url, { title, icon: favicon });
   savePanel(tab);
   if (tab === active) renderPanelTabs(tab);
 }
@@ -1974,8 +1919,9 @@ const surfaceById = (id) => {
 
 function go(s, url) {
   const tab = browserTab(s) ?? active;
+  clearFailure(s);
   Object.assign(s, { url, title: "", icon: "" });
-  remember(url);
+  rememberVisit(url);
   savePanel(tab);
   if (NATIVE_PAGES && openPages.has(s.id)) invoke("browser_do", { id: s.id, action: { do: "go", url } }).catch((e) => flash(String(e)));
   renderPanel();
@@ -1986,15 +1932,14 @@ function navigate(s, nav, e) {
   const native = NATIVE_PAGES && openPages.has(s.id);
   const act = (action) => invoke("browser_do", { id: s.id, action }).catch((err) => flash(String(err)));
   if (nav === "external" && s.url) openOutside(s.url);
-  else if (nav === "reload" && s.url) {
-    if (native) act({ do: s.loading ? "stop" : "reload" });
-    else if (frame && s.loading) {
-      try {
-        if (sameOrigin(frame)) frame.contentWindow.stop();
-      } catch {}
-      s.loading = false;
-      syncChrome(s);
-    } else if (frame) {
+  else if (nav === "reload" && s.failure) go(s, s.failure.url || s.url);
+  else if ((nav === "back" || nav === "forward") && clearFailure(s)) {
+    renderBrowser(s);
+    if (native) act({ do: nav });
+  } else if (nav === "reload" && s.url) {
+    // As T3's Refresh does, a click while the page loads starts it over.
+    if (native) act({ do: "reload" });
+    else if (frame) {
       s.loading = true;
       syncChrome(s);
       frame.src = frame.src;
@@ -2013,11 +1958,6 @@ function navigate(s, nav, e) {
   else if (nav === "capture") capture(s, e.shiftKey);
   else if (nav === "pip") togglePip(s);
   else if (nav === "more") toggleMenu(e.target.closest("[data-nav]"), browserMenu(s));
-  else if (nav === "lock") {
-    s.aspectLock = !s.aspectLock;
-    savePanel(active);
-    syncDeviceBar(s);
-  } else if (nav === "rotate" && s.device) setDevice(s, { ...s.device, w: s.device.h, h: s.device.w });
 }
 
 function browserMenu(s) {
@@ -2028,15 +1968,10 @@ function browserMenu(s) {
     { label: "Hard reload", disabled: !s.url, run: native ? act({ do: "hard-reload" }) : () => go(s, s.url) },
     ...(NATIVE_PAGES ? [
       { label: s.shownDevtools ? "Close DevTools" : "Open DevTools", disabled: !native, run: () => toggleDevtools(s) },
-      { label: "Open separate preview window", disabled: !s.url, run: () => invoke("browser_window", { url: s.url }).catch((e) => flash(String(e))) },
+      { label: s.window ? "Close separate preview window" : "Open separate preview window", disabled: !s.url, run: () => invoke("browser_window", { id: s.id, url: s.url }).catch((e) => flash(String(e))) },
     ] : []),
-    { label: `${s.devices ? "Hide" : "Show"} device toolbar`, run: () => {
-      s.devices = !s.devices;
-      if (!s.devices) s.device = null;
-      savePanel(active);
-      renderBrowser(s);
-    } },
-    ...(NATIVE_PAGES ? [{ label: "Appearance", disabled: !native, sub: ["system", "light", "dark"].map((mode) => ({ label: mode[0].toUpperCase() + mode.slice(1), checked: scheme === mode, run: () => {
+    { label: `${s.device ? "Hide" : "Show"} device toolbar`, disabled: !s.url, run: () => toggleDeviceToolbar(s) },
+    ...(NATIVE_PAGES ? [{ label: "Appearance", disabled: !native, sub: ["system", "light", "dark"].map((mode) => ({ label: mode[0].toUpperCase() + mode.slice(1), radio: true, checked: scheme === mode, run: () => {
       s.scheme = mode;
       savePanel(active);
       act({ do: "appearance", mode })();
@@ -2047,23 +1982,12 @@ function browserMenu(s) {
   ];
 }
 
-function setDevice(s, device) {
-  s.device = device;
-  savePanel(active);
-  renderBrowser(s);
-}
-function syncDeviceBar(s) {
-  const bar = panelBody.querySelector(".device-bar");
-  if (bar) bar.outerHTML = deviceBar(s);
-}
-
 /** Zooms the page by `step`, or back to 100% when it is 0. */
 function zoomBrowser(s, step) {
   s.zoom = step ? Math.min(3, Math.max(0.25, Math.round(((s.zoom ?? 1) + step) * 100) / 100)) : 1;
-  const frame = panelBody.querySelector(".browser iframe");
-  if (frame) frame.style.cssText = frameStyle(s);
+  fitShownPage();
   placePages(true);
-  flash(`Zoom ${Math.round(s.zoom * 100)}%`);
+  showZoom(s);
   savePanel(active);
   const value = panelMenu.querySelector(".zoom .value");
   if (value) value.textContent = `${Math.round(s.zoom * 100)}%`;
@@ -2073,11 +1997,8 @@ panelBody.addEventListener("submit", (e) => {
   if (!e.target.matches(".url-bar")) return;
   e.preventDefault();
   const s = shownSurface(active);
-  let url = e.target.url.value.trim();
+  const url = addressOf(e.target.url.value);
   if (!s || !url) return;
-  if (!/^https?:\/\//.test(url)) {
-    url = /^(localhost|127\.|0\.0\.0\.0|\[::1\])/.test(url) ? `http://${url}` : /\.\w{2,}($|\/)/.test(url) ? `https://${url}` : `https://duckduckgo.com/?q=${encodeURIComponent(url)}`;
-  }
   e.target.url.blur();
   go(s, url);
 });
@@ -2093,23 +2014,6 @@ panelBody.addEventListener("click", (e) => {
   if (nav && isPage(s) && !nav.disabled) return navigate(s, nav.dataset.nav, e);
   const card = e.target.closest(".browser [data-url]");
   if (card && s) go(s, card.dataset.url);
-});
-panelBody.addEventListener("change", (e) => {
-  const s = shownSurface(active);
-  if (!isPage(s)) return;
-  if (e.target.matches("[data-device]")) {
-    const [name, w, h] = DEVICES.find(([n]) => n === e.target.value);
-    setDevice(s, w ? { name, w, h } : null);
-  } else if (e.target.matches("[data-size]")) {
-    const inputs = [...panelBody.querySelectorAll("[data-size]")];
-    let [w, h] = inputs.map((i) => Math.round(Number(i.value)));
-    if (s.aspectLock && s.device) {
-      const ratio = s.device.w / s.device.h;
-      if (e.target.dataset.size === "w") h = Math.round(w / ratio);
-      else w = Math.round(h * ratio);
-    }
-    setDevice(s, w > 0 && h > 0 ? { name: "Custom", w: Math.min(w, 4000), h: Math.min(h, 4000) } : null);
-  }
 });
 
 const sameOrigin = (frame) => hostOf(frame.src) !== "" && new URL(frame.src).origin === location.origin;
@@ -2160,17 +2064,6 @@ function pageTarget() {
   return { s, box, r };
 }
 
-function fitDevice(s, box) {
-  const area = box.parentElement.getBoundingClientRect();
-  if (!s.device) {
-    box.style.cssText = "";
-    return 1;
-  }
-  const scale = Math.max(0.1, Math.min(1, (area.width - 32) / s.device.w, (area.height - 32) / s.device.h));
-  box.style.cssText = `width:${Math.round(s.device.w * scale)}px;height:${Math.round(s.device.h * scale)}px`;
-  return scale;
-}
-
 function placePages(force = false) {
   const target = pageTarget();
   if (!target) {
@@ -2180,7 +2073,7 @@ function placePages(force = false) {
     return;
   }
   const { s, box } = target;
-  const scale = box.closest("#preview-pip") ? 1 : fitDevice(s, box);
+  const scale = box.closest("#preview-pip") ? Number(pipFrame.dataset.scale) || 1 : fitPage(s, box);
   const r = box.getBoundingClientRect();
   const at = { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) };
   const key = JSON.stringify(at);
@@ -2229,18 +2122,19 @@ if (NATIVE_PAGES) {
     }
     const was = s.loading;
     // Docking and undocking the inspector resizes the page's webview, so it goes back in its place.
-    const { url, title, back, forward, loading, devtools, audible } = e.state;
+    const { url, title, back, forward, loading, devtools, audible, window: own } = e.state;
     if (devtools !== !!s.shownDevtools) {
       setTimeout(() => placePages(true), 700);
       if (!devtools && s.shownDevtools) s.devtools = false;
       s.shownDevtools = devtools;
     }
-    Object.assign(s, { back, forward, loading, audible });
+    Object.assign(s, { back, forward, loading, audible, window: own });
     if (url && url !== s.url && /^https?:/.test(url)) {
       s.url = url;
-      remember(url);
+      rememberVisit(url);
     }
     if (title !== (s.title ?? "")) s.title = title;
+    if (title) rememberPage(s.url, { title });
     if (was && !loading) pageIcon(s);
     if (tab) savePanel(tab);
     if (tab === active) {
@@ -2256,6 +2150,7 @@ async function pageIcon(s) {
   const href = await invoke("browser_eval", { id: s.id, js: ICON_JS }).catch(() => null);
   if (typeof href === "string" && /^https?:/.test(href) && href !== s.icon) {
     s.icon = href;
+    rememberPage(s.url, { icon: href });
     const tab = browserTab(s);
     if (tab) savePanel(tab);
     if (tab === active) renderPanelTabs(tab);
@@ -2285,64 +2180,6 @@ function toggleMute(s) {
   renderPanelTabs(active);
 }
 
-/** The floating preview: the thread's page over the chat, while the panel shows something else. */
-function togglePip(s) {
-  const p = panelOf(active);
-  p.pip = p.pip === s.id ? null : s.id;
-  savePanel(active);
-  renderPanel();
-}
-const pipFrame = document.createElement("div");
-pipFrame.id = "preview-pip";
-pipFrame.hidden = true;
-document.getElementById("chat").append(pipFrame);
-function renderPip(tab) {
-  const p = panelOf(tab);
-  const s = guiOn() && p.pip && p.surfaces.find((x) => x.id === p.pip);
-  pipFrame.hidden = !s;
-  if (!s) {
-    pipFrame.dataset.id = "";
-    pipFrame.innerHTML = "";
-    return;
-  }
-  const title = surfaceTitle(tab, s);
-  if (pipFrame.dataset.id === s.id) {
-    pipFrame.querySelector(".title").textContent = title;
-    return;
-  }
-  pipFrame.dataset.id = s.id;
-  pipFrame.innerHTML = `<div class="page">${NATIVE_PAGES ? "" : `<iframe src="${esc(s.url)}" title="Floating preview" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"></iframe>`}</div>
-    <div class="pill"><span class="title">${esc(title)}</span><button type="button" class="icon" data-pip="panel" title="Open preview in right panel">${icon("panel-right")}</button><button type="button" class="icon" data-pip="close" title="Close floating preview">${icon("x")}</button></div>`;
-}
-pipFrame.addEventListener("click", (e) => {
-  const b = e.target.closest("[data-pip]");
-  if (!b || !active) return;
-  const p = panelOf(active);
-  const id = p.pip;
-  p.pip = null;
-  if (b.dataset.pip === "panel") {
-    p.active = id;
-    p.open = true;
-  }
-  savePanel(active);
-  renderPanel();
-});
-pipFrame.addEventListener("pointerdown", (down) => {
-  if (!down.target.closest(".pill") || down.target.closest("button")) return;
-  down.preventDefault();
-  const chat = document.getElementById("chat").getBoundingClientRect();
-  const start = pipFrame.getBoundingClientRect();
-  drag(down, {
-    move: (e) => {
-      const right = Math.max(12, Math.min(chat.width - start.width - 12, chat.right - (start.right + e.clientX - down.clientX)));
-      const bottom = Math.max(12, Math.min(chat.height - start.height - 12, chat.bottom - (start.bottom + e.clientY - down.clientY)));
-      pipFrame.style.right = `${right}px`;
-      pipFrame.style.bottom = `${bottom}px`;
-    },
-    drop: () => {},
-  });
-});
-
 /** Saves `blob` to Downloads and says where, with what T3's toast offers. */
 async function saveCapture(name, blob, kind) {
   const path = await invoke("save_capture", { name, bytes: [...new Uint8Array(await blob.arrayBuffer())] });
@@ -2354,131 +2191,6 @@ async function saveCapture(name, blob, kind) {
 }
 const stamp = () => new Date().toISOString().slice(0, 19).replace("T", " at ").replace(/:/g, ".");
 const snapshotOf = async (s) => new Blob([await invoke("browser_snapshot", { id: s.id })], { type: "image/png" });
-
-let recording = null;
-async function capture(s, record) {
-  if (recording) return stopRecording();
-  if (!openPages.has(s.id)) return;
-  if (!record) {
-    try {
-      await saveCapture(`Screenshot ${stamp()}.png`, await snapshotOf(s), "Screenshot");
-    } catch (e) {
-      flash(`Couldn't capture the page: ${e}`);
-    }
-    return;
-  }
-  const canvas = document.createElement("canvas");
-  const first = await createImageBitmap(await snapshotOf(s)).catch(() => null);
-  if (!first) return flash("Couldn't capture the page");
-  Object.assign(canvas, { width: first.width, height: first.height });
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(first, 0, 0);
-  const type = ["video/webm", "video/mp4"].find((t) => window.MediaRecorder?.isTypeSupported(t));
-  if (!type) return flash("This system can't record video");
-  const chunks = [];
-  const recorder = new MediaRecorder(canvas.captureStream(10), { mimeType: type });
-  recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-  recording = { id: s.id, recorder, done: new Promise((r) => (recorder.onstop = r)) };
-  recorder.start(1000);
-  syncChrome(s);
-  (async () => {
-    while (recording?.recorder === recorder) {
-      const frame = await snapshotOf(s).then(createImageBitmap).catch(() => null);
-      if (frame && recording?.recorder === recorder) ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
-      await new Promise((r) => setTimeout(r, 80));
-    }
-  })();
-  recording.save = async () => saveCapture(`Recording ${stamp()}.${type.split("/")[1]}`, new Blob(chunks, { type }), "Recording");
-}
-async function stopRecording() {
-  const r = recording;
-  recording = null;
-  r.recorder.stop();
-  await r.done;
-  const s = surfaceById(r.id);
-  if (s && shownSurface(active) === s) syncChrome(s);
-  r.save().catch((e) => flash(String(e)));
-}
-
-/** The annotation picker runs inside the page: hovering outlines an element, a click picks it, a drag
- * picks a region, and with Shift held a drag draws. The pick waits in `__pinnedPick` for the panel. */
-const PICK_JS = `(() => {
-  if (window.__pinnedPicker) return true;
-  const ui = document.createElement("div");
-  ui.style.cssText = "position:fixed;inset:0;z-index:2147483647;cursor:crosshair";
-  const box = document.createElement("div");
-  box.style.cssText = "position:fixed;pointer-events:none;border:2px solid #346bf1;background:rgb(52 107 241/.12);border-radius:3px;display:none";
-  const ink = document.createElement("canvas");
-  ink.style.cssText = "position:fixed;inset:0;pointer-events:none";
-  ink.width = innerWidth * devicePixelRatio; ink.height = innerHeight * devicePixelRatio;
-  const pen = ink.getContext("2d"); pen.scale(devicePixelRatio, devicePixelRatio); pen.strokeStyle = "#ff4d4f"; pen.lineWidth = 3; pen.lineCap = "round";
-  ui.append(ink, box); document.documentElement.append(ui);
-  const show = (r) => Object.assign(box.style, { display: "block", left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px" });
-  const under = (x, y) => { ui.style.display = "none"; const el = document.elementFromPoint(x, y); ui.style.display = ""; return el; };
-  const path = (el) => { const parts = []; for (let e = el; e && e.nodeType === 1 && e !== document.body && e !== document.documentElement && parts.length < 5; e = e.parentElement) { let p = e.localName; if (e.id) { parts.unshift(p + "#" + e.id); break; } const cls = [...e.classList].slice(0, 2).join("."); if (cls) p += "." + cls; parts.unshift(p); } return parts.join(" > "); };
-  let down = null, strokes = [];
-  const done = (pick) => { ui.remove(); removeEventListener("keydown", key, true); window.__pinnedPicker = null; window.__pinnedPick = pick; };
-  const cancel = () => done({ cancelled: true });
-  const key = (e) => { if (e.key === "Escape") { e.preventDefault(); cancel(); } };
-  addEventListener("keydown", key, true);
-  ui.onpointermove = (e) => {
-    if (down?.draw) { pen.lineTo(e.clientX, e.clientY); pen.stroke(); strokes.at(-1).push([e.clientX, e.clientY]); return; }
-    if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) { down.region = true; return show({ left: Math.min(down.x, e.clientX), top: Math.min(down.y, e.clientY), width: Math.abs(e.clientX - down.x), height: Math.abs(e.clientY - down.y) }); }
-    if (!down) { const el = under(e.clientX, e.clientY); if (el) show(el.getBoundingClientRect()); }
-  };
-  ui.onpointerdown = (e) => { e.preventDefault(); down = { x: e.clientX, y: e.clientY, draw: e.shiftKey }; if (down.draw) { pen.beginPath(); pen.moveTo(e.clientX, e.clientY); strokes.push([[e.clientX, e.clientY]]); } };
-  ui.onpointerup = (e) => {
-    const d = down; down = null;
-    if (!d) return;
-    const view = { width: innerWidth, height: innerHeight, url: location.href, title: document.title };
-    if (d.draw) { const xs = strokes.flat().map((p) => p[0]), ys = strokes.flat().map((p) => p[1]); return done({ kind: "drawing", ...view, rect: { left: Math.min(...xs) - 8, top: Math.min(...ys) - 8, width: Math.max(...xs) - Math.min(...xs) + 16, height: Math.max(...ys) - Math.min(...ys) + 16 } }); }
-    if (d.region) { const r = box.getBoundingClientRect(); return done({ kind: "region", ...view, rect: { left: r.left, top: r.top, width: r.width, height: r.height } }); }
-    const el = under(e.clientX, e.clientY);
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    done({ kind: "element", ...view, selector: path(el), tag: el.localName, text: (el.innerText || el.value || "").trim().slice(0, 200), html: el.outerHTML.slice(0, 400), rect: { left: r.left, top: r.top, width: r.width, height: r.height } });
-  };
-  window.__pinnedPicker = { cancel }; window.__pinnedPick = null;
-  return true;
-})()`;
-
-async function pickElement(s) {
-  if (s.picking) {
-    s.picking = false;
-    invoke("browser_eval", { id: s.id, js: "(() => { window.__pinnedPicker?.cancel(); return true; })()" }).catch(() => {});
-    return syncChrome(s);
-  }
-  if (!openPages.has(s.id)) return;
-  s.picking = true;
-  syncChrome(s);
-  await invoke("browser_eval", { id: s.id, js: PICK_JS }).catch((e) => flash(String(e)));
-  let pick = null;
-  while (s.picking && !pick) {
-    await new Promise((r) => setTimeout(r, 250));
-    pick = await invoke("browser_eval", { id: s.id, js: "(() => { const p = window.__pinnedPick; window.__pinnedPick = null; return p ?? null; })()" }).catch(() => null);
-  }
-  s.picking = false;
-  syncChrome(s);
-  if (!pick || pick.cancelled) return;
-  const tab = browserTab(s);
-  const note = pick.kind === "element"
-    ? `[${hostOf(pick.url)} ${pick.selector}${pick.text ? ` "${pick.text.replace(/\s+/g, " ").slice(0, 80)}"` : ""}]`
-    : `[${hostOf(pick.url)} ${pick.kind} at ${Math.round(pick.rect.left)},${Math.round(pick.rect.top)} ${Math.round(pick.rect.width)}×${Math.round(pick.rect.height)}]`;
-  const head = prompt.value.replace(/\s+$/, "");
-  prompt.value = `${head}${head ? " " : ""}${note} `;
-  prompt.dispatchEvent(new Event("input"));
-  try {
-    const shot = await createImageBitmap(await snapshotOf(s));
-    const ratio = shot.width / pick.width;
-    const r = pick.rect;
-    const canvas = Object.assign(document.createElement("canvas"), { width: Math.max(1, Math.round(r.width * ratio)), height: Math.max(1, Math.round(r.height * ratio)) });
-    canvas.getContext("2d").drawImage(shot, r.left * ratio, r.top * ratio, r.width * ratio, r.height * ratio, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise((done) => canvas.toBlob(done, "image/png"));
-    await attachFiles(tab, [new File([blob], `annotation-${Date.now().toString(36)}.png`, { type: "image/png" })]);
-  } catch {
-    flash("The annotation was kept without the screenshot");
-  }
-}
 
 const checkState = (c) => {
   const v = (c.conclusion || c.state || c.status || "").toUpperCase();

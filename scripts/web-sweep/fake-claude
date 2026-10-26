@@ -456,6 +456,10 @@ function submit() {
         res.setHeader("content-type", "text/html; charset=utf-8");
         return res.end('<!doctype html><title>Page A</title><link rel="icon" href="/dot.png"><p>page a</p><a href="/">home</a>');
       }
+      if (req.url === "/report.zip") {
+        res.setHeader("content-type", "application/zip");
+        return res.end("PK sweep");
+      }
       if (req.url === "/dot.png") {
         res.setHeader("content-type", "image/png");
         return res.end(Buffer.from(DOT_PNG, "base64"));

@@ -22,6 +22,39 @@ pub struct PageMeta {
     pub title: String,
     /// The page's icon as a `data:` URL, so a client that can't reach the machine's localhost shows it.
     pub icon: Option<String>,
+    /// Why the page can't be reached, as Chromium names it (`ERR_CONNECTION_REFUSED`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+    /// The file name, when the address answers a file a browser downloads instead of showing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+/// Why a fetch got no page: the address can't be reached, named as Chromium names it, or some other failure.
+enum FetchError {
+    Unreachable(&'static str),
+    Failed(String),
+}
+
+impl From<String> for FetchError {
+    fn from(e: String) -> Self {
+        FetchError::Failed(e)
+    }
+}
+
+impl From<&str> for FetchError {
+    fn from(e: &str) -> Self {
+        FetchError::Failed(e.to_owned())
+    }
+}
+
+/// Whether a browser shows a `kind` response itself rather than downloading it.
+fn shows_inline(kind: &str) -> bool {
+    kind.is_empty()
+        || ["text/", "image/", "video/", "audio/"].iter().any(|p| kind.starts_with(p))
+        || ["application/pdf", "application/json", "application/xml", "application/javascript", "application/xhtml+xml"].contains(&kind)
+        || kind.ends_with("+json")
+        || kind.ends_with("+xml")
 }
 
 /// The title and icon of the page at `url`, fetched from this machine.
@@ -30,9 +63,14 @@ pub fn page_meta(url: &str) -> Result<PageMeta, String> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(format!("not a web address: {url}"));
     }
-    let (base, kind, page) = fetch(url, PAGE_LIMIT)?;
+    let (base, kind, page) = match fetch(url, PAGE_LIMIT) {
+        Ok(got) => got,
+        Err(FetchError::Unreachable(code)) => return Ok(PageMeta { failure: Some(code.into()), ..PageMeta::default() }),
+        Err(FetchError::Failed(e)) => return Err(e),
+    };
     if !kind.contains("html") {
-        return Ok(PageMeta::default());
+        let name = base.path_segments().and_then(|mut s| s.next_back()).filter(|n| !n.is_empty()).unwrap_or("download");
+        return Ok(PageMeta { file: (!shows_inline(&kind)).then(|| name.to_owned()), ..PageMeta::default() });
     }
     let html = String::from_utf8_lossy(&page);
     let title = element_text(&html, "title").map(|t| unescape(t.trim())).unwrap_or_default();
@@ -48,15 +86,25 @@ pub fn page_meta(url: &str) -> Result<PageMeta, String> {
         let (_, kind, bytes) = fetch(at, ICON_LIMIT).ok()?;
         kind.starts_with("image/").then(|| format!("data:{kind};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
     });
-    Ok(PageMeta { title, icon })
+    Ok(PageMeta { title, icon, ..PageMeta::default() })
 }
 
 /// The final address, content type and first `limit` bytes of what `url` answers, after redirects.
 /// A dev server answers plain HTTP, which this reads over a socket; reqwest takes https.
-fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>), String> {
+fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>), FetchError> {
     if url.scheme() == "https" {
         let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(4)).build().map_err(|e| e.to_string())?;
-        let got = client.get(url).send().map_err(|e| e.to_string())?.error_for_status().map_err(|e| e.to_string())?;
+        let got = client.get(url).send().map_err(|e| {
+            let dns = format!("{e:?}").contains("dns error");
+            match () {
+                _ if e.is_timeout() => FetchError::Unreachable("ERR_TIMED_OUT"),
+                _ if e.is_redirect() => FetchError::Unreachable("ERR_TOO_MANY_REDIRECTS"),
+                _ if e.is_connect() && dns => FetchError::Unreachable("ERR_NAME_NOT_RESOLVED"),
+                _ if e.is_connect() => FetchError::Unreachable("ERR_CONNECTION_REFUSED"),
+                _ => FetchError::Failed(e.to_string()),
+            }
+        })?;
+        let got = got.error_for_status().map_err(|e| e.to_string())?;
         let (at, kind) = (got.url().clone(), got.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned());
         let mut body = vec![];
         got.take(limit).read_to_end(&mut body).map_err(|e| e.to_string())?;
@@ -68,9 +116,9 @@ fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>
         let port = at.port_or_known_default().unwrap_or(80);
         // localhost may name ::1 first while the server listens on 127.0.0.1 only. Windows takes
         // seconds to refuse a closed loopback port, while an open one answers at once.
-        let addrs: Vec<_> = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port)).map_err(|e| e.to_string())?.collect();
+        let addrs: Vec<_> = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port)).map_err(|_| FetchError::Unreachable("ERR_NAME_NOT_RESOLVED"))?.collect();
         let wait = |a: &std::net::SocketAddr| if a.ip().is_loopback() { Duration::from_millis(300) } else { Duration::from_secs(2) };
-        let mut stream = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, wait(a)).ok()).ok_or_else(|| format!("nothing answers at {host}:{port}"))?;
+        let mut stream = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, wait(a)).ok()).ok_or(FetchError::Unreachable("ERR_CONNECTION_REFUSED"))?;
         stream.set_read_timeout(Some(Duration::from_secs(4))).map_err(|e| e.to_string())?;
         let target = at.query().map_or_else(|| at.path().to_owned(), |q| format!("{}?{q}", at.path()));
         write!(stream, "GET {target} HTTP/1.0\r\nHost: {host}:{port}\r\nAccept: text/html,image/*;q=0.9,*/*;q=0.5\r\nUser-Agent: pinned\r\n\r\n").map_err(|e| e.to_string())?;
@@ -87,12 +135,12 @@ fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>
             continue;
         }
         if !(200..300).contains(&status) {
-            return Err(format!("the page answered {status}"));
+            return Err(format!("the page answered {status}").into());
         }
         let kind = header("content-type").unwrap_or_default();
         return Ok((at, kind.split(';').next().unwrap_or("").trim().to_owned(), body));
     }
-    Err("too many redirects".into())
+    Err(FetchError::Unreachable("ERR_TOO_MANY_REDIRECTS"))
 }
 
 fn element_text<'a>(html: &'a str, name: &str) -> Option<&'a str> {
@@ -1214,8 +1262,37 @@ mod tests {
             }
         });
         let meta = page_meta(&format!("http://localhost:{port}/")).unwrap();
-        assert_eq!(meta, PageMeta { title: "Dev server".into(), icon: Some("data:image/png;base64,UE5HIQ==".into()) });
+        assert_eq!(meta, PageMeta { title: "Dev server".into(), icon: Some("data:image/png;base64,UE5HIQ==".into()), ..PageMeta::default() });
         assert!(page_meta("file:///etc/passwd").unwrap_err().contains("not a web address"));
+    }
+
+    #[test]
+    fn page_meta_names_an_unreachable_page_and_a_file_it_would_download() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        assert_eq!(page_meta(&format!("http://127.0.0.1:{port}/")).unwrap().failure.as_deref(), Some("ERR_CONNECTION_REFUSED"));
+        assert_eq!(page_meta("http://no-such-host.invalid/").unwrap().failure.as_deref(), Some("ERR_NAME_NOT_RESOLVED"));
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in server.incoming().flatten().take(2) {
+                let mut stream = stream;
+                let mut ask = vec![];
+                let mut chunk = [0; 1024];
+                while !ask.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => ask.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let kind = if String::from_utf8_lossy(&ask).starts_with("GET /report.zip") { "application/zip" } else { "application/manifest+json" };
+                let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nPK").as_bytes());
+            }
+        });
+        let zip = page_meta(&format!("http://127.0.0.1:{port}/report.zip")).unwrap();
+        assert_eq!((zip.file.as_deref(), zip.failure), (Some("report.zip"), None));
+        assert_eq!(page_meta(&format!("http://127.0.0.1:{port}/manifest.webmanifest")).unwrap(), PageMeta::default());
     }
 
     #[test]

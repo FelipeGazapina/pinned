@@ -14,6 +14,14 @@ const server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "text/html");
     return res.end(`<!doctype html><title>probe two</title><h1>two</h1>`);
   }
+  if (url.pathname === "/report.zip") {
+    res.setHeader("Content-Type", "application/zip");
+    return res.end("PK probe");
+  }
+  if (url.pathname === "/slow") {
+    res.setHeader("Content-Type", "text/html");
+    return setTimeout(() => res.end(`<!doctype html><title>probe slow</title><h1>slow</h1>`), 2500);
+  }
   if (url.pathname === "/opened") {
     seen.add("opened");
     res.setHeader("Content-Type", "text/html");

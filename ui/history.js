@@ -6,9 +6,11 @@ async function showGeneral() {
     <p class="meta">While this is on, the ${COMPUTER} and its display don't go to sleep, so sessions keep working when you step away. It turns off when you switch it off or quit pinned.</p>
     <p class="error" id="awake-error"></p>` : ""}
     ${sidebarSettingsHtml()}
-    ${sendShortcutHtml()}`;
+    ${sendShortcutHtml()}
+    ${browserSettingsHtml()}`;
   bindSidebarSettings();
   bindSendShortcut();
+  bindBrowserSettings();
   if (!TAURI) return;
   document.getElementById("keep-awake").onchange = async (e) => {
     try {

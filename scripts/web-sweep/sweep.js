@@ -101,7 +101,12 @@ async function sweep(profileName) {
   const browser = await playwright[engine].launch({ headless: true });
   const context = await browser.newContext({ ...profile, colorScheme: "dark", permissions: engine === "chromium" ? ["clipboard-read", "clipboard-write"] : [] });
   if (touch) await context.addInitScript(stubVisualViewport);
-  await context.addInitScript(() => localStorage.getItem("mode") || localStorage.setItem("mode", "terminal"));
+  // It runs in every frame too, where a page that failed to load has no storage to read.
+  await context.addInitScript(() => {
+    try {
+      localStorage.getItem("mode") || localStorage.setItem("mode", "terminal");
+    } catch {}
+  });
   let page = await context.newPage();
 
   let seen = [];
@@ -2555,9 +2560,9 @@ async function sweep(profileName) {
     const port = readLog("serve.port").trim();
     await page.fill("#panel-body .url-bar input", `http://localhost:${port}/slow`);
     await page.press("#panel-body .url-bar input", "Enter");
-    await waitFor("the loading bar", () => page.locator("#panel-body .loading-bar").isVisible(), 2000);
-    check((await page.getAttribute('#panel-body [data-nav="reload"]', "title")) === "Stop", "while loading, Reload isn't Stop");
-    await waitFor("the page to load", async () => !(await page.locator("#panel-body .loading-bar").isVisible()), 10000);
+    await waitFor("the loading bar", async () => (await page.getAttribute("#panel-body .loading-bar", "data-loading")) === "true", 2000);
+    check((await page.getAttribute('#panel-body [data-nav="reload"]', "aria-label")) === "Stop", "while loading, Reload isn't Stop");
+    await waitFor("the page to load", async () => (await page.getAttribute("#panel-body .loading-bar", "data-loading")) === "false", 10000);
     await waitFor("the page's title on its tab", async () => (await text("#panel-tabs .ptab.active")) === "Sweep server");
     const more = async (label) => {
       await press(gui('#panel-body [data-nav="more"]'));
@@ -2571,10 +2576,11 @@ async function sweep(profileName) {
     await press(gui('#panel-menu [data-zoom="0"]'));
     await page.keyboard.press("Escape");
     await more("Show device toolbar");
-    await page.selectOption("#panel-body [data-device]", "iPhone SE");
-    const width = () => page.locator("#panel-body iframe").evaluate((f) => Math.round(f.getBoundingClientRect().width));
+    await press(gui("#panel-body [data-device]"));
+    await press(gui('#panel-menu button:has(.label:text-is("iPhone SE"))'));
+    const width = () => page.locator("#panel-body iframe").evaluate((f) => f.offsetWidth);
     await waitFor("the iPhone SE size", async () => (await width()) === 375);
-    await press(gui('#panel-body [data-nav="rotate"]'));
+    await press(gui('#panel-body [data-device-do="rotate"]'));
     await waitFor("the rotated size", async () => (await width()) === 667);
     await more("Hide device toolbar");
     await fromPlus("Browser");
@@ -2685,9 +2691,10 @@ async function sweep(profileName) {
     }
     await press(gui('#panel-body [data-nav="more"]'));
     await press(menuItem("Show device toolbar"));
-    await page.selectOption("#panel-body [data-device]", "iPhone SE");
-    await press(gui('#panel-body [data-nav="lock"]'));
-    check((await page.getAttribute('#panel-body [data-nav="lock"]', "title")) === "Unlock aspect ratio", "the lock didn't lock");
+    await press(gui("#panel-body [data-device]"));
+    await press(menuItem("iPhone SE"));
+    await press(gui('#panel-body [data-device-do="lock"]'));
+    check((await page.getAttribute('#panel-body [data-device-do="lock"]', "title")) === "Unlock aspect ratio", "the lock didn't lock");
     await page.fill('#panel-body [data-size="w"]', "750");
     await page.locator('#panel-body [data-size="w"]').dispatchEvent("change");
     await waitFor("the locked height", async () => (await page.inputValue('#panel-body [data-size="h"]')) === "1334");
@@ -2698,9 +2705,302 @@ async function sweep(profileName) {
     if (touch) await closePanelIfOpen();
     await waitFor("the floating page", () => page.locator("#preview-pip iframe").isVisible());
     const box = await rect("#preview-pip");
-    check(box.width >= 300 && box.height >= 200, `the floating page is ${box.width}×${box.height}`);
+    const source = await page.evaluate(() => miniSource(panelOf(active).surfaces.find((x) => x.id === panelOf(active).pip)));
+    check(Math.abs(box.width / box.height - source.w / source.h) < 0.03 && (Math.round(Math.max(box.width, box.height)) === 320 || Math.round(box.width) === 240), `the floating page is ${box.width}×${box.height} for a ${source.w}×${source.h} page`);
     await press(gui('#preview-pip [data-pip="panel"]'));
     await waitFor("the page back in the panel", async () => (await page.locator("#panel-body .viewport iframe").count()) === 1 && !(await page.locator("#preview-pip").isVisible()));
+    await closePanelIfOpen();
+  });
+
+  await step("browser: Refresh spins while a page loads, and the bar sweeps to full width and fades", async () => {
+    await openPanelTo("browser", "Browser");
+    const port = readLog("serve.port").trim();
+    await page.fill("#panel-body .url-bar input", `http://localhost:${port}/slow`);
+    await page.press("#panel-body .url-bar input", "Enter");
+    const reload = '#panel-body [data-nav="reload"]';
+    await waitFor("the page to start loading", async () => (await page.getAttribute("#panel-body .loading-bar", "data-loading")) === "true", 3000);
+    check((await page.getAttribute(reload, "aria-label")) === "Stop" && (await page.getAttribute(reload, "title")) === "Loading…", `while loading, Refresh reads ${await page.getAttribute(reload, "aria-label")} / ${await page.getAttribute(reload, "title")}`);
+    const spin = await page.locator(`${reload} .i`).evaluate((i) => getComputedStyle(i).animationName);
+    check(spin === "browser-spin", `the Refresh icon doesn't spin: ${spin}`);
+    check((await page.locator(`${reload} .i path`).first().getAttribute("d")) === "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8", "the Refresh icon isn't RefreshCw");
+    const seen = await page.locator("#panel-body .loading-bar").evaluate((bar) => new Promise((done) => {
+      const samples = [];
+      const scale = () => new DOMMatrix(getComputedStyle(bar).transform).a;
+      const tick = () => {
+        samples.push({ loading: bar.isConnected && bar.dataset.loading === "true", scale: scale(), opacity: Number(getComputedStyle(bar).opacity), glow: getComputedStyle(bar).boxShadow });
+        if (samples.length > 400 || (!samples.at(-1).loading && samples.at(-1).opacity === 0)) return done(samples);
+        requestAnimationFrame(tick);
+      };
+      tick();
+    }));
+    const loading = seen.filter((x) => x.loading);
+    const after = seen.filter((x) => !x.loading);
+    check(loading.length && loading.every((x) => x.scale >= 0.03 && x.scale <= 0.91 && x.opacity === 1), `while loading the bar ran ${loading.map((x) => x.scale.toFixed(2)).join(",")}`);
+    check(loading[0].glow !== "none", "the bar has no glow");
+    check(after.some((x) => x.scale > 0.98 && x.opacity > 0.5), `the bar didn't sweep to full width before fading: ${after.map((x) => `${x.scale.toFixed(2)}@${x.opacity.toFixed(2)}`).join(" ")}`);
+    check(after.at(-1)?.opacity === 0, "the bar didn't fade out");
+    check((await page.getAttribute(reload, "aria-label")) === "Refresh", "Refresh stayed Stop");
+    return `${loading.length} loading frames, ${after.length} to fade`;
+  });
+
+  await step("browser: the empty tab lists recent pages with their icon, title and age, and only the thread's own servers", async () => {
+    const port = readLog("serve.port").trim();
+    await openPanelTo("browser", "Browser");
+    await page.fill("#panel-body .url-bar input", `http://localhost:${port}/a`);
+    await page.press("#panel-body .url-bar input", "Enter");
+    await waitFor("Page A's title", async () => (await text("#panel-tabs .ptab.active")) === "Page A", 10000);
+    await fromPlus("Browser");
+    const recent = `#panel-body .servers .row:has(button[data-url="http://localhost:${port}/a"])`;
+    await waitFor("Page A among Recently used", async () => (await page.locator(recent).count()) === 1, 5000);
+    check(!/No preview yet/.test(await text("#panel-body .browser-empty")), "the title stays above the lists");
+    check((await page.locator("#panel-body .browser-empty .group").first().locator(".i").count()) === 1, "the heading has no icon");
+    check((await text(`${recent} b`)) === "Page A", `the card's title is ${await text(`${recent} b`)}`);
+    check(new RegExp(`^localhost:${port}/a · (just now|\\d+s ago|\\d+m ago)$`).test(await text(`${recent} b + span`)), `the card's subline is ${await text(`${recent} b + span`)}`);
+    await waitFor("Page A's icon", async () => /^data:image\/png/.test((await page.getAttribute(`${recent} img.favicon`, "src").catch(() => "")) ?? ""), 5000);
+    const server = `#panel-body section:has(.group:text-is("Local servers")) button[data-url="http://localhost:${port}"]`;
+    await waitFor("the server's card", async () => (await page.locator(server).count()) === 1, 12000);
+    check((await text(`${server} b + span`)) === `localhost:${port}`, `the server's subline is ${await text(`${server} b + span`)}`);
+    check((await page.locator(`${server} .mockup, ${server} img.favicon`).count()) >= 1 && !(await page.locator(`${server} [data-icon], ${server} svg.i`).count()), "the server's card shows an icon, not its page's");
+    check(/Select a live local server to open it in this browser tab\./.test(await text("#panel-body .browser-empty")), "no line under the servers");
+    if (!touch) await page.hover(recent);
+    await press(gui(`${recent} [data-forget]`));
+    await waitFor("Page A to leave Recently used", async () => (await page.locator(recent).count()) === 0);
+    check(!(await page.evaluate((u) => browserRecents.some((e) => e.url === u), `http://localhost:${port}/a`)), "the removed page is still saved");
+    const kept = await page.evaluate(() => JSON.stringify(browserRecents));
+    try {
+      await page.evaluate(() => { browserRecents = []; activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))); });
+      await waitFor("beta", async () => /beta/.test(await text("#chat-head .crumb")));
+      await openPanelTo("browser", "Browser");
+      await waitFor("beta's ports", () => page.evaluate(() => Array.isArray(threadOf(active).ports)), 8000);
+      await page.evaluate(() => renderBrowser(shownSurface(active), true));
+      const blank = await text("#panel-body .browser-empty");
+      check(/^No preview yet\s*Type a URL above, or run a dev script\. Browser-ready localhost servers will show up here automatically\.\s*(This thread runs on .*)?$/.test(blank), `beta's empty tab reads: ${blank}`);
+      check((await page.locator("#panel-body .browser-empty .media .i").count()) === 1, "no globe over the blank state");
+      check(!(await page.locator(`#panel-body [data-url="http://localhost:${new URL(HUB).port}"]`).count()), "beta lists the machine's other listening ports");
+    } finally {
+      await page.evaluate((k) => { browserRecents = JSON.parse(k); saveRecents(); activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))); }, kept);
+      await waitFor("alpha", async () => /alpha/.test(await text("#chat-head .crumb")));
+      await closePanelIfOpen();
+    }
+  });
+
+  await step("browser: the device toolbar opens Responsive at the page's size, lists DevTools' devices, rotates, resizes from its rails and closes", async () => {
+    await openPanelTo("browser", "Browser");
+    const port = readLog("serve.port").trim();
+    if (!(await page.locator("#panel-body iframe").count())) {
+      await page.fill("#panel-body .url-bar input", `http://localhost:${port}/a`);
+      await page.press("#panel-body .url-bar input", "Enter");
+    }
+    await press(gui('#panel-body [data-nav="more"]'));
+    await press(menuItem("Show device toolbar"));
+    const size = async () => [Number(await page.inputValue('#panel-body [data-size="w"]')), Number(await page.inputValue('#panel-body [data-size="h"]'))];
+    const frame = () => page.locator("#panel-body iframe").evaluate((f) => [f.offsetWidth, f.offsetHeight]);
+    check((await text("#panel-body [data-device]")) === "Responsive", `the preset reads ${await text("#panel-body [data-device]")}`);
+    const [w, h] = await size();
+    check(w >= 240 && h >= 240 && JSON.stringify(await frame()) === JSON.stringify([w, h]), `Responsive is ${w}×${h}, the page ${(await frame()).join("×")}`);
+    const barWidth = (await rect("#panel-body .device-bar")).width;
+    check((await page.locator("#panel-body .device-bar .dims-label").count()) === (barWidth >= 560 ? 1 : 0), `"Dimensions" at a ${barWidth}px toolbar`);
+    await press(gui("#panel-body [data-device]"));
+    const labels = await menuLabels();
+    check(labels.length === 18 && labels[0] === "Responsive" && labels[1] === "iPhone SE" && labels.at(-1) === "Nest Hub Max" && labels.includes("Samsung Galaxy S20 Ultra"), `presets: ${labels.join(" | ")}`);
+    check((await text("#panel-menu .group")) === "Standard" && (await text('#panel-menu button:has(.label:text-is("iPad Air")) .hint')) === "820 × 1180", "the presets aren't grouped with their sizes");
+    await page.keyboard.press("Escape");
+    await press(gui('#panel-body [data-device-do="rotate"]'));
+    await waitFor("Responsive to rotate", async () => JSON.stringify(await size()) === JSON.stringify([h, w]));
+    const link = async () => page.locator('#panel-body [data-device-do="lock"] path').first().getAttribute("d");
+    check((await link()) === "M15 7h2a5 5 0 0 1 0 10h-2", "the open lock isn't Unlink2");
+    await press(gui('#panel-body [data-device-do="lock"]'));
+    check((await link()) === "M9 17H7A5 5 0 0 1 7 7h2", `the shut lock isn't Link2: ${await link()}`);
+    await press(gui('#panel-body [data-device-do="lock"]'));
+    await page.locator("#panel-body .rail.e").focus();
+    await page.keyboard.press("ArrowRight");
+    await waitFor("the east rail's arrow key", async () => (await size())[0] === h + 10);
+    if (!touch) {
+      const rail = await rect("#panel-body .rail.e");
+      await page.mouse.move(rail.x + rail.width / 2, rail.y + rail.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(rail.x + rail.width / 2 - 30, rail.y + rail.height / 2, { steps: 4 });
+      check(/^\d+ × \d+$/.test(await text("#panel-body .device-size")), "no size readout while dragging");
+      await page.mouse.up();
+      await waitFor("the drag to narrow the page", async () => (await size())[0] < h + 10 && (await frame())[0] === (await size())[0]);
+    }
+    check((await page.locator("#panel-body .rail").count()) === 5, "the page has no resize rails");
+    await press(gui('#panel-body [data-device-do="close"]'));
+    await waitFor("the toolbar to close", async () => !(await page.locator("#panel-body .device-bar").count()) && !(await page.locator("#panel-body .viewport.device").count()));
+    await closePanelIfOpen();
+    return `Responsive ${w}×${h}`;
+  });
+
+  await step("browser: Settings pick the address bar's search engine and where links open, and terminal links follow them across wrapped rows", async () => {
+    await page.evaluate(() => toggleSettings());
+    await tapOrClick('#settings-nav [data-page="general"]');
+    await waitFor("the Browser settings", () => page.locator("#browser-settings").isVisible());
+    check((await page.inputValue("#browser-links")) === "system", "links don't open in the default browser at first");
+    const engines = await page.locator("#browser-search option").allTextContents();
+    check(engines.join("|") === "DuckDuckGo|Google|Bing|Brave Search|Kagi|Ecosia|Custom", `engines: ${engines.join(" | ")}`);
+    await page.selectOption("#browser-search", "custom");
+    await waitFor("the custom URL field", () => page.locator("#browser-search-url").isVisible());
+    check(/Searches use DuckDuckGo until then/.test(await text("#browser-settings")), "an empty custom URL isn't flagged");
+    await page.fill("#browser-search-url", "https://search.example.test/find?q=%s");
+    await page.locator("#browser-search-url").dispatchEvent("change");
+    await waitFor("the custom URL to be taken", async () => !/Searches use DuckDuckGo/.test(await text("#browser-settings")));
+    await page.evaluate(() => toggleSettings());
+    await openPanelTo("browser", "Browser");
+    const port = readLog("serve.port").trim();
+    const typed = async (value) => {
+      await page.fill("#panel-body .url-bar input", value);
+      await page.press("#panel-body .url-bar input", "Enter");
+      await sleep(150);
+      return page.evaluate(() => shownSurface(active).url);
+    };
+    check((await typed("pinned sweep words")) === "https://search.example.test/find?q=pinned%20sweep%20words", "a query didn't use the custom engine");
+    check((await typed(`localhost:${port}/a`)) === `http://localhost:${port}/a`, "a loopback host didn't go over http");
+    check((await typed("mailto:someone@example.test")) === `http://localhost:${port}/a`, "a mailto: address went somewhere");
+    await page.evaluate(() => toggleSettings());
+    await tapOrClick('#settings-nav [data-page="general"]');
+    await page.selectOption("#browser-search", "kagi");
+    await page.evaluate(() => toggleSettings());
+    await openPanelTo("browser", "Browser");
+    check((await typed("pinned")) === "https://kagi.com/search?q=pinned", "a query didn't use Kagi");
+    await typed(`localhost:${port}/a`);
+    await page.evaluate(() => { save("gui-browser-search", ""); save("gui-browser-search-url", ""); });
+
+    await fromPlus("Terminal");
+    await waitFor("the shell", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1, 10000);
+    await page.locator("#panel-body .xterm-helper-textarea").focus();
+    const wrapped = `http://localhost:${port}/a?w=${"q".repeat(220)}END`;
+    await page.keyboard.type(`clear; echo ${wrapped}; echo ./notes.md:1\n`);
+    const spot = (needle, back) => page.evaluate(([n, b]) => {
+      for (const row of document.querySelectorAll("#panel-body .xterm-rows > div")) {
+        const i = row.textContent.indexOf(n);
+        if (i < 0 || row.textContent.includes("echo")) continue;
+        const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+        let seen = 0;
+        for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+          if (seen + t.length > i - b) {
+            const range = document.createRange();
+            range.setStart(t, i - b - seen);
+            range.setEnd(t, i - b - seen + 1);
+            const r = range.getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          }
+          seen += t.length;
+        }
+      }
+      return null;
+    }, [needle, back]);
+    // The typed command shows the address too, so wait for the row echo printed.
+    await waitFor("the wrapped link", async () => !!(await spot("END", 3)) && !!(await spot("notes.md:1", -3)), 10000);
+    const clickAt = async (at, modifiers = []) => {
+      await page.mouse.move(at.x, at.y);
+      await sleep(300);
+      for (const m of modifiers) await page.keyboard.down(m);
+      await page.mouse.click(at.x, at.y);
+      for (const m of modifiers) await page.keyboard.up(m);
+    };
+    const tail = await spot("END", 3);
+    check(tail, "the wrapped link's last row isn't on screen");
+    const popup = page.context().waitForEvent("page", { timeout: 8000 });
+    await clickAt(tail);
+    const outside = await popup;
+    check(outside.url() === wrapped, `a plain click with the default setting opened ${outside.url().slice(0, 60)} outside`);
+    await outside.close();
+    check(await openTab("terminal").isVisible(), "the default setting opened the preview");
+    await page.evaluate(() => save("gui-browser-links", "app"));
+    await clickAt(tail);
+    await waitFor("the wrapped link in the preview", async () => (await page.evaluate(() => shownSurface(active)?.url)) === wrapped, 10000);
+    await page.click('#panel-tabs .ptab[data-panel="terminal"]');
+    await waitFor("the shell again", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1);
+    const popup2 = page.context().waitForEvent("page", { timeout: 8000 });
+    await clickAt(await spot("END", 3), [(await page.evaluate(() => IS_MAC)) ? "Meta" : "Control"]);
+    const forced = await popup2;
+    check(forced.url() === wrapped, "⌘-click didn't open the link outside");
+    await forced.close();
+    await clickAt(await spot("notes.md:1", -3));
+    await waitFor("notes.md in a File tab", async () => /notes\.md/.test(await text("#panel-tabs .ptab.active")), 10000);
+    await page.evaluate(() => save("gui-browser-links", ""));
+    await page.click('#panel-tabs .ptab[data-panel="terminal"]');
+    await press(gui('#panel-tabs .ptab[data-panel="terminal"] .lead'));
+    await closePanelIfOpen();
+  });
+
+  await step("browser: an unreachable address and a file show T3's screens in place of the page", async () => {
+    await openPanelTo("browser", "Browser");
+    const port = readLog("serve.port").trim();
+    await page.fill("#panel-body .url-bar input", "http://localhost:1/");
+    await page.press("#panel-body .url-bar input", "Enter");
+    await waitFor("the unreachable screen", () => gui("#panel-body .page-failure").isVisible(), 10000);
+    const failure = await text("#panel-body .page-failure");
+    check(/This site can’t be reached/.test(failure) && /localhost:1: Connection refused\./.test(failure) && /ERR_CONNECTION_REFUSED/.test(failure), `the screen reads ${failure}`);
+    check(!(await page.locator("#panel-body iframe").count()), "the page still shows under the screen");
+    await press(gui('#panel-body [data-failure="details"]'));
+    check(/Try:\s*Checking your connection/.test(await text("#panel-body .page-failure")) && (await text('#panel-body [data-failure="details"]')) === "Hide details", "Details shows no advice");
+    await press(gui('#panel-body [data-failure="reload"]'));
+    await waitFor("the screen again after Reload", () => gui("#panel-body .page-failure").isVisible(), 10000);
+    await page.fill("#panel-body .url-bar input", `http://localhost:${port}/report.zip`);
+    await page.press("#panel-body .url-bar input", "Enter");
+    await waitFor("the file screen", async () => /This file can’t be shown here/.test(await text("#panel-body .page-failure")), 10000);
+    check(new RegExp(`report\\.zip from localhost:${port} was downloaded instead\\.`).test(await text("#panel-body .page-failure")), `the file screen reads ${await text("#panel-body .page-failure")}`);
+    check((await page.getAttribute("#panel-body .page-failure a[download]", "href")) === `http://localhost:${port}/report.zip` && (await text('#panel-body [data-failure="open"]')) === "Open in browser", "the file screen has no Download and Open in browser");
+    await page.fill("#panel-body .url-bar input", `http://localhost:${port}/a`);
+    await page.press("#panel-body .url-bar input", "Enter");
+    await waitFor("the page back", async () => /page a/.test((await page.frameLocator("#panel-body iframe").locator("body").textContent().catch(() => "")) ?? ""), 10000);
+    check(!(await page.locator("#panel-body .page-failure").count()), "the screen stayed over the page");
+    await closePanelIfOpen();
+  });
+
+  await step("browser: zooming fades the new zoom in at the page's top right, then out", async () => {
+    await openPanelTo("browser", "Browser");
+    await press(gui('#panel-body [data-nav="more"]'));
+    await press(gui('#panel-menu [data-zoom="0.1"]'));
+    const pill = "#panel-body .viewport .zoom-pill";
+    await waitFor("the zoom pill", async () => (await page.locator(pill).evaluate((p) => Number(getComputedStyle(p).opacity)).catch(() => 0)) === 1, 2000);
+    check((await text(pill)) === "110%", `the pill reads ${await text(pill)}`);
+    const box = await rect(pill);
+    const view = await rect("#panel-body .viewport");
+    check(Math.abs(view.right - box.right - 12) <= 1 && Math.abs(box.top - view.top - 12) <= 1, `the pill sits at ${box.right - view.right},${box.top - view.top}`);
+    check(!/Zoom 110%/.test(await text("#panel-note").catch(() => "")), "the zoom still flashes in the bottom note");
+    await waitFor("the pill to fade", async () => (await page.locator(pill).evaluate((p) => Number(getComputedStyle(p).opacity))) === 0, 4000);
+    await press(gui('#panel-menu [data-zoom="0"]'));
+    await page.keyboard.press("Escape");
+    await closePanelIfOpen();
+  });
+
+  await step("browser: the floating preview keeps the page's shape as it resizes from a corner, moves by its handle, and offers T3's controls", async () => {
+    await openPanelTo("browser", "Browser");
+    await press(gui('#panel-body [data-nav="pip"]'));
+    if (touch) await closePanelIfOpen();
+    await waitFor("the floating page", () => page.locator("#preview-pip iframe").isVisible());
+    const pip = "#preview-pip";
+    const before = await rect(pip);
+    const labels = await page.locator("#preview-pip .pill button").evaluateAll((bs) => bs.map((b) => b.getAttribute("aria-label")));
+    check(labels.join("|") === "Open in right panel|Close floating preview", `the pill offers ${labels.join(" | ")}`);
+    check(!(await page.locator("#preview-pip .pill .title").count()), "the pill shows a title");
+    const drag = async (selector, dx, dy) => {
+      const r = await rect(selector);
+      await page.mouse.move(r.x + r.width / 2, r.y + r.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(r.x + r.width / 2 + dx, r.y + r.height / 2 + dy, { steps: 5 });
+      await page.mouse.up();
+    };
+    if (!touch) {
+      await drag("#preview-pip .grip.nw", -60, -60);
+      const grown = await rect(pip);
+      check(grown.width > before.width + 20 && Math.abs(grown.width / grown.height - before.width / before.height) < 0.03, `a corner drag made it ${grown.width}×${grown.height} from ${before.width}×${before.height}`);
+      check(Math.abs(grown.right - before.right) <= 1 && Math.abs(grown.bottom - before.bottom) <= 1, "the opposite corner moved");
+      await page.hover(pip);
+      await drag("#preview-pip .handle", -40, -30);
+      const moved = await rect(pip);
+      check(Math.abs(moved.x - (grown.x - 40)) <= 1 && Math.abs(moved.y - (grown.y - 30)) <= 1, `the handle moved it to ${moved.x},${moved.y} from ${grown.x},${grown.y}`);
+      await drag("#preview-pip .handle", -4000, -4000);
+      const chat = await rect("#chat");
+      const clamped = await rect(pip);
+      check(Math.round(clamped.x - chat.x) === 12 && Math.round(clamped.y - chat.y) === 12, `dragged off, it sits at ${clamped.x - chat.x},${clamped.y - chat.y}`);
+    }
+    check((await page.locator("#preview-pip .grip").count()) === 8, "the player has no resize grips");
+    await press(gui('#preview-pip [data-pip="close"]'));
+    await waitFor("the player to close", async () => !(await page.locator(pip).isVisible()));
+    await page.evaluate(() => { panelOf(active).pipAt = null; savePanel(active); });
     await closePanelIfOpen();
   });
 
@@ -3204,6 +3504,7 @@ async function sweep(profileName) {
   });
 
   await step("app view: a Terminal tab runs a shell in the thread's folder, and its links open in the preview", async () => {
+    await page.evaluate(() => save("gui-browser-links", "app"));
     await openPanelTo("terminal", "Terminal");
     const screen = () => page.locator("#panel-body .xterm-rows").textContent();
     await waitFor("the shell", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1, 10000);
@@ -3238,6 +3539,7 @@ async function sweep(profileName) {
     await waitFor("page A", async () => /page a/.test((await page.frameLocator("#panel-body iframe").locator("body").textContent().catch(() => "")) ?? ""), 10000);
     await page.click('#panel-tabs .ptab[data-panel="terminal"]');
     await press(gui('#panel-tabs .ptab[data-panel="terminal"] .lead'));
+    await page.evaluate(() => save("gui-browser-links", ""));
     await closePanelIfOpen();
   });
 
