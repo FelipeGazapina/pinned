@@ -18,6 +18,7 @@ pub mod pty;
 pub mod reminders;
 pub mod sessions;
 pub mod slack;
+pub mod stats;
 pub mod sync;
 pub mod thread;
 pub mod uploads;
