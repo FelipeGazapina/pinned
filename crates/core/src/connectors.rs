@@ -229,10 +229,10 @@ pub struct Connector {
     /// How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.
     #[serde(default)]
     pub followed: BTreeMap<String, Followed>,
-    /// When a message workflow paged a category's user group in each Slack thread (RFC 3339), by
-    /// `<channel id>:<thread ts>`. A thread is paged once, however often it is sorted again.
+    /// The escalation a message workflow posted in each Slack thread, by `<channel id>:<thread ts>`.
+    /// A thread gets one, however often it is sorted again.
     #[serde(default)]
-    pub paged: BTreeMap<String, String>,
+    pub paged: BTreeMap<String, Paged>,
     /// Whether a session that opens a pull request must prove it works, with a Playwright video.
     #[serde(default = "on")]
     pub proof: bool,
@@ -244,6 +244,15 @@ pub struct Connector {
 
 fn on() -> bool {
     true
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Paged {
+    /// RFC 3339.
+    pub at: String,
+    /// Whether the post pinged the group, rather than pointing at a thread it pinged a moment ago.
+    pub ping: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -347,16 +356,17 @@ impl Connector {
     }
 
     fn record_escalation(&mut self, channel: &str, thread: &str, reply: &Reply, now: DateTime<Utc>) {
-        if let Reply::Ping(_) = reply {
-            self.paged.insert(thread_key(channel, thread), now.to_rfc3339());
-        }
+        let ping = matches!(reply, Reply::Ping(_));
+        self.paged.insert(thread_key(channel, thread), Paged { at: now.to_rfc3339(), ping });
     }
 
+    /// The thread this router last pinged a group in, within the cooldown.
     fn recent_page(&self, channel: &str, now: DateTime<Utc>) -> Option<String> {
         let prefix = thread_key(channel, "");
         self.paged
             .iter()
-            .filter_map(|(key, at)| Some((key.strip_prefix(&prefix)?, DateTime::parse_from_rfc3339(at).ok()?)))
+            .filter(|(_, paged)| paged.ping)
+            .filter_map(|(key, paged)| Some((key.strip_prefix(&prefix)?, DateTime::parse_from_rfc3339(&paged.at).ok()?)))
             .filter(|(_, at)| now.signed_duration_since(*at) < PAGE_COOLDOWN)
             .max_by_key(|(_, at)| *at)
             .map(|(thread, _)| thread.to_owned())
@@ -720,7 +730,7 @@ struct Page {
     react: bool,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Reply {
     Ping(String),
     Already { handle: String, thread: String },
@@ -2285,7 +2295,8 @@ mod tests {
         let posted = Page { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), reply: Reply::Ping(ping.into()), react: true };
         assert_eq!((settled.work.len(), settled.pages, settled.errors.len()), (0, vec![posted], 0), "it stops, pages and reacts");
         assert_eq!(store.connectors[0].handled, [THREAD]);
-        assert_eq!(store.connectors[0].paged, BTreeMap::from([(THREAD.to_owned(), "2026-10-19T10:01:00+00:00".to_owned())]));
+        let pinged = Paged { at: "2026-10-19T10:01:00+00:00".into(), ping: true };
+        assert_eq!(store.connectors[0].paged, BTreeMap::from([(THREAD.to_owned(), pinged)]));
         assert_eq!(settle(&mut store, vec![("c5", stopped(Some(paging())))]).pages, [], "the next check pages no one again");
 
         let mut store = Store { connectors: vec![router(), slack_connector()], ..Store::default() };
@@ -2356,10 +2367,41 @@ mod tests {
         let router = &store.connectors[0];
         assert_eq!(router.handled, ["C0123ABCD:1792399000.000000", "C0123ABCD:1792399600.000000", "C0999WXYZ:1792400100.000000", "C0123ABCD:1792400900.000000"]);
         assert_eq!(
-            router.paged.keys().collect::<Vec<_>>(),
-            ["C0123ABCD:1792399000.000000", "C0123ABCD:1792400900.000000", "C0999WXYZ:1792400100.000000"],
-            "only pings are recorded, so the cooldown runs from the page"
+            router.paged.iter().map(|(key, paged)| (key.as_str(), paged.ping)).collect::<Vec<_>>(),
+            [
+                ("C0123ABCD:1792399000.000000", true),
+                ("C0123ABCD:1792399600.000000", false),
+                ("C0123ABCD:1792400050.000200", false),
+                ("C0123ABCD:1792400900.000000", true),
+                ("C0999WXYZ:1792400100.000000", true),
+            ],
+            "every escalation is recorded, and the cooldown runs from the pings"
         );
+    }
+
+    #[test]
+    fn a_thread_told_it_was_already_escalated_is_told_once() {
+        let (connectors, dir) = stored("already-once", vec![router(), slack_connector()]);
+        let at = |minutes| checked_at() + chrono::Duration::minutes(minutes);
+        let already = |thread: &str| Reply::Already { handle: "prod-engg".into(), thread: thread.into() };
+        let replies = |settled: &Settled| settled.pages.iter().map(|p| (p.thread.clone(), p.reply.clone())).collect::<Vec<_>>();
+
+        let settled = settle_at(&mut connectors.store.lock().unwrap(), vec![("c5", escalated("C0123ABCD", "1792399000.000000"))], at(0));
+        assert_eq!(settled.pages.len(), 1);
+        let settled = settle_at(&mut connectors.store.lock().unwrap(), vec![("c5", routed("escalation", "c2", Some(paging())))], at(5));
+        assert_eq!(replies(&settled), [("1792400050.000200".to_owned(), already("1792399000.000000"))]);
+        let work = settled.work.into_iter().next().unwrap();
+        assert!(block_on(connectors.hand_over(work, &|_| async { false })).is_err());
+
+        let mut store = connectors.store.lock().unwrap();
+        let settled = settle_at(&mut store, vec![("c5", routed("escalation", "c2", Some(paging())))], at(8));
+        assert_eq!((runs(&settled).0.len(), replies(&settled)), (1, vec![]), "the thread sorted again starts a session and posts nothing");
+        assert_eq!(store.connectors[0].paged[THREAD], Paged { at: "2026-10-19T10:06:00+00:00".into(), ping: false });
+
+        let settled = settle_at(&mut store, vec![("c5", escalated("C0123ABCD", "1792400300.000000"))], at(12));
+        assert_eq!(replies(&settled), [("1792400300.000000".to_owned(), already("1792399000.000000"))], "the link points at the thread that was pinged");
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
