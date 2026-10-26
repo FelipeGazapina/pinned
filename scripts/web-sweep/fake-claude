@@ -42,9 +42,19 @@ function run(command, input) {
     execFileSync("/bin/sh", ["-c", command], { input: JSON.stringify(input), stdio: ["pipe", "ignore", "ignore"] });
   } catch {}
 }
+// Each turn costs $0.42, and claude logs the turn's length and its running cost after the Stop hook returns.
+const started = Date.now();
+let turnStart = started;
+let turnsDone = 0;
 const hook = (event, extra = {}) => {
+  if (event === "UserPromptSubmit") turnStart = Date.now();
   const command = settings.hooks?.[event]?.[0]?.hooks?.[0]?.command;
   if (command) run(command, { session_id: session, cwd: process.cwd(), ...extra });
+  if (event === "Stop") {
+    turnsDone++;
+    record({ type: "system", subtype: "turn_duration", durationMs: Date.now() - turnStart });
+    record({ type: "cost-state", startTime: started, totalCostUSD: turnsDone * 0.42, hasUnknownModelCost: false });
+  }
 };
 const transcript = path.join(process.env.HOME, ".claude", "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${session}.jsonl`);
 fs.mkdirSync(path.dirname(transcript), { recursive: true });
@@ -60,6 +70,44 @@ function used(name, input, content, is_error = false) {
   wrote([{ type: "tool_use", id, name, input }]);
   said([{ type: "tool_result", tool_use_id: id, content, is_error }]);
 }
+// Background agents as claude keeps them: the Agent tool uses answer at once, and each agent writes its
+// own transcript and meta file under the session's subagents folder, a step a second, until it ends.
+function spawnAgents() {
+  const dir = path.join(transcript.replace(/\.jsonl$/, ""), "subagents");
+  fs.mkdirSync(dir, { recursive: true });
+  const agents = [
+    { id: "a1sweep", name: "Map the parser", kind: "Explore", model: "haiku", tool: "Read", steps: 4 },
+    { id: "a2sweep", name: "Check the tests", kind: "general-purpose", tool: "Bash", steps: 9, finished: true },
+  ];
+  wrote(agents.map((a) => ({ type: "tool_use", id: `agent-${a.id}`, name: "Agent", input: { description: a.name, subagent_type: a.kind, prompt: `${a.name}.`, run_in_background: true } })));
+  record({
+    type: "user",
+    message: { role: "user", content: agents.map((a) => ({ type: "tool_result", tool_use_id: `agent-${a.id}`, content: [{ type: "text", text: `Async agent launched successfully.\nagentId: ${a.id}` }] })) },
+    toolUseResult: { isAsync: true },
+  });
+  wrote([{ type: "text", text: "Two agents are on it." }]);
+  for (const a of agents) {
+    const meta = (extra) => fs.writeFileSync(path.join(dir, `agent-${a.id}.meta.json`), JSON.stringify({ agentType: a.kind, description: a.name, toolUseId: `agent-${a.id}`, spawnDepth: 1, requestShape: "background", model: a.model, ...extra }));
+    let n = 0;
+    const append = (entry) => fs.appendFileSync(path.join(dir, `agent-${a.id}.jsonl`), JSON.stringify({ isSidechain: true, agentId: a.id, uuid: `${a.id}-${++n}`, timestamp: new Date().toISOString(), sessionId: session, ...entry }) + "\n");
+    meta({});
+    append({ type: "user", message: { role: "user", content: `${a.name}.` } });
+    let step = 0;
+    const timer = setInterval(() => {
+      if (++step <= a.steps) {
+        const id = `${a.id}-${step}`;
+        const input = a.tool === "Read" ? { file_path: path.join(process.cwd(), `src/part${step}.rs`) } : { command: `cargo test batch_${step}`, description: `Run test batch ${step}` };
+        append({ type: "assistant", message: { role: "assistant", stop_reason: "tool_use", content: [{ type: "tool_use", id, name: a.tool, input }] } });
+        return append({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: `step ${step} ok` }] } });
+      }
+      clearInterval(timer);
+      append({ type: "assistant", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: `${a.name}: all clear.` }] } });
+      if (a.finished) meta({ finished: true });
+      said(`<task-notification>\n<task-id>${a.id}</task-id>\n<status>completed</status>\n</task-notification>`);
+    }, 1000);
+  }
+}
+
 const DOT_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 // Each takes a while, as claude would, and ends the turn itself.
 const SLOW = {
@@ -80,7 +128,7 @@ if (settings.statusLine?.command) {
   });
 }
 
-const KEYS = { "\x1b": "[esc]", "\t": "[tab]", "\x1b[Z": "[shift-tab]", "\x1b[A": "[up]", "\x1b[B": "[down]", "\x1bOA": "[up]", "\x1bOB": "[down]", "\x03": "[ctrl-c]" };
+const KEYS = { "\x1b": "[esc]", "\t": "[tab]", "\x1b[Z": "[shift-tab]", "\x1b[A": "[up]", "\x1b[B": "[down]", "\x1bOA": "[up]", "\x1bOB": "[down]", "\x03": "[ctrl-c]", "\x18": "[ctrl-x]", "\x0b": "[ctrl-k]" };
 const out = (text) => process.stdout.write(text);
 const UNTRUSTED_MARKER = ".untrusted";
 let trusting = fs.existsSync(UNTRUSTED_MARKER) ? 1 : 0;
@@ -213,6 +261,8 @@ function submit() {
     fs.writeFileSync("docs/guide.md", Array.from({ length: 1200 }, (_, i) => `line ${i}`).join("\n") + "\n");
     fs.writeFileSync("README.md", "# beta\n");
     wrote([{ type: "text", text: "Wrote the tree." }]);
+  } else if (line === "spawn agents") {
+    spawnAgents();
   } else if (line === "many") {
     for (let i = 1; i <= 45; i++) {
       said(`question ${i}`);

@@ -200,7 +200,7 @@ const rowTabs = () => [...threadList.querySelectorAll(".thread-row")].map((r) =>
 
 function markThreadSeen(tab) {
   if (!tab || !guiOn() || document.hidden) return;
-  seenAt[threadKey(tab)] = tab.view.updated ?? 0;
+  seenAt[threadKey(tab)] = lastActivity(tab);
   save("gui-seen", JSON.stringify(seenAt));
   if (wokeNow(tab)) {
     delete sideMarks.snoozed[threadKey(tab)];
@@ -209,10 +209,24 @@ function markThreadSeen(tab) {
 }
 
 const durationLabel = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h ${Math.floor(s / 60) % 60}m`);
+/** The thread's active time and cost, as `1h 12m · $3.42`. A running turn counts until its end reports the exact time. */
+function statsLabel(tab) {
+  const stats = tab?.view.stats;
+  if (!stats) return "";
+  const running = statusOf(tab) === "working" && tab.view.updated ? Math.max(0, nowS() - tab.view.updated) : 0;
+  const active = stats.active_ms == null ? "" : durationLabel(stats.active_ms / 1000 + running);
+  const cost = stats.cost_usd == null ? "" : stats.cost_usd < 0.01 ? "<$0.01" : `$${stats.cost_usd.toFixed(2)}`;
+  return [active, cost].filter(Boolean).join(" · ");
+}
+function statsHtml(tab) {
+  const label = statsLabel(tab);
+  return label ? `<span class="stats" data-stats="${esc(tab.key)}">${esc(label)}</span>` : "";
+}
 function statusSlot(tab) {
   const phase = phaseOf(tab);
   if (phase === "asking") return { icon: "shield-question", text: "Approval", tone: "warning" };
   if (phase === "working") return { icon: "circle-dashed", text: "Working", tone: "info", since: unixOf(lastPrompt(tab)?.at) };
+  if (phase === "delegating") return { icon: "bot", text: agentsWorking(runningAgents(tab).length), tone: "info", since: delegatedSince(tab) / 1000 || 0 };
   if (phase === "input") return { icon: "message-circle-question", text: "Input", tone: "input" };
   if (phase === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "limited" } : { icon: "circle-alert", text: "Failed", tone: "error" };
   if (wokeNow(tab) && tab !== active) return { icon: "alarm-clock", text: "Woke", tone: "limited", woke: true };
@@ -465,9 +479,9 @@ function cardRow(tab) {
   const phase = phaseOf(tab);
   const woke = !!slot?.woke;
   const row = rowShell(tab, "tall");
-  row.classList.toggle("receded", tab !== active && (phase === "working" || (["asking", "done", "idle"].includes(phase) && !unseenDone(tab) && !woke)));
+  row.classList.toggle("receded", tab !== active && (["working", "delegating"].includes(phase) || (["asking", "done", "idle"].includes(phase) && !unseenDone(tab) && !woke)));
   row.classList.toggle("bright", unseenDone(tab) || woke || phase === "input");
-  row.classList.toggle("working", phase === "working" && tab !== active);
+  row.classList.toggle("working", ["working", "delegating"].includes(phase) && tab !== active);
   const draft = tab !== active && hasDraft(tab);
   row.classList.toggle("draft", draft);
   const ws = threadOf(tab).workspace;
@@ -483,7 +497,7 @@ function cardRow(tab) {
   const acts = `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${MOD_LABEL}⇧S)">${icon("check")}Settle</span></span>`;
   row.innerHTML = `<span class="l1">${draft ? `<span class="draft-pen" role="img" title="Unsent draft" aria-label="Unsent draft">${icon("square-pen")}</span>` : ""}${projectIcon(projectName(tab), tab)}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>
     <span class="l2">${titleHtml(tab)}</span>
-    <span class="l3">${where}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="right">${remote}<span class="provider">${icon("claude")}</span></span></span>`;
+    <span class="l3">${where}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="right">${statsHtml(tab)}${remote}<span class="provider">${icon("claude")}</span></span></span>`;
   return row;
 }
 
@@ -516,6 +530,7 @@ function rowCardHtml(tab) {
     ${line(icon("monitor"), esc(machineName(tab.machine)))}
     ${ws?.branch ? line(icon("git-branch"), middle(ws.branch, 30), "branch") : ""}
     ${line(icon("claude"), esc(modelName(tab)))}
+    ${statsLabel(tab) ? line(icon("clock"), statsHtml(tab), "stats") : ""}
     ${failed ? line(icon("circle-alert"), tab.view.resume_at ? "Usage limit reached" : "Error occurred", tab.view.resume_at ? "warning" : "error") : ""}
   </div>${prs.length ? `<ul class="card-foot">${prs.map((p) => prItem(tab, p, false)).join("")}</ul>` : ""}`;
 }
@@ -643,6 +658,10 @@ function scheduleWake() {
 
 function tickDurations() {
   for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, nowS() - el.dataset.since)) : "";
+  for (const el of document.querySelectorAll("[data-stats]")) {
+    const text = statsLabel(tabByKey(el.dataset.stats));
+    if (el.textContent !== text) el.textContent = text;
+  }
 }
 setInterval(() => guiOn() && tickDurations(), 1000);
 
@@ -1703,7 +1722,7 @@ function crumbHtml(tab, sub = null) {
   const title = sub ? sub.title : parent;
   return `<button type="button" class="project" data-new-here aria-label="New thread in ${esc(name)}" data-tip="New thread in ${esc(name)}">${projectIcon(name, tab)}<span>${esc(name)}</span></button>${sep}${sub
     ? `<button type="button" class="parent" data-subagent-back aria-label="Open parent thread: ${esc(parent)}" data-tip="${esc(parent)}"><span class="text">${esc(parent)}</span></button>${sep}<h2 class="title sub" data-tip="${esc(title)}"><span class="text">${esc(title)}</span></h2>`
-    : `<button type="button" class="title" aria-haspopup="menu" aria-label="Thread actions for ${esc(title)}" data-tip="${esc(title)}"><h2 class="text">${esc(title)}</h2>${icon("chevron-down", "chev")}</button>`}`;
+    : `<button type="button" class="title" aria-haspopup="menu" aria-label="Thread actions for ${esc(title)}" data-tip="${esc(title)}"><h2 class="text">${esc(title)}</h2>${icon("chevron-down", "chev")}</button>`}${statsHtml(tab)}`;
 }
 /** A parent crumb that would push the title out folds to "...", as T3 Code's does. */
 function fitParentCrumb() {

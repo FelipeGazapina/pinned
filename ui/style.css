@@ -106,6 +106,9 @@ body[data-tabs="left"] .tab .resize, body[data-tabs="right"] .tab .resize { disp
 #workspace[data-drop="bottom"]::after { bottom: 0; left: 0; right: 0; height: 28px; }
 #workspace[data-drop="left"]::after { top: 0; bottom: 0; left: 0; width: var(--tab-bar-width); }
 #workspace[data-drop="right"]::after { top: 0; bottom: 0; right: 0; width: var(--tab-bar-width); }
+/* Which pinned this is: the app's own build, or the hub's in a browser. */
+#version { position: absolute; right: 18px; bottom: 2px; z-index: 40; font-size: 10px; color: var(--muted); opacity: 0.7;
+  pointer-events: none; user-select: none; -webkit-user-select: none; }
 #grip { position: absolute; right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize;
   background: linear-gradient(135deg, transparent 50%, var(--muted) 50%, transparent 60%,
     transparent 70%, var(--muted) 70%, transparent 80%); }
@@ -115,17 +118,11 @@ body[data-tabs="left"] .tab .resize, body[data-tabs="right"] .tab .resize { disp
 #pill[data-mode="cards"] { border-radius: 10px; }
 #pill .handle { padding: 0 6px 0 10px; color: var(--muted); cursor: grab; height: 100%;
   display: flex; align-items: center; }
-#carousel { flex: 1; min-width: 0; height: 100%; overflow: hidden;
+#carousel { flex: 1; min-width: 0; height: 100%; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
   mask-image: linear-gradient(90deg, transparent, #000 12px, #000 calc(100% - 12px), transparent); }
-#track { display: flex; width: max-content; height: 100%;
-  animation: marquee var(--period, 0s) linear infinite; }
-#carousel:hover #track { animation-play-state: paused; }
-@keyframes marquee { to { transform: translateX(calc(-1 * var(--set-width, 0px))); } }
-@media (prefers-reduced-motion: reduce) {
-  #track { animation: none; }
-  #carousel { overflow-x: auto; scrollbar-width: none; }
-}
-.set { display: flex; align-items: center; gap: var(--item-gap); padding-right: var(--item-gap); height: 100%; }
+#carousel::-webkit-scrollbar { display: none; }
+#track { display: flex; align-items: center; gap: var(--item-gap); width: max-content; height: 100%; padding: 0 12px 0 4px; }
+#track .none { color: var(--muted); }
 #pill { --item-gap: 16px; }
 #pill[data-mode="cards"] { --item-gap: 8px; }
 .item { flex: none; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
@@ -160,6 +157,8 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 #settings { flex: 1; min-height: 0; display: flex; }
 #settings-nav { flex: none; width: 140px; display: flex; flex-direction: column; gap: 2px; padding: 8px 6px;
   border-right: 1px solid var(--border); }
+#settings-nav :is(.head, .i) { display: none; }
+#settings-nav .links { display: contents; }
 #settings-nav button { text-align: left; padding: 5px 8px; border-radius: 6px; color: var(--muted); }
 #settings-nav button:hover { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.039); }
 #settings-nav button.active { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.078); color: var(--fg); }
@@ -388,6 +387,7 @@ html[data-shell="web"] body { background: var(--s-bg, rgb(15 17 21)); }
 html[data-shell="web"] #expanded { border: 0; border-radius: 0;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 html[data-shell="web"] header { cursor: default; }
+html[data-shell="web"] #version { right: calc(8px + env(safe-area-inset-right)); bottom: calc(2px + env(safe-area-inset-bottom)); }
 html[data-shell="web"] :is(#minimize, #grip, #pill, .update, [data-app-only]) { display: none !important; }
 
 #login { display: none; }
