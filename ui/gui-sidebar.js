@@ -1477,7 +1477,7 @@ function newThreadWithoutProject() {
   const machine = active?.machine ?? onlineMachines()[0];
   if (!machine) return toggleProjects();
   if (pickerOpen()) closeProjects();
-  openTab(machine, null).catch((e) => tell(`Couldn't open a thread: ${esc(e)}`, 6000));
+  openScratchTab(machine).catch((e) => tell(`Couldn't open a thread: ${esc(e)}`, 6000));
 }
 /** T3 Code's Add project: the palette's sources, `machine` picked as their environment. */
 function addProject(machine = active?.machine) {

@@ -161,16 +161,20 @@ fn statusline_shell() -> Option<PathBuf> {
 }
 
 const LIMIT_ERROR: &[u8] = br#""apiError":"usage_limit_reached""#;
+const API_ERROR: &[u8] = br#""isApiErrorMessage":true"#;
 
-/// When the usage limit that last stopped the session lifts, from the error Claude Code
-/// wrote to its transcript. Only lines carrying that error are parsed.
+/// When the usage limit that stopped the session lifts, from the last error Claude Code wrote to
+/// its transcript, unless that error was another, such as a monthly spend limit with no reset.
+/// Only lines carrying an error are parsed.
 fn limit_reset_from_transcript(transcript: impl BufRead) -> Option<u64> {
-    transcript
+    let has = |line: &[u8], mark: &[u8]| line.windows(mark.len()).any(|w| w == mark);
+    let last = transcript
         .split(b'\n')
         .map_while(Result::ok)
-        .filter(|line| line.windows(LIMIT_ERROR.len()).any(|w| w == LIMIT_ERROR))
-        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(&line).ok()?["apiErrorParams"]["rate_limit_info"]["resetsAt"].as_u64())
-        .last()
+        .filter(|line| has(line, LIMIT_ERROR) || has(line, API_ERROR))
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(&line).ok())
+        .last()?;
+    last["apiErrorParams"]["rate_limit_info"]["resetsAt"].as_u64().filter(|_| last["apiError"] == "usage_limit_reached")
 }
 
 const AI_TITLE: &[u8] = br#""type":"ai-title""#;
@@ -327,6 +331,8 @@ mod tests {
         );
         assert_eq!(limit_reset_from_transcript(transcript.as_bytes()), Some(1792400000));
         assert_eq!(limit_reset_from_transcript(r#"{"type":"user"}"#.as_bytes()), None);
+        let spent = format!("{transcript}\n{}", r#"{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"content":[{"type":"text","text":"You've hit your monthly spend limit"}]}}"#);
+        assert_eq!(limit_reset_from_transcript(spent.as_bytes()), None, "a later error without a reset kept the old one");
     }
 
     #[test]

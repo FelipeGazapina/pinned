@@ -146,6 +146,7 @@ const SLOW = {
     said("<local-command-stdout>Compacted </local-command-stdout>");
   },
   think: () => wrote([{ type: "text", text: "Done thinking." }]),
+  "todos-live": () => wrote([{ type: "text", text: "Finished the list." }]),
   build: () => {
     said([{ type: "tool_result", tool_use_id: building, content: "built in 4s" }]);
     wrote([{ type: "text", text: "Built." }]);
@@ -268,6 +269,15 @@ function submit() {
     line = "";
     return drawQuestion();
   }
+  // A usage limit stops the turn as claude's does: an API error line, then StopFailure.
+  if (line === "limited" || line === "spent") {
+    const resetsAt = Math.floor(Date.now() / 1000) + 2 * 3600;
+    const text = line === "limited" ? "You've hit your limit · resets 5pm (UTC)" : "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage?from=cc";
+    record({ type: "assistant", isApiErrorMessage: true, error: "rate_limit", apiErrorStatus: 429, ...(line === "limited" ? { apiError: "usage_limit_reached", apiErrorParams: { rate_limit_info: { status: "rejected", resetsAt, rateLimitType: "five_hour" } } } : {}), message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text }] } });
+    hook("StopFailure", { transcript_path: transcript });
+    line = "";
+    return prompt();
+  }
   if (line === "/ask") {
     wrote([{ type: "tool_use", id: `ask-${lines}`, name: "Bash", input: { command: "rm -rf build", description: "Remove the build folder" } }]);
     hook("Notification", { message: "Claude needs your permission to use Bash" });
@@ -277,6 +287,7 @@ function submit() {
     return;
   } else if (SLOW[line]) {
     const finish = SLOW[line];
+    if (line === "todos-live") used("TodoWrite", { todos: TODOS.map((t) => ({ ...t, status: "completed" })) }, TODOS_SAVED);
     if (line === "think") wrote([{ type: "thinking", thinking: "**Weighing the options**\n\nComparing the two approaches before answering.", signature: "c2ln" }]);
     if (line === "build") {
       building = `tool-${lines}`;
@@ -415,6 +426,12 @@ function submit() {
     wrote([{ type: "text", text: "Wrote revert.txt." }]);
   } else if (line === "prlink") {
     wrote([{ type: "text", text: "Opened [the pull request](https://github.com/example/alpha/pull/42)." }]);
+  } else if (line === "todos" || line === "todos-done") {
+    used("TodoWrite", { todos: line === "todos" ? TODOS : TODOS.map((t) => ({ ...t, status: "completed" })) }, TODOS_SAVED);
+    wrote([{ type: "text", text: line === "todos" ? "Working through the list." : "All done." }]);
+  } else if (line === "elsewhere") {
+    // Claude names the branch it ran on in every line; this one ran on another.
+    record({ type: "assistant", gitBranch: "elsewhere", message: { role: "assistant", content: [{ type: "text", text: "Ran on elsewhere." }] } });
   } else if (line === "notice") {
     said("<local-command-stdout>Set model to Haiku 5.5\nfor this session</local-command-stdout>");
   } else if (line === "limit") {
@@ -662,6 +679,12 @@ function answerQuestion(key) {
   prompt();
 }
 
+const TODOS = [
+  { content: "Read the parser", status: "completed", activeForm: "Reading the parser" },
+  { content: "Fix the off-by-one", status: "in_progress", activeForm: "Fixing the off-by-one" },
+  { content: "Add a test", status: "pending", activeForm: "Adding a test" },
+];
+const TODOS_SAVED = "Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable";
 // As claude 2.1 asks: Tab on "No" opens a line for telling Claude what to do instead.
 const CHOICES = ["Yes", "Yes, and don't ask again for rm commands", "No"];
 let asking = 0;

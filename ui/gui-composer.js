@@ -13,6 +13,10 @@ Object.assign(ICON_PATHS, {
   star: `<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>`,
   "corner-up-right": `<path d="m15 14 5-5-5-5"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/>`,
   "chevron-left": `<path d="m15 18-6-6 6-6"/>`,
+  "list-todo": `<path d="M13 5h8"/><path d="M13 12h8"/><path d="M13 19h8"/><path d="m3 17 2 2 4-4"/><rect x="3" y="4" width="6" height="6" rx="1"/>`,
+  circle: `<circle cx="12" cy="12" r="10"/>`,
+  "circle-dot": `<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/>`,
+  gauge: `<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>`,
   "folder-git-2": `<path d="M18 19a5 5 0 0 1-5-5v8"/><path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"/><circle cx="13" cy="12" r="2"/><circle cx="20" cy="19" r="2"/>`,
 });
 
@@ -115,6 +119,7 @@ const declineOption = (menu) => menuKind(menu) === "approval" && menu.options.fi
 const freeOption = (menu) => menuKind(menu) !== "approval" && menu.options.find((o) => /^(Type something|Tell Claude what to change)/.test(o.head));
 
 function placeholderFor(tab, t) {
+  if (composer.dataset.collapsed === "true") return "Ask anything...";
   const menu = tab.menu;
   if (menu && menuKind(menu) === "approval") {
     if (!declineOption(menu)) return "Choose an option above";
@@ -148,6 +153,8 @@ function renderComposer(tab) {
   send.title = blocked || (composer.dataset.sending === "true" ? "Submitting message" : compacting ? `Summarize ${formatTokens(compactOffer(tab))} tokens of history, then send` : working ? `Queue message (${keys})` : `Send (${keys})`);
   send.setAttribute("aria-label", send.title);
   renderApproval(tab);
+  renderBanners(tab);
+  renderTasks(tab);
   renderPills(tab);
   rest();
   renderAttachments(t);
@@ -341,19 +348,51 @@ function renderApproval(tab) {
   if (kind === "question") return renderQuestion(tab, menu, tabs, lines);
   delete approval.dataset.collapsed;
   const label = kind === "plan" ? "Plan ready" : /command/i.test(lines[0]) ? "Command approval" : /file|edit/i.test(lines[0]) ? "File change approval" : "Permission approval";
-  const what = permission ? lines.at(-1) : menu.question;
-  const middle = permission ? lines.slice(1, -1).filter((l) => !/^Tip:/.test(l)) : [];
+  if (permission) return renderPermission(menu, lines, label);
+  const options = menu.options.map((o) => `<button type="button" data-option="${o.n}" class="choice"${o.chosen ? " data-chosen" : ""}${o.n <= 9 ? ` data-key="${o.n}"` : ""}><span class="label">${esc(o.head)}</span>${o.more ? `<span class="about">${esc(o.more)}</span>` : ""}</button>`);
+  approval.innerHTML = `${icon("circle-alert", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
+      <p class="what">${esc(menu.question)}</p><div class="options choices">${options.join("")}</div></div>
+    <div class="actions"><button type="button" data-show-terminal class="outline">Terminal</button></div>`;
+}
+
+/** T3 Code's answers to a permission, each one the option of claude's menu that means it: Approve
+ * is its first "Yes", Decline its "No", Always allow the "Yes" that stops it asking, and Cancel its
+ * Esc. Claude's other options, such as "Yes, and switch to auto mode", stay in the "…" menu. */
+function approvalChoices(menu) {
+  const accept = menu.options.find((o) => /^Yes\b/.test(o.head));
+  const always = menu.options.find((o) => o !== accept && /^Yes\b/.test(o.head) && /always|don't ask again|during this session/i.test(o.label));
+  const decline = declineOption(menu) || null;
+  return { accept, decline, always, rest: menu.options.filter((o) => ![accept, always, decline].includes(o)) };
+}
+/** As T3 Code's approval panel: what is asked, the command or file, and why, then Decline,
+ * Approve and "…" at its right. */
+function renderPermission(menu, lines, label) {
+  const question = lines.at(-1);
+  const middle = lines.slice(1, -1).filter((l) => !/^Tip:/.test(l));
   const detail = menu.box || middle.join("\n");
   const about = menu.box ? middle.join("\n") : "";
-  const options = menu.options.map((o) =>
-    permission
-      ? `<button type="button" data-option="${o.n}" class="${o.chosen ? "primary" : "outline"}"${o.chosen ? " data-chosen" : ""}>${esc(o.label)}</button>`
-      : `<button type="button" data-option="${o.n}" class="choice"${o.chosen ? " data-chosen" : ""}${o.n <= 9 ? ` data-key="${o.n}"` : ""}><span class="label">${esc(o.head)}</span>${o.more ? `<span class="about">${esc(o.more)}</span>` : ""}</button>`,
-  );
-  approval.innerHTML = `${icon(permission ? "shield" : "circle-alert", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
-      <p class="what">${esc(what)}</p>${about ? `<p class="about">${esc(about)}</p>` : ""}${detail ? `<pre>${esc(detail)}</pre>` : ""}
-      <div class="options${permission ? "" : " choices"}">${options.join("")}</div></div>
-    <div class="actions"><button type="button" data-show-terminal class="outline">Terminal</button></div>`;
+  const { accept, decline } = approvalChoices(menu);
+  approval.innerHTML = `${icon("shield", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
+      ${detail ? `<pre tabindex="0">${esc(detail)}</pre>` : ""}${about ? `<p class="about">${esc(about)}</p>` : ""}${/^Do you want to proceed\?$/.test(question) ? "" : `<p class="about">${esc(question)}</p>`}</div>
+    <div class="actions">${decline ? `<button type="button" class="outline" data-approval="decline">Decline</button>` : ""}${accept ? `<button type="button" class="primary" data-approval="accept">Approve</button>` : ""}
+      <button type="button" class="outline icon" data-approval-more aria-label="More approval options" title="More approval options">${icon("ellipsis")}</button></div>`;
+}
+function approvalMore(tab, anchor) {
+  const menu = tab.menu;
+  const { always, rest } = approvalChoices(menu);
+  const pick = (o) => () => tab.menu === menu && chooseOption(tab, o.n, o.label);
+  const entries = [{ label: "Cancel", run: () => tab.menu === menu && cancelMenu(tab) }];
+  if (always) entries.push(/session/i.test(always.label) ? { label: "Always allow this session", run: pick(always) } : { label: "Always allow", hint: always.label, run: pick(always) });
+  entries.push(...rest.map((o) => ({ label: o.label, run: pick(o) })), { rule: true }, { label: "Show in terminal", run: () => toggleDrawer(true) });
+  openMenu(anchor, entries, "approval");
+  const box = composerMenu.offsetParent.getBoundingClientRect();
+  const at = anchor.getBoundingClientRect();
+  Object.assign(composerMenu.style, { left: "", right: `${Math.max(0, box.right - at.right)}px`, top: "", bottom: `${box.bottom - at.top + 4}px` });
+}
+function cancelMenu(tab) {
+  tab.menu = null;
+  renderComposer(tab);
+  return writeTo(tab, "\x1b");
 }
 function renderQuestion(tab, menu, tabs, lines) {
   const t = threadOf(tab);
@@ -396,16 +435,19 @@ function pickOption(tab, n) {
 approval.addEventListener("click", (e) => {
   const tab = active;
   if (!tab) return;
+  const answer = e.target.closest("[data-approval]");
+  if (answer && tab.menu) {
+    const choice = approvalChoices(tab.menu)[answer.dataset.approval];
+    if (answer.dataset.approval === "decline" && prompt.value.trim()) return send();
+    return choice && chooseOption(tab, choice.n, choice.label);
+  }
+  if (e.target.closest("[data-approval-more]") && tab.menu) return composerMenu.hidden || composerMenu.dataset.kind !== "approval" ? approvalMore(tab, e.target.closest("[data-approval-more]")) : (composerMenu.hidden = true);
   const option = e.target.closest("[data-option]");
   if (option && tab.menu) {
     if (menuKind(tab.menu) === "question") return pickOption(tab, Number(option.dataset.option));
     return chooseOption(tab, Number(option.dataset.option), tab.menu.options[option.dataset.option - 1]?.label);
   }
-  if (e.target.closest("[data-dismiss]") && tab.menu) {
-    tab.menu = null;
-    renderComposer(tab);
-    return writeTo(tab, "\x1b");
-  }
+  if (e.target.closest("[data-dismiss]") && tab.menu) return cancelMenu(tab);
   if (e.target.closest("[data-toggle]")) {
     const t = threadOf(tab);
     const header = approval.querySelector(".q-header")?.textContent;
@@ -509,16 +551,186 @@ async function implementInNewThread(tab) {
   renderSidebar();
 }
 
+/** T3 Code's notices over the composer: the front one attached to it, the rest behind a cap that
+ * shows them on hover or a tap. */
+const composerBanners = Object.assign(document.createElement("div"), { id: "composer-banners", hidden: true });
+approval.before(composerBanners);
+const bannerDismissed = new Set();
+let bannersOpen = false;
+let restoringBranch = null;
+/** The usage limit that stopped the thread's turn, from the reset time claude wrote, or from its
+ * message when it wrote none, such as for a monthly spend limit. */
+function limitBanner(tab) {
+  if (phaseOf(tab) !== "failed") return null;
+  const at = tab.view.resume_at;
+  const last = threadOf(tab).items.findLast((i) => i.kind === "error" || i.kind === "user");
+  if (!at && !(last?.kind === "error" && /hit your .*limit|usage limit/i.test(last.text))) return null;
+  const key = threadKey(tab);
+  const snoozed = at && sideMarks.snoozed[key]?.until === at;
+  const actions = at && at > (tab.view.updated ?? 0) ? `<button type="button" class="ghost" data-banner-act="resume">${tab.view.held ? "Resume at reset" : "Cancel auto-resume"}</button>${snoozed ? "" : `<button type="button" class="ghost" data-banner-act="snooze"${at <= Date.now() / 1000 ? " disabled" : ""}>Snooze until reset</button>`}` : "";
+  return { id: `limit:${at}`, variant: "warning", icon: "gauge", title: esc("Usage limit reached"), description: esc(at ? `Resets ${new Date(at * 1000).toLocaleString()}` : "Reset time unavailable; retry manually"), actions };
+}
+/** As T3 Code: the local checkout moved off the branch the thread last ran on. */
+function branchBanner(tab) {
+  const t = threadOf(tab);
+  const ws = t.workspace;
+  if (!ws?.branch || ws.worktree || !t.branch || t.branch === ws.branch) return null;
+  const id = `branch:${threadKey(tab)}:${t.branch}:${ws.branch}`;
+  if (bannerDismissed.has(id)) return null;
+  const busy = ["working", "delegating"].includes(phaseOf(tab)) || !!tab.menu || restoringBranch === tab;
+  return {
+    id, variant: "info", icon: "git-branch", dismiss: "Dismiss branch change notice",
+    title: `<span class="muted">Branch changed from</span><code title="This thread last ran on ${esc(t.branch)}. Sending will continue on ${esc(ws.branch)}.">${esc(t.branch)}</code>`,
+    actions: `<button type="button" class="ghost" data-banner-act="restore"${busy ? " disabled" : ""}>${restoringBranch === tab ? "Restoring..." : "Restore branch"}</button>`,
+  };
+}
+const bannerHtml = (b, attached) => `<div class="banner${attached ? " attached" : ""}" role="alert" data-banner="${esc(b.id)}" data-variant="${b.variant}">${icon(b.icon, "lead")}<span class="content"><span class="title">${b.title}</span>${b.description ? `<span class="description">${b.description}</span>` : ""}</span>
+    ${b.actions || b.dismiss ? `<span class="actions">${b.actions ?? ""}${b.dismiss ? `<button type="button" class="ghost icon" data-banner-act="dismiss" aria-label="${esc(b.dismiss)}" title="${esc(b.dismiss)}">${icon("x")}</button>` : ""}</span>` : ""}</div>`;
+function renderBanners(tab) {
+  const items = tab ? [limitBanner(tab), branchBanner(tab)].filter(Boolean) : [];
+  // Warnings go in front, as T3 Code orders them.
+  items.sort((a, b) => (a.variant === "warning" ? 0 : 1) - (b.variant === "warning" ? 0 : 1));
+  if (items.length < 2) bannersOpen = false;
+  composerBanners.hidden = !items.length;
+  const [front, ...rest] = items;
+  const html = !front ? "" : `${rest.length ? `<div class="stack${bannersOpen ? " open" : ""}"><button type="button" class="peek" data-banner-act="peek" aria-label="Show other notices" aria-expanded="${bannersOpen}"></button><div class="others" role="group" aria-label="Other notices">${rest.map((b) => bannerHtml(b, false)).join("")}</div></div>` : ""}${bannerHtml(front, true)}`;
+  if (composerBanners.dataset.html !== html) {
+    composerBanners.dataset.html = html;
+    composerBanners.innerHTML = html;
+  }
+  composer.dataset.banners = items.length > 0;
+}
+composerBanners.addEventListener("pointerenter", (e) => e.pointerType !== "touch" && composerBanners.querySelector(".stack") && !bannersOpen && ((bannersOpen = true), renderBanners(active)));
+composerBanners.addEventListener("pointerleave", (e) => e.pointerType !== "touch" && bannersOpen && ((bannersOpen = false), renderBanners(active)));
+composerBanners.addEventListener("click", async (e) => {
+  const tab = active;
+  const b = e.target.closest("[data-banner-act]");
+  if (!tab || !b || b.disabled) return;
+  const act = b.dataset.bannerAct;
+  if (act === "peek") {
+    bannersOpen = !bannersOpen;
+    return renderBanners(tab);
+  }
+  if (act === "dismiss") {
+    bannerDismissed.add(b.closest("[data-banner]").dataset.banner);
+    return renderBanners(tab);
+  }
+  if (act === "snooze") return snooze(tab, tab.view.resume_at);
+  if (act === "resume") {
+    b.disabled = true;
+    b.textContent = "Saving...";
+    await callOn(tab.machine, { cmd: "auto_resume", tab: tab.view.id, on: !!tab.view.held }).catch((err) => showComposerNote(`Could not change auto-resume: ${err}`, true));
+    return refreshTabs(tab.machine);
+  }
+  if (act === "restore") restoreBranch(tab);
+});
+/** Switches the checkout back to the thread's branch, asking first while it has changes, as T3 Code does. */
+async function restoreBranch(tab) {
+  const t = threadOf(tab);
+  const branch = t.branch;
+  if (t.git?.dirty && !(await confirmRestore(branch))) return;
+  restoringBranch = tab;
+  renderBanners(tab);
+  try {
+    await callOn(tab.machine, { cmd: "checkout", tab: tab.view.id, branch, create: false });
+  } catch (err) {
+    showComposerNote(String(err), true);
+  } finally {
+    restoringBranch = null;
+    Object.assign(t, { workspaceFor: null, gitFor: null });
+    await fetchWorkspace(tab);
+    if (tab === active) renderComposer(tab);
+  }
+}
+function confirmRestore(branch) {
+  composerSheet.innerHTML = `<form class="sheet" role="alertdialog" aria-label="Switch to ${esc(branch)}?"><h2>Switch to <code>${esc(branch)}</code>?</h2><p class="about">You have uncommitted changes. They'll carry over to the other branch, or block the switch if they conflict.</p>
+    <footer><span class="spacer"></span><button type="button" class="outline" data-answer="">Cancel</button><button type="button" class="primary" data-answer="yes">Switch branch</button></footer></form>`;
+  composerSheet.hidden = false;
+  return new Promise((resolve) => {
+    composerSheet.querySelector("form").onclick = (e) => {
+      const b = e.target.closest("[data-answer]");
+      if (!b) return;
+      closeSheet();
+      resolve(!!b.dataset.answer);
+    };
+  });
+}
+
+/** T3 Code's Tasks tab under the notices: the list claude keeps with TodoWrite, while its turn runs
+ * or until every step is done, its current step and progress, and the whole list when opened. */
+const composerDock = Object.assign(document.createElement("div"), { id: "composer-dock" });
+const tasksTab = Object.assign(document.createElement("div"), { id: "composer-tasks", hidden: true });
+approval.after(composerDock);
+composerDock.append(tasksTab, document.getElementById("stash"));
+let tasksOpen = false;
+function tasksOf(tab) {
+  const t = threadOf(tab);
+  const todos = t.todos;
+  if (!todos?.steps.length) return null;
+  const since = t.items.findLast((i) => i.kind === "user")?.at ?? "";
+  const live = phaseOf(tab) === "working" && todos.at >= since;
+  if (!live && todos.steps.every((s) => s.status === "completed")) return null;
+  const done = todos.steps.filter((s) => s.status === "completed").length;
+  const current = todos.steps.find((s) => s.status === "in_progress") ?? todos.steps.find((s) => s.status === "pending") ?? todos.steps.at(-1);
+  return { steps: todos.steps, done, total: todos.steps.length, step: current.step, live };
+}
+const TASK_ICONS = { completed: "check", in_progress: "circle-dot", pending: "circle" };
+const TASK_LABELS = { completed: "Completed", in_progress: "Running", pending: "Pending" };
+function renderTasks(tab) {
+  const tasks = tab && approval.hidden ? tasksOf(tab) : null;
+  if (!tasks) tasksOpen = false;
+  tasksTab.hidden = !tasks;
+  const segments = tasks && tasks.total > 1 && tasks.total <= 10 ? `<span class="segments" aria-hidden="true">${tasks.steps.map((s) => `<span data-status="${s.status}"></span>`).join("")}</span>` : "";
+  const html = !tasks ? "" : `<button type="button" class="row" data-tasks-toggle aria-expanded="${tasksOpen}" aria-label="${tasksOpen ? "Collapse tasks" : "Tasks"}: ${tasks.done} of ${tasks.total} complete. Current task: ${esc(tasks.step)}">
+      ${icon("list-todo", "lead")}<span class="name">Tasks</span><span class="current">${esc(tasks.step)}</span><span class="count${tasks.done >= tasks.total ? " done" : ""}">${tasks.done}/${tasks.total}</span>${segments}${icon("chevron-down", `chev${tasksOpen ? "" : " up"}`)}</button>
+    ${tasksOpen ? `<ul class="steps" role="list" aria-label="Task list. ${tasks.done} of ${tasks.total} complete.">${tasks.steps.map((s) => `<li data-status="${s.status}">${icon(TASK_ICONS[s.status], "lead")}<span class="text"><span class="sr-only">${TASK_LABELS[s.status]}: </span>${esc(s.step)}</span><span class="when">${s.status === "in_progress" && tasks.live ? "now" : ""}</span></li>`).join("")}</ul>` : ""}`;
+  if (tasksTab.dataset.html !== html) {
+    tasksTab.dataset.html = html;
+    tasksTab.innerHTML = html;
+  }
+  tasksTab.toggleAttribute("data-open", tasksOpen);
+}
+tasksTab.addEventListener("pointerdown", (e) => e.target.closest("[data-tasks-toggle]") && e.preventDefault());
+tasksTab.addEventListener("click", (e) => {
+  if (!e.target.closest("[data-tasks-toggle]") || !active) return;
+  tasksOpen = !tasksOpen;
+  renderTasks(active);
+});
+
 /** With the thread scrolled up and a one-line prompt not being typed in, the composer rests as one
  * row, as T3 Code's does, to show more of the thread. Like T3's, it comes to rest on a scroll, not
- * on a blur: pressing Send takes the focus, and a blur would move Send out from under the press. */
+ * on a blur: pressing Send takes the focus, and a blur would move Send out from under the press.
+ * On a phone it collapses whenever the prompt isn't focused, to a row that opens it, as T3's does;
+ * a press in the composer holds it open until the press ends. */
+let composerPressed = false;
 function rest() {
   const away = threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight > 40;
   const t = active && threadOf(active);
-  const resting = !!t && away && document.activeElement !== prompt && !prompt.value.includes("\n") && approval.hidden && composerMenu.hidden && !t.attachments?.length && !narrow(640);
+  const typing = document.activeElement === prompt || prompt.value.includes("\n");
+  const phone = narrow(640);
+  const asked = active?.menu && !active.answering && menuKind(active.menu) === "question";
+  const collapsed = phone && !!t && !typing && !composerPressed && !asked && composerMenu.hidden && document.getElementById("chat").dataset.hero !== "true";
+  const resting = collapsed || (!phone && !!t && away && !typing && approval.hidden && composerMenu.hidden && !t.attachments?.length);
   if (composer.dataset.resting !== String(resting)) composer.dataset.resting = resting;
+  if (composer.dataset.collapsed !== String(collapsed)) {
+    composer.dataset.collapsed = collapsed;
+    if (active) prompt.placeholder = placeholderFor(active, threadOf(active));
+  }
   hostControls();
 }
+let pressTimer;
+const releasePress = (ms) => {
+  clearTimeout(pressTimer);
+  pressTimer = setTimeout(() => {
+    composerPressed = false;
+    rest();
+  }, ms);
+};
+composer.addEventListener("pointerdown", () => (composerPressed = true), true);
+// A tap's click can come a task after its pointerup, so the click lets go, or a moment later.
+for (const end of ["pointerup", "pointercancel"]) window.addEventListener(end, () => composerPressed && releasePress(400), true);
+window.addEventListener("click", () => composerPressed && releasePress(0), true);
+prompt.addEventListener("blur", () => setTimeout(rest, 0));
 /** A resting composer hands its controls to the context strip under it, as T3 Code's does. */
 const composerControls = composer.querySelector(".controls");
 function hostControls() {
@@ -548,6 +760,7 @@ prompt.addEventListener("input", () => {
 prompt.addEventListener("keydown", (e) => {
   if (isTrigger() && triggerKey(e)) return e.preventDefault();
   if (deleteChip(e)) return e.preventDefault();
+  if (promptCodeKey(e)) return e.preventDefault();
   if (e.key === "Enter" && e.altKey && !e.shiftKey && (IS_MAC ? e.metaKey : e.ctrlKey)) {
     e.preventDefault();
     return sendAndNewThread();
@@ -797,7 +1010,7 @@ function placeMenu(anchor) {
   else composerMenu.style.left = `${Math.max(0, left)}px`;
 }
 window.addEventListener("mousedown", (e) => {
-  const keeps = isTrigger() ? "#composer-menu, #prompt" : "#composer-menu, #model-button, #more-button, #mode-button, #traits-button, #stash, #composer-footer .branch, #composer-footer .where, [data-hero-project]";
+  const keeps = isTrigger() ? "#composer-menu, #prompt" : "#composer-menu, #model-button, #more-button, #mode-button, #traits-button, #stash, #composer-footer .branch, #composer-footer .where, [data-hero-project], [data-approval-more]";
   if (!composerMenu.hidden && !e.target.closest(keeps)) composerMenu.hidden = true;
 }, true);
 window.addEventListener("keydown", (e) => {
@@ -1304,7 +1517,7 @@ const TRIGGER_EMPTY = { slash: "No matching command.", mention: "No matching fil
  * folder's files and folders, each filtered as more is typed, as T3 Code's trigger menus do. */
 async function showTrigger() {
   const tab = active;
-  const trigger = tab && !tab.menu && triggerAt();
+  const trigger = tab && !tab.menu && !blockAt(prompt.value.split("\n"), caretLine(prompt.value, prompt.selectionStart)) && triggerAt();
   if (!trigger) {
     if (isTrigger()) composerMenu.hidden = true;
     return;
@@ -1443,30 +1656,224 @@ function expandChips(tab, text) {
 const mirror = Object.assign(document.createElement("div"), { id: "prompt-mirror", ariaHidden: "true" });
 prompt.before(mirror);
 const CHIP_ICONS = { skill: "sparkles", pr: "git-pull-request" };
-/** The textarea can't draw chips, so a copy of its text under it does, letter for letter, with
- * each chip's sigil swapped for its icon; the textarea's own text turns transparent above it. */
+/** The textarea can't draw chips or code blocks, so a copy of its text under it does, line for line
+ * and letter for letter: each chip's sigil swapped for its icon, each code block framed and
+ * highlighted. The textarea's own text turns transparent above it. */
 function renderMirror() {
   const tab = active;
   const chips = tab ? liveChips(tab) : {};
-  const on = Object.keys(chips).length > 0 && composer.dataset.composing !== "true";
+  const lines = prompt.value.split("\n");
+  const blocks = promptBlocks(lines);
+  const on = (Object.keys(chips).length > 0 || blocks.length > 0) && composer.dataset.composing !== "true";
   composer.dataset.chips = on;
-  if (!on) return (mirror.innerHTML = "");
-  let html = "";
-  let last = 0;
-  for (const m of prompt.value.matchAll(CHIP_WORD)) {
-    const chip = chips[m[2]];
-    if (!chip) continue;
-    const at = m.index + m[1].length;
-    html += esc(prompt.value.slice(last, at));
-    const mark = chip.kind === "mention" ? fileTypeIcon(chip.value) : icon(CHIP_ICONS[chip.kind]);
-    html += `<span class="chip ${chip.kind}"><span class="sigil">${esc(m[2][0])}${mark}</span>${esc(m[2].slice(1))}</span>`;
-    last = at + m[2].length;
+  if (!on) {
+    mirror.innerHTML = "";
+    blockPickers.innerHTML = "";
+    return;
   }
-  mirror.innerHTML = `${html}${esc(prompt.value.slice(last))}\u200b`;
+  const line = (text) => {
+    let html = "";
+    let last = 0;
+    for (const m of text.matchAll(CHIP_WORD)) {
+      const chip = chips[m[2]];
+      if (!chip) continue;
+      const at = m.index + m[1].length;
+      html += esc(text.slice(last, at));
+      const mark = chip.kind === "mention" ? fileTypeIcon(chip.value) : icon(CHIP_ICONS[chip.kind]);
+      html += `<span class="chip ${chip.kind}"><span class="sigil">${esc(m[2][0])}${mark}</span>${esc(m[2].slice(1))}</span>`;
+      last = at + m[2].length;
+    }
+    return `<div class="pl">${html}${esc(text.slice(last)) || "\u200b"}</div>`;
+  };
+  let html = "";
+  let next = 0;
+  for (const b of blocks) {
+    html += lines.slice(next, b.open).map(line).join("");
+    const code = lines.slice(b.open + 1, b.close ?? lines.length);
+    const lang = languageOf(b.info);
+    const colored = highlightLines(code, (languageEntry(lang)?.id ?? lang.toLowerCase()) || null);
+    html += `<div class="pblock"><div class="pl fence fence-open">${esc(lines[b.open])}</div>${code.map((c, i) => `<div class="pl code">${c ? colored[i] : "\u200b"}</div>`).join("")}${b.close === null ? "" : `<div class="pl fence">${esc(lines[b.close])}</div>`}</div>`;
+    next = (b.close ?? lines.length - 1) + 1;
+  }
+  mirror.innerHTML = html + lines.slice(next).map(line).join("");
   Object.assign(mirror.style, { top: `${prompt.offsetTop}px`, left: `${prompt.offsetLeft}px`, width: `${prompt.clientWidth}px`, height: `${prompt.clientHeight}px` });
   mirror.scrollTop = prompt.scrollTop;
+  renderBlockPickers(blocks);
 }
-prompt.addEventListener("scroll", () => (mirror.scrollTop = prompt.scrollTop));
+document.addEventListener("highlighter", () => active && renderMirror());
+/** T3 Code's code blocks in the prompt: a fence on a line of its own opens one, closed by a fence
+ * of the same kind or by the end of the prompt. The textarea keeps the fences as typed, which is the
+ * markdown claude gets; the copy under it draws the block framed and highlighted, with the language
+ * picker on the fence line. */
+const PROMPT_LANGUAGES = [["", "Plain text"], ["bash", "Bash"], ["c", "C"], ["cpp", "C++"], ["csharp", "C#"], ["css", "CSS"], ["dart", "Dart"], ["diff", "Diff"], ["dockerfile", "Dockerfile"], ["elixir", "Elixir"], ["go", "Go"], ["graphql", "GraphQL"], ["haskell", "Haskell"], ["html", "HTML"], ["java", "Java"], ["javascript", "JavaScript"], ["json", "JSON"], ["jsx", "JSX"], ["kotlin", "Kotlin"], ["lua", "Lua"], ["markdown", "Markdown"], ["php", "PHP"], ["powershell", "PowerShell"], ["python", "Python"], ["r", "R"], ["ruby", "Ruby"], ["rust", "Rust"], ["scala", "Scala"], ["scss", "SCSS"], ["sql", "SQL"], ["svelte", "Svelte"], ["swift", "Swift"], ["toml", "TOML"], ["tsx", "TSX"], ["typescript", "TypeScript"], ["vue", "Vue"], ["xml", "XML"], ["yaml", "YAML"], ["zig", "Zig"]].map(([id, label]) => ({ id, label }));
+const LANGUAGE_ALIASES = { cs: "csharp", "c++": "cpp", js: "javascript", md: "markdown", py: "python", rb: "ruby", rs: "rust", sh: "bash", shell: "bash", ts: "typescript", yml: "yaml" };
+/** A file name of each language, for its icon. */
+const LANGUAGE_FILES = { bash: "a.sh", c: "a.c", cpp: "a.cpp", csharp: "a.cs", css: "a.css", dart: "a.dart", diff: "a.diff", dockerfile: "Dockerfile", elixir: "a.ex", go: "a.go", graphql: "a.graphql", haskell: "a.hs", html: "a.html", java: "a.java", javascript: "a.js", json: "a.json", jsx: "a.jsx", kotlin: "a.kt", lua: "a.lua", markdown: "a.md", php: "a.php", powershell: "a.ps1", python: "a.py", r: "a.r", ruby: "a.rb", rust: "a.rs", scala: "a.scala", scss: "a.scss", sql: "a.sql", svelte: "a.svelte", swift: "a.swift", toml: "a.toml", tsx: "a.tsx", typescript: "a.ts", vue: "a.vue", xml: "a.xml", yaml: "a.yaml", zig: "a.zig" };
+const languageOf = (info) => info.trim().split(/\s+/, 1)[0] ?? "";
+const languageEntry = (lang) => {
+  const id = lang === "text" ? "" : LANGUAGE_ALIASES[lang.toLowerCase()] ?? lang.toLowerCase();
+  return PROMPT_LANGUAGES.find((l) => l.id === id) ?? null;
+};
+const languageLabel = (lang) => languageEntry(lang)?.label ?? lang;
+/** The info string with `language` in place of its first word; plain text clears it unless more follows. */
+function withLanguage(info, language) {
+  const rest = info.slice(languageOf(info).length + (/^\s*/.exec(info)[0].length));
+  if (language) return `${language}${rest}`;
+  return rest.trim() ? `text${rest}` : "";
+}
+const OPENING_FENCE = /^(`{3,}|~{3,})([^\n]*)$/;
+const closes = (line, fence) => {
+  const run = /^(`{3,}|~{3,})[ \t]*$/.exec(line)?.[1];
+  return !!run && run[0] === fence[0] && run.length >= fence.length;
+};
+/** The prompt's code blocks by line: where each opens, its fence and info string, and the line that
+ * closes it, or none when it runs to the end. A fence opens a block only once a line follows it. */
+function promptBlocks(lines) {
+  const blocks = [];
+  for (let i = 0; i < lines.length - 1; i++) {
+    const open = OPENING_FENCE.exec(lines[i]);
+    if (!open || (open[1][0] === "`" && open[2].includes("`"))) continue;
+    let end = i + 1;
+    while (end < lines.length && !closes(lines[end], open[1])) end++;
+    blocks.push({ open: i, close: end < lines.length ? end : null, fence: open[1], info: open[2] });
+    i = end;
+  }
+  return blocks;
+}
+/** The block the caret's line is in, from its fence through its closing one. */
+function blockAt(lines, line) {
+  return promptBlocks(lines).find((b) => line >= b.open && line <= (b.close ?? lines.length - 1)) ?? null;
+}
+const caretLine = (text, at) => text.slice(0, at).split("\n").length - 1;
+
+/** The language buttons sit on the fence lines, over the textarea. */
+const blockPickers = Object.assign(document.createElement("div"), { id: "prompt-blocks" });
+prompt.after(blockPickers);
+function renderBlockPickers(blocks) {
+  const fences = [...mirror.querySelectorAll(".pl.fence-open")];
+  blockPickers.innerHTML = blocks.map((b, i) => {
+    const lang = languageOf(b.info);
+    const id = languageEntry(lang)?.id ?? lang;
+    return `<button type="button" class="block-lang" data-block="${i}" aria-label="Code language: ${esc(languageLabel(lang) || "Plain text")}">${fileTypeIcon(LANGUAGE_FILES[id] ?? "a.txt")}<span>${esc(languageLabel(lang) || "Plain text")}</span>${icon("chevron-down")}</button>`;
+  }).join("");
+  Object.assign(blockPickers.style, { top: `${prompt.offsetTop}px`, left: `${prompt.offsetLeft}px`, width: `${prompt.clientWidth}px`, height: `${prompt.clientHeight}px` });
+  const top = mirror.getBoundingClientRect().top;
+  [...blockPickers.children].forEach((b, i) => fences[i] && (b.style.top = `${fences[i].getBoundingClientRect().top - top}px`));
+}
+blockPickers.addEventListener("mousedown", (e) => e.target.closest(".block-lang") && e.preventDefault());
+blockPickers.addEventListener("click", (e) => {
+  const b = e.target.closest(".block-lang");
+  if (b && active) openLanguages(b, Number(b.dataset.block));
+});
+/** T3 Code's language picker: a searchable list, each language with its file icon and a check on the current one. */
+function openLanguages(anchor, index) {
+  const block = promptBlocks(prompt.value.split("\n"))[index];
+  if (!block) return;
+  const lang = languageOf(block.info);
+  const current = languageEntry(lang)?.id ?? lang;
+  const items = PROMPT_LANGUAGES.some((l) => l.id === current) ? PROMPT_LANGUAGES : [{ id: current, label: current }, ...PROMPT_LANGUAGES];
+  composerMenu.dataset.kind = "languages";
+  composerMenu.innerHTML = `<input class="search" placeholder="Search languages" aria-label="Search languages" autocomplete="off" spellcheck="false"><div class="list" role="listbox"></div>`;
+  composerMenu.hidden = false;
+  const box = composerMenu.offsetParent.getBoundingClientRect();
+  const at = anchor.getBoundingClientRect();
+  Object.assign(composerMenu.style, { right: "", left: `${Math.max(0, at.left - box.left)}px`, top: "", bottom: `${box.bottom - at.top + 4}px` });
+  const search = composerMenu.querySelector(".search");
+  const list = () => {
+    const needle = search.value.trim().toLowerCase();
+    const shown = needle ? items.filter((l) => l.label.toLowerCase().includes(needle) || l.id.includes(needle)) : items;
+    composerMenu.querySelector(".list").innerHTML = shown.map((l, i) => `<button type="button" data-lang="${esc(l.id)}" role="option"${i === 0 ? ` class="highlight"` : ""}>${fileTypeIcon(LANGUAGE_FILES[l.id] ?? "a.txt", "lead")}<span class="label">${esc(l.label)}</span>${l.id === current ? icon("check", "check") : ""}</button>`).join("") || `<p class="none">No matching languages.</p>`;
+  };
+  list();
+  search.oninput = list;
+  search.onkeydown = (e) => {
+    const rows = [...composerMenu.querySelectorAll("[data-lang]")];
+    const at = rows.findIndex((r) => r.classList.contains("highlight"));
+    if (e.key === "Escape") {
+      composerMenu.hidden = true;
+      prompt.focus();
+    } else if (e.key === "Enter") rows[at]?.click();
+    else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      rows[at]?.classList.remove("highlight");
+      const next = rows[(at + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length];
+      next?.classList.add("highlight");
+      next?.scrollIntoView({ block: "nearest" });
+    } else return;
+    e.stopPropagation();
+  };
+  composerMenu.querySelector(".list").onclick = (e) => {
+    const row = e.target.closest("[data-lang]");
+    if (!row) return;
+    composerMenu.hidden = true;
+    if (row.dataset.lang !== current) setBlockLanguage(index, row.dataset.lang);
+    else prompt.focus();
+  };
+  search.focus();
+}
+/** Rewrites the block's fence for `language`, then puts the caret at the end of its code, as T3 Code does. */
+function setBlockLanguage(index, language) {
+  const lines = prompt.value.split("\n");
+  const block = promptBlocks(lines)[index];
+  if (!block) return;
+  lines[block.open] = `${block.fence}${withLanguage(block.info, language)}`;
+  const last = (block.close ?? lines.length) - 1;
+  prompt.value = lines.join("\n");
+  const caret = lines.slice(0, last + 1).join("\n").length;
+  prompt.focus();
+  prompt.setSelectionRange(caret, caret);
+  prompt.dispatchEvent(new Event("input"));
+}
+
+/** Enter and Tab in a code block, as in T3 Code's: Enter on a fence line opens a closed block with
+ * the caret in it, Enter in a block keeps the line's indent, on its closing fence leaves it, and
+ * after two blank lines at the end of an open one closes it; Tab indents and Shift+Tab outdents. */
+function promptCodeKey(e) {
+  if ((e.key !== "Enter" && e.key !== "Tab") || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return false;
+  const text = prompt.value;
+  const [from, to] = [prompt.selectionStart, prompt.selectionEnd];
+  const lines = text.split("\n");
+  const at = caretLine(text, from);
+  const block = blockAt(lines, at);
+  const lineStart = text.lastIndexOf("\n", from - 1) + 1;
+  const lineEnd = text.indexOf("\n", from) < 0 ? text.length : text.indexOf("\n", from);
+  const replace = (start, end, insert, caret = start + insert.length) => {
+    prompt.setRangeText(insert, start, end, "end");
+    prompt.setSelectionRange(caret, caret);
+    prompt.dispatchEvent(new Event("input"));
+    return true;
+  };
+  if (e.key === "Tab") {
+    if (!block || at === block.open || at === block.close) return false;
+    if (!e.shiftKey && from === to) return replace(from, to, "  ");
+    const end = text.indexOf("\n", Math.max(from, to - 1)) < 0 ? text.length : text.indexOf("\n", Math.max(from, to - 1));
+    const original = text.slice(lineStart, end).split("\n");
+    const next = original.map((l) => (e.shiftKey ? (l.startsWith("  ") ? l.slice(2) : l.replace(/^[\t ]/, "")) : l ? `  ${l}` : l));
+    const firstDelta = next[0].length - original[0].length;
+    const joined = next.join("\n");
+    prompt.setRangeText(joined, lineStart, end, "preserve");
+    prompt.setSelectionRange(Math.max(lineStart, from + firstDelta), Math.max(lineStart, to + joined.length - original.join("\n").length));
+    prompt.dispatchEvent(new Event("input"));
+    return true;
+  }
+  if (e.shiftKey || from !== to) return false;
+  if (!block) {
+    const open = OPENING_FENCE.exec(text.slice(lineStart, lineEnd));
+    if (!open || from !== lineEnd || (open[1][0] === "`" && open[2].includes("`"))) return false;
+    return replace(from, from, `\n\n${open[1]}`, from + 1);
+  }
+  if (at === block.close && from === lineEnd) return replace(from, from, "\n");
+  if (block.close === null && from === text.length && /\n[ \t]*\n[ \t]*$/.test(text.slice(0, from)) && at > block.open + 2) {
+    const trailing = /\n[ \t]*\n[ \t]*$/.exec(text)[0];
+    return replace(from - trailing.length, from, `\n${block.fence}\n`);
+  }
+  return replace(from, from, `\n${/^[ \t]*/.exec(text.slice(lineStart, from))[0]}`);
+}
+
+prompt.addEventListener("scroll", () => {
+  mirror.scrollTop = prompt.scrollTop;
+  if (blockPickers.childElementCount) renderBlockPickers(promptBlocks(prompt.value.split("\n")));
+});
 prompt.addEventListener("compositionstart", () => {
   composer.dataset.composing = "true";
   renderMirror();
@@ -1647,7 +2054,8 @@ onGuiKey("h", () => openHosts(document.querySelector("#composer-footer button.wh
 onGuiKey("l", pickPreviousWorktree, { shift: true });
 
 /** T3 Code's empty-thread headline, "What should we build in <project>?", whose project opens a
- * new thread in another one. */
+ * new thread in another one; a thread without a project asks "What should we work on?" over its
+ * project picker. */
 const heroHead = Object.assign(document.createElement("div"), { id: "hero-head" });
 composer.prepend(heroHead);
 function renderHero(tab) {
@@ -1655,7 +2063,9 @@ function renderHero(tab) {
   heroHead.hidden = !on;
   if (!on) return;
   const name = projectName(tab);
-  const html = `<h1><span class="ask">What should we build<span class="q">?</span><span class="in"> in</span></span>
+  const html = threadOf(tab).workspace?.scratch
+    ? `<h1>What should we work on?</h1><p><button type="button" class="project picker" data-hero-project>No project${icon("chevron-down")}</button></p>`
+    : `<h1><span class="ask">What should we build<span class="q">?</span><span class="in"> in</span></span>
       <span class="where"><button type="button" class="project" data-hero-project title="${esc(name)}">${esc(name)}${icon("chevron-down")}</button><span class="in">?</span></span></h1>
     <p><button type="button" class="scratch" data-hero-scratch>or start without a project</button></p>`;
   if (heroHead.dataset.html !== html) {
@@ -1668,6 +2078,15 @@ heroHead.addEventListener("click", (e) => {
   const trigger = e.target.closest("[data-hero-project]");
   if (trigger) openHeroProjects(trigger);
 });
+/** Opens a thread in the machine's folder for threads without a project, as T3 Code's Scratch. */
+async function openScratchTab(machine) {
+  const id = await callOn(machine, { cmd: "open_scratch", bypass: false }).catch((e) => (/unknown variant/.test(String(e)) ? callOn(machine, { cmd: "open_tab", path: null, bypass: false }) : Promise.reject(e)));
+  await refreshTabs(machine);
+  const tab = tabByKey(keyOf(machine, id));
+  activate(tab);
+  await startTab(tab);
+  return tab;
+}
 async function openHeroProjects(anchor) {
   const tab = active;
   if (!tab) return;

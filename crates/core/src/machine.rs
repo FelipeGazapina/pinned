@@ -185,6 +185,8 @@ struct Tab {
     interrupted: bool,
     /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
     resume_at: Option<u64>,
+    /// The session doesn't continue by itself when its usage limit lifts.
+    held_at_limit: bool,
     /// The model every start of this tab passes as `--model`, picked for its conversation alone.
     model: Option<String>,
     /// The worktree made for this tab by `set_workspace`, dropped when the tab leaves it unused.
@@ -212,6 +214,7 @@ impl Tab {
             bypass: self.bypass,
             interrupted: self.interrupted,
             resume_at: self.resume_at,
+            held: self.held_at_limit,
             model: self.model.clone(),
         })
     }
@@ -226,6 +229,7 @@ impl Tab {
             title: self.title.clone(),
             message: self.message.clone(),
             resume_at: self.resume_at,
+            held: self.held_at_limit,
             connector: self.env.iter().find(|(k, _)| k == CONNECTOR_ENV).map(|(_, v)| v.clone()),
             subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
@@ -239,6 +243,8 @@ impl Tab {
 pub struct Machine {
     launch: Launch,
     default_cwd: PathBuf,
+    /// The folder threads started without a project run in.
+    scratch: PathBuf,
     tabs: Mutex<HashMap<TabId, Tab>>,
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
@@ -293,6 +299,7 @@ impl Machine {
         Arc::new_cyclic(|me| Machine {
             launch,
             default_cwd,
+            scratch: dir.as_ref().map(|d| d.join("scratch")).unwrap_or_else(|| std::env::temp_dir().join("pinned-scratch")),
             tabs: Mutex::new(HashMap::new()),
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
@@ -338,6 +345,8 @@ impl Machine {
         match call {
             Call::Tabs => json(self.tabs()),
             Call::OpenTab { path, bypass } => json(self.open_tab(path, bypass)),
+            Call::OpenScratch { bypass } => json(self.open_scratch(bypass)?),
+            Call::AutoResume { tab, on } => json(self.auto_resume(&tab, on)?),
             Call::StartClaude { tab, cols, rows } => json(self.start_claude(&tab, cols, rows)?),
             Call::SetBypass { tab, on, cols, rows } => json(self.set_bypass(&tab, on, cols, rows)?),
             Call::SetModel { tab, model, cols, rows } => json(self.set_model(&tab, &model, cols, rows)?),
@@ -381,7 +390,10 @@ impl Machine {
             }
             Call::Thread { tab, from } => json(self.thread(&tab, from)?),
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
-            Call::Workspace { tab } => json(workspace::of(&self.tab(&tab, |t| t.cwd.clone())?)),
+            Call::Workspace { tab } => {
+                let cwd = self.tab(&tab, |t| t.cwd.clone())?;
+                json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
+            }
             Call::RegenerateTitle { tab, previous, thread } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 json(titles::regenerate(&self.launch.claude, &cwd, self.launch.path_env.as_deref(), &previous, &thread)?)
@@ -555,11 +567,11 @@ impl Machine {
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
         let (session, process) = self.tab(tab, |t| (t.claude_session.clone(), t.session.as_ref().and(t.started)))?;
         let Some(file) = session.as_deref().and_then(|s| thread::find(&thread::projects_dir(&home()), s)) else {
-            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, agents: vec![] });
+            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: vec![] });
         };
         let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
         let agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
-        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, agents })
+        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
     }
 
     /// Every tab, in the order they opened.
@@ -577,12 +589,33 @@ impl Machine {
     /// With `bypass` the tab's claude never asks for permission.
     pub fn open_tab(&self, path: Option<String>, bypass: bool) -> TabId {
         let cwd = match path {
+            Some(path) if Path::new(&path) == self.scratch => self.scratch.clone(),
             Some(path) => self.open_project(path.into()),
             None => self.default_cwd.clone(),
         };
         let id = self.add_tab(cwd, vec![], vec![], bypass, None);
         self.emit_tabs();
         id
+    }
+
+    /// Adds a tab in the folder kept for threads without a project, which no project lists, and
+    /// returns its id.
+    pub fn open_scratch(&self, bypass: bool) -> Result<TabId, String> {
+        std::fs::create_dir_all(&self.scratch).map_err(|e| format!("could not make {}: {e}", self.scratch.display()))?;
+        let id = self.add_tab(self.scratch.clone(), vec![], vec![], bypass, None);
+        self.emit_tabs();
+        Ok(id)
+    }
+
+    /// Lets the tab's session continue by itself once its usage limit lifts, or holds it.
+    pub fn auto_resume(&self, tab: &str, on: bool) -> Result<(), String> {
+        self.tab(tab, |t| t.held_at_limit = !on)?;
+        self.save_sessions();
+        if on {
+            self.continue_when_limit_lifts(tab);
+        }
+        self.emit_tabs();
+        Ok(())
     }
 
     /// Adds a tab for a connector's run without starting it, and returns its id. Refused when
@@ -957,7 +990,7 @@ impl Machine {
             .map(|s| {
                 let (launch, resume_at) = s.reopen(now);
                 let id = self.add_tab(s.cwd, launch, s.env, s.bypass, Some(s.session));
-                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.model) = (s.interrupted, resume_at, s.model));
+                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model) = (s.interrupted, resume_at, s.held, s.model));
                 id
             })
             .collect();
@@ -1038,6 +1071,7 @@ impl Machine {
             tally: Tally::default(),
             interrupted: false,
             resume_at: None,
+            held_at_limit: false,
             model: None,
             made: None,
             turn: None,
@@ -1146,14 +1180,16 @@ impl Machine {
 
     fn record_status(&self, tab: &str, event: &AgentEvent) {
         let changed = self.tab(tab, |t| {
-            let before = (t.interrupted, t.resume_at);
+            let before = (t.interrupted, t.resume_at, t.held_at_limit);
             match event.status {
                 AgentStatus::Working | AgentStatus::Done => {
                     t.interrupted = event.status == AgentStatus::Working;
                     t.resume_at = None;
+                    t.held_at_limit = false;
                 }
                 AgentStatus::Failed => {
                     t.interrupted = true;
+                    t.held_at_limit &= t.resume_at == event.resume_at;
                     t.resume_at = event.resume_at;
                 }
                 AgentStatus::NeedsInput => {}
@@ -1167,7 +1203,7 @@ impl Machine {
                 t.title = event.title.clone();
             }
             t.message = event.message.clone().filter(|_| event.status == AgentStatus::NeedsInput);
-            before != (t.interrupted, t.resume_at)
+            before != (t.interrupted, t.resume_at, t.held_at_limit)
         });
         if changed == Ok(true) {
             self.save_sessions();
@@ -1223,7 +1259,7 @@ impl Machine {
                     return;
                 }
             }
-            let fired = machine.tab(&tab, |t| t.resume_at.take() == Some(at) && t.session.is_some());
+            let fired = machine.tab(&tab, |t| !t.held_at_limit && t.session.is_some() && t.resume_at == Some(at) && t.resume_at.take().is_some());
             if fired != Ok(true) {
                 return;
             }
@@ -1908,6 +1944,42 @@ mod tests {
         assert_eq!(text(&seen), "--settings|s|--plugin-dir|p|--resume|s1|--model|claude-opus-4-8|\r\n");
         assert_eq!(sessions::load(&dir.join("sessions.json"))[0].model.as_deref(), Some("claude-opus-4-8"), "a relaunch keeps the model");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_thread_without_a_project_runs_in_the_machines_scratch_folder() {
+        let dir = temp("scratch");
+        let project = dir.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(launch(), Some(dir.clone()), Some(project.clone()), |_| {});
+        let tab = m.call(Call::OpenScratch { bypass: false }).unwrap().as_str().unwrap().to_owned();
+        assert_eq!(m.view(&tab).unwrap().cwd, dir.join("scratch").display().to_string());
+        assert!(dir.join("scratch").is_dir());
+        assert_eq!(m.call(Call::Workspace { tab }).unwrap()["scratch"], true);
+        let again = m.open_tab(Some(dir.join("scratch").display().to_string()), false);
+        assert_eq!(m.call(Call::Workspace { tab: again }).unwrap()["scratch"], true);
+        let other = m.open_tab(None, false);
+        assert_eq!(m.call(Call::Workspace { tab: other }).unwrap()["scratch"], false);
+        assert_eq!(m.list_projects().iter().map(|p| p.path.clone()).collect::<Vec<_>>(), [project.display().to_string()], "the scratch folder joined the projects");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_session_held_at_its_usage_limit_stays_held_until_the_next_turn() {
+        let m = machine();
+        let tab = m.open_tab(None, false);
+        let failed = |resume_at| AgentEvent { status: AgentStatus::Failed, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at, prompt: None, snapshot: None };
+        m.record_status(&tab, &failed(Some(1792400000)));
+        m.call(Call::AutoResume { tab: tab.clone(), on: false }).unwrap();
+        assert!(m.view(&tab).unwrap().held);
+        m.record_status(&tab, &failed(Some(1792400000)));
+        assert!(m.view(&tab).unwrap().held, "the same limit reported again let it go");
+        m.record_status(&tab, &failed(Some(1792500000)));
+        assert!(!m.view(&tab).unwrap().held, "a new limit kept the old hold");
+        m.call(Call::AutoResume { tab: tab.clone(), on: false }).unwrap();
+        m.record_status(&tab, &AgentEvent { status: AgentStatus::Working, ..failed(None) });
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.held, view.resume_at), (false, None));
     }
 
     #[test]
