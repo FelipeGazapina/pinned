@@ -1166,7 +1166,7 @@ threadView.addEventListener("toggle", (e) => {
 const openOutside = (url) => WEB_URL.test(url) && (TAURI ? invoke("open_url", { url }).catch(console.warn) : window.open(url, "_blank", "noopener"));
 
 function openLink(url, outside = false) {
-  if (!outside && /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?([/?#]|$)/.test(url)) {
+  if (!outside && WEB_URL.test(url) && linksOpenInApp()) {
     setBrowserUrl(url);
     return openPanel("browser");
   }

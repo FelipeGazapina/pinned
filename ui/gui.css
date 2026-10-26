@@ -360,17 +360,6 @@ body[data-panel-max="true"] #panel-resize { display: none; }
   color: var(--g-fg); font: 12px var(--g-sans); outline: none; }
 .url-bar input:focus { box-shadow: 0 0 0 1px rgb(var(--g-primary-rgb) / 0.5); }
 .browser iframe { flex: 1; width: 100%; border: 0; background: #fff; }
-.browser-empty { flex: 1; overflow: auto; padding: 48px 24px; text-align: center; color: var(--g-muted); font-size: 12px; }
-.browser-empty .big { width: 28px; height: 28px; opacity: 0.5; }
-.browser-empty .title { color: var(--g-fg); font-size: 14px; font-weight: 500; margin: 10px 0 4px; }
-.browser-empty .group { text-align: left; margin: 24px 0 8px; font-weight: 500; }
-.servers { border: 1px solid var(--g-border); border-radius: 14px; overflow: hidden; text-align: left; }
-.servers button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px; border-top: 1px solid var(--g-border); }
-.servers button:first-child { border-top: 0; }
-.servers button:hover { background: var(--g-accent); }
-.servers b { display: block; color: var(--g-fg); font-weight: 500; font-size: 14px; }
-.servers span span { color: var(--g-muted); font-size: 12px; }
-.browser-empty .hint { margin-top: 16px; }
 
 .pr-head { padding: 4px 16px 0; border-bottom: 1px solid rgb(var(--g-ink-rgb) / 0.036); }
 .pr-head .icon .i { width: 14px; height: 14px; }

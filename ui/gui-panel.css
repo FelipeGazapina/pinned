@@ -141,51 +141,13 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 .url-bar .recording::after { content: ""; position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--g-error);
   animation: status-pulse 1.2s ease-in-out infinite; }
 @keyframes status-pulse { 50% { opacity: 0.35; } }
-.viewport.native { display: grid; place-items: stretch; }
-.viewport.native.device { place-items: center; overflow: hidden; }
-.viewport.native .page { min-width: 0; min-height: 0; background: #fff; }
-.viewport.native.device .page { border-radius: 12px; box-shadow: 0 0 0 1px var(--g-border), 0 12px 32px -12px var(--g-shadow); }
 .viewport.floating { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-size: 12px; }
-#preview-pip { position: absolute; right: 12px; bottom: 140px; z-index: 6; width: 320px; height: 220px; border-radius: 12px; overflow: hidden;
-  background: #fff; box-shadow: 0 0 0 1px var(--g-border), 0 24px 48px -12px var(--g-shadow); }
-#preview-pip .page, #preview-pip iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
-#preview-pip .pill { position: absolute; top: 6px; right: 6px; display: flex; align-items: center; gap: 2px; height: 32px; padding: 2px 2px 2px 8px; border-radius: 8px;
-  border: 1px solid rgb(var(--g-ink-rgb) / 0.1); background: rgb(var(--g-overlay-rgb) / 0.92); color: var(--g-fg); font-size: 12px; cursor: grab; opacity: 0; transition: opacity 0.15s; }
-#preview-pip:hover .pill, #preview-pip .pill:focus-within { opacity: 1; }
-/* A native page draws over the page's own HTML, so in the app the pill gets a strip above it. */
-:root[data-shell="app"] #preview-pip { background: var(--g-overlay); height: 252px; }
-:root[data-shell="app"] #preview-pip .page { top: 32px; height: auto; bottom: 0; }
-:root[data-shell="app"] #preview-pip .pill { top: 0; right: 0; left: 0; height: 32px; border: 0; border-radius: 0; background: none; opacity: 1; }
-:root[data-shell="app"] #preview-pip .pill .title { flex: 1; max-width: none; }
-#preview-pip .pill .title { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 4px; }
-#preview-pip .icon { width: 24px; height: 24px; }
-#preview-pip .icon .i { width: 14px; height: 14px; }
 #panel-tabs .ptab .lead { position: relative; }
 #panel-tabs .ptab .favicon { display: block; width: 12px; height: 12px; border-radius: 2px; object-fit: contain; }
 #panel-tabs .ptab .pending { position: absolute; right: -1px; bottom: -1px; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 #panel-tabs .ptab .audio { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 4px; color: inherit; flex: none; }
 #panel-tabs .ptab .audio:hover { background: var(--g-hover); }
 #panel-tabs .ptab .audio .i { width: 12px; height: 12px; }
-.servers button { text-align: left; }
-.servers button > span { display: flex; flex-direction: column; min-width: 0; }
-.url-bar .loading-bar { position: absolute; left: 0; bottom: -1px; height: 2px; width: 90%; background: var(--g-primary); transform-origin: 0 0;
-  animation: preview-loading 5.3s ease-out; }
-.url-bar .loading-bar[hidden] { display: none; }
-@keyframes preview-loading { from { transform: scaleX(0); } to { transform: scaleX(1); } }
-.device-bar { flex: none; display: flex; align-items: center; gap: 6px; height: 36px; padding: 0 8px; border-bottom: 1px solid rgb(var(--g-ink-rgb) / 0.036);
-  overflow-x: auto; scrollbar-width: none; font-size: 12px; }
-.device-bar .scope { position: relative; display: flex; align-items: center; height: 24px; border-radius: 8px; background: var(--g-input); flex: none; }
-.device-bar .scope select { appearance: none; border: 0; background: none; color: var(--g-fg); font: 12px var(--g-sans); padding: 0 24px 0 9px; height: 24px; outline: none; }
-.device-bar .scope select option { background: var(--g-raised); }
-.device-bar .scope .i { position: absolute; right: 6px; width: 14px; height: 14px; opacity: 0.7; pointer-events: none; }
-.device-bar input { width: 56px; height: 24px; border: 0; border-radius: 6px; padding: 0 6px; background: var(--g-accent); color: var(--g-fg);
-  font: 12px var(--g-mono); outline: none; flex: none; }
-.device-bar .icon { width: 24px !important; height: 24px !important; }
-.device-bar .icon .i { width: 14px; height: 14px; }
-.viewport { flex: 1; min-height: 0; position: relative; overflow: hidden; }
-.viewport iframe { display: block; border: 0; background: #fff; transform-origin: 0 0; }
-.viewport.device { overflow: auto; background: rgb(var(--g-ink-rgb) / 0.02); padding: 16px; box-sizing: border-box; }
-.viewport.device iframe { margin: 0 auto; border-radius: 12px; box-shadow: 0 0 0 1px var(--g-border), 0 12px 32px -12px var(--g-shadow); }
 
 .pr-error { display: flex; align-items: flex-start; gap: 6px; color: var(--g-error); }
 .pr-error .i { width: 14px; height: 14px; flex: none; margin-top: 1px; }
@@ -522,6 +484,3 @@ body.panel-animating #panel { transition: transform var(--panel-animation, 0ms) 
 .file-chip:hover { background: rgb(var(--g-ink-rgb) / 0.1); }
 .file-chip .ficon { display: inline-grid; place-items: center; }
 .file-chip .ficon .i { width: 12px; height: 12px; }
-@media (hover: none) {
-  #preview-pip .pill { opacity: 1; }
-}
