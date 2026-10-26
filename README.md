@@ -172,6 +172,12 @@ signed in.
 
 The usage meter shows the active tab's account. Each Claude Code account has its own limits.
 
+A tab that hits its account's usage limit continues by itself when the limit lifts. To go on
+sooner, pick **Continue under** another signed-in Claude Code account from the note above the
+prompt or the session menu. pinned copies the conversation into that account's home and resumes
+it there. The same menu offers **Move to** an account at any time. Only the tab moves: the
+project keeps its account.
+
 Codex tabs run the `codex` CLI without pinned's hooks, so they get no status dot, no usage
 meter and no resume after a restart.
 

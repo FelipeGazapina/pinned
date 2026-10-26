@@ -488,6 +488,32 @@ async function setBypass(tab, on) {
   focusInput();
 }
 
+/** The other Claude Code accounts signed in on the tab's machine, which can take its conversation over. */
+const switchTargets = (tab) =>
+  tab.view.program === "sign-in" || terminalOnly(tab)
+    ? []
+    : (machines.get(tab.machine)?.accounts ?? []).filter((a) => a.provider === "claude" && a.signed_in && a.id !== tab.view.account);
+
+/** Session menu items that move the tab's conversation to another account, to continue past a usage limit. */
+const switchItems = (tab) =>
+  switchTargets(tab).map((a) => ({
+    label: tab.view.resume_at ? `Continue under ${a.name}` : `Move to ${a.name}`,
+    hint: "Copies this conversation to the account and resumes it there",
+    run: () => switchAccount(tab, a.id),
+  }));
+
+async function switchAccount(tab, account) {
+  refit(tab);
+  try {
+    await callOn(tab.machine, { cmd: "switch_account", tab: tab.view.id, account, cols: tab.term.cols, rows: tab.term.rows });
+    await refreshTabs(tab.machine);
+  } catch (e) {
+    tab.term.write(`\r\n\x1b[31m[could not switch accounts: ${e}]\x1b[0m\r\n`);
+    if (guiOn()) showComposerNote(String(e), true);
+  }
+  focusInput();
+}
+
 function closeTab(tab) {
   rememberClosed(tab);
   removeTab(tab, true);
@@ -557,7 +583,7 @@ function render() {
     badge.hidden = !remote;
     badge.textContent = remote ? initials(machineName(tab.machine)) : "";
     const other = tab.view.account !== DEFAULT_ACCOUNT;
-    if (other && !machines.get(tab.machine).accountsAsked) accountsOf(tab.machine).catch(console.warn);
+    if ((other || tab.view.resume_at) && !machines.get(tab.machine).accountsAsked) accountsOf(tab.machine).catch(console.warn);
     const named = accountOf(tab.machine, tab.view.account);
     const accountBadge = tab.button.querySelector(".badge.account");
     accountBadge.hidden = !other;
@@ -1029,6 +1055,7 @@ function openSessionMenu(tab) {
     tab.view.bypass
       ? item("Ask for permissions again", "Restarts claude and resumes this conversation.", () => setBypass(tab, false))
       : item("⚠ Skip all permissions", "Restarts claude with no permission checks and resumes this conversation.", () => setBypass(tab, true), "danger"),
+    ...switchItems(tab).map((s) => item(s.label, `${s.hint}.`, s.run)),
     item("Attach files…", "", () => document.getElementById("attach").click()),
     item("Change folder…", "", () => document.getElementById("folder").click()),
     item("Close tab", "", () => closeTab(tab)),

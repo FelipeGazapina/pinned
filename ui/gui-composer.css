@@ -9,6 +9,10 @@
 #composer-note { margin-top: 0; margin-bottom: 6px; padding: 0 12px; font-size: 12px; color: var(--g-muted); }
 #composer-note[data-error] { color: var(--g-error); }
 #composer-note[hidden] { display: none; }
+#limit-note { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; padding: 8px 12px; border: 1px solid var(--g-border); border-radius: 10px; font-size: 12px; color: var(--g-warning-fg); }
+#limit-note[hidden] { display: none; }
+#limit-note > span { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 12em; }
+#limit-note button { font-size: 12px; color: var(--g-text); }
 
 #attachments { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 16px 0; }
 #attachments .attachment { display: flex; align-items: center; gap: 6px; max-width: 220px; height: 40px; padding: 0 4px 0 4px; border-radius: 10px;

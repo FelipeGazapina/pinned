@@ -156,6 +156,9 @@ pub enum Call {
     SetProjectAccount { path: String, account: Option<AccountId> },
     /// The new tab's id, running the CLI's login for the account in the account's home.
     SignIn { account: AccountId },
+    /// The tab's folder, as `start_claude`. Moves the tab's conversation to another Claude Code
+    /// account signed in here and resumes it there, continuing a turn a usage limit stopped.
+    SwitchAccount { tab: TabId, account: AccountId, cols: u16, rows: u16 },
     /// `ThreadPage`: the conversation's items from byte `from` of its transcript on.
     Thread { tab: TabId, from: u64 },
     /// `null`. Types `text` into the session as one prompt and submits it.
@@ -222,6 +225,7 @@ impl Call {
                 | Call::ListAccounts
                 | Call::AddAccount { .. }
                 | Call::SignIn { .. }
+                | Call::SwitchAccount { .. }
         )
     }
 }
@@ -546,6 +550,10 @@ mod tests {
         round_trip(Call::ListAccounts, json!({ "cmd": "list_accounts" }));
         round_trip(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }, json!({ "cmd": "add_account", "provider": "codex", "name": "Side" }));
         round_trip(Call::SignIn { account: "work".into() }, json!({ "cmd": "sign_in", "account": "work" }));
+        round_trip(
+            Call::SwitchAccount { tab: "tab-1".into(), account: "spare".into(), cols: 120, rows: 32 },
+            json!({ "cmd": "switch_account", "tab": "tab-1", "account": "spare", "cols": 120, "rows": 32 }),
+        );
         round_trip(Call::RemoveAccount { account: "side".into() }, json!({ "cmd": "remove_account", "account": "side" }));
         round_trip(
             Call::SetProjectAccount { path: "/repo".into(), account: None },

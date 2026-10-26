@@ -109,6 +109,7 @@ function renderComposer(tab) {
   const keys = sendWithMod ? "⌘Enter" : "Enter";
   send.title = composer.dataset.sending === "true" ? "Submitting message" : working ? `Queue message (${keys})` : `Send (${keys})`;
   renderApproval(tab);
+  renderLimitNote(tab);
   rest();
   renderAttachments(t);
   renderStash();
@@ -126,6 +127,22 @@ function renderComposer(tab) {
     ${ws?.branch ? `<button type="button" class="branch" title="${esc(ws.branch)} · ⌘⇧G">${icon("git-branch")}<span>${esc(ws.branch)}</span>${icon("chevron-down", "chev")}</button>` : ""}`;
   prompt.placeholder = placeholderFor(tab, t);
 }
+
+/** A turn a usage limit stopped continues by itself when it lifts, or now under another signed-in account. */
+function renderLimitNote(tab) {
+  const note = document.getElementById("limit-note");
+  const at = tab?.view.resume_at;
+  note.hidden = !at;
+  if (!at) return;
+  const time = new Date(at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const buttons = switchTargets(tab).map((a) => `<button type="button" class="outline" data-switch-account="${esc(a.id)}">Continue under ${esc(a.name)}</button>`);
+  note.innerHTML = `<span>${icon("circle-alert")}${esc(accountName(tab.machine, tab.view.account))} hit its usage limit. This thread continues by itself at ${esc(time)}.</span>${buttons.join("")}`;
+}
+
+document.getElementById("limit-note").onclick = (e) => {
+  const button = e.target.closest("[data-switch-account]");
+  if (button && active) switchAccount(active, button.dataset.switchAccount);
+};
 
 function switchDraft(tab) {
   composer.dataset.tab = tab?.key ?? "";
@@ -541,6 +558,7 @@ document.getElementById("more-button").onclick = (e) => {
     tab.view.bypass
       ? { label: "Ask for permissions again", hint: "Restarts claude and resumes this conversation", run: () => setBypass(tab, false) }
       : { label: "Full access", hint: "Restarts claude with no permission checks and resumes", run: () => setBypass(tab, true), cls: "danger" },
+    ...switchItems(tab),
     { label: "Compact the conversation", hint: "/compact", run: () => sendSlash(tab, "/compact") },
     {
       label: "Send with ⌘Enter",

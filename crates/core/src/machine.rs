@@ -372,6 +372,7 @@ impl Machine {
             Call::RemoveAccount { account } => json(self.accounts.remove(&account)?),
             Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
             Call::SignIn { account } => json(self.sign_in(&account)?),
+            Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from } => json(self.thread(&tab, from)?),
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
             Call::Workspace { tab } => json(workspace::of(&self.tab(&tab, |t| t.cwd.clone())?)),
@@ -545,6 +546,46 @@ impl Machine {
         self.continue_when_limit_lifts(tab);
         self.emit_tabs();
         Ok(cwd.display().to_string())
+    }
+
+    /// Moves the tab's conversation to `account` and restarts it there, returning its folder. The
+    /// transcript is copied into the account's home, where `--resume` finds it, and a turn that
+    /// stopped, as on a usage limit, continues at once instead of waiting for the old account.
+    pub fn switch_account(&self, tab: &str, account: &str, cols: u16, rows: u16) -> Result<String, String> {
+        let to = self.accounts.get(account).ok_or_else(|| format!("no account {account} on this machine"))?;
+        let (from, program, session, working) = self.tab(tab, |t| {
+            let working = t.status == Some(AgentStatus::Working) || (t.status == Some(AgentStatus::NeedsInput) && t.interrupted);
+            (t.account.clone(), t.program, t.claude_session.clone(), working)
+        })?;
+        if program != Program::Agent {
+            return Err("a sign-in tab has no conversation to move".into());
+        }
+        if to.provider != from.provider {
+            return Err(format!("account {} runs {}, which can't resume a {} conversation", to.id, to.provider.spec().name, from.provider.spec().name));
+        }
+        if to.id == from.id {
+            return self.tab(tab, |t| t.cwd.display().to_string());
+        }
+        if working {
+            return Err("claude is working in this tab. Switch accounts when the turn ends.".into());
+        }
+        if !self.status(&to).signed_in {
+            return Err(format!("account {} is not signed in on this machine", to.id));
+        }
+        if let Some(session) = &session {
+            let file = self.transcript(&from, session).ok_or_else(|| format!("could not find the transcript of {session} under account {}", from.id))?;
+            let project = file.parent().and_then(Path::file_name).ok_or("the transcript has no project folder")?;
+            let into = self.accounts.home(&to).join("projects").join(project);
+            std::fs::create_dir_all(&into).and_then(|_| copy_tree(file.parent().unwrap(), &into, session)).map_err(|e| format!("could not copy the conversation to {}: {e}", to.id))?;
+        }
+        self.tab(tab, |t| {
+            t.account = to;
+            t.resume_at = None;
+            if let Some(saved) = t.saved() {
+                (t.launch, t.resume_at) = saved.reopen(unix_now());
+            }
+        })?;
+        self.start_claude(tab, cols, rows)
     }
 
     /// Turns the tab's permission skipping on or off and returns its folder. Claude reads the flag
@@ -1057,6 +1098,30 @@ impl Machine {
         }
         Ok(self.open_project(target))
     }
+}
+
+/// Copies `<session>.jsonl` and the `<session>` folder of its subagents from `from` into `into`.
+fn copy_tree(from: &Path, into: &Path, session: &str) -> std::io::Result<()> {
+    let name = format!("{session}.jsonl");
+    std::fs::copy(from.join(&name), into.join(&name))?;
+    copy_dir(&from.join(session), &into.join(session))
+}
+
+fn copy_dir(from: &Path, into: &Path) -> std::io::Result<()> {
+    if !from.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(into)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = into.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn home() -> PathBuf {
@@ -1773,6 +1838,48 @@ mod tests {
         let tabs = m.restore_tabs();
         assert_eq!(m.view(&tabs[0]).unwrap().account, "claude");
         assert_eq!(first_line(&m, &tabs[0]), "claude|--settings s --plugin-dir p --resume s1|||claude\r\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_limited_session_moves_to_another_signed_in_account_and_continues_there() {
+        let root = temp("switch-account");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let m = accounts_machine(&root);
+        for (provider, name) in [(Provider::Claude, "Work"), (Provider::Claude, "Spare"), (Provider::Codex, "Side")] {
+            m.call(Call::AddAccount { provider, name: name.into() }).unwrap();
+        }
+        m.open_project(app.clone());
+        m.call(Call::SetProjectAccount { path: app.display().to_string(), account: Some("work".into()) }).unwrap();
+        let config = root.join("config").display().to_string();
+        let work = PathBuf::from(format!("{config}/accounts/work/projects/-app"));
+        std::fs::create_dir_all(work.join("s1/subagents")).unwrap();
+        std::fs::write(work.join("s1.jsonl"), "{}\n").unwrap();
+        std::fs::write(work.join("s1/subagents/agent-a.jsonl"), "{}\n").unwrap();
+        let tab = m.open_tab(Some(app.display().to_string()), false).unwrap();
+        m.tab(&tab, |t| (t.claude_session, t.interrupted, t.resume_at) = (Some("s1".into()), true, Some(unix_now() + 3600))).unwrap();
+        let switch = |account: &str| m.call(Call::SwitchAccount { tab: tab.clone(), account: account.into(), cols: 80, rows: 24 });
+
+        assert_eq!(switch("side"), Err("account side runs Codex, which can't resume a Claude Code conversation".into()));
+        assert_eq!(switch("home"), Err("no account home on this machine".into()));
+        assert_eq!(switch("spare"), Err("account spare is not signed in on this machine".into()));
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Working)).unwrap();
+        std::fs::write(format!("{config}/accounts/spare/signed-in"), "").unwrap();
+        assert_eq!(switch("spare"), Err("claude is working in this tab. Switch accounts when the turn ends.".into()));
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Failed)).unwrap();
+
+        assert_eq!(switch("spare"), Ok(json!(app.display().to_string())));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("the resumed session", || text(&seen).contains('\n'));
+        assert_eq!(text(&seen), format!("claude|--settings s --plugin-dir p --resume s1 Continue from where you left off.|{config}/accounts/spare||spare\r\n"));
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.account.as_str(), view.resume_at), ("spare", None));
+        let spare = PathBuf::from(format!("{config}/accounts/spare/projects/-app"));
+        assert!(spare.join("s1.jsonl").is_file() && spare.join("s1/subagents/agent-a.jsonl").is_file(), "the transcript and its subagents follow the conversation");
+        let kept: Value = serde_json::from_slice(&std::fs::read(root.join("config/sessions.json")).unwrap()).unwrap();
+        assert_eq!(kept[0]["account"], json!("spare"), "a restart resumes it under the new account");
         let _ = std::fs::remove_dir_all(root);
     }
 
