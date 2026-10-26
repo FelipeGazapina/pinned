@@ -25,6 +25,7 @@
   --g-pr-merged-rgb: 196 181 253;
   --g-pr-closed-rgb: 252 165 165;
   --g-pr-draft-rgb: 161 161 170;
+  --g-teal: rgb(94 234 212 / 0.9);
   --g-canvas: rgb(var(--g-canvas-rgb));
   --g-sidebar: #000000;
   --g-bg: color-mix(in srgb, var(--g-canvas) calc(var(--opacity) * 100%), transparent);
@@ -131,6 +132,7 @@ html[data-appearance="light"] {
   --g-pr-merged-rgb: 124 58 237;
   --g-pr-closed-rgb: 220 38 38;
   --g-pr-draft-rgb: 113 113 122;
+  --g-teal: #0d9488;
   --g-sidebar: #fafafa;
   --g-message: #f4f4f5;
   --g-accent: #f4f4f5;

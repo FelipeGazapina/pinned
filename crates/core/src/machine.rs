@@ -427,6 +427,7 @@ impl Machine {
                 self.shells.close(&shell);
                 Ok(Value::Null)
             }
+            Call::BusyShells { shells } => json(self.shells.busy(&shells, self.launch.path_env.as_deref())),
             Call::DeviceHub { embed } => json(self.device_hub.url(embed.as_deref(), self.launch.path_env.as_deref())?),
             Call::Subagent { tab, tool } => {
                 let file = thread::subagent(&self.transcript(&tab)?, &tool).ok_or("Claude Code kept no transcript of this subagent")?;

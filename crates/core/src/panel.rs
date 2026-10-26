@@ -766,11 +766,55 @@ impl Shells {
     pub fn close(&self, id: &str) {
         self.open.lock().unwrap().remove(id);
     }
+
+    /// Those of `ids` whose shell has a command running under it.
+    pub fn busy(&self, ids: &[String], path: Option<&str>) -> Vec<String> {
+        let pids: Vec<(String, u32)> = {
+            let open = self.open.lock().unwrap();
+            ids.iter().filter_map(|id| Some((id.clone(), open.get(id)?.session.pid()?))).collect()
+        };
+        if pids.is_empty() {
+            return vec![];
+        }
+        let table = crate::workspace::run(Path::new("/"), path, "ps", &["-A", "-o", "pid=,ppid=,comm="]).unwrap_or_default();
+        pids.into_iter().filter(|(_, pid)| runs_command(&table, *pid)).map(|(id, _)| id).collect()
+    }
+}
+
+/// Whether `ps -o pid=,ppid=,comm=` lists a command under the shell `shell`. As T3 Code's terminal
+/// manager reads it, a child named as the shell with no children of its own is the shell's prompt
+/// helper, not a command.
+fn runs_command(table: &str, shell: u32) -> bool {
+    let rows: Vec<(u32, u32, &str)> = table
+        .lines()
+        .filter_map(|line| {
+            let (pid, rest) = line.trim().split_once(char::is_whitespace)?;
+            let rest = rest.trim_start();
+            let (ppid, comm) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            Some((pid.parse().ok()?, ppid.parse().ok()?, comm.trim()))
+        })
+        .collect();
+    let name = |pid: u32| {
+        let comm = rows.iter().find(|r| r.0 == pid).map_or("", |r| r.2.trim_start_matches('-'));
+        Path::new(comm).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())
+    };
+    let shell_name = name(shell);
+    rows.iter().filter(|r| r.1 == shell).any(|r| shell_name.is_empty() || name(r.0) != shell_name || rows.iter().any(|c| c.1 == r.0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shell_runs_a_command_when_a_child_is_not_its_own_prompt_helper() {
+        let table = "  100     1 /bin/zsh\n  200   100 zsh\n  300   100 -zsh\n  301   300 git\n  400     1 zsh\n  401   400 npm run dev\n  500     1 -zsh\n  501   500 zsh\n";
+        assert!(runs_command(table, 100), "a helper with a child of its own is a command");
+        assert!(runs_command(table, 400));
+        assert!(!runs_command(table, 500), "a lone copy of the shell is its prompt helper");
+        assert!(!runs_command(table, 999));
+        assert!(!runs_command("  600     1 bash\n", 600));
+    }
 
     fn git(dir: &Path, args: &[&str]) {
         assert!(Command::new("git").args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "git {args:?}");

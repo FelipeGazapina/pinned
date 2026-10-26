@@ -1004,7 +1004,8 @@ async function sweep(profileName) {
   /** Visible text whose contrast with what is painted behind it is under 2:1, compositing translucent
    * fills and opacity up the tree onto the canvas. T3's own faint labels (muted at 60-70%, the
    * warning orange) sit between 2 and 3 in its light theme; text the theme missed sits near 1.
-   * Syntax tokens keep pierre-light's own colors, as T3's do, so code is left out. */
+   * Syntax tokens keep pierre-light's own colors, as T3's do, so code is left out, as is a row's
+   * branch, which T3 paints at muted/40 (about 1.7 in light) to sit behind the title. */
   const unreadable = (scope) =>
     page.evaluate((scope) => {
       const ctx = Object.assign(document.createElement("canvas"), { width: 1, height: 1 }).getContext("2d", { willReadFrequently: true });
@@ -1023,7 +1024,7 @@ async function sweep(profileName) {
       const bad = [];
       for (const el of document.querySelectorAll(`${scope} *`)) {
         if (![...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) continue;
-        if (!el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) || el.closest("[aria-hidden=true], [disabled], [aria-disabled=true], .xterm, iframe, .wireframe, pre code, .dl .code, .fl .code")) continue;
+        if (!el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) || el.closest("[aria-hidden=true], [disabled], [aria-disabled=true], .xterm, iframe, .wireframe, pre code, .dl .code, .fl .code, .thread-row .l3 .branch")) continue;
         const r = el.getBoundingClientRect();
         if (!r.width || !r.height || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue;
         const fills = [];
@@ -2388,7 +2389,7 @@ async function sweep(profileName) {
     await page.evaluate(() => (window.open = (url) => (window.__opened = url)));
     if (!touch) {
       await showSidebar();
-      await page.click('#thread-list .thread-row [data-pr]', { modifiers: ["Meta"] });
+      await page.click("#composer-footer .pr[data-pr]", { modifiers: ["Meta"] });
       await waitFor("the badge to open GitHub", async () => /github\.com\/example\/alpha\/pull\/4\d/.test((await page.evaluate(() => window.__opened)) ?? ""));
       await page.evaluate(() => (window.__opened = ""));
       await page.click('#thread .pr-link[data-pr$="/pull/41"]', { button: "middle" });
@@ -3793,10 +3794,12 @@ async function sweep(profileName) {
     const alpha = await keyFor("alpha");
     await openRow(alpha);
     await showSidebar();
+    // Alpha linked #41 (a draft) and #42 (merged), which T3 Code's badge reads as "+2", open overall.
     const badge = `${rowSel(alpha)} .pr`;
-    await waitFor("alpha's badge to read merged", async () => (await prState(badge)) === "merged", 10000);
-    check((await tone(badge)) === "rgba(196, 181, 253, 0.9)", `the merged badge is ${await tone(badge)}`);
-    check((await attr(badge, "aria-label")) === "PR #42 merged", `aria-label: ${await attr(badge, "aria-label")}`);
+    await waitFor("alpha's badge to read open overall", async () => (await prState(badge)) === "open" && /#42 - Merged/.test((await attr(badge, "aria-label")) ?? ""), 10000);
+    check((await text(badge)) === "+2", `the badge reads ${await text(badge)}`);
+    check((await tone(badge)) === "rgba(110, 231, 183, 0.9)", `the badge is ${await tone(badge)}`);
+    check((await attr(badge, "aria-label")) === "PR #42 - Merged: Add notes, and 1 more linked; overall open", `aria-label: ${await attr(badge, "aria-label")}`);
     await waitFor("the composer's badge to read merged", async () => (await prState("#composer-footer .pr")) === "merged");
     check((await tone("#composer-footer .pr")) === "rgba(196, 181, 253, 0.9)", `the composer's badge is ${await tone("#composer-footer .pr")}`);
     check((await attr(rowSel(alpha), "title")) === null, "the row still has a native tooltip");
@@ -4214,6 +4217,62 @@ async function sweep(profileName) {
     const copy = await page.locator("#side-menu button:not(.back) .label").allTextContents();
     check(copy.join() === "Path,Branch,Thread ID", `Copy: ${copy.join(", ")}`);
     await page.keyboard.press("Escape");
+    await openRow(alpha);
+  });
+
+  await step("app view: line 3 as T3's: the branch at muted/40, a running command's terminal pulses, and several pull requests read +N or as a stack", async () => {
+    const alpha = await keyFor("alpha");
+    const beta = await keyFor("beta");
+    await openRow(alpha);
+    await showSidebar();
+    check((await tone(`${rowSel(alpha)} .l3 .branch`)) === "rgba(129, 129, 129, 0.4)", `the branch is ${await tone(`${rowSel(alpha)} .l3 .branch`)}`);
+
+    await openPanelTo("terminal", "Terminal");
+    await waitFor("the shell", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1, 10000);
+    await sleep(500);
+    await page.locator("#panel-body .xterm-helper-textarea").focus();
+    await page.keyboard.type("sleep 30\n");
+    const pulse = `${rowSel(alpha)} .term-run`;
+    await showSidebar();
+    await waitFor("alpha's terminal to pulse", () => page.locator(pulse).count(), 8000);
+    check((await attr(pulse, "aria-label")) === "1 terminal process running. Open terminal", `the pulse reads ${await attr(pulse, "aria-label")}`);
+    check((await tone(pulse)) === "rgba(94, 234, 212, 0.9)", `the pulse is ${await tone(pulse)}`);
+    check((await page.locator(`${pulse} .i`).evaluate((el) => getComputedStyle(el).animationName)) === "terminal-pulse", "the glyph doesn't pulse");
+    await closePanelIfOpen();
+    await openRow(beta);
+    await showSidebar();
+    await press(page.locator(pulse));
+    await waitFor("alpha's terminal shown", async () => (await crumbProject()) === "alpha" && (await openTab("terminal").isVisible()), 5000);
+    await page.locator("#panel-body .xterm-helper-textarea").focus();
+    await page.keyboard.press("Control+c");
+    await waitFor("the pulse to stop", async () => !(await page.locator(pulse).count()), 8000);
+    await press(gui('#panel-tabs .ptab[data-panel="terminal"] .lead'));
+    await closePanelIfOpen();
+
+    const badge = `${rowSel(alpha)} .pr[data-pr-list]`;
+    await showSidebar();
+    check((await text(badge)) === "+2", `alpha's two pull requests read ${await text(badge)}`);
+    check(/^PR #4[12] - \w+: .+, and 1 more linked; overall open$/.test(await attr(badge, "aria-label")), `label: ${await attr(badge, "aria-label")}`);
+    check((await tone(badge)) === "rgba(110, 231, 183, 0.9)", `the badge is ${await tone(badge)}`);
+    await page.evaluate((k) => {
+      const tab = tabByKey(k);
+      linkPr(tab, "https://github.com/example/alpha/pull/43");
+      unlinkPr(tab, "https://github.com/example/alpha/pull/41");
+      renderSidebar();
+    }, alpha);
+    await waitFor("#42 and #43 as a stack", async () => /^Stack of 2 pull requests, \w+$/.test((await attr(badge, "aria-label")) ?? ""), 10000);
+    check((await text(badge)) === "2" && (await page.locator(`${badge} .i`).innerHTML()).includes("m16.02 12"), `the stack reads ${await text(badge)}`);
+    check((await attr(badge, "aria-label")).endsWith(await attr(badge, "data-state")), "the stack's color isn't its state's");
+    await page.evaluate((k) => {
+      const tab = tabByKey(k);
+      linkPr(tab, "https://github.com/example/alpha/pull/41");
+      unlinkPr(tab, "https://github.com/example/alpha/pull/43");
+      renderSidebar();
+    }, alpha);
+    await waitFor("+2 again", async () => (await text(badge)) === "+2");
+    await press(page.locator(badge));
+    await waitFor("the Linked pull requests list", () => openTab("prs").isVisible(), 5000);
+    await closePanelIfOpen();
     await openRow(alpha);
   });
 

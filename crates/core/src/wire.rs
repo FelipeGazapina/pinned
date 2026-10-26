@@ -304,6 +304,8 @@ pub enum Call {
     OpenShell { tab: TabId, cols: u16, rows: u16 },
     /// `null`. Ends the shell `shell`.
     CloseShell { shell: String },
+    /// `Vec<String>`: those of `shells` running a command, as T3 Code's terminal-running pulse reads them.
+    BusyShells { shells: Vec<String> },
     /// The address of the machine's device hub, which mirrors its simulators and emulators. It
     /// starts on the first call; `embed` is the origin of a page that frames it.
     DeviceHub {
@@ -374,6 +376,7 @@ impl Call {
                 | Call::SaveFile { .. }
                 | Call::CreateProject { .. }
                 | Call::PublishProject { .. }
+                | Call::BusyShells { .. }
         )
     }
 }

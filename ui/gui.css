@@ -93,6 +93,7 @@ button.outline .i { width: 14px; height: 14px; }
 .thread-row .status .i { width: 16px; height: 16px; }
 .status.info { color: var(--g-info); }
 .status.warning { color: var(--g-warning-fg); }
+.status.limited { color: var(--g-warning); }
 .status.input { color: var(--g-input-tone); }
 .status.error { color: var(--g-error); }
 .status.success { color: var(--g-success); }
@@ -104,7 +105,7 @@ button.outline .i { width: 14px; height: 14px; }
 .thread-row.active .l2 { color: var(--g-fg); }
 .thread-row .l3 { margin-top: 2px; font-size: 12px; color: rgb(var(--g-muted-rgb) / 0.8); }
 .thread-row .l3 .i { width: 12px; height: 12px; }
-.thread-row .branch { min-width: 0; display: flex; align-items: center; gap: 4px; white-space: nowrap; color: rgb(var(--g-muted-rgb) / 0.8); }
+.thread-row .branch { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; white-space: nowrap; color: rgb(var(--g-muted-rgb) / 0.4); }
 .thread-row .pr { display: flex; align-items: center; gap: 3px; color: var(--g-muted); font-variant-numeric: tabular-nums; flex: none; }
 .thread-row .pr:hover { text-decoration: underline; }
 .thread-row .provider { opacity: 0.6; display: flex; }

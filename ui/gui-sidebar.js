@@ -202,8 +202,8 @@ function statusSlot(tab) {
   if (phase === "asking") return { icon: "shield-question", text: "Approval", tone: "warning" };
   if (phase === "working") return { icon: "circle-dashed", text: "Working", tone: "info", since: unixOf(lastPrompt(tab)?.at) };
   if (phase === "input") return { icon: "message-circle-question", text: "Input", tone: "input" };
-  if (phase === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "warning" } : { icon: "circle-alert", text: "Failed", tone: "error" };
-  if (wokeNow(tab) && tab !== active) return { icon: "alarm-clock", text: "Woke", tone: "warning", woke: true };
+  if (phase === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "limited" } : { icon: "circle-alert", text: "Failed", tone: "error" };
+  if (wokeNow(tab) && tab !== active) return { icon: "alarm-clock", text: "Woke", tone: "limited", woke: true };
   return null;
 }
 
@@ -357,12 +357,70 @@ function notePrStatus(url, status) {
 }
 /** The PR panel's fuller answer from gh says the same of the state. */
 const notePrView = (url, d) =>
-  notePrStatus(url, { state: d.state === "OPEN" && d.isDraft ? "draft" : d.state.toLowerCase(), title: d.title, merged_at: d.mergedAt, closed_at: d.closedAt });
+  notePrStatus(url, { state: d.state === "OPEN" && d.isDraft ? "draft" : d.state.toLowerCase(), title: d.title, merged_at: d.mergedAt, closed_at: d.closedAt, head: d.headRefName, base: d.baseRefName });
 /** A pull request's glyph and number in its state's color, as T3 Code's badge. */
 function prBadge(tab, tag = "span", pr = prOf(tab)) {
   if (!pr) return "";
   const state = prStatus(tab, pr)?.state;
   return `<${tag}${tag === "button" ? ' type="button"' : ""} class="pr" data-pr="${esc(pr.url)}"${state ? ` data-state="${state}"` : ""} aria-label="PR #${pr.number}${state ? ` ${state}` : ""}">${icon(PR_LOOKS[state]?.icon ?? "git-pull-request-arrow")}#${pr.number}</${tag}>`;
+}
+/** The shells open beside a thread, in panel Terminal tabs and drawer terminals: `{ id, surface }` or `{ id, script }`. */
+const threadShells = (tab) => [
+  ...[...shellTerms].filter(([, e]) => e.tab === tab && e.shell).map(([surface, e]) => ({ id: e.shell, surface })),
+  ...scriptShells.filter((s) => s.tab === tab && s.id).map((script) => ({ id: script.id, script })),
+];
+/** Shells running a command, which pulse a terminal glyph on their thread's row, as T3 Code's do.
+ * The machines are asked each second while any shell is open. */
+let busyShells = new Set();
+async function askBusyShells() {
+  if (!guiOn() || document.hidden) return;
+  const byMachine = new Map();
+  for (const tab of tabs) for (const { id } of threadShells(tab)) byMachine.set(tab.machine, [...(byMachine.get(tab.machine) ?? []), id]);
+  const busy = new Set();
+  await Promise.all([...byMachine].map(([machine, shells]) => callOn(machine, { cmd: "busy_shells", shells }).then((ids) => ids.forEach((id) => busy.add(`${machine}:${id}`)), () => {})));
+  if ([...busy].join() === [...busyShells].join()) return;
+  busyShells = busy;
+  renderSidebar();
+}
+setInterval(askBusyShells, 1000);
+const busyShellsOf = (tab) => threadShells(tab).filter(({ id }) => busyShells.has(`${tab.machine}:${id}`));
+function terminalPulse(tab) {
+  const n = busyShellsOf(tab).length;
+  if (!n) return "";
+  const label = n === 1 ? "1 terminal process running. Open terminal" : `${n} terminal processes running. Open terminal`;
+  // Every pulse keeps one phase, however recently its row was drawn.
+  return `<span class="term-run" role="button" data-act="terminal" aria-label="${label}" data-tip="${label}" data-tip-delay="150" style="--pulse-at: -${Date.now() % 2000}ms">${icon("terminal")}</span>`;
+}
+function revealTerminal(tab) {
+  const [shell] = busyShellsOf(tab);
+  if (!shell) return;
+  if (tab !== active) activate(tab);
+  if (shell.surface) return addSurface(tab, panelOf(tab).surfaces.find((s) => s.id === shell.surface));
+  toggleDrawer(true);
+  showDrawerView(tab, shell.script);
+}
+/** T3 Code's badge for a thread that linked several pull requests: a stack glyph and its layer count
+ * when they chain branch on branch, else "+N" with the latest's glyph, in their overall state's color.
+ * It opens the thread's Linked pull requests. */
+function rowPrBadge(tab) {
+  const links = linkedPrs(tab);
+  if (links.length < 2) return prBadge(tab, "span", links[0] ? prsOf(tab).find((p) => p.url === links[0].url) ?? links[0] : undefined);
+  const statuses = links.map((p) => prStatus(tab, p));
+  const states = statuses.map((st) => (st?.state === "draft" ? "open" : st?.state ?? "open"));
+  const state = statuses.every((st) => st?.state === "draft") ? "draft" : states.includes("open") ? "open" : states.every((st) => st === "merged") ? "merged" : "closed";
+  const heads = new Map(statuses.filter((st) => st?.head).map((st) => [st.head, st]));
+  const bases = statuses.filter((st) => !st?.base || !heads.has(st.base) || heads.get(st.base) === st).length;
+  const look = PR_LOOKS[state].label.toLowerCase();
+  const latest = prOf(tab) ?? links[0];
+  const lead = prStatus(tab, latest);
+  const label = bases === 1
+    ? `Stack of ${links.length} pull requests, ${look}`
+    : `${lead ? `PR #${latest.number} - ${PR_LOOKS[lead.state].label}: ${lead.title}` : `PR #${latest.number}, status pending`}, and ${links.length - 1} more linked; overall ${look}`;
+  return `<span class="pr" role="button" data-act="prs" data-pr-list data-state="${state}" aria-label="${esc(label)}">${icon(bases === 1 ? "layers-2" : PR_LOOKS[state].icon)}${bases === 1 ? links.length : `+${links.length}`}</span>`;
+}
+function openLinkedPrs(tab) {
+  if (tab !== active) activate(tab);
+  addSurface(tab, { id: "prs", kind: "prs" });
 }
 const pinMark = (tab) => (isPinned(tab) ? `<span class="pin" role="button" data-act="unpin" title="Unpin thread">${icon("pin")}${icon("pin-off")}</span>` : "");
 const titleHtml = (tab) =>
@@ -380,17 +438,19 @@ function cardRow(tab) {
   const draft = tab !== active && hasDraft(tab);
   row.classList.toggle("draft", draft);
   const ws = threadOf(tab).workspace;
+  // As T3 Code's: the branch, or a project-less thread's machine once threads span machines, or nothing.
+  const scratchMachine = !ws?.branch && ws && !ws.repo && new Set(tabs.map((t) => t.machine)).size > 1;
   const where = ws?.branch
-    ? `${ws.worktree ? icon("folder-git", "dim") : ""}<span class="branch" title="${esc(ws.branch)}">${middle(ws.branch)}</span>`
-    : `<span class="branch">${icon("monitor")}<span class="head">${esc(machineName(tab.machine))}</span></span>`;
-  const remote = tab.machine !== LOCAL ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
+    ? `${ws.worktree ? icon("folder-git", "dim") : ""}<span class="branch">${middle(ws.branch)}</span>`
+    : scratchMachine ? `<span class="branch">${icon("monitor")}<span class="head">${esc(machineName(tab.machine))}</span></span>` : `<span class="branch"></span>`;
+  const remote = tab.machine !== LOCAL && !scratchMachine ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
   const state = slot
     ? `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : ""}>${icon(slot.icon)}${slot.text}${slot.since ? ` <span class="since" data-since="${slot.since}"></span>` : ""}</span>`
     : `<span class="stamp when${unseenDone(tab) ? " unread" : ""}">${esc(ago(latestUserAt(tab)))}</span>`;
   const acts = `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${MOD_LABEL}⇧S)">${icon("check")}Settle</span></span>`;
   row.innerHTML = `<span class="l1">${draft ? `<span class="draft-pen" role="img" title="Unsent draft" aria-label="Unsent draft">${icon("square-pen")}</span>` : ""}${projectIcon(projectName(tab), tab)}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>
     <span class="l2">${titleHtml(tab)}</span>
-    <span class="l3">${where}${prBadge(tab)}<span class="right">${remote}<span class="provider">${icon("claude")}</span></span></span>`;
+    <span class="l3">${where}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="right">${remote}<span class="provider">${icon("claude")}</span></span></span>`;
   return row;
 }
 
@@ -401,7 +461,7 @@ function slimRow(tab, action) {
   const act = action === "wake"
     ? `<span role="button" data-act="wake" title="Wake thread now">${icon("alarm-clock-off")}</span>`
     : `<span role="button" data-act="unsettle" title="Un-settle thread">${icon("undo-2")}</span>`;
-  row.innerHTML = `${projectIcon(projectName(tab), tab)}<span class="l2">${titleHtml(tab)}</span>${pinMark(tab)}${prBadge(tab)}<span class="slot">${time}<span class="acts">${act}</span></span>`;
+  row.innerHTML = `${projectIcon(projectName(tab), tab)}<span class="l2">${titleHtml(tab)}</span>${pinMark(tab)}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="slot">${time}<span class="acts">${act}</span></span>`;
   return row;
 }
 
@@ -437,10 +497,11 @@ let card = null;
 let cardTimer;
 let cardClosedAt = 0;
 function cardTarget(el) {
-  const pr = el.closest("#thread-list .pr[data-pr], #composer-footer .pr[data-pr]");
+  const pr = el.closest("#thread-list .pr[data-pr], #thread-list .pr[data-pr-list], #composer-footer .pr[data-pr]");
   const row = el.closest("#thread-list .thread-row:not(.result)");
   const tab = row ? tabByKey(row.dataset.tab) : pr && active;
   if (!tab || ui.renaming === tab.key) return null;
+  if (pr?.dataset.prList !== undefined) return { key: `prs:${tab.key}`, anchor: pr, tab, side: "top", delay: 150, html: () => `<ul>${linkedPrs(tab).map((p) => prItem(tab, p)).join("")}</ul>` };
   if (pr) return { key: `pr:${tab.key}:${pr.dataset.pr}`, anchor: pr, tab, side: "top", delay: row ? 150 : 600, html: () => `<ul>${prItem(tab, prsOf(tab).find((p) => p.url === pr.dataset.pr) ?? prOf(tab))}</ul>` };
   return { key: `row:${tab.key}`, anchor: row, tab, side: "right", delay: 150, html: () => rowCardHtml(tab) };
 }
@@ -960,7 +1021,7 @@ threadList.addEventListener("click", (e) => {
   if (row.classList.contains("result")) return openResult(tab);
   const act = e.target.closest("[data-act]")?.dataset.act;
   if (act === "snooze") return openSideMenu(snoozeItems([tab]), e.target.closest("[data-act]"));
-  if (act) return { settle, unsettle, wake, unpin: pin, dismiss: wake, discard: discardDraft }[act](tab);
+  if (act) return { settle, unsettle, wake, unpin: pin, dismiss: wake, discard: discardDraft, terminal: revealTerminal, prs: openLinkedPrs }[act](tab);
   const pr = e.target.closest("[data-pr]");
   if (pr && isModClick(e)) return openOutside(pr.dataset.pr);
   if (!pr && isModClick(e)) return toggleSelected(tab);
@@ -1042,7 +1103,7 @@ threadList.addEventListener("pointerdown", (e) => {
   if (e.pointerType !== "mouse" || e.button !== 0 || ui.search || isModClick(e) || e.shiftKey) return;
   const row = e.target.closest(".thread-row:not(.result)");
   const act = e.target.closest("[data-act]")?.dataset.act;
-  if (!row || e.target.closest("input, .pr, .pin, .woke") || (act && !["settle", "unsettle", "wake"].includes(act))) return;
+  if (!row || e.target.closest("input, .pr, .pin, .woke, .term-run") || (act && !["settle", "unsettle", "wake"].includes(act))) return;
   rowDrag = { row, key: row.dataset.tab, x: e.clientX, y: e.clientY, sweep: act ?? null, started: false };
 });
 addEventListener("pointermove", (e) => {
