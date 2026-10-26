@@ -373,7 +373,7 @@ async function loadFolders(c) {
     suggestions.folders = (await callOn(machine, { cmd: "list_projects" })).map((p) => p.path);
   } catch {}
   fillList("folders", suggestions.folders);
-  if (!machines.get(machine)?.accounts) {
+  if (machine && !machines.get(machine)?.accounts) {
     await accountsOf(machine).catch(console.warn);
     if (page === "connectors" && view.name === "edit" && view.draft === c) redraw();
   }

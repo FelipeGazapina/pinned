@@ -6,6 +6,20 @@ const fs = require("fs");
 const path = require("path");
 
 const args = process.argv.slice(2);
+// An account's home is CLAUDE_CONFIG_DIR, signed in once `auth login` ran there; the default home always is.
+const home = process.env.CLAUDE_CONFIG_DIR ?? path.join(process.env.HOME, ".claude");
+if (args[0] === "auth") {
+  const signedIn = !process.env.CLAUDE_CONFIG_DIR || fs.existsSync(path.join(home, "signed-in"));
+  if (args[1] === "status") {
+    const name = path.basename(process.env.CLAUDE_CONFIG_DIR ?? "personal");
+    console.log(JSON.stringify(signedIn ? { loggedIn: true, email: `${name}@example.test`, subscriptionType: "max" } : { loggedIn: false }));
+    process.exit(signedIn ? 0 : 1);
+  }
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, "signed-in"), "");
+  console.log("Signed in");
+  process.exit(0);
+}
 const settingsFile = args[args.indexOf("--settings") + 1];
 const settings = settingsFile ? JSON.parse(fs.readFileSync(settingsFile, "utf8")) : {};
 // --resume carries on the named session, so its transcript grows where it left off, as claude's does.
@@ -31,7 +45,7 @@ const hook = (event, extra = {}) => {
     record({ type: "cost-state", startTime: started, totalCostUSD: turnsDone * 0.42, hasUnknownModelCost: false });
   }
 };
-const transcript = path.join(process.env.HOME, ".claude", "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${session}.jsonl`);
+const transcript = path.join(home, "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${session}.jsonl`);
 fs.mkdirSync(path.dirname(transcript), { recursive: true });
 let lines = 0;
 function record(entry) {
@@ -75,7 +89,8 @@ function drawTrust() {
   TRUST.forEach((c, i) => out(`${i + 1 === trusting ? " ❯" : "  "} ${c}\r\n`));
   out("\r\n Enter to confirm · Esc to cancel\r\n");
 }
-const greet = () => out(`fake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}\r\n> `);
+const greet = () =>
+  out(`account ${process.env.PINNED_ACCOUNT}${resumed ? `, resuming ${resumed}` : ""}\r\nfake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}\r\n> `);
 if (resumed) out(`resumed ${resumed}\r\n`);
 if (trusting) drawTrust();
 else greet();
@@ -86,6 +101,14 @@ function submit() {
   if (line === "/exit") process.exit(0);
   hook("UserPromptSubmit", { prompt: line });
   said(line);
+  // A usage limit stops the turn as claude's does: the error goes to the transcript, then StopFailure.
+  if (line === "/limit") {
+    record({ type: "assistant", apiError: "usage_limit_reached", apiErrorParams: { rate_limit_info: { status: "rejected", resetsAt: Math.floor(Date.now() / 1000) + 3600 } }, message: { role: "assistant", content: [{ type: "text", text: "You've hit your limit" }] } });
+    out("You've hit your limit\r\n");
+    hook("StopFailure", { transcript_path: transcript });
+    line = "";
+    return prompt();
+  }
   if (line === "/modes") {
     mode = "manual";
     line = "";

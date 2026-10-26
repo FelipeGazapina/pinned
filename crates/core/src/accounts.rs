@@ -165,7 +165,9 @@ impl Accounts {
         if id.is_empty() {
             return Err("an account needs a name with a letter or digit".into());
         }
-        if self.get(&id).is_some() {
+        // Held from the check to the save, so two adds of one name can't both pass.
+        let mut added = self.added.lock().unwrap();
+        if Provider::ALL.iter().any(|p| p.spec().builtin == id) || added.iter().any(|a| a.id == id) {
             return Err(format!("an account {id} already exists"));
         }
         let account = Account { id, provider, name: name.into() };
@@ -174,7 +176,6 @@ impl Accounts {
             .mode(0o700)
             .create(self.home(&account))
             .map_err(|e| format!("could not make {}'s folder: {e}", account.id))?;
-        let mut added = self.added.lock().unwrap();
         added.push(account.clone());
         save(dir, &added)?;
         Ok(account)

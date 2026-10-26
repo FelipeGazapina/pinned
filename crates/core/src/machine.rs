@@ -484,7 +484,8 @@ impl Machine {
         if !account.provider.spec().harness {
             return Err(format!("account {} runs {}, which can't run a connector's session", account.id, account.provider.spec().name));
         }
-        if !self.status(&account).signed_in {
+        // The built-in login ran every run before accounts existed, so only an added one is asked.
+        if !account.is_builtin() && !self.status(&account).signed_in {
             return Err(format!("account {} is not signed in on this machine", account.id));
         }
         let exe = self.launch.exe.display().to_string();
