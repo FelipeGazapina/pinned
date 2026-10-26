@@ -614,12 +614,16 @@ function renderThread() {
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit]);
+  // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
+  // open in them survives; heights measured since the last draw would otherwise shift the window.
+  if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
   const stick = threadView.dataset.tab !== place || threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
   const anchor = stick ? null : anchorOf();
   const spacer = !stick && threadView.querySelector(".lane > .spacer");
   const scrolled = spacer ? threadView.getBoundingClientRect().top - spacer.getBoundingClientRect().top : null;
   const win = finder.open ? { lo: 0, hi: shown.length, above: 0, below: 0 } : windowOf(t, shown.map((x) => x.id), anchor, scrolled);
-  const key = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit, win.lo, win.hi]);
+  const key = JSON.stringify([content, win.lo, win.hi]);
   if (threadView.dataset.key === key) return renderComposer(tab);
   const changes = sub ? new Map() : changesByTurn(t.history, turns);
   const opening = turns.find((x) => x.user);
@@ -634,6 +638,7 @@ function renderThread() {
   const follow = !liveRows || liveRows.scrollHeight - liveRows.scrollTop - liveRows.clientHeight < 24;
   threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${body}</div>`;
   threadView.dataset.key = key;
+  threadView.dataset.content = content;
   threadView.dataset.tab = place;
   markClippedTables(threadView);
   for (const rows of threadView.querySelectorAll(".group > .rows")) {
