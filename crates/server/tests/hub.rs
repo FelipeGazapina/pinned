@@ -535,7 +535,7 @@ fn a_run_whose_machine_goes_offline_resumes_on_another_machine_with_its_work() {
     let args = std::fs::read_to_string(&args_file).unwrap();
     let args: Vec<&str> = args.lines().collect();
     assert_eq!(args.windows(2).find(|w| w[0] == "--resume"), Some(&["--resume", "s1"][..]));
-    assert!(args.last().unwrap().starts_with("pinned resumed this session because the machine running it went offline."), "{args:?}");
+    assert!(args.last().unwrap().starts_with("pinned resumed this session after it stopped before finishing."), "{args:?}");
 
     // mac-mini comes back with the old session: its callbacks are refused and its tab closes.
     node_a.reconnect(creds_a);

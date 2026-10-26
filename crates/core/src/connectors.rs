@@ -387,8 +387,14 @@ impl Run {
     }
 
     /// The spec that resumes the run's conversation, from `checkpoint` on a machine that hasn't it.
+    /// The checkpoint's conversation is the one resumed: its transcript is the one restored.
     pub fn resume_spec(&self, checkpoint: Option<Checkpoint>) -> Option<RunSpec> {
-        let args = self.resume.clone()?;
+        let mut args = self.resume.clone()?;
+        if let (Some(cp), Some(at)) = (&checkpoint, args.iter().position(|a| a == "--resume")) {
+            if let Some(session) = args.get_mut(at + 1) {
+                session.clone_from(&cp.session);
+            }
+        }
         Some(RunSpec { args, worktree: Some(self.worktree.clone()), checkpoint, ..self.spec() })
     }
 }
@@ -431,8 +437,12 @@ pub struct Delivery {
 }
 
 impl Delivery {
+    pub fn subject(&self) -> Subject {
+        Subject::SlackThread { channel: self.channel.clone(), thread: self.thread.clone() }
+    }
+
     pub fn env(&self) -> Vec<(String, String)> {
-        agent::session_env(&self.connector, &Subject::SlackThread { channel: self.channel.clone(), thread: self.thread.clone() })
+        agent::session_env(&self.connector, &self.subject())
     }
 
     pub fn text(&self) -> String {
@@ -694,7 +704,7 @@ impl Connectors {
                     }
                     return Err(self.unclaim(&connector, &subject, &folder));
                 };
-                self.dispatched(run, &machine)?;
+                self.dispatched(run, &machine, false)?;
                 if recorded {
                     return self.acknowledge_thread(&subject, &mentioned).await;
                 }
@@ -710,12 +720,17 @@ impl Connectors {
                 let cursor = if open(Work::Delivery(d.clone())).await.is_some() {
                     d.cursor.clone()
                 } else {
+                    // A run still on its way to a session gets the messages there, once it has one.
+                    let key = runs::key(&d.connector, &d.subject());
+                    if self.store.lock().unwrap().runs.get(&key).is_some_and(|job| matches!(job.phase, runs::Phase::Queued { .. } | runs::Phase::Running { .. })) {
+                        return Err("a Slack thread's new messages wait for its run's machine; the next check passes them on".into());
+                    }
                     let (run, newest) = self.fallback(&d).await?;
                     let folder = run.cwd.clone();
                     let Some(machine) = open(Work::Run(run.clone())).await else {
                         return Err(format!("could not open a session in {} for a Slack thread; the next check tries again", folder.display()));
                     };
-                    self.dispatched(run, &machine)?;
+                    self.dispatched(run, &machine, true)?;
                     newest
                 };
                 self.follow(&d.connector, &d.channel, &d.thread, cursor)?;
@@ -728,8 +743,9 @@ impl Connectors {
         }
     }
 
-    /// Records that `machine` took `run`, as its first start or a later one.
-    fn dispatched(&self, run: Run, machine: &MachineId) -> Result<(), String> {
+    /// Records that `machine` took `run`, as its first start or a later one. A run someone woke
+    /// with new work starts its attempts over; one cancelled while it started stays cancelled.
+    fn dispatched(&self, run: Run, machine: &MachineId, woken: bool) -> Result<(), String> {
         let now = now();
         let key = runs::key(&run.connector, &run.subject);
         let mut store = self.store.lock().unwrap();
@@ -753,6 +769,13 @@ impl Connectors {
             updated: now,
             events: vec![],
         });
+        if job.phase == runs::Phase::Cancelled && !woken {
+            return Ok(());
+        }
+        if woken {
+            job.attempt = 0;
+            job.retried = None;
+        }
         job.dispatched(machine, now);
         self.seen.lock().unwrap().insert(key, now);
         self.save(&store)
@@ -795,9 +818,12 @@ impl Connectors {
                 }
             }
         }
+        // A run queued when the hub stopped may be starting on a machine that hasn't reconnected yet.
+        let settling = now < self.started + self.timing.grace;
         let mut errors = vec![];
         for (job, step) in todo {
             let done = match step {
+                Step::Dispatch if settling => Ok(()),
                 Step::Dispatch => match self.redispatch(&job) {
                     Ok(run) => self.hand_over(Work::Run(run), open).await,
                     Err(e) => Err(e),
@@ -824,7 +850,7 @@ impl Connectors {
         if let Some(prompt) = args.last_mut() {
             *prompt += START_OVER;
         }
-        let resume = job.session.as_deref().map(|session| resume_args(c, session, MOVED.to_owned()));
+        let resume = job.session.as_deref().map(|session| resume_args(c, session, RESUMED.to_owned()));
         Ok(Run {
             cwd: job.cwd.clone(),
             repo: job.repo.clone(),
@@ -853,16 +879,19 @@ impl Connectors {
         }
     }
 
-    /// Refuses a run's callback from a machine other than the one that holds the run, as an
-    /// earlier attempt's session on a machine that came back after the run moved on.
+    /// Refuses a run's callback from a session that must stop working on it, as an earlier
+    /// attempt's on a machine that came back after the run moved on or stopped.
     pub fn held_by(&self, connector: &str, subject: &Subject, machine: &str) -> Result<(), String> {
         let store = self.store.lock().unwrap();
-        match store.runs.get(&runs::key(connector, subject)).and_then(Job::machine) {
-            Some(holder) if holder != machine => {
-                Err("this run moved to another machine after this one went offline: stop working on it here".into())
-            }
-            _ => Ok(()),
+        match store.runs.get(&runs::key(connector, subject)).and_then(|job| job.refuses(machine)) {
+            Some(why) => Err(why.into()),
+            None => Ok(()),
         }
+    }
+
+    /// The machine whose session a run's messages and prompts go to, while one holds it.
+    pub fn holder(&self, connector: &str, subject: &Subject) -> Option<MachineId> {
+        self.store.lock().unwrap().runs.get(&runs::key(connector, subject)).and_then(Job::machine).cloned()
     }
 
     /// Records the conversation a checkpoint of the run holds, which a resume continues even when
@@ -880,7 +909,11 @@ impl Connectors {
     /// Starts a failed or cancelled run again, from its first attempt.
     pub fn retry_run(&self, key: &str) -> Result<(), String> {
         let mut store = self.store.lock().unwrap();
-        store.runs.get_mut(key).ok_or("that run is gone")?.retry(now());
+        let job = store.runs.get_mut(key).ok_or("that run is gone")?;
+        if !job.ended() {
+            return Err("only a failed or cancelled run can be retried".into());
+        }
+        job.retry(now());
         self.save(&store)?;
         self.wake.notify_one();
         Ok(())
@@ -1107,9 +1140,10 @@ fn flags(c: &Connector) -> Vec<String> {
     args
 }
 
-/// What a session is told when a machine resumes it after the one running it went offline.
-const MOVED: &str = "pinned resumed this session because the machine running it went offline. Your conversation is restored. \
-    The working tree holds your work as of the last checkpoint, uncommitted changes included; anything after it is gone. \
+/// What a session is told when pinned resumes it after it stopped: its machine went offline,
+/// claude exited, or someone retried it.
+const RESUMED: &str = "pinned resumed this session after it stopped before finishing. Your conversation is restored. \
+    The working tree holds your work as of the last checkpoint, uncommitted changes included, or newer where this machine has it. \
     Check `git status`, `git log` and any pull request you opened before redoing work, then continue from where you left off.";
 /// What a run that starts over, its conversation lost with its machine, is told.
 const START_OVER: &str = "\n\nAn earlier attempt at this was lost with its machine before it could be resumed. \
@@ -1602,6 +1636,7 @@ mod tests {
         assert_eq!(connectors.held_by("c1", &subject, "m9"), Ok(()), "an unknown run holds no machine");
         assert_eq!(block_on(connectors.hand_over(Work::Run(run(&quiet_linear(), &issue(), "/bin/pinned")), &taken)), Ok(()));
         assert_eq!(connectors.held_by("c1", &subject, "m1"), Ok(()));
+        assert_eq!(connectors.holder("c1", &subject).as_deref(), Some("m1"), "its messages and prompts go to m1 alone");
         assert_eq!(
             connectors.held_by("c1", &subject, "m2"),
             Err("this run moved to another machine after this one went offline: stop working on it here".into())
@@ -1643,7 +1678,7 @@ mod tests {
         let sent = sent.into_inner().unwrap();
         let resume = sent[0].0.clone().unwrap();
         assert_eq!(resume[..6], ["--resume", "s1", "--model", "sonnet", "--effort", "xhigh"]);
-        assert_eq!(resume.last().map(String::as_str), Some(MOVED));
+        assert_eq!(resume.last().map(String::as_str), Some(RESUMED));
         assert!(sent[0].1.ends_with(START_OVER), "the arguments that start over say an attempt was lost");
         let view = &connectors.get_settings().runs[0];
         assert_eq!((&view.phase, view.attempt), (&runs::Phase::Running { machine: "m2".into() }, 2));
@@ -1673,6 +1708,53 @@ mod tests {
         assert_eq!(connectors.get_settings().connectors[0].handled, ["C0123ABCD:1792400050.000200"]);
         assert_eq!(block_on(connectors.acknowledge("C0123ABCD", &[])), Ok(()), "nothing to react to needs no Slack");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_threads_messages_wait_for_its_running_run_instead_of_starting_another() {
+        let (connectors, dir) = stored("waiting", vec![slack_connector()]);
+        let thread_run = slack_run(&slack_connector(), "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &taken)), Ok(()));
+        let delivery = Delivery {
+            connector: "c2".into(),
+            channel: "C0123ABCD".into(),
+            thread: "1792400050.000200".into(),
+            messages: vec!["yes, file it".into()],
+            cursor: "1792400090.000000".into(),
+            mentioned: vec![],
+        };
+        let opened = Mutex::new(vec![]);
+        let offline = |work: Work| {
+            opened.lock().unwrap().push(matches!(work, Work::Run(_)));
+            std::future::ready(None)
+        };
+        let waits = Err("a Slack thread's new messages wait for its run's machine; the next check passes them on".to_owned());
+        assert_eq!(block_on(connectors.hand_over(Work::Delivery(delivery), &offline)), waits);
+        assert_eq!(opened.into_inner().unwrap(), [false], "no second session was opened");
+        assert!(!connectors.get_settings().connectors[0].followed.contains_key("C0123ABCD:1792400050.000200"), "the cursor stayed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_cancelled_while_it_starts_stays_cancelled_and_only_an_ended_run_retries() {
+        let (connectors, dir) = stored("cancelled", vec![quiet_linear()]);
+        let started = run(&quiet_linear(), &issue(), "/bin/pinned");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(started.clone()), &taken)), Ok(()));
+        let key = runs::key("c1", &Subject::LinearIssue { issue: "uuid".into() });
+        assert_eq!(connectors.retry_run(&key), Err("only a failed or cancelled run can be retried".into()));
+        connectors.cancel_run(&key).unwrap();
+        connectors.dispatched(started, &"m2".to_owned(), false).unwrap();
+        assert_eq!(connectors.get_settings().runs[0].phase, runs::Phase::Cancelled);
+        assert_eq!(connectors.retry_run(&key), Ok(()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_resume_continues_the_conversation_its_checkpoint_holds() {
+        let started = Run { resume: Some(vec!["--resume".into(), "s1".into(), "go on".into()]), ..run(&quiet_linear(), &issue(), "/bin/pinned") };
+        let checkpoint = Checkpoint { session: "s2".into(), transcript: crate::wire::Bytes(vec![]), worktree: None, code: None };
+        assert_eq!(started.resume_spec(Some(checkpoint)).unwrap().args, ["--resume", "s2", "go on"]);
+        assert_eq!(started.resume_spec(None).unwrap().args, ["--resume", "s1", "go on"]);
     }
 
     #[test]

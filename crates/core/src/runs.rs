@@ -30,6 +30,8 @@ const LISTED: usize = 200;
 /// A run that ended this long ago leaves the store.
 const KEEP: u64 = 30 * 24 * 3600;
 const EVENTS: usize = 40;
+/// What Claude Code's notification says a while after a turn ended, when nothing waits on anyone.
+const IDLE_NOTICE: &str = "waiting for your input";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "state", rename_all = "kebab-case")]
@@ -40,8 +42,13 @@ pub enum Phase {
     Running { machine: MachineId },
     /// Its session finished its turn, or its tab closed, on `machine`. A Slack reply wakes it.
     Idle { machine: MachineId },
-    /// Stopped after `ATTEMPTS` starts.
-    Failed { error: String },
+    /// Stopped after `ATTEMPTS` starts. A run whose turns kept failing stays with the `machine`
+    /// that ran them, where someone may take its session over by hand.
+    Failed {
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<MachineId>,
+    },
     Cancelled,
 }
 
@@ -204,9 +211,30 @@ impl Job {
         self.set(Phase::Running { machine: machine.clone() }, now, format!("{what} on {machine}"));
     }
 
-    pub fn fail(&mut self, error: String, now: u64) -> Step {
-        self.set(Phase::Failed { error: error.clone() }, now, format!("stopped: {error}"));
+    fn fail(&mut self, error: String, machine: Option<MachineId>, now: u64) -> Step {
+        self.set(Phase::Failed { error: error.clone(), machine }, now, format!("stopped: {error}"));
         Step::Report(error)
+    }
+
+    /// Queues the run to start again, once any usage limit lifts, after it lost its session.
+    fn lost(&mut self, why: String, now: u64) -> Option<Step> {
+        if self.attempt >= ATTEMPTS {
+            return Some(self.fail(format!("{why} and the run has used its {ATTEMPTS} attempts"), None, now));
+        }
+        let after = self.limit.unwrap_or(now).max(now);
+        self.set(Phase::Queued { after }, now, why);
+        (after <= now).then_some(Step::Dispatch)
+    }
+
+    /// Why a session on `machine` must stop working on the run, if it must.
+    pub fn refuses(&self, machine: &str) -> Option<&'static str> {
+        match &self.phase {
+            Phase::Queued { .. } => None,
+            Phase::Running { machine: holder } | Phase::Idle { machine: holder } | Phase::Failed { machine: Some(holder), .. } => {
+                (holder != machine).then_some("this run moved to another machine after this one went offline: stop working on it here")
+            }
+            Phase::Failed { machine: None, .. } | Phase::Cancelled => Some("this run was stopped: stop working on it here"),
+        }
     }
 
     /// Queues the run again from the start of its attempts.
@@ -244,9 +272,20 @@ impl Job {
             },
             Phase::Running { machine } if online.iter().any(|(m, _)| *m == machine) => {
                 *seen = now;
-                match on(&machine) {
-                    Some(tab) => steps.extend(self.observe(tab, now)),
-                    None => self.set(Phase::Idle { machine }, now, "its tab closed"),
+                let exited = online
+                    .iter()
+                    .filter(|(m, _)| *m == machine)
+                    .flat_map(|(_, tabs)| tabs)
+                    .find(|t| !t.running && t.connector.as_deref() == Some(&self.connector) && t.subject.as_ref() == Some(&self.subject));
+                match (on(&machine), exited) {
+                    (Some(tab), _) => steps.extend(self.observe(tab, now)),
+                    // claude died mid-turn and nothing will start it again in that tab.
+                    (None, Some(tab)) if !finished(tab) => {
+                        steps.extend(self.lost(format!("claude exited mid-turn on {machine}"), now));
+                        steps.push(Step::Close { machine: machine.clone(), tab: tab.id.clone() });
+                    }
+                    (None, Some(_)) => self.set(Phase::Idle { machine }, now, "claude exited after its turn"),
+                    (None, None) => self.set(Phase::Idle { machine }, now, "its tab closed"),
                 }
             }
             Phase::Running { machine } if now.saturating_sub(*seen) >= grace => match tabs.first() {
@@ -255,20 +294,11 @@ impl Job {
                     *seen = now;
                     steps.extend(self.observe(tab, now));
                 }
-                None if self.attempt >= ATTEMPTS => {
-                    steps.push(self.fail(format!("{machine} went offline and the run has used its {ATTEMPTS} attempts"), now))
-                }
-                None => {
-                    let after = self.limit.unwrap_or(now).max(now);
-                    self.set(Phase::Queued { after }, now, format!("{machine} went offline"));
-                    if after <= now {
-                        steps.push(Step::Dispatch);
-                    }
-                }
+                None => steps.extend(self.lost(format!("{machine} went offline"), now)),
             },
             Phase::Running { .. } => {}
             Phase::Idle { machine } => {
-                let woken = tabs.iter().find(|(_, t)| matches!(t.status, Some(AgentStatus::Working | AgentStatus::NeedsInput)));
+                let woken = tabs.iter().find(|(_, t)| busy(t));
                 if let Some((other, tab)) = woken {
                     self.set(Phase::Running { machine: (*other).clone() }, now, format!("working again on {other}"));
                     *seen = now;
@@ -279,14 +309,8 @@ impl Job {
             }
             Phase::Failed { .. } | Phase::Cancelled => {}
         }
-        let holder = self.machine().cloned();
         for (machine, tab) in &tabs {
-            let stale = match (&self.phase, &holder) {
-                (Phase::Cancelled, _) => true,
-                (_, Some(holder)) => *machine != holder,
-                _ => false,
-            };
-            if stale {
+            if self.refuses(machine).is_some() {
                 steps.push(Step::Close { machine: (*machine).clone(), tab: tab.id.clone() });
             }
         }
@@ -305,7 +329,7 @@ impl Job {
         self.observe_session(tab);
         let Some(machine) = self.machine().cloned() else { return vec![] };
         match tab.status {
-            Some(AgentStatus::Done) => {
+            _ if finished(tab) => {
                 self.limit = None;
                 self.set(Phase::Idle { machine }, now, "finished its turn");
                 vec![]
@@ -321,7 +345,7 @@ impl Job {
             Some(AgentStatus::Failed) if self.retried != tab.updated => {
                 self.retried = tab.updated;
                 if self.attempt >= ATTEMPTS {
-                    return vec![self.fail(format!("its turn failed and the run has used its {ATTEMPTS} attempts"), now)];
+                    return vec![self.fail(format!("its turn failed and the run has used its {ATTEMPTS} attempts"), Some(machine), now)];
                 }
                 self.attempt += 1;
                 self.log(now, format!("its turn failed; attempt {} continues it", self.attempt));
@@ -330,6 +354,20 @@ impl Job {
             _ => vec![],
         }
     }
+}
+
+/// Whether the tab's turn ended, counting Claude Code's notice that it sits idle since.
+fn finished(tab: &TabView) -> bool {
+    match tab.status {
+        Some(AgentStatus::Done) => true,
+        Some(AgentStatus::NeedsInput) => tab.message.as_deref().is_some_and(|m| m.to_lowercase().contains(IDLE_NOTICE)),
+        _ => false,
+    }
+}
+
+/// Whether the tab's session is in a turn: working, or asking something mid-turn.
+fn busy(tab: &TabView) -> bool {
+    matches!(tab.status, Some(AgentStatus::Working | AgentStatus::NeedsInput)) && !finished(tab)
 }
 
 #[cfg(test)]
@@ -442,7 +480,7 @@ mod tests {
         let steps = j.reconcile(&[], &mut NOW.clone(), NOW + GRACE, GRACE);
         let error = "m1 went offline and the run has used its 3 attempts".to_owned();
         assert_eq!(steps, vec![Step::Report(error.clone())]);
-        assert_eq!(j.phase, Phase::Failed { error });
+        assert_eq!(j.phase, Phase::Failed { error, machine: None });
     }
 
     #[test]
@@ -490,7 +528,7 @@ mod tests {
         assert_eq!(j.reconcile(&[("m1".to_owned(), vec![failed(NOW + 90)])], &mut 0, NOW + 120, GRACE), vec![Step::Continue]);
         let error = "its turn failed and the run has used its 3 attempts".to_owned();
         assert_eq!(j.reconcile(&[("m1".to_owned(), vec![failed(NOW + 150)])], &mut 0, NOW + 180, GRACE), vec![Step::Report(error.clone())]);
-        assert_eq!((j.attempt, j.phase), (3, Phase::Failed { error }));
+        assert_eq!((j.attempt, j.phase), (3, Phase::Failed { error, machine: Some("m1".into()) }));
     }
 
     #[test]
@@ -498,6 +536,50 @@ mod tests {
         let mut j = job(Phase::Cancelled, 1);
         let online = [("m1".to_owned(), vec![tab("tab-1", Some(AgentStatus::Working))])];
         assert_eq!(j.reconcile(&online, &mut 0, NOW, GRACE), vec![Step::Close { machine: "m1".into(), tab: "tab-1".into() }]);
+    }
+
+    fn idle_notice(id: &str) -> TabView {
+        TabView { message: Some("Claude is waiting for your input".into()), ..tab(id, Some(AgentStatus::NeedsInput)) }
+    }
+
+    #[test]
+    fn claudes_idle_notice_ends_a_turn_and_never_wakes_an_idle_run() {
+        let mut j = job(running("m1"), 1);
+        j.reconcile(&[("m1".to_owned(), vec![idle_notice("tab-1")])], &mut 0, NOW, GRACE);
+        assert_eq!(j.phase, Phase::Idle { machine: "m1".into() });
+        j.reconcile(&[("m1".to_owned(), vec![idle_notice("tab-1")])], &mut 0, NOW + 60, GRACE);
+        assert_eq!(j.phase, Phase::Idle { machine: "m1".into() });
+        let asking = TabView { message: Some("Claude needs your permission to use Bash".into()), ..tab("tab-1", Some(AgentStatus::NeedsInput)) };
+        j.reconcile(&[("m1".to_owned(), vec![asking])], &mut 0, NOW + 120, GRACE);
+        assert_eq!(j.phase, running("m1"));
+    }
+
+    #[test]
+    fn claude_exiting_mid_turn_starts_the_run_again_and_after_its_turn_idles_it() {
+        let exited = |status| TabView { running: false, ..tab("tab-1", Some(status)) };
+        let mut j = job(running("m1"), 1);
+        let steps = j.reconcile(&[("m1".to_owned(), vec![exited(AgentStatus::Working)])], &mut 0, NOW, GRACE);
+        assert_eq!(steps, vec![Step::Dispatch, Step::Close { machine: "m1".into(), tab: "tab-1".into() }]);
+        assert_eq!((j.phase, j.events.last().unwrap().text.as_str()), (Phase::Queued { after: NOW }, "claude exited mid-turn on m1"));
+        let mut j = job(running("m1"), 1);
+        assert_eq!(j.reconcile(&[("m1".to_owned(), vec![exited(AgentStatus::Done)])], &mut 0, NOW, GRACE), vec![]);
+        assert_eq!(j.phase, Phase::Idle { machine: "m1".into() });
+    }
+
+    #[test]
+    fn a_run_that_failed_offline_closes_the_session_that_comes_back() {
+        let mut j = job(Phase::Failed { error: "m1 went offline".into(), machine: None }, ATTEMPTS);
+        let online = [("m1".to_owned(), vec![tab("tab-1", Some(AgentStatus::Working))])];
+        assert_eq!(j.reconcile(&online, &mut 0, NOW, GRACE), vec![Step::Close { machine: "m1".into(), tab: "tab-1".into() }]);
+        assert_eq!(j.refuses("m1"), Some("this run was stopped: stop working on it here"));
+    }
+
+    #[test]
+    fn a_run_whose_turns_failed_stays_with_its_machine() {
+        let mut j = job(Phase::Failed { error: "its turn failed".into(), machine: Some("m1".into()) }, ATTEMPTS);
+        let online = [("m1".to_owned(), vec![tab("tab-1", Some(AgentStatus::Working))])];
+        assert_eq!(j.reconcile(&online, &mut 0, NOW, GRACE), vec![]);
+        assert_eq!((j.refuses("m1"), j.refuses("m2").is_some()), (None, true));
     }
 
     #[test]
