@@ -1331,6 +1331,7 @@ async function resumeThread(entry, taken) {
     if (entry.title) sideMarks.titles[threadKey(tab)] = entry.title;
     if (entry.pinned) sideMarks.pins.push(threadKey(tab));
     saveMarks();
+    if (settingsOpen()) toggleSettings();
     activate(tab);
   } catch (e) {
     tell(`Couldn't reopen the thread: ${esc(e)}`, 6000);
