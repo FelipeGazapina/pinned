@@ -16,6 +16,33 @@ if (args.includes("-p") && /git commit message/.test(args.at(-1) ?? "")) {
   process.stdout.write("Write the sweep's notes\n");
   process.exit(0);
 }
+// `claude -p` over the SDK's control protocol, as the Usage page checks limits: it answers
+// initialize with the account and get_usage with the plan's windows, then waits to be killed.
+if (args.includes("-p") && args.includes("--input-format")) {
+  const resetsIn = (s) => new Date(Date.now() + s * 1000).toISOString();
+  const answers = {
+    initialize: { account: { email: "sweep@example.test", subscriptionType: "max", tokenSource: "claude.ai" } },
+    get_usage: { subscription_type: "max", rate_limits_available: true, rate_limits: {
+      five_hour: { utilization: 23.5, resets_at: resetsIn(3600) },
+      seven_day: { utilization: 74, resets_at: resetsIn(86400) },
+      model_scoped: [{ display_name: "Fable", utilization: 40, resets_at: resetsIn(86400) }],
+      extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1250, utilization: 25 },
+    } },
+  };
+  let buffered = "";
+  process.stdin.on("data", (chunk) => {
+    buffered += chunk;
+    for (let at; (at = buffered.indexOf("\n")) >= 0; ) {
+      const line = buffered.slice(0, at);
+      buffered = buffered.slice(at + 1);
+      const message = JSON.parse(line);
+      fs.appendFileSync(path.join(process.env.HOME, "claude-control.log"), `${message.request.subtype}\n`);
+      const response = answers[message.request.subtype] ?? {};
+      process.stdout.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response } })}\n`);
+    }
+  });
+  return;
+}
 // Any other `claude -p`, as the pull request guide runs it: the prompt on stdin, one JSON answer, then exit.
 if (args.includes("-p")) {
   const asked = fs.readFileSync(0, "utf8");

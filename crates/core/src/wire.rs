@@ -209,13 +209,20 @@ pub enum Call {
     },
     /// `pulls::Stack` the pull request `number` of github.com's `repo` (`owner/name`) sits in, or `null`.
     PullRequestStack { repo: String, number: u64 },
-    /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since` on.
-    /// `prices` are the user's, per model, which win over LiteLLM's list.
-    TokenUsage {
-        since: u64,
+    /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since`
+    /// on, priced with the machine's `usage::PriceBook` over LiteLLM's list.
+    TokenUsage { since: u64 },
+    /// `usage::PriceBook`: the prices and model mappings the user set on the machine.
+    UsagePrices,
+    /// The `usage::PriceBook` after setting each model's price and mapping, or clearing it with `null`.
+    SetUsagePrices {
         #[serde(default)]
-        prices: HashMap<String, usage::Price>,
+        prices: HashMap<String, Option<usage::Price>>,
+        #[serde(default)]
+        aliases: HashMap<String, Option<String>>,
     },
+    /// `usage::Limits`: the account and plan limits claude's own usage check reports.
+    UsageLimits,
     /// `panel::PageMeta` of the web page at `url`, fetched from this machine.
     PageMeta { url: String },
     /// `panel::Refs`: the tab's folder's local and remote branches, for picking what to compare with.
@@ -371,6 +378,7 @@ impl Call {
                 | Call::Branches { .. }
                 | Call::Checkout { .. }
                 | Call::TokenUsage { .. }
+                | Call::UsageLimits
                 | Call::PullRequests { .. }
                 | Call::PullRequestStack { .. }
                 | Call::PageMeta { .. }
