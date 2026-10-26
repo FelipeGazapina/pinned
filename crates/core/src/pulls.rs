@@ -117,6 +117,7 @@ pub struct Layer {
     pub number: u64,
     pub title: String,
     pub head: String,
+    pub head_sha: String,
     pub state: State,
 }
 
@@ -353,7 +354,7 @@ fn read_stack(raw: &Value) -> Option<Stack> {
         number: raw["number"].as_u64()?,
         url: raw["html_url"].as_str().map_or_else(|| s(&raw["url"]), str::to_owned),
         base: raw["base"].as_str().map_or_else(|| s(&raw["base"]["ref"]), str::to_owned),
-        layers: raw["pull_requests"].as_array().into_iter().flatten().filter_map(|l| Some(Layer { number: l["number"].as_u64()?, title: s(&l["title"]), head: s(&l["head"]["ref"]), state: layer_state(l) })).collect(),
+        layers: raw["pull_requests"].as_array().into_iter().flatten().filter_map(|l| Some(Layer { number: l["number"].as_u64()?, title: s(&l["title"]), head: s(&l["head"]["ref"]), head_sha: s(&l["head"]["sha"]), state: layer_state(l) })).collect(),
     })
 }
 
