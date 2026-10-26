@@ -15,6 +15,8 @@ const IDENTITY: [(&str, &str); 4] = [
 ];
 /// Holds the fetched checkpoint commit, whose tree the restored worktree is reset to.
 const RESTORED: &str = "refs/pinned/restore";
+/// Where the work a restore replaced stays, as `<REPLACED>/<worktree name>`.
+const REPLACED: &str = "refs/pinned/replaced";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Checkpoint {
@@ -92,10 +94,7 @@ pub fn session_cwd(transcript: &Path) -> Option<PathBuf> {
 /// The work in `cwd`, or None outside a repository, before its first commit, or when the
 /// bundle would pass `limit` bytes.
 pub fn capture_code(cwd: &Path, limit: u64) -> Option<Code> {
-    let head = git(cwd, &["rev-parse", "--verify", "-q", "HEAD"]).ok()?;
-    let tree = crate::history::snapshot(cwd)?;
-    // A signing setup could prompt or fail on a machine nobody is watching.
-    let commit = git_with(cwd, &["commit-tree", "--no-gpg-sign", &tree, "-p", &head, "-m", "pinned checkpoint"], &IDENTITY).ok()?;
+    let commit = snapshot_commit(cwd)?;
     let id = format!("{}-{:x}", std::process::id(), nanos());
     let name = format!("refs/pinned/checkpoint-{id}");
     let file = std::env::temp_dir().join(format!("pinned-checkpoint-{id}.bundle"));
@@ -113,10 +112,54 @@ pub fn capture_code(cwd: &Path, limit: u64) -> Option<Code> {
     Some(Code { bundle: Bytes(bundle?), commit, branch })
 }
 
-/// Puts the checkpoint's work in the worktree `.claude/worktrees/<name>` of `checkout`, replacing
-/// one an earlier attempt left, and its transcript where Claude Code looks for that folder's
-/// sessions. Answers the folder to resume in.
-pub fn restore(home: &Path, checkout: &Path, name: &str, checkpoint: &Checkpoint) -> Result<PathBuf, String> {
+/// A commit of `cwd`'s whole working tree on top of HEAD, leaving the tree and index as they are.
+fn snapshot_commit(cwd: &Path) -> Option<String> {
+    let head = git(cwd, &["rev-parse", "--verify", "-q", "HEAD"]).ok()?;
+    let tree = crate::history::snapshot(cwd)?;
+    // A signing setup could prompt or fail on a machine nobody is watching.
+    git_with(cwd, &["commit-tree", "--no-gpg-sign", &tree, "-p", &head, "-m", "pinned checkpoint"], &IDENTITY).ok()
+}
+
+/// The folder a run resumes `session` in: its worktree `.claude/worktrees/<name>` of `checkout`,
+/// or `checkout` itself when there is none, with the conversation where Claude Code looks from
+/// there. This machine's own worktree is kept when its transcript already holds everything
+/// `checkpoint`'s does, as on the machine that captured it; otherwise the checkpoint replaces it.
+pub fn resume_in(home: &Path, checkout: &Path, name: &str, session: Option<&str>, checkpoint: Option<&Checkpoint>) -> Result<PathBuf, String> {
+    let target = checkout.join(".claude/worktrees").join(plain(name)?);
+    let cwd = match checkpoint {
+        Some(checkpoint) if !holds(home, &target, checkpoint) => restore(home, checkout, name, checkpoint)?,
+        _ if target.is_dir() => target,
+        _ => checkout.to_path_buf(),
+    };
+    if let Some(session) = session {
+        reachable(home, &cwd, plain(session)?)?;
+    }
+    Ok(cwd)
+}
+
+/// Whether the worktree at `target` is at least as far along as `checkpoint`. Claude Code only
+/// appends to a transcript, so a local one that starts with the checkpoint's has all of it.
+fn holds(home: &Path, target: &Path, checkpoint: &Checkpoint) -> bool {
+    let local = transcript(home, &checkpoint.session).and_then(|file| std::fs::read(file).ok());
+    target.is_dir() && local.zip(gunzip(&checkpoint.transcript.0).ok()).is_some_and(|(local, saved)| local.starts_with(&saved))
+}
+
+/// Copies the newest transcript of `session` to where Claude Code looks for it from `cwd`.
+fn reachable(home: &Path, cwd: &Path, session: &str) -> Result<(), String> {
+    let Some(newest) = transcript(home, session) else { return Ok(()) };
+    let dir = crate::sync::claude_dir(home, cwd);
+    let file = dir.join(format!("{session}.jsonl"));
+    if newest == file {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    std::fs::copy(&newest, &file).map(drop).map_err(|e| format!("could not copy the transcript: {e}"))
+}
+
+/// Puts the checkpoint's work in the worktree `.claude/worktrees/<name>` of `checkout`, and its
+/// transcript where Claude Code looks for that folder's sessions. The work of a worktree it
+/// replaces stays under `REPLACED`. Answers the folder to resume in.
+fn restore(home: &Path, checkout: &Path, name: &str, checkpoint: &Checkpoint) -> Result<PathBuf, String> {
     // Both come from another machine and become paths; one that climbs out could delete the checkout.
     let (name, session) = (plain(name)?, plain(&checkpoint.session)?);
     let target = checkout.join(".claude/worktrees").join(name);
@@ -128,6 +171,9 @@ pub fn restore(home: &Path, checkout: &Path, name: &str, checkpoint: &Checkpoint
         }
         None => "HEAD".to_owned(),
     };
+    if let Some(work) = target.is_dir().then(|| snapshot_commit(&target)).flatten() {
+        git(checkout, &["update-ref", &format!("{REPLACED}/{name}"), &work])?;
+    }
     let _ = git(checkout, &["worktree", "remove", "--force", path]);
     if target.exists() {
         std::fs::remove_dir_all(&target).map_err(|e| format!("could not clear {path}: {e}"))?;
@@ -179,7 +225,8 @@ fn adopt(worktree: &Path, branch: &str) {
 fn plain(name: &str) -> Result<&str, String> {
     let mut parts = Path::new(name).components();
     match (parts.next(), parts.next()) {
-        (Some(Component::Normal(_)), None) => Ok(name),
+        // A session id becomes a `claude` argument, where a leading dash would read as a flag.
+        (Some(Component::Normal(_)), None) if !name.starts_with('-') => Ok(name),
         _ => Err(format!("{name:?} is not a plain name")),
     }
 }
@@ -189,7 +236,15 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn git_with(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
-    let out = Command::new("git").args(args).envs(env.iter().copied()).current_dir(cwd).stdin(Stdio::null()).output().map_err(|e| format!("could not run git: {e}"))?;
+    let out = Command::new("git")
+        .args(args)
+        .envs(env.iter().copied())
+        // Nobody may be there to answer a credential prompt.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
     } else {
@@ -298,7 +353,49 @@ mod tests {
         assert_eq!(restore(&home, &b, "w", &cp).unwrap(), target);
         assert_eq!(state(&target), expected);
         assert!(!target.join("junk.txt").exists());
+        assert_eq!(run(&b, &["show", "refs/pinned/replaced/w:junk.txt"]), "left by the first attempt", "the replaced work stays in a ref");
         assert_eq!(run(&b, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_resume_keeps_a_worktree_that_is_further_along_than_the_checkpoint() {
+        let root = temp("keep");
+        let b = root.join("b");
+        repo(&b);
+        commit(&b, "tracked.txt", "v1\n", "init");
+        let home = root.join("home");
+        let cp = checkpoint(Some(capture_code(&b, 1 << 20).unwrap()));
+        let target = resume_in(&home, &b, "w", Some("s1"), Some(&cp)).unwrap();
+        let transcript = crate::sync::claude_dir(&home, &target).join("s1.jsonl");
+        std::fs::write(target.join("tracked.txt"), "after the checkpoint\n").unwrap();
+        std::fs::write(&transcript, "{\"cwd\":\"/x\"}\n{\"type\":\"assistant\"}\n").unwrap();
+        assert_eq!(resume_in(&home, &b, "w", Some("s1"), Some(&cp)).unwrap(), target);
+        assert_eq!(std::fs::read_to_string(target.join("tracked.txt")).unwrap(), "after the checkpoint\n");
+
+        std::fs::write(&transcript, "{\"cwd\":\"/elsewhere\"}\n").unwrap();
+        assert_eq!(resume_in(&home, &b, "w", Some("s1"), Some(&cp)).unwrap(), target);
+        assert_eq!(std::fs::read_to_string(target.join("tracked.txt")).unwrap(), "v1\n", "a transcript that went another way is replaced");
+        assert_eq!(run(&b, &["show", "refs/pinned/replaced/w:tracked.txt"]), "after the checkpoint");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_resume_without_a_checkpoint_goes_on_where_the_session_worked_and_finds_its_transcript() {
+        let root = temp("local");
+        let b = root.join("b");
+        repo(&b);
+        commit(&b, "tracked.txt", "v1\n", "init");
+        let home = root.join("home");
+        let started = crate::sync::claude_dir(&home, &b);
+        std::fs::create_dir_all(&started).unwrap();
+        std::fs::write(started.join("s1.jsonl"), "{}\n").unwrap();
+        assert_eq!(resume_in(&home, &b, "w", Some("s1"), None).unwrap(), b);
+        let target = b.join(".claude/worktrees/w");
+        run(&b, &["worktree", "add", "-q", "--detach", target.to_str().unwrap()]);
+        assert_eq!(resume_in(&home, &b, "w", Some("s1"), None).unwrap(), target);
+        assert_eq!(std::fs::read_to_string(crate::sync::claude_dir(&home, &target).join("s1.jsonl")).unwrap(), "{}\n");
+        assert_eq!(resume_in(&home, &b, "w", Some("--print"), None), Err("\"--print\" is not a plain name".into()));
         let _ = std::fs::remove_dir_all(root);
     }
 

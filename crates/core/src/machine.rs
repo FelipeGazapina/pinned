@@ -573,15 +573,15 @@ impl Machine {
     /// the run's folder can't be found or cloned here.
     pub fn open_run(&self, run: &RunSpec) -> Result<TabId, String> {
         let cwd = self.find_folder(&run.folder, run.repo.as_deref(), run.token.as_deref())?;
-        // A run another machine lost goes on in a worktree of its own, holding that machine's work.
-        let cwd = match (&run.checkpoint, &run.worktree) {
-            (Some(checkpoint), Some(name)) => crate::checkpoint::restore(&self.launch.home, &cwd, name, checkpoint)?,
-            _ => cwd,
+        // A run resuming a conversation shows its transcript before claude's first hook names it.
+        let resumed = run.args.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone());
+        // A resumed run goes on in its worktree, holding its own work or what the checkpoint carried.
+        let cwd = match &run.worktree {
+            Some(name) => crate::checkpoint::resume_in(&self.launch.home, &cwd, name, resumed.as_deref(), run.checkpoint.as_ref())?,
+            None => cwd,
         };
         let exe = self.launch.exe.display().to_string();
         let args = run.args.iter().map(|a| a.replace(EXE_PLACEHOLDER, &exe)).collect();
-        // A run resuming a conversation shows its transcript before claude's first hook names it.
-        let resumed = run.args.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone());
         let id = self.add_tab(cwd, args, run.env.clone(), false, resumed);
         self.emit_tabs();
         Ok(id)
