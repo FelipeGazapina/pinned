@@ -168,9 +168,9 @@ const surfaceTitle = (tab, s) => {
   if (s.kind === "diff") return "Diff";
   if (s.kind === "files") return "Files";
   if (s.kind === "file") return s.path.split("/").pop();
-  if (s.kind === "terminal") return s.label ?? "Terminal";
+  if (s.kind === "terminal") return terminalLabel(terminalsOf(s).active);
   if (s.kind === "prs") return "Pull requests";
-  if (s.kind === "device") return s.label ?? "Device";
+  if (s.kind === "device") return s.label ?? s.target?.name ?? "Device";
   if (s.kind === "pr") return `#${s.url.match(/\/pull\/(\d+)/)?.[1] ?? "?"}`;
   return s.title || hostOf(s.url) || "Browser";
 };
@@ -222,14 +222,14 @@ function addMenu() {
   ];
 }
 
-const kindIcon = (s) => (s.kind === "browser" && /^(https?:|data:image\/)/.test(s.icon ?? "") ? `<img class="i kind favicon" src="${esc(s.icon)}" alt="">` : icon(SURFACES[s.kind].icon, "kind"));
+const kindIcon = (tab, s) => (s.kind === "browser" && /^(https?:|data:image\/)/.test(s.icon ?? "") ? `<img class="i kind favicon" src="${esc(s.icon)}" alt="">` : surfaceIcon(tab, s) ?? icon(SURFACES[s.kind].icon, "kind"));
 function renderPanelTabs(tab) {
   const p = panelOf(tab);
   const html = p.surfaces.map((s) => {
     const title = surfaceTitle(tab, s);
     const audio = s.kind === "browser" && (s.muted || s.audible) ? `<button type="button" class="audio" data-mute="${esc(s.id)}" title="${s.muted ? "Unmute tab" : "Mute tab"}">${icon(s.muted ? "volume-x" : "volume-2")}</button>` : "";
-    return `<div class="ptab${s.id === p.active ? " active" : ""}" data-surface="${esc(s.id)}" data-panel="${s.kind}" title="${esc(title)}" draggable="true">
-      <button type="button" class="lead" data-close-surface="${esc(s.id)}" title="Close ${esc(title)}">${kindIcon(s)}${icon("x", "x")}${s.pending ? `<span class="pending"></span>` : ""}</button>${audio}<span>${esc(title)}</span></div>`;
+    return `<div class="ptab${s.id === p.active ? " active" : ""}" data-surface="${esc(s.id)}" data-panel="${s.kind}" title="${esc(surfaceTip(tab, s) ?? title)}" draggable="true">
+      <button type="button" class="lead" data-close-surface="${esc(s.id)}" title="Close ${esc(title)}">${kindIcon(tab, s)}${icon("x", "x")}${s.pending ? `<span class="pending"></span>` : ""}</button>${audio}<span>${esc(title)}</span></div>`;
   }).join("");
   if (tabStrip.dataset.html !== html) {
     tabStrip.dataset.html = html;
@@ -1070,14 +1070,20 @@ function treeRows(list, closed, filter = "") {
   const rows = [];
   const dirs = [];
   const walk = (dir, depth) => {
-    for (const [name, sub] of [...dir.dirs].sort(([a], [b]) => a.localeCompare(b))) {
+    for (let [name, sub] of [...dir.dirs].sort(([a], [b]) => a.localeCompare(b))) {
+      // A folder that holds one folder and nothing else shares its row, as in T3's tree.
+      while (sub.dirs.size === 1 && !sub.files.length) {
+        const [[inner, deeper]] = sub.dirs;
+        dirs.push(sub.path);
+        [name, sub] = [`${name}/${inner}`, deeper];
+      }
       dirs.push(sub.path);
       const open = q ? true : !closed.has(sub.path);
-      rows.push(`<button type="button" class="dir" data-files-dir="${esc(sub.path)}" style="--depth:${depth}">${icon(open ? "chevron-down" : "chevron-right")}${icon(open ? "folder-open" : "folder")}<span>${esc(name)}</span></button>`);
+      rows.push(`<button type="button" class="dir${open ? " open" : ""}" data-files-dir="${esc(sub.path)}" style="--depth:${depth}" draggable="true" aria-expanded="${open}">${pierreChevron()}<span>${esc(name)}</span></button>`);
       if (open) walk(sub, depth + 1);
     }
     for (const path of dir.files.sort((a, b) => a.localeCompare(b))) {
-      rows.push(`<button type="button" class="leaf" data-files-open="${esc(path)}" style="--depth:${depth}" title="${esc(path)}">${fileIcon(path)}<span class="name">${esc(path.split("/").pop())}</span></button>`);
+      rows.push(`<button type="button" class="leaf" data-files-open="${esc(path)}" style="--depth:${depth}" title="${esc(path)}" draggable="true">${pierreIcon(path)}<span class="name">${esc(path.split("/").pop())}</span></button>`);
     }
   };
   walk(root, 0);
@@ -1169,10 +1175,12 @@ function renderFilePanel(s) {
   const kind = renderedKind(s.path);
   const rendered = kind && s.rendered !== false && !s.editing;
   const text = s.draft ?? file?.text;
-  const editor = editorFor(tab.machine);
-  const tools = `${s.pending ? `<button type="button" class="primary save" data-file-save title="Save (${MOD}S)">Save</button>` : ""}${editor ? `<button type="button" class="icon" data-file-open-in title="Open in ${esc(editor.name)}">${icon("square-arrow-out-up-right")}</button>` : ""}
+  const readOnly = !machines.get(tab.machine)?.view.online;
+  const browsable = servesHere(tab) && /\.(html?|pdf|svg)$/i.test(s.path);
+  const tools = `${s.pending && !readOnly ? `<button type="button" class="primary save" data-file-save title="Save (${MOD}S)">Save</button>` : ""}${fileOpenInHtml(tab)}
     ${kind && file?.text != null ? `<button type="button" class="icon${rendered ? " on" : ""}" data-file-rendered title="${rendered ? "Show source" : kind === "table" ? "Show as table" : "Show preview"}">${icon(rendered ? "code-xml" : kind === "table" ? "table-2" : "eye")}</button>` : ""}
-    ${file?.text != null ? `<button type="button" class="icon${ui.fileWrap ? " on" : ""}" data-file-wrap title="${ui.fileWrap ? "Disable word wrap" : "Enable word wrap"}">${icon("text-wrap")}</button>` : ""}
+    ${file?.text != null && !rendered ? `<button type="button" class="icon${ui.fileWrap ? " on" : ""}" data-file-wrap title="${ui.fileWrap ? "Disable word wrap" : "Enable word wrap"}">${icon("text-wrap")}</button>` : ""}
+    ${browsable ? `<button type="button" class="icon" data-file-browser title="Open file in preview browser">${icon("globe-2")}</button>` : ""}
     <button type="button" class="icon${s.explorer ? " on" : ""}" data-file-explorer title="${s.explorer ? "Hide file explorer" : "Show file explorer"}">${icon("folder-tree")}</button>`;
   let body;
   if (got?.error) body = `<p class="panel-empty">${esc(got.error)}</p>`;
@@ -1182,9 +1190,9 @@ function renderFilePanel(s) {
   else if (file.text == null) body = `<p class="panel-empty">The file is binary and cannot be displayed as text.</p>`;
   else if (rendered && kind === "markdown") body = `<div class="md file-markdown">${markdown(text)}</div>`;
   else if (rendered && kind === "table") body = delimited(text, s.path.endsWith(".tsv") ? "\t" : ",");
-  else if (rendered && kind === "html") body = `<iframe class="html-view" sandbox="allow-scripts" title="${esc(s.path)}" srcdoc="${esc(text)}"></iframe>`;
-  else body = codeHtml(tab, s, text);
-  const notice = file?.truncated ? `<p class="file-notice">Preview limited to the first 2 MB of a ${file.size.toLocaleString()} byte file.</p>` : got?.saveError ? `<p class="file-notice error">${esc(got.saveError)}</p>` : "";
+  else if (rendered && kind === "html") body = servesHere(tab) ? `<iframe class="html-view" data-src title="${esc(s.path)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"></iframe>` : `<iframe class="html-view" sandbox="allow-scripts" title="${esc(s.path)}" srcdoc="${esc(text)}"></iframe>`;
+  else body = codeHtml(tab, s, text, readOnly || file.truncated);
+  const notice = [readOnly ? `<p class="file-notice muted">Read-only connection. Unsaved edits are kept until write access returns.</p>` : "", file?.truncated && !rendered ? `<p class="file-notice">Preview limited to the first 1 MB of a ${file.size.toLocaleString()} byte file.</p>` : got?.saveError ? `<p class="file-notice error">${esc(got.saveError)}</p>` : ""].join("");
   const html = `<div class="file-view${s.explorer ? " with-explorer" : ""}"><div class="file-bar">${crumbsHtml(tab, s)}<span class="spacer"></span>${tools}</div>${notice}
     <div class="file-body"><div class="file-main">${body}</div>${s.explorer ? filesTreeHtml(tab, { filter: s.explorerFilter ?? "" }, { aside: true }) : ""}</div></div>`;
   const editing = document.activeElement?.matches?.(".code-edit") && [document.activeElement.selectionStart, document.activeElement.selectionEnd, document.activeElement.scrollTop];
@@ -1195,6 +1203,7 @@ function renderFilePanel(s) {
       area?.setSelectionRange(editing[0], editing[1]);
     }
     if (s.reveal && file?.text != null) revealLine(s);
+    mountFileFrame(tab, s);
   }
 }
 
@@ -1221,12 +1230,12 @@ function codeRows(tab, s, text, reviewing) {
 }
 /** While lines are picked or commented on, the view reviews them; otherwise it edits. A click into
  * the code goes back to editing. */
-function codeHtml(tab, s, text) {
+function codeHtml(tab, s, text, locked = false) {
   const key = `file:${s.id}`;
   const reviewing = !s.editAnyway && (ui.selection?.key === key || ui.commentAt?.key === key || reviewComments(tab, key).get(s.path)?.size > 0);
   const digits = String(text.split("\n").length).length;
   return `<div class="code-view${ui.fileWrap ? " wrap" : ""}${reviewing ? " reviewing" : ""}" data-comments data-key="${esc(key)}"><div class="file" data-path="${esc(s.path)}" style="--digits:${digits}"><div class="code-lines">${codeRows(tab, s, text, reviewing)}</div>
-    <textarea class="code-edit" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Edit ${esc(s.path)}">${esc(text)}</textarea></div></div>`;
+    <textarea class="code-edit" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Edit ${esc(s.path)}"${locked ? " readonly" : ""}>${esc(text)}</textarea></div></div>`;
 }
 
 function revealLine(s) {
@@ -1342,8 +1351,13 @@ function filesClick(e) {
     s.explorer = !s.explorer;
     savePanel(tab);
   } else if (e.target.closest("[data-file-open-in]")) {
-    const editor = editorFor(tab.machine);
-    callOn(tab.machine, { cmd: "open_in", tab: tab.view.id, editor: editor.id, path: s.path }).then(() => flash(`Opened ${s.path} in ${editor.name}`), (err) => flash(String(err)));
+    openFileIn(tab, s);
+    return true;
+  } else if (e.target.closest("[data-file-editors]")) {
+    fileEditorsMenu(tab, e.target.closest("[data-file-editors]"));
+    return true;
+  } else if (e.target.closest("[data-file-browser]")) {
+    openFileInBrowser(tab, s);
     return true;
   } else if (e.target.closest(".code-view .no[data-line]")) {
     s.editAnyway = false;
@@ -1543,78 +1557,6 @@ filePicker.addEventListener("click", (e) => {
 onGuiKey("p", () => (filePicker.hidden || pickerMode !== "files" ? openPicker("files") : closePicker()));
 onGuiKey("f", () => (filePicker.hidden || pickerMode !== "content" ? openPicker("content") : closePicker()), { shift: true });
 
-/** Terminal tabs: login shells in the thread's folder beside its claude, as T3's thread terminals are.
- * Each keeps its xterm across tab switches; closing the tab ends the shell. */
-const shellTerms = new Map();
-function newTerminalSurface(tab) {
-  const n = Math.max(0, ...panelOf(tab).surfaces.filter((s) => s.kind === "terminal").map((s) => s.n ?? 0)) + 1;
-  return addSurface(tab, { id: `terminal:${Date.now().toString(36)}`, kind: "terminal", n, label: n === 1 ? "Terminal" : `Terminal ${n}` });
-}
-
-function shellTerm(tab, s) {
-  if (shellTerms.has(s.id)) return shellTerms.get(s.id);
-  const el = document.createElement("div");
-  el.className = "shell-term";
-  const term = new Terminal({ fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, cursorBlink: true, allowTransparency: true, theme: { background: "#00000000" } });
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  const entry = { el, term, fit, tab, shell: null, opened: false, typed: [] };
-  shellTerms.set(s.id, entry);
-  wireTerminalLinks(term);
-  // Keys typed while the shell starts wait for it.
-  term.onData((data) => (entry.shell ? callOn(tab.machine, { cmd: "write_input", tab: entry.shell, data }) : entry.typed.push(data)));
-  term.onResize(({ cols, rows }) => entry.shell && callOn(tab.machine, { cmd: "resize_pty", tab: entry.shell, cols, rows }).catch(() => {}));
-  return entry;
-}
-
-async function startShell(entry) {
-  const { tab, term } = entry;
-  try {
-    entry.shell = await callOn(tab.machine, { cmd: "open_shell", tab: tab.view.id, cols: term.cols, rows: term.rows });
-    await machines.get(tab.machine).transport.attach(entry.shell, { write: (bytes) => term.write(bytes), reset: () => term.reset() });
-    if (entry.typed.length) callOn(tab.machine, { cmd: "write_input", tab: entry.shell, data: entry.typed.splice(0).join("") });
-  } catch (e) {
-    term.write(`\r\n${/unknown variant/.test(String(e)) ? `${machineName(tab.machine)} runs an older pinned, which has no terminals. Update it to open one.` : String(e)}\r\n`);
-  }
-}
-
-function renderTerminalPanel(s) {
-  const entry = shellTerm(active, s);
-  if (showPanel(`<div class="shell-host" data-shell="${esc(s.id)}"></div>`) || entry.el.parentElement?.dataset.shell !== s.id) {
-    panelBody.querySelector(".shell-host").append(entry.el);
-  }
-  if (!entry.opened) {
-    entry.opened = true;
-    entry.term.open(entry.el);
-  }
-  requestAnimationFrame(() => {
-    entry.fit.fit();
-    if (!entry.shell && !entry.starting) {
-      entry.starting = true;
-      startShell(entry);
-    }
-    if (document.activeElement === document.body || !document.activeElement) entry.term.focus();
-  });
-}
-new ResizeObserver(() => {
-  const s = active && shownSurface(active);
-  if (s?.kind === "terminal") shellTerms.get(s.id)?.fit.fit();
-}).observe(panelBody);
-
-/** Ends the shells of terminal tabs that closed. */
-function closeGoneShells() {
-  const keep = new Set([...panelStates.values()].flatMap((p) => p.surfaces.map((s) => s.id)));
-  for (const [id, entry] of shellTerms) {
-    if (keep.has(id)) continue;
-    shellTerms.delete(id);
-    if (entry.shell) {
-      machines.get(entry.tab.machine)?.transport.detach(entry.shell);
-      callOn(entry.tab.machine, { cmd: "close_shell", shell: entry.shell }).catch(() => {});
-    }
-    entry.term.dispose();
-  }
-}
-
 /** A plain click on a terminal's web link opens it as the timeline's links do, a local server in the
  * preview; with ⌘ or Ctrl it goes to the system browser. */
 const TERMINAL_URL = /https?:\/\/[^\s"'`<>()[\]{}]+[^\s"'`<>()[\]{}.,;:!?]/g;
@@ -1635,65 +1577,29 @@ function wireTerminalLinks(term) {
 }
 setInterval(() => tabs.forEach((tab) => wireTerminalLinks(tab.term)), 1000);
 
-/** The thread's pull requests: the ones claude opened, and the ones linked by hand. */
+/** The thread's pull requests: the ones claude linked from its transcript, and the ones linked by
+ * hand, each with who linked it and when. */
+const linkedByHand = (tab) => JSON.parse(load(`gui-prs:${threadKey(tab)}`) ?? "[]").map((e) => (typeof e === "string" ? { url: e, at: 0 } : e));
 function linkedPrs(tab) {
   const t = threadOf(tab);
-  const extra = JSON.parse(load(`gui-prs:${threadKey(tab)}`) ?? "[]");
   const gone = new Set(JSON.parse(load(`gui-prs-unlinked:${threadKey(tab)}`) ?? "[]"));
-  const urls = [...new Set([...t.items.filter((i) => i.kind === "pr").map((i) => i.url), ...extra])].filter((u) => !gone.has(u));
-  return urls.map((url) => ({ url, number: url.match(/\/pull\/(\d+)/)?.[1] ?? "?" }));
+  const byAgent = t.items.filter((i) => i.kind === "pr").map((i) => ({ url: i.url, source: "agent", at: Date.parse(i.at) || 0 }));
+  const seen = new Set();
+  return [...byAgent, ...linkedByHand(tab).map((e) => ({ ...e, source: "manual" }))]
+    .filter((pr) => !gone.has(pr.url) && !seen.has(pr.url) && seen.add(pr.url))
+    .map((pr) => ({ ...pr, number: pr.url.match(/\/pull\/(\d+)/)?.[1] ?? "?" }));
 }
 function linkPr(tab, url) {
   const key = threadKey(tab);
-  save(`gui-prs:${key}`, JSON.stringify([...new Set([...JSON.parse(load(`gui-prs:${key}`) ?? "[]"), url])]));
+  const hand = linkedByHand(tab).filter((e) => e.url !== url);
+  save(`gui-prs:${key}`, JSON.stringify([...hand, { url, at: Date.now() }]));
   save(`gui-prs-unlinked:${key}`, JSON.stringify(JSON.parse(load(`gui-prs-unlinked:${key}`) ?? "[]").filter((u) => u !== url)));
 }
 function unlinkPr(tab, url) {
   const key = threadKey(tab);
-  save(`gui-prs:${key}`, JSON.stringify(JSON.parse(load(`gui-prs:${key}`) ?? "[]").filter((u) => u !== url)));
+  save(`gui-prs:${key}`, JSON.stringify(linkedByHand(tab).filter((e) => e.url !== url)));
   save(`gui-prs-unlinked:${key}`, JSON.stringify([...new Set([...JSON.parse(load(`gui-prs-unlinked:${key}`) ?? "[]"), url])]));
 }
-
-function renderPrsPanel(s) {
-  const tab = active;
-  const prs = linkedPrs(tab);
-  if (!prs.length) {
-    return showPanel(`<div class="prs-empty">${icon("link-2", "big")}<p class="title">No linked pull requests</p><p>Pull requests the agent opens from this thread land here. Link one yourself from a URL or a number.</p>
-      <button type="button" class="outline" data-prs-link>${icon("plus")}Link pull request</button></div>`);
-  }
-  const rows = prs.map((pr) => {
-    const entry = prCache.get(`${tab.key}:${pr.url}`);
-    if (!entry) loadPr(tab, pr.url, true);
-    const d = entry?.data;
-    const state = d ? (d.isDraft ? "draft" : (d.state ?? "open").toLowerCase()) : "";
-    return `<div class="pr-row" data-prs-open="${esc(pr.url)}">${d ? icon(state === "merged" ? "git-merge" : "git-pull-request", `state ${state}`) : `<span class="spinner small" aria-label="Waiting for host state"></span>`}
-      <span class="what"><span class="line"><span class="num ${state}">#${esc(pr.number)}</span><span class="name">${esc(d?.title ?? "")}</span></span>
-        ${d ? `<span class="line muted"><span class="mono">${esc(d.headRefName)}</span><span class="add">+${d.additions}</span><span class="del">-${d.deletions}</span></span>` : ""}</span>
-      <button type="button" class="icon" data-prs-more="${esc(pr.url)}" aria-label="Actions for #${esc(pr.number)}">${icon("ellipsis")}</button></div>`;
-  }).join("");
-  const open = prs.filter((pr) => /OPEN/i.test(prCache.get(`${tab.key}:${pr.url}`)?.data?.state ?? "")).length;
-  const synced = Math.max(0, ...prs.map((pr) => prCache.get(`${tab.key}:${pr.url}`)?.at ?? 0));
-  showPanel(`<div class="prs"><div class="prs-list">${rows}</div><footer><span>${open} open · ${prs.length} linked${synced ? ` · synced ${esc(ago(synced / 1000))}${ago(synced / 1000) === "now" ? "" : " ago"}` : ""}</span><button type="button" class="ghost" data-prs-link>${icon("plus")}Link</button></footer></div>`);
-}
-
-function prsClick(e) {
-  const tab = active;
-  const more = e.target.closest("[data-prs-more]");
-  if (more) {
-    const url = more.dataset.prsMore;
-    return toggleMenu(more, [
-      { label: "Copy link", icon: "link-2", run: () => copyText(url, "Link copied") },
-      { label: "Open", icon: "arrow-up-right", run: () => openPr(tab, url) },
-      { label: "Unlink from thread", icon: "unlink", run: () => (unlinkPr(tab, url), renderPanel()) },
-    ]);
-  }
-  if (e.target.closest("[data-prs-link]")) return linkPrDialog(tab);
-  const row = e.target.closest("[data-prs-open]");
-  if (row) return e.metaKey || e.ctrlKey ? openOutside(row.dataset.prsOpen) : openPr(tab, row.dataset.prsOpen);
-}
-panelBody.addEventListener("click", (e) => {
-  if (e.target.closest(".prs, .prs-empty")) prsClick(e);
-});
 
 /** Asks for a pull request URL or number, as T3's Link pull request dialog does. */
 function linkPrDialog(tab) {
@@ -1728,36 +1634,6 @@ function linkPrDialog(tab) {
     }
   };
 }
-
-/** The Device tab is the dashboard of Expo's device hub, the server T3's Device surface streams iOS
- * simulators and Android emulators from, running on the thread's machine: a live screen to tap,
- * swipe and type into, and the machine's devices to boot. */
-async function startDeviceHub(tab, s) {
-  s.starting = true;
-  renderPanel();
-  try {
-    const url = await callOn(tab.machine, { cmd: "device_hub", ...(TAURI ? {} : { embed: location.origin }) });
-    Object.assign(s, { url, starting: false, error: null });
-  } catch (e) {
-    Object.assign(s, { starting: false, error: /unknown variant/.test(String(e)) ? `${machineName(tab.machine)} runs an older pinned, which can't mirror devices. Update it to use this tab.` : String(e) });
-  }
-  savePanel(tab);
-  if (tab === active && shownSurface(tab) === s) renderPanel();
-}
-
-function renderDevicePanel(s) {
-  const tab = active;
-  if (s.url) return renderBrowser(s);
-  if (!s.starting && !s.error) startDeviceHub(tab, s);
-  if (s.error) return showPanel(`<div class="device-setup">${icon("smartphone", "big")}<p class="title">Couldn't start the device hub</p><p>${esc(s.error)}</p><button type="button" class="outline" data-device-retry>${icon("rotate-cw")}Try again</button></div>`);
-  showPanel(`<div class="device-setup">${icon("smartphone", "big")}<p class="title">Starting the device hub…</p><p>The first start downloads ${esc("expo-device-hub")}. iOS simulators need Xcode, Android emulators the Android SDK.</p><span class="spinner"></span></div>`);
-}
-panelBody.addEventListener("click", (e) => {
-  const s = active && shownSurface(active);
-  if (s?.kind !== "device" || !e.target.closest("[data-device-retry]")) return;
-  s.error = null;
-  renderPanel();
-});
 
 function seenUrls(tab) {
   const found = new Set();
@@ -2307,6 +2183,7 @@ function renderPip(tab) {
     return;
   }
   const title = surfaceTitle(tab, s);
+  if (s.kind === "device") return renderDevicePip(tab, s, title);
   if (pipFrame.dataset.id === s.id) {
     pipFrame.querySelector(".title").textContent = title;
     return;

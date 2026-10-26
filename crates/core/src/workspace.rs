@@ -413,9 +413,18 @@ pub fn editors(home: &Path, path: Option<&str>) -> Vec<Editor> {
     EDITORS.iter().filter(|e| editor_at(e.0, home, path).is_some()).map(|&(id, n, ..)| Editor { id, name: name(id, n) }).collect()
 }
 
-/// Opens `cwd`, or `file` inside its repository, in the editor `id`.
-pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, home: &Path, path: Option<&str>) -> Result<(), String> {
-    let editor = editor_at(id, home, path).ok_or_else(|| format!("{id} isn't installed on this machine"))?;
+#[derive(Clone, Copy, Default)]
+pub struct OpenHow {
+    /// `file` is from `cwd` rather than its repository's top.
+    pub folder: bool,
+    /// Shows `file` in the file manager instead of opening it.
+    pub reveal: bool,
+}
+
+/// Opens `cwd`, or `file` inside its repository, in the editor `id`. `default` opens it with the
+/// app the system picks for it.
+pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, how: OpenHow, home: &Path, path: Option<&str>) -> Result<(), String> {
+    let editor = if id == "default" { None } else { Some(editor_at(id, home, path).ok_or_else(|| format!("{id} isn't installed on this machine"))?) };
     let target = match file {
         None => cwd.to_owned(),
         Some(file) => {
@@ -423,18 +432,43 @@ pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, home: &Path, path: Opti
             if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
                 return Err(format!("{file:?} is not a path inside the project"));
             }
-            let top = run(cwd, None, "git", &["rev-parse", "--show-toplevel"]).map(|t| PathBuf::from(t.trim())).unwrap_or_else(|_| cwd.to_owned());
+            let top = if how.folder { cwd.to_owned() } else { run(cwd, None, "git", &["rev-parse", "--show-toplevel"]).map(|t| PathBuf::from(t.trim())).unwrap_or_else(|_| cwd.to_owned()) };
             top.join(rel)
         }
     };
-    let mut command = if cfg!(target_os = "macos") {
-        let mut open = Command::new("open");
-        open.arg("-a").arg(&editor);
-        open
-    } else {
-        Command::new(&editor)
+    let mut command = match (&editor, how.reveal) {
+        (_, true) if cfg!(target_os = "macos") => {
+            let mut open = Command::new("open");
+            open.arg("-R").arg(&target);
+            open
+        }
+        (_, true) if cfg!(windows) => {
+            let mut explorer = Command::new("explorer");
+            explorer.arg(format!("/select,{}", target.display()));
+            explorer
+        }
+        (_, true) => {
+            let mut open = Command::new("xdg-open");
+            open.arg(target.parent().unwrap_or(&target));
+            open
+        }
+        (None, false) => {
+            let mut open = Command::new(if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" });
+            open.arg(&target);
+            open
+        }
+        (Some(editor), false) if cfg!(target_os = "macos") => {
+            let mut open = Command::new("open");
+            open.arg("-a").arg(editor).arg(&target);
+            open
+        }
+        (Some(editor), false) => {
+            let mut command = Command::new(editor);
+            command.arg(&target);
+            command
+        }
     };
-    command.arg(&target).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(path) = path {
         command.env("PATH", path);
     }
@@ -611,12 +645,14 @@ mod tests {
     fn editors_open_only_known_ids_and_paths_inside_the_project() {
         let dir = tempfile::tempdir().unwrap();
         let empty = dir.path().to_str().unwrap();
-        assert!(open_in(dir.path(), "notepad", None, dir.path(), Some(empty)).unwrap_err().contains("isn't installed"));
+        assert!(open_in(dir.path(), "notepad", None, OpenHow::default(), dir.path(), Some(empty)).unwrap_err().contains("isn't installed"));
         for path in ["../secret", "/etc/passwd", "a/../../b"] {
-            let err = open_in(dir.path(), "finder", Some(path), dir.path(), Some(empty));
+            let err = open_in(dir.path(), "finder", Some(path), OpenHow::default(), dir.path(), Some(empty));
             if cfg!(target_os = "macos") {
                 assert!(err.unwrap_err().contains("not a path inside"), "{path}");
             }
+            let err = open_in(dir.path(), "default", Some(path), OpenHow { folder: true, reveal: true }, dir.path(), Some(empty));
+            assert!(err.unwrap_err().contains("not a path inside"), "{path}");
         }
         assert!(pr_action(dir.path(), "--admin", PrAction::Merge, None).unwrap_err().contains("is not a pull request"));
     }

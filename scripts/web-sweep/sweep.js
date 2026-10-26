@@ -2231,6 +2231,7 @@ async function sweep(profileName) {
     await page.click('#panel-tabs .ptab[data-panel="terminal"]');
     await press(gui('#panel-tabs .ptab[data-panel="terminal"] .lead'));
     await closePanelIfOpen();
+    fs.rmSync(path.join(HOME, "open.log"), { force: true });
   });
 
   await step("app view: Linked pull requests lists the thread's pull requests and links another", async () => {
@@ -2241,6 +2242,7 @@ async function sweep(profileName) {
     await page.fill("#link-pr input", "https://github.com/example/alpha/pull/43");
     await page.press("#link-pr input", "Enter");
     await waitFor("#43 linked", async () => (await page.locator("#panel-body .pr-row").count()) === 3, 10000);
+    if (!touch) await page.hover('#panel-body .pr-row[data-prs-open$="/pull/43"]');
     await press(gui('#panel-body [data-prs-more$="/pull/43"]'));
     await press(menuItem("Unlink from thread"));
     await waitFor("#43 unlinked", async () => (await page.locator("#panel-body .pr-row").count()) === 2);
@@ -2249,17 +2251,315 @@ async function sweep(profileName) {
     await closePanelIfOpen();
   });
 
-  await step("app view: the Device tab starts the device hub and shows its dashboard", async () => {
+  await step("app view: the Device tab sets up the device hub as T3's wizard does, lists the machine's simulators and emulators, and opens one to its live screen", async () => {
     await openPanelTo("device", "Device");
-    await waitFor("the hub's dashboard", async () => /Expo Device Hub dashboard/.test((await page.frameLocator("#panel-body iframe").locator("body").textContent().catch(() => "")) ?? ""), 20000);
-    check(/expo-device-hub@0\.15\.3 --host 127\.0\.0\.1 --port \d+ --frame-ancestor http/.test(readLog("npx.log")), `npx ran: ${readLog("npx.log")}`);
-    await page.dblclick('#panel-tabs .ptab[data-panel="device"] span:last-child').catch(() => {});
+    await waitFor("the setup wizard", async () => (await text("#device-setup h2")) === "Set up devices", 10000);
+    check(await page.isDisabled("#device-setup [data-setup-next]"), "setup continues with the hub off");
+    await press(gui('#device-setup [aria-label="Enable device hub"]'));
+    await waitFor("the hub ready", async () => /Device hub is ready\./.test(await text("#device-setup .setup-body")), 30000);
+    check(/expo-device-hub@0\.15\.3 --host 127\.0\.0\.1 --port \d+/.test(readLog("npx.log")), `npx ran: ${readLog("npx.log")}`);
+    await press(gui("#device-setup [data-setup-next]"));
+    check((await text('#device-setup [data-platform="ios"]')).includes("Xcode and iOS Simulator are available."), "iOS isn't ready");
+    check((await text('#device-setup [data-platform="android"]')).includes("The Android SDK and Emulator are available."), "Android isn't ready");
+    await press(gui("#device-setup [data-setup-next]"));
+    check(/Allow agent control/.test(await text("#device-setup .setup-body")), "the third step isn't agent access");
+    await press(gui('#device-setup [aria-label="Allow agents to control devices"]'));
+    await waitFor("agent tools", async () => /Agent tools are ready\./.test(await text("#device-setup .setup-body")));
+    check(await page.evaluate(() => callOn(active.machine, { cmd: "device_agents" })), "the machine doesn't keep the agents' access");
+    await press(gui('#device-setup [aria-label="Allow agents to control devices"]'));
+    await waitFor("agent access off", async () => !/Agent tools are ready/.test(await text("#device-setup .setup-body")));
+    await press(gui("#device-setup [data-setup-next]"));
+    await waitFor("the device list", async () => (await page.locator("#panel-body .device-list h3").allTextContents()).join("|") === "iOS Simulators|Android Emulators", 15000);
+    const rows = (await page.locator("#panel-body .device-row").allInnerTexts()).map((r) => r.replace(/\s+/g, " ").trim());
+    check(rows.join("|") === "iPhone 17 sweep-node · iOS 26.0 · Stopped Start|Pixel_9 sweep-node · Android 16 · Running Open|Tablet_10 sweep-node · Android · Stopped Start", `the rows: ${rows.join(" | ")}`);
+    await press(gui('#panel-body [aria-label="Open Pixel_9"]'));
+    await waitFor("Pixel_9's tab", async () => (await text('#panel-tabs .ptab.active[data-panel="device"]')) === "Pixel_9", 15000);
+    check(await page.locator('#panel-tabs .ptab.active[data-panel="device"] svg.brand').count(), "the tab has no Android mark");
+    check(/Pixel_9\nsweep-node · Android 16/.test(await page.getAttribute('#panel-tabs .ptab.active[data-panel="device"]', "title")), "the tab's tooltip lacks the machine and version");
+    await waitFor("the H.264 stream", async () => (await page.getAttribute("#panel-body .device-screen", "data-live").catch(() => null)) === "video", 15000);
+    const pixel = await page.evaluate(() => [...document.querySelector("#panel-body .device-screen canvas").getContext("2d").getImageData(108, 240, 1, 1).data]);
+    check(Math.abs(pixel[0] - 42) < 12 && Math.abs(pixel[1] - 157) < 12 && Math.abs(pixel[2] - 143) < 12, `the decoded frame's center is ${pixel}`);
+    check(/stream emulator-5554 \?device=emulator-5554&frame-meta=1/.test(readLog("hub.log")), "the screen didn't open serve-emu's socket");
+    check((await page.locator("#panel-body .device-rail button").evaluateAll((bs) => bs.map((b) => b.getAttribute("aria-label")))).join("|") === "Home|Back|Recents|Rotate device|Switch device to dark mode|Device text size|Device tools|Save screenshot|More device actions", "the rail isn't T3's");
+    await press(gui("#panel-body .device-screen"));
+    await waitFor("a touch on the socket", async () => /ws emulator-5554 \{"type":"touch","action":"down","x":0\.\d+,"y":0\.\d+,"ack":false\}[\s\S]*"action":"up"/.test(readLog("hub.log")));
     if (!touch) {
+      await page.focus("#panel-body .device-screen");
+      await page.keyboard.type("hi");
+      await page.keyboard.press("Enter");
+      await waitFor("the keys", async () => /"type":"text","text":"h"[\s\S]*"type":"text","text":"i"[\s\S]*"type":"key","keycode":66/.test(readLog("hub.log")));
+    }
+    for (const button of ["Home", "Back", "Recents"]) await press(gui(`#panel-body .device-rail [aria-label="${button}"]`));
+    await waitFor("the buttons", async () => /\{"type":"home","ack":false\}[\s\S]*\{"type":"back","ack":false\}[\s\S]*\{"type":"recents","ack":false\}/.test(readLog("hub.log")));
+    await press(gui('#panel-body .device-rail [aria-label="Rotate device"]'));
+    check((await menuLabels()).join("|") === "Portrait|Landscape", "the rotate menu");
+    await press(menuItem("Landscape"));
+    await waitFor("adb to tilt the emulator", async () => readLog("adb.log").includes("adb -s emulator-5554 emu sensor set acceleration 9.81:0:0"));
+    await press(gui('#panel-body .device-rail [aria-label="Switch device to dark mode"]'));
+    await waitFor("dark mode", async () => readLog("adb.log").includes("adb -s emulator-5554 shell cmd uimode night yes") && (await page.locator('#panel-body .device-rail [aria-label="Switch device to light mode"]').count()) === 1);
+    await press(gui('#panel-body .device-rail [aria-label="Device text size"]'));
+    check((await menuLabels()).join("|") === "Small|Default|Large|Extra large", "the text sizes");
+    await press(menuItem("Large"));
+    await waitFor("a larger font", async () => readLog("adb.log").includes("shell settings put system font_scale 1.15"));
+    await press(gui('#panel-body .device-rail [aria-label="Device tools"]'));
+    await waitFor("the tools", async () => /Foreground\s*com\.android\.launcher3/.test(await text("#panel-body .device-tools")), 10000);
+    check((await page.locator("#panel-body .device-tools h4").allTextContents()).join("|") === "App|Emulator|Accessibility|Location|Permissions", "the tools' sections");
+    await page.fill('#panel-body .device-tools [name="app"][placeholder="Package name to launch"]', "com.example.app");
+    await press(gui('#panel-body .device-tools [data-tool-form="launch"] button'));
+    await waitFor("the app in front", async () => /Foreground\s*com\.example\.app/.test(await text("#panel-body .device-tools")), 10000);
+    check(readLog("adb.log").includes("shell monkey -p com.example.app -c android.intent.category.LAUNCHER 1"), "adb launched nothing");
+    await press(gui('#panel-body .device-tools [aria-label="Network"]'));
+    await waitFor("the network off", async () => readLog("adb.log").includes("shell svc wifi disable") && readLog("adb.log").includes("shell svc data disable"));
+    await page.selectOption('#panel-body .device-tools [data-tool-select="preset"]', "Tokyo");
+    await press(gui('#panel-body .device-tools [data-tool-form="location"] button[type="submit"]'));
+    await waitFor("Tokyo", async () => readLog("adb.log").includes("emu geo fix 139.6503 35.6762"));
+    await press(gui('#panel-body .device-tools [data-decision="grant"]'));
+    await waitFor("the camera granted", async () => readLog("adb.log").includes("shell pm grant com.example.app android.permission.CAMERA"));
+    await press(gui('#panel-body .device-tools [aria-label="Overlay element frames"]'));
+    await waitFor("the frames over the screen", async () => (await text("#panel-body .device-screen .ax .chip")) === "Sign in", 10000);
+    const frame = await page.evaluate(() => {
+      const [screen, box] = [document.querySelector("#panel-body .device-screen").getBoundingClientRect(), document.querySelector("#panel-body .device-screen .ax").getBoundingClientRect()];
+      return [(box.left - screen.left) / screen.width, (box.top - screen.top) / screen.height].map((n) => Math.round(n * 100));
+    });
+    check(frame.join(",") === "25,75", `the Sign in frame sits at ${frame}`);
+    await press(gui('#panel-body .device-tools [aria-label="Close tools"]'));
+    const [download] = await Promise.all([page.waitForEvent("download"), press(gui('#panel-body .device-rail [aria-label="Save screenshot"]'))]);
+    check(/^Pixel_9-.+\.png$/.test(download.suggestedFilename()), `the screenshot is ${download.suggestedFilename()}`);
+    // Away from the hub's machine the screen is the machine's screenshots, and taps go through it.
+    await page.evaluate(() => fallBackToScreenshots([...deviceScreens.values()][0]));
+    await waitFor("screenshots", async () => (await page.getAttribute("#panel-body .device-screen", "data-live")) === "screenshots" && /^data:image\/png;base64,/.test(await page.getAttribute("#panel-body .device-screen img", "src")), 10000);
+    await press(gui("#panel-body .device-screen"));
+    await waitFor("a tap through the machine", async () => /rest tap emulator-5554 \{"type":"tap","x":0\.\d+,"y":0\.\d+\}/.test(readLog("hub.log")), 10000);
+    await press(gui('#panel-body .device-rail [aria-label="More device actions"]'));
+    check((await menuLabels()).join("|") === "Float device over chat|Close device panel|Power off device", "the more menu");
+    await press(menuItem("Float device over chat"));
+    await waitFor("the device floating", async () => (await page.locator("#preview-pip .device-screen").count()) === 1 && (await page.evaluate(() => document.body.dataset.panel)) === "closed");
+    await press(gui('#preview-pip [data-pip="panel"]'));
+    await waitFor("the device back", async () => (await page.locator("#panel-body .device-stage .device-screen").count()) === 1);
+    await press(gui('#panel-body .device-rail [aria-label="More device actions"]'));
+    await press(menuItem("Power off device"));
+    await waitFor("Pixel_9 off and its tab closed", async () => readLog("hub.log").includes("shutdown emulator-5554") && !(await page.locator('#panel-tabs .ptab[data-panel="device"]').count()), 10000);
+    await openPanelTo("device", "Device");
+    await press(gui('#panel-body [aria-label="Start iPhone 17"]'));
+    await waitFor("the iPhone's screen", async () => (await page.getAttribute("#panel-body .device-screen", "data-live").catch(() => null)) === "mjpeg", 15000);
+    check(/boot ios 5A1C7E0B-2D7A-4E1B-9C3D-6F8A9B0C1D2E iPhone 17\nattach 5A1C7E0B-2D7A-4E1B-9C3D-6F8A9B0C1D2E/.test(readLog("hub.log")), "the simulator didn't boot and attach");
+    check(await page.locator('#panel-tabs .ptab.active[data-panel="device"] svg.brand').count(), "the tab has no Apple mark");
+    check(!(await page.locator('#panel-body .device-rail [aria-label="Back"]').count()), "an iPhone has a Back button");
+    await press(gui('#panel-body .device-rail [aria-label="Home"]'));
+    await press(gui("#panel-body .device-screen"));
+    await waitFor("the simulator's HID input", async () => /hid 5A1C7E0B-2D7A-4E1B-9C3D-6F8A9B0C1D2E 4 \{"button":"home"\}[\s\S]*hid \S+ 3 \{"type":"begin"[\s\S]*hid \S+ 3 \{"type":"end"/.test(readLog("hub.log")), 10000);
+    if (!touch) {
+      await page.dblclick('#panel-tabs .ptab[data-panel="device"] span:last-child');
       await page.fill("#panel-tabs .ptab .rename", "Sim");
       await page.press("#panel-tabs .ptab .rename", "Enter");
       await waitFor("the renamed tab", async () => (await text('#panel-tabs .ptab[data-panel="device"]')) === "Sim");
     }
     await press(gui('#panel-tabs .ptab[data-panel="device"] .lead'));
+    await closePanelIfOpen();
+  });
+
+  const dropMention = (from) =>
+    page.evaluate((selector) => {
+      const data = new DataTransfer();
+      document.querySelector(selector).dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: data }));
+      const composer = document.getElementById("composer");
+      composer.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: data }));
+      composer.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: data }));
+    }, from);
+
+  await step("app view: Files draws T3's Pierre rows, shares a lone folder's row, and its right-click menu opens, reveals, mentions and adds a file to the chat, as a drag does", async () => {
+    fs.mkdirSync(path.join(HOME, "work/alpha/pkg/src"), { recursive: true });
+    fs.writeFileSync(path.join(HOME, "work/alpha/pkg/src/index.ts"), "export {};\n");
+    await page.fill("#prompt", "");
+    await openPanelTo("files", "Files");
+    await page.fill("#panel-body [data-files-filter]", "");
+    await press(gui("#panel-body [data-files-refresh]"));
+    await waitFor("pkg/src on one row", async () => (await text('#panel-body [data-files-dir="pkg/src"]')) === "pkg/src", 10000);
+    check(await page.locator('#panel-body [data-files-open="app.js"] svg.pierre use[href="#file-tree-builtin-javascript"]').count(), "app.js has no Pierre JavaScript icon");
+    check(!(await page.locator("#panel-body .files-tree .dir .i:not(.chevron)").count()), "folders draw a folder icon T3's tree has not");
+    await page.locator('#panel-body [data-files-open="app.js"]').click({ button: "right" });
+    const items = await menuLabels();
+    check(items.join("|") === "Open|Reveal in Finder|Open with|Copy mention|Add to chat", `the file menu: ${items.join(" | ")}`);
+    await press(menuItem("Open"));
+    await waitFor("the system to open app.js", async () => readLog("open.log").trim().split("\n").pop() === path.join(HOME, "work/alpha/app.js"));
+    await page.locator('#panel-body [data-files-open="app.js"]').click({ button: "right" });
+    await press(menuItem("Reveal in Finder"));
+    await waitFor("Finder to reveal app.js", async () => readLog("open.log").trim().split("\n").pop() === `-R ${path.join(HOME, "work/alpha/app.js")}`);
+    await page.locator('#panel-body [data-files-dir="pkg/src"]').click({ button: "right" });
+    await press(menuItem("Copy mention"));
+    await waitFor("the copy note", async () => (engine === "chromium" ? /Mention copied/ : /Mention copied|Couldn't reach the clipboard/).test(await text("#panel-note")));
+    if (engine === "chromium") check((await page.evaluate(() => navigator.clipboard.readText())) === "@pkg/src", "the clipboard lacks the mention");
+    await page.locator('#panel-body [data-files-open="app.js"]').click({ button: "right" });
+    await press(menuItem("Add to chat"));
+    await waitFor("app.js in the composer", async () => (await page.inputValue("#prompt")) === "@app.js ");
+    await dropMention('#panel-body [data-files-open="notes.md"]');
+    await waitFor("notes.md dropped in", async () => (await page.inputValue("#prompt")) === "@app.js @notes.md ");
+    check(await page.evaluate(() => chipsOf(active)["@notes.md"]?.value === "notes.md"), "the dropped file is no mention chip");
+    await page.fill("#prompt", "");
+    await closePanelIfOpen();
+  });
+
+  await step("app view: a File tab carries the file's icon, draws HTML from the folder with its stylesheet, opens it in the preview browser and in T3's Open-in group, and shows a big file's first 1 MB read-only", async () => {
+    fs.mkdirSync(path.join(HOME, "work/alpha/site"), { recursive: true });
+    fs.writeFileSync(path.join(HOME, "work/alpha/site/index.html"), `<!doctype html><link rel="stylesheet" href="style.css"><h1>The site</h1>`);
+    fs.writeFileSync(path.join(HOME, "work/alpha/site/style.css"), "h1 { color: rgb(1, 2, 3); }");
+    fs.writeFileSync(path.join(HOME, "work/alpha/big.log"), "x".repeat(1258291));
+    await openPanelTo("files", "Files");
+    await press(gui("#panel-body [data-files-refresh]"));
+    await page.fill("#panel-body [data-files-filter]", "index.html");
+    await press(gui('#panel-body [data-files-open="site/index.html"]'));
+    await waitFor("index.html in a File tab", async () => (await text('#panel-tabs .ptab.active[data-panel="file"]')) === "index.html");
+    check(await page.locator('#panel-tabs .ptab.active .lead svg.pierre use[href="#file-tree-builtin-html"]').count(), "the File tab has no Pierre HTML icon");
+    const frame = page.frameLocator("#panel-body iframe.html-view");
+    await waitFor("the page with its stylesheet", async () => (await frame.locator("h1").evaluate((h) => getComputedStyle(h).color).catch(() => "")) === "rgb(1, 2, 3)", 10000);
+    check(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{32}\/site\/index\.html$/.test(await page.getAttribute("#panel-body iframe.html-view", "src")), "the page isn't served from the folder");
+    await press(gui("#panel-body .open-in-file .main"));
+    await waitFor("the preferred editor to open the file", async () => /^-a \S+\.app /.test(readLog("open.log").trim().split("\n").pop()) && readLog("open.log").trim().endsWith(` ${path.join(HOME, "work/alpha/site/index.html")}`));
+    await press(gui("#panel-body .open-in-file .pick"));
+    const editors = await menuLabels();
+    check(editors.includes("Zed") && editors.includes("Finder"), `the editors: ${editors.join(" | ")}`);
+    await page.keyboard.press("Escape");
+    await press(gui('#panel-body [data-file-browser]'));
+    await waitFor("the file in the browser", async () => /The site/.test((await page.frameLocator("#panel-body .browser iframe").locator("body").textContent().catch(() => "")) ?? ""), 10000);
+    await press(gui('#panel-tabs .ptab.active[data-panel="browser"] .lead'));
+    await page.fill("#panel-body [data-files-filter]", "").catch(() => {});
+    await page.evaluate(() => openFileSurface("big.log"));
+    await waitFor("the 1 MB notice", async () => (await text("#panel-body .file-notice")) === "Preview limited to the first 1 MB of a 1,258,291 byte file.", 10000);
+    check(await page.locator("#panel-body .code-edit[readonly]").count(), "a cut-off file can be edited");
+    await page.evaluate(() => {
+      machines.get(active.machine).view.online = false;
+      renderPanel();
+    });
+    await waitFor("the read-only notice", async () => /Read-only connection\. Unsaved edits are kept until write access returns\./.test(await text("#panel-body .file-view")));
+    await page.evaluate(() => {
+      machines.get(active.machine).view.online = true;
+      renderPanel();
+    });
+    await press(gui('#panel-tabs .ptab.active[data-panel="file"] .lead'));
+    await press(gui('#panel-tabs .ptab.active[data-panel="file"] .lead'));
+    await closePanelIfOpen();
+    for (const made of ["site", "big.log", "pkg"]) fs.rmSync(path.join(HOME, "work/alpha", made), { recursive: true, force: true });
+  });
+
+  await step("app view: the first Terminal tab reads Terminal 1, splits side by side and stacked up to four, lists and closes them, opens another, and its menu adds a selection to the chat", async () => {
+    await openPanelTo("terminal", "Terminal");
+    await waitFor("Terminal 1", async () => (await text('#panel-tabs .ptab.active[data-panel="terminal"]')) === "Terminal 1");
+    await press(gui('#panel-body [data-term-act="split"]'));
+    await waitFor("two side by side", async () => (await page.locator("#panel-body .term-pane .xterm").count()) === 2);
+    check((await text('#panel-tabs .ptab.active[data-panel="terminal"]')) === "Terminal 2", "the tab doesn't name the new terminal");
+    check((await page.locator("#panel-body .term-list .term-row .name").allTextContents()).join("|") === "Terminal 1|Terminal 2", "the list misses a terminal");
+    check(/Side by side\s*2/.test(await text("#panel-body .term-group")), `the group reads ${await text("#panel-body .term-group")}`);
+    await press(gui('#panel-body .term-list [data-term-act="split-vertical"]'));
+    await waitFor("three stacked", async () => (await page.locator("#panel-body .term-pane .xterm").count()) === 3 && (await page.getAttribute("#panel-body .term-panes", "data-split")) === "vertical");
+    const [a, b] = await page.locator("#panel-body .term-pane").evaluateAll((els) => els.slice(0, 2).map((el) => el.getBoundingClientRect().toJSON()));
+    check(Math.abs(a.left - b.left) < 2 && b.top > a.top + 20, "the panes don't stack");
+    await press(gui('#panel-body .term-list [data-term-act="split"]'));
+    await waitFor("four", async () => (await page.locator("#panel-body .term-pane").count()) === 4);
+    check((await page.getAttribute('#panel-body .term-list [data-term-act="split"]', "aria-disabled")) === "true", "a fifth split is offered");
+    check(/max 4 per group/.test(await page.getAttribute('#panel-body .term-list [data-term-act="split"]', "aria-label")), "the split's label lacks its limit");
+    await press(gui('#panel-body .term-list [data-term-act="close"]'));
+    await waitFor("three again", async () => (await page.locator("#panel-body .term-pane").count()) === 3);
+    await press(gui('#panel-body .term-row [data-term-close="term-3"]'));
+    await waitFor("Terminal 3 closed", async () => (await page.locator("#panel-body .term-list .term-row .name").allTextContents()).join("|") === "Terminal 1|Terminal 2");
+    await press(gui('#panel-body .term-row[data-term-pick="term-1"] .name'));
+    await waitFor("Terminal 1 picked", async () => (await text('#panel-tabs .ptab.active[data-panel="terminal"]')) === "Terminal 1");
+    await page.locator('#panel-body .term-pane[data-term="term-1"] .xterm-helper-textarea').focus();
+    await page.keyboard.type("echo split-$((20+22))\n");
+    const pane = '#panel-body .term-pane[data-term="term-1"]';
+    await waitFor("the output", async () => /split-42/.test(await text(`${pane} .xterm-rows`)), 10000);
+    await page.locator(`${pane} .xterm-screen`).click({ button: "right" });
+    check((await menuLabels()).join("|") === "Add to chat|Copy|Paste|Select all|Jump to latest", `the terminal menu: ${(await menuLabels()).join(" | ")}`);
+    check(await page.isDisabled('#panel-menu button:has(.label:text-is("Add to chat"))'), "Add to chat works with nothing selected");
+    await press(menuItem("Select all"));
+    await page.locator(`${pane} .xterm-screen`).click({ button: "right" });
+    await press(menuItem("Add to chat"));
+    await waitFor("the selection in the composer", async () => /Terminal 1 lines? 1/.test(await text("#attachments")));
+    check(await page.evaluate(() => /^<terminal_context>\n- Terminal 1 lines? 1[\s\S]*split-42[\s\S]*<\/terminal_context>$/.test(threadOf(active).attachments.at(-1).text)), "the context block isn't T3's");
+    await page.evaluate(() => {
+      threadOf(active).attachments.pop();
+      renderComposer(active);
+    });
+    if (!touch) {
+      await page.locator(`${pane} .xterm-helper-textarea`).focus();
+      await page.keyboard.press("Meta+d");
+      await waitFor("⌘D to split", async () => (await page.locator("#panel-body .term-pane").count()) === 3);
+      await page.keyboard.press("Meta+w");
+      await waitFor("⌘W to close the terminal, not the tab", async () => (await page.locator("#panel-body .term-pane").count()) === 2 && (await openTab("terminal").count()) === 1);
+    }
+    await press(gui('#panel-body .term-list [data-term-act="new"]'));
+    await waitFor("a new Terminal tab", async () => (await page.locator('#panel-tabs .ptab[data-panel="terminal"]').count()) === 2 && (await text('#panel-tabs .ptab.active[data-panel="terminal"]')) === "Terminal 3");
+    await press(gui('#panel-body .term-actions [data-term-act="close"]'));
+    await waitFor("its tab to close", async () => (await page.locator('#panel-tabs .ptab[data-panel="terminal"]').count()) === 1);
+    await press(gui('#panel-tabs .ptab[data-panel="terminal"]'));
+    await press(gui('#panel-tabs .ptab[data-panel="terminal"] .lead'));
+    await closePanelIfOpen();
+    fs.rmSync(path.join(HOME, "open.log"), { force: true });
+  });
+
+  await step("app view: Linked pull requests rows carry T3's state, checks, review, author, repository, branches, age and who linked them, Shift shows quick actions, a watch wakes claude on a new comment, and a row drags into the composer", async () => {
+    const pr43 = "https://github.com/example/alpha/pull/43";
+    const row = (n) => `#panel-body .pr-row[data-prs-open$="/pull/${n}"]`;
+    const stateFile = (n) => path.join(HOME, `.fake-gh-${n}`);
+    const kept = Object.fromEntries([41, 42].map((n) => [n, fs.existsSync(stateFile(n)) ? fs.readFileSync(stateFile(n), "utf8") : null]));
+    fs.writeFileSync(stateFile(41), "draft");
+    fs.writeFileSync(stateFile(42), "open");
+    await page.evaluate(() => prCache.clear());
+    await page.fill("#prompt", "");
+    await openPanelTo("prs", "Linked pull requests");
+    await waitFor("#41 loaded", async () => (await page.locator(`${row(41)} .pr-glyph[data-state="draft"]`).count()) === 1, 15000);
+    check((await page.getAttribute(`${row(41)} .sig.fail`, "aria-label")) === "Some checks were not successful", "#41 has no failing checks glyph");
+    check((await page.getAttribute(`${row(41)} .sig.quiet`, "aria-label")) === "Awaiting review", "#41 has no review glyph");
+    check(/^S\s*sweeper\s*example\/alpha\s*sweep\/notes-41\s*→\s*main\s*\d+\w+ ago$/.test((await text(`${row(41)} .meta`)).trim()), `#41's meta: ${await text(`${row(41)} .meta`)}`);
+    check(/^Linked by the agent/.test(await page.getAttribute(`${row(41)} .num`, "title")), "#41 doesn't say the agent linked it");
+    await waitFor("#42's stack", async () => (await text(`${row(42)} .stack`)).trim() === "2", 15000);
+    check((await page.getAttribute(`${row(42)} .sig.ok`, "aria-label")) === "All checks have passed", "#42 has no passing checks glyph");
+    await press(gui("#panel-body [data-prs-link]"));
+    await page.fill("#link-pr input", pr43);
+    await page.press("#link-pr input", "Enter");
+    await waitFor("#43 linked", async () => (await page.locator(`${row(43)} .pr-glyph[data-state="open"]`).count()) === 1, 10000);
+    check(/^Linked by you/.test(await page.getAttribute(`${row(43)} .num`, "title")), "#43 doesn't say you linked it");
+    if (!touch) {
+      await page.keyboard.down("Shift");
+      await waitFor("the quick actions", async () => await page.locator(`${row(43)} .quick`).isVisible());
+      check((await page.locator(`${row(43)} .quick button`).allTextContents()).join("|") === "Close|Merge", `#43's quick actions: ${(await page.locator(`${row(43)} .quick button`).allTextContents()).join("|")}`);
+      check(await page.isDisabled(`${row(42)} [data-prs-quick="merge"]`), "a stacked pull request merges from the list");
+      check((await page.locator(`${row(41)} .quick button`).allTextContents()).join("|") === "Close|Ready for review", "#41's quick actions");
+      await page.click(`${row(43)} [data-prs-quick="close"]`);
+      await waitFor("#43 closed", async () => (await page.locator(`${row(43)} .pr-glyph[data-state="closed"]`).count()) === 1, 10000);
+      await page.click(`${row(43)} [data-prs-quick="reopen"]`);
+      await waitFor("#43 reopened", async () => (await page.locator(`${row(43)} .pr-glyph[data-state="open"]`).count()) === 1, 10000);
+      await page.keyboard.up("Shift");
+      check(!(await page.locator(`${row(43)} .quick`).isVisible()), "the quick actions outlast Shift");
+      check(/pr close .*\/pull\/43/.test(readLog("gh.log")) && /pr reopen .*\/pull\/43/.test(readLog("gh.log")), "gh closed and reopened nothing");
+    }
+    if (!touch) await page.hover(row(43));
+    await press(gui(`#panel-body [data-prs-more="${pr43}"]`));
+    check((await menuLabels()).join("|") === "Copy link|Open|Watch for changes|Unlink from thread", `#43's menu: ${(await menuLabels()).join(" | ")}`);
+    await press(menuItem("Watch for changes"));
+    await waitFor("the watching eye", async () => (await page.getAttribute(`${row(43)} .sig[aria-label="Watching"]`, "title").catch(() => "")) === "Watching: the agent wakes when checks finish, someone comments, or the branch conflicts");
+    fs.writeFileSync(path.join(HOME, ".fake-gh-43.json"), JSON.stringify({ comments: [{ author: { login: "monalisa" }, body: "Can this  land\ntoday?", createdAt: "2026-01-02T10:00:00Z" }] }));
+    await waitFor("claude woken by the comment", async () => /Update on pull request #43 \(https:\/\/github\.com\/example\/alpha\/pull\/43\), which Pinned is watching for you:[\s\S]*1 new comment:[\s\S]*monalisa: "Can this land today\?"/.test(await text("#thread")), 20000);
+    if (!touch) await page.hover(row(43));
+    await press(gui(`#panel-body [data-prs-more="${pr43}"]`));
+    await press(menuItem("Stop watching"));
+    await waitFor("the eye gone", async () => !(await page.locator(`${row(43)} .sig[aria-label="Watching"]`).count()));
+    if (!touch) await page.hover(row(43));
+    await press(gui(`#panel-body [data-prs-more="${pr43}"]`));
+    await press(menuItem("Unlink from thread"));
+    await waitFor("#43 unlinked", async () => !(await page.locator(row(43)).count()));
+    for (const f of [".fake-gh-43", ".fake-gh-43.json"]) fs.rmSync(path.join(HOME, f), { force: true });
+    for (const [n, was] of Object.entries(kept)) (was === null ? fs.rmSync(stateFile(n), { force: true }) : fs.writeFileSync(stateFile(n), was));
+    await page.evaluate(() => {
+      const data = new DataTransfer();
+      document.querySelector('#panel-body .pr-row[data-prs-open$="/pull/42"]').dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: data }));
+      const composer = document.getElementById("composer");
+      composer.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: data }));
+      composer.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: data }));
+    });
+    await waitFor("#42 in the composer", async () => (await page.inputValue("#prompt")) === "#42 ");
+    check(await page.evaluate(() => chipsOf(active)["#42"]?.value === "https://github.com/example/alpha/pull/42"), "the dropped pull request is no chip");
+    await page.fill("#prompt", "");
+    await page.evaluate(() => prCache.clear());
     await closePanelIfOpen();
   });
 
@@ -4633,12 +4933,12 @@ async function sweep(profileName) {
     await page.evaluate(() => document.body.dataset.page === "settings" && toggleSettings());
   });
 
-  await step("follow: the Device tab's dashboard fills the panel's height", async () => {
+  await step("follow: the Device tab fills the panel's height", async () => {
     if (touch) await page.evaluate(() => toggleSidebar(false));
     await openPanelTo("device", "Device");
-    await waitFor("the hub's dashboard", async () => /Expo Device Hub dashboard/.test((await page.frameLocator("#panel-body iframe").locator("body").textContent().catch(() => "")) ?? ""), 20000);
-    const [frame, body] = await page.evaluate(() => [document.querySelector("#panel-body iframe").getBoundingClientRect().height, document.querySelector("#panel-body").getBoundingClientRect().height]);
-    check(frame > body - 80, `the dashboard is ${Math.round(frame)}px tall in a ${Math.round(body)}px panel`);
+    await waitFor("the device list", async () => (await page.locator("#panel-body .device-list").count()) === 1, 20000);
+    const [frame, body] = await page.evaluate(() => [document.querySelector("#panel-body .device-panel").getBoundingClientRect().height, document.querySelector("#panel-body").getBoundingClientRect().height]);
+    check(frame > body - 80, `the Device tab is ${Math.round(frame)}px tall in a ${Math.round(body)}px panel`);
     await page.locator('#panel-tabs .ptab[data-panel="device"] .lead').dispatchEvent("click");
     await closePanelIfOpen();
     return `${Math.round(frame)}px of ${Math.round(body)}px`;

@@ -1,6 +1,6 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
-use crate::panel::{DeviceHub, Shells};
+use crate::panel::{DeviceHub, FileServer, Shells};
 use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, projects, pty, pulls, reminders, scaffold, scripts, sessions, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
@@ -242,6 +242,10 @@ pub struct Machine {
     guides: PathBuf,
     shells: Shells,
     device_hub: DeviceHub,
+    file_server: FileServer,
+    /// Present while new sessions may drive the machine's simulators and emulators.
+    device_agents: Option<PathBuf>,
+    pr_watches: crate::prwatch::Watches,
     clones: PathBuf,
     quitting: AtomicBool,
     usage: Mutex<Usage>,
@@ -291,6 +295,9 @@ impl Machine {
             guides: dir.as_ref().map(|d| d.join("guides")).unwrap_or_else(|| std::env::temp_dir().join("pinned-guides")),
             shells: Shells::default(),
             device_hub: DeviceHub::default(),
+            file_server: FileServer::default(),
+            device_agents: dir.as_ref().map(|d| d.join("device-agents")),
+            pr_watches: Default::default(),
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
             usage: Mutex::new(Usage::default()),
@@ -375,9 +382,10 @@ impl Machine {
                 json(workspace::listeners(pid, self.launch.path_env.as_deref()))
             }
             Call::Editors => json(workspace::editors(&home(), self.launch.path_env.as_deref())),
-            Call::OpenIn { tab, editor, path } => {
+            Call::OpenIn { tab, editor, path, folder, reveal } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
-                json(workspace::open_in(&cwd, &editor, path.as_deref(), &home(), self.launch.path_env.as_deref())?)
+                let how = workspace::OpenHow { folder, reveal };
+                json(workspace::open_in(&cwd, &editor, path.as_deref(), how, &home(), self.launch.path_env.as_deref())?)
             }
             Call::Commands { tab } => json(commands::list(&home(), &self.tab(&tab, |t| t.cwd.clone())?)),
             Call::Files { tab } => json(files::list(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())),
@@ -415,6 +423,8 @@ impl Machine {
             Call::PageMeta { url } => json(panel::page_meta(&url)?),
             Call::Refs { tab } => json(panel::refs(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
             Call::ReadFile { tab, path, root, rev } => json(panel::read_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, root, rev.as_deref())?),
+            Call::WatchPr { tab, pr, watching } => json(self.watch_pr(&tab, pr.as_deref(), watching)?),
+            Call::FileUrl { tab, path, root } => json(self.file_server.url(&self.tab(&tab, |t| t.cwd.clone())?, &path, root)?),
             Call::WriteFile { tab, path, root, text, since } => json(panel::write_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, root, &text, since.as_deref())?),
             Call::Search { tab, query, case, regex } => json(panel::search(&self.tab(&tab, |t| t.cwd.clone())?, &query, case, regex, self.launch.path_env.as_deref())?),
             Call::PrEdit { tab, pr, title, body } => json(panel::pr_edit(&self.tab(&tab, |t| t.cwd.clone())?, &pr, title.as_deref(), body.as_deref(), self.launch.path_env.as_deref())?),
@@ -428,6 +438,19 @@ impl Machine {
                 Ok(Value::Null)
             }
             Call::DeviceHub { embed } => json(self.device_hub.url(embed.as_deref(), self.launch.path_env.as_deref())?),
+            Call::DeviceAgents { allow } => {
+                let file = self.device_agents.as_ref().ok_or("this machine keeps no settings")?;
+                match allow {
+                    Some(true) => std::fs::write(file, "").map_err(|e| e.to_string())?,
+                    Some(false) => drop(std::fs::remove_file(file)),
+                    None => {}
+                }
+                json(file.exists())
+            }
+            Call::Device { op } => {
+                let path = self.launch.path_env.as_deref();
+                json(crate::device::Host { port: self.device_hub.port(None, path)?, path }.run(op)?)
+            }
             Call::Subagent { tab, tool } => {
                 let file = thread::subagent(&self.transcript(&tab)?, &tool).ok_or("Claude Code kept no transcript of this subagent")?;
                 json(thread::read_subagent(&file).map_err(|e| format!("could not read the subagent's transcript: {e}"))?)
@@ -600,6 +623,10 @@ impl Machine {
             }
             (t.cwd.clone(), args, t.env.clone(), t.bypass)
         })?;
+        let mut args = args;
+        if self.device_agents.as_ref().is_some_and(|f| f.exists()) {
+            args.extend(["--append-system-prompt".to_owned(), crate::device::AGENT_PROMPT.to_owned()]);
+        }
         self.save_sessions();
         let cmd = self.launch.command(tab, &cwd, bypass, args, &env);
         self.spawn(tab, cmd, pty::size(cols, rows))?;
@@ -847,6 +874,62 @@ impl Machine {
         let tabs = self.tabs.lock().unwrap();
         let live = tabs.iter().filter(|(_, t)| t.session.is_some() && env.iter().all(|e| t.env.contains(e)));
         live.max_by_key(|(id, _)| tab_number(id)).map(|(id, _)| id.clone())
+    }
+
+    /// The tab's watched pull requests, after starting or stopping the watch on `pr`.
+    fn watch_pr(&self, tab: &str, pr: Option<&str>, watching: bool) -> Result<Vec<String>, String> {
+        let cwd = self.tab(tab, |t| t.cwd.clone())?;
+        let Some(pr) = pr else { return Ok(self.pr_watches.of(tab)) };
+        if !pr.starts_with("https://") {
+            return Err(format!("{pr:?} is not a pull request URL"));
+        }
+        if watching {
+            // The first read is what later reads are measured against.
+            let view = workspace::run(&cwd, self.launch.path_env.as_deref(), "gh", &["pr", "view", "--json", crate::prwatch::FIELDS, "--", pr]).map_err(|_| "gh couldn't read the pull request".to_owned())?;
+            let now = crate::prwatch::snapshot(&serde_json::from_str(&view).map_err(|e| format!("gh sent a bad answer: {e}"))?);
+            let list = self.pr_watches.set(tab, pr, true);
+            self.pr_watches.update(tab, pr, now);
+            self.start_watching();
+            return Ok(list);
+        }
+        Ok(self.pr_watches.set(tab, pr, false))
+    }
+
+    /// Reads the watched pull requests now and then, and wakes each tab's claude when it's free.
+    fn start_watching(&self) {
+        if self.pr_watches.started.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let me = self.me.clone();
+        let every = std::env::var("PINNED_PR_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(every));
+            let Some(machine) = me.upgrade() else { return };
+            if machine.quitting.load(Ordering::Relaxed) {
+                return;
+            }
+            machine.read_watches();
+        });
+    }
+
+    fn read_watches(&self) {
+        let tabs: Vec<String> = self.tabs.lock().unwrap().keys().cloned().collect();
+        self.pr_watches.forget(&tabs);
+        for tab in tabs {
+            let Ok(cwd) = self.tab(&tab, |t| t.cwd.clone()) else { continue };
+            for url in self.pr_watches.of(&tab) {
+                let view = workspace::run(&cwd, self.launch.path_env.as_deref(), "gh", &["pr", "view", "--json", crate::prwatch::FIELDS, "--", &url]);
+                if let Some(view) = view.ok().and_then(|v| serde_json::from_str(&v).ok()) {
+                    self.pr_watches.update(&tab, &url, crate::prwatch::snapshot(&view));
+                }
+            }
+            let free = self.tab(&tab, |t| t.session.is_some() && matches!(t.status, None | Some(AgentStatus::Done))).unwrap_or(false);
+            if free {
+                if let Some(text) = self.pr_watches.take_wake(&tab) {
+                    let _ = self.type_prompt(&tab, &text);
+                }
+            }
+        }
     }
 
     /// Types `text` into the tab's session as one prompt and submits it.
@@ -1606,6 +1689,25 @@ mod tests {
         wait_for("claude's arguments", || text(&seen).ends_with("\r\n"));
         assert_eq!(text(&seen), "--settings|s|--plugin-dir|p|--resume|s1|--model|claude-opus-4-8|\r\n");
         assert_eq!(sessions::load(&dir.join("sessions.json"))[0].model.as_deref(), Some("claude-opus-4-8"), "a relaunch keeps the model");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn allowing_agents_to_drive_devices_tells_each_new_session_how() {
+        let dir = temp("device-agents");
+        let claude = dir.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { claude, ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        assert_eq!(m.call(Call::DeviceAgents { allow: None }), Ok(json!(false)));
+        assert_eq!(m.call(Call::DeviceAgents { allow: Some(true) }), Ok(json!(true)));
+        let tab = m.add_tab(dir.clone(), vec![], vec![], false, None);
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        m.start_claude(&tab, 80, 24).unwrap();
+        wait_for("claude's arguments", || text(&seen).ends_with("\r\n"));
+        assert_eq!(text(&seen), format!("--settings|s|--plugin-dir|p|--append-system-prompt|{}|\r\n", crate::device::AGENT_PROMPT));
+        assert_eq!(m.call(Call::DeviceAgents { allow: Some(false) }), Ok(json!(false)));
         let _ = std::fs::remove_dir_all(dir);
     }
 
