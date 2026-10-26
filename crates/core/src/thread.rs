@@ -100,10 +100,6 @@ pub struct Context {
     pub at: String,
 }
 
-pub fn projects_dir(home: &Path) -> PathBuf {
-    std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| home.join(".claude"), PathBuf::from).join("projects")
-}
-
 pub fn find(projects: &Path, session: &str) -> Option<PathBuf> {
     if session.is_empty() || !session.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
         return None;

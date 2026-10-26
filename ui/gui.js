@@ -213,6 +213,7 @@ function renderGui() {
       watchMenu(tab);
     }
     tab.menu = tab.answering ? null : terminalMenu(tab);
+    if (terminalOnly(tab)) continue;
     tab.dialog = tab.menu || tab.answering ? null : terminalDialog(tab);
     if (!t.loaded) fetchThread(tab);
     fetchWorkspace(tab);
@@ -222,14 +223,17 @@ function renderGui() {
   markThreadSeen(active);
   noteVisit();
   renderSidebar();
-  if (active && threadOf(active).unsupported) renderUnsupported();
+  const only = !!active && terminalOnly(active);
+  document.getElementById("chat").dataset.terminalOnly = only;
+  if (only) renderTerminalOnly();
+  else if (active && threadOf(active).unsupported) renderUnsupported();
   else renderThread();
   renderPanel();
 }
 
 setInterval(() => {
   if (!guiOn() || document.hidden) return;
-  for (const tab of tabs) if (tab === active || turnLive(tab) || phaseOf(tab) === "delegating") fetchThread(tab);
+  for (const tab of tabs) if ((tab === active || turnLive(tab) || phaseOf(tab) === "delegating") && !terminalOnly(tab)) fetchThread(tab);
 }, POLL_MS);
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
 document.addEventListener("visibilitychange", () => markThreadSeen(active));

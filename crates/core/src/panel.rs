@@ -973,7 +973,7 @@ pub fn guide_stops(out: &str) -> Result<Value, String> {
 /// The review guide kept for `pr` and the run writing one, as `{guide, run}`. With `write`, a
 /// headless claude starts writing a new one in the tab's folder from the pull request's diff, and
 /// the answer comes back with `run` set until it is done.
-pub fn guide(cwd: &Path, pr: &str, write: bool, store: &Path, claude: &Path, path: Option<&str>) -> Result<Value, String> {
+pub fn guide(cwd: &Path, pr: &str, write: bool, store: &Path, claude: &Path, env: &[(String, String)], path: Option<&str>) -> Result<Value, String> {
     check_url(pr)?;
     let file = store.join(format!("{}.json", &hash(pr.as_bytes())[..16]));
     let mut kept: Value = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({ "guide": null, "run": null }));
@@ -996,6 +996,7 @@ pub fn guide(cwd: &Path, pr: &str, write: bool, store: &Path, claude: &Path, pat
     command
         .args(["-p", "--output-format", "json", "--json-schema", GUIDE_SCHEMA, "--allowedTools", "Read,Grep,Glob"])
         .current_dir(cwd)
+        .envs(env.iter().cloned())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

@@ -1655,6 +1655,14 @@ function renderUnsupported() {
     <p class="hint">Update pinned there, or use the terminal view.</p><button class="primary" data-mode-terminal>Terminal view</button></div>`;
 }
 
+function renderTerminalOnly() {
+  document.querySelector("#chat-head .crumb").innerHTML = crumbHtml(active);
+  document.getElementById("pr-chip").hidden = true;
+  threadView.dataset.key = "";
+  const what = active.view.program === "sign-in" ? "This sign-in runs" : `${esc(accountName(active.machine, active.view.account))} runs Codex, which`;
+  threadView.innerHTML = `<div class="blank"><p>${what} in the terminal only.</p><button class="primary" data-mode-terminal>Terminal view</button></div>`;
+}
+
 /** T3 Code's media dialog: the image over a dark scrim with a close button, and for a message's
  * several images Previous and Next, ←/→ and a "name (i/N)" caption. */
 const imageZoom = document.getElementById("image-zoom");

@@ -416,18 +416,22 @@ async function checkLimits() {
 function limitAccounts() {
   const accounts = new Map();
   for (const m of usageSelected()) {
-    const probe = limitsOf(m);
-    let windows = probe?.windows?.length ? probe.windows : [];
-    if (!windows.length) {
-      const report = machines.get(m)?.usage ?? {};
-      windows = STATUSLINE_WINDOWS.filter(([id]) => report[id]).map(([id, kind, label, minutes]) => ({ id, kind, label, used: report[id].used_percentage, resets_at: report[id].resets_at, minutes }));
+    // claude's own check answers for the machine's default account; the others report through their statusline.
+    const reports = machines.get(m)?.usage ?? {};
+    for (const account of new Set([DEFAULT_ACCOUNT, ...Object.keys(reports)])) {
+      const probe = account === DEFAULT_ACCOUNT ? limitsOf(m) : null;
+      let windows = probe?.windows?.length ? probe.windows : [];
+      if (!windows.length) {
+        const report = reports[account] ?? {};
+        windows = STATUSLINE_WINDOWS.filter(([id]) => report[id]).map(([id, kind, label, minutes]) => ({ id, kind, label, used: report[id].used_percentage, resets_at: report[id].resets_at, minutes }));
+      }
+      if (!windows.length) continue;
+      const key = probe?.email ? `email:${probe.email.toLowerCase()}` : `machine:${m}:${account}`;
+      const at = probe?.windows?.length ? probe.at : 0;
+      const held = accounts.get(key);
+      const environments = [...(held?.environments ?? []), account === DEFAULT_ACCOUNT ? machineName(m) : `${machineName(m)} · ${accountName(m, account)}`];
+      accounts.set(key, held && held.at >= at ? { ...held, environments, plan: held.plan ?? probe?.plan } : { key, email: probe?.email, plan: probe?.plan ?? held?.plan, windows, at, environments });
     }
-    if (!windows.length) continue;
-    const key = probe?.email ? `email:${probe.email.toLowerCase()}` : `machine:${m}`;
-    const at = probe?.windows?.length ? probe.at : 0;
-    const held = accounts.get(key);
-    const environments = [...(held?.environments ?? []), machineName(m)];
-    accounts.set(key, held && held.at >= at ? { ...held, environments, plan: held.plan ?? probe?.plan } : { key, email: probe?.email, plan: probe?.plan ?? held?.plan, windows, at, environments });
   }
   return [...accounts.values()];
 }
@@ -532,7 +536,7 @@ function limitsHtml() {
   const pools = limitPools(limitAccounts(), now);
   const notices = usageSelected().flatMap((m) => {
     const probe = limitsOf(m);
-    const text = probe?.error ? `Could not read limits: ${probe.error}` : probe?.unavailable && !machines.get(m)?.usage?.five_hour && !machines.get(m)?.usage?.seven_day ? probe.unavailable : "";
+    const text = probe?.error ? `Could not read limits: ${probe.error}` : probe?.unavailable && !machines.get(m)?.usage?.[DEFAULT_ACCOUNT]?.five_hour && !machines.get(m)?.usage?.[DEFAULT_ACCOUNT]?.seven_day ? probe.unavailable : "";
     return text ? [usageSelected().length > 1 ? `${machineName(m)} · ${text}` : text] : [];
   });
   return `<div class="limits-view">${pools.length || notices.length ? "" : `<p class="muted note">No provider on the selected environments reports subscription limits.</p>`}

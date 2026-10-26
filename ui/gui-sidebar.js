@@ -491,13 +491,14 @@ function cardRow(tab) {
     ? `${ws.worktree ? icon("folder-git", "dim") : ""}<span class="branch">${middle(ws.branch)}</span>`
     : scratchMachine ? `<span class="branch">${icon("monitor")}<span class="head">${esc(machineName(tab.machine))}</span></span>` : `<span class="branch"></span>`;
   const remote = tab.machine !== LOCAL && !scratchMachine ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
+  const account = tab.view.account !== DEFAULT_ACCOUNT ? `<span class="account" title="Runs under the ${esc(accountName(tab.machine, tab.view.account))} account">${esc(accountName(tab.machine, tab.view.account))}</span>` : "";
   const state = slot
     ? `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : ""}>${icon(slot.icon)}${slot.text}${slot.since ? ` <span class="since" data-since="${slot.since}"></span>` : ""}</span>`
     : `<span class="stamp when${unseenDone(tab) ? " unread" : ""}">${esc(ago(latestUserAt(tab)))}</span>`;
   const acts = `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${bindingLabel("thread.settle") ?? ""})">${icon("check")}Settle</span></span>`;
   row.innerHTML = `<span class="l1">${draft ? `<span class="draft-pen" role="img" title="Unsent draft" aria-label="Unsent draft">${icon("square-pen")}</span>` : ""}${projectIcon(projectName(tab), tab)}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>
     <span class="l2">${titleHtml(tab)}</span>
-    <span class="l3">${where}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="right">${statsHtml(tab)}${remote}<span class="provider">${icon("claude")}</span></span></span>`;
+    <span class="l3">${where}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="right">${statsHtml(tab)}${remote}${account}<span class="provider">${icon("claude")}</span></span></span>`;
   return row;
 }
 
@@ -916,6 +917,7 @@ function rowMenuItems(tab) {
       { label: "Thread ID", icon: "hash", disabled: !session, run: () => copyAndTell(session, "thread ID") },
     ] },
     { label: "Project settings", icon: "gear", run: () => openProjectSettings(tab) },
+    ...(switchItems(tab).length ? [{ label: "Move to account", icon: "user-round", children: () => switchItems(tab).map(({ label, run }) => ({ label, run })) }] : []),
     { label: "Archive thread", icon: "archive", sep: true, disabled: turnLive(tab), run: () => archiveThread(tab) },
     { label: "Delete", icon: "trash", danger: true, run: () => deleteThreads([tab]) },
   ];

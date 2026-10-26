@@ -1,6 +1,7 @@
 //! The protocol between machines, the hub and clients: one JSON object per WebSocket text frame.
 //! Every enum is internally tagged and unknown fields are ignored, so versions can drift.
 
+use crate::accounts::{self, AccountId, Provider};
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
 use crate::branches::GitStep;
@@ -40,10 +41,26 @@ impl<'de> Deserialize<'de> for Bytes {
     }
 }
 
+/// What a tab runs.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Program {
+    /// The account's agent CLI, a session that may be resumed.
+    #[default]
+    Agent,
+    /// The CLI's login for the account, never resumed.
+    SignIn,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TabView {
     pub id: TabId,
     pub cwd: String,
+    /// The account the tab's sessions run under.
+    #[serde(default = "accounts::default_account")]
+    pub account: AccountId,
+    #[serde(default)]
+    pub program: Program,
     pub bypass: bool,
     pub running: bool,
     pub status: Option<AgentStatus>,
@@ -79,6 +96,9 @@ pub struct ProjectView {
     /// The origin as `host/owner/name`, which names the project on every machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    /// The account its sessions run under, the default one unless the user picked another.
+    #[serde(default = "accounts::default_account")]
+    pub account: AccountId,
 }
 
 /// Everything a client may ask a machine to do, local or through the hub. The comment on each
@@ -155,6 +175,19 @@ pub enum Call {
     /// The absolute path the file was saved under, in a private folder of the machine, for a
     /// session to read. Refused past `uploads::LIMIT`.
     Upload { name: String, data: Bytes },
+    /// `Vec<accounts::View>`: the built-in accounts, then the added ones, each as its CLI reports it.
+    ListAccounts,
+    /// The new account's `accounts::View`. Its id is a slug of `name`.
+    AddAccount { provider: Provider, name: String },
+    /// `null`. Projects that ran under it fall back to the default account.
+    RemoveAccount { account: AccountId },
+    /// The project's `ProjectView`. `account: null` runs it under the default account again.
+    SetProjectAccount { path: String, account: Option<AccountId> },
+    /// The new tab's id, running the CLI's login for the account in the account's home.
+    SignIn { account: AccountId },
+    /// The tab's folder, as `start_claude`. Moves the tab's conversation to another Claude Code
+    /// account signed in here and resumes it there, continuing a turn a usage limit stopped.
+    SwitchAccount { tab: TabId, account: AccountId, cols: u16, rows: u16 },
     /// `ThreadPage`: the conversation's items from byte `from` of its transcript on.
     Thread { tab: TabId, from: u64 },
     /// `null`. Types `text` into the session as one prompt and submits it.
@@ -441,6 +474,10 @@ impl Call {
                 | Call::Files { .. }
                 | Call::Branches { .. }
                 | Call::Checkout { .. }
+                | Call::ListAccounts
+                | Call::AddAccount { .. }
+                | Call::SignIn { .. }
+                | Call::SwitchAccount { .. }
                 | Call::TokenUsage { .. }
                 | Call::UsageLimits
                 | Call::PullRequests { .. }
@@ -523,6 +560,9 @@ pub struct RunSpec {
     /// The account's GitHub token, added by the hub, which clones a private repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// The agent account the connector names; none runs the session under its project's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AccountId>,
 }
 
 /// What a machine reports on its own.
@@ -538,7 +578,12 @@ pub enum MachineEvent {
     Output { tab: TabId, data: Bytes },
     /// The tab's claude exited by itself.
     Exit { tab: TabId },
-    Usage { usage: Usage },
+    /// The account's usage, after its session reported it.
+    Usage {
+        usage: Usage,
+        #[serde(default = "accounts::default_account")]
+        account: AccountId,
+    },
 }
 
 /// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
@@ -761,6 +806,8 @@ mod tests {
         TabView {
             id: "tab-3".into(),
             cwd: "/repo".into(),
+            account: "work".into(),
+            program: Program::Agent,
             bypass: false,
             running: true,
             status: Some(AgentStatus::NeedsInput),
@@ -812,6 +859,7 @@ mod tests {
                     args: vec!["--name".into(), "ENG-7 Broken button".into(), "Run `'{{pinned}}' stage coding`".into()],
                     env: vec![("PINNED_CONNECTOR".into(), "c1".into()), ("PINNED_ISSUE".into(), "uuid".into())],
                     token: None,
+                    account: Some("work".into()),
                 },
             },
             json!({
@@ -821,8 +869,21 @@ mod tests {
                     "repo": "git@github.com:acme/app.git",
                     "args": ["--name", "ENG-7 Broken button", "Run `'{{pinned}}' stage coding`"],
                     "env": [["PINNED_CONNECTOR", "c1"], ["PINNED_ISSUE", "uuid"]],
+                    "account": "work",
                 },
             }),
+        );
+        round_trip(Call::ListAccounts, json!({ "cmd": "list_accounts" }));
+        round_trip(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }, json!({ "cmd": "add_account", "provider": "codex", "name": "Side" }));
+        round_trip(Call::SignIn { account: "work".into() }, json!({ "cmd": "sign_in", "account": "work" }));
+        round_trip(
+            Call::SwitchAccount { tab: "tab-1".into(), account: "spare".into(), cols: 120, rows: 32 },
+            json!({ "cmd": "switch_account", "tab": "tab-1", "account": "spare", "cols": 120, "rows": 32 }),
+        );
+        round_trip(Call::RemoveAccount { account: "side".into() }, json!({ "cmd": "remove_account", "account": "side" }));
+        round_trip(
+            Call::SetProjectAccount { path: "/repo".into(), account: None },
+            json!({ "cmd": "set_project_account", "path": "/repo", "account": null }),
         );
         round_trip(
             Call::Deliver { env: vec![("PINNED_SLACK_THREAD".into(), "1.2".into())], text: "yes".into() },
@@ -895,7 +956,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_ignored_and_a_run_needs_only_folder_and_args() {
         let call: Call = serde_json::from_value(json!({ "cmd": "run", "run": { "folder": "/repo", "args": [], "later": 1 }, "extra": true })).unwrap();
-        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![], token: None } });
+        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![], token: None, account: None } });
         assert!(serde_json::from_value::<Call>(json!({ "cmd": "format_disk" })).is_err());
     }
 
@@ -909,16 +970,21 @@ mod tests {
         round_trip(
             MachineEvent::Tabs { tabs: vec![tab_view()] },
             json!({ "kind": "tabs", "tabs": [{
-                "id": "tab-3", "cwd": "/repo", "bypass": false, "running": true, "status": "needs-input",
+                "id": "tab-3", "cwd": "/repo", "account": "work", "program": "agent", "bypass": false, "running": true, "status": "needs-input",
                 "title": "Fix the build", "message": "Claude needs your permission to use Bash",
                 "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3, "updated": 1792400000, "session": "s1",
                 "stats": { "active_ms": 4320000, "cost_usd": 3.42 },
             }] }),
         );
         round_trip(
-            MachineEvent::Usage { usage: Usage { five_hour: Some(crate::agent::LimitWindow { used_percentage: 23.5, resets_at: 1792400000 }), seven_day: None } },
-            json!({ "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 1792400000 } } }),
+            MachineEvent::Usage {
+                usage: Usage { five_hour: Some(crate::agent::LimitWindow { used_percentage: 23.5, resets_at: 1792400000 }), seven_day: None },
+                account: "work".into(),
+            },
+            json!({ "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 1792400000 } }, "account": "work" }),
         );
+        let old: MachineEvent = serde_json::from_value(json!({ "kind": "usage", "usage": {} })).unwrap();
+        assert!(matches!(old, MachineEvent::Usage { account, .. } if account == "claude"), "a machine before accounts reports the default account's usage");
         assert!(serde_json::from_value::<MachineEvent>(json!({ "kind": "output", "tab": "t", "data": "not base64!" })).is_err());
     }
 

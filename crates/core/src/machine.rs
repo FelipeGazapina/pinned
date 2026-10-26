@@ -1,12 +1,13 @@
+use crate::accounts::{self, Account, Accounts, Provider};
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::stats::{ThreadStats, Tally};
-use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, EXE_PLACEHOLDER};
+use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, FileServer, Shells};
 use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, process, projects, pty, pulls, reminders, scaffold, scripts, sessions, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -31,7 +32,8 @@ pub type Listener = Box<dyn Fn(&Event) + Send + Sync>;
 
 pub struct Launch {
     pub exe: PathBuf,
-    pub claude: PathBuf,
+    /// Each provider's CLI. One left out runs as its bare name, found on PATH.
+    pub bins: BTreeMap<Provider, PathBuf>,
     pub path_env: Option<String>,
     pub settings: PathBuf,
     pub mcp_config: Option<PathBuf>,
@@ -63,7 +65,7 @@ impl Launch {
         let path_env = login_shell_path().or_else(|| std::env::var("PATH").ok());
         Ok(Launch {
             exe: exe.to_owned(),
-            claude: find_claude(path_env.as_deref()),
+            bins: Provider::ALL.into_iter().map(|p| (p, find_bin(p.spec().bin, path_env.as_deref()))).collect(),
             path_env,
             settings,
             mcp_config: Some(mcp_config),
@@ -73,24 +75,36 @@ impl Launch {
         })
     }
 
-    fn command(&self, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)]) -> CommandBuilder {
-        let mut cmd = CommandBuilder::new(&self.claude);
+    pub fn bin(&self, provider: Provider) -> PathBuf {
+        self.bins.get(&provider).cloned().unwrap_or_else(|| provider.spec().bin.into())
+    }
+
+    fn command(&self, program: Program, provider: Provider, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)]) -> CommandBuilder {
+        let spec = provider.spec();
+        let mut cmd = CommandBuilder::new(self.bin(provider));
         for key in INHERITED_SESSION_ENV {
             cmd.env_remove(key);
         }
-        if let Some(mcp_config) = &self.mcp_config {
-            // --mcp-config takes any number of values, so --settings right after it keeps it from swallowing the rest.
-            cmd.arg("--mcp-config");
-            cmd.arg(mcp_config);
+        match program {
+            Program::Agent => {
+                if spec.harness {
+                    if let Some(mcp_config) = &self.mcp_config {
+                        // --mcp-config takes any number of values, so --settings right after it keeps it from swallowing the rest.
+                        cmd.arg("--mcp-config");
+                        cmd.arg(mcp_config);
+                    }
+                    cmd.arg("--settings");
+                    cmd.arg(&self.settings);
+                    cmd.arg("--plugin-dir");
+                    cmd.arg(&self.plugin_dir);
+                }
+                if bypass {
+                    cmd.arg(spec.bypass_flag);
+                }
+                cmd.args(args);
+            }
+            Program::SignIn => cmd.args(spec.login),
         }
-        cmd.arg("--settings");
-        cmd.arg(&self.settings);
-        cmd.arg("--plugin-dir");
-        cmd.arg(&self.plugin_dir);
-        if bypass {
-            cmd.arg("--dangerously-skip-permissions");
-        }
-        cmd.args(args);
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -168,6 +182,8 @@ impl Screen {
 
 struct Tab {
     cwd: PathBuf,
+    account: Account,
+    program: Program,
     session: Option<pty::Session>,
     /// When the running claude started, so a subagent an earlier claude left mid-step reads as stopped.
     started: Option<SystemTime>,
@@ -206,7 +222,11 @@ struct Tab {
 
 impl Tab {
     /// What reopens the tab's conversation, once claude has reported one.
+    /// A sign-in tab has no conversation to resume.
     fn saved(&self) -> Option<sessions::Saved> {
+        if self.program != Program::Agent {
+            return None;
+        }
         Some(sessions::Saved {
             cwd: self.cwd.clone(),
             session: self.claude_session.clone()?,
@@ -215,6 +235,7 @@ impl Tab {
             interrupted: self.interrupted,
             resume_at: self.resume_at,
             held: self.held_at_limit,
+            account: self.account.id.clone(),
             model: self.model.clone(),
         })
     }
@@ -223,6 +244,8 @@ impl Tab {
         TabView {
             id: id.to_owned(),
             cwd: self.cwd.display().to_string(),
+            account: self.account.id.clone(),
+            program: self.program,
             bypass: self.bypass,
             running: self.session.is_some(),
             status: self.status,
@@ -251,6 +274,7 @@ pub struct Machine {
     sync_file: Option<PathBuf>,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
+    accounts: Accounts,
     /// One file of finished turns per project.
     history_dir: Option<PathBuf>,
     /// Files clients attached, saved for sessions to read.
@@ -267,7 +291,7 @@ pub struct Machine {
     pr_watches: crate::prwatch::Watches,
     clones: PathBuf,
     quitting: AtomicBool,
-    usage: Mutex<Usage>,
+    usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     agents: Mutex<subagents::Cache>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
@@ -310,6 +334,7 @@ impl Machine {
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
             projects: Mutex::new(projects),
             projects_file,
+            accounts: Accounts::load(dir.as_deref(), home.clone()),
             history_dir: dir.as_ref().map(|d| d.join("history")),
             uploads,
             rates_file: dir.as_ref().map(|d| d.join("usage-model-rates.json")),
@@ -321,7 +346,7 @@ impl Machine {
             pr_watches: Default::default(),
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
-            usage: Mutex::new(Usage::default()),
+            usage: Mutex::default(),
             agents: Mutex::default(),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
@@ -351,7 +376,7 @@ impl Machine {
     pub fn call(&self, call: Call) -> Result<Value, String> {
         match call {
             Call::Tabs => json(self.tabs()),
-            Call::OpenTab { path, bypass } => json(self.open_tab(path, bypass)),
+            Call::OpenTab { path, bypass } => json(self.open_tab(path, bypass)?),
             Call::OpenScratch { bypass } => json(self.open_scratch(bypass)?),
             Call::AutoResume { tab, on } => json(self.auto_resume(&tab, on)?),
             Call::StartClaude { tab, cols, rows } => json(self.start_claude(&tab, cols, rows)?),
@@ -395,6 +420,21 @@ impl Machine {
                 let dir = self.uploads.as_ref().ok_or("this machine keeps no files")?;
                 json(uploads::save(dir, &name, &data.0)?.display().to_string())
             }
+            Call::ListAccounts => json(self.list_accounts()),
+            Call::AddAccount { provider, name } => {
+                let account = self.accounts.add(provider, &name)?;
+                json(self.view_account(account))
+            }
+            Call::RemoveAccount { account } => {
+                // Its tabs would save sessions under an id the next start can't resume.
+                if self.tabs.lock().unwrap().values().any(|t| t.account.id == account) {
+                    return Err(format!("close the tabs that run under {account} before removing it"));
+                }
+                json(self.accounts.remove(&account)?)
+            }
+            Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
+            Call::SignIn { account } => json(self.sign_in(&account)?),
+            Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from } => json(self.thread(&tab, from)?),
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
             Call::Workspace { tab } => {
@@ -403,7 +443,7 @@ impl Machine {
             }
             Call::RegenerateTitle { tab, previous, thread } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
-                json(titles::regenerate(&self.launch.claude, &cwd, self.launch.path_env.as_deref(), &previous, &thread)?)
+                json(titles::regenerate(&self.launch.bin(Provider::Claude), &self.headless_env(&tab)?, &cwd, self.launch.path_env.as_deref(), &previous, &thread)?)
             }
             Call::Favicon { tab } => json(favicon::of(&history::project_of(&self.tab(&tab, |t| t.cwd.clone())?))),
             Call::PrStatus { tab, pr } => json(workspace::pr_status(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
@@ -421,7 +461,10 @@ impl Machine {
                 let how = workspace::OpenHow { folder, reveal };
                 json(workspace::open_in(&cwd, &editor, path.as_deref(), how, &home(), self.launch.path_env.as_deref())?)
             }
-            Call::Commands { tab } => json(commands::list(&home(), &self.tab(&tab, |t| t.cwd.clone())?)),
+            Call::Commands { tab } => {
+                let (cwd, account) = self.tab(&tab, |t| (t.cwd.clone(), t.account.clone()))?;
+                json(commands::list(&self.accounts.home(&account), &cwd))
+            }
             Call::Files { tab } => json(files::list(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())),
             Call::Branches { tab } => json(branches::of(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
             Call::Checkout { tab, branch, create, from } => {
@@ -440,7 +483,7 @@ impl Machine {
             }
             Call::Git { tab, step } => {
                 let cwd = self.idle_folder(&tab, "Run git")?;
-                json(branches::run_step(&cwd, &step, &self.launch.claude, self.launch.path_env.as_deref())?)
+                json(branches::run_step(&cwd, &step, &self.launch.bin(Provider::Claude), &self.headless_env(&tab)?, self.launch.path_env.as_deref())?)
             }
             Call::SetWorkspace { tab, worktree, cols, rows } => json(self.set_workspace(&tab, worktree.as_deref(), cols, rows)?),
             Call::PullRequests { paths, state, involvement, query, filters, limit } => {
@@ -448,7 +491,10 @@ impl Machine {
                 json(pulls::list(&home(), path, self.gh_repos(&paths), state, involvement, &query, &filters, limit)?)
             }
             Call::PullRequestStack { repo, number } => json(pulls::stack(&home(), self.launch.path_env.as_deref(), &repo, number)?),
-            Call::TokenUsage { since } => json(usage::read(&thread::projects_dir(&home()), since, &usage::rates(self.rates_file.as_deref()), &usage::PriceBook::load(self.prices_file().as_deref()))),
+            Call::TokenUsage { since } => {
+                let homes: Vec<PathBuf> = self.accounts.list().iter().filter(|a| a.provider == Provider::Claude).map(|a| self.accounts.home(a).join("projects")).collect();
+                json(usage::read(&homes, since, &usage::rates(self.rates_file.as_deref()), &usage::PriceBook::load(self.prices_file().as_deref())))
+            }
             Call::UsagePrices => json(usage::PriceBook::load(self.prices_file().as_deref())),
             Call::SetUsagePrices { prices, aliases } => {
                 let file = self.prices_file().ok_or("this machine keeps no settings")?;
@@ -457,7 +503,7 @@ impl Machine {
                 book.save(&file)?;
                 json(book)
             }
-            Call::UsageLimits => json(usage::limits(&self.launch.claude, &home(), self.launch.path_env.as_deref())?),
+            Call::UsageLimits => json(usage::limits(&self.launch.bin(Provider::Claude), &home(), self.launch.path_env.as_deref())?),
             Call::PullRequestFilterOptions { paths, kind, query } => json(pulls::filter_options(&home(), self.launch.path_env.as_deref(), &self.gh_repos(&paths), kind, &query)?),
             Call::PullRequestFiles { host, repo, number } => json(pulls::files(&home(), self.launch.path_env.as_deref(), &host, &repo, number)?),
             Call::PageMeta { url } => json(panel::page_meta(&url)?),
@@ -471,7 +517,7 @@ impl Machine {
             Call::PrComment { tab, pr, body, reply_to } => json(panel::pr_comment(&self.tab(&tab, |t| t.cwd.clone())?, &pr, &body, reply_to.as_deref(), self.launch.path_env.as_deref())?),
             Call::PrReview { tab, pr, event, body, comments } => json(panel::pr_review(&self.tab(&tab, |t| t.cwd.clone())?, &pr, event, &body, &comments, self.launch.path_env.as_deref())?),
             Call::PrRerun { tab, check } => json(panel::pr_rerun(&self.tab(&tab, |t| t.cwd.clone())?, &check, self.launch.path_env.as_deref())?),
-            Call::PrGuide { tab, pr, write } => json(panel::guide(&self.tab(&tab, |t| t.cwd.clone())?, &pr, write, &self.guides, &self.launch.claude, self.launch.path_env.as_deref())?),
+            Call::PrGuide { tab, pr, write } => json(panel::guide(&self.tab(&tab, |t| t.cwd.clone())?, &pr, write, &self.guides, &self.launch.bin(Provider::Claude), &self.headless_env(&tab)?, self.launch.path_env.as_deref())?),
             Call::PrChange { tab, pr, change } => json(panel::pr_change(&self.tab(&tab, |t| t.cwd.clone())?, &pr, &change, self.launch.path_env.as_deref())?),
             Call::PrCandidates { tab, pr, of } => json(panel::pr_candidates(&self.tab(&tab, |t| t.cwd.clone())?, &pr, of, self.launch.path_env.as_deref())?),
             Call::PrStack { tab, pr, action, method, heads } => json(panel::pr_stack(&self.tab(&tab, |t| t.cwd.clone())?, &pr, action, method.unwrap_or(panel::MergeMethod::Merge), &heads, self.launch.path_env.as_deref())?),
@@ -505,10 +551,11 @@ impl Machine {
         }
     }
 
-    /// The tab's transcript file.
+    /// The tab's transcript file, in the home of the account it runs under.
     fn transcript(&self, tab: &str) -> Result<PathBuf, String> {
-        let session = self.tab(tab, |t| t.claude_session.clone())?.ok_or("this thread has no conversation yet")?;
-        thread::find(&thread::projects_dir(&home()), &session).ok_or_else(|| "Claude Code's transcript of this conversation is gone".into())
+        let (session, account) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone()))?;
+        let session = session.ok_or("this thread has no conversation yet")?;
+        self.find_transcript(&account, &session).ok_or_else(|| "Claude Code's transcript of this conversation is gone".into())
     }
 
     /// Copies the tab's conversation up to `cut` under a new session id, with the turns pinned saved for
@@ -576,20 +623,25 @@ impl Machine {
         }
     }
 
+    /// The session's transcript, in the home of the account it ran under.
+    fn find_transcript(&self, account: &Account, session: &str) -> Option<PathBuf> {
+        thread::find(&self.accounts.home(account).join("projects"), session)
+    }
+
     /// Opens a tab beside `tab` whose claude resumes its conversation through the message `through`, as
     /// T3 Code's "Fork from this response" does, and returns the new tab's id.
     pub fn fork(&self, tab: &str, through: &str) -> Result<TabId, String> {
-        let (cwd, env, bypass) = self.tab(tab, |t| (t.cwd.clone(), t.env.clone(), t.bypass))?;
+        let (cwd, account, env, bypass) = self.tab(tab, |t| (t.cwd.clone(), t.account.clone(), t.env.clone(), t.bypass))?;
         let new = self.fork_session(tab, thread::Cut::Through(through), true)?.ok_or("there is nothing to fork before this message")?;
-        let id = self.add_tab(cwd, vec!["--resume".into(), new.clone()], env, bypass, Some(new));
+        let id = self.add_tab(cwd, account, vec!["--resume".into(), new.clone()], env, bypass, Some(new));
         self.emit_tabs();
         Ok(id)
     }
 
     /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
-        let (session, process) = self.tab(tab, |t| (t.claude_session.clone(), t.session.as_ref().and(t.started)))?;
-        let Some(file) = session.as_deref().and_then(|s| thread::find(&thread::projects_dir(&home()), s)) else {
+        let (session, account, process) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.session.as_ref().and(t.started)))?;
+        let Some(file) = session.as_deref().and_then(|s| self.find_transcript(&account, s)) else {
             return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: vec![] });
         };
         let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
@@ -609,23 +661,60 @@ impl Machine {
     }
 
     /// Adds a tab on the project at `path`, or the default folder, and returns its id.
-    /// With `bypass` the tab's claude never asks for permission.
-    pub fn open_tab(&self, path: Option<String>, bypass: bool) -> TabId {
+    /// With `bypass` the tab's agent never asks for permission.
+    pub fn open_tab(&self, path: Option<String>, bypass: bool) -> Result<TabId, String> {
         let cwd = match path {
             Some(path) if Path::new(&path) == self.scratch => self.scratch.clone(),
             Some(path) => self.open_project(path.into()),
             None => self.default_cwd.clone(),
         };
-        let id = self.add_tab(cwd, vec![], vec![], bypass, None);
+        let account = self.account_for(None, &cwd)?;
+        let id = self.add_tab(cwd, account, vec![], vec![], bypass, None);
         self.emit_tabs();
-        id
+        Ok(id)
+    }
+
+    /// The account a session in `cwd` runs under: the one `explicit` names, else its project's,
+    /// else the default one. A project whose account was removed falls back to the default.
+    pub fn account_for(&self, explicit: Option<&str>, cwd: &Path) -> Result<Account, String> {
+        if let Some(id) = explicit.filter(|id| !id.is_empty()) {
+            return self.accounts.get(id).ok_or_else(|| format!("no account {id} on this machine"));
+        }
+        let project = history::project_of(cwd);
+        let chosen = self.projects.lock().unwrap().iter().find(|p| p.path == project).and_then(|p| p.account.clone());
+        Ok(chosen.and_then(|id| self.accounts.get(&id)).unwrap_or_else(|| Account::builtin(Provider::Claude)))
+    }
+
+    /// The env of a headless `claude -p` beside the tab: its account's, or the built-in one's
+    /// when the tab runs Codex.
+    fn headless_env(&self, tab: &str) -> Result<Vec<(String, String)>, String> {
+        let account = self.tab(tab, |t| t.account.clone())?;
+        Ok(self.accounts.env(&if account.provider == Provider::Claude { account } else { Account::builtin(Provider::Claude) }))
+    }
+
+    /// Who each account's CLI says is signed in, asked of every account at once.
+    pub fn list_accounts(&self) -> Vec<accounts::View> {
+        std::thread::scope(|scope| {
+            let asked: Vec<_> = self.accounts.list().into_iter().map(|a| scope.spawn(move || self.view_account(a))).collect();
+            asked.into_iter().map(|h| h.join().unwrap()).collect()
+        })
+    }
+
+    fn view_account(&self, account: Account) -> accounts::View {
+        let status = self.status(&account);
+        accounts::View::new(account, status)
+    }
+
+    fn status(&self, account: &Account) -> accounts::Status {
+        self.accounts.status(account, &self.launch.bin(account.provider), self.launch.path_env.as_deref())
     }
 
     /// Adds a tab in the folder kept for threads without a project, which no project lists, and
     /// returns its id.
     pub fn open_scratch(&self, bypass: bool) -> Result<TabId, String> {
         std::fs::create_dir_all(&self.scratch).map_err(|e| format!("could not make {}: {e}", self.scratch.display()))?;
-        let id = self.add_tab(self.scratch.clone(), vec![], vec![], bypass, None);
+        let account = self.account_for(None, &self.scratch)?;
+        let id = self.add_tab(self.scratch.clone(), account, vec![], vec![], bypass, None);
         self.emit_tabs();
         Ok(id)
     }
@@ -642,14 +731,23 @@ impl Machine {
     }
 
     /// Adds a tab for a connector's run without starting it, and returns its id. Refused when
-    /// the run's folder can't be found or cloned here.
+    /// the run's folder can't be found or cloned here, or its account can't run it here.
     pub fn open_run(&self, run: &RunSpec) -> Result<TabId, String> {
         let cwd = self.find_folder(&run.folder, run.repo.as_deref(), run.token.as_deref())?;
+        let account = self.account_for(run.account.as_deref(), &cwd)?;
+        // The prompt reports through pinned's hooks and commands, which only reach Claude Code.
+        if !account.provider.spec().harness {
+            return Err(format!("account {} runs {}, which can't run a connector's session", account.id, account.provider.spec().name));
+        }
+        // The built-in login ran every run before accounts existed, so only an added one is asked.
+        if !account.is_builtin() && !self.status(&account).signed_in {
+            return Err(format!("account {} is not signed in on this machine", account.id));
+        }
         let exe = self.launch.exe.display().to_string();
         let args = run.args.iter().map(|a| a.replace(EXE_PLACEHOLDER, &exe)).collect();
         // A run resuming a conversation shows its transcript before claude's first hook names it.
         let resumed = run.args.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone());
-        let id = self.add_tab(cwd, args, run.env.clone(), false, resumed);
+        let id = self.add_tab(cwd, account, args, run.env.clone(), false, resumed);
         self.emit_tabs();
         Ok(id)
     }
@@ -672,10 +770,24 @@ impl Machine {
         Ok(id)
     }
 
-    /// Starts claude in the tab, replacing a session already running there, and returns its
+    /// Opens a tab running the CLI's login for the account, in the account's home, and returns its id.
+    pub fn sign_in(&self, account: &str) -> Result<TabId, String> {
+        let account = self.accounts.get(account).ok_or_else(|| format!("no account {account} on this machine"))?;
+        let home = self.accounts.home(&account);
+        std::fs::create_dir_all(&home).map_err(|e| format!("could not make {}: {e}", home.display()))?;
+        let id = self.add_tab(home, account, vec![], vec![], false, None);
+        self.tab(&id, |t| t.program = Program::SignIn)?;
+        if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
+            self.close_tab(&id);
+            return Err(e);
+        }
+        Ok(id)
+    }
+
+    /// Starts the tab's program, replacing a session already running there, and returns its
     /// folder. Viewers stay attached and see the new session from its first byte.
     pub fn start_claude(&self, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
-        let (cwd, args, env, bypass) = self.tab(tab, |t| {
+        let (cwd, account, program, args, env, bypass) = self.tab(tab, |t| {
             // Without launch arguments this is a fresh conversation, not the one recorded before.
             if t.launch.is_empty() {
                 t.claude_session = None;
@@ -685,18 +797,59 @@ impl Machine {
             if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
                 args.extend(["--model".to_owned(), model]);
             }
-            (t.cwd.clone(), args, t.env.clone(), t.bypass)
+            (t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass)
         })?;
         let mut args = args;
         if self.device_agents.as_ref().is_some_and(|f| f.exists()) {
             args.extend(["--append-system-prompt".to_owned(), crate::device::AGENT_PROMPT.to_owned()]);
         }
         self.save_sessions();
-        let cmd = self.launch.command(tab, &cwd, bypass, args, &env);
+        let env = [self.accounts.env(&account), env].concat();
+        let cmd = self.launch.command(program, account.provider, tab, &cwd, bypass, args, &env);
         self.spawn(tab, cmd, pty::size(cols, rows))?;
         self.continue_when_limit_lifts(tab);
         self.emit_tabs();
         Ok(cwd.display().to_string())
+    }
+
+    /// Moves the tab's conversation to `account` and restarts it there, returning its folder. The
+    /// transcript is copied into the account's home, where `--resume` finds it, and a turn that
+    /// stopped, as on a usage limit, continues at once instead of waiting for the old account.
+    pub fn switch_account(&self, tab: &str, account: &str, cols: u16, rows: u16) -> Result<String, String> {
+        let to = self.accounts.get(account).ok_or_else(|| format!("no account {account} on this machine"))?;
+        let (from, program, session, working) = self.tab(tab, |t| {
+            let working = t.status == Some(AgentStatus::Working) || (t.status == Some(AgentStatus::NeedsInput) && t.interrupted);
+            (t.account.clone(), t.program, t.claude_session.clone(), working)
+        })?;
+        if program != Program::Agent {
+            return Err("a sign-in tab has no conversation to move".into());
+        }
+        if to.provider != from.provider {
+            return Err(format!("account {} runs {}, which can't resume a {} conversation", to.id, to.provider.spec().name, from.provider.spec().name));
+        }
+        if to.id == from.id {
+            return self.tab(tab, |t| t.cwd.display().to_string());
+        }
+        if working {
+            return Err("claude is working in this tab. Switch accounts when the turn ends.".into());
+        }
+        if !self.status(&to).signed_in {
+            return Err(format!("account {} is not signed in on this machine", to.id));
+        }
+        if let Some(session) = &session {
+            let file = self.find_transcript(&from, session).ok_or_else(|| format!("could not find the transcript of {session} under account {}", from.id))?;
+            let project = file.parent().and_then(Path::file_name).ok_or("the transcript has no project folder")?;
+            let into = self.accounts.home(&to).join("projects").join(project);
+            std::fs::create_dir_all(&into).and_then(|_| copy_tree(file.parent().unwrap(), &into, session)).map_err(|e| format!("could not copy the conversation to {}: {e}", to.id))?;
+        }
+        self.tab(tab, |t| {
+            t.account = to;
+            t.resume_at = None;
+            if let Some(saved) = t.saved() {
+                (t.launch, t.resume_at) = saved.reopen(unix_now());
+            }
+        })?;
+        self.start_claude(tab, cols, rows)
     }
 
     /// Turns the tab's permission skipping on or off and returns its folder. Claude reads the flag
@@ -910,7 +1063,8 @@ impl Machine {
             return Err(format!("{path} is not a folder on this machine"));
         }
         let dir = self.open_project(path.into());
-        self.tab(tab, |t| t.cwd = dir.clone())?;
+        let account = self.account_for(None, &dir)?;
+        self.tab(tab, |t| (t.cwd, t.account) = (dir.clone(), account))?;
         self.emit_tabs();
         Ok(dir.display().to_string())
     }
@@ -927,15 +1081,34 @@ impl Machine {
     }
 
     pub fn list_projects(&self) -> Vec<ProjectView> {
-        let projects = self.projects.lock().unwrap();
-        projects::recent(&projects)
-            .into_iter()
-            .map(|p| ProjectView {
-                path: p.path.display().to_string(),
-                name: p.path.file_name().map_or_else(|| "/".into(), |n| n.to_string_lossy().into_owned()),
-                repo: git_remote(&p.path).and_then(|remote| repo_key(&remote)),
-            })
-            .collect()
+        let paths: Vec<PathBuf> = projects::recent(&self.projects.lock().unwrap()).into_iter().map(|p| p.path.clone()).collect();
+        paths.iter().map(|path| self.project_view(path)).collect()
+    }
+
+    fn project_view(&self, path: &Path) -> ProjectView {
+        ProjectView {
+            path: path.display().to_string(),
+            name: path.file_name().map_or_else(|| "/".into(), |n| n.to_string_lossy().into_owned()),
+            repo: git_remote(path).and_then(|remote| repo_key(&remote)),
+            account: self.account_for(None, path).map_or_else(|_| accounts::default_account(), |a| a.id),
+        }
+    }
+
+    /// Runs the project's later sessions under `account`, or the default account for none.
+    pub fn set_project_account(&self, path: &str, account: Option<String>) -> Result<ProjectView, String> {
+        if let Some(id) = account.as_deref().filter(|id| self.accounts.get(id).is_none()) {
+            return Err(format!("no account {id} on this machine"));
+        }
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+        {
+            let mut projects = self.projects.lock().unwrap();
+            let project = projects.iter_mut().find(|p| p.path == path).ok_or_else(|| format!("{} is not a project on this machine", path.display()))?;
+            project.account = account;
+            if let Some(file) = &self.projects_file {
+                projects::save(file, &projects);
+            }
+        }
+        Ok(self.project_view(&path))
     }
 
     /// The projects this machine syncs: the most recently opened checkout of each git origin.
@@ -950,9 +1123,11 @@ impl Machine {
                 let repo = git_remote(&path)?;
                 let key = repo_key(&repo)?;
                 let name = repo_name(&repo).unwrap_or_default().to_owned();
+                let account = self.account_for(None, &path).ok()?;
                 seen.insert(key.clone()).then(|| sync::Checkout {
                     project: sync::Project { key, name, repo },
                     history: self.history_dir.as_ref().map(|dir| history::file_for(dir, &path)),
+                    claude_home: (account.provider == Provider::Claude).then(|| self.accounts.home(&account)),
                     path,
                 })
             })
@@ -1070,11 +1245,13 @@ impl Machine {
         let ids: Vec<TabId> = sessions::load(file)
             .into_iter()
             .filter(|s| s.cwd.is_dir())
-            .map(|s| {
+            .filter_map(|s| {
+                // The transcript is in its account's home: with that account gone, nothing can resume it.
+                let account = self.account_for(Some(&s.account), &s.cwd).ok()?;
                 let (launch, resume_at) = s.reopen(now);
-                let id = self.add_tab(s.cwd, launch, s.env, s.bypass, Some(s.session));
+                let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session));
                 let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model) = (s.interrupted, resume_at, s.held, s.model));
-                id
+                Some(id)
             })
             .collect();
         self.emit_tabs();
@@ -1085,8 +1262,9 @@ impl Machine {
         ids
     }
 
-    pub fn usage(&self) -> Usage {
-        *self.usage.lock().unwrap()
+    /// Each account's usage, as its sessions last reported it.
+    pub fn usage(&self) -> BTreeMap<accounts::AccountId, Usage> {
+        self.usage.lock().unwrap().clone()
     }
 
     /// Answers the hook socket. Hook events and usage update the tabs; every other message, a
@@ -1100,13 +1278,15 @@ impl Machine {
                     machine.record_event(event);
                     Ok(String::new())
                 }
-                Message::Usage(report) => {
+                Message::Usage { usage: report, account } => {
+                    let account = account.unwrap_or_else(accounts::default_account);
                     let usage = {
-                        let mut usage = machine.usage.lock().unwrap();
-                        *usage = report.over(*usage, unix_now());
-                        *usage
+                        let mut all = machine.usage.lock().unwrap();
+                        let known = all.entry(account.clone()).or_default();
+                        *known = report.over(*known, unix_now());
+                        *known
                     };
-                    machine.emit(Event::Usage { usage });
+                    machine.emit(Event::Usage { usage, account });
                     Ok(String::new())
                 }
                 message => other(message),
@@ -1141,10 +1321,12 @@ impl Machine {
         self.tabs.lock().unwrap().get_mut(id).map(f).ok_or_else(|| format!("no tab {id}"))
     }
 
-    fn add_tab(&self, cwd: PathBuf, launch: Vec<String>, env: Vec<(String, String)>, bypass: bool, claude_session: Option<String>) -> TabId {
+    fn add_tab(&self, cwd: PathBuf, account: Account, launch: Vec<String>, env: Vec<(String, String)>, bypass: bool, claude_session: Option<String>) -> TabId {
         let id = format!("tab-{}", self.next_tab.fetch_add(1, Ordering::Relaxed));
         let tab = Tab {
             cwd,
+            account,
+            program: Program::Agent,
             session: None,
             started: None,
             launch,
@@ -1248,8 +1430,8 @@ impl Machine {
     /// Reads what the tab's transcript gained since the last read, outside the tabs lock, and
     /// returns the turns counted so far. `None` when the tab has no transcript to read.
     fn read_stats(&self, tab: &str) -> Option<u32> {
-        let (session, mut tally) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone()))).ok()??;
-        let file = thread::find(&thread::projects_dir(&home()), &session)?;
+        let (session, mut tally, account) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone(), t.account.clone()))).ok()??;
+        let file = self.find_transcript(&account, &session)?;
         tally.advance(&file).ok()?;
         let turns = tally.turns;
         self.tab(tab, |t| {
@@ -1372,12 +1554,11 @@ impl Machine {
         if query.trim().chars().count() < 2 {
             return vec![];
         }
-        let sessions: Vec<(TabId, String, u64)> = self.tabs.lock().unwrap().iter().filter_map(|(id, t)| Some((id.clone(), t.claude_session.clone()?, t.view(id).updated.unwrap_or(0)))).collect();
-        let projects = thread::projects_dir(&home());
+        let sessions: Vec<(TabId, Account, String, u64)> = self.tabs.lock().unwrap().iter().filter_map(|(id, t)| Some((id.clone(), t.account.clone(), t.claude_session.clone()?, t.view(id).updated.unwrap_or(0)))).collect();
         let mut found: Vec<(ThreadMatch, u64)> = sessions
             .into_iter()
-            .filter_map(|(tab, session, updated)| {
-                let found = thread::search(&thread::find(&projects, &session)?, query).ok()??;
+            .filter_map(|(tab, account, session, updated)| {
+                let found = thread::search(&self.find_transcript(&account, &session)?, query).ok()??;
                 Some((ThreadMatch { tab, found }, updated))
             })
             .collect();
@@ -1409,6 +1590,29 @@ impl Machine {
     }
 }
 
+/// Copies `<session>.jsonl` and the `<session>` folder of its subagents from `from` into `into`.
+fn copy_tree(from: &Path, into: &Path, session: &str) -> std::io::Result<()> {
+    let name = format!("{session}.jsonl");
+    std::fs::copy(from.join(&name), into.join(&name))?;
+    copy_dir(&from.join(session), &into.join(session))
+}
+
+fn copy_dir(from: &Path, into: &Path) -> std::io::Result<()> {
+    if !from.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(into)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = into.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
 #[cfg(unix)]
 const HOME_ENV: &str = "HOME";
 // Where Claude Code looks for ~/.claude on Windows; HOME there is Git Bash's, when set at all.
@@ -1530,20 +1734,24 @@ fn clone_once(repo: &str, into: &Path, config: Option<&(&str, String)>) -> Resul
     }
 }
 
-#[cfg(unix)]
-const CLAUDE: [&str; 1] = ["claude"];
-// The native installer's binary first, then npm's shim.
-#[cfg(windows)]
-const CLAUDE: [&str; 2] = ["claude.exe", "claude.cmd"];
+/// The files `name` goes by on PATH: on Windows the native installer's binary first, then npm's shim.
+fn bin_names(name: &str) -> Vec<String> {
+    if cfg!(windows) {
+        vec![format!("{name}.exe"), format!("{name}.cmd")]
+    } else {
+        vec![name.to_owned()]
+    }
+}
 
-/// The first of `CLAUDE` found on `path_env`, or where the native installer puts claude.
-fn find_claude(path_env: Option<&str>) -> PathBuf {
+/// The first of `name`'s files found on `path_env`, or where the native installer puts it.
+fn find_bin(name: &str, path_env: Option<&str>) -> PathBuf {
     let dirs: Vec<PathBuf> = path_env.map(|path| std::env::split_paths(path).collect()).unwrap_or_default();
-    CLAUDE
+    let names = bin_names(name);
+    names
         .iter()
         .flat_map(|name| dirs.iter().map(move |dir| dir.join(name)))
         .find(|p| p.is_file())
-        .unwrap_or_else(|| home().join(".local").join("bin").join(CLAUDE[0]))
+        .unwrap_or_else(|| home().join(".local").join("bin").join(&names[0]))
 }
 
 /// Apps opened from Finder inherit launchd's bare PATH. Ask the user's login shell for the
@@ -1610,7 +1818,7 @@ mod tests {
     fn launch() -> Launch {
         Launch {
             exe: "/opt/pinned/bin/pinned".into(),
-            claude: "claude".into(),
+            bins: BTreeMap::new(),
             path_env: None,
             settings: "s".into(),
             mcp_config: None,
@@ -1640,7 +1848,7 @@ mod tests {
 
     #[cfg(unix)]
     fn running(m: &Machine, env: Vec<(String, String)>, script: &str) -> TabId {
-        let id = m.add_tab("/repo".into(), vec![], env, false, None);
+        let id = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env, false, None);
         m.spawn(&id, sh(script), pty::size(80, 24)).unwrap();
         id
     }
@@ -1714,7 +1922,7 @@ mod tests {
         running(&m, session_env("c2", &Subject::LinearIssue { issue: "uuid".into() }), "sleep 30");
         running(&m, slack_env("c9", "1792400050.000200"), "sleep 30");
         running(&m, slack_env("c2", "1792499999.000100"), "sleep 30");
-        m.add_tab("/repo".into(), vec![], slack_env("c2", "1792400050.000200"), false, None);
+        m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], slack_env("c2", "1792400050.000200"), false, None);
         let d = delivery("c2", "1792400050.000200", &["hi"]);
         assert_eq!(m.live_tab(&d.env()), None, "the thread's only tab has no running session");
         assert!(!m.deliver(&d.env(), &d.text()));
@@ -1835,7 +2043,7 @@ mod tests {
         let events = Arc::new(Mutex::new(vec![]));
         let seen_events = events.clone();
         let m = Machine::new(launch(), None, Some("/repo".into()), move |e| seen_events.lock().unwrap().push(serde_json::to_value(e).unwrap()));
-        let tab = m.add_tab("/repo".into(), vec![], vec![], false, None);
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         let mut cmd = CommandBuilder::new("cmd.exe");
         cmd.args(["/c", "echo pinned on windows"]);
         m.spawn(&tab, cmd, pty::size(80, 24)).unwrap();
@@ -1860,10 +2068,10 @@ mod tests {
         std::fs::create_dir_all(&empty).unwrap();
         std::fs::create_dir_all(bin.join("claude.d")).unwrap();
         let path = std::env::join_paths([&empty, &bin]).unwrap().into_string().unwrap();
-        assert_eq!(find_claude(Some(&path)), PathBuf::from(std::env::var("HOME").unwrap()).join(".local/bin/claude"), "a folder is not claude");
+        assert_eq!(find_bin("claude", Some(&path)), PathBuf::from(std::env::var("HOME").unwrap()).join(".local/bin/claude"), "a folder is not claude");
         std::fs::write(bin.join("claude"), "").unwrap();
-        assert_eq!(find_claude(Some(&path)), bin.join("claude"));
-        assert_eq!(find_claude(None), PathBuf::from(std::env::var("HOME").unwrap()).join(".local/bin/claude"));
+        assert_eq!(find_bin("claude", Some(&path)), bin.join("claude"));
+        assert_eq!(find_bin("claude", None), PathBuf::from(std::env::var("HOME").unwrap()).join(".local/bin/claude"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1879,10 +2087,10 @@ mod tests {
         }
         std::fs::write(native.join("claude.exe"), "").unwrap();
         let path = std::env::join_paths([&npm, &native]).unwrap().into_string().unwrap();
-        assert_eq!(find_claude(Some(&path)), native.join("claude.exe"));
+        assert_eq!(find_bin("claude", Some(&path)), native.join("claude.exe"));
         std::fs::remove_file(native.join("claude.exe")).unwrap();
-        assert_eq!(find_claude(Some(&path)), npm.join("claude.cmd"));
-        assert_eq!(find_claude(None), PathBuf::from(std::env::var("USERPROFILE").unwrap()).join(r".local\bin\claude.exe"));
+        assert_eq!(find_bin("claude", Some(&path)), npm.join("claude.cmd"));
+        assert_eq!(find_bin("claude", None), PathBuf::from(std::env::var("USERPROFILE").unwrap()).join(r".local\bin\claude.exe"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1892,13 +2100,13 @@ mod tests {
         let heard = Arc::new(Mutex::new(vec![]));
         let seen = heard.clone();
         let id = m.subscribe(Box::new(move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap())));
-        let tab = m.open_tab(None, false);
+        let tab = m.open_tab(None, false).unwrap();
         m.unsubscribe(id);
         m.close_tab(&tab);
         assert_eq!(
             *heard.lock().unwrap(),
             [json!({ "kind": "tabs", "tabs": [{
-                "id": "tab-1", "cwd": "/repo", "bypass": false, "running": false, "status": null,
+                "id": "tab-1", "cwd": "/repo", "account": "claude", "program": "agent", "bypass": false, "running": false, "status": null,
                 "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1,
             }] })]
         );
@@ -1907,7 +2115,7 @@ mod tests {
     #[test]
     fn hook_events_set_the_tabs_status_title_and_question() {
         let m = machine();
-        let tab = m.open_tab(None, false);
+        let tab = m.open_tab(None, false).unwrap();
         let event = |status, title: Option<&str>, message: Option<&str>| AgentEvent {
             status,
             cwd: None,
@@ -1937,7 +2145,7 @@ mod tests {
         git(&dir, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
         git(&dir, &["branch", "other"]);
         let m = machine();
-        let tab = m.add_tab(dir.clone(), vec![], vec![], false, None);
+        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None };
         m.record_event(working.clone());
         let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false, from: None };
@@ -1969,7 +2177,7 @@ mod tests {
         assert_eq!(
             m.call(Call::Tabs),
             Ok(json!([{
-                "id": "tab-1", "cwd": "/repo", "bypass": true, "running": false, "status": null,
+                "id": "tab-1", "cwd": "/repo", "account": "claude", "program": "agent", "bypass": true, "running": false, "status": null,
                 "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1,
             }]))
         );
@@ -1989,8 +2197,8 @@ mod tests {
         let claude = dir.join("claude");
         std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { claude, ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
-        let tab = m.add_tab(dir.clone(), vec![], vec![], false, Some("s1".into()));
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into()));
         m.spawn(&tab, sh("sleep 30"), pty::size(80, 24)).unwrap();
         m.tab(&tab, |t| t.interrupted = true).unwrap();
         let (seen, sink) = viewer();
@@ -2016,8 +2224,8 @@ mod tests {
         let claude = dir.join("claude");
         std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { claude, ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
-        let tab = m.add_tab(dir.clone(), vec![], vec![], false, Some("s1".into()));
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into()));
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
 
@@ -2036,10 +2244,10 @@ mod tests {
         let claude = dir.join("claude");
         std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { claude, ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let m = Machine::new(Launch { bins: [(Provider::Claude, claude)].into_iter().collect(), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
         assert_eq!(m.call(Call::DeviceAgents { allow: None }), Ok(json!(false)));
         assert_eq!(m.call(Call::DeviceAgents { allow: Some(true) }), Ok(json!(true)));
-        let tab = m.add_tab(dir.clone(), vec![], vec![], false, None);
+        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
         m.start_claude(&tab, 80, 24).unwrap();
@@ -2059,9 +2267,9 @@ mod tests {
         assert_eq!(m.view(&tab).unwrap().cwd, dir.join("scratch").display().to_string());
         assert!(dir.join("scratch").is_dir());
         assert_eq!(m.call(Call::Workspace { tab }).unwrap()["scratch"], true);
-        let again = m.open_tab(Some(dir.join("scratch").display().to_string()), false);
+        let again = m.open_tab(Some(dir.join("scratch").display().to_string()), false).unwrap();
         assert_eq!(m.call(Call::Workspace { tab: again }).unwrap()["scratch"], true);
-        let other = m.open_tab(None, false);
+        let other = m.open_tab(None, false).unwrap();
         assert_eq!(m.call(Call::Workspace { tab: other }).unwrap()["scratch"], false);
         assert_eq!(m.list_projects().iter().map(|p| p.path.clone()).collect::<Vec<_>>(), [project.display().to_string()], "the scratch folder joined the projects");
         let _ = std::fs::remove_dir_all(dir);
@@ -2070,7 +2278,7 @@ mod tests {
     #[test]
     fn a_session_held_at_its_usage_limit_stays_held_until_the_next_turn() {
         let m = machine();
-        let tab = m.open_tab(None, false);
+        let tab = m.open_tab(None, false).unwrap();
         let failed = |resume_at| AgentEvent { status: AgentStatus::Failed, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at, prompt: None, snapshot: None };
         m.record_status(&tab, &failed(Some(1792400000)));
         m.call(Call::AutoResume { tab: tab.clone(), on: false }).unwrap();
@@ -2096,8 +2304,8 @@ mod tests {
         let claude = dir.join("claude");
         std::fs::write(&claude, "#!/bin/sh\npwd; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { claude, ..launch() }, None, None, |_| {});
-        let tab = m.add_tab(std::fs::canonicalize(&repo).unwrap(), vec![], vec![], false, None);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, None, |_| {});
+        let tab = m.add_tab(std::fs::canonicalize(&repo).unwrap(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
 
@@ -2119,8 +2327,8 @@ mod tests {
         let claude = dir.join("claude");
         std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { claude, ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
-        let tab = m.add_tab(dir.clone(), vec![], vec![], false, Some("s1".into()));
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into()));
         m.spawn(&tab, sh("sleep 30"), pty::size(80, 24)).unwrap();
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
@@ -2135,13 +2343,14 @@ mod tests {
     #[test]
     fn a_run_opens_in_its_folder_with_this_machines_binary() {
         let dir = temp("run-folder");
-        let m = machine();
+        let m = Machine::new(Launch { bins: fake_bins(&dir.join(".bin")), ..launch() }, None, Some("/repo".into()), |_| {});
         let run = RunSpec {
             folder: dir.display().to_string(),
             repo: Some("git@github.com:acme/app.git".into()),
             args: vec!["--name".into(), "ENG-7".into(), "Run `'{{pinned}}' stage coding` first".into()],
             env: vec![("PINNED_CONNECTOR".into(), "c1".into())],
             token: None,
+            account: None,
         };
         let id = m.open_run(&run).unwrap();
         let view = m.view(&id).unwrap();
@@ -2156,7 +2365,7 @@ mod tests {
     fn a_run_resuming_a_session_reads_its_transcript_from_the_start() {
         let dir = temp("run-resume");
         let m = machine();
-        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec!["--resume".into(), "s1".into()], env: vec![], token: None };
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec!["--resume".into(), "s1".into()], env: vec![], token: None, account: None };
         let id = m.open_run(&run).unwrap();
         assert_eq!(m.tab(&id, |t| t.claude_session.clone()).unwrap().as_deref(), Some("s1"));
         assert_eq!(m.thread(&id, 0).unwrap().session.as_deref(), Some("s1"));
@@ -2171,7 +2380,7 @@ mod tests {
     fn claude_does_not_inherit_the_session_pinned_was_started_from() {
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session");
         std::env::set_var("CLAUDECODE", "1");
-        let cmd = launch().command("tab-1", Path::new("/repo"), false, vec![], &[]);
+        let cmd = launch().command(Program::Agent, Provider::Claude, "tab-1", Path::new("/repo"), false, vec![], &[]);
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
@@ -2180,11 +2389,333 @@ mod tests {
     #[test]
     fn a_run_that_cannot_start_leaves_no_tab() {
         let dir = temp("run-unstartable");
-        let m = Machine::new(Launch { claude: "/nonexistent/claude".into(), ..launch() }, None, Some("/repo".into()), |_| {});
-        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec![], env: vec![], token: None };
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, "/nonexistent/claude".into())]), ..launch() }, None, Some("/repo".into()), |_| {});
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec![], env: vec![], token: None, account: None };
         assert!(m.run(&run).is_err());
         assert_eq!(m.tabs(), vec![]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Fake `claude` and `codex` that answer their status command like the real ones, signed in on
+    /// the default home and on a home holding a `signed-in` file, and otherwise print what they
+    /// were started with.
+    fn fake_bins(dir: &Path) -> BTreeMap<Provider, PathBuf> {
+        std::fs::create_dir_all(dir).unwrap();
+        let script = |name: &str, status: &str, home: &str, signed_in: &str, signed_out: &str| {
+            let path = dir.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nif [ \"$1 $2\" = \"{status}\" ]; then\n  [ -n \"${home}\" ] && [ ! -e \"${home}/signed-in\" ] && {{ echo '{signed_out}'; exit 1; }}\n  echo '{signed_in}'; exit 0\nfi\n\
+                     printf '%s|%s|%s|%s|%s\\n' \"$(basename \"$0\")\" \"$*\" \"$CLAUDE_CONFIG_DIR\" \"$CODEX_HOME\" \"$PINNED_ACCOUNT\"\nsleep 30\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            path
+        };
+        BTreeMap::from([
+            (Provider::Claude, script("claude", "auth status", "CLAUDE_CONFIG_DIR", r#"{"loggedIn":true,"email":"ana@acme.dev","orgName":"Acme","subscriptionType":"max"}"#, r#"{"loggedIn":false}"#)),
+            (Provider::Codex, script("codex", "login status", "CODEX_HOME", "Logged in using ChatGPT", "Not logged in")),
+        ])
+    }
+
+    fn accounts_machine(root: &Path) -> Arc<Machine> {
+        Machine::new(Launch { bins: fake_bins(&root.join("bin")), ..launch() }, Some(root.join("config")), None, |_| {})
+    }
+
+    /// Starts the tab and returns the first line its session printed.
+    fn first_line(m: &Machine, tab: &str) -> String {
+        let (seen, sink) = viewer();
+        m.attach(tab, "test".into(), sink).unwrap();
+        m.start_claude(tab, 200, 24).unwrap();
+        wait_for("the first line", || text(&seen).contains('\n'));
+        text(&seen)
+    }
+
+    #[test]
+    fn a_tab_runs_its_projects_account_in_that_accounts_home() {
+        let root = temp("account-tabs");
+        let m = accounts_machine(&root);
+        let (work_app, side_app, own_app) = (root.join("work-app"), root.join("side-app"), root.join("own-app"));
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        for (app, account) in [(&work_app, Some("work")), (&side_app, Some("side")), (&own_app, None)] {
+            std::fs::create_dir_all(app).unwrap();
+            m.open_project(app.clone());
+            m.call(Call::SetProjectAccount { path: app.display().to_string(), account: account.map(Into::into) }).unwrap();
+        }
+        let open = |app: &Path, bypass| m.open_tab(Some(app.display().to_string()), bypass).unwrap();
+        let config = root.join("config").display().to_string();
+        assert_eq!(first_line(&m, &open(&work_app, false)), format!("claude|--settings s --plugin-dir p|{config}/accounts/work||work\r\n"));
+        assert_eq!(first_line(&m, &open(&side_app, true)), format!("codex|--dangerously-bypass-approvals-and-sandbox||{config}/accounts/side|side\r\n"));
+        assert_eq!(first_line(&m, &open(&own_app, true)), "claude|--settings s --plugin-dir p --dangerously-skip-permissions|||claude\r\n");
+        assert_eq!(m.tabs().into_iter().map(|t| t.account).collect::<Vec<_>>(), ["work", "side", "claude"]);
+
+        let moved = m.open_tab(Some(own_app.display().to_string()), false).unwrap();
+        m.set_folder(&moved, &work_app.display().to_string()).unwrap();
+        assert_eq!(m.view(&moved).unwrap().account, "work", "a tab moved to another project takes that project's account");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_headless_claude_runs_under_the_tabs_claude_account() {
+        let root = temp("account-headless");
+        let claude = root.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\necho \"{\\\"title\\\":\\\"as $PINNED_ACCOUNT\\\"}\"\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        let title = |account: &str| {
+            let tab = m.add_tab(root.clone(), m.accounts.get(account).unwrap(), vec![], vec![], false, None);
+            m.call(Call::RegenerateTitle { tab, previous: String::new(), thread: "USER: hi".into() })
+        };
+        assert_eq!(title("work"), Ok(json!("as work")));
+        assert_eq!(title("side"), Ok(json!("as claude")), "a Codex tab asks the built-in Claude Code login");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn account_calls_answer_with_the_json_a_client_reads() {
+        let root = temp("account-calls");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let m = accounts_machine(&root);
+        m.open_project(app.clone());
+        let work = json!({
+            "id": "work", "provider": "claude", "name": "Work", "provider_name": "Claude Code", "builtin": false,
+            "signed_in": false, "email": null, "org": null, "plan": null,
+        });
+        assert_eq!(m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }), Ok(work.clone()));
+        assert_eq!(m.call(Call::AddAccount { provider: Provider::Codex, name: "work".into() }), Err("an account work already exists".into()));
+        assert_eq!(
+            m.call(Call::ListAccounts),
+            Ok(json!([
+                {
+                    "id": "claude", "provider": "claude", "name": "Claude Code", "provider_name": "Claude Code", "builtin": true,
+                    "signed_in": true, "email": "ana@acme.dev", "org": "Acme", "plan": "max",
+                },
+                {
+                    "id": "codex", "provider": "codex", "name": "Codex", "provider_name": "Codex", "builtin": true,
+                    "signed_in": true, "email": null, "org": null, "plan": null,
+                },
+                work,
+            ]))
+        );
+        let path = app.display().to_string();
+        assert_eq!(m.call(Call::SetProjectAccount { path: path.clone(), account: Some("work".into()) }), Ok(json!({ "path": path, "name": "app", "account": "work" })));
+        assert_eq!(m.call(Call::SetProjectAccount { path: path.clone(), account: Some("home".into()) }), Err("no account home on this machine".into()));
+        assert_eq!(
+            m.call(Call::SetProjectAccount { path: "/nonexistent/app".into(), account: None }),
+            Err("/nonexistent/app is not a project on this machine".into())
+        );
+        assert_eq!(m.call(Call::RemoveAccount { account: "claude".into() }), Err("claude is built in and can't be removed".into()));
+        assert_eq!(m.call(Call::RemoveAccount { account: "work".into() }), Ok(Value::Null));
+        assert_eq!(m.call(Call::ListProjects), Ok(json!([{ "path": path, "name": "app", "account": "claude" }])), "a project whose account is gone runs under the default one");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_run_starts_only_under_a_claude_account_signed_in_here_and_in_its_home() {
+        let root = temp("run-account");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let m = accounts_machine(&root);
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        m.open_project(app.clone());
+        let run = |account: Option<&str>| {
+            let spec = RunSpec { folder: app.display().to_string(), repo: None, args: vec!["Fix ENG-7".into()], env: vec![], token: None, account: account.map(Into::into) };
+            m.call(Call::Run { run: spec })
+        };
+        assert_eq!(run(Some("work")), Err("account work is not signed in on this machine".into()));
+        assert_eq!(run(Some("side")), Err("account side runs Codex, which can't run a connector's session".into()));
+        assert_eq!(run(Some("home")), Err("no account home on this machine".into()));
+        assert_eq!(m.tabs(), vec![], "a refused run leaves no tab");
+
+        let config = root.join("config").display().to_string();
+        std::fs::write(format!("{config}/accounts/work/signed-in"), "").unwrap();
+        let tab = run(Some("work")).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(tab.as_str().unwrap(), "test".into(), sink).unwrap();
+        wait_for("the session", || text(&seen).contains('\n'));
+        assert_eq!(text(&seen), format!("claude|--settings s --plugin-dir p Fix ENG-7|{config}/accounts/work||work\r\n"));
+
+        m.call(Call::SetProjectAccount { path: app.display().to_string(), account: Some("work".into()) }).unwrap();
+        let tab = run(None).unwrap();
+        assert_eq!(m.view(tab.as_str().unwrap()).unwrap().account, "work", "a connector that names no account runs under its project's");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn usage_is_kept_for_each_account_its_sessions_report() {
+        use std::io::{BufRead, Write};
+        let root = temp("usage");
+        let events = Arc::new(Mutex::new(vec![]));
+        let seen = events.clone();
+        let m = Machine::new(Launch { sock: root.join("sock"), ..launch() }, None, None, move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap()));
+        m.listen(|_| Err("not for this test".into())).unwrap();
+        let report = |line: &str| {
+            let mut sock = std::os::unix::net::UnixStream::connect(root.join("sock")).unwrap();
+            writeln!(sock, "{line}").unwrap();
+            std::io::BufReader::new(sock).read_line(&mut String::new()).unwrap();
+        };
+        report(r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":4102444800}}"#);
+        report(r#"{"kind":"usage","account":"work","seven_day":{"used_percentage":90.0,"resets_at":4102444800}}"#);
+        report(r#"{"kind":"usage","account":"work","five_hour":{"used_percentage":5.0,"resets_at":4102444800}}"#);
+        let window = |used: f64| json!({ "used_percentage": used, "resets_at": 4102444800u64 });
+        assert_eq!(
+            serde_json::to_value(m.usage()).unwrap(),
+            json!({ "claude": { "five_hour": window(23.5) }, "work": { "five_hour": window(5.0), "seven_day": window(90.0) } })
+        );
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&json!({ "kind": "usage", "usage": { "five_hour": window(5.0), "seven_day": window(90.0) }, "account": "work" }))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_project_syncs_the_claude_files_of_its_account() {
+        let root = temp("sync-account");
+        let m = accounts_machine(&root);
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        for (name, account) in [("own", None), ("work", Some("work")), ("side", Some("side"))] {
+            let app = root.join(name);
+            std::fs::create_dir_all(&app).unwrap();
+            git(&app, &["init", "-q"]);
+            git(&app, &["remote", "add", "origin", &format!("git@github.com:acme/{name}.git")]);
+            m.open_project(app.clone());
+            m.set_project_account(&app.display().to_string(), account.map(Into::into)).unwrap();
+        }
+        let homes: Vec<(String, Option<PathBuf>)> = m.checkouts().into_iter().map(|c| (c.project.name, c.claude_home)).collect();
+        assert_eq!(
+            homes.into_iter().collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                ("own".into(), Some(home().join(".claude"))),
+                ("side".into(), None),
+                ("work".into(), Some(root.join("config/accounts/work"))),
+            ])
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn signing_in_runs_the_providers_login_in_the_accounts_home_and_is_never_resumed() {
+        let root = temp("sign-in");
+        let m = accounts_machine(&root);
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        let config = root.join("config").display().to_string();
+        let tab = m.call(Call::SignIn { account: "work".into() }).unwrap();
+        assert_eq!(tab, json!("tab-1"));
+        let (seen, sink) = viewer();
+        m.attach("tab-1", "test".into(), sink).unwrap();
+        wait_for("the login", || text(&seen).contains('\n'));
+        assert_eq!(text(&seen), format!("claude|auth login|{config}/accounts/work||work\r\n"));
+        let view = m.view("tab-1").unwrap();
+        assert_eq!((view.cwd, view.account.as_str(), view.program, view.running), (format!("{config}/accounts/work"), "work", Program::SignIn, true));
+        m.record_session("tab-1", "s1".into(), None);
+        assert_eq!(sessions::load(&root.join("config/sessions.json")), vec![], "a login is not a session to resume");
+
+        let side = m.sign_in("side").unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&side, "test".into(), sink).unwrap();
+        wait_for("the login", || text(&seen).contains('\n'));
+        assert_eq!(text(&seen), format!("codex|login||{config}/accounts/side|side\r\n"));
+        assert_eq!(m.call(Call::SignIn { account: "home".into() }), Err("no account home on this machine".into()));
+        assert_eq!(m.tabs().len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn files_from_v0_7_0_load_and_run_under_the_default_account() {
+        let root = temp("v070");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(root.join("config/projects.json"), format!(r#"[{{"path": "{}", "last_opened": 1760000000}}]"#, app.display())).unwrap();
+        std::fs::write(
+            root.join("config/sessions.json"),
+            format!(r#"[{{"cwd": "{}", "session": "s1", "env": [], "bypass": false, "interrupted": false, "resume_at": null}}]"#, app.display()),
+        )
+        .unwrap();
+        let m = accounts_machine(&root);
+        assert_eq!(m.list_projects().into_iter().map(|p| p.account).collect::<Vec<_>>(), ["claude"]);
+        let tabs = m.restore_tabs();
+        assert_eq!(m.view(&tabs[0]).unwrap().account, "claude");
+        assert_eq!(first_line(&m, &tabs[0]), "claude|--settings s --plugin-dir p --resume s1|||claude\r\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_limited_session_moves_to_another_signed_in_account_and_continues_there() {
+        let root = temp("switch-account");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let m = accounts_machine(&root);
+        for (provider, name) in [(Provider::Claude, "Work"), (Provider::Claude, "Spare"), (Provider::Codex, "Side")] {
+            m.call(Call::AddAccount { provider, name: name.into() }).unwrap();
+        }
+        m.open_project(app.clone());
+        m.call(Call::SetProjectAccount { path: app.display().to_string(), account: Some("work".into()) }).unwrap();
+        let config = root.join("config").display().to_string();
+        let work = PathBuf::from(format!("{config}/accounts/work/projects/-app"));
+        std::fs::create_dir_all(work.join("s1/subagents")).unwrap();
+        std::fs::write(work.join("s1.jsonl"), "{}\n").unwrap();
+        std::fs::write(work.join("s1/subagents/agent-a.jsonl"), "{}\n").unwrap();
+        let tab = m.open_tab(Some(app.display().to_string()), false).unwrap();
+        m.tab(&tab, |t| (t.claude_session, t.interrupted, t.resume_at) = (Some("s1".into()), true, Some(unix_now() + 3600))).unwrap();
+        let switch = |account: &str| m.call(Call::SwitchAccount { tab: tab.clone(), account: account.into(), cols: 80, rows: 24 });
+
+        assert_eq!(switch("side"), Err("account side runs Codex, which can't resume a Claude Code conversation".into()));
+        assert_eq!(switch("home"), Err("no account home on this machine".into()));
+        assert_eq!(switch("spare"), Err("account spare is not signed in on this machine".into()));
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Working)).unwrap();
+        std::fs::write(format!("{config}/accounts/spare/signed-in"), "").unwrap();
+        assert_eq!(switch("spare"), Err("claude is working in this tab. Switch accounts when the turn ends.".into()));
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Failed)).unwrap();
+
+        assert_eq!(switch("spare"), Ok(json!(app.display().to_string())));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("the resumed session", || text(&seen).contains('\n'));
+        assert_eq!(text(&seen), format!("claude|--settings s --plugin-dir p --resume s1 Continue from where you left off.|{config}/accounts/spare||spare\r\n"));
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.account.as_str(), view.resume_at), ("spare", None));
+        let spare = PathBuf::from(format!("{config}/accounts/spare/projects/-app"));
+        assert!(spare.join("s1.jsonl").is_file() && spare.join("s1/subagents/agent-a.jsonl").is_file(), "the transcript and its subagents follow the conversation");
+        let kept: Value = serde_json::from_slice(&std::fs::read(root.join("config/sessions.json")).unwrap()).unwrap();
+        assert_eq!(kept[0]["account"], json!("spare"), "a restart resumes it under the new account");
+        assert_eq!(
+            m.call(Call::RemoveAccount { account: "spare".into() }),
+            Err("close the tabs that run under spare before removing it".into()),
+            "its saved session would not resume after a restart"
+        );
+        m.close_tab(&tab);
+        assert_eq!(m.call(Call::RemoveAccount { account: "spare".into() }), Ok(Value::Null));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_session_resumes_in_the_account_it_ran_under() {
+        let root = temp("resume-account");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(root.join("config/accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
+        let saved = |session: &str, account: &str| format!(r#"{{"cwd": "{}", "session": "{session}", "env": [], "account": "{account}"}}"#, app.display());
+        std::fs::write(root.join("config/sessions.json"), format!("[{}, {}]", saved("s1", "work"), saved("s2", "gone"))).unwrap();
+        let m = accounts_machine(&root);
+        let tabs = m.restore_tabs();
+        assert_eq!(tabs.len(), 1, "a session whose account is gone can't resume anywhere");
+        let config = root.join("config").display().to_string();
+        assert_eq!(first_line(&m, &tabs[0]), format!("claude|--settings s --plugin-dir p --resume s1|{config}/accounts/work||work\r\n"));
+        let kept: Value = serde_json::from_slice(&std::fs::read(root.join("config/sessions.json")).unwrap()).unwrap();
+        assert_eq!((&kept[0]["session"], &kept[0]["account"]), (&json!("s1"), &json!("work")));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2209,10 +2740,10 @@ mod tests {
             git(dir, &["init", "-q"]);
             git(dir, &["remote", "add", "origin", origin]);
         }
-        let m = machine();
+        let m = Machine::new(Launch { bins: fake_bins(&root.join("bin")), ..launch() }, None, Some("/repo".into()), |_| {});
         m.open_project(other);
         m.open_project(ours.clone());
-        let run = RunSpec { folder: "/Users/someone-else/app".into(), repo: Some("git@github.com:acme/app.git".into()), args: vec![], env: vec![], token: None };
+        let run = RunSpec { folder: "/Users/someone-else/app".into(), repo: Some("git@github.com:acme/app.git".into()), args: vec![], env: vec![], token: None, account: None };
         let id = m.open_run(&run).unwrap();
         assert_eq!(m.view(&id).unwrap().cwd, ours.display().to_string());
         let _ = std::fs::remove_dir_all(root);

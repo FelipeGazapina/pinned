@@ -155,7 +155,7 @@ fn get_opacity(panel: State<Panel>) -> u8 {
 }
 
 #[tauri::command]
-fn get_usage(machine: State<Arc<Machine>>) -> agent::Usage {
+fn get_usage(machine: State<Arc<Machine>>) -> std::collections::BTreeMap<String, agent::Usage> {
     machine.usage()
 }
 
@@ -359,7 +359,7 @@ fn main() {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),
                 agent::Message::ListReminders => Ok(handle.state::<reminders::Reminders>().list()),
                 agent::Message::CancelReminder { id } => handle.state::<reminders::Reminders>().cancel(id),
-                agent::Message::Agent(_) | agent::Message::Usage(_) => Err("the machine answers this itself".into()),
+                agent::Message::Agent(_) | agent::Message::Usage { .. } => Err("the machine answers this itself".into()),
                 callback => match handle.state::<account::Account>().forward(callback) {
                     Ok(answer) => answer,
                     Err(agent::Message::Stage { connector, subject, stage }) => tauri::async_runtime::block_on(

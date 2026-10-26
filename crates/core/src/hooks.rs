@@ -108,7 +108,7 @@ pub fn statusline() {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     if let (Some(usage), Ok(sock)) = (usage_from_status(&input), std::env::var(SOCK_ENV)) {
-        tell(&sock, &Message::Usage(usage));
+        tell(&sock, &Message::Usage { usage, account: std::env::var(crate::accounts::ACCOUNT_ENV).ok() });
     }
     let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| crate::machine::home().join(".claude"), PathBuf::from);
     if let Some(command) = user_statusline(&config_dir) {

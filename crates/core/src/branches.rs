@@ -177,7 +177,7 @@ pub enum GitStep {
 
 /// Runs `step` in `cwd`: what it answers is the commit message, the pull request's URL, or `null`.
 /// `claude` is the binary that writes a commit message.
-pub fn run_step(cwd: &Path, step: &GitStep, claude: &Path, path: Option<&str>) -> Result<Option<String>, String> {
+pub fn run_step(cwd: &Path, step: &GitStep, claude: &Path, env: &[(String, String)], path: Option<&str>) -> Result<Option<String>, String> {
     let git = |args: &[&str]| run(cwd, path, "git", args).map_err(said);
     let stage = |files: &[String]| -> Result<(), String> {
         if files.iter().any(|f| f.starts_with('-')) {
@@ -195,7 +195,7 @@ pub fn run_step(cwd: &Path, step: &GitStep, claude: &Path, path: Option<&str>) -
             diff.truncate((0..=diff.len().min(20_000)).rev().find(|i| diff.is_char_boundary(*i)).unwrap_or(0));
             let ask = format!("Write the git commit message for the change below. Answer with the message alone: an imperative subject of at most 72 characters, then a blank line and a short body only if it helps.\n\n{stat}\n{diff}");
             let mut command = crate::process::command(claude);
-            command.args(["-p", "--model", "haiku", &ask]).current_dir(cwd).stdin(Stdio::null());
+            command.args(["-p", "--model", "haiku", &ask]).current_dir(cwd).envs(env.iter().cloned()).stdin(Stdio::null());
             if let Some(path) = path {
                 command.env("PATH", path);
             }
@@ -332,7 +332,7 @@ mod tests {
         git(dir.path(), &["init", "-q", "--bare", "-b", "main", remote.to_str().unwrap()]);
         let repo = dir.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
-        run_step(&repo, &GitStep::Init, Path::new("/bin/false"), None).unwrap();
+        run_step(&repo, &GitStep::Init, Path::new("/bin/false"), &[], None).unwrap();
         git(&repo, &["symbolic-ref", "HEAD", "refs/heads/main"]);
         git(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
         git(&repo, &["commit", "-q", "--allow-empty", "-m", "first"]);
@@ -344,16 +344,16 @@ mod tests {
         std::fs::write(&claude, "#!/bin/sh\necho 'Add the a file'\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let files = vec!["a.txt".to_owned()];
-        let message = run_step(&repo, &GitStep::Message { files: files.clone() }, &claude, None).unwrap().unwrap();
+        let message = run_step(&repo, &GitStep::Message { files: files.clone() }, &claude, &[], None).unwrap().unwrap();
         assert_eq!(message, "Add the a file");
-        assert_eq!(run_step(&repo, &GitStep::Message { files: vec![] }, Path::new("/bin/false"), None).unwrap().unwrap(), "Update 2 files", "with no claude");
+        assert_eq!(run_step(&repo, &GitStep::Message { files: vec![] }, Path::new("/bin/false"), &[], None).unwrap().unwrap(), "Update 2 files", "with no claude");
         git(&repo, &["reset", "-q"]);
-        run_step(&repo, &GitStep::Commit { message, files }, &claude, None).unwrap();
+        run_step(&repo, &GitStep::Commit { message, files }, &claude, &[], None).unwrap();
         let b = of(&repo, None).unwrap();
         assert_eq!((b.changed, b.remote, b.detached), (vec!["b.txt".to_owned()], true, false), "b stayed out of the commit");
-        run_step(&repo, &GitStep::Push, &claude, None).unwrap();
+        run_step(&repo, &GitStep::Push, &claude, &[], None).unwrap();
         let b = of(&repo, None).unwrap();
         assert_eq!((b.upstream.as_deref(), b.ahead), (Some("origin/main"), 0));
-        assert!(run_step(&repo, &GitStep::Commit { message: "x".into(), files: vec!["--all".into()] }, &claude, None).is_err());
+        assert!(run_step(&repo, &GitStep::Commit { message: "x".into(), files: vec!["--all".into()] }, &claude, &[], None).is_err());
     }
 }

@@ -123,14 +123,16 @@ struct Tokens {
     speed: Option<String>,
 }
 
-/// Every transcript under `projects` with a line at or after `since`, summed per quarter hour,
+/// Every transcript under each of `projects` with a line at or after `since`, summed per quarter hour,
 /// model, session and speed, a mapped model counted as the one `book` maps it to. Claude Code
 /// repeats a message's usage on each of its content blocks and copies messages into resumed and
 /// forked sessions, so a message counts once, by id and request.
-pub fn read(projects: &Path, since: u64, rates: &RateTable, book: &PriceBook) -> Vec<Row> {
+pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBook) -> Vec<Row> {
     let targets = book.targets();
     let mut files = vec![];
-    walk(projects, since.saturating_sub(MTIME_SLACK), &mut files);
+    for dir in projects {
+        walk(dir, since.saturating_sub(MTIME_SLACK), &mut files);
+    }
     files.sort();
     let mut seen = HashSet::new();
     let mut sessions: HashMap<String, u32> = HashMap::new();
@@ -568,7 +570,7 @@ mod tests {
         std::fs::write(project.join("s1/subagents/agent-a.jsonl"), assistant("m6", "r6", "s1", "2026-10-24T10:40:00Z", "claude-opus-5-5", usage.clone())).unwrap();
 
         let since = unix_of("2026-10-24T00:00:00Z").unwrap();
-        let rows = read(dir.path(), since, &table(), &PriceBook::default());
+        let rows = read(&[dir.path().to_owned()], since, &table(), &PriceBook::default());
         let quarters: Vec<_> = rows.iter().map(|r| (r.at, r.model.as_str())).collect();
         let at = |iso| unix_of(iso).unwrap();
         assert_eq!(
@@ -622,7 +624,7 @@ mod tests {
         let mut book = PriceBook::default();
         let aliases = HashMap::from([("my-opus".to_owned(), Some("alias-mid".to_owned())), ("alias-mid".to_owned(), Some("claude-opus-5-5".to_owned())), ("loop-a".to_owned(), Some("loop-b".to_owned())), ("loop-b".to_owned(), Some("loop-a".to_owned()))]);
         book.apply(HashMap::new(), aliases).unwrap();
-        let rows = read(dir.path(), 0, &table(), &book);
+        let rows = read(&[dir.path().to_owned()], 0, &table(), &book);
         let models: Vec<_> = rows.iter().map(|r| (r.model.as_str(), r.input, r.cost.map(|c| c.input))).collect();
         assert_eq!(models, [("claude-opus-5-5", 2_000_000, Some(10.0)), ("loop-a", 1_000_000, None)], "a chain resolves, a loop stays as it was");
         assert!(book.apply(HashMap::new(), HashMap::from([("x".to_owned(), Some(" x ".to_owned()))])).is_err());

@@ -61,21 +61,20 @@ const BUILTIN: &[(&str, &str)] = &[
     ("usage", "Show session cost, plan usage, and activity stats"),
 ];
 
-/// The commands claude offers in `cwd`: its own, then the user's, the project's, and the enabled
-/// plugins', each with its skills, then those claude.ai syncs for the signed-in account. A name seen
-/// before is skipped, as claude shows it once.
-pub fn list(home: &Path, cwd: &Path) -> Vec<Command> {
-    let claude = home.join(".claude");
+/// The commands claude offers in `cwd` when its home is `claude`: its own, then the user's, the
+/// project's, and the enabled plugins', each with its skills, then those claude.ai syncs for the
+/// signed-in account. A name seen before is skipped, as claude shows it once.
+pub fn list(claude: &Path, cwd: &Path) -> Vec<Command> {
     let mut out: Vec<Command> = BUILTIN
         .iter()
         .map(|(name, description)| Command { name: (*name).into(), description: (*description).into(), source: "builtin", skill: false })
         .collect();
-    add_from(&mut out, &claude, "", "user");
+    add_from(&mut out, claude, "", "user");
     add_from(&mut out, &cwd.join(".claude"), "", "project");
-    for (name, root) in plugins(&claude) {
+    for (name, root) in plugins(claude) {
         add_from(&mut out, &root, &format!("{name}:"), "plugin");
     }
-    if let Some(account) = account(home) {
+    if let Some(account) = account(claude) {
         add_skills(&mut out, &claude.join("skills/synced").join(&account), "", "user");
         for (name, root) in synced_plugins(&claude.join("plugins/synced").join(&account)) {
             add_from(&mut out, &root, &format!("{name}:"), "plugin");
@@ -85,9 +84,11 @@ pub fn list(home: &Path, cwd: &Path) -> Vec<Command> {
 }
 
 /// claude.ai syncs skills and plugins into a folder per signed-in account, named for its
-/// organization and account, so the folders of an account signed in before stay on disk.
-fn account(home: &Path) -> Option<String> {
-    let config: Value = serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).ok()?).ok()?;
+/// organization and account, so the folders of an account signed in before stay on disk. Claude
+/// keeps `.claude.json` inside a CLAUDE_CONFIG_DIR, and beside the default `~/.claude`.
+fn account(claude: &Path) -> Option<String> {
+    let file = [claude.join(".claude.json"), claude.parent()?.join(".claude.json")].into_iter().find(|f| f.is_file())?;
+    let config: Value = serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?;
     let account = &config["oauthAccount"];
     Some(format!("{}_{}", account["organizationUuid"].as_str()?, account["accountUuid"].as_str()?))
 }
@@ -242,7 +243,7 @@ mod tests {
             .to_string(),
         );
 
-        let all = list(home.path(), project.path());
+        let all = list(&claude, project.path());
         let mine: Vec<_> = all.iter().filter(|c| c.source != "builtin").map(|c| (c.name.as_str(), c.description.as_str(), c.source, c.skill)).collect();
         assert_eq!(
             mine,
@@ -263,6 +264,6 @@ mod tests {
     #[test]
     fn a_home_with_no_claude_folder_has_only_the_builtins() {
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(list(home.path(), home.path()).len(), BUILTIN.len());
+        assert_eq!(list(&home.path().join(".claude"), home.path()).len(), BUILTIN.len());
     }
 }

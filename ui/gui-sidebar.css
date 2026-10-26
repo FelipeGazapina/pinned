@@ -53,6 +53,7 @@
 .thread-row .l3 .right { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
 .thread-row .remote { display: flex; color: rgb(var(--g-side-muted-rgb) / 0.7); }
 .thread-row .remote .i { width: 14px; height: 14px; }
+.thread-row .account { font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--g-input); color: var(--g-side-muted); max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-row.drop { background: var(--g-row-hover); box-shadow: inset 0 0 0 1px rgb(var(--g-primary-rgb) / 0.7); }
 .thread-row input.rename, #chat-head input.rename { width: 100%; min-width: 0; height: 20px; padding: 0 4px; border: 0; border-radius: 6px; outline: 1px solid rgb(var(--g-ink-rgb) / 0.18);
   background: var(--g-input); color: var(--g-fg); font: inherit; user-select: text; -webkit-user-select: text; }

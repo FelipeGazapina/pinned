@@ -138,6 +138,9 @@ pub struct Connector {
     pub machine: String,
     #[serde(default)]
     pub repo: String,
+    /// The account its sessions run under; empty runs them under their project's.
+    #[serde(default)]
+    pub account: String,
 }
 
 fn on() -> bool {
@@ -230,6 +233,10 @@ impl Connector {
         }
         self.since = watermark.to_rfc3339();
         true
+    }
+
+    fn account(&self) -> Option<String> {
+        Some(self.account.trim().to_owned()).filter(|a| !a.is_empty())
     }
 
     fn unclaim(&mut self, subject: &Subject) {
@@ -358,6 +365,8 @@ pub struct Run {
     pub subject: Subject,
     /// The Slack messages the bot reacts to once a tab takes the run, by ts.
     pub mentioned: Vec<String>,
+    /// The account the connector names, or none for its project's.
+    pub account: Option<String>,
 }
 
 impl Run {
@@ -368,6 +377,7 @@ impl Run {
             args: self.args.clone(),
             env: agent::session_env(&self.connector, &self.subject),
             token: None,
+            account: self.account.clone(),
         }
     }
 }
@@ -869,7 +879,7 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
         issue.description.as_deref().unwrap_or("(no description)"),
     );
     args.push(prompt);
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() }, mentioned: vec![] }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() }, mentioned: vec![], account: c.account() }
 }
 
 /// What every connector session that may open a pull request must do to prove the change works.
@@ -980,7 +990,7 @@ fn slack_run(
     prompt += note.unwrap_or_default();
     args.push(prompt);
     let subject = Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() };
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![] }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account() }
 }
 
 fn reply_header(author: &str) -> String {
@@ -1218,6 +1228,22 @@ mod tests {
     }
 
     #[test]
+    fn a_connector_from_v0_7_0_runs_under_its_projects_account_and_a_named_one_under_that() {
+        let saved = serde_json::json!({
+            "id": "c1", "name": "Bugs", "enabled": true, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": "/repo", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+            "instructions": "", "machine": "m1", "repo": "",
+        });
+        let old: Connector = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(run(&old, &issue(), "/bin/pinned").spec().account, None);
+        let mut named = saved;
+        named["account"] = " work ".into();
+        let named: Connector = serde_json::from_value(named).unwrap();
+        assert_eq!(run(&named, &issue(), "/bin/pinned").spec().account.as_deref(), Some("work"));
+        assert_eq!(serde_json::to_value(&named).unwrap()["account"], " work ");
+    }
+
+    #[test]
     fn a_run_no_tab_took_is_found_again_by_the_next_check() {
         let mut linear = linear_connector();
         linear.handled = vec!["uuid".into(), "older".into()];
@@ -1341,6 +1367,7 @@ mod tests {
             proof: false,
             machine: String::new(),
             repo: String::new(),
+            account: String::new(),
         }
     }
 
@@ -1399,6 +1426,7 @@ mod tests {
             proof: false,
             machine: String::new(),
             repo: String::new(),
+            account: String::new(),
         }
     }
 
