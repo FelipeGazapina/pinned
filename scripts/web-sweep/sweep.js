@@ -1040,7 +1040,11 @@ async function sweep(profileName) {
   });
 
   await step("app view: typography sets the interface, prompt, code and terminal fonts, and the lane keeps 48px gutters down to 640px", async () => {
-    await page.evaluate(() => toggleSettings());
+    // The typed fields, without the font list Chromium could offer once a field takes focus.
+    await page.evaluate(() => {
+      Object.assign(installedFonts, { status: "unavailable", families: [] });
+      toggleSettings();
+    });
     await settingsNav("appearance");
     const resetTypography = () =>
       page.evaluate(() => {
@@ -1455,7 +1459,7 @@ async function sweep(profileName) {
       const head = [await text("#theme-color-picker .cp-title"), await text("#theme-color-picker .cp-sub"), await page.inputValue('#theme-color-picker [data-cp="hex"]'), await page.inputValue('#theme-color-picker [data-cp="rgb"]')];
       const rgb = [1, 3, 5].map((i) => parseInt(before.slice(i, i + 2), 16)).join(", ");
       check(head.join("|") === `Accent|Choose a color|${before.slice(0, 7)}|${rgb}`, `the picker opens as ${head.join(" | ")}`);
-      check(/^Accent · \d+ uses?$/.test(await sub()) && (await page.evaluate(() => document.querySelector("#send").hasAttribute("data-theme-inspector-match"))), `the swatch selects Accent: ${await sub()}`);
+      check(/^Accent color · \d+ uses?$/.test(await sub()) && (await page.evaluate(() => document.querySelector("#send").hasAttribute("data-theme-inspector-match"))), `the swatch selects Accent: ${await sub()}`);
       const plane = await rect("#theme-color-picker .cp-plane");
       const corner = { x: plane.right - 2, y: plane.top + 2 };
       if (touch) await page.touchscreen.tap(corner.x, corner.y);
@@ -1860,7 +1864,11 @@ async function sweep(profileName) {
   });
 
   await step("app view: font fields take only installed fonts (monospace for code), name the default face, and turn into T3's font list once the browser lists installed fonts; panel and drawer terminals follow the terminal font", async () => {
-    await page.evaluate(() => toggleSettings());
+    // Chromium may list the machine's fonts itself; the typed field is checked without them first.
+    await page.evaluate(() => {
+      Object.assign(installedFonts, { status: "unavailable", families: [] });
+      toggleSettings();
+    });
     await settingsNav("appearance");
     try {
       const sans = page.locator("#look-sans-font");
@@ -1908,8 +1916,9 @@ async function sweep(profileName) {
       check(sizes === "15|17", `a panel terminal's font size: ${sizes}`);
     } finally {
       await page.evaluate(() => {
+        closeFontPicker();
         delete window.queryLocalFonts;
-        Object.assign(installedFonts, { status: "unavailable", families: [] });
+        Object.assign(installedFonts, { status: typeof window.queryLocalFonts === "function" ? "unknown" : "unavailable", families: [] });
         for (const name of ["sans-font", "mono-font", "advanced", "terminal-size"]) setLook(name, "");
         looksChanged();
         if (settingsOpen()) toggleSettings();

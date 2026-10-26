@@ -1,10 +1,10 @@
 /** T3 Code's tooltip (components/ui/tooltip.tsx): in the app view a control's title shows in a styled
  * popup above it, or below when there is no room, once the pointer rests 600 ms, and at once when
  * another closed less than 400 ms ago. The title moves to data-tip while it shows, so the browser's
- * own tooltip stays away, and comes back when it hides. */
+ * own tooltip stays away, and comes back when it hides. A press hides it until the pointer moves. */
 const tipEl = Object.assign(document.createElement("div"), { id: "g-tooltip", role: "tooltip", hidden: true });
 document.body.append(tipEl);
-const tip = { target: null, timer: 0, closedAt: 0 };
+const tip = { target: null, timer: 0, closedAt: 0, pressedAt: null };
 
 function showTip() {
   const el = tip.target;
@@ -36,6 +36,9 @@ document.addEventListener("pointerover", (e) => {
   if (e.pointerType !== "mouse") return;
   const el = guiOn() ? e.target.closest?.("[title], [data-tip]") : null;
   if (el && el === tip.target) return;
+  // The browser replays a hover where the pointer rests when what is under it changes, as after a press.
+  if (tip.pressedAt && Math.abs(e.clientX - tip.pressedAt.x) + Math.abs(e.clientY - tip.pressedAt.y) < 2) return;
+  tip.pressedAt = null;
   hideTip();
   if (!el?.title.trim()) return;
   tip.target = el;
@@ -44,4 +47,8 @@ document.addEventListener("pointerover", (e) => {
   tip.timer = setTimeout(showTip, performance.now() - tip.closedAt < 400 ? 0 : 600);
 });
 document.addEventListener("pointerout", (e) => e.relatedTarget || hideTip());
-for (const type of ["pointerdown", "keydown", "wheel", "scroll"]) addEventListener(type, () => tip.target && hideTip(), true);
+addEventListener("pointerdown", (e) => {
+  tip.pressedAt = { x: e.clientX, y: e.clientY };
+  hideTip();
+}, true);
+for (const type of ["keydown", "wheel", "scroll"]) addEventListener(type, () => tip.target && hideTip(), true);
