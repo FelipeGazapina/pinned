@@ -88,6 +88,7 @@ const TRIGGERS = {
         model: DECISION_MODEL,
         instructions: "Categorize this Slack message. Choose escalation only for urgent production problems.",
         categories: clone(DEFAULT_CATEGORIES),
+        fallback: null,
       },
     }),
     instructions: (c) => TRIGGERS["slack-mention"].instructions(c),
@@ -209,7 +210,7 @@ function integrationsHtml() {
   return `<h2>Connectors</h2>
     <p class="hint">Services the harness can read from and act on.</p>
     <div class="card">
-      <div class="card-head"><span class="logo">◐</span><div><b>Linear</b><div class="hint">Issues, labels and comments</div></div>
+      <div class="card-head"><span class="logo" data-tone="linear" data-logo="linear">${LOGOS.linear}</span><div><b>Linear</b><div class="hint">Issues, labels and comments</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>
@@ -232,7 +233,7 @@ function githubCardHtml() {
        </ol>
        <p class="error" id="github-error"></p>`;
   return `<div class="card">
-      <div class="card-head"><span class="logo github">⎇</span><div><b>GitHub</b><div class="hint">Clones your repositories on any machine that lacks them, private ones too</div></div>
+      <div class="card-head"><span class="logo" data-logo="github">${LOGOS.github}</span><div><b>GitHub</b><div class="hint">Clones your repositories on any machine that lacks them, private ones too</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
@@ -252,7 +253,7 @@ function vercelCardHtml() {
        </ol>
        <p class="error" id="vercel-error"></p>`;
   return `<div class="card">
-      <div class="card-head"><span class="logo" data-tone="vercel">▲</span><div><b>Vercel AI Gateway</b><div class="hint">Decision models that sort Slack messages into categories</div></div>
+      <div class="card-head"><span class="logo" data-tone="vercel" data-logo="vercel">${LOGOS.vercel}</span><div><b>Vercel AI Gateway</b><div class="hint">Decision models that sort Slack messages into categories</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
@@ -274,7 +275,7 @@ function slackCardHtml() {
        </ol>
        <p class="error" id="slack-error"></p>`;
   return `<div class="card">
-      <div class="card-head"><span class="logo slack">#</span><div><b>Slack</b><div class="hint">Mentions of the bot, answered in their thread</div></div>
+      <div class="card-head"><span class="logo" data-logo="slack">${LOGOS.slack}</span><div><b>Slack</b><div class="hint">Mentions of the bot, answered in their thread</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
@@ -292,7 +293,27 @@ const input = (path, value, attrs = "") => `<input data-bind="${path}" value="${
 const select = (path, values, labelOf, selected) => `<select data-bind="${path}">${options(values, labelOf, selected)}</select>`;
 const check = (path, on, text) => `<label class="toggle"><input type="checkbox" data-bind="${path}"${on ? " checked" : ""}> ${text}</label>`;
 const switchHtml = (attrs, on) => `<label class="switch" title="On: the workflow watches and starts sessions"><input type="checkbox" ${attrs}${on ? " checked" : ""}><span></span></label>`;
-const iconHtml = (step) => `<span class="icon" data-tone="${step.tone}" title="${esc(`${step.app}: ${step.title}`)}">${step.icon}</span>`;
+const SLACK_MARK = [
+  ["red", "M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zm1.271 0a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313z"],
+  ["blue", "M8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zm0 1.271a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312z"],
+  ["green", "M18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zm-1.268 0a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312z"],
+  ["yellow", "M15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zm0-1.268a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"],
+];
+const CLAUDE_RAYS = Array.from({ length: 12 }, (_, i) => {
+  const a = (i * Math.PI) / 6 + 0.2;
+  const r = i % 2 ? 8.5 : 11;
+  return `M${(12 + 2.6 * Math.cos(a)).toFixed(2)} ${(12 + 2.6 * Math.sin(a)).toFixed(2)}L${(12 + r * Math.cos(a)).toFixed(2)} ${(12 + r * Math.sin(a)).toFixed(2)}`;
+}).join("");
+/** Each app's mark, drawn in its theme-aware colours by the stylesheet. Steps of other apps keep their glyph. */
+const LOGOS = {
+  slack: `<svg viewBox="0 0 24 24">${SLACK_MARK.map(([part, d]) => `<path class="${part}" d="${d}"/>`).join("")}</svg>`,
+  linear: `<svg viewBox="0 0 24 24"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg>`,
+  vercel: `<svg viewBox="0 0 24 24"><path d="M12 2.5 23 21.5H1z"/></svg>`,
+  claude: `<svg viewBox="0 0 24 24"><path d="${CLAUDE_RAYS}"/></svg>`,
+  github: `<svg viewBox="0 0 24 24"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 0-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.2.5-2.3 1.3-3.1-.2-.4-.6-1.6 0-3.2 0 0 1-.3 3.4 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8 0 3.2.9.8 1.3 1.9 1.3 3.2 0 4.6-2.8 5.6-5.5 5.9.5.4.9 1 .9 2.2v3.3c0 .3.1.7.8.6A12 12 0 0 0 12 .3"/></svg>`,
+};
+const iconHtml = (step) =>
+  `<span class="icon" data-tone="${step.tone}"${LOGOS[step.tone] ? ` data-logo="${step.tone}"` : ""} title="${esc(`${step.app}: ${step.title}`)}">${LOGOS[step.tone] ?? step.icon}</span>`;
 const kindHtml = (c) => `<label>Starts when ${select("trigger.kind", Object.keys(TRIGGERS), (t) => TRIGGERS[t].text, c.trigger.kind)}</label>`;
 
 /** An optional step that moves the Linear issue to a column at `stage`, matching the backend's `Stage`. Off while it names no column. */
@@ -378,6 +399,7 @@ const STEPS = {
       const twice = categories.find((cat, i) => names[i] && names.indexOf(names[i]) !== i);
       const vague = categories.find((cat) => cat.name.trim() && !cat.description.trim());
       const removed = categories.find((cat) => cat.workflow && !settings.connectors.some((k) => k.id === cat.workflow));
+      const fallback = fallbackOf(c.trigger.decide);
       return [
         !settings.vercel && "Connect the Vercel AI Gateway under Connectors.",
         !c.trigger.decide.model.trim() && "Name the decision model.",
@@ -386,10 +408,11 @@ const STEPS = {
         twice && `Two categories are named “${twice.name.trim()}”.`,
         vague && `Describe the category “${vague.name.trim()}”.`,
         removed && `The workflow that “${removed.name.trim()}” routes to was deleted.`,
+        fallback?.mention?.trim() && `The fallback can't ping a group, so saving sets it back to “${BEST_GUESS}”.`,
       ].filter(Boolean);
     },
     fields: (c) => decideHtml(c),
-    branches: (c) => c.trigger.decide.categories.map((cat, i) => ({ label: cat.name.trim() || "unnamed", nodes: branchNodes(cat, i) })),
+    branches: (c) => c.trigger.decide.categories.map((cat, i) => ({ label: cat.name.trim() || "unnamed", nodes: branchNodes(cat, i), end: cat.workflow ? undefined : i })),
     stub: "＋ Add category",
   },
   picked: moveStep("picked", "Move the issue when pinned picks it up"),
@@ -515,7 +538,17 @@ function decideHtml(c) {
     <label>Instructions <textarea data-bind="trigger.decide.instructions" rows="3">${esc(decide.instructions)}</textarea></label>
     <div class="categories">${decide.categories.map(row).join("")}</div>
     <div class="actions start"><button class="secondary" data-action="add-category">＋ Add category</button></div>
-    <p class="hint">The model puts each message in one category, judged by its description. A mention pings a Slack user group, by its handle or ID, in the message's thread. A route hands the thread to a Slack mention or called workflow, which answers it there.</p>`;
+    <label>When the model is less than 60% sure ${fallbackHtml(decide)}</label>
+    <p class="hint">The model puts each message in one category, judged by its description. A mention pings a Slack user group, by its handle or ID, in the message's thread. A route hands the thread to a Slack mention or called workflow, which answers it there. When the model is unsure, the fallback category takes the message instead of its guess.</p>`;
+}
+
+const BEST_GUESS = "Use its best guess";
+const fallbackOf = (decide) => (decide.fallback ? decide.categories.find((cat) => cat.name.trim() === decide.fallback) : undefined);
+
+/** Only a category that pings no one can take the unsure messages; one that gained a mention stays listed so its issue reads. */
+function fallbackHtml(decide) {
+  const names = decide.categories.filter((cat) => cat.name.trim() && (!cat.mention?.trim() || cat === fallbackOf(decide))).map((cat) => cat.name.trim());
+  return select("trigger.decide.fallback", ["", ...new Set(names)], (name) => name || BEST_GUESS, decide.fallback ?? "");
 }
 
 function routePanelHtml(c, i) {
@@ -665,7 +698,14 @@ function editorHtml() {
       <button class="primary" id="save-connector" data-action="save-connector" title="Save (⌘S)"></button>
     </div>
     <div class="editor">
-      <div class="canvas"></div>
+      <div class="canvas-wrap">
+        <div class="canvas"></div>
+        <div class="zoom" role="toolbar" aria-label="Zoom">
+          <button data-action="zoom-fit" title="Fit to view">${icon("maximize")}</button>
+          <button data-action="zoom-in" title="Zoom in">${icon("zoom-in")}</button>
+          <button data-action="zoom-out" title="Zoom out">${icon("zoom-out")}</button>
+        </div>
+      </div>
       <p class="error" id="editor-error"></p>
       ${panelHtml(c)}
     </div>`;
@@ -677,10 +717,17 @@ const TEXT_H = 56;
 const COL = 230;
 const ROW = 150;
 const PAD = 48;
+const STUB = 40;
+const END = 24;
+const MENU_W = 280;
+
+/** Optional steps of the flow that are off, which the ＋ after the chain's last node offers. */
+const offSteps = (c) => flowOf(c).map(([id]) => id).filter((id) => !shown(c, id));
 
 function layoutOf(c) {
   const nodes = [];
   const edges = [];
+  const ends = [];
   const place = (node, col, row, h = node.ports > 2 ? Math.max(TILE, node.ports * 28 + 16) : TILE) => {
     nodes.push({ ...node, cx: PAD + TEXT_W / 2 + col * COL, cy: row * ROW, h });
     return nodes.at(-1);
@@ -700,26 +747,43 @@ function layoutOf(c) {
         edges.push(i ? { from, to: placed } : { from, to: placed, port, portLabel: branch.label });
         from = placed;
       });
+      if (branch.end !== undefined) ends.push({ from, category: branch.end });
     });
     if (branches.length && step.stub) place({ stub: step.stub }, col + 1, middle + 0.9, 32);
   });
+  if (offSteps(c).length) ends.push({ from: prev, menu: true });
   const top = Math.min(...nodes.map((n) => n.cy - n.h / 2));
   const bottom = Math.max(...nodes.map((n) => n.cy + n.h / 2 + TEXT_H));
   for (const n of nodes) n.cy += PAD - top;
-  const width = 2 * PAD + TEXT_W + Math.max(...nodes.map((n) => n.cx)) - nodes[0].cx;
-  return { nodes, edges, width, height: bottom - top + 2 * PAD };
+  const right = Math.max(...nodes.map((n) => n.cx + TEXT_W / 2), ...ends.map((e) => e.from.cx + TILE / 2 + STUB + END));
+  return { nodes, edges, ends, width: right + PAD, height: bottom - top + 2 * PAD };
 }
 
 function flowHtml(c) {
-  const { nodes, edges, width, height } = layoutOf(c);
+  const { nodes, edges, ends, width, height } = layoutOf(c);
   return `<div class="flow" data-width="${width}" data-height="${height}" style="width:${width}px;height:${height}px">
     ${nodes.map((n) => nodeHtml(c, n)).join("")}
     <svg class="edges" width="${width}" height="${height}" aria-hidden="true">
       <defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow" d="M0 1 9 5 0 9z"/></marker></defs>
       ${edges.map(edgeHtml).join("")}
+      ${ends.map(({ from }) => `<path d="M${from.cx + TILE / 2} ${from.cy}h${STUB}"/><circle cx="${from.cx + TILE / 2}" cy="${from.cy}" r="4.5"/>`).join("")}
     </svg>
     ${edges.map(edgeLabelHtml).join("")}
+    ${ends.map((end) => endHtml(c, end)).join("")}
   </div>`;
+}
+
+/** The ＋ at an open end: after the chain it lists the steps that are off, after a category that stops it picks what comes next. */
+function endHtml(c, { from, menu, category }) {
+  const x = from.cx + TILE / 2 + STUB;
+  const at = `left:${x}px;top:${from.cy - END / 2}px`;
+  if (!menu) {
+    const name = c.trigger.decide.categories[category].name.trim();
+    return `<button class="end" data-action="choose-route" data-category="${category}" title="${esc(`Choose what happens after “${name}”`)}" style="${at}">${icon("plus")}</button>`;
+  }
+  const items = offSteps(c).map((id) => `<button data-action="add-step" data-step="${id}">${iconHtml(STEPS[id])}<span>${esc(STEPS[id].ghost)}</span></button>`);
+  return `<button class="end" data-action="open-add-menu" aria-expanded="${!!view.menu}" title="Add a step" style="${at}">${icon("plus")}</button>
+    ${view.menu ? `<div class="add-menu" style="width:${MENU_W}px;left:${x + END - MENU_W}px;top:${from.cy + END / 2 + 6}px">${items.join("")}</div>` : ""}`;
 }
 
 const nodeAt = (n) => `left:${n.cx - TEXT_W / 2}px;top:${n.cy - n.h / 2}px`;
@@ -780,24 +844,59 @@ function panelHtml(c) {
 }
 
 const READABLE_ZOOM = 0.75;
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 1.5;
 
-function fitFlow() {
+/** The zoom that shows the whole flow, never above 1. Opening a workflow floors it at a readable size; the Fit button doesn't. */
+function fitZoom(floor) {
+  const canvas = settingsPage.querySelector(".canvas");
+  const flow = canvas.firstElementChild;
+  return Math.max(floor, Math.min(1, canvas.clientWidth / flow.dataset.width, canvas.clientHeight / flow.dataset.height));
+}
+
+/** Draws the flow at the view's zoom and pan; a null zoom fits it. */
+function applyZoom() {
   const canvas = settingsPage.querySelector(".canvas");
   const flow = canvas?.firstElementChild;
   if (!flow) return;
-  flow.style.zoom = Math.max(READABLE_ZOOM, Math.min(1, canvas.clientWidth / flow.dataset.width, canvas.clientHeight / flow.dataset.height));
+  const zoom = view.zoom ?? fitZoom(READABLE_ZOOM);
+  flow.style.zoom = zoom;
+  if (view.pan) [canvas.scrollLeft, canvas.scrollTop] = view.pan;
+  settingsPage.querySelector('[data-action="zoom-in"]').disabled = zoom >= MAX_ZOOM;
+  settingsPage.querySelector('[data-action="zoom-out"]').disabled = zoom <= MIN_ZOOM;
 }
+
+/** Zooms keeping the point under `at` (the canvas's centre by default) where it is. */
+function zoomTo(zoom, at) {
+  const canvas = settingsPage.querySelector(".canvas");
+  const flow = canvas.firstElementChild;
+  const box = canvas.getBoundingClientRect();
+  const [x, y] = at ?? [box.left + canvas.clientWidth / 2, box.top + canvas.clientHeight / 2];
+  const was = flow.getBoundingClientRect();
+  const scale = Number(flow.style.zoom) || 1;
+  view.zoom = Math.round(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom)) * 100) / 100;
+  view.pan = null;
+  applyZoom();
+  const now = flow.getBoundingClientRect();
+  canvas.scrollLeft += now.left + ((x - was.left) / scale) * view.zoom - x;
+  canvas.scrollTop += now.top + ((y - was.top) / scale) * view.zoom - y;
+  view.pan = [canvas.scrollLeft, canvas.scrollTop];
+}
+
+const zoomNow = () => Number(settingsPage.querySelector(".flow").style.zoom);
 
 const changed = () => JSON.stringify(view.draft) !== view.original;
 
 function refresh() {
   const c = view.draft;
   settingsPage.querySelector(".canvas").innerHTML = flowHtml(c);
-  fitFlow();
+  applyZoom();
   const command = document.getElementById("command");
   if (command) command.textContent = commandPreview(c);
   const repo = document.getElementById("repo");
   if (repo) repo.innerHTML = repoHint(c);
+  const fallback = settingsPage.querySelector('.node-panel [data-bind="trigger.decide.fallback"]');
+  if (fallback && fallback !== document.activeElement) fallback.outerHTML = fallbackHtml(c.trigger.decide);
   const save = document.getElementById("save-connector");
   save.disabled = !!c.id && !changed();
   save.textContent = !c.id ? "Create" : changed() ? "Save" : "Saved";
@@ -810,7 +909,7 @@ function redraw() {
 }
 
 function edit(index, draft = clone(settings.connectors[index]), open = null) {
-  view = { name: "edit", index, draft, original: JSON.stringify(draft), open };
+  view = { name: "edit", index, draft, original: JSON.stringify(draft), open, zoom: null, pan: null, menu: false };
   loadFolders(draft);
 }
 
@@ -871,6 +970,7 @@ function tidyTrigger({ kind, label, channel, decide }) {
         workflow: cat.workflow || null,
         mention: trimmed(cat.mention).replace(/^@/, "") || null,
       })),
+      fallback: decide.fallback || null,
     };
   }
   return trigger;
@@ -937,12 +1037,20 @@ function armed(button, text) {
 
 function showStep(id, focus) {
   view.open = id;
+  view.menu = false;
   redraw();
   settingsPage.querySelector(".flow .open")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   if (focus) settingsPage.querySelector(".node-panel .details [data-bind]")?.focus();
 }
 
-const stepOf = (button) => button.closest(".step").dataset.step;
+const stepOf = (button) => button.dataset.step ?? button.closest(".step").dataset.step;
+
+function focusCategory(category, field) {
+  showStep("decide");
+  const input = settingsPage.querySelector(`.node-panel [data-bind="trigger.decide.categories.${category}.${field}"]`);
+  input?.scrollIntoView({ block: "nearest" });
+  input?.focus();
+}
 
 const actions = {
   "go-integrations": () => showPage("integrations"),
@@ -1050,16 +1158,27 @@ const actions = {
     settingsPage.querySelector(`.node-panel [data-bind="trigger.decide.categories.${categories.length - 1}.name"]`)?.focus();
   },
   "remove-category"(button) {
-    view.draft.trigger.decide.categories.splice(Number(button.closest("[data-category]").dataset.category), 1);
+    const decide = view.draft.trigger.decide;
+    const [removed] = decide.categories.splice(Number(button.closest("[data-category]").dataset.category), 1);
+    if (removed.name.trim() === decide.fallback) decide.fallback = null;
     showStep("decide");
   },
   "open-branch"(button) {
     const { branch, category } = button.closest(".branch").dataset;
     if (branch === "route") return showStep(`route:${category}`);
-    showStep("decide");
-    const field = settingsPage.querySelector(`.node-panel [data-bind="trigger.decide.categories.${category}.${branch === "mention" ? "mention" : "workflow"}"]`);
-    field?.scrollIntoView({ block: "nearest" });
-    field?.focus();
+    focusCategory(category, branch === "mention" ? "mention" : "workflow");
+  },
+  "choose-route": (button) => focusCategory(button.dataset.category, "workflow"),
+  "open-add-menu"() {
+    view.menu = !view.menu;
+    refresh();
+  },
+  "zoom-in": () => zoomTo(Math.floor(zoomNow() * 10 + 1e-6) / 10 + 0.1),
+  "zoom-out": () => zoomTo(Math.ceil(zoomNow() * 10 - 1e-6) / 10 - 0.1),
+  "zoom-fit"() {
+    view.zoom = fitZoom(MIN_ZOOM);
+    view.pan = [0, 0];
+    applyZoom();
   },
   "open-route"(button) {
     if ((!view.draft.id || changed()) && !armed(button, "Discard changes and open?")) return;
@@ -1078,6 +1197,8 @@ const actions = {
     fillRepo();
   },
   async "save-connector"() {
+    const decide = view.draft.trigger.decide;
+    if (decide && fallbackOf(decide)?.mention?.trim()) decide.fallback = null;
     const c = tidy(view.draft);
     const error = document.getElementById("editor-error");
     if (!c.name) {
@@ -1097,7 +1218,7 @@ const actions = {
       let index = settings.connectors.findIndex((known) => known.id === saved.id);
       if (index < 0) index = settings.connectors.push(saved) - 1;
       settings.connectors[index] = saved;
-      edit(index, clone(saved), view.open);
+      Object.assign(view, { index, draft: clone(saved), original: JSON.stringify(saved) });
       redraw();
     } catch (err) {
       error.textContent = err;
@@ -1112,12 +1233,71 @@ const actions = {
   },
 };
 
+/** A mouse drag on the canvas's ground pans it, and the click that ends it does nothing. Touch pans by scrolling. */
+let canvasPan = null;
+let canvasPanned = false;
+
 settingsPage.addEventListener("click", (e) => {
   const button = e.target.closest("[data-action]");
-  if (!button) return;
-  e.preventDefault();
-  actions[button.dataset.action](button);
+  if (button) {
+    e.preventDefault();
+    return actions[button.dataset.action](button);
+  }
+  if (canvasPanned || !e.target.closest(".canvas") || e.target.closest(".step, .branch, .add-menu")) return;
+  if (view.menu) {
+    view.menu = false;
+    return refresh();
+  }
+  if (view.open) showStep(null);
 });
+
+settingsPage.addEventListener("pointerdown", (e) => {
+  canvasPanned = false;
+  const canvas = e.target.closest(".canvas");
+  if (!canvas || e.button !== 0 || e.pointerType === "touch" || e.target.closest(".step, .branch, button, .add-menu")) return;
+  canvasPan = { canvas, id: e.pointerId, x: e.clientX, y: e.clientY, left: canvas.scrollLeft, top: canvas.scrollTop };
+});
+
+settingsPage.addEventListener("pointermove", (e) => {
+  if (canvasPan?.id !== e.pointerId) return;
+  const dx = e.clientX - canvasPan.x;
+  const dy = e.clientY - canvasPan.y;
+  if (!canvasPanned && Math.hypot(dx, dy) < 4) return;
+  if (!canvasPanned) {
+    canvasPanned = true;
+    canvasPan.canvas.setPointerCapture(e.pointerId);
+    canvasPan.canvas.classList.add("panning");
+  }
+  canvasPan.canvas.scrollLeft = canvasPan.left - dx;
+  canvasPan.canvas.scrollTop = canvasPan.top - dy;
+});
+
+for (const type of ["pointerup", "pointercancel"]) {
+  settingsPage.addEventListener(type, (e) => {
+    if (canvasPan?.id !== e.pointerId) return;
+    canvasPan.canvas.classList.remove("panning");
+    canvasPan = null;
+  });
+}
+
+settingsPage.addEventListener(
+  "wheel",
+  (e) => {
+    if (!(e.ctrlKey || e.metaKey) || !e.target.closest(".canvas")) return;
+    e.preventDefault();
+    // A mouse notch is about 100 and a pinch frame a few units, so both zoom by at most 10% a frame.
+    zoomTo(zoomNow() * Math.exp(-Math.max(-10, Math.min(10, e.deltaY)) / 100), [e.clientX, e.clientY]);
+  },
+  { passive: false },
+);
+
+settingsPage.addEventListener(
+  "scroll",
+  (e) => {
+    if (e.target.classList?.contains("canvas") && view.name === "edit") view.pan = [e.target.scrollLeft, e.target.scrollTop];
+  },
+  true,
+);
 
 settingsPage.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "linear-key") actions["connect-linear"]();
@@ -1128,6 +1308,10 @@ settingsPage.addEventListener("keydown", (e) => {
     e.preventDefault();
     actions["save-connector"]();
   }
+  if (e.key === "Escape" && view.menu) {
+    view.menu = false;
+    return refresh();
+  }
   if (e.key === "Escape" && view.open) showStep(null);
 });
 
@@ -1135,7 +1319,10 @@ settingsPage.addEventListener("input", (e) => {
   const path = e.target.dataset.bind;
   if (!path || path in RESHAPES) return;
   if (e.target.tagName === "SELECT" && e.target.value === NEW_ROUTE) return newRoute(e.target);
+  const decide = view.draft.trigger.decide;
+  const renamed = /^trigger\.decide\.categories\.\d+\.name$/.test(path) && decide.fallback && fallbackOf(decide);
   bind(path, e.target.type === "checkbox" ? e.target.checked : e.target.value);
+  if (renamed) decide.fallback = renamed.name.trim() || null;
   refresh();
 });
 
@@ -1156,7 +1343,7 @@ settingsPage.addEventListener("change", async (e) => {
   e.target.closest(".flow-card").dataset.on = e.target.checked;
 });
 
-addEventListener("resize", fitFlow);
+addEventListener("resize", applyZoom);
 
 for (const b of document.querySelectorAll("#settings-nav [data-page]")) b.onclick = () => showPage(b.dataset.page);
 document.getElementById("settings-toggle").onclick = toggleSettings;
