@@ -491,7 +491,7 @@ function accountChip(email) {
   const hue = Math.abs(hash) % 360;
   return `<span class="account-chip" role="img" aria-label="Account ${accountInitials(email)}" style="background:oklch(0.85 0.08 ${hue});color:oklch(0.35 0.1 ${hue})">${accountInitials(email)}</span>`;
 }
-const accountName = (a) => (a.email ? accountChip(a.email) : "Claude");
+const limitAccountName = (a) => (a.email ? accountChip(a.email) : "Claude");
 
 /** T3 Code's segment popover: the account, its plan and machines, then the window's figures. */
 function segmentPopHtml(account, w, reset, now) {
@@ -523,8 +523,8 @@ function limitCardHtml(pool, now) {
         <span class="clip"><span class="cut" style="${clip}"><span class="fill" style="width:${left}%;background:${CLAUDE_COLOR}"></span>${
           left < 100 && member.refill > 0 && pool.resets.some((r) => r.member === member) ? `<span class="refill" style="width:${Math.min(100 - left, member.refill)}%;--refill:${CLAUDE_COLOR}"></span>` : ""}</span></span>
         ${timeLeft === null ? "" : `<span class="tick" style="left:${at}"></span>`}<span class="index">${i + 1}</span>
-        <span class="inside">${many ? `<span class="who">${accountName(member.account)}</span>` : ""}<b>${left}%</b>${resets ? `<span class="chip">${resets.replace("resets in ", "↻ ")}</span>` : ""}</span></button>
-      <button type="button" class="legend-row" style="grid-column:1 / -1;grid-row:${i + 2}"${pop}><span class="index-chip"><span style="background:${CLAUDE_COLOR}"></span>${i + 1}</span><span class="who">${accountName(member.account)}</span><b>${left}%</b><span class="chip">${resets.replace("resets in ", "↻ ")}</span></button>`;
+        <span class="inside">${many ? `<span class="who">${limitAccountName(member.account)}</span>` : ""}<b>${left}%</b>${resets ? `<span class="chip">${resets.replace("resets in ", "↻ ")}</span>` : ""}</span></button>
+      <button type="button" class="legend-row" style="grid-column:1 / -1;grid-row:${i + 2}"${pop}><span class="index-chip"><span style="background:${CLAUDE_COLOR}"></span>${i + 1}</span><span class="who">${limitAccountName(member.account)}</span><b>${left}%</b><span class="chip">${resets.replace("resets in ", "↻ ")}</span></button>`;
   }).join("");
   return `<div class="limit-card" data-window="${esc(pool.id)}"><div class="limit-text"><span class="label">${esc(pool.label)}</span>
       <span class="figure"><b>${pool.remaining}%</b><span class="muted">left${pool.pace ? ` <span class="pace" role="img" aria-label="${paceLabel}"${popAttr(paceLabel)}>${icon(paceIcon)}</span>` : ""}</span></span>

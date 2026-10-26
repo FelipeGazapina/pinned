@@ -149,7 +149,7 @@ function setRecording(input, on) {
 }
 const isDirty = (row, draft) => draft.key !== row.key || whenText(draft.when) !== row.when;
 
-function rowHtml(row, rows, anchor) {
+function keybindingRowHtml(row, rows, anchor) {
   const draft = draftOf(row);
   const dirty = isDirty(row, draft);
   const conflicts = kbConflicts(rows, row.id, draft.key, whenText(draft.when));
@@ -195,7 +195,7 @@ function renderKeybindings() {
   const focused = document.activeElement?.closest?.("#keybindings") && document.activeElement.matches("[data-keybinding-capture]") ? document.activeElement.closest("[data-kb-row], [data-kb-new]") : null;
   const focusKey = focused?.dataset.kbRow ?? (focused ? "new" : null);
   root.querySelector(".kb-groups").innerHTML = `${kb.adding ? newRowHtml(rows) : ""}${groups.length
-    ? groups.map(([id, title, list]) => `<div class="kb-group" id="keybindings-${id}"><h3>${esc(title)}</h3>${list.map((r) => rowHtml(r, rows, !anchored.has(r.command) && anchored.add(r.command))).join("")}</div>`).join("")
+    ? groups.map(([id, title, list]) => `<div class="kb-group" id="keybindings-${id}"><h3>${esc(title)}</h3>${list.map((r) => keybindingRowHtml(r, rows, !anchored.has(r.command) && anchored.add(r.command))).join("")}</div>`).join("")
     : `<div class="kb-group"><p class="kb-empty">No keybindings match your search.</p></div>`}`;
   root.querySelector("[data-kb-add]").disabled = !!kb.adding;
   if (focusKey) (focusKey === "new" ? root.querySelector("[data-kb-new] [data-keybinding-capture]") : root.querySelector(`[data-kb-row="${CSS.escape(focusKey)}"] [data-keybinding-capture]`))?.focus();
@@ -412,7 +412,7 @@ onGuiCommand("terminal.new", () => {
 });
 /** ⌘D and ⌘⇧D in the drawer: another terminal beside the focused one, or under it, four at most. */
 const MAX_TERMINALS_PER_GROUP = 4;
-function splitTerminal(vertical) {
+function splitDrawerTerminal(vertical) {
   const at = focusedTerminal();
   if (!active || at.panel) return;
   const t = threadOf(active);
@@ -422,8 +422,8 @@ function splitTerminal(vertical) {
   else t.claudeGroup = group;
   runScript(active, nextTerminal(active), null, group).then((shell) => shell?.term.focus());
 }
-onGuiCommand("terminal.split", () => splitTerminal(false));
-onGuiCommand("terminal.splitVertical", () => splitTerminal(true));
+onGuiCommand("terminal.split", () => splitDrawerTerminal(false));
+onGuiCommand("terminal.splitVertical", () => splitDrawerTerminal(true));
 onGuiCommand("terminal.close", () => {
   const at = focusedTerminal();
   if (at.panel) return closeSurface();

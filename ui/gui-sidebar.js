@@ -620,14 +620,14 @@ document.body.append(sideTip);
 let tipFor = null;
 let tipTimer;
 let tipClosedAt = 0;
-function hideTip() {
+function hideSideTip() {
   clearTimeout(tipTimer);
   if (!sideTip.hidden) tipClosedAt = Date.now();
   sideTip.hidden = true;
   tipFor = null;
 }
-function showTip(el) {
-  if (!el.isConnected || !el.dataset.tip) return hideTip();
+function showSideTip(el) {
+  if (!el.isConnected || !el.dataset.tip) return hideSideTip();
   sideTip.innerHTML = `<span>${esc(el.dataset.tip)}</span>${el.dataset.tipSub ? `<span class="sub">${esc(el.dataset.tipSub)}</span>` : ""}`;
   sideTip.hidden = false;
   const a = el.getBoundingClientRect();
@@ -640,15 +640,17 @@ function showTip(el) {
 }
 document.addEventListener("pointerover", (e) => {
   if (e.pointerType !== "mouse") return;
-  const el = e.target.closest?.("[data-tip]");
+  // A title gui-tooltip.js moved into data-tip is its tooltip, not this one.
+  const found = e.target.closest?.("[data-tip]");
+  const el = found === tip.target ? null : found;
   if (el === tipFor) return;
   const shown = !sideTip.hidden;
-  hideTip();
+  hideSideTip();
   if (!el || document.body.classList.contains("dragging-row")) return;
   tipFor = el;
-  tipTimer = setTimeout(() => showTip(el), shown || Date.now() - tipClosedAt < 400 ? 0 : Number(el.dataset.tipDelay ?? 600));
+  tipTimer = setTimeout(() => showSideTip(el), shown || Date.now() - tipClosedAt < 400 ? 0 : Number(el.dataset.tipDelay ?? 600));
 });
-for (const type of ["pointerdown", "blur", "scroll"]) addEventListener(type, hideTip, true);
+for (const type of ["pointerdown", "blur", "scroll"]) addEventListener(type, hideSideTip, true);
 
 const wakeLabel = (until) => {
   const s = until - nowS();

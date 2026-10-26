@@ -430,7 +430,7 @@ function closeGoneShells() {
 const PR_SOURCES = { manual: "Linked by you", agent: "Linked by the agent" };
 const PR_CHECKS_TONE = { passing: ["circle-check", "ok", "All checks have passed"], failing: ["circle-x", "fail", "Some checks were not successful"], pending: ["circle-dot", "pending", "Some checks haven't completed yet"] };
 const PR_REVIEW_TONE = { APPROVED: ["user-check", "ok", "Approved"], CHANGES_REQUESTED: ["user-round-x", "pending", "Changes requested"], REVIEW_REQUIRED: ["user-round", "quiet", "Awaiting review"] };
-function prChecksState(d) {
+function prRollupState(d) {
   const states = (d.statusCheckRollup ?? []).map(checkState);
   if (!states.length) return null;
   return states.includes("fail") ? "failing" : states.includes("pending") ? "pending" : "passing";
@@ -463,7 +463,7 @@ function prRowHtml(tab, pr, watched) {
   const open = !d || state === "open" || state === "draft";
   const repo = pr.url.match(/github\.com\/([^/]+\/[^/]+)\/pull/)?.[1] ?? "";
   const tone = ([ic, cls, label]) => `<span class="sig ${cls}" role="img" aria-label="${label}" title="${label}">${icon(ic)}</span>`;
-  const checks = d && prChecksState(d);
+  const checks = d && prRollupState(d);
   const review = d && PR_REVIEW_TONE[d.reviewDecision];
   const conflict = d && state === "open" && d.mergeable === "CONFLICTING" ? `<span class="conflict" role="img" aria-label="Conflicts with ${esc(d.baseRefName)}" title="Conflicts with ${esc(d.baseRefName)}">${icon("triangle-alert")}</span>` : "";
   const stack = d?.stack && d.stack.below.length + d.stack.above.length > 0 ? d.stack.below.length + d.stack.above.length + 1 : 0;
