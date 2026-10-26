@@ -259,7 +259,8 @@
 
   await step("a diff file's name opens a native menu with Open, Reveal in Finder and Open with", async () => {
     const tab = active;
-    setDiffState(tab, { scope: "base", base: null });
+    // The clone's origin/HEAD is its own branch, so Automatic finds nothing to compare.
+    setDiffState(tab, { scope: "base", base: "origin/main" });
     openSurface("diff");
     let title = null;
     for (let i = 0; i < 60 && !(title = panelBody.querySelector(".diff[data-comments] .file > header .path")); i++) await sleep(250);
