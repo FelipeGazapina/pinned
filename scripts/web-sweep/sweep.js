@@ -731,6 +731,35 @@ async function sweep(profileName) {
     await waitFor("the compacted note", async () => (await page.locator("#thread .note", { hasText: "The conversation was compacted." }).count()) > 0, 10000);
   });
 
+  // The fake claude logs each turn's length after its Stop hook returns, and $0.42 a turn.
+  await step("app view: the header and the row read the thread's active time and cost, ticking while it works", async () => {
+    const readouts = () =>
+      page.evaluate(() => {
+        const row = document.querySelector("#thread-list .thread-row.active");
+        return { head: document.querySelector("#chat-head .crumb .stats")?.textContent ?? "", row: row?.querySelector(".stats")?.textContent ?? "", tip: row?.title ?? "", status: active.view.status };
+      });
+    const parse = (s) => {
+      const m = /^(\d+)s · \$(\d+\.\d\d)$/.exec(s);
+      return m && { secs: Number(m[1]), cost: m[2] };
+    };
+    await waitFor("the last turn to end", async () => (await readouts()).status === "done" && parse((await readouts()).head));
+    await sleep(1000);
+    const before = await readouts();
+    check(before.row === before.head, `the row reads "${before.row}", the header "${before.head}"`);
+    check(before.tip.split("\n").includes(before.head), `the row's tooltip lacks the readout: ${before.tip}`);
+    await sendPrompt("think");
+    await waitFor("the turn to start", async () => (await readouts()).status === "working");
+    await sleep(2500);
+    const during = await readouts();
+    check(parse(during.head)?.secs >= parse(before.head).secs + 2, `while working it read "${during.head}" after "${before.head}"`);
+    const cost = (Number(parse(before.head).cost) + 0.42).toFixed(2);
+    await waitFor(`$${cost}`, async () => parse((await readouts()).head)?.cost === cost, 8000);
+    const after = await readouts();
+    check(after.status === "done" && parse(after.head).secs >= parse(before.head).secs + 4, `after the turn it read "${after.head}", status ${after.status}`);
+    check(after.row === after.head, `the row reads "${after.row}", the header "${after.head}"`);
+    return `${before.head} then ${during.head} then ${after.head}`;
+  });
+
   await step("app view: changed files show as a folder tree with 1.2k counts", async () => {
     await sendPrompt("tree");
     await answered("Wrote the tree.");
