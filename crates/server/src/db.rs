@@ -6,6 +6,7 @@ use base64::Engine;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand_core::{OsRng, RngCore};
+use pinned_core::checkpoint::Checkpoint;
 use pinned_core::sync;
 use pinned_core::wire::{AccountView, MachineView};
 use serde_json::Value;
@@ -30,6 +31,8 @@ create table if not exists pair_codes (code text primary key, account uuid not n
   expires_at timestamptz not null);
 create table if not exists project_files (account uuid not null references accounts on delete cascade, project text not null,
   path text not null, sha text not null, modified bigint not null, data bytea not null, primary key (account, project, path));
+create table if not exists run_checkpoints (account uuid not null references accounts on delete cascade, run text not null,
+  data bytea not null, updated timestamptz not null default now(), primary key (account, run));
 create table if not exists shared_projects (account uuid not null references accounts on delete cascade, key text not null,
   name text not null, repo text not null, updated timestamptz not null default now(), primary key (account, key));
 ";
@@ -401,6 +404,26 @@ impl Db {
 
     pub async fn save_store(&self, account: Uuid, store: &Value) -> Result<(), String> {
         self.client().await?.execute("update accounts set store = $2 where id = $1", &[&account, store]).await.map_err(err).map(drop)
+    }
+
+    /// Keeps the newest checkpoint of the run `run`, and drops checkpoints no run touched in a month.
+    pub async fn save_checkpoint(&self, account: Uuid, run: &str, checkpoint: &Checkpoint) -> Result<(), String> {
+        let data = serde_json::to_vec(checkpoint).map_err(|e| e.to_string())?;
+        let db = self.client().await?;
+        db.execute(
+            "insert into run_checkpoints (account, run, data) values ($1, $2, $3) \
+             on conflict (account, run) do update set data = excluded.data, updated = now()",
+            &[&account, &run, &data],
+        )
+        .await
+        .map_err(err)?;
+        db.execute("delete from run_checkpoints where updated < now() - interval '30 days'", &[]).await.map_err(err)?;
+        Ok(())
+    }
+
+    pub async fn checkpoint(&self, account: Uuid, run: &str) -> Result<Option<Checkpoint>, String> {
+        let row = self.client().await?.query_opt("select data from run_checkpoints where account = $1 and run = $2", &[&account, &run]).await.map_err(err)?;
+        row.map(|r| serde_json::from_slice(&r.get::<_, Vec<u8>>(0)).map_err(|e| e.to_string())).transpose()
     }
 
     pub async fn save_secrets(&self, account: Uuid, secrets: &BTreeMap<String, String>) -> Result<(), String> {

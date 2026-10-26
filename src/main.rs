@@ -299,6 +299,8 @@ fn main() {
             commands::clone_repo,
             commands::save_connector,
             commands::delete_connector,
+            commands::retry_run,
+            commands::cancel_run,
             commands::pick_folder,
             account::account,
             account::sign_in,

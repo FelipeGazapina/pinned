@@ -39,6 +39,8 @@ pub struct Launch {
     pub plugin_dir: PathBuf,
     pub tutorial_helper: PathBuf,
     pub sock: PathBuf,
+    /// The home Claude Code keeps its sessions under, where a resumed run's transcript goes.
+    pub home: PathBuf,
 }
 
 impl Launch {
@@ -68,6 +70,7 @@ impl Launch {
             plugin_dir,
             tutorial_helper,
             sock: files.join("pinned.sock"),
+            home: home(),
         })
     }
 
@@ -570,6 +573,11 @@ impl Machine {
     /// the run's folder can't be found or cloned here.
     pub fn open_run(&self, run: &RunSpec) -> Result<TabId, String> {
         let cwd = self.find_folder(&run.folder, run.repo.as_deref(), run.token.as_deref())?;
+        // A run another machine lost goes on in a worktree of its own, holding that machine's work.
+        let cwd = match (&run.checkpoint, &run.worktree) {
+            (Some(checkpoint), Some(name)) => crate::checkpoint::restore(&self.launch.home, &cwd, name, checkpoint)?,
+            _ => cwd,
+        };
         let exe = self.launch.exe.display().to_string();
         let args = run.args.iter().map(|a| a.replace(EXE_PLACEHOLDER, &exe)).collect();
         // A run resuming a conversation shows its transcript before claude's first hook names it.
@@ -1411,6 +1419,7 @@ mod tests {
             plugin_dir: "p".into(),
             tutorial_helper: "t".into(),
             sock: "k".into(),
+            home: "/nonexistent-home".into(),
         }
     }
 
@@ -1798,6 +1807,8 @@ mod tests {
             args: vec!["--name".into(), "ENG-7".into(), "Run `'{{pinned}}' stage coding` first".into()],
             env: vec![("PINNED_CONNECTOR".into(), "c1".into())],
             token: None,
+            checkpoint: None,
+            worktree: None,
         };
         let id = m.open_run(&run).unwrap();
         let view = m.view(&id).unwrap();
@@ -1812,7 +1823,7 @@ mod tests {
     fn a_run_resuming_a_session_reads_its_transcript_from_the_start() {
         let dir = temp("run-resume");
         let m = machine();
-        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec!["--resume".into(), "s1".into()], env: vec![], token: None };
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec!["--resume".into(), "s1".into()], env: vec![], token: None, checkpoint: None, worktree: None };
         let id = m.open_run(&run).unwrap();
         assert_eq!(m.tab(&id, |t| t.claude_session.clone()).unwrap().as_deref(), Some("s1"));
         assert_eq!(m.thread(&id, 0).unwrap().session.as_deref(), Some("s1"));
@@ -1837,7 +1848,7 @@ mod tests {
     fn a_run_that_cannot_start_leaves_no_tab() {
         let dir = temp("run-unstartable");
         let m = Machine::new(Launch { claude: "/nonexistent/claude".into(), ..launch() }, None, Some("/repo".into()), |_| {});
-        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec![], env: vec![], token: None };
+        let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec![], env: vec![], token: None, checkpoint: None, worktree: None };
         assert!(m.run(&run).is_err());
         assert_eq!(m.tabs(), vec![]);
         let _ = std::fs::remove_dir_all(dir);
@@ -1868,7 +1879,7 @@ mod tests {
         let m = machine();
         m.open_project(other);
         m.open_project(ours.clone());
-        let run = RunSpec { folder: "/Users/someone-else/app".into(), repo: Some("git@github.com:acme/app.git".into()), args: vec![], env: vec![], token: None };
+        let run = RunSpec { folder: "/Users/someone-else/app".into(), repo: Some("git@github.com:acme/app.git".into()), args: vec![], env: vec![], token: None, checkpoint: None, worktree: None };
         let id = m.open_run(&run).unwrap();
         assert_eq!(m.view(&id).unwrap().cwd, ours.display().to_string());
         let _ = std::fs::remove_dir_all(root);

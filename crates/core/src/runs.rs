@@ -80,6 +80,49 @@ pub struct Job {
     pub events: Vec<Event>,
 }
 
+/// A run as the runs list shows it, without the prompt it started with.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct View {
+    pub key: String,
+    pub connector: String,
+    pub title: String,
+    #[serde(flatten)]
+    pub phase: Phase,
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<AgentStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<Stage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    pub created: u64,
+    pub updated: u64,
+    pub events: Vec<Event>,
+}
+
+/// The runs list: every run, the most recently changed first.
+pub fn views<'a>(runs: impl IntoIterator<Item = (&'a String, &'a Job)>) -> Vec<View> {
+    let mut views: Vec<View> = runs
+        .into_iter()
+        .map(|(key, j)| View {
+            key: key.clone(),
+            connector: j.connector.clone(),
+            title: j.title.clone(),
+            phase: j.phase.clone(),
+            attempt: j.attempt,
+            status: j.status,
+            stage: j.stage,
+            limit: j.limit,
+            created: j.created,
+            updated: j.updated,
+            events: j.events.clone(),
+        })
+        .collect();
+    views.sort_by_key(|v| std::cmp::Reverse(v.updated));
+    views
+}
+
 /// What a run needs from the machines.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Step {

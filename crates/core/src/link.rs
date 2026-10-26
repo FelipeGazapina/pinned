@@ -3,7 +3,7 @@
 use crate::account::Credentials;
 use crate::agent::{Message, Usage};
 use crate::machine::{Machine, ViewerId};
-use crate::sync;
+use crate::{checkpoint, sync};
 use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -29,6 +29,11 @@ const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const SYNC_FIRST: Duration = Duration::from_secs(5);
 const SYNC_EVERY: Duration = Duration::from_secs(20);
+/// How often the work of a workflow session running here goes to the hub, which loses at most
+/// this much of it when the machine goes offline.
+const CHECKPOINT_EVERY: Duration = Duration::from_secs(30);
+/// A transcript past this, gzipped, leaves too little room in one message for the code.
+const TRANSCRIPT_LIMIT: usize = (sync::FILE_LIMIT / 4) as usize;
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
 pub const UNAUTHORIZED: u16 = 4001;
 
@@ -91,6 +96,8 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     let (stop, stopped) = watch::channel(false);
     let (syncing, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
     std::thread::spawn(move || sync_projects(&syncing, &synced_machine, &sync_stopped));
+    let (checkpointing, checkpointed, checkpoint_stopped) = (shared.clone(), machine.clone(), stopped.clone());
+    std::thread::spawn(move || checkpoint_runs(&checkpointing, &checkpointed, &checkpoint_stopped));
     let (link, version) = (shared.clone(), version.to_owned());
     let thread = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("could not start the hub link's runtime");
@@ -182,6 +189,45 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
             }
         }
         state.save(&file);
+    }
+}
+
+/// Sleeps `wait`, and answers false once the link stops.
+fn pause(wait: Duration, stopped: &watch::Receiver<bool>) -> bool {
+    let until = Instant::now() + wait;
+    while Instant::now() < until {
+        if *stopped.borrow() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    true
+}
+
+/// Sends the hub the work of each workflow session running here whose transcript changed, so
+/// another machine can resume its run if this one goes offline.
+fn checkpoint_runs(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<bool>) {
+    let home = machine.launch().home.clone();
+    let mut sent: HashMap<String, SystemTime> = HashMap::new();
+    while pause(CHECKPOINT_EVERY, stopped) {
+        if !shared.online() {
+            continue;
+        }
+        for tab in machine.tabs() {
+            let (Some(connector), Some(subject), Some(session), true) = (tab.connector, tab.subject, tab.session, tab.running) else { continue };
+            let Some(modified) = checkpoint::transcript(&home, &session).and_then(|f| f.metadata().ok()?.modified().ok()) else { continue };
+            if sent.get(&session) == Some(&modified) {
+                continue;
+            }
+            let Some(checkpoint) = checkpoint::capture(&home, &session, sync::FILE_LIMIT) else { continue };
+            if checkpoint.transcript.0.len() > TRANSCRIPT_LIMIT {
+                continue;
+            }
+            match shared.call(HubCall::Checkpoint { connector, subject, checkpoint }) {
+                Ok(_) => drop(sent.insert(session, modified)),
+                Err(e) => eprintln!("pinned: could not checkpoint a workflow session: {e}"),
+            }
+        }
     }
 }
 

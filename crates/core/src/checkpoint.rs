@@ -20,7 +20,7 @@ const RESTORED: &str = "refs/pinned/restore";
 pub struct Checkpoint {
     /// Claude Code's id for the conversation.
     pub session: String,
-    /// The session's transcript, as Claude Code wrote it.
+    /// The session's transcript, as Claude Code wrote it, gzipped.
     pub transcript: Bytes,
     /// The worktree the session worked in, by its name under `.claude/worktrees`, if it used one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -38,6 +38,35 @@ pub struct Code {
     /// The branch HEAD was on, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+}
+
+/// Everything another machine needs to resume `session`, or None while it has no transcript.
+/// The code goes along while its bundle stays under `limit` bytes.
+pub fn capture(home: &Path, session: &str, limit: u64) -> Option<Checkpoint> {
+    let file = transcript(home, session)?;
+    let raw = std::fs::read(&file).ok()?;
+    let cwd = session_cwd(&file);
+    let worktree = cwd.as_deref().and_then(worktree_name);
+    let code = cwd.as_deref().filter(|cwd| cwd.is_dir()).and_then(|cwd| capture_code(cwd, limit));
+    Some(Checkpoint { session: session.to_owned(), transcript: Bytes(crate::sync::pack(&raw)), worktree, code })
+}
+
+/// The name of the worktree under `.claude/worktrees` that `cwd` is in, if any.
+fn worktree_name(cwd: &Path) -> Option<String> {
+    let parts: Vec<Component> = cwd.components().collect();
+    parts.windows(3).find_map(|w| match w {
+        [Component::Normal(a), Component::Normal(b), Component::Normal(name)] if *a == ".claude" && *b == "worktrees" => {
+            Some(name.to_string_lossy().into_owned())
+        }
+        _ => None,
+    })
+}
+
+fn gunzip(gz: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut raw = vec![];
+    flate2::read::GzDecoder::new(gz).read_to_end(&mut raw).map_err(|e| format!("the checkpoint's transcript is corrupt: {e}"))?;
+    Ok(raw)
 }
 
 /// The transcript of `session`, wherever Claude Code keeps it under `home`.
@@ -114,7 +143,7 @@ pub fn restore(home: &Path, checkout: &Path, name: &str, checkpoint: &Checkpoint
     }
     let dir = crate::sync::claude_dir(home, &target);
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    std::fs::write(dir.join(format!("{session}.jsonl")), &checkpoint.transcript.0).map_err(|e| format!("could not write the transcript: {e}"))?;
+    std::fs::write(dir.join(format!("{session}.jsonl")), gunzip(&checkpoint.transcript.0)?).map_err(|e| format!("could not write the transcript: {e}"))?;
     Ok(target)
 }
 
@@ -204,7 +233,7 @@ mod tests {
     }
 
     fn checkpoint(code: Option<Code>) -> Checkpoint {
-        Checkpoint { session: "s1".into(), transcript: Bytes(b"{\"cwd\":\"/x\"}\n".to_vec()), worktree: Some("w".into()), code }
+        Checkpoint { session: "s1".into(), transcript: Bytes(crate::sync::pack(b"{\"cwd\":\"/x\"}\n")), worktree: Some("w".into()), code }
     }
 
     /// Everything a resumed session would see in `dir`.
@@ -334,6 +363,29 @@ mod tests {
         assert_eq!(session_cwd(&file), None);
         assert_eq!(session_cwd(&root.join("missing.jsonl")), None);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_capture_finds_the_session_and_the_worktree_it_worked_in() {
+        let home = temp("capture-home");
+        let repo_dir = temp("capture-repo");
+        repo(&repo_dir);
+        commit(&repo_dir, "a.txt", "one\n", "init");
+        let cwd = repo_dir.join(".claude/worktrees/eng-7");
+        run(&repo_dir, &["worktree", "add", "-q", "-b", "eng-7", cwd.to_str().unwrap()]);
+        std::fs::write(cwd.join("a.txt"), "two\n").unwrap();
+        let line = format!("{{\"cwd\":{}}}\n", serde_json::to_string(cwd.to_str().unwrap()).unwrap());
+        let dir = crate::sync::claude_dir(&home, &cwd);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("s9.jsonl"), &line).unwrap();
+
+        let checkpoint = capture(&home, "s9", 1 << 20).unwrap();
+        assert_eq!((checkpoint.session.as_str(), checkpoint.worktree.as_deref()), ("s9", Some("eng-7")));
+        assert_eq!(gunzip(&checkpoint.transcript.0).unwrap(), line.as_bytes());
+        assert_eq!(checkpoint.code.unwrap().branch.as_deref(), Some("eng-7"));
+        assert_eq!(capture(&home, "missing", 1 << 20), None);
+        let _ = std::fs::remove_dir_all(home);
+        let _ = std::fs::remove_dir_all(repo_dir);
     }
 
     #[test]

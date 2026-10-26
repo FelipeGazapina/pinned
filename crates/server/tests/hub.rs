@@ -223,6 +223,7 @@ impl Node {
             plugin_dir: dir.join("plugin"),
             tutorial_helper: dir.join("plugin/tutorial.mjs"),
             sock: dir.join("sock"),
+            home: dir.join("home"),
         };
         let machine = Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), |_| {});
         let link = link::spawn(creds, machine.clone(), "0.0.0-test");
@@ -363,6 +364,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     };
     let (dir_a, dir_b, repo) = (temp("dispatch-a"), temp("dispatch-b"), temp("dispatch-repo"));
     let (creds_a, creds_b) = (register("mac-mini", &dir_a), register("vps", &dir_b));
+    let (mac_mini, vps) = (Some(creds_a.machine_id.clone()), Some(creds_b.machine_id.clone()));
     let connector = client
         .hub(json!({ "cmd": "save_connector", "connector": {
             "name": "Bugs", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
@@ -373,14 +375,14 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     let id = connector["id"].as_str().unwrap().to_owned();
     client.wait("the saved connector", |f| f["type"] == "settings" && f["settings"]["connectors"][0]["id"] == id);
     let account_id = uuid::Uuid::parse_str(&account.id).unwrap();
-    let run = |subject: Subject| Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![] });
+    let run = |subject: Subject| Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![], title: "ENG-1".into(), worktree: "eng-1".into(), resume: None });
     let open = |work| hub.runtime.block_on(hub.hub().open(account_id, work));
     let connector_tabs = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.connector.as_deref() == Some(&id) && t.running).count();
 
     let mut node_b = Node::start(&dir_b, creds_b);
     wait_for("vps online", || node_b.online());
     client.wait_machines(&[("mac-mini", false), ("vps", true)]);
-    assert!(open(run(Subject::LinearIssue { issue: "uuid-1".into() })), "the preferred machine is offline, so the other one runs it");
+    assert_eq!(open(run(Subject::LinearIssue { issue: "uuid-1".into() })), vps, "the preferred machine is offline, so the other one runs it");
     assert_eq!(connector_tabs(&node_b), 1);
     assert_eq!(node_b.machine.tabs()[0].cwd, repo.display().to_string());
 
@@ -388,11 +390,11 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     // The delivery below is a prompt, which the node holds until claude takes the terminal, as this stand-in does.
     std::fs::write(dir_a.join("claude"), "#!/bin/sh\nstty raw -echo; exec cat\n").unwrap();
     client.wait_machines(&[("mac-mini", true), ("vps", true)]);
-    assert!(open(run(Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() })));
+    assert_eq!(open(run(Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() })), mac_mini);
     assert_eq!((connector_tabs(&node_a), connector_tabs(&node_b)), (1, 1), "the preferred machine runs it once online");
 
     let issue = Subject::LinearIssue { issue: "uuid-1".into() };
-    assert!(open(run(issue.clone())), "a run a session already works on counts as taken");
+    assert_eq!(open(run(issue.clone())), vps, "a run a session already works on counts as taken by its machine");
     let Work::Run(again) = run(Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() }) else { unreachable!() };
     assert_eq!(node_a.machine.run(&again.spec()), Ok("tab-1".into()), "a machine answers a run sent again with the session it started");
     assert_eq!((connector_tabs(&node_a), connector_tabs(&node_b)), (1, 1));
@@ -415,14 +417,14 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     let seen = Arc::new(Mutex::new(vec![]));
     let sink = seen.clone();
     node_a.machine.attach("tab-1", "test".into(), Box::new(move |b: &[u8]| sink.lock().unwrap().extend_from_slice(b))).unwrap();
-    assert!(open(delivery("1792400050.000200")), "the thread's live session takes its new messages");
+    assert_eq!(open(delivery("1792400050.000200")), mac_mini, "the thread's live session takes its new messages");
     wait_for("the delivered prompt", || String::from_utf8_lossy(&seen.lock().unwrap()).contains("yes, file it"));
-    assert!(!open(delivery("1792499999.000100")), "no session answers that thread");
+    assert_eq!(open(delivery("1792499999.000100")), None, "no session answers that thread");
 
     node_a.kill();
     node_b.kill();
     client.wait_machines(&[("mac-mini", false), ("vps", false)]);
-    assert!(!open(run(Subject::LinearIssue { issue: "uuid-2".into() })), "with no machine online the run is unclaimed, for the next check");
+    assert_eq!(open(run(Subject::LinearIssue { issue: "uuid-2".into() })), None, "with no machine online the run is unclaimed, for the next check");
 }
 
 #[test]

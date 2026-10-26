@@ -66,17 +66,24 @@ fn connect(creds: &Credentials, machine: Arc<Machine>) -> Link {
     link::spawn(creds.clone(), machine, env!("CARGO_PKG_VERSION"))
 }
 
+/// The machine id runs record while this signed-out Mac runs its own workflows.
+const LOCAL: &str = "this-mac";
+
 fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
-        let open = |work| {
-            let taken = match work {
-                connectors::Work::Run(run) => machine.run(&run.spec()).is_ok(),
+        // This Mac is the only machine, so a run resumes here, where its transcript already is.
+        let open = |work: connectors::Work| {
+            let taken = match &work {
+                connectors::Work::Run(run) => machine.run(&run.resume_spec(None).unwrap_or_else(|| run.spec())).is_ok(),
                 connectors::Work::Delivery(d) => machine.deliver(&d.env(), &d.text()),
+                connectors::Work::Prompt { text, .. } => machine.deliver(&work.env(), text),
+                connectors::Work::Close { tab, .. } => machine.close_tab(tab),
             };
-            async move { taken }
+            async move { taken.then(|| LOCAL.to_owned()) }
         };
+        let online = || vec![(LOCAL.to_owned(), machine.tabs())];
         let checked = |check: &connectors::Check| drop(app.emit("connectors-checked", check));
-        app.state::<Connectors>().watch(open, checked).await
+        app.state::<Connectors>().watch(open, online, checked).await
     })
 }
 

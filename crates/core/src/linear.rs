@@ -107,6 +107,19 @@ pub async fn move_issue(key: &str, issue: &str, column: &str) -> Result<(), Stri
     }
 }
 
+pub async fn comment(key: &str, issue: &str, body: &str) -> Result<(), String> {
+    let created = query(
+        key,
+        "mutation($id: String!, $body: String!) { commentCreate(input: { issueId: $id, body: $body }) { success } }",
+        json!({ "id": issue, "body": body }),
+    )
+    .await?;
+    match created["commentCreate"]["success"].as_bool() {
+        Some(true) => Ok(()),
+        _ => Err("Linear refused the comment".into()),
+    }
+}
+
 /// Team names, for suggesting the team a Slack connector files issues in.
 pub async fn team_names(key: &str) -> Result<Vec<String>, String> {
     let data = query(key, "{ teams(first: 250) { nodes { name } } }", json!({})).await?;

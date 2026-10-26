@@ -4,6 +4,7 @@
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
 use crate::branches::GitStep;
+use crate::checkpoint::Checkpoint;
 use crate::scripts::Script;
 use crate::panel::{ReviewComment, ReviewEvent};
 use crate::workspace::{DiffScope, PrAction};
@@ -413,6 +414,12 @@ pub struct RunSpec {
     /// The account's GitHub token, added by the hub, which clones a private repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// The work of a run another machine lost, which this one restores into the worktree
+    /// `worktree` before `args` resume its conversation. Added by the hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<Checkpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
 }
 
 /// What a machine reports on its own.
@@ -502,6 +509,18 @@ pub enum HubCall {
         assignee: String,
     },
     LinearTake { connector: String, channel: String, thread: String, issue: String },
+    /// From a machine: the work of a workflow session it runs, which another machine resumes
+    /// the run from if this one goes offline. `null`.
+    Checkpoint {
+        connector: String,
+        #[serde(flatten)]
+        subject: Subject,
+        checkpoint: Checkpoint,
+    },
+    /// Starts a failed or cancelled run again, by `runs::key`. `null`.
+    RetryRun { key: String },
+    /// Stops a run and closes its tabs. `null`.
+    CancelRun { key: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -686,6 +705,8 @@ mod tests {
                     args: vec!["--name".into(), "ENG-7 Broken button".into(), "Run `'{{pinned}}' stage coding`".into()],
                     env: vec![("PINNED_CONNECTOR".into(), "c1".into()), ("PINNED_ISSUE".into(), "uuid".into())],
                     token: None,
+                    checkpoint: None,
+                    worktree: None,
                 },
             },
             json!({
@@ -742,7 +763,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_ignored_and_a_run_needs_only_folder_and_args() {
         let call: Call = serde_json::from_value(json!({ "cmd": "run", "run": { "folder": "/repo", "args": [], "later": 1 }, "extra": true })).unwrap();
-        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![], token: None } });
+        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![], token: None, checkpoint: None, worktree: None } });
         assert!(serde_json::from_value::<Call>(json!({ "cmd": "format_disk" })).is_err());
     }
 
@@ -830,8 +851,8 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, connectors: vec![], checked: None } },
-            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "connectors": [], "checked": null } }),
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, connectors: vec![], checked: None, runs: vec![] } },
+            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "connectors": [], "checked": null, "runs": [] } }),
         );
     }
 

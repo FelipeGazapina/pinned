@@ -2,7 +2,7 @@ use crate::db::{self, Db};
 use pinned_core::agent::{Subject, Usage};
 use pinned_core::connectors::{Connectors, Keys, Storage, Work};
 use base64::Engine;
-use pinned_core::{github, sync};
+use pinned_core::{github, runs, sync};
 use pinned_core::wire::{
     Call, HubCall, MachineEvent, MachineId, MachineView, PairCode, Reply, TabId, TabView, Target, ToClient, ToMachine, EXE_PLACEHOLDER,
 };
@@ -148,6 +148,11 @@ impl Hub {
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
+    /// Refuses a session's callback from a machine its run moved away from.
+    pub async fn held_by(&self, account: &Account, connector: &str, subject: &Subject, machine: &str) -> Result<(), String> {
+        self.connectors(account).await?.held_by(connector, subject, machine)
+    }
+
     async fn connectors(&self, account: &Account) -> Result<Arc<Connectors>, String> {
         let connectors = account
             .connectors
@@ -167,30 +172,33 @@ impl Hub {
         }
         let (hub, id) = (self.clone(), account.id);
         let checked = (self.clone(), account.clone());
+        let live = account.clone();
         tokio::spawn(async move {
             let open = |work| {
                 let hub = hub.clone();
                 async move { hub.open(id, work).await }
             };
+            let online = || live.online_tabs();
             let on_check = |_: &pinned_core::connectors::Check| {
                 let (hub, account) = checked.clone();
                 tokio::spawn(async move { hub.push_settings(&account).await });
             };
-            connectors.watch(open, on_check).await
+            connectors.watch(open, online, on_check).await
         });
         Ok(())
     }
 
-    /// Hands a connector's work to a machine of the account, and answers whether one took it.
+    /// Hands a connector's work to a machine of the account, and answers which one took it.
     /// A run goes to the connector's machine when it is online, else to the others, the most
-    /// recently connected first. New thread messages go to whichever machine runs a session of
-    /// that connector and has the thread's.
-    pub async fn open(&self, account: Uuid, work: Work) -> bool {
-        let Ok(account) = self.account(account).await else { return false };
+    /// recently connected first. A run that resumes a conversation takes its last checkpoint
+    /// along, and starts over when there is none. New thread messages and prompts go to whichever
+    /// machine runs that session.
+    pub async fn open(&self, account: Uuid, work: Work) -> Option<MachineId> {
+        let Ok(account) = self.account(account).await else { return None };
         match work {
             Work::Run(run) => {
-                if account.working_on(&run.connector, &run.subject, |_| true) {
-                    return true;
+                if let Some(machine) = account.working_on(&run.connector, &run.subject, |_| true) {
+                    return Some(machine);
                 }
                 let (preferred, token) = match self.connectors(&account).await {
                     Ok(c) => (
@@ -199,35 +207,59 @@ impl Hub {
                     ),
                     Err(_) => (String::new(), None),
                 };
-                let mut spec = run.spec();
+                let checkpoint = match &run.resume {
+                    Some(_) => self.db.checkpoint(account.id, &runs::key(&run.connector, &run.subject)).await.unwrap_or_else(|e| {
+                        eprintln!("pinned-server: could not read the checkpoint of workflow {}'s run: {e}", run.connector);
+                        None
+                    }),
+                    None => None,
+                };
+                let mut spec = match checkpoint {
+                    Some(checkpoint) => run.resume_spec(Some(checkpoint)).unwrap_or_else(|| run.spec()),
+                    None => run.spec(),
+                };
                 spec.token = token.filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
                 for machine in account.dispatch_order(&preferred, |_| true) {
                     match self.call_machine(&account, &machine, Call::Run { run: spec.clone() }, RUN_WAIT).await {
-                        Ok(_) => return true,
+                        Ok(_) => return Some(machine),
                         Err(Unanswered::Refused(e)) => eprintln!("pinned-server: {machine} refused a run of workflow {}: {e}", run.connector),
                         // The run may have started there, so it doesn't go to a second machine. The next
                         // check finds its tab, or sends it again, and a machine answers a run it has with that session.
                         Err(Unanswered::Lost(e)) => {
                             eprintln!("pinned-server: lost {machine}'s answer to a run of workflow {}: {e}", run.connector);
-                            return false;
+                            return None;
                         }
                     }
                 }
-                false
+                None
             }
-            Work::Delivery(d) => {
-                let runs_connector = |tabs: &[TabView]| tabs.iter().any(|t| t.running && t.connector.as_deref() == Some(&d.connector));
+            Work::Delivery(_) | Work::Prompt { .. } => {
+                let env = work.env();
+                let text = match &work {
+                    Work::Delivery(d) => d.text(),
+                    Work::Prompt { text, .. } => text.clone(),
+                    _ => unreachable!(),
+                };
+                let connector = env.iter().find(|(k, _)| k == pinned_core::agent::CONNECTOR_ENV).map(|(_, v)| v.clone());
+                let runs_connector = |tabs: &[TabView]| tabs.iter().any(|t| t.running && t.connector == connector);
                 for machine in account.dispatch_order("", runs_connector) {
-                    let call = Call::Deliver { env: d.env(), text: d.text() };
+                    let call = Call::Deliver { env: env.clone(), text: text.clone() };
                     match self.call_machine(&account, &machine, call, MACHINE_CALL_WAIT).await {
-                        Ok(Value::Bool(true)) => return true,
+                        Ok(Value::Bool(true)) => return Some(machine),
                         // The messages were likely typed; opening another session for the thread would answer it twice.
-                        Err(Unanswered::Lost(_)) => return true,
+                        Err(Unanswered::Lost(_)) => return Some(machine),
                         _ => {}
                     }
                 }
-                false
+                None
             }
+            Work::Close { machine, tab } => match self.call_machine(&account, &machine, Call::CloseTab { tab }, MACHINE_CALL_WAIT).await {
+                Ok(_) => Some(machine),
+                Err(e) => {
+                    eprintln!("pinned-server: could not close a stale workflow tab on {machine}: {}", String::from(e));
+                    None
+                }
+            },
         }
     }
 
@@ -350,6 +382,11 @@ impl Hub {
             HubCall::LinearTake { connector, channel, thread, issue } => {
                 (json(c().await?.linear_take(&connector, &channel, &thread, &issue).await?), true)
             }
+            HubCall::Checkpoint { connector, subject, checkpoint } => {
+                return json(self.db.save_checkpoint(account.id, &runs::key(&connector, &subject), &checkpoint).await?);
+            }
+            HubCall::RetryRun { key } => (json(c().await?.retry_run(&key)?), true),
+            HubCall::CancelRun { key } => (json(c().await?.cancel_run(&key)?), true),
         };
         if changed {
             self.watch(account).await?;
@@ -425,14 +462,19 @@ impl Account {
         }
     }
 
-    /// Whether a session on an online machine that `on` picks works on the connector's `subject`.
-    pub fn working_on(&self, connector: &str, subject: &Subject, on: impl Fn(&MachineId) -> bool) -> bool {
+    /// The online machine, among those `on` picks, with a session on the connector's `subject`.
+    pub fn working_on(&self, connector: &str, subject: &Subject, on: impl Fn(&MachineId) -> bool) -> Option<MachineId> {
         let live = self.live.lock().unwrap();
         live.machines
             .iter()
             .filter(|(id, _)| on(id))
-            .flat_map(|(_, m)| &m.tabs)
-            .any(|t| t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject))
+            .find(|(_, m)| m.tabs.iter().any(|t| t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)))
+            .map(|(id, _)| id.clone())
+    }
+
+    /// Every online machine with its tabs, which the connectors reconcile their runs with.
+    pub fn online_tabs(&self) -> Vec<(MachineId, Vec<TabView>)> {
+        self.live.lock().unwrap().machines.iter().map(|(id, m)| (id.clone(), m.tabs.clone())).collect()
     }
 
     fn dispatch_order(&self, preferred: &str, wanted: impl Fn(&[TabView]) -> bool) -> Vec<MachineId> {
