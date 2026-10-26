@@ -61,6 +61,11 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.killed.store(true, Ordering::SeqCst);
         let Some(mut child) = self.child.take() else { return };
+        // Before the app quitting can exit under it.
+        #[cfg(unix)]
+        if let Some(pid) = child.process_id() {
+            kill_tree(pid);
+        }
         // portable-pty's kill gives SIGHUP 200ms before SIGKILL and never reaps a process that
         // outlived the SIGHUP, as claude does: off the caller's thread, and reaped, or a node piles up zombies.
         std::thread::spawn(move || {
@@ -68,6 +73,40 @@ impl Drop for Session {
             let _ = child.wait();
         });
     }
+}
+
+/// claude runs its tools, background shells and subagents' commands in process groups of their
+/// own, which the terminal's hangup never reaches and which outlive claude. Each process found is
+/// stopped before its children are looked up, so none can fork away or be orphaned, then all are killed.
+#[cfg(unix)]
+fn kill_tree(root: u32) {
+    let mut tree = vec![root];
+    let mut found = vec![root];
+    while !found.is_empty() {
+        signal("-STOP", &found);
+        found = children(&tree);
+        tree.extend(&found);
+    }
+    signal("-KILL", &tree);
+}
+
+#[cfg(unix)]
+fn children(of: &[u32]) -> Vec<u32> {
+    let Ok(ps) = std::process::Command::new("ps").args(["-A", "-o", "pid=", "-o", "ppid="]).output() else { return vec![] };
+    String::from_utf8_lossy(&ps.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut ids = line.split_whitespace().map(|id| id.parse::<u32>().ok());
+            Some((ids.next()??, ids.next()??))
+        })
+        .filter(|(pid, ppid)| of.contains(ppid) && !of.contains(pid))
+        .map(|(pid, _)| pid)
+        .collect()
+}
+
+#[cfg(unix)]
+fn signal(which: &str, pids: &[u32]) {
+    let _ = std::process::Command::new("kill").arg(which).args(pids.iter().map(u32::to_string)).output();
 }
 
 #[cfg(all(test, unix))]
