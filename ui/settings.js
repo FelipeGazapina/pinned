@@ -77,6 +77,7 @@ function onHubSettings(latest) {
 function showPage(name) {
   page = name;
   save("settings-page", name);
+  delete settingsPage.dataset.view;
   for (const b of document.querySelectorAll("#settings-nav [data-page]")) b.classList.toggle("active", b.dataset.page === name);
   if (name === "connectors" && settings.linear && !suggestions.labels.length) {
     connectorCall("linear_suggestions").then((found) => {
@@ -433,48 +434,136 @@ function editorHtml() {
       <button class="secondary" data-action="close-editor" title="Back to workflows">←</button>
       ${input("name", c.name, 'class="title" placeholder="Workflow name"')}
       ${switchHtml('data-bind="enabled"', c.enabled)}
+      ${c.id ? `<button class="secondary danger" data-action="delete-connector">Delete</button>` : ""}
       <button class="primary" id="save-connector" data-action="save-connector" title="Save (⌘S)"></button>
     </div>
-    <p class="error" id="editor-error"></p>
-    <div class="flow">${flowOf(c).map(([id, edge]) => stepHtml(c, id, edge)).join("")}</div>
-    ${c.id ? `<div class="actions start"><button class="secondary danger" data-action="delete-connector">Delete workflow</button></div>` : ""}`;
+    <div class="editor">
+      <div class="canvas"></div>
+      <p class="error" id="editor-error"></p>
+      ${panelHtml(c)}
+    </div>`;
 }
 
-function stepHtml(c, id, edge) {
-  const step = STEPS[id];
-  const edgeHtml = edge === undefined ? "" : `<div class="edge">${edge ? `<span>${esc(edge)}</span>` : ""}</div>`;
-  if (!shown(c, id)) {
-    return `${edgeHtml}<div class="step" data-step="${id}">
-      <button class="node ghost" data-action="add-step"><span class="icon">＋</span><span class="text">${esc(step.ghost)}</span></button></div>`;
-  }
-  const open = view.open === id;
-  return `${edgeHtml}<div class="step${open ? " open" : ""}" data-step="${id}">
-    <button class="node${step.trigger ? " trigger" : ""}" data-action="toggle-step" aria-expanded="${open}">
-      ${iconHtml(step)}
-      <span class="text"><span class="app">${step.app}</span><b>${step.title}</b><span class="summary"></span></span>
-      <span class="warn" hidden>!</span>
-      <span class="chevron">›</span>
-    </button>
-    ${open ? `<div class="details">${step.fields(c)}${step.optional ? `<div class="actions start"><button class="secondary" data-action="remove-step">Remove step</button></div>` : ""}</div>` : ""}
+/** The canvas's grid, in pixels: a square tile per node, its text under it, columns and branch rows at a fixed pitch. */
+const TILE = 84;
+const TEXT_W = 150;
+const TEXT_H = 56;
+const COL = 230;
+const ROW = 150;
+const PAD = 48;
+
+/**
+ * Where the canvas draws each node and edge. The flow runs left to right; a step with `branches`
+ * fans out into the columns after it, one row per branch, centred on the step.
+ */
+function layoutOf(c) {
+  const nodes = [];
+  const edges = [];
+  const place = (node, col, row) => {
+    const h = node.ports > 2 ? Math.max(TILE, node.ports * 28 + 16) : TILE;
+    nodes.push({ ...node, cx: PAD + TEXT_W / 2 + col * COL, cy: row * ROW, h });
+    return nodes.at(-1);
+  };
+  let prev = null;
+  flowOf(c).forEach(([id, label], col) => {
+    const step = STEPS[id];
+    const branches = step.branches?.(c) ?? [];
+    const node = place({ step: id, ghost: !shown(c, id), ports: branches.length || 1 }, col, 0);
+    if (prev) edges.push({ from: prev, to: node, label, dashed: prev.ghost || node.ghost });
+    prev = node;
+    branches.forEach((branch, port) => {
+      let from = node;
+      branch.nodes.forEach((target, i) => {
+        const placed = place(target, col + 1 + i, port - (branches.length - 1) / 2);
+        edges.push(i ? { from, to: placed } : { from, to: placed, port, portLabel: branch.label });
+        from = placed;
+      });
+    });
+  });
+  const top = Math.min(...nodes.map((n) => n.cy - n.h / 2));
+  const bottom = Math.max(...nodes.map((n) => n.cy + n.h / 2 + TEXT_H));
+  for (const n of nodes) n.cy += PAD - top;
+  const width = 2 * PAD + TEXT_W + Math.max(...nodes.map((n) => n.cx)) - nodes[0].cx;
+  return { nodes, edges, width, height: bottom - top + 2 * PAD };
+}
+
+function flowHtml(c) {
+  const { nodes, edges, width, height } = layoutOf(c);
+  return `<div class="flow" data-width="${width}" data-height="${height}" style="width:${width}px;height:${height}px">
+    ${nodes.map((n) => nodeHtml(c, n)).join("")}
+    <svg class="edges" width="${width}" height="${height}" aria-hidden="true">
+      <defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow" d="M0 1 9 5 0 9z"/></marker></defs>
+      ${edges.map(edgeHtml).join("")}
+    </svg>
+    ${edges.map(edgeLabelHtml).join("")}
   </div>`;
+}
+
+const nodeAt = (n) => `left:${n.cx - TEXT_W / 2}px;top:${n.cy - n.h / 2}px`;
+
+function nodeHtml(c, n) {
+  const step = STEPS[n.step];
+  if (n.ghost) {
+    return `<div class="step" data-step="${n.step}" style="${nodeAt(n)}">
+      <button class="node ghost" data-action="add-step" title="${esc(step.ghost)}"><span class="icon">＋</span></button>
+      <span class="text"><span class="summary">${esc(step.ghost)}</span></span></div>`;
+  }
+  const issues = step.issues?.(c) ?? [];
+  const open = view.open === n.step;
+  return `<div class="step${open ? " open" : ""}" data-step="${n.step}" style="${nodeAt(n)}">
+    <button class="node${step.trigger ? " trigger" : ""}" data-action="toggle-step" aria-expanded="${open}" title="${esc(`${step.app}: ${step.title}`)}" style="height:${n.h}px">
+      ${iconHtml(step)}${issues.length ? `<span class="warn" title="${esc(issues.join(" "))}">!</span>` : ""}
+    </button>
+    <span class="text"><b>${step.title}</b><span class="summary">${esc(step.summary(c))}</span></span>
+  </div>`;
+}
+
+/** The ends of an edge: the right edge of `from` (at its port's height when it fans out) and the left edge of `to`. */
+function ends({ from, to, port }) {
+  const y1 = port === undefined ? from.cy : from.cy - from.h / 2 + (from.h * (port + 0.5)) / from.ports;
+  return [from.cx + TILE / 2, y1, to.cx - TILE / 2, to.cy];
+}
+
+function edgeHtml(edge) {
+  const [x1, y1, x2, y2] = ends(edge);
+  const bend = (x2 - x1) / 2;
+  return `<path${edge.dashed ? ' class="dashed"' : ""} d="M${x1} ${y1}C${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2 - 6} ${y2}" marker-end="url(#flow-arrow)"/>
+    <circle cx="${x1}" cy="${y1}" r="4.5"/><circle cx="${x2}" cy="${y2}" r="4.5"/>`;
+}
+
+/** A chain edge's event as a pill at the curve's midpoint; a branch's name beside its port, as n8n labels an If node's outputs. */
+function edgeLabelHtml(edge) {
+  const [x1, y1, x2, y2] = ends(edge);
+  if (edge.portLabel !== undefined) return `<span class="port-label" style="left:${x1 + 10}px;top:${y1}px">${esc(edge.portLabel)}</span>`;
+  return edge.label ? `<span class="edge-label" style="left:${(x1 + x2) / 2}px;top:${(y1 + y2) / 2}px">${esc(edge.label)}</span>` : "";
+}
+
+/** The selected node's fields, docked beside the canvas as n8n's node view. */
+function panelHtml(c) {
+  const step = STEPS[view.open];
+  if (!step || !shown(c, view.open)) return "";
+  return `<aside class="node-panel" aria-label="${esc(step.title)}">
+    <div class="node-panel-head">${iconHtml(step)}<span class="text"><span class="app">${step.app}</span><b>${step.title}</b></span>
+      <button class="secondary close" data-action="close-step" title="Close (Esc)">✕</button></div>
+    <div class="details">${step.fields(c)}${step.optional ? `<div class="actions start"><button class="secondary" data-action="remove-step">Remove step</button></div>` : ""}</div>
+  </aside>`;
+}
+
+/** Zooms the flow out until it fits the canvas, down to a size whose text still reads, as n8n fits its view on opening. */
+function fitFlow() {
+  const canvas = settingsPage.querySelector(".canvas");
+  const flow = canvas?.firstElementChild;
+  if (!flow) return;
+  flow.style.zoom = Math.max(0.75, Math.min(1, canvas.clientWidth / flow.dataset.width, canvas.clientHeight / flow.dataset.height));
 }
 
 const changed = () => JSON.stringify(view.draft) !== view.original;
 
-/** Updates the parts of the editor that follow the draft without redrawing it, so the field being typed in keeps focus. */
+/** Redraws the canvas and the parts of the panel that follow the draft, leaving the panel's fields alone so the one being typed in keeps focus. */
 function refresh() {
   const c = view.draft;
-  for (const el of settingsPage.querySelectorAll(".step")) {
-    const step = STEPS[el.dataset.step];
-    const summary = el.querySelector(".summary");
-    if (summary) summary.textContent = step.summary(c);
-    const warn = el.querySelector(".warn");
-    if (warn) {
-      const issues = step.issues?.(c) ?? [];
-      warn.hidden = !issues.length;
-      warn.title = issues.join(" ");
-    }
-  }
+  settingsPage.querySelector(".canvas").innerHTML = flowHtml(c);
+  fitFlow();
   const command = document.getElementById("command");
   if (command) command.textContent = commandPreview(c);
   const repo = document.getElementById("repo");
@@ -485,6 +574,7 @@ function refresh() {
 }
 
 function redraw() {
+  settingsPage.dataset.view = view.name;
   settingsPage.innerHTML = connectorsHtml();
   if (view.name === "edit") refresh();
 }
@@ -589,9 +679,8 @@ function armed(button, text) {
 function showStep(id, focus) {
   view.open = id;
   redraw();
-  const step = settingsPage.querySelector(".step.open");
-  step?.scrollIntoView({ block: "nearest" });
-  if (focus) step?.querySelector(".details [data-bind]")?.focus();
+  settingsPage.querySelector(".step.open")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (focus) settingsPage.querySelector(".node-panel .details [data-bind]")?.focus();
 }
 
 const stepOf = (button) => button.closest(".step").dataset.step;
@@ -676,8 +765,9 @@ const actions = {
     STEPS[id].add?.(view.draft);
     showStep(id, true);
   },
-  "remove-step"(button) {
-    STEPS[stepOf(button)].remove(view.draft);
+  "close-step": () => showStep(null),
+  "remove-step"() {
+    STEPS[view.open].remove(view.draft);
     showStep(null);
   },
   async "pick-folder"() {
@@ -763,6 +853,8 @@ settingsPage.addEventListener("change", async (e) => {
   }
   e.target.closest(".flow-card").dataset.on = e.target.checked;
 });
+
+addEventListener("resize", fitFlow);
 
 for (const b of document.querySelectorAll("#settings-nav [data-page]")) b.onclick = () => showPage(b.dataset.page);
 document.getElementById("settings-toggle").onclick = toggleSettings;
