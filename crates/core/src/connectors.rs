@@ -1560,6 +1560,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    fn quiet_linear() -> Connector {
+        Connector { columns: Columns::default(), ..linear_connector() }
+    }
+
+    fn taken(_: Work) -> std::future::Ready<Option<MachineId>> {
+        std::future::ready(Some("m1".to_owned()))
+    }
+
+    #[test]
+    fn a_run_reports_each_stage_once() {
+        let (connectors, dir) = stored("stage-once", vec![quiet_linear()]);
+        assert_eq!(block_on(connectors.hand_over(Work::Run(run(&quiet_linear(), &issue(), "/bin/pinned")), &taken)), Ok(()));
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let stage = |stage| block_on(connectors.stage("c1", &subject, stage));
+        assert_eq!(stage(Stage::Review), Ok("this workflow has no column for that stage, so the issue stays where it is".into()));
+        assert_eq!(stage(Stage::Review), Ok("this run already reported that stage, so the issue stays where it is".into()));
+        assert_eq!(stage(Stage::Coding), Ok("this run already reported that stage, so the issue stays where it is".into()), "a resumed session can't move the issue back");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_reply_already_in_the_thread_is_not_posted_again() {
+        let (connectors, dir) = stored("reply-once", vec![slack_connector()]);
+        let thread_run = slack_run(&slack_connector(), "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &taken)), Ok(()));
+        let key = runs::key("c2", &Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() });
+        connectors.store.lock().unwrap().runs.get_mut(&key).unwrap().replies.push(reply_hash("Fixed in #42."));
+        let reply = |text| block_on(connectors.slack_reply("c2", "C0123ABCD", "1792400050.000200", text));
+        assert_eq!(reply(" Fixed in #42.\n"), Ok("this reply is already in the Slack thread, so it was not posted again".into()));
+        assert_eq!(reply("Something new."), Err("Slack is not connected: connect it in pinned's Connectors settings".into()), "a new reply goes to Slack");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_that_moved_refuses_its_old_machine() {
+        let (connectors, dir) = stored("held", vec![quiet_linear()]);
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        assert_eq!(connectors.held_by("c1", &subject, "m9"), Ok(()), "an unknown run holds no machine");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(run(&quiet_linear(), &issue(), "/bin/pinned")), &taken)), Ok(()));
+        assert_eq!(connectors.held_by("c1", &subject, "m1"), Ok(()));
+        assert_eq!(
+            connectors.held_by("c1", &subject, "m2"),
+            Err("this run moved to another machine after this one went offline: stop working on it here".into())
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_whose_machine_is_gone_resumes_its_conversation_on_another() {
+        let (connectors, dir) = stored("redispatch", vec![quiet_linear()]);
+        let connectors = connectors.with_timing(runs::Timing { check: Duration::from_secs(1), grace: 0 });
+        assert_eq!(block_on(connectors.hand_over(Work::Run(run(&quiet_linear(), &issue(), "/bin/pinned")), &taken)), Ok(()));
+        connectors.checkpointed("c1", &Subject::LinearIssue { issue: "uuid".into() }, "s1").unwrap();
+        let sent = Mutex::new(vec![]);
+        let open = |work: Work| {
+            if let Work::Run(run) = &work {
+                sent.lock().unwrap().push((run.resume.clone(), run.args.last().cloned().unwrap_or_default()));
+            }
+            std::future::ready(Some("m2".to_owned()))
+        };
+        assert_eq!(block_on(connectors.reconcile(&[("m3".to_owned(), vec![])], &open)), None);
+        let sent = sent.into_inner().unwrap();
+        let resume = sent[0].0.clone().unwrap();
+        assert_eq!(resume[..6], ["--resume", "s1", "--model", "sonnet", "--effort", "xhigh"]);
+        assert_eq!(resume.last().map(String::as_str), Some(MOVED));
+        assert!(sent[0].1.ends_with(START_OVER), "the arguments that start over say an attempt was lost");
+        let view = &connectors.get_settings().runs[0];
+        assert_eq!((&view.phase, view.attempt), (&runs::Phase::Running { machine: "m2".into() }, 2));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn the_slack_watermark_waits_for_a_mention_until_a_session_takes_it() {
         let at = |rfc3339: &str| DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&Utc);
