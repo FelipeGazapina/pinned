@@ -35,7 +35,6 @@ const FIXES = {
 };
 const routedText = (text, how = "Another workflow routed the Slack thread below here.") => text.replace("Someone mentioned you in the Slack thread below.", how);
 const DECISION_MODEL = "typesafe-ai/jev";
-/** A new message workflow's categories. `mention` pings a Slack user group in the thread; `workflow` hands the thread on. */
 const DEFAULT_CATEGORIES = [
   { name: "error", description: "Someone reports a bug or an error", workflow: null, mention: null },
   { name: "doubt", description: "Someone asks a question", workflow: null, mention: null },
@@ -47,12 +46,7 @@ const DEFAULT_CATEGORIES = [
   },
   { name: "ignore", description: "Anything else", workflow: null, mention: null },
 ];
-/** The steps of a workflow whose session answers a Slack thread, after its trigger. */
 const sessionSteps = (c, event) => [["agent", event], ["reply", ""], ["bug", ""], ...(c.fix === "off" ? [] : [["coding", "starts the fix"], ["review", "pull request opened"], ["proof", ""]])];
-/**
- * What can start a workflow, matching the backend's `Trigger`: what the trigger stores, the steps
- * that follow it, and a new workflow's defaults. `trigger(was)` keeps the channel when the kind changes.
- */
 const TRIGGERS = {
   "linear-label": {
     text: "A Linear issue gets a label",
@@ -124,7 +118,6 @@ const VERCEL_KEYS = "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2F
 let settings = { linear: null, slack: null, vercel: null, connectors: [], checked: null };
 const PAGES = ["general", "integrations", "projects", "connectors", "account", "machines", "archive"];
 let page = PAGES.includes(load("settings-page")) ? load("settings-page") : "integrations";
-/** Names from the connected Linear workspace, Slack channels and Vercel's decision models, for the connector form's suggestions. */
 let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [], decisionModels: [] };
 
 const settingsOpen = () => document.body.dataset.page === "settings";
@@ -473,13 +466,11 @@ const STEPS = {
 /** A connector's steps in run order, each with the event that leads into it. */
 const flowOf = (c) => [[TRIGGERS[c.trigger.kind].step], ...TRIGGERS[c.trigger.kind].steps(c)];
 
-/** The message workflows' categories that hand their threads to `c`. */
 const routesTo = (c) =>
   settings.connectors.flatMap((r) =>
     r.trigger.kind === "slack-message" && c.id ? r.trigger.decide.categories.filter((cat) => cat.workflow === c.id).map((cat) => ({ router: r.name, category: cat.name })) : [],
   );
 
-/** What a category does after the decision, as canvas nodes: its mention, then the workflow it hands the thread to, or a Stop tile when it does neither. */
 function branchNodes(category, i) {
   const mention = (category.mention ?? "").trim().replace(/^@/, "");
   const nodes = mention ? [{ kind: "mention", category: i, tone: "slack", icon: "@", app: "Slack", title: `Mention @${mention}`, summary: "Pings the group" }] : [];
@@ -496,7 +487,6 @@ function branchNodes(category, i) {
   return nodes;
 }
 
-/** The route select's last option, which saves a new called workflow for the category. */
 const NEW_ROUTE = "＋new";
 
 function decideHtml(c) {
@@ -513,9 +503,9 @@ function decideHtml(c) {
     return `<div class="category" data-category="${i}">
       <div class="row">${input(`${at}.name`, cat.name, 'class="name" placeholder="Category" aria-label="Category name" spellcheck="false"')}
         <button class="secondary" data-action="remove-category" title="Remove this category">✕</button></div>
-      ${input(`${at}.description`, cat.description, 'placeholder="What a message in it looks like" aria-label="Description"')}
+      <textarea data-bind="${at}.description" rows="2" placeholder="What a message in it looks like" aria-label="Description">${esc(cat.description)}</textarea>
       <div class="grid">
-        <label>Mention ${input(`${at}.mention`, cat.mention ?? "", 'placeholder="prod-engg" spellcheck="false"')}</label>
+        <label>Mention ${input(`${at}.mention`, cat.mention ?? "", 'placeholder="No one" spellcheck="false"')}</label>
         <label>Then ${select(`${at}.workflow`, Object.keys(routes), (id) => routes[id], cat.workflow ?? "")}</label>
       </div>
       <p class="hint mention-hint">Pings only when the model is at least 85% sure, once per thread, and at most once every 30 minutes per channel.</p>
@@ -570,7 +560,6 @@ const repoHint = (c) =>
     ? "A machine without the folder can't run this session."
     : `A machine without ${c.folder.trim() ? "this folder" : "a clone"} clones <code>${esc(c.repo.trim())}</code> into <code>~/pinned</code>${settings.github ? " with your GitHub token" : ""}.`;
 
-/** Saves a new called workflow for a category and routes the category to it, from the route select's last option. */
 async function newRoute(select) {
   const router = view.draft;
   const category = router.trigger.decide.categories[Number(select.closest("[data-category]").dataset.category)];
@@ -682,7 +671,6 @@ function editorHtml() {
     </div>`;
 }
 
-/** The canvas's grid, in pixels: a square tile per node, its text under it, columns and branch rows at a fixed pitch. */
 const TILE = 84;
 const TEXT_W = 150;
 const TEXT_H = 56;
@@ -690,10 +678,6 @@ const COL = 230;
 const ROW = 150;
 const PAD = 48;
 
-/**
- * Where the canvas draws each node and edge. The flow runs left to right; a step with `branches`
- * fans out into the columns after it, one row per branch, centred on the step.
- */
 function layoutOf(c) {
   const nodes = [];
   const edges = [];
@@ -765,7 +749,6 @@ function nodeHtml(c, n) {
   </div>`;
 }
 
-/** The ends of an edge: the right edge of `from` (at its port's height when it fans out) and the left edge of `to`. */
 function ends({ from, to, port }) {
   const y1 = port === undefined ? from.cy : from.cy - from.h / 2 + (from.h * (port + 0.5)) / from.ports;
   return [from.cx + TILE / 2, y1, to.cx - TILE / 2, to.cy];
@@ -778,14 +761,12 @@ function edgeHtml(edge) {
     <circle cx="${x1}" cy="${y1}" r="4.5"/><circle cx="${x2}" cy="${y2}" r="4.5"/>`;
 }
 
-/** A chain edge's event as a pill at the curve's midpoint; a branch's name beside its port, as n8n labels an If node's outputs. */
 function edgeLabelHtml(edge) {
   const [x1, y1, x2, y2] = ends(edge);
   if (edge.portLabel !== undefined) return `<span class="port-label" style="left:${x1 + 8}px;top:${y1}px">${esc(edge.portLabel)}</span>`;
   return edge.label ? `<span class="edge-label" style="left:${(x1 + x2) / 2}px;top:${(y1 + y2) / 2}px">${esc(edge.label)}</span>` : "";
 }
 
-/** The selected node's fields, docked beside the canvas as n8n's node view. */
 function panelHtml(c) {
   const route = /^route:(\d+)$/.exec(view.open ?? "");
   if (route) return routePanelHtml(c, Number(route[1]));
@@ -798,17 +779,17 @@ function panelHtml(c) {
   </aside>`;
 }
 
-/** Zooms the flow out until it fits the canvas, down to a size whose text still reads, as n8n fits its view on opening. */
+const READABLE_ZOOM = 0.75;
+
 function fitFlow() {
   const canvas = settingsPage.querySelector(".canvas");
   const flow = canvas?.firstElementChild;
   if (!flow) return;
-  flow.style.zoom = Math.max(0.75, Math.min(1, canvas.clientWidth / flow.dataset.width, canvas.clientHeight / flow.dataset.height));
+  flow.style.zoom = Math.max(READABLE_ZOOM, Math.min(1, canvas.clientWidth / flow.dataset.width, canvas.clientHeight / flow.dataset.height));
 }
 
 const changed = () => JSON.stringify(view.draft) !== view.original;
 
-/** Redraws the canvas and the parts of the panel that follow the draft, leaving the panel's fields alone so the one being typed in keeps focus. */
 function refresh() {
   const c = view.draft;
   settingsPage.querySelector(".canvas").innerHTML = flowHtml(c);
@@ -876,7 +857,6 @@ function checkedText() {
 
 const trimmed = (s) => (s ?? "").trim();
 
-/** A trigger with its typed names trimmed and its empty choices null, as the backend reads them. */
 function tidyTrigger({ kind, label, channel, decide }) {
   const trigger = { kind };
   if (label !== undefined) trigger.label = trimmed(label);
