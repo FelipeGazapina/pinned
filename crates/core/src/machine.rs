@@ -2111,6 +2111,24 @@ mod tests {
     }
 
     #[test]
+    fn a_headless_claude_runs_under_the_tabs_claude_account() {
+        let root = temp("account-headless");
+        let claude = root.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\necho \"{\\\"title\\\":\\\"as $PINNED_ACCOUNT\\\"}\"\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        let title = |account: &str| {
+            let tab = m.add_tab(root.clone(), m.accounts.get(account).unwrap(), vec![], vec![], false, None);
+            m.call(Call::RegenerateTitle { tab, previous: String::new(), thread: "USER: hi".into() })
+        };
+        assert_eq!(title("work"), Ok(json!("as work")));
+        assert_eq!(title("side"), Ok(json!("as claude")), "a Codex tab asks the built-in Claude Code login");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn account_calls_answer_with_the_json_a_client_reads() {
         let root = temp("account-calls");
         let app = root.join("app");

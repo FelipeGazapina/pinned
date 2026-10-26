@@ -5203,8 +5203,83 @@ async function sweep(profileName) {
     return `wrong current: ${wrong}`;
   });
 
+  let spareTab = null;
+  await step("Accounts: Settings' nav opens Accounts, where an added account lists signed out", async () => {
+    await settingsPage("accounts");
+    check((await page.locator('#settings-nav [data-page="accounts"] svg').count()) === 1, "the Accounts link has no icon");
+    await page.waitForSelector("#account-list .card", { timeout: 15000 });
+    await page.fill(".add-account [name=name]", "Spare");
+    await press(page.locator(".add-account .primary"));
+    await page.waitForSelector('#account-list .card[data-account="spare"]');
+    const card = (await text('#account-list .card[data-account="spare"]')).replace(/\s+/g, " ");
+    check(/Not signed in/.test(card), `Spare reads: ${card}`);
+    const over = await overflowing();
+    check(!over.length, `overflowing: ${over}`);
+    return card;
+  });
+
+  await step("Accounts: Sign in runs the login in its own tab, which the app view leaves to the terminal", async () => {
+    await press(page.locator('#account-list .card[data-account="spare"] [data-action="sign-in-account"]'));
+    await waitFor("the sign-in tab", () => page.evaluate(() => active?.view.program === "sign-in"), 10000);
+    await waitFor("Spare signed in", () => page.evaluate(() => machines.get(active.machine).accounts?.find((a) => a.id === "spare")?.signed_in), 15000);
+    await tapOrClick("#mode-gui");
+    await waitFor("the app view", () => page.locator("#chat").isVisible());
+    const said = await text("#thread .blank p");
+    check(said === "This sign-in runs in the terminal only.", `the thread says "${said}"`);
+    check(!(await page.locator("#composer").isVisible()), "the composer of another thread shows");
+    check(!(await page.locator("#pr-chip").isVisible()), "a PR chip shows");
+    await page.evaluate(() => closeTab(active));
+    return said;
+  });
+
+  await step("Accounts: a usage limit offers Continue under Spare, which resumes the thread there", async () => {
+    const machine = await page.evaluate(() => [...machines.keys()].find((k) => machines.get(k).view.online && machines.get(k).view.name === "sweep-node"));
+    spareTab = await page.evaluate(async ([m, p]) => (await openTab(m, p)).key, [machine, path.join(HOME, "work/alpha")]);
+    await waitFor("claude's session", () => page.evaluate(() => !!active?.view.session), 15000);
+    await page.evaluate(() => callOn(active.machine, { cmd: "prompt", tab: active.view.id, text: "/limit" }));
+    await page.waitForSelector("#limit-note:not([hidden]) [data-switch-account=spare]", { timeout: 15000 });
+    const note = await text("#limit-note");
+    check(/hit its usage limit/.test(note), `the note reads "${note}"`);
+    await press(page.locator("#limit-note [data-switch-account=spare]"));
+    await waitFor("the thread under Spare", () => page.evaluate(() => active?.view.account === "spare" && !active.view.resume_at), 15000);
+    check(await page.locator("#limit-note").isHidden(), "the limit note stayed");
+    const session = await page.evaluate(() => active.view.session);
+    const projects = path.join(DIR, "node/accounts/spare/projects");
+    check(fs.readdirSync(projects).some((d) => fs.existsSync(path.join(projects, d, `${session}.jsonl`))), `the transcript ${session} is not in Spare's home`);
+    await showSidebar();
+    const badge = await text(`${rowSel(spareTab)} .account`);
+    check(badge === "Spare", `the row's account badge reads "${badge}"`);
+    await waitTerm(new RegExp(`account spare, resuming ${session}`), 10000);
+    return note;
+  });
+
+  await step("Accounts: Remove waits for the thread to leave Spare, which its row menu moves back", async () => {
+    await settingsPage("accounts");
+    await page.waitForSelector('#account-list .card[data-account="spare"]', { timeout: 15000 });
+    await action("remove-account", await page.locator('#settings-page [data-action="remove-account"]').count() - 1);
+    await action("confirm-remove-account");
+    await waitFor("the refusal", async () => /close the tabs that run under spare/.test(await text("#account-list .error")));
+    const refused = await text("#account-list .error");
+    await closeSettings();
+    await rowMenu(rowSel(spareTab));
+    await menuPick("Move to account");
+    await menuPick("Move to Claude Code");
+    await waitFor("the thread under the built-in account", () => page.evaluate((k) => tabByKey(k)?.view.account === "claude", spareTab), 15000);
+    await settingsPage("accounts");
+    await page.waitForSelector('#account-list .card[data-account="spare"]', { timeout: 15000 });
+    await action("remove-account", await page.locator('#settings-page [data-action="remove-account"]').count() - 1);
+    await action("confirm-remove-account");
+    await page.waitForSelector('#account-list .card[data-account="spare"]', { state: "detached" });
+    await closeSettings();
+    await page.evaluate((k) => closeTab(tabByKey(k)), spareTab);
+    await showSidebar();
+    await tapOrClick("#mode-terminal");
+    await waitFor("the tab bar", () => page.locator("#tab-bar").isVisible());
+    return refused;
+  });
+
   await step("Settings at phone width: nav and pages fit", async () => {
-    for (const name of ["integrations", "projects", "connectors", "account", "machines"]) {
+    for (const name of ["integrations", "accounts", "projects", "connectors", "account", "machines"]) {
       await settingsPage(name);
       await sleep(200);
       const over = await overflowing();
