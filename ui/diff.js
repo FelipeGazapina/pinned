@@ -249,7 +249,7 @@ function diffRows(lines, { lang, comments, draft, selection, path }) {
 }
 
 const rangeLabel = (c) => (c.start === c.end ? `L${c.end}` : `L${c.start} to L${c.end}`);
-const commentHtml = (c) => `<div class="dcomment">${icon("message-circle")}<p><span class="range">${esc(rangeLabel(c))}</span>${esc(c.text)}</p><button type="button" class="icon" data-comment-delete="${esc(c.id)}" title="Delete comment">${icon("trash-2")}</button></div>`;
+const commentHtml = (c) => c.html ?? `<div class="dcomment">${icon("message-circle")}<p><span class="range">${esc(rangeLabel(c))}</span>${esc(c.text)}</p><button type="button" class="icon" data-comment-delete="${esc(c.id)}" title="Delete comment">${icon("trash-2")}</button></div>`;
 const draftHtml = (d) => `<div class="dcomment draft"><textarea rows="3" placeholder="Add a comment…" data-comment-text>${esc(d.text ?? "")}</textarea>
   <div class="row"><span class="hint">${IS_MAC ? "⌘" : "Ctrl"} Enter to send</span><span class="spacer"></span><button type="button" class="outline" data-comment-cancel>Cancel</button><button type="button" class="primary" data-comment-save>Comment</button></div></div>`;
 
@@ -308,8 +308,8 @@ function filesHtml(files, key, opts = {}) {
     return `<section class="file" data-id="${esc(id)}" data-path="${esc(f.path)}" data-status="${f.status}"${collapsed ? " data-collapsed" : ""}${fresh ? " data-fresh" : ""}>
       <header>${icon(collapsed ? "chevron-right" : "chevron-down", "fold")}<span class="change"></span><span class="path" title="${esc(opts.openTitle ?? f.path)}"><bdi>${esc(f.path)}</bdi></span>
         <button type="button" class="copy" data-copy="${esc(f.path)}" title="Copy path">${icon("copy")}</button><span class="spacer"></span>
-        ${viewed ? `<label class="viewed${viewed.changed ? " changed" : ""}"><input type="checkbox" data-viewed="${esc(f.path)}"${viewed.on ? " checked" : ""}>${viewed.changed ? "Changed" : "Viewed"}</label>` : ""}
-        <span class="del">-${f.removed}</span><span class="add">+${f.added}</span></header>
+        <span class="del">-${f.removed}</span><span class="add">+${f.added}</span>
+        ${viewed ? `<label class="viewed${viewed.changed ? " changed" : ""}"${viewed.changed ? ' title="This file has been pushed to since you marked it viewed."' : ""}><input type="checkbox" data-viewed="${esc(f.path)}" aria-label="${viewed.changed ? "Changed" : "Viewed"}"${viewed.on ? " checked" : ""}>${viewed.changed ? "Changed" : "Viewed"}</label>` : ""}</header>
       ${collapsed ? "" : `<div class="hunks">${f.binary ? `<p class="panel-empty">Binary file</p>` : body}</div>`}</section>`;
   }).join("");
 }
