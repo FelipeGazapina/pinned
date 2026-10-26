@@ -94,7 +94,7 @@ function browseView({ clone = false, root = false } = {}) {
     footerAction: (query) => (state(query).relativeNeedsProject || palette.hi >= 0 ? "Select" : undefined),
     footerTrail: () => (TAURI && addingMachine() === LOCAL && !clone ? `<button type="button" class="act" data-footer-act>Open in ${FILE_MANAGER}</button>` : ""),
     footerRun: async () => {
-      const path = await chooseFolder(addingCwd());
+      const path = await invoke("pick_folder", { start: addingCwd() });
       if (path) addProjectAt(LOCAL, path);
     },
     groups(query) {

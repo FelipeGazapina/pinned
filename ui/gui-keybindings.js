@@ -83,9 +83,14 @@ const kbPill = (key) =>
     part === "mod" ? (IS_MAC ? "⌘" : "Ctrl") : part === "shift" ? "⇧" : part === "alt" ? (IS_MAC ? "⌥" : "Alt") : part === "ctrl" ? "⌃" : part.length === 1 ? part.toUpperCase() : part)}</kbd>`).join("")}</span>`;
 
 const kb = { query: "", drafts: new Map(), adding: null, popover: null };
+/** The Keybindings settings page, as T3 Code's settings/keybindings route. */
+function showKeybindings() {
+  settingsPage.innerHTML = keybindingsSettingsHtml();
+  bindKeybindingsSettings();
+}
 function keybindingsSettingsHtml() {
   const web = !TAURI ? `<span class="kb-note" role="img" tabindex="0" aria-label="The browser may claim some shortcuts first. The desktop app receives them all." title="The browser may claim some shortcuts first. The desktop app receives them all.">${icon("triangle-alert")}</span>` : "";
-  return `<section id="keybindings"><h2 class="looks-title">Keybindings${web}</h2>
+  return `<h2>Keybindings${web}</h2><section id="keybindings">
     <div class="kb-tools"><label class="kb-search">${icon("search")}<input type="search" placeholder="Search keybindings" aria-label="Search keybindings" autocomplete="off" spellcheck="false"></label>
     <button type="button" class="kb-button" data-kb-add>${icon("plus")}Add keybinding</button></div><div class="kb-groups"></div></section>`;
 }

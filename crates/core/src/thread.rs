@@ -147,7 +147,7 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
     let mut bytes = vec![];
     (&mut f).take(READ_LIMIT).read_to_end(&mut bytes)?;
     let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-    let lines: Vec<Value> = bytes[..whole].split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice(line).ok()).collect();
+    let lines: Vec<Value> = bytes[..whole].split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice::<Value>(line).ok()).filter(|v| v["isSidechain"].as_bool() != Some(true)).collect();
     let mut items: Vec<Item> = lines.iter().flat_map(items_of).collect();
     let context = lines.iter().rev().find_map(context_of);
     let mut next = from + whole as u64;
@@ -244,9 +244,9 @@ fn rest_of_line(f: &mut impl Read) -> std::io::Result<Option<u64>> {
     }
 }
 
-fn items_of(line: &Value) -> Vec<Item> {
+pub(crate) fn items_of(line: &Value) -> Vec<Item> {
     let str_of = |v: &Value| v.as_str().unwrap_or_default().to_owned();
-    if line["isSidechain"].as_bool() == Some(true) || line["isMeta"].as_bool() == Some(true) {
+    if line["isMeta"].as_bool() == Some(true) {
         return vec![];
     }
     let id = str_of(&line["uuid"]);
@@ -432,7 +432,7 @@ fn first_string(input: &Value) -> Option<String> {
     input.as_object()?.values().find_map(|v| v.as_str()).map(str::to_owned)
 }
 
-fn clip(text: &str, chars: usize) -> String {
+pub(crate) fn clip(text: &str, chars: usize) -> String {
     match text.char_indices().nth(chars) {
         Some((i, _)) => format!("{}…", &text[..i]),
         None => text.to_owned(),

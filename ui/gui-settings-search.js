@@ -16,17 +16,17 @@ const SETTINGS_SEARCH = [
   ["Auto-settle inactive threads", "general", ["sidebar", "settle", "inactivity"]],
   ["Panel animation", "general", ["right panel", "motion", "duration"]],
   ["Send shortcut", "general", ["enter", "composer", "newline"]],
-  ["Keybindings", "general", ["shortcuts", "keyboard", "hotkeys"]],
   ["Linear", "integrations", ["connectors", "issues", "api key"]],
   ["Slack", "integrations", ["connectors", "messages", "bot"]],
   ["GitHub", "integrations", ["connectors", "token", "repositories", "source control"]],
   ["Projects", "projects", ["history", "changes", "turns"]],
+  ["Keybindings", "keybindings", ["shortcuts", "keyboard", "hotkeys"]],
   ["Workflows", "connectors", ["automation", "triggers", "agents"]],
   ["Account", "account", ["sign in", "sign out", "hub", "email", "password"]],
   ["Machines", "machines", ["servers", "remote", "computers", "environments"]],
   ["Archive", "archive", ["archived threads", "unarchive", "delete"]],
 ];
-const settingsPageLabel = (page) => document.querySelector(`#settings-nav [data-page="${page}"]`)?.textContent.trim() || SETTINGS_PAGES.find(([name]) => name === page)?.[1] || page;
+const settingsPageLabel = (page) => document.querySelector(`#settings-nav [data-page="${page}"]`)?.textContent.trim() || page;
 
 /** searchSettings: nothing before a query; keybindings rank after the settings. */
 function settingsSearchItems() {
@@ -43,7 +43,7 @@ function settingsSearchItems() {
     sub: `Settings · Keybindings`,
     secondary: true,
     terms: [commandTitle(command), "Keybindings", command, ...DEFAULT_KEYBINDINGS.filter((r) => r.command === command).map((r) => r.key)],
-    run: () => openSetting("general", "Keybindings", `keybinding-${command}`),
+    run: () => openSetting("keybindings", "Keybindings", `keybinding-${command}`),
   }));
   return [...settings, ...keys];
 }

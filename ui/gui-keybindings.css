@@ -1,11 +1,12 @@
 #keybindings { max-width: 720px; }
-#keybindings h2 { display: flex; align-items: center; gap: 6px; }
-#keybindings .kb-note { display: inline-flex; color: var(--g-warning); cursor: help; }
+#settings-page h2:has(.kb-note) { display: flex; align-items: center; gap: 6px; }
+#settings-page h2 .kb-note { display: inline-flex; color: var(--g-warning); cursor: help; }
+#settings-page h2 .kb-note .i { width: 14px; height: 14px; }
 #keybindings .i { width: 14px; height: 14px; flex: none; }
 #keybindings .kb-tools { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 16px; }
 #keybindings .kb-search { position: relative; display: flex; align-items: center; flex: 1 1 240px; min-width: 0; }
 #keybindings .kb-search .i { position: absolute; left: 10px; color: var(--g-muted); pointer-events: none; }
-#keybindings .kb-search input { width: 100%; height: 32px; padding: 0 10px 0 30px; border-radius: 8px; border: 1px solid var(--g-input); background: transparent; color: var(--g-fg); font: inherit; font-size: 14px; }
+body[data-mode="gui"] #settings-page #keybindings .kb-search input { width: 100%; height: 32px; padding: 0 10px 0 30px; border-radius: 8px; border: 1px solid var(--g-input); background: transparent; color: var(--g-fg); font: inherit; font-size: 14px; }
 #keybindings .kb-group { margin-bottom: 24px; border: 1px solid var(--g-border); border-radius: 12px; overflow: hidden; }
 #keybindings .kb-group h3 { margin: 0; padding: 10px 16px; font-size: 13px; font-weight: 600; border-bottom: 1px solid var(--g-border); }
 #keybindings .kb-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--g-border); }

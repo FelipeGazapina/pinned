@@ -115,15 +115,6 @@ const paletteResults = paletteEl.querySelector(".results");
 const palette = { views: [], hi: 0, shown: [], projects: [], linked: null };
 const paletteOpen = () => !paletteEl.hidden;
 const RECENT_THREADS = 12;
-const SETTINGS_PAGES = [
-  ["general", "General", "settings"],
-  ["integrations", "Connectors", "zap"],
-  ["projects", "Projects", "folder"],
-  ["connectors", "Workflows", "bot"],
-  ["account", "Account", "user-round"],
-  ["machines", "Machines", "monitor"],
-  ["archive", "Archive", "archive"],
-];
 
 const normalize = (text) => String(text ?? "").normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
 const startsWord = (field, token) => {
