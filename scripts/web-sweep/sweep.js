@@ -3679,6 +3679,73 @@ async function sweep(profileName) {
     }
   });
 
+  await step("composer: on a phone the unfocused composer collapses to one Ask anything... row", async () => {
+    const state = () => page.evaluate(() => composer.dataset.collapsed);
+    await page.evaluate(() => (prompt.blur(), rest()));
+    if (!touch) {
+      check((await state()) === "false", "a desktop composer collapsed");
+      return "a desktop composer stays open";
+    }
+    await waitFor("the collapsed row", async () => (await state()) === "true");
+    check((await page.getAttribute("#prompt", "placeholder")) === "Ask anything...", `placeholder: ${await page.getAttribute("#prompt", "placeholder")}`);
+    check(!(await page.locator("#composer-attach").isVisible()) && (await page.locator("#send").isVisible()), "the row shows more than the prompt and Send");
+    const row = await rect("#composer .box");
+    check(row.height <= 52, `the row is ${Math.round(row.height)}px tall`);
+    await page.fill("#prompt", "a draft");
+    await waitFor("the composer to open on focus", async () => (await state()) === "false" && (await page.locator("#composer-attach").isVisible()));
+    await page.evaluate(() => prompt.blur());
+    await waitFor("the row again, with the draft", async () => (await state()) === "true" && (await page.inputValue("#prompt")) === "a draft");
+    await tapOrClick("#prompt");
+    await waitFor("the composer to open on a tap", async () => (await state()) === "false");
+    await page.fill("#prompt", "");
+    return `${Math.round(row.height)}px row`;
+  });
+
+  await step("composer: a fenced block in the prompt draws as a highlighted code block with T3 Code's language picker", async () => {
+    try {
+      await page.fill("#prompt", "Look at this:\n```ts\nconst answer = 42;\n```\nthanks");
+      await waitFor("the code block", () => page.locator("#prompt-mirror .pblock").isVisible());
+      await waitFor("the code colored", async () => (await page.locator("#prompt-mirror .pblock .code span[style*='color']").count()) > 0, 8000);
+      const fit = await page.evaluate(() => [document.getElementById("prompt-mirror").scrollHeight, prompt.scrollHeight, [...document.querySelectorAll("#prompt-mirror .pl")].map((l) => Math.round(l.offsetTop))]);
+      check(Math.abs(fit[0] - fit[1]) <= 1 && fit[2].length === 5, `the drawn lines don't sit on the textarea's: ${JSON.stringify(fit)}`);
+      check((await page.locator("#prompt-mirror .fence").evaluateAll((els) => els.map((e) => getComputedStyle(e).color))).every((c) => /rgba\(.*, 0\)|transparent/.test(c)), "the fences show");
+      const picker = page.locator("#prompt-blocks .block-lang");
+      check((await picker.innerText()).trim() === "TypeScript" && (await picker.getAttribute("aria-label")) === "Code language: TypeScript", `the picker reads ${await picker.innerText()}`);
+      const [button, fence] = [await rect("#prompt-blocks .block-lang"), await rect("#prompt-mirror .fence-open")];
+      check(Math.abs(button.top + button.height / 2 - (fence.top + fence.height / 2)) <= 3, "the picker isn't on the fence line");
+      await press(picker);
+      await waitFor("the languages", () => page.locator('#composer-menu[data-kind="languages"]').isVisible());
+      check((await page.getAttribute('#composer-menu[data-kind="languages"] .search', "placeholder")) === "Search languages", "the search isn't T3's");
+      check(await page.locator('#composer-menu [data-lang="typescript"] .check').count() === 1, "the current language has no check");
+      await page.fill('#composer-menu[data-kind="languages"] .search', "zzz");
+      check((await text('#composer-menu[data-kind="languages"] .none')) === "No matching languages.", "no empty state");
+      await page.fill('#composer-menu[data-kind="languages"] .search', "pyth");
+      await press(page.locator('#composer-menu [data-lang="python"]'));
+      await waitFor("the fence rewritten", async () => (await page.inputValue("#prompt")) === "Look at this:\n```python\nconst answer = 42;\n```\nthanks");
+      await waitFor("the picker to follow", async () => (await picker.innerText()).trim() === "Python");
+      await page.fill("#prompt", "```js");
+      await page.press("#prompt", "Enter");
+      check((await page.inputValue("#prompt")) === "```js\n\n```" && (await page.evaluate(() => prompt.selectionStart)) === 6, `Enter on a fence: ${JSON.stringify(await page.inputValue("#prompt"))}`);
+      await page.keyboard.type("if (x) {");
+      await page.press("#prompt", "Enter");
+      await page.press("#prompt", "Tab");
+      await page.keyboard.type("y();");
+      check((await page.inputValue("#prompt")) === "```js\nif (x) {\n  y();\n```", `Enter and Tab in the block: ${JSON.stringify(await page.inputValue("#prompt"))}`);
+      await page.press("#prompt", "Enter");
+      check((await page.inputValue("#prompt")) === "```js\nif (x) {\n  y();\n  \n```", `Enter kept the indent: ${JSON.stringify(await page.inputValue("#prompt"))}`);
+      await page.evaluate(() => prompt.setSelectionRange(prompt.value.length, prompt.value.length));
+      await page.press("#prompt", "Enter");
+      check((await page.inputValue("#prompt")) === "```js\nif (x) {\n  y();\n  \n```\n", `Enter on the closing fence: ${JSON.stringify(await page.inputValue("#prompt"))}`);
+      check(!/echo: ```js/.test(await termText()), "Enter in the block sent the prompt");
+      await page.fill("#prompt", "plain words");
+      check(!(await page.locator("#prompt-mirror .pblock").count()) && !(await page.locator("#prompt-blocks .block-lang").count()), "a prompt without a fence drew a block");
+      return "TypeScript → Python";
+    } finally {
+      await page.evaluate(() => (composerMenu.hidden = true));
+      await page.fill("#prompt", "");
+    }
+  });
+
   await step("app view: the terminal drawer shows the same session", async () => {
     await tapOrClick("#toggle-terminal");
     await waitFor("the drawer", () => page.locator(".term:not([hidden])").evaluate((el) => getComputedStyle(el).visibility === "visible" && el.getBoundingClientRect().height > 60));

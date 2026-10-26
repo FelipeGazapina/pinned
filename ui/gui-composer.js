@@ -119,6 +119,7 @@ const declineOption = (menu) => menuKind(menu) === "approval" && menu.options.fi
 const freeOption = (menu) => menuKind(menu) !== "approval" && menu.options.find((o) => /^(Type something|Tell Claude what to change)/.test(o.head));
 
 function placeholderFor(tab, t) {
+  if (composer.dataset.collapsed === "true") return "Ask anything...";
   const menu = tab.menu;
   if (menu && menuKind(menu) === "approval") {
     if (!declineOption(menu)) return "Choose an option above";
@@ -679,14 +680,38 @@ tasksTab.addEventListener("click", (e) => {
 
 /** With the thread scrolled up and a one-line prompt not being typed in, the composer rests as one
  * row, as T3 Code's does, to show more of the thread. Like T3's, it comes to rest on a scroll, not
- * on a blur: pressing Send takes the focus, and a blur would move Send out from under the press. */
+ * on a blur: pressing Send takes the focus, and a blur would move Send out from under the press.
+ * On a phone it collapses whenever the prompt isn't focused, to a row that opens it, as T3's does;
+ * a press in the composer holds it open until the press ends. */
+let composerPressed = false;
 function rest() {
   const away = threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight > 40;
   const t = active && threadOf(active);
-  const resting = !!t && away && document.activeElement !== prompt && !prompt.value.includes("\n") && approval.hidden && composerMenu.hidden && !t.attachments?.length && !narrow(640);
+  const typing = document.activeElement === prompt || prompt.value.includes("\n");
+  const phone = narrow(640);
+  const asked = active?.menu && !active.answering && menuKind(active.menu) === "question";
+  const collapsed = phone && !!t && !typing && !composerPressed && !asked && composerMenu.hidden && document.getElementById("chat").dataset.hero !== "true";
+  const resting = collapsed || (!phone && !!t && away && !typing && approval.hidden && composerMenu.hidden && !t.attachments?.length);
   if (composer.dataset.resting !== String(resting)) composer.dataset.resting = resting;
+  if (composer.dataset.collapsed !== String(collapsed)) {
+    composer.dataset.collapsed = collapsed;
+    if (active) prompt.placeholder = placeholderFor(active, threadOf(active));
+  }
   hostControls();
 }
+let pressTimer;
+const releasePress = (ms) => {
+  clearTimeout(pressTimer);
+  pressTimer = setTimeout(() => {
+    composerPressed = false;
+    rest();
+  }, ms);
+};
+composer.addEventListener("pointerdown", () => (composerPressed = true), true);
+// A tap's click can come a task after its pointerup, so the click lets go, or a moment later.
+for (const end of ["pointerup", "pointercancel"]) window.addEventListener(end, () => composerPressed && releasePress(400), true);
+window.addEventListener("click", () => composerPressed && releasePress(0), true);
+prompt.addEventListener("blur", () => setTimeout(rest, 0));
 /** A resting composer hands its controls to the context strip under it, as T3 Code's does. */
 const composerControls = composer.querySelector(".controls");
 function hostControls() {
@@ -716,6 +741,7 @@ prompt.addEventListener("input", () => {
 prompt.addEventListener("keydown", (e) => {
   if (isTrigger() && triggerKey(e)) return e.preventDefault();
   if (deleteChip(e)) return e.preventDefault();
+  if (promptCodeKey(e)) return e.preventDefault();
   if (e.key === "Enter" && e.altKey && !e.shiftKey && (IS_MAC ? e.metaKey : e.ctrlKey)) {
     e.preventDefault();
     return sendAndNewThread();
@@ -1447,7 +1473,7 @@ const TRIGGER_EMPTY = { slash: "No matching command.", mention: "No matching fil
  * folder's files and folders, each filtered as more is typed, as T3 Code's trigger menus do. */
 async function showTrigger() {
   const tab = active;
-  const trigger = tab && !tab.menu && triggerAt();
+  const trigger = tab && !tab.menu && !blockAt(prompt.value.split("\n"), caretLine(prompt.value, prompt.selectionStart)) && triggerAt();
   if (!trigger) {
     if (isTrigger()) composerMenu.hidden = true;
     return;
@@ -1586,30 +1612,224 @@ function expandChips(tab, text) {
 const mirror = Object.assign(document.createElement("div"), { id: "prompt-mirror", ariaHidden: "true" });
 prompt.before(mirror);
 const CHIP_ICONS = { skill: "sparkles", pr: "git-pull-request" };
-/** The textarea can't draw chips, so a copy of its text under it does, letter for letter, with
- * each chip's sigil swapped for its icon; the textarea's own text turns transparent above it. */
+/** The textarea can't draw chips or code blocks, so a copy of its text under it does, line for line
+ * and letter for letter: each chip's sigil swapped for its icon, each code block framed and
+ * highlighted. The textarea's own text turns transparent above it. */
 function renderMirror() {
   const tab = active;
   const chips = tab ? liveChips(tab) : {};
-  const on = Object.keys(chips).length > 0 && composer.dataset.composing !== "true";
+  const lines = prompt.value.split("\n");
+  const blocks = promptBlocks(lines);
+  const on = (Object.keys(chips).length > 0 || blocks.length > 0) && composer.dataset.composing !== "true";
   composer.dataset.chips = on;
-  if (!on) return (mirror.innerHTML = "");
-  let html = "";
-  let last = 0;
-  for (const m of prompt.value.matchAll(CHIP_WORD)) {
-    const chip = chips[m[2]];
-    if (!chip) continue;
-    const at = m.index + m[1].length;
-    html += esc(prompt.value.slice(last, at));
-    const mark = chip.kind === "mention" ? fileTypeIcon(chip.value) : icon(CHIP_ICONS[chip.kind]);
-    html += `<span class="chip ${chip.kind}"><span class="sigil">${esc(m[2][0])}${mark}</span>${esc(m[2].slice(1))}</span>`;
-    last = at + m[2].length;
+  if (!on) {
+    mirror.innerHTML = "";
+    blockPickers.innerHTML = "";
+    return;
   }
-  mirror.innerHTML = `${html}${esc(prompt.value.slice(last))}\u200b`;
+  const line = (text) => {
+    let html = "";
+    let last = 0;
+    for (const m of text.matchAll(CHIP_WORD)) {
+      const chip = chips[m[2]];
+      if (!chip) continue;
+      const at = m.index + m[1].length;
+      html += esc(text.slice(last, at));
+      const mark = chip.kind === "mention" ? fileTypeIcon(chip.value) : icon(CHIP_ICONS[chip.kind]);
+      html += `<span class="chip ${chip.kind}"><span class="sigil">${esc(m[2][0])}${mark}</span>${esc(m[2].slice(1))}</span>`;
+      last = at + m[2].length;
+    }
+    return `<div class="pl">${html}${esc(text.slice(last)) || "\u200b"}</div>`;
+  };
+  let html = "";
+  let next = 0;
+  for (const b of blocks) {
+    html += lines.slice(next, b.open).map(line).join("");
+    const code = lines.slice(b.open + 1, b.close ?? lines.length);
+    const lang = languageOf(b.info);
+    const colored = highlightLines(code, (languageEntry(lang)?.id ?? lang.toLowerCase()) || null);
+    html += `<div class="pblock"><div class="pl fence fence-open">${esc(lines[b.open])}</div>${code.map((c, i) => `<div class="pl code">${c ? colored[i] : "\u200b"}</div>`).join("")}${b.close === null ? "" : `<div class="pl fence">${esc(lines[b.close])}</div>`}</div>`;
+    next = (b.close ?? lines.length - 1) + 1;
+  }
+  mirror.innerHTML = html + lines.slice(next).map(line).join("");
   Object.assign(mirror.style, { top: `${prompt.offsetTop}px`, left: `${prompt.offsetLeft}px`, width: `${prompt.clientWidth}px`, height: `${prompt.clientHeight}px` });
   mirror.scrollTop = prompt.scrollTop;
+  renderBlockPickers(blocks);
 }
-prompt.addEventListener("scroll", () => (mirror.scrollTop = prompt.scrollTop));
+document.addEventListener("highlighter", () => active && renderMirror());
+/** T3 Code's code blocks in the prompt: a fence on a line of its own opens one, closed by a fence
+ * of the same kind or by the end of the prompt. The textarea keeps the fences as typed, which is the
+ * markdown claude gets; the copy under it draws the block framed and highlighted, with the language
+ * picker on the fence line. */
+const PROMPT_LANGUAGES = [["", "Plain text"], ["bash", "Bash"], ["c", "C"], ["cpp", "C++"], ["csharp", "C#"], ["css", "CSS"], ["dart", "Dart"], ["diff", "Diff"], ["dockerfile", "Dockerfile"], ["elixir", "Elixir"], ["go", "Go"], ["graphql", "GraphQL"], ["haskell", "Haskell"], ["html", "HTML"], ["java", "Java"], ["javascript", "JavaScript"], ["json", "JSON"], ["jsx", "JSX"], ["kotlin", "Kotlin"], ["lua", "Lua"], ["markdown", "Markdown"], ["php", "PHP"], ["powershell", "PowerShell"], ["python", "Python"], ["r", "R"], ["ruby", "Ruby"], ["rust", "Rust"], ["scala", "Scala"], ["scss", "SCSS"], ["sql", "SQL"], ["svelte", "Svelte"], ["swift", "Swift"], ["toml", "TOML"], ["tsx", "TSX"], ["typescript", "TypeScript"], ["vue", "Vue"], ["xml", "XML"], ["yaml", "YAML"], ["zig", "Zig"]].map(([id, label]) => ({ id, label }));
+const LANGUAGE_ALIASES = { cs: "csharp", "c++": "cpp", js: "javascript", md: "markdown", py: "python", rb: "ruby", rs: "rust", sh: "bash", shell: "bash", ts: "typescript", yml: "yaml" };
+/** A file name of each language, for its icon. */
+const LANGUAGE_FILES = { bash: "a.sh", c: "a.c", cpp: "a.cpp", csharp: "a.cs", css: "a.css", dart: "a.dart", diff: "a.diff", dockerfile: "Dockerfile", elixir: "a.ex", go: "a.go", graphql: "a.graphql", haskell: "a.hs", html: "a.html", java: "a.java", javascript: "a.js", json: "a.json", jsx: "a.jsx", kotlin: "a.kt", lua: "a.lua", markdown: "a.md", php: "a.php", powershell: "a.ps1", python: "a.py", r: "a.r", ruby: "a.rb", rust: "a.rs", scala: "a.scala", scss: "a.scss", sql: "a.sql", svelte: "a.svelte", swift: "a.swift", toml: "a.toml", tsx: "a.tsx", typescript: "a.ts", vue: "a.vue", xml: "a.xml", yaml: "a.yaml", zig: "a.zig" };
+const languageOf = (info) => info.trim().split(/\s+/, 1)[0] ?? "";
+const languageEntry = (lang) => {
+  const id = lang === "text" ? "" : LANGUAGE_ALIASES[lang.toLowerCase()] ?? lang.toLowerCase();
+  return PROMPT_LANGUAGES.find((l) => l.id === id) ?? null;
+};
+const languageLabel = (lang) => languageEntry(lang)?.label ?? lang;
+/** The info string with `language` in place of its first word; plain text clears it unless more follows. */
+function withLanguage(info, language) {
+  const rest = info.slice(languageOf(info).length + (/^\s*/.exec(info)[0].length));
+  if (language) return `${language}${rest}`;
+  return rest.trim() ? `text${rest}` : "";
+}
+const OPENING_FENCE = /^(`{3,}|~{3,})([^\n]*)$/;
+const closes = (line, fence) => {
+  const run = /^(`{3,}|~{3,})[ \t]*$/.exec(line)?.[1];
+  return !!run && run[0] === fence[0] && run.length >= fence.length;
+};
+/** The prompt's code blocks by line: where each opens, its fence and info string, and the line that
+ * closes it, or none when it runs to the end. A fence opens a block only once a line follows it. */
+function promptBlocks(lines) {
+  const blocks = [];
+  for (let i = 0; i < lines.length - 1; i++) {
+    const open = OPENING_FENCE.exec(lines[i]);
+    if (!open || (open[1][0] === "`" && open[2].includes("`"))) continue;
+    let end = i + 1;
+    while (end < lines.length && !closes(lines[end], open[1])) end++;
+    blocks.push({ open: i, close: end < lines.length ? end : null, fence: open[1], info: open[2] });
+    i = end;
+  }
+  return blocks;
+}
+/** The block the caret's line is in, from its fence through its closing one. */
+function blockAt(lines, line) {
+  return promptBlocks(lines).find((b) => line >= b.open && line <= (b.close ?? lines.length - 1)) ?? null;
+}
+const caretLine = (text, at) => text.slice(0, at).split("\n").length - 1;
+
+/** The language buttons sit on the fence lines, over the textarea. */
+const blockPickers = Object.assign(document.createElement("div"), { id: "prompt-blocks" });
+prompt.after(blockPickers);
+function renderBlockPickers(blocks) {
+  const fences = [...mirror.querySelectorAll(".pl.fence-open")];
+  blockPickers.innerHTML = blocks.map((b, i) => {
+    const lang = languageOf(b.info);
+    const id = languageEntry(lang)?.id ?? lang;
+    return `<button type="button" class="block-lang" data-block="${i}" aria-label="Code language: ${esc(languageLabel(lang) || "Plain text")}">${fileTypeIcon(LANGUAGE_FILES[id] ?? "a.txt")}<span>${esc(languageLabel(lang) || "Plain text")}</span>${icon("chevron-down")}</button>`;
+  }).join("");
+  Object.assign(blockPickers.style, { top: `${prompt.offsetTop}px`, left: `${prompt.offsetLeft}px`, width: `${prompt.clientWidth}px`, height: `${prompt.clientHeight}px` });
+  const top = mirror.getBoundingClientRect().top;
+  [...blockPickers.children].forEach((b, i) => fences[i] && (b.style.top = `${fences[i].getBoundingClientRect().top - top}px`));
+}
+blockPickers.addEventListener("mousedown", (e) => e.target.closest(".block-lang") && e.preventDefault());
+blockPickers.addEventListener("click", (e) => {
+  const b = e.target.closest(".block-lang");
+  if (b && active) openLanguages(b, Number(b.dataset.block));
+});
+/** T3 Code's language picker: a searchable list, each language with its file icon and a check on the current one. */
+function openLanguages(anchor, index) {
+  const block = promptBlocks(prompt.value.split("\n"))[index];
+  if (!block) return;
+  const lang = languageOf(block.info);
+  const current = languageEntry(lang)?.id ?? lang;
+  const items = PROMPT_LANGUAGES.some((l) => l.id === current) ? PROMPT_LANGUAGES : [{ id: current, label: current }, ...PROMPT_LANGUAGES];
+  composerMenu.dataset.kind = "languages";
+  composerMenu.innerHTML = `<input class="search" placeholder="Search languages" aria-label="Search languages" autocomplete="off" spellcheck="false"><div class="list" role="listbox"></div>`;
+  composerMenu.hidden = false;
+  const box = composerMenu.offsetParent.getBoundingClientRect();
+  const at = anchor.getBoundingClientRect();
+  Object.assign(composerMenu.style, { right: "", left: `${Math.max(0, at.left - box.left)}px`, top: "", bottom: `${box.bottom - at.top + 4}px` });
+  const search = composerMenu.querySelector(".search");
+  const list = () => {
+    const needle = search.value.trim().toLowerCase();
+    const shown = needle ? items.filter((l) => l.label.toLowerCase().includes(needle) || l.id.includes(needle)) : items;
+    composerMenu.querySelector(".list").innerHTML = shown.map((l, i) => `<button type="button" data-lang="${esc(l.id)}" role="option"${i === 0 ? ` class="highlight"` : ""}>${fileTypeIcon(LANGUAGE_FILES[l.id] ?? "a.txt", "lead")}<span class="label">${esc(l.label)}</span>${l.id === current ? icon("check", "check") : ""}</button>`).join("") || `<p class="none">No matching languages.</p>`;
+  };
+  list();
+  search.oninput = list;
+  search.onkeydown = (e) => {
+    const rows = [...composerMenu.querySelectorAll("[data-lang]")];
+    const at = rows.findIndex((r) => r.classList.contains("highlight"));
+    if (e.key === "Escape") {
+      composerMenu.hidden = true;
+      prompt.focus();
+    } else if (e.key === "Enter") rows[at]?.click();
+    else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      rows[at]?.classList.remove("highlight");
+      const next = rows[(at + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length];
+      next?.classList.add("highlight");
+      next?.scrollIntoView({ block: "nearest" });
+    } else return;
+    e.stopPropagation();
+  };
+  composerMenu.querySelector(".list").onclick = (e) => {
+    const row = e.target.closest("[data-lang]");
+    if (!row) return;
+    composerMenu.hidden = true;
+    if (row.dataset.lang !== current) setBlockLanguage(index, row.dataset.lang);
+    else prompt.focus();
+  };
+  search.focus();
+}
+/** Rewrites the block's fence for `language`, then puts the caret at the end of its code, as T3 Code does. */
+function setBlockLanguage(index, language) {
+  const lines = prompt.value.split("\n");
+  const block = promptBlocks(lines)[index];
+  if (!block) return;
+  lines[block.open] = `${block.fence}${withLanguage(block.info, language)}`;
+  const last = (block.close ?? lines.length) - 1;
+  prompt.value = lines.join("\n");
+  const caret = lines.slice(0, last + 1).join("\n").length;
+  prompt.focus();
+  prompt.setSelectionRange(caret, caret);
+  prompt.dispatchEvent(new Event("input"));
+}
+
+/** Enter and Tab in a code block, as in T3 Code's: Enter on a fence line opens a closed block with
+ * the caret in it, Enter in a block keeps the line's indent, on its closing fence leaves it, and
+ * after two blank lines at the end of an open one closes it; Tab indents and Shift+Tab outdents. */
+function promptCodeKey(e) {
+  if ((e.key !== "Enter" && e.key !== "Tab") || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return false;
+  const text = prompt.value;
+  const [from, to] = [prompt.selectionStart, prompt.selectionEnd];
+  const lines = text.split("\n");
+  const at = caretLine(text, from);
+  const block = blockAt(lines, at);
+  const lineStart = text.lastIndexOf("\n", from - 1) + 1;
+  const lineEnd = text.indexOf("\n", from) < 0 ? text.length : text.indexOf("\n", from);
+  const replace = (start, end, insert, caret = start + insert.length) => {
+    prompt.setRangeText(insert, start, end, "end");
+    prompt.setSelectionRange(caret, caret);
+    prompt.dispatchEvent(new Event("input"));
+    return true;
+  };
+  if (e.key === "Tab") {
+    if (!block || at === block.open || at === block.close) return false;
+    if (!e.shiftKey && from === to) return replace(from, to, "  ");
+    const end = text.indexOf("\n", Math.max(from, to - 1)) < 0 ? text.length : text.indexOf("\n", Math.max(from, to - 1));
+    const original = text.slice(lineStart, end).split("\n");
+    const next = original.map((l) => (e.shiftKey ? (l.startsWith("  ") ? l.slice(2) : l.replace(/^[\t ]/, "")) : l ? `  ${l}` : l));
+    const firstDelta = next[0].length - original[0].length;
+    const joined = next.join("\n");
+    prompt.setRangeText(joined, lineStart, end, "preserve");
+    prompt.setSelectionRange(Math.max(lineStart, from + firstDelta), Math.max(lineStart, to + joined.length - original.join("\n").length));
+    prompt.dispatchEvent(new Event("input"));
+    return true;
+  }
+  if (e.shiftKey || from !== to) return false;
+  if (!block) {
+    const open = OPENING_FENCE.exec(text.slice(lineStart, lineEnd));
+    if (!open || from !== lineEnd || (open[1][0] === "`" && open[2].includes("`"))) return false;
+    return replace(from, from, `\n\n${open[1]}`, from + 1);
+  }
+  if (at === block.close && from === lineEnd) return replace(from, from, "\n");
+  if (block.close === null && from === text.length && /\n[ \t]*\n[ \t]*$/.test(text.slice(0, from)) && at > block.open + 2) {
+    const trailing = /\n[ \t]*\n[ \t]*$/.exec(text)[0];
+    return replace(from - trailing.length, from, `\n${block.fence}\n`);
+  }
+  return replace(from, from, `\n${/^[ \t]*/.exec(text.slice(lineStart, from))[0]}`);
+}
+
+prompt.addEventListener("scroll", () => {
+  mirror.scrollTop = prompt.scrollTop;
+  if (blockPickers.childElementCount) renderBlockPickers(promptBlocks(prompt.value.split("\n")));
+});
 prompt.addEventListener("compositionstart", () => {
   composer.dataset.composing = "true";
   renderMirror();
