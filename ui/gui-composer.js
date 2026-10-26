@@ -136,7 +136,7 @@ function renderComposer(tab) {
   const empty = !prompt.value.trim() && !t?.attachments?.length;
   composer.dataset.working = working;
   composer.dataset.empty = empty;
-  document.getElementById("chat").dataset.hero = !!tab && t.loaded && !t.items.length && !tab.menu;
+  document.getElementById("chat").dataset.hero = !!tab && t.loaded && !t.items.length && !tab.menu && !tab.dialog;
   const send = document.getElementById("send");
   const blocked = tab && sendBlocked(tab);
   const spinning = composer.dataset.sending === "true" || blocked === "Connecting" || blocked === "Preparing worktree";
@@ -195,9 +195,19 @@ function watchMenu(tab) {
       queued = false;
       const lines = screenLines(tab);
       const menu = tab.answering ? null : menuOn(lines);
-      // claude hides its mode line and effort marks while a menu is up.
-      const mode = modeOn(lines) ?? (menu || tab.answering ? tab.mode ?? null : null);
-      const traits = traitsOn(lines) ?? (menu || tab.answering ? tab.traits ?? null : null);
+      const dialog = menu || tab.answering ? null : terminalDialog(tab);
+      // claude hides its mode line and effort marks while a menu or a dialog is up.
+      const covered = menu || dialog || tab.answering;
+      const mode = modeOn(lines) ?? (covered ? tab.mode ?? null : null);
+      const traits = traitsOn(lines) ?? (covered ? tab.traits ?? null : null);
+      if (dialog !== (tab.dialog ?? null)) {
+        const opened = !tab.dialog;
+        tab.dialog = dialog;
+        if (tab === active) {
+          renderDialog(tab, opened);
+          renderComposer(tab);
+        }
+      }
       if (JSON.stringify([menu, mode, traits]) === JSON.stringify([tab.menu ?? null, tab.mode ?? null, tab.traits ?? null])) return;
       tab.menu = menu;
       tab.mode = mode;
@@ -214,6 +224,15 @@ const ARROW_DOWN = "\x1b[B";
 const ARROW_UP = "\x1b[A";
 const SHIFT_TAB = "\x1b[Z";
 const writeTo = (tab, data) => callOn(tab.machine, { cmd: "write_input", tab: tab.view.id, data });
+/** Presses Esc until claude's dialog closes, a few times at most for one opened from another. Keys
+ * typed into a dialog would move its cursor or pick an entry instead of reaching the prompt. */
+async function closeClaudeDialog(tab) {
+  for (let i = 0; i < 3 && terminalDialog(tab); i++) {
+    await writeTo(tab, "\x1b");
+    await until(() => !terminalDialog(tab), 1000);
+  }
+  return !terminalDialog(tab);
+}
 const arrowsTo = (menu, n) => {
   const from = menu.options.find((o) => o.chosen)?.n ?? 1;
   return (n > from ? ARROW_DOWN : ARROW_UP).repeat(Math.abs(n - from));
@@ -541,7 +560,7 @@ prompt.addEventListener("keydown", (e) => {
     stop();
   } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && recall(e.key === "ArrowUp" ? -1 : 1)) {
     e.preventDefault();
-  } else if (e.key === "Tab" && e.shiftKey && active?.view.running && !active.menu) {
+  } else if (e.key === "Tab" && e.shiftKey && active?.view.running && !active.menu && !active.dialog) {
     e.preventDefault();
     writeTo(active, SHIFT_TAB);
   }
@@ -604,6 +623,10 @@ async function send() {
   const chips = { ...chipsOf(tab) };
   const compactFirst = !!compactOffer(tab) && !t.keepHistory && !/^\/compact\b/.test(text);
   composer.dataset.sending = "true";
+  if (!(await closeClaudeDialog(tab))) {
+    delete composer.dataset.sending;
+    return showComposerNote("Claude's dialog didn't close. Your message is still here.", true);
+  }
   clearComposer(tab, false);
   try {
     // claude takes the message typed while it compacts as the next prompt.
@@ -787,7 +810,11 @@ window.addEventListener("keydown", (e) => {
 
 function sendSlash(tab, text) {
   if (!tab || waitsOnMenu(tab)) return false;
-  callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text }).then(() => setTimeout(() => fetchThread(tab), 400), (e) => showComposerNote(String(e), true));
+  (async () => {
+    if (!(await closeClaudeDialog(tab))) throw "Claude's dialog didn't close.";
+    await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });
+    setTimeout(() => fetchThread(tab), 400);
+  })().catch((e) => showComposerNote(String(e), true));
   return true;
 }
 
@@ -1699,7 +1726,7 @@ async function openBranches(anchor) {
   }
   threadOf(tab).git = git;
   const delegating = phaseOf(tab) === "delegating";
-  const busy = phaseOf(tab) === "working" || !!tab.menu || delegating;
+  const busy = phaseOf(tab) === "working" || !!tab.menu || !!tab.dialog || delegating;
   // A fresh worktree, as T3 Code's draft one, picks the ref it starts from, which may be the remote's.
   const base = threadOf(tab).madeWorktree === tab.view.cwd && workspaceOpen(tab);
   const current = git.refs.find((r) => r.current)?.name;

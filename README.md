@@ -84,12 +84,17 @@ The app view has three columns:
   it; double-click the edge to reset it. ⌘B hides the sidebar.
 - **Thread.** Your prompts and Claude's answers. The tool calls of a turn fold into one
   **Worked for** row; click it to see each one. A turn that changed files ends with a card of
-  those files. **Open diff** shows them in the side panel. Type below and press Enter to send.
+  those files. **Open diff** shows them in the side panel. A page Claude published with its
+  Artifact tool shows as a card; **Open** opens it on claude.ai. Type below and press Enter to send.
   While Claude works, Enter queues your message and the red button stops the turn.
   Each agent Claude spawns gets a card under the turn with its name, its kind, what it is doing
   now and how long it has run; click a card to see its recent steps. While any agent runs after
   Claude's turn ended, the thread and its sidebar row read **N agents working**, and you can still
   send a prompt. The menu under the prompt picks the model.
+  A command that opens one of Claude's own screens, such as `/usage`, `/status`, `/mcp` or
+  `/model`, shows that screen live at the end of the thread. Keys you press on it reach Claude,
+  and on a touch screen its buttons send them; Esc or ✕ closes it. Sending a message closes it
+  first, so your words reach the prompt rather than the screen.
 - **Side panel.** Each thread keeps its own panel: its tabs, the one shown, its width, and
   whether it is open or maximized. **+** (⌘T while the panel is open) adds a tab, and ⌘W closes
   the shown tab before it ever closes a thread. ⌘D opens the **Diff**: one turn, the latest
@@ -125,7 +130,7 @@ under the thread at any time; drag its top edge to resize it.
 The composer keeps a draft per thread, and the sidebar marks threads with one. ⌘S sets a draft
 aside in the **Stash** above the prompt. ↑ and ↓ in an empty prompt bring back the thread's
 earlier prompts, and `/` lists Claude's commands with your own and your project's commands and
-skills. Attached files show above the prompt and go out with it. Next to the model menu (⌘⇧M),
+skills, your plugins' and those claude.ai syncs to your account. Attached files show above the prompt and go out with it. Next to the model menu (⌘⇧M),
 the mode menu (⌘⇧A, or ⇧Tab in the prompt) switches Claude between Supervised, Auto-accept
 edits, Plan and Auto. The branch under the prompt (⌘⇧G) switches or creates branches once Claude
 is between turns, and the Git button in the header asks Claude to commit, push or open a pull

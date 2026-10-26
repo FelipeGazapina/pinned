@@ -211,6 +211,7 @@ function renderGui() {
       watchMenu(tab);
     }
     tab.menu = tab.answering ? null : terminalMenu(tab);
+    tab.dialog = tab.menu || tab.answering ? null : terminalDialog(tab);
     if (!t.loaded) fetchThread(tab);
     fetchWorkspace(tab);
     if (tab === active && !t.history) fetchHistory(tab);

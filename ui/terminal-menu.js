@@ -68,3 +68,69 @@ function modeOn(lines) {
   if (named) return { "auto mode": "auto", "manual mode": "manual", "accept edits": "accept", "plan mode": "plan", "bypass permissions": "bypass" }[named[1]];
   return /\? for shortcuts/.test(bottom) ? "manual" : null;
 }
+
+/** The dialog claude draws in place of its prompt for /usage, /status, /mcp and the like, if one is
+ * up: the lines under the ▔ rule above it. These dialogs write nothing to the transcript. A ▔ rule
+ * with claude's prompt box under it is only output, such as a file shown in the terminal. */
+function dialogOn(lines) {
+  const rule = lines.findLastIndex((l) => DIALOG_RULE.test(l));
+  if (rule < 0) return null;
+  const body = lines.slice(rule + 1);
+  if (body.some((l) => /^\s*─{20,}\s*$/.test(l))) return null;
+  while (body.length && !body.at(-1).trim()) body.pop();
+  return body.length ? body : null;
+}
+const DIALOG_RULE = /▔{20,}/;
+
+/** claude's dialog on `tab`'s screen as HTML in claude's own colors, or null when none is up. */
+function terminalDialog(tab) {
+  const buffer = tab.term.buffer.active;
+  const rows = Array.from({ length: tab.term.rows }, (_, i) => buffer.getLine(buffer.baseY + i));
+  const lines = rows.map((row) => row?.translateToString(true) ?? "");
+  const body = dialogOn(lines);
+  if (!body) return null;
+  const top = lines.findLastIndex((l) => DIALOG_RULE.test(l)) + 1;
+  const cell = buffer.getNullCell();
+  // The 16 named colors as the terminal drawer's theme sets them, so the card reads like the drawer.
+  const theme = tab.term.options.theme ?? {};
+  const palette = ANSI.map((c, i) => theme[ANSI_KEYS[i]] ?? c);
+  return rows.slice(top, top + body.length).map((row) => rowHtml(row, cell, palette)).join("\n");
+}
+
+function rowHtml(row, cell, palette) {
+  let html = "";
+  let run = { key: null, text: "" };
+  const flush = () => {
+    if (run.text) html += run.key ? `<span ${run.key}>${esc(run.text)}</span>` : esc(run.text);
+  };
+  for (let x = 0; x < row.length; x++) {
+    row.getCell(x, cell);
+    if (!cell.getWidth()) continue;
+    let fg = cell.isFgRGB() ? hex(cell.getFgColor()) : cell.isFgPalette() ? paletteColor(cell.getFgColor(), palette) : null;
+    let bg = cell.isBgRGB() ? hex(cell.getBgColor()) : cell.isBgPalette() ? paletteColor(cell.getBgColor(), palette) : null;
+    const inverse = !!cell.isInverse();
+    if (inverse) [fg, bg] = [bg, fg];
+    const classes = [inverse && "inverse", cell.isBold() && "bold", cell.isDim() && "dim", cell.isItalic() && "italic", cell.isUnderline() && "underline"].filter(Boolean);
+    const style = [fg && `color:${fg}`, bg && `background:${bg}`].filter(Boolean).join(";");
+    const key = [classes.length && `class="${classes.join(" ")}"`, style && `style="${style}"`].filter(Boolean).join(" ") || null;
+    if (key !== run.key) {
+      flush();
+      run = { key, text: "" };
+    }
+    run.text += cell.getChars() || " ";
+  }
+  if (!run.key) run.text = run.text.trimEnd();
+  flush();
+  return html;
+}
+const hex = (rgb) => `#${rgb.toString(16).padStart(6, "0")}`;
+// xterm's own palette, for a terminal whose theme names no colors, as the terminal view's.
+const ANSI = ["#2e3436", "#cc0000", "#4e9a06", "#c4a000", "#3465a4", "#75507b", "#06989a", "#d3d7cf", "#555753", "#ef2929", "#8ae234", "#fce94f", "#729fcf", "#ad7fa8", "#34e2e2", "#eeeeec"];
+const ANSI_NAMED = ["Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White"];
+const ANSI_KEYS = [...ANSI_NAMED.map((c) => c.toLowerCase()), ...ANSI_NAMED.map((c) => `bright${c}`)];
+function paletteColor(n, palette) {
+  if (n < 16) return palette[n];
+  if (n >= 232) return `rgb(${Array(3).fill(8 + (n - 232) * 10)})`;
+  const steps = [0, 95, 135, 175, 215, 255];
+  return `rgb(${steps[Math.floor((n - 16) / 36)]},${steps[Math.floor((n - 16) / 6) % 6]},${steps[(n - 16) % 6]})`;
+}

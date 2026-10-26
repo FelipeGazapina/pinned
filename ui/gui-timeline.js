@@ -20,6 +20,9 @@ Object.assign(ICON_PATHS, {
 
 const PLAN_TOOL = "ExitPlanMode";
 const QUESTION_TOOL = "AskUserQuestion";
+/** A page the Artifact tool published to claude.ai: its local file and its link. */
+const PUBLISHED = /^Published (.+?) at (https:\/\/claude\.ai\/(?:code\/)?artifact\/[\w-]+)/;
+const published = (step) => (step.kind === "tool" && step.name === "Artifact" && !step.result?.error && step.result?.text.match(PUBLISHED)) || null;
 const interruption = (step) => /^\[Request interrupted/.test(step.result?.text ?? "");
 
 function turnsOf(items) {
@@ -45,7 +48,7 @@ function turnsOf(items) {
     const lastText = t.steps.lastIndexOf(texts.at(-1));
     // Errors, answered questions and plans stay in sight, and once the turn settles so does a tool that
     // failed after the last thing claude said.
-    const shown = (s) => s === t.lead || s === t.answer || s.kind === "error" || (s.kind === "tool" && (s.name === PLAN_TOOL || (s.name === QUESTION_TOOL && s.result)));
+    const shown = (s) => s === t.lead || s === t.answer || s.kind === "error" || (s.kind === "tool" && (s.name === PLAN_TOOL || (s.name === QUESTION_TOOL && s.result) || !!published(s)));
     t.failed = new Set(t.steps.filter((s, i) => i > lastText && s.kind === "tool" && s.result?.error && !shown(s) && !interruption(s)));
     t.shown = t.steps.filter(shown);
     t.work = t.steps.filter((s) => !shown(s));
@@ -392,9 +395,17 @@ function shownHtml(step, cwd, t, answer, forkable) {
   if (step.kind === "error" || (step.kind === "tool" && step.result?.error && step.name !== QUESTION_TOOL && step.name !== PLAN_TOOL)) return errorHtml(step, cwd);
   if (step.name === PLAN_TOOL) return planHtml(step, t);
   if (step.name === QUESTION_TOOL) return questionHtml(step);
+  if (published(step)) return artifactHtml(step);
   if (step !== answer) return `<div class="assistant md">${markdown(step.text)}</div>`;
   return `<div class="answer"><div class="assistant md">${markdown(step.text)}</div>
     <div class="meta"><button type="button" class="xs" data-copy-item="${esc(step.id)}" title="Copy">${icon("copy")}</button>${forkable ? `<button type="button" class="xs" data-fork="${esc(step.id)}" title="Fork from this response">${icon("git-fork")}</button>` : ""}${whenHtml(step.at)}</div></div>`;
+}
+
+function artifactHtml(step) {
+  const [, file, url] = published(step);
+  return `<div class="artifact-card">${icon("globe", "lead")}<div class="body"><span class="badge">Artifact</span><h3>${esc(file.split("/").pop())}</h3>
+      ${step.detail ? `<p class="about">${esc(step.detail)}</p>` : ""}</div>
+    <a class="open" href="${esc(url)}" title="${esc(url)}">Open${icon("external-link")}</a></div>`;
 }
 
 const endOfSecond = (seconds) => seconds * 1000 + 999;
@@ -636,7 +647,12 @@ function renderThread() {
     : `<div class="blank"><p>${blank}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
   const liveRows = threadView.querySelector(".work.live .group[open] > .rows");
   const follow = !liveRows || liveRows.scrollHeight - liveRows.scrollTop - liveRows.clientHeight < 24;
-  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${body}</div>`;
+  // The window redraws on scroll, so claude's dialog card moves into the new lane, keeping its focus.
+  const card = threadView.querySelector("#dialog-slot > .dialog-card");
+  const focused = card?.contains(document.activeElement);
+  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
+  if (card) document.getElementById("dialog-slot")?.append(card);
+  if (focused && card.isConnected) card.focus({ preventScroll: true });
   threadView.dataset.key = key;
   threadView.dataset.content = content;
   threadView.dataset.tab = place;
@@ -647,6 +663,7 @@ function renderThread() {
   }
   for (const el of threadView.querySelectorAll(".lane > .turn")) t.heights?.set(el.dataset.turnId, el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().top);
   const kept = anchor && threadView.querySelector(`.lane > .turn[data-turn-id="${CSS.escape(anchor.id)}"]`);
+  renderDialog(tab);
   if (stick) threadView.scrollTop = threadView.scrollHeight;
   else if (kept) threadView.scrollTop += kept.getBoundingClientRect().top - threadView.getBoundingClientRect().top - anchor.delta;
   if (finder.open) findMatches();
@@ -654,6 +671,49 @@ function renderThread() {
   renderMinimap(shown, t);
   renderComposer(tab);
 }
+
+const DIALOG_KEYS = { "shift-tab": "\x1b[Z", tab: "\t", left: "\x1b[D", right: "\x1b[C", up: "\x1b[A", down: "\x1b[B", enter: "\r", esc: "\x1b" };
+const DIALOG_BUTTONS = [["shift-tab", "⇧Tab"], ["tab", "Tab"], ["left", "←"], ["right", "→"], ["up", "↑"], ["down", "↓"], ["enter", "Enter"]];
+const PRESSED = { Tab: "tab", ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down", Enter: "enter", Escape: "esc" };
+
+/** claude's dialog, such as /usage's, live at the end of the thread. Keys pressed on it reach
+ * claude, as do its buttons on a touch screen. When it has just `opened` from the composer, it takes
+ * the focus; a thread drawn again around it leaves the focus where it is. */
+function renderDialog(tab, opened = false) {
+  const slot = document.getElementById("dialog-slot");
+  if (!slot) return;
+  if (tab !== active || !tab.dialog) {
+    const focused = slot.contains(document.activeElement);
+    slot.replaceChildren();
+    return focused && prompt.focus();
+  }
+  let card = slot.querySelector(".dialog-card");
+  if (!card) {
+    slot.innerHTML = `<div class="dialog-card" tabindex="0" aria-label="Claude's dialog. Keys pressed here go to Claude.">
+      <div class="head">${icon("square-terminal", "lead")}<span class="title">Claude</span>
+        <span class="keys">${DIALOG_BUTTONS.map(([key, label]) => `<button type="button" class="xs" data-dialog-key="${key}">${label}</button>`).join("")}</span>
+        <button type="button" class="xs outline" data-show-terminal>Terminal</button>
+        <button type="button" class="xs" data-dialog-key="esc" title="Close (Esc)">${icon("x")}</button></div>
+      <pre class="screen"></pre></div>`;
+    card = slot.firstElementChild;
+  }
+  const screen = card.querySelector(".screen");
+  if (screen.shown === tab.dialog) return;
+  const end = threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
+  screen.innerHTML = screen.shown = tab.dialog;
+  if (opened || end) threadView.scrollTop = threadView.scrollHeight;
+  if (opened && (document.activeElement === document.body || (document.activeElement === prompt && !prompt.value))) card.focus({ preventScroll: true });
+}
+
+threadView.addEventListener("keydown", (e) => {
+  if (!e.target.closest?.(".dialog-card") || e.target.closest("button") || !active?.dialog || e.metaKey || e.ctrlKey || e.altKey) return;
+  const name = e.key === "Tab" && e.shiftKey ? "shift-tab" : PRESSED[e.key];
+  const data = name ? DIALOG_KEYS[name] : e.key === "Backspace" ? "\x7f" : e.key.length === 1 ? e.key : null;
+  if (!data) return;
+  e.preventDefault();
+  e.stopPropagation();
+  writeTo(active, data);
+});
 
 const rerender = () => {
   threadView.dataset.key = "";
@@ -1078,6 +1138,12 @@ threadView.addEventListener("click", (e) => {
   if (e.target.closest("[data-new-thread]")) return toggleProjects();
   if (e.target.closest("[data-mode-terminal]")) return setMode("terminal");
   if (!active) return;
+  const dialogKey = e.target.closest("[data-dialog-key]");
+  if (dialogKey) {
+    dialogKey.closest(".dialog-card").focus({ preventScroll: true });
+    return writeTo(active, DIALOG_KEYS[dialogKey.dataset.dialogKey]);
+  }
+  if (e.target.closest(".dialog-card [data-show-terminal]")) return toggleDrawer(true);
   const t = shownThread();
   const toggle = e.target.closest("[data-toggle]");
   if (toggle) {

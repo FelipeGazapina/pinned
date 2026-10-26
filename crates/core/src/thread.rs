@@ -359,6 +359,7 @@ fn describe_tool(name: &str, input: &Value) -> (String, String) {
         "WebSearch" => field("query").to_owned(),
         "Agent" | "Task" => field("description").to_owned(),
         "Skill" => field("skill").to_owned(),
+        "Artifact" => field("file_path").to_owned(),
         "AskUserQuestion" => input["questions"][0]["question"].as_str().unwrap_or_default().to_owned(),
         _ => String::new(),
     };
@@ -368,6 +369,7 @@ fn describe_tool(name: &str, input: &Value) -> (String, String) {
         "Edit" => format!("{}\n---\n{}", field("old_string"), field("new_string")),
         "Write" => field("content").to_owned(),
         "Agent" | "Task" => field("prompt").to_owned(),
+        "Artifact" => field("description").to_owned(),
         "ExitPlanMode" => return (clip(summary.lines().next().unwrap_or_default(), SUMMARY_CHARS), clip(field("plan"), PLAN_CHARS)),
         _ => String::new(),
     };
@@ -566,6 +568,22 @@ mod tests {
                 },
                 Item::Tool { id: "p1".into(), at: "t3".into(), name: "ExitPlanMode".into(), summary: "# Ship the fix".into(), detail: "# Ship the fix\n\n1. Patch\n2. Test".into() },
                 Item::Error { id: "e".into(), at: "t4".into(), text: "API Error: Your computer went to sleep mid-response. The response above may be incomplete.".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_published_artifact_reads_as_its_file_and_description() {
+        let items = page(&[
+            r#"{"type":"assistant","uuid":"a","timestamp":"t1","message":{"content":[{"type":"tool_use","id":"x1","name":"Artifact","input":{"file_path":"/tmp/payouts.html","icon":"flow","description":"Follows an invoice to the bank."}}]}}"#,
+            r#"{"type":"assistant","uuid":"b","timestamp":"t2","message":{"content":[{"type":"tool_use","id":"x2","name":"Artifact","input":{"action":"quickstart","intent":"other"}}]}}"#,
+        ])
+        .items;
+        assert_eq!(
+            items,
+            vec![
+                Item::Tool { id: "x1".into(), at: "t1".into(), name: "Artifact".into(), summary: "/tmp/payouts.html".into(), detail: "Follows an invoice to the bank.".into() },
+                Item::Tool { id: "x2".into(), at: "t2".into(), name: "Artifact".into(), summary: "quickstart".into(), detail: "".into() },
             ]
         );
     }

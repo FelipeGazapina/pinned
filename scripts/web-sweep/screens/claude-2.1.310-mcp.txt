@@ -1,0 +1,40 @@
+ ▝▝   ▝▝   ~/work/app
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ● high · /effort ▔
+   Manage MCP servers
+   30 servers
+
+     User MCPs (/Users/me/.claude.json)
+   ❯ ✔ pencil                               5 tools
+
+     claude.ai
+     ✔ claude.ai Claude Docs                8 tools
+     ✔ claude.ai Context7                   2 tools
+     ✔ claude.ai Figma                      43 tools
+     ✔ claude.ai Google Calendar            9 tools
+     ✔ claude.ai Google Drive               8 tools
+     ✔ claude.ai Linear                     77 tools
+     ✔ claude.ai Miro                       51 tools
+     ⚠ claude.ai Railway                    needs authentication
+     ✔ claude.ai Wispr Flow                 17 tools
+     → Show unused connectors               3 hidden
+
+     Built-in MCPs (always available)
+     ✔ claude-in-chrome                     22 tools
+     ◯ computer-use
+     ⚠ plugin:design:atlassian              needs authentication
+     ⚠ plugin:design:figma                  needs authentication
+     ◯ plugin:design:gmail                  not configured
+     ◯ plugin:design:google calendar        not configured
+     ⚠ plugin:design:intercom               needs authentication
+     ⚠ plugin:design:linear                 needs authentication
+     ⚠ plugin:design:notion                 needs authentication
+     ⚠ plugin:design:slack                  needs authentication
+     ⚠ plugin:engineering:datadog           needs authentication
+     ◯ plugin:engineering:gmail             not configured
+     ◯ plugin:engineering:google calendar   not configured
+     ◯ plugin:finance:databricks            not configured
+     ◯ plugin:finance:gmail                 not configured
+     ↓ 2 more
+   https://code.claude.com/docs/en/mcp for help
+   ↑/↓ to navigate · Enter to confirm · Esc to cancel

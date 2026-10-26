@@ -166,6 +166,29 @@ button.xs.copied { color: var(--g-success); }
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 96px), transparent); }
 .plan-foot { display: flex; justify-content: center; margin-top: 16px; }
 
+.artifact-card { display: flex; align-items: center; gap: 12px; margin: 4px 0 16px; padding: 12px 16px; border-radius: 16px; border: 1px solid rgb(var(--g-ink-rgb) / 0.05); background: rgb(var(--g-raised-rgb) / 0.7); }
+.artifact-card .lead { flex: none; color: var(--g-muted); }
+.artifact-card .body { flex: 1; min-width: 0; }
+.artifact-card .badge { padding: 1px 6px; border-radius: 6px; background: var(--g-hover); color: var(--g-fg); font-size: 11px; font-weight: 500; }
+.artifact-card h3 { margin: 6px 0 0; font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-card .about { margin: 2px 0 0; color: var(--g-muted); font-size: 13px; }
+.artifact-card .open { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--g-border); color: var(--g-fg); font-size: 13px; text-decoration: none; }
+.artifact-card .open:hover { background: var(--g-hover); }
+
+.dialog-card { margin: 4px 0 16px; border-radius: 16px; border: 1px solid var(--g-input); background: var(--g-term-bg); outline: none; overflow: hidden; }
+.dialog-card:focus-within { border-color: rgb(var(--g-info-rgb) / 0.5); }
+.dialog-card .head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--g-border); color: var(--g-muted); font-size: 12px; }
+.dialog-card .head .title { margin-right: auto; color: var(--g-fg); font-weight: 500; }
+.dialog-card .keys { display: flex; flex-wrap: wrap; gap: 2px; }
+.dialog-card .keys button { min-width: 24px; justify-content: center; font-family: var(--g-mono); }
+@media (max-width: 640px) { .dialog-card .head { flex-wrap: wrap; } .dialog-card .keys { order: 1; flex-basis: 100%; } }
+.dialog-card .screen { margin: 0; padding: 10px 12px; overflow-x: auto; color: var(--g-term-fg); font: 12px/1.35 var(--g-mono); white-space: pre; }
+.dialog-card .screen .inverse { color: var(--g-term-bg); background: var(--g-term-fg); }
+.dialog-card .screen .bold { font-weight: 600; }
+.dialog-card .screen .dim { opacity: 0.6; }
+.dialog-card .screen .italic { font-style: italic; }
+.dialog-card .screen .underline { text-decoration: underline; }
+
 .changes > summary { position: sticky; top: 8px; z-index: 2; border-radius: 10px 10px 0 0;
   background: linear-gradient(rgb(var(--g-ink-rgb) / 0.016), rgb(var(--g-ink-rgb) / 0.016)), var(--g-canvas); }
 .changes:not([open]) > summary { border-radius: 10px; }

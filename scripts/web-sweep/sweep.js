@@ -735,6 +735,20 @@ async function sweep(profileName) {
     check(download.suggestedFilename() === "ship-the-fix.md", `the download is named ${download.suggestedFilename()}`);
   });
 
+  await step("app view: a published artifact shows as a card that opens it", async () => {
+    await sendPrompt("artifact");
+    await answered("Published the page.");
+    const cards = page.locator("#thread .turn:last-of-type .artifact-card");
+    check((await cards.count()) === 1, `${await cards.count()} artifact cards, but only one Artifact call published`);
+    check((await cards.locator("h3").textContent()) === "payouts.html", `the card is titled ${await cards.locator("h3").textContent()}`);
+    check((await cards.locator(".about").textContent()) === "Follows an invoice to the bank.", `the card says ${await cards.locator(".about").textContent()}`);
+    await page.evaluate(() => (window.open = (url) => (window.openedUrl = url)));
+    await press(cards.locator("a[href]"));
+    const opened = await page.evaluate(() => window.openedUrl);
+    check(opened === "https://claude.ai/artifact/PgGFrq1LMW2iDhYZThVQcD", `Open went to ${opened}`);
+    return opened;
+  });
+
   await step("app view: the live row shows thinking and Running <program>, and /compact shows Compacting…", async () => {
     await sendPrompt("think");
     await waitFor("the live thought", async () => (await text("#thread .live-tool .label")) === "Weighing the options", 6000);
@@ -2640,6 +2654,58 @@ async function sweep(profileName) {
     const modes = await page.evaluate((screens) => screens.map(modeOn), ["manual-mode", "accept-edits", "idle"].map((s) => screen(`claude-2.1.310-${s}.txt`)));
     check(modes.join() === "manual,accept,", `modes: ${modes.join()}`);
     return options;
+  });
+
+  await step("composer: the dialog parser reads claude 2.1's /usage, /status, /mcp and /model", async () => {
+    const screen = (name) => fs.readFileSync(path.join(__dirname, "screens", name), "utf8").split("\n");
+    const dialogs = await page.evaluate((screens) => screens.map((lines) => dialogOn(lines)?.join("\n") ?? null), ["usage", "status", "mcp", "model"].map((s) => screen(`claude-2.1.310-${s}.txt`)));
+    const [usage, status, mcp, model] = dialogs;
+    check(/^\s+Settings\s+Status\s+Config\s+Usage/.test(usage) && /Current session/.test(usage) && !/~\/work\/app/.test(usage), `/usage reads as ${JSON.stringify(usage?.slice(0, 80))}`);
+    check(/Esc to cancel$/.test(status) && /Version:\s+2\.1\.310/.test(status), `/status reads as ${JSON.stringify(status?.slice(-60))}`);
+    check(/Manage MCP servers/.test(mcp), `/mcp reads as ${JSON.stringify(mcp?.slice(0, 60))}`);
+    check(/Select model/.test(model), `/model reads as ${JSON.stringify(model?.slice(0, 60))}`);
+    const none = await page.evaluate((screens) => screens.map((lines) => dialogOn(lines)), ["idle", "permission", "question", "plan", "manual-mode"].map((s) => screen(`claude-2.1.310-${s}.txt`)));
+    check(none.every((d) => d === null), `a prompt or menu read as a dialog: ${JSON.stringify(none)}`);
+    const shown = await page.evaluate((lines) => dialogOn(lines), [...screen("claude-2.1.310-usage.txt").slice(0, 10), ...screen("claude-2.1.310-manual-mode.txt").slice(-5)]);
+    check(shown === null, `a ▔ rule printed above claude's prompt box read as a dialog: ${JSON.stringify(shown)}`);
+    return dialogs.map((d) => d.split("\n").length).join(" | ");
+  });
+
+  await step("composer: /usage shows claude's dialog live in the thread, takes keys, and a prompt closes it first", async () => {
+    await sendPrompt("/usage");
+    const card = gui("#thread .dialog-card");
+    await waitFor("the dialog in the thread", () => card.isVisible());
+    check(/Current session/.test(await card.locator(".screen").textContent()), `the card shows ${await card.locator(".screen").textContent()}`);
+    check((await card.locator(".screen .inverse", { hasText: "Usage" }).count()) === 1, "the shown tab isn't drawn in reverse video");
+    await press(card.locator('[data-dialog-key="tab"]'));
+    await waitFor("the Status tab", async () => /Version:/.test(await card.locator(".screen").textContent()));
+    if (!touch) {
+      await card.focus();
+      await page.keyboard.press("Tab");
+      await waitFor("Tab typed into the card to reach claude", async () => /Current session/.test(await card.locator(".screen").textContent()));
+      await page.evaluate(() => rerender());
+      check(await page.evaluate(() => !!document.activeElement?.closest(".dialog-card")), "drawing the thread again took the focus off claude's dialog");
+      await page.focus("#prompt");
+      await page.evaluate(() => rerender());
+      check(await page.evaluate(() => document.activeElement?.id === "prompt"), "drawing the thread again moved the focus into claude's dialog");
+    }
+    await press(card.locator('[data-dialog-key="esc"]'));
+    await waitFor("the dialog to close", async () => !(await page.locator("#thread .dialog-card").isVisible()));
+    await sendPrompt("/usage");
+    await waitFor("the dialog again", () => gui("#thread .dialog-card").isVisible());
+    if (touch) await sendPrompt("after the dialog");
+    else {
+      await page.fill("#prompt", "after the dialog");
+      await page.press("#prompt", "Enter");
+      await page.press("#prompt", "Enter");
+    }
+    await waitFor("the prompt to reach claude", async () => /echo: after the dialog/.test(await termText()));
+    await answered("echo: after the dialog");
+    check(!(await page.locator("#thread .dialog-card").isVisible()), "the dialog stayed up after the prompt went out");
+    await sendPrompt("and one more");
+    await answered("echo: and one more");
+    const sent = (await termText()).match(/echo: after the dialog/g).length;
+    check(sent === 1, `Enter pressed twice while the dialog closed sent the prompt ${sent} times`);
   });
 
   await step("composer: a question shows option descriptions and takes number keys or a typed answer", async () => {
