@@ -103,7 +103,7 @@ body[data-jump-hints] .thread-row[data-jump]::after { display: block; }
 #side-menu .custom-snooze .primary { justify-content: center; }
 
 @media (max-width: 768px) {
-  #sidebar-resize, #chat-head .crumb .project { display: none; }
+  #sidebar-resize, #chat-head .crumb .project, #chat-head .crumb .stats { display: none; }
 }
 @media (pointer: coarse) {
   #side-menu button { min-height: 40px; }

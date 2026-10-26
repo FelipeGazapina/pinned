@@ -747,6 +747,14 @@ async function sweep(profileName) {
     const before = await readouts();
     check(before.row === before.head, `the row reads "${before.row}", the header "${before.head}"`);
     check(before.tip.split("\n").includes(before.head), `the row's tooltip lacks the readout: ${before.tip}`);
+    const placed = await page.evaluate(() =>
+      [["#chat-head .crumb .stats", "#chat-head .crumb"], ["#thread-list .thread-row.active .stats", "#thread-list .thread-row.active .l3"]].map(([inner, outer]) => {
+        const box = document.querySelector(inner).getBoundingClientRect();
+        if (!box.width) return "hidden";
+        return box.right <= document.querySelector(outer).getBoundingClientRect().right + 0.5 ? "inside" : "spills";
+      }));
+    check(placed[0] === (touch ? "hidden" : "inside"), `the header readout is ${placed[0]}`);
+    check(placed[1] !== "spills", "the row readout spills out of its line");
     await sendPrompt("think");
     await waitFor("the turn to start", async () => (await readouts()).status === "working");
     await sleep(2500);
