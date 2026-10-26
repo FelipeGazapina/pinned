@@ -86,7 +86,6 @@ body[data-mode="gui"] #settings-page .look select { grid-column: 2; grid-row: 1 
 body[data-mode="gui"] #settings .editor-bar { top: calc(-1 * var(--top)); margin-top: calc(-1 * var(--top)); margin-bottom: 16px; padding: 16px 0 12px;
   background: var(--g-canvas); border-color: var(--g-border); }
 body[data-mode="gui"] #settings .editor-bar input.title { font-size: 15px; }
-/* The editor spans the whole page, as n8n's canvas does. */
 body[data-mode="gui"] #settings-page[data-view="edit"] { padding: 0; }
 body[data-mode="gui"] #settings-page[data-view="edit"] > * { max-width: none; margin-inline: 0; }
 body[data-mode="gui"] #settings-page[data-view="edit"] .editor-bar { margin: 0; padding: 10px 16px; }

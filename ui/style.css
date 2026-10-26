@@ -243,7 +243,6 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 #settings .editor-bar input.title { flex: 1; min-width: 0; font-weight: 600; }
 #settings .editor-bar button.secondary { padding: 4px 9px; }
 
-/* The workflow editor: the bar, then a canvas that scrolls both ways beside the selected node's panel. */
 #settings-page[data-view="edit"] { display: flex; flex-direction: column; padding: 0; overflow: hidden; container-type: inline-size; }
 #settings-page[data-view="edit"] .editor-bar { position: static; margin: 0; }
 .editor { position: relative; flex: 1; min-height: 0; display: flex;
@@ -299,7 +298,6 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 #settings .category .row { margin: 0; }
 #settings .category input.name { font-weight: 600; }
 .category .mention-hint { font-size: 11px; }
-/* The paging guards only matter to a category that pings someone. */
 .category:has([data-bind$=".mention"]:placeholder-shown) .mention-hint { display: none; }
 @container (max-width: 720px) {
   .editor { flex-direction: column; }

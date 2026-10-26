@@ -1,11 +1,8 @@
-//! The Vercel AI Gateway, whose decision models sort a Slack message into a workflow's categories.
-
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
 const API: &str = "https://ai-gateway.vercel.sh/v1";
-/// The one question `choose` asks, by the name the gateway answers it under.
 const QUESTION: &str = "category";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -39,7 +36,6 @@ struct Answer {
     probabilities: HashMap<String, f64>,
 }
 
-/// What the decision model answered.
 #[derive(Debug, PartialEq)]
 pub struct Chosen {
     /// The position of the choice it picked.
@@ -150,7 +146,6 @@ mod tests {
         assert_eq!(deciding(models), Ok(vec!["baseten/mammoth-1".to_owned(), "typesafe-ai/jev".to_owned()]));
     }
 
-    /// Reaches the real gateway: `cargo test -p pinned-core decision_models_live -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn decision_models_live() {

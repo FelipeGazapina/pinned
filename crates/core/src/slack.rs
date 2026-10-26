@@ -158,18 +158,15 @@ pub async fn channel_id(token: &str, channel: &str) -> Result<String, String> {
         .ok_or_else(|| format!("Slack has no channel #{name} the bot can see"))
 }
 
-/// The name of the channel `id`, for a thread's session outside the channel its workflow watches.
 pub async fn channel_name(token: &str, id: &str) -> Result<String, String> {
     let body = call(token, "conversations.info", &[("channel", id)]).await?;
     body["channel"]["name"].as_str().map(str::to_owned).ok_or_else(|| "Slack sent no channel name".into())
 }
 
-/// User group ids are uppercase and start with S, handles are what people type after `@`.
 fn is_group_id(group: &str) -> bool {
     group.len() > 1 && group.starts_with('S') && group.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
-/// The id of the user group with `handle` in a `usergroups.list` answer.
 fn group_with_handle(groups: &Value, handle: &str) -> Option<String> {
     groups.as_array().into_iter().flatten().find(|g| g["handle"].as_str() == Some(handle)).and_then(|g| g["id"].as_str()).map(str::to_owned)
 }
@@ -227,8 +224,6 @@ fn mentions_in(messages: &Value, bot: &str, since: DateTime<Utc>) -> Vec<Mention
         .collect()
 }
 
-/// Top-level messages in a history page that people wrote after `since`, oldest first: neither the
-/// bot's own, another bot's, nor a thread reply Slack also shows in the channel.
 fn from_people(messages: &Value, bot: &str, since: DateTime<Utc>) -> Vec<Value> {
     let since = since.timestamp_micros();
     let mut people: Vec<Value> = messages
