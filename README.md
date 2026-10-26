@@ -2,12 +2,14 @@
 
 Claude Code in a small panel that stays on top of everything on macOS, including fullscreen
 videos and fullscreen apps. When the agent finishes or needs your approval, the panel tells you
-even while you're watching something else.
+even while you're watching something else. It runs on Windows too.
 
 pinned hosts the official `claude` CLI in a terminal. It uses your existing Claude Code login,
 and it never reads your credentials or calls the Anthropic API.
 
 ## Install
+
+### Mac
 
 1. Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and log in with `claude`.
 2. Download the `.dmg` for your Mac from [Releases](https://github.com/FelipeGazapina/pinned/releases/latest).
@@ -21,6 +23,27 @@ Run this once after you install:
 xattr -dr com.apple.quarantine /Applications/pinned.app
 ```
 
+### Windows
+
+1. Install [Git for Windows](https://git-scm.com/downloads/win). Claude Code runs pinned's
+   statusline in its Git Bash.
+2. Install Claude Code with its native installer. In PowerShell:
+
+   ```powershell
+   irm https://claude.ai/install.ps1 | iex
+   ```
+
+   Then run `claude` once and log in.
+3. Download `pinned_<version>_x64-setup.exe` from
+   [Releases](https://github.com/FelipeGazapina/pinned/releases/latest) and run it. It installs
+   pinned for your user only, so it needs no admin rights.
+
+The installer isn't signed, so SmartScreen warns on its first run. Click **More info**, then
+**Run anyway**.
+
+On Windows the tray icon in the taskbar takes the place of the menu-bar icon, and Ctrl takes
+the place of ⌘ in every shortcut below.
+
 ## Use
 
 - pinned starts in the project you opened most recently. Click 📁 to start `claude` in another folder.
@@ -32,7 +55,7 @@ xattr -dr com.apple.quarantine /Applications/pinned.app
 - The header shows how much of your Claude subscription you have used, for example
   `5h 23%  7d 41%`. Each window has a thin bar: blue below 70%, amber from 70%, red from 90%.
   Hover over it to see the exact figures and when each window resets.
-- Quit from the menu-bar icon.
+- Quit from the menu-bar icon (the tray icon on Windows).
 
 From a terminal you can open a specific folder:
 
@@ -426,7 +449,8 @@ install, and restart.
   `ui/` renders it with xterm.js.
 - `crates/core/src/hooks.rs` passes Claude Code a `--settings` file with `UserPromptSubmit`, `Stop` and
   `Notification` hooks. Each hook runs `pinned hook <status>`, which forwards the event to the
-  window over a Unix socket. Your own `~/.claude/settings.json` is not modified.
+  window over a Unix socket, which Windows has had since Windows 10 version 1803. Your own
+  `~/.claude/settings.json` is not modified.
 - The usage meter comes from the data Claude Code gives its statusline. The `--settings` file
   sets `pinned statusline` as the statusline, which forwards the 5-hour and 7-day figures to
   the window. Claude Code reports them only for Pro and Max subscriptions, and only after a
@@ -445,7 +469,12 @@ install, and restart.
 ```sh
 cargo run -- ~/path/to/project    # debug build
 npm run tauri build               # .app and .dmg in target/release/bundle
+npm run tauri build -- --bundles nsis   # on Windows: the setup .exe in target/release/bundle/nsis
 ```
+
+The `windows` workflow runs the tests on Windows and builds the installer for every
+pull request. Download it from the run's `pinned-windows-setup` artifact to try a change on
+Windows before a release.
 
 ## Release
 
@@ -454,7 +483,7 @@ scripts/release.sh 0.2.0
 ```
 
 The script bumps the version in `Cargo.toml`, tags `v0.2.0` and pushes. The `release`
-workflow builds both Mac architectures, signs the update bundles, and publishes the release
+workflow builds both Mac architectures and the Windows installer, signs the update bundles, and publishes the release
 with `latest.json`. Running copies then offer the update.
 
 Update signing needs the `TAURI_SIGNING_PRIVATE_KEY` repository secret. Its public half is

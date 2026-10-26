@@ -859,7 +859,7 @@ TAURI?.webview.getCurrentWebview().onDragDropEvent(async ({ payload }) => {
   zone.classList.toggle("over", over && payload.type !== "drop" && payload.type !== "leave");
   if (payload.type !== "drop" || !over) return;
   try {
-    readThemeFiles(await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split("/").pop()))));
+    readThemeFiles(await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split(/[\\/]/).pop()))));
   } catch (err) {
     themeImport.error = String(err);
     renderThemeFile();

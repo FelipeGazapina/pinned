@@ -273,11 +273,11 @@ pub fn save_capture(app: AppHandle, name: String, bytes: Vec<u8>) -> Result<Stri
 #[tauri::command]
 pub fn reveal_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    let opened = std::process::Command::new("open").arg("-R").arg(&path).spawn();
+    let opened = pinned_core::process::command("open").arg("-R").arg(&path).spawn();
     #[cfg(windows)]
-    let opened = std::process::Command::new("explorer").arg(format!("/select,{path}")).spawn();
+    let opened = pinned_core::process::command("explorer").arg(format!("/select,{path}")).spawn();
     #[cfg(not(any(target_os = "macos", windows)))]
-    let opened = std::process::Command::new("xdg-open").arg(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/"))).spawn();
+    let opened = pinned_core::process::command("xdg-open").arg(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/"))).spawn();
     opened.map(drop).map_err(|e| e.to_string())
 }
 

@@ -12,8 +12,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [aarch64-apple-darwin, x86_64-apple-darwin]
-    runs-on: macos-latest
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc --bundles nsis
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,6 +42,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: pinned ${{ github.ref_name }}
-          releaseBody: Install the .dmg, or click the update button in a running pinned.
+          releaseBody: On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. Or click the update button in a running pinned.
           releaseDraft: false
-          args: --target ${{ matrix.target }}
+          args: ${{ matrix.args }}

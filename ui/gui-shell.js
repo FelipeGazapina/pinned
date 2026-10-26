@@ -187,7 +187,7 @@ function paletteProjects() {
   const seen = new Map(palette.projects.map((p) => [`${p.machine}:${p.path}`, p]));
   for (const tab of tabs) {
     const path = projectOfTab(tab);
-    if (!seen.has(`${tab.machine}:${path}`)) seen.set(`${tab.machine}:${path}`, { machine: tab.machine, path, name: path.split("/").filter(Boolean).pop() || "/" });
+    if (!seen.has(`${tab.machine}:${path}`)) seen.set(`${tab.machine}:${path}`, { machine: tab.machine, path, name: path.split(/[\\/]/).filter(Boolean).pop() || "/" });
   }
   return [...seen.values()];
 }

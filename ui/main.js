@@ -27,11 +27,13 @@ let active = null;
 const keyOf = (machine, id) => `${machine}:${id}`;
 const tabByKey = (key) => tabs.find((t) => t.key === key);
 const callOn = (machine, call) => machines.get(machine).transport.call(call);
+const IS_MAC = /Mac/.test(navigator.platform);
+const COMPUTER = IS_MAC ? "Mac" : "PC";
 const statusOf = (tab) => tab.view.status ?? "idle";
-const machineName = (id) => (id === LOCAL ? "This Mac" : machines.get(id)?.view.name ?? "machine");
+const machineName = (id) => (id === LOCAL ? `This ${COMPUTER}` : machines.get(id)?.view.name ?? "machine");
 const initials = (name) => name.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
 const tilde = (path) => path.replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)(?=\/|$)/, "~");
-const tabName = (tab) => tab.view.cwd.split("/").filter(Boolean).pop() || (tab.view.cwd ? "/" : "claude");
+const tabName = (tab) => tab.view.cwd.split(/[\\/]/).filter(Boolean).pop() || (tab.view.cwd ? "/" : "claude");
 const isVertical = () => ["left", "right"].includes(document.body.dataset.tabs);
 
 let order = [];
@@ -713,7 +715,6 @@ if (TAURI) {
   invoke("focus_panel");
 }
 
-const IS_MAC = /Mac/.test(navigator.platform);
 const TAB_STEP = { ArrowLeft: -1, ArrowRight: 1 };
 const PICKER_STEP = { ArrowUp: -1, ArrowDown: 1 };
 
@@ -831,7 +832,7 @@ TAURI?.webview.getCurrentWebview().onDragDropEvent(async ({ payload }) => {
   const tab = threadAt(payload.position) ?? active;
   if (tab.machine === LOCAL) return tab.view.running && pastePaths(tab, payload.paths);
   try {
-    const files = await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split("/").pop())));
+    const files = await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split(/[\\/]/).pop())));
     await attachFiles(tab, files);
   } catch (e) {
     showAttachNote(String(e), true);
@@ -862,9 +863,9 @@ document.addEventListener("paste", (e) => {
   if (!active || settingsOpen() || pickerOpen() || types.includes("text/plain") || !types.includes("Files")) return;
   e.preventDefault();
   e.stopPropagation();
-  // A clipboard image has no text for xterm to paste; on this Mac, Ctrl+V makes Claude Code read the image itself.
-  // The app view attaches it instead, so it shows in the composer before it's sent.
-  if (active.machine === LOCAL && !guiOn()) callOn(LOCAL, { cmd: "write_input", tab: active.view.id, data: "\x16" });
+  // A clipboard image has no text for xterm to paste. On this computer Claude Code reads the image itself
+  // on Ctrl+V, or Alt+V on Windows. The app view attaches it instead, so it shows in the composer before it's sent.
+  if (active.machine === LOCAL && !guiOn()) callOn(LOCAL, { cmd: "write_input", tab: active.view.id, data: IS_MAC ? "\x16" : "\x1bv" });
   else attachFiles(active, [...e.clipboardData.files]);
 }, true);
 
@@ -1184,7 +1185,7 @@ function disconnectHub() {
 
 async function bootApp() {
   machines.set(LOCAL, {
-    view: { id: LOCAL, name: "This Mac", os: "macos", online: true, last_seen: 0 },
+    view: { id: LOCAL, name: `This ${COMPUTER}`, os: IS_MAC ? "macos" : "windows", online: true, last_seen: 0 },
     tabs: [],
     transport: localTransport,
     usage: {},

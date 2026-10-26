@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 const READ_LIMIT: usize = 2_000_000;
@@ -66,9 +66,11 @@ fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>
     for _ in 0..5 {
         let host = at.host_str().ok_or("no host")?.to_owned();
         let port = at.port_or_known_default().unwrap_or(80);
-        // localhost may name ::1 first while the server listens on 127.0.0.1 only.
+        // localhost may name ::1 first while the server listens on 127.0.0.1 only. Windows takes
+        // seconds to refuse a closed loopback port, while an open one answers at once.
         let addrs: Vec<_> = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port)).map_err(|e| e.to_string())?.collect();
-        let mut stream = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, Duration::from_secs(2)).ok()).ok_or_else(|| format!("nothing answers at {host}:{port}"))?;
+        let wait = |a: &std::net::SocketAddr| if a.ip().is_loopback() { Duration::from_millis(300) } else { Duration::from_secs(2) };
+        let mut stream = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, wait(a)).ok()).ok_or_else(|| format!("nothing answers at {host}:{port}"))?;
         stream.set_read_timeout(Some(Duration::from_secs(4))).map_err(|e| e.to_string())?;
         let target = at.query().map_or_else(|| at.path().to_owned(), |q| format!("{}?{q}", at.path()));
         write!(stream, "GET {target} HTTP/1.0\r\nHost: {host}:{port}\r\nAccept: text/html,image/*;q=0.9,*/*;q=0.5\r\nUser-Agent: pinned\r\n\r\n").map_err(|e| e.to_string())?;
@@ -242,7 +244,7 @@ pub fn read_file(cwd: &Path, rel: &str, root: bool, rev: Option<&str>) -> Result
         Some(rev) => {
             check_rev(rev)?;
             let spec = if root { format!("{rev}:{rel}") } else { format!("{rev}:./{rel}") };
-            let out = Command::new("git").args(["show", &spec]).current_dir(&base).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
+            let out = crate::process::command("git").args(["show", &spec]).current_dir(&base).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
             if !out.status.success() {
                 return Err(format!("git: {}", String::from_utf8_lossy(&out.stderr).trim()));
             }
@@ -352,7 +354,7 @@ fn gh(cwd: &Path, path: Option<&str>, args: &[&str]) -> Result<String, String> {
 }
 
 fn gh_input(cwd: &Path, path: Option<&str>, args: &[&str], input: Option<&str>) -> Result<String, String> {
-    let mut command = Command::new("gh");
+    let mut command = crate::process::command("gh");
     command.args(args).current_dir(cwd).stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(path) = path {
         command.env("PATH", path);
@@ -580,7 +582,7 @@ pub fn guide(cwd: &Path, pr: &str, write: bool, store: &Path, claude: &Path, pat
     std::fs::create_dir_all(store).map_err(|e| e.to_string())?;
     std::fs::write(&file, kept.to_string()).map_err(|e| e.to_string())?;
     let prompt = guide_prompt(&view, &diff);
-    let mut command = Command::new(claude);
+    let mut command = crate::process::command(claude);
     command
         .args(["-p", "--output-format", "json", "--json-schema", GUIDE_SCHEMA, "--allowedTools", "Read,Grep,Glob"])
         .current_dir(cwd)
@@ -638,7 +640,8 @@ impl DeviceHub {
         if let Some(origin) = embed.filter(|o| o.starts_with("http://") || o.starts_with("https://")) {
             args.extend(["--frame-ancestor", origin]);
         }
-        let mut command = Command::new("npx");
+        // npm installs npx on Windows as a batch file, which a program name without its extension never finds.
+        let mut command = crate::process::command(if cfg!(windows) { "npx.cmd" } else { "npx" });
         command.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         if let Some(path) = path {
             command.env("PATH", path);
@@ -773,7 +776,7 @@ mod tests {
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) {
-        assert!(Command::new("git").args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "git {args:?}");
+        assert!(crate::process::command("git").args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "git {args:?}");
     }
 
     #[test]
@@ -790,7 +793,8 @@ mod tests {
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = server.local_addr().unwrap().port();
         std::thread::spawn(move || {
-            for stream in server.incoming().flatten().take(2) {
+            // Every connection, as another test looking for web servers may knock on this one too.
+            for stream in server.incoming().flatten() {
                 let mut stream = stream;
                 let mut ask = vec![];
                 let mut chunk = [0; 1024];

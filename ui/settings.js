@@ -189,7 +189,7 @@ let view = { name: "list" };
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const isSlack = (c) => c.trigger.kind === "slack-mention";
 const subject = (c) => (isSlack(c) ? "thread" : "issue");
-const folderName = (path) => path.split("/").filter(Boolean).pop() ?? "";
+const folderName = (path) => path.split(/[\\/]/).filter(Boolean).pop() ?? "";
 
 const input = (path, value, attrs = "") => `<input data-bind="${path}" value="${esc(value)}" ${attrs}>`;
 const select = (path, values, labelOf, selected) => `<select data-bind="${path}">${options(values, labelOf, selected)}</select>`;

@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod account;
 mod awake;
 mod browser;
@@ -192,15 +194,22 @@ fn watch_reminders(app: AppHandle) {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         for reminder in app.state::<reminders::Reminders>().take_due(now) {
-            notify(&reminder.message);
+            notify(&app, &reminder.message);
         }
     });
 }
 
-fn notify(message: &str) {
+#[cfg(not(windows))]
+fn notify(_app: &AppHandle, message: &str) {
     let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!("display notification \"{escaped}\" with title \"Reminder\" sound name \"Glass\"");
-    let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+    let _ = pinned_core::process::command("osascript").args(["-e", &script]).status();
+}
+
+#[cfg(windows)]
+fn notify(app: &AppHandle, message: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title("Reminder").body(message).show();
 }
 
 /// Debug builds run the script `PINNED_PROBE` names in the main window once it has loaded, so
@@ -266,6 +275,8 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_notification::init());
     builder
         .invoke_handler(tauri::generate_handler![
             machine_call,
@@ -319,7 +330,7 @@ fn main() {
         ])
         .setup(move |app| {
             let config = app.path().app_config_dir().ok();
-            let from_arg = std::env::args().nth(1).and_then(|d| std::fs::canonicalize(d).ok()).filter(|p| p.is_dir());
+            let from_arg = std::env::args().nth(1).and_then(|d| dunce::canonicalize(d).ok()).filter(|p| p.is_dir());
             let handle = app.handle().clone();
             let machine = Machine::new(launch, config.clone(), from_arg, move |event: MachineEvent| drop(handle.emit("machine", event)));
             app.manage(machine.clone());

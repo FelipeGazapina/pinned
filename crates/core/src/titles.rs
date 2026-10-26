@@ -1,7 +1,7 @@
 //! A new title for a conversation from a short `claude -p`, as T3 Code regenerates thread titles.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// T3 Code's regenerate prompt, its editorial rules unchanged.
 const RULES: &str = "Determine the title in this order:
@@ -30,7 +30,7 @@ fn prompt(previous: &str, thread: &str) -> String {
 
 /// Runs `claude` without tools, hooks or a saved session, since only its answer matters.
 pub fn regenerate(claude: &Path, cwd: &Path, path: Option<&str>, previous: &str, thread: &str) -> Result<String, String> {
-    let mut command = Command::new(claude);
+    let mut command = crate::process::command(claude);
     command
         .args(["-p", "--no-session-persistence", "--model", "haiku", "--tools", "", "--settings", r#"{"disableAllHooks":true}"#])
         .arg(prompt(previous, thread))

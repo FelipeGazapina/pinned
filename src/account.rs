@@ -2,6 +2,7 @@ use pinned_core::account::{self, Credentials};
 use pinned_core::connectors::{self, Connectors, Keys};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::Machine;
+use pinned_core::process;
 use pinned_core::wire::HubCall;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -81,7 +82,7 @@ fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
 }
 
 fn computer_name() -> String {
-    std::process::Command::new("scutil")
+    process::command("scutil")
         .args(["--get", "ComputerName"])
         .output()
         .ok()

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 const DIFF_LIMIT: usize = 400_000;
@@ -267,6 +267,7 @@ pub fn listeners(root: Option<u32>, path: Option<&str>) -> Vec<Listener> {
 }
 
 /// `(port, pid, command)` of every listening TCP socket, from lsof, or /proc where lsof is missing.
+#[cfg(not(windows))]
 fn listening(path: Option<&str>) -> Vec<(u16, u32, String)> {
     // macOS keeps lsof in /usr/sbin, which a PATH may leave out.
     let lsof = if Path::new("/usr/sbin/lsof").exists() { "/usr/sbin/lsof" } else { "lsof" };
@@ -278,6 +279,59 @@ fn listening(path: Option<&str>) -> Vec<(u16, u32, String)> {
     }
 }
 
+/// `(port, pid, command)` of every listening TCP socket, from netstat.
+#[cfg(windows)]
+fn listening(path: Option<&str>) -> Vec<(u16, u32, String)> {
+    let names: HashMap<u32, String> = processes().into_iter().map(|(pid, _, name)| (pid, name)).collect();
+    let out = run(Path::new("/"), path, "netstat", &["-ano"]).unwrap_or_default();
+    parse_netstat(&out).into_iter().map(|(port, pid)| (port, pid, names.get(&pid).cloned().unwrap_or_default())).collect()
+}
+
+/// `(port, pid)` of each listening TCP socket in `netstat -ano`. netstat names the state in the
+/// system's language, so a listening socket is told by its unset foreign address.
+#[cfg(any(windows, test))]
+fn parse_netstat(out: &str) -> Vec<(u16, u32)> {
+    out.lines()
+        .filter_map(|line| {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            let [proto, local, foreign, _, pid] = cols[..] else { return None };
+            if proto != "TCP" || !matches!(foreign, "0.0.0.0:0" | "[::]:0") {
+                return None;
+            }
+            Some((local.rsplit(':').next()?.parse().ok()?, pid.parse().ok()?))
+        })
+        .collect()
+}
+
+/// `(pid, parent pid, program)` of every process, the program without its .exe.
+#[cfg(windows)]
+fn processes() -> Vec<(u32, u32, String)> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if handle == INVALID_HANDLE_VALUE {
+        return vec![];
+    }
+    // SAFETY: a valid snapshot handle this function owns, closed when `snapshot` drops.
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(handle) };
+    // SAFETY: PROCESSENTRY32W is plain data, valid zeroed.
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut found = vec![];
+    let mut more = unsafe { Process32FirstW(handle, &mut entry) } != 0;
+    while more {
+        let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+        let exe = String::from_utf16_lossy(&entry.szExeFile[..len]);
+        let program = exe.strip_suffix(".exe").unwrap_or(&exe).to_owned();
+        found.push((entry.th32ProcessID, entry.th32ParentProcessID, program));
+        more = unsafe { Process32NextW(handle, &mut entry) } != 0;
+    }
+    drop(snapshot);
+    found
+}
+
+#[cfg(any(not(windows), test))]
 fn parse_lsof(out: &str) -> Vec<(u16, u32, String)> {
     let (mut pid, mut command) = (0, String::new());
     let mut found = vec![];
@@ -297,6 +351,7 @@ fn parse_lsof(out: &str) -> Vec<(u16, u32, String)> {
     found
 }
 
+#[cfg(not(windows))]
 fn proc_listening() -> Vec<(u16, u32, String)> {
     let mut ports = HashMap::new();
     for file in ["/proc/net/tcp", "/proc/net/tcp6"] {
@@ -324,15 +379,11 @@ fn proc_listening() -> Vec<(u16, u32, String)> {
     found
 }
 
-/// `root` and every process under it, from `ps`.
+/// `root` and every process under it.
 fn descendants(root: u32, path: Option<&str>) -> HashSet<u32> {
-    let out = run(Path::new("/"), path, "ps", &["-A", "-o", "pid=,ppid="]).unwrap_or_default();
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    for line in out.lines() {
-        let mut cols = line.split_whitespace().filter_map(|c| c.parse().ok());
-        if let (Some(pid), Some(ppid)) = (cols.next(), cols.next()) {
-            children.entry(ppid).or_default().push(pid);
-        }
+    for (pid, ppid) in parents(path) {
+        children.entry(ppid).or_default().push(pid);
     }
     let mut tree = HashSet::from([root]);
     let mut next = vec![root];
@@ -344,6 +395,23 @@ fn descendants(root: u32, path: Option<&str>) -> HashSet<u32> {
         }
     }
     tree
+}
+
+/// `(pid, parent pid)` of every process, from `ps`.
+#[cfg(not(windows))]
+fn parents(path: Option<&str>) -> Vec<(u32, u32)> {
+    let out = run(Path::new("/"), path, "ps", &["-A", "-o", "pid=,ppid="]).unwrap_or_default();
+    out.lines()
+        .filter_map(|line| {
+            let mut cols = line.split_whitespace().filter_map(|c| c.parse().ok());
+            Some((cols.next()?, cols.next()?))
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn parents(_path: Option<&str>) -> Vec<(u32, u32)> {
+    processes().into_iter().map(|(pid, ppid, _)| (pid, ppid)).collect()
 }
 
 fn serves_html(port: u16) -> bool {
@@ -391,7 +459,7 @@ const EDITORS: &[(&str, &str, &str, &[&str])] = &[
     ("goland", "GoLand", "GoLand", &["goland"]),
     ("rustrover", "RustRover", "RustRover", &["rustrover"]),
     ("clion", "CLion", "CLion", &["clion"]),
-    ("finder", "Finder", "Finder", &["xdg-open"]),
+    ("finder", "Finder", "Finder", &["xdg-open", "explorer"]),
 ];
 
 /// Where `id` lives on this machine: its app bundle, or its command.
@@ -404,12 +472,14 @@ fn editor_at(id: &str, home: &Path, path: Option<&str>) -> Option<PathBuf> {
         let bundle = format!("{app}.app");
         return [home.join("Applications"), PathBuf::from("/Applications")].into_iter().map(|dir| dir.join(&bundle)).find(|b| b.is_dir());
     }
+    // Windows editors put a .cmd launcher on PATH, and explorer is an .exe.
+    let suffixes: &[&str] = if cfg!(windows) { &[".exe", ".cmd"] } else { &[""] };
     let dirs: Vec<PathBuf> = std::env::split_paths(path.unwrap_or_default()).collect();
-    commands.iter().flat_map(|c| dirs.iter().map(move |d| d.join(c))).find(|f| f.is_file())
+    commands.iter().flat_map(|c| dirs.iter().flat_map(move |d| suffixes.iter().map(move |s| d.join(format!("{c}{s}"))))).find(|f| f.is_file())
 }
 
 pub fn editors(home: &Path, path: Option<&str>) -> Vec<Editor> {
-    let name = |id, name| if id == "finder" && !cfg!(target_os = "macos") { "File manager" } else { name };
+    let name = |id, name| if id == "finder" && !cfg!(target_os = "macos") { if cfg!(windows) { "File Explorer" } else { "File manager" } } else { name };
     EDITORS.iter().filter(|e| editor_at(e.0, home, path).is_some()).map(|&(id, n, ..)| Editor { id, name: name(id, n) }).collect()
 }
 
@@ -428,11 +498,11 @@ pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, home: &Path, path: Opti
         }
     };
     let mut command = if cfg!(target_os = "macos") {
-        let mut open = Command::new("open");
+        let mut open = crate::process::command("open");
         open.arg("-a").arg(&editor);
         open
     } else {
-        Command::new(&editor)
+        crate::process::command(&editor)
     };
     command.arg(&target).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(path) = path {
@@ -449,7 +519,7 @@ pub(crate) enum Failure {
 }
 
 pub(crate) fn run(cwd: &Path, path: Option<&str>, program: &str, args: &[&str]) -> Result<String, Failure> {
-    let mut command = Command::new(program);
+    let mut command = crate::process::command(program);
     command.args(args).current_dir(cwd).stdin(Stdio::null());
     if let Some(path) = path {
         command.env("PATH", path);
@@ -467,7 +537,7 @@ mod tests {
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) {
-        assert!(Command::new("git").args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "git {args:?}");
+        assert!(crate::process::command("git").args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "git {args:?}");
     }
 
     #[test]
@@ -512,8 +582,11 @@ mod tests {
         for pr in ["--web", "-R other/repo", "", "12a", "http://github.com/o/r/pull/1"] {
             assert!(pull_request(dir.path(), pr, None).unwrap_err().contains("is not a pull request"), "{pr:?}");
         }
-        let missing = pull_request(dir.path(), "7", Some(dir.path().to_str().unwrap())).unwrap_err();
-        assert!(missing.contains("isn't installed"), "{missing}");
+        // Windows also looks for a program on pinned's own PATH, so an empty PATH can't hide gh there.
+        if cfg!(unix) {
+            let missing = pull_request(dir.path(), "7", Some(dir.path().to_str().unwrap())).unwrap_err();
+            assert!(missing.contains("isn't installed"), "{missing}");
+        }
         assert!(pr_status(dir.path(), "--web", None).unwrap_err().contains("is not a pull request"));
     }
 
@@ -585,6 +658,12 @@ mod tests {
     fn lsof_output_names_each_port_with_its_process() {
         let out = "p501\ncnode\nf23\nn*:5173\nf24\nn[::1]:5173\np77\ncrapportd\nf5\nn127.0.0.1:49152\n";
         assert_eq!(parse_lsof(out), vec![(5173, 501, "node".into()), (5173, 501, "node".into()), (49152, 77, "rapportd".into())]);
+    }
+
+    #[test]
+    fn netstat_output_names_each_listening_port_with_its_process() {
+        let out = "\r\nConexões ativas\r\n\r\n  Proto  Endereço local  Endereço externo  Estado\r\n  TCP    0.0.0.0:5173   0.0.0.0:0  ESCUTANDO  501\r\n  TCP    127.0.0.1:5173  127.0.0.1:61000  ESTABELECIDA  501\r\n  TCP    [::1]:3000  [::]:0  ESCUTANDO  77\r\n  UDP    0.0.0.0:5353  *:*  88\r\n";
+        assert_eq!(parse_netstat(out), vec![(5173, 501), (3000, 77)]);
     }
 
     #[test]
