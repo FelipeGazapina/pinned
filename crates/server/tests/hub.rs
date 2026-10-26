@@ -341,6 +341,7 @@ fn the_hub_serves_the_install_script_binaries_and_the_web_app() {
     assert_eq!(get("/download/pinned-server-aarch64-apple-darwin").0, 404);
     assert_eq!(get("/download/..%2Fui%2Findex.html").0, 404);
     assert_eq!(get("/"), (200, "<title>pinned</title>".into()));
+    assert_eq!(get("/api/version"), (200, env!("CARGO_PKG_VERSION").into()));
     let page = reqwest::blocking::get(format!("{}/index.html", hub.url)).unwrap();
     assert_eq!(page.headers()["cache-control"], "no-cache", "a browser revalidates the web app after each deploy");
 }
@@ -384,6 +385,8 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     assert_eq!(node_b.machine.tabs()[0].cwd, repo.display().to_string());
 
     let mut node_a = Node::start(&dir_a, creds_a);
+    // The delivery below is a prompt, which the node holds until claude takes the terminal, as this stand-in does.
+    std::fs::write(dir_a.join("claude"), "#!/bin/sh\nstty raw -echo; exec cat\n").unwrap();
     client.wait_machines(&[("mac-mini", true), ("vps", true)]);
     assert!(open(run(Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() })));
     assert_eq!((connector_tabs(&node_a), connector_tabs(&node_b)), (1, 1), "the preferred machine runs it once online");

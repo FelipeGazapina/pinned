@@ -1,7 +1,8 @@
 use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
+use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, MachineEvent, ProjectView, RunSpec, TabId, TabView, ThreadPage, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, projects, pty, pulls, reminders, scaffold, scripts, sessions, sync, thread, titles, uploads, usage, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, projects, pty, pulls, reminders, scaffold, scripts, sessions, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -10,12 +11,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::SystemTime;
 
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
 pub const OUTPUT_KEEP: usize = 256 * 1024;
 /// Slack after a usage limit's reset time before the session is told to continue.
 const LIMIT_MARGIN_SECS: u64 = 5;
 const UNWATCHED: (u16, u16) = (120, 32);
+/// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
+const TURN_LOG_WAIT: (u32, std::time::Duration) = (25, std::time::Duration::from_millis(200));
 
 pub type Event = MachineEvent;
 /// Names a viewer of a tab, such as `local` for the app's own webview; attaching again replaces it.
@@ -163,6 +167,8 @@ impl Screen {
 struct Tab {
     cwd: PathBuf,
     session: Option<pty::Session>,
+    /// When the running claude started, so a subagent an earlier claude left mid-step reads as stopped.
+    started: Option<SystemTime>,
     /// Extra `claude` arguments for the first start only, so a restart doesn't redo the task.
     launch: Vec<String>,
     /// Environment for every start, such as the issue a connector's session reports on.
@@ -171,6 +177,8 @@ struct Tab {
     bypass: bool,
     /// Claude Code's id for the conversation in progress, known once a hook reports it.
     claude_session: Option<String>,
+    /// `claude_session`'s transcript as read so far, which starts over whenever the session changes.
+    tally: Tally,
     /// A turn is running, or died on an error: the session has work left if pinned quits now.
     interrupted: bool,
     /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
@@ -185,6 +193,8 @@ struct Tab {
     updated: Option<u64>,
     title: Option<String>,
     message: Option<String>,
+    /// Prompts typed before the session took the terminal, typed in once it does.
+    held: Vec<String>,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
     screen: Arc<Mutex<Screen>>,
@@ -219,6 +229,7 @@ impl Tab {
             opened: tab_number(id).into(),
             updated: self.updated,
             session: self.claude_session.clone(),
+            stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
         }
     }
 }
@@ -245,6 +256,7 @@ pub struct Machine {
     clones: PathBuf,
     quitting: AtomicBool,
     usage: Mutex<Usage>,
+    agents: Mutex<subagents::Cache>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -294,6 +306,7 @@ impl Machine {
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
             usage: Mutex::new(Usage::default()),
+            agents: Mutex::default(),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -524,15 +537,13 @@ impl Machine {
 
     /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
-        let session = self.tab(tab, |t| t.claude_session.clone())?;
-        let page = session.as_deref().and_then(|s| thread::find(&thread::projects_dir(&home()), s)).map(|file| thread::read(&file, from));
-        match page {
-            Some(page) => {
-                let page = page.map_err(|e| format!("could not read the transcript: {e}"))?;
-                Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context })
-            }
-            None => Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None }),
-        }
+        let (session, process) = self.tab(tab, |t| (t.claude_session.clone(), t.session.as_ref().and(t.started)))?;
+        let Some(file) = session.as_deref().and_then(|s| thread::find(&thread::projects_dir(&home()), s)) else {
+            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, agents: vec![] });
+        };
+        let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
+        let agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
+        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, agents })
     }
 
     /// Every tab, in the order they opened.
@@ -596,6 +607,7 @@ impl Machine {
             // Without launch arguments this is a fresh conversation, not the one recorded before.
             if t.launch.is_empty() {
                 t.claude_session = None;
+                t.tally = Tally::default();
             }
             let mut args = std::mem::take(&mut t.launch);
             if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
@@ -700,9 +712,11 @@ impl Machine {
         // Dropping the old session kills it silently, so its exit can't be mistaken for the new one's.
         let screen = self.tab(tab, |t| {
             t.session = None;
+            t.held.clear();
             t.screen.clone()
         })?;
         let session = screen.lock().unwrap().restart();
+        let started = SystemTime::now();
         let (me, exited) = (self.me.clone(), tab.to_owned());
         let pty = pty::Session::spawn(
             cmd,
@@ -716,8 +730,39 @@ impl Machine {
         )?;
         self.tab(tab, |t| {
             t.session = Some(pty);
+            t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
-        })
+        })?;
+        self.type_held_once_raw(tab, session);
+        Ok(())
+    }
+
+    /// Watches the session until it takes the terminal, then types the prompts held for it. The
+    /// program says nothing when it does, so the poll asks the pty.
+    fn type_held_once_raw(&self, tab: &str, session: u64) {
+        let (me, tab) = (self.me.clone(), tab.to_owned());
+        std::thread::spawn(move || loop {
+            let Some(machine) = me.upgrade() else { return };
+            let Ok(screen) = machine.tab(&tab, |t| t.screen.clone()) else { return };
+            if screen.lock().unwrap().session != session {
+                return;
+            }
+            let done = machine.tab(&tab, |t| match t.session.as_mut() {
+                Some(s) if s.raw() => {
+                    for text in std::mem::take(&mut t.held) {
+                        let _ = s.write(&paste(&text));
+                    }
+                    true
+                }
+                Some(_) => false,
+                None => true,
+            });
+            if done.unwrap_or(true) {
+                return;
+            }
+            drop(machine);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        });
     }
 
     /// Replays the tab's screen to `sink`, then streams its output there until `detach`.
@@ -852,10 +897,22 @@ impl Machine {
         live.max_by_key(|(id, _)| tab_number(id)).map(|(id, _)| id.clone())
     }
 
-    /// Types `text` into the tab's session as one prompt and submits it.
+    /// Types `text` into the tab's session as one prompt and submits it. A session that has not
+    /// taken the terminal yet, as claude starting up, gets it once it does: typed earlier, the
+    /// pty's cooked mode would echo it and turn the submitting \r into \n, and claude would never
+    /// see a prompt.
     fn type_prompt(&self, tab: &str, text: &str) -> Result<(), String> {
         self.tab(tab, |t| match t.session.as_mut() {
-            Some(s) => s.write(&paste(text)).map_err(|e| e.to_string()),
+            Some(s) if s.raw() => {
+                for held in std::mem::take(&mut t.held) {
+                    s.write(&paste(&held)).map_err(|e| e.to_string())?;
+                }
+                s.write(&paste(text)).map_err(|e| e.to_string())
+            }
+            Some(_) => {
+                t.held.push(text.to_owned());
+                Ok(())
+            }
             None => Err(format!("tab {tab} has no running session")),
         })?
     }
@@ -878,6 +935,10 @@ impl Machine {
             })
             .collect();
         self.emit_tabs();
+        // A resumed session reports no new id, so its transcript is read here.
+        for id in &ids {
+            self.refresh_stats(id, false);
+        }
         ids
     }
 
@@ -919,11 +980,13 @@ impl Machine {
 
     fn record_event(&self, event: AgentEvent) {
         if let Some(tab) = &event.tab {
-            if let Some(session) = &event.session {
-                self.record_session(tab, session.clone(), event.cwd.as_deref());
-            }
+            let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
             self.record_status(tab, &event);
             self.record_turn(tab, &event);
+            let turn_ended = matches!(event.status, AgentStatus::Done | AgentStatus::Failed);
+            if new_session || turn_ended {
+                self.refresh_stats(tab, turn_ended);
+            }
             self.continue_when_limit_lifts(tab);
             self.emit_tabs();
         }
@@ -940,10 +1003,12 @@ impl Machine {
         let tab = Tab {
             cwd,
             session: None,
+            started: None,
             launch,
             env,
             bypass,
             claude_session,
+            tally: Tally::default(),
             interrupted: false,
             resume_at: None,
             model: None,
@@ -953,6 +1018,7 @@ impl Machine {
             updated: None,
             title: None,
             message: None,
+            held: vec![],
             screen: Arc::default(),
         };
         self.tabs.lock().unwrap().insert(id.clone(), tab);
@@ -995,19 +1061,60 @@ impl Machine {
     }
 
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
-    fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) {
-        let changed = self.tab(tab, |t| {
-            let mut changed = t.claude_session.as_ref() != Some(&session);
+    /// True when the session is new to the tab.
+    fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) -> bool {
+        let Ok((new, changed)) = self.tab(tab, |t| {
+            let new = t.claude_session.as_ref() != Some(&session);
+            if new {
+                t.tally = Tally::default();
+            }
+            let mut changed = new;
             if let Some(worktree) = reported_cwd.and_then(|c| sessions::worktree(&t.cwd, Path::new(c))) {
                 t.cwd = worktree;
                 changed = true;
             }
             t.claude_session = Some(session);
-            changed
-        });
-        if changed == Ok(true) {
+            (new, changed)
+        }) else {
+            return false;
+        };
+        if changed {
             self.save_sessions();
         }
+        new
+    }
+
+    /// Reads what the tab's transcript gained, off the caller's thread, then sends the tabs again.
+    /// After a turn ends it reads again until that turn's duration shows up, or gives up.
+    fn refresh_stats(&self, tab: &str, turn_ended: bool) {
+        let (Some(machine), tab) = (self.me.upgrade(), tab.to_owned()) else { return };
+        std::thread::spawn(move || {
+            let before = machine.tab(&tab, |t| t.tally.turns).ok();
+            for _ in 0..TURN_LOG_WAIT.0 {
+                let after = machine.read_stats(&tab);
+                if !turn_ended || after.is_none() || after != before {
+                    break;
+                }
+                std::thread::sleep(TURN_LOG_WAIT.1);
+            }
+            machine.emit_tabs();
+        });
+    }
+
+    /// Reads what the tab's transcript gained since the last read, outside the tabs lock, and
+    /// returns the turns counted so far. `None` when the tab has no transcript to read.
+    fn read_stats(&self, tab: &str) -> Option<u32> {
+        let (session, mut tally) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone()))).ok()??;
+        let file = thread::find(&thread::projects_dir(&home()), &session)?;
+        tally.advance(&file).ok()?;
+        let turns = tally.turns;
+        self.tab(tab, |t| {
+            if t.claude_session.as_ref() == Some(&session) {
+                t.tally = tally;
+            }
+        })
+        .ok()?;
+        Some(turns)
     }
 
     fn record_status(&self, tab: &str, event: &AgentEvent) {
@@ -1067,7 +1174,11 @@ impl Machine {
             return;
         }
         let _ = self.tab(tab, |t| (t.interrupted, t.resume_at) = (false, None));
-        if self.tab(tab, |t| t.claude_session.take()).ok().flatten().is_some() {
+        let ended = self.tab(tab, |t| {
+            t.tally = Tally::default();
+            t.claude_session.take()
+        });
+        if ended.ok().flatten().is_some() {
             self.save_sessions();
         }
     }
@@ -1425,6 +1536,29 @@ mod tests {
         assert_eq!(std::fs::read(&file).unwrap(), expected);
         let elsewhere = delivery("c2", "1792499999.000100", &["elsewhere"]);
         assert!(!m.deliver(&elsewhere.env(), &elsewhere.text()));
+        let _ = std::fs::remove_file(file);
+    }
+
+    /// Until claude takes the terminal, the pty is in cooked mode: it echoes what is typed and
+    /// turns the submitting \r into \n, so a prompt typed that early never submits. The session
+    /// here draws first and takes the terminal a while later, as claude does, and the prompt still
+    /// arrives whole, and only then.
+    #[test]
+    fn a_prompt_typed_before_the_session_takes_the_terminal_waits_for_it() {
+        let file = std::env::temp_dir().join(format!("pinned-early-prompt-{}.bin", std::process::id()));
+        let m = machine();
+        let tab = running(&m, vec![], &format!("sleep 0.2; echo drawn; sleep 0.3; stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "typed early".into() }), Ok(json!(null)));
+        wait_for("the session to draw", || text(&seen).contains("drawn"));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "typed after drawing".into() }), Ok(json!(null)));
+        wait_for("stty", || text(&seen).contains("ready"));
+        let expected: &[u8] = b"\x1b[200~typed early\x1b[201~\r\x1b[200~typed after drawing\x1b[201~\r";
+        wait_for("cat to write", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
+        assert_eq!(std::fs::read(&file).unwrap(), expected);
+        assert!(text(&seen).starts_with("drawn\r\nready"), "the terminal echoed a prompt before the session took it: {:?}", text(&seen));
         let _ = std::fs::remove_file(file);
     }
 

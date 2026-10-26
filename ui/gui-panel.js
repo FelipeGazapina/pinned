@@ -2267,8 +2267,6 @@ function toggleDevtools(s) {
   invoke("browser_do", { id: s.id, action: { do: "devtools" } }).catch((e) => flash(String(e)));
 }
 
-/** A page's devtools window takes the focus from the app's, which must not shrink to the pill for it. */
-const pageDevtoolsOpen = () => [...panelStates.values()].some((p) => p.surfaces.some((s) => s.devtools || s.shownDevtools));
 
 /** Keeps the native pages of surfaces still open, and closes the rest. */
 function closeGonePages() {
@@ -2764,3 +2762,27 @@ openIn.querySelector(".pick").onclick = (e) => {
     : [{ label: "No installed editors found", disabled: true }]);
 };
 for (const el of openIn.querySelectorAll("[data-ic]")) el.outerHTML = icon(el.dataset.ic);
+
+/** On a phone the header's actions fold into one menu, so the thread's title keeps the row. */
+document.getElementById("head-more").onclick = (e) => {
+  const tab = active;
+  if (!tab) return;
+  const pr = prOf(tab);
+  const chosen = !openIn.hidden && editorFor(tab.machine);
+  const pick = (ed) => () => (save(`gui-editor:${tab.machine}`, ed.id), renderOpenIn(tab), openInEditor());
+  const scripts = !scriptsControl.hidden && projectScripts(tab);
+  const quick = gitAction.querySelector(".main");
+  const quickLabel = quick.textContent.trim();
+  const git = gitAction.querySelector(".more").hidden ? [] : gitMenuEntries(tab).filter((g) => g.label && g.label !== quickLabel);
+  const sections = [
+    pr ? [{ label: `Open PR #${pr.number}`, icon: "github", run: () => openPr(tab, pr.url) }] : [],
+    chosen ? [{ group: "Open in" }, ...editorsOn(tab.machine).map((ed) => ({ label: ed.name, checked: ed.id === chosen.id, run: pick(ed) }))] : [],
+    scripts ? [{ group: "Actions" }, ...scripts.scripts.map((s) => ({ label: scriptLabel(s), run: () => runScript(tab, s) })), { label: "Add action", icon: "plus", run: () => openScriptEditor(tab) }] : [],
+    gitAction.hidden ? [] : [{ group: "Git" }, ...(quick.dataset.action ? [{ label: quickLabel, icon: GIT_ICONS[quick.dataset.action] ?? "git-commit", disabled: quick.disabled, run: () => quick.click() }] : []),
+      ...git.map((g) => ({ label: g.label, icon: g.icon, disabled: g.disabled, run: g.run }))],
+    [{ label: "Thread details", icon: "square-menu", checked: !detailsCard.hidden, run: () => toggleDetails() },
+      { label: ui.drawer ? "Hide terminal" : "Show terminal", icon: "panel-bottom", run: () => toggleDrawer() },
+      { label: panelOf(tab).open ? "Hide side panel" : "Show side panel", icon: "panel-right", run: togglePanel }],
+  ];
+  toggleMenu(e.currentTarget, sections.filter((s) => s.length > 1 || (s.length && !s[0].group)).flatMap((s, i) => (i ? ["-", ...s] : s)));
+};
