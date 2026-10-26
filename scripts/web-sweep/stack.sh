@@ -1,6 +1,6 @@
 #!/bin/sh
 # Starts a throwaway stack for the web sweep: Postgres, a hub serving this checkout's ui/, an
-# account, and a paired node whose `claude` is scripts/web-sweep/fake-claude.
+# account, and a paired node whose `claude` is scripts/web-sweep/fake-claude and `gh` fake-gh.
 #
 #   scripts/web-sweep/stack.sh start   # prints the hub URL and the account
 #   scripts/web-sweep/stack.sh stop
@@ -57,12 +57,17 @@ start() {
 
   # The node asks the login shell for PATH; this shell answers with the sweep's, fake claude first.
   cp "$REPO/scripts/web-sweep/fake-claude" "$DIR/bin/claude"
+  cp "$REPO/scripts/web-sweep/fake-gh" "$DIR/bin/gh"
   printf '#!/bin/sh\nshift\nexec /bin/sh -c "$1"\n' >"$DIR/bin/shell"
-  chmod +x "$DIR/bin/claude" "$DIR/bin/shell"
-  for p in alpha beta; do
+  # Opening an editor logs what it would open, and a Zed.app gives the node an editor to list.
+  printf '#!/bin/sh\necho "$@" >>"$HOME/open.log"\n' >"$DIR/bin/open"
+  mkdir -p "$DIR/home/Applications/Zed.app"
+  chmod +x "$DIR/bin/claude" "$DIR/bin/gh" "$DIR/bin/shell" "$DIR/bin/open"
+  for p in alpha beta gamma; do
     git -C "$DIR/home/work" init -q "$p"
     git -C "$DIR/home/work/$p" remote add origin "https://github.com/example/$p.git"
   done
+  touch "$DIR/home/work/gamma/.untrusted"
   env HOME="$DIR/home" PINNED_PASSWORD="$PASSWORD" "$SERVER" login "$HUB" "$EMAIL" --name sweep-node --config-dir "$DIR/node" >/dev/null
   env HOME="$DIR/home" SHELL="$DIR/bin/shell" PATH="$DIR/bin:$PATH" "$SERVER" node --config-dir "$DIR/node" >"$DIR/node.log" 2>&1 &
   echo $! >"$DIR/node.pid"

@@ -35,6 +35,8 @@ const initials = (name) => name.split(/[\s._-]+/).filter(Boolean).slice(0, 2).ma
 const tilde = (path) => path.replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)(?=\/|$)/, "~");
 const accountOf = (machine, id) => machines.get(machine)?.accounts?.find((a) => a.id === id);
 const accountName = (machine, id) => accountOf(machine, id)?.name ?? id;
+/** A tab with no Claude Code transcript to show as a thread: a sign-in, or a Codex session. */
+const terminalOnly = (tab) => tab.view.program === "sign-in" || accountOf(tab.machine, tab.view.account)?.provider === "codex";
 const tabName = (tab) =>
   tab.view.program === "sign-in"
     ? `Sign in · ${accountName(tab.machine, tab.view.account)}`
@@ -98,11 +100,14 @@ function setAccounts(machine, list) {
 async function signIn(machine, account) {
   const id = await callOn(machine, { cmd: "sign_in", account });
   await revealTab(machine, id);
+  if (guiOn()) setMode("terminal");
 }
 
 function updateView(tab, view) {
   const before = statusOf(tab);
+  const key = threadKey(tab);
   tab.view = view;
+  if (threadKey(tab) !== key) rekeyThread(key, threadKey(tab));
   const after = statusOf(tab);
   if (after === before) return;
   if (!TAURI) return attend(tab, ALERTS.includes(after));
@@ -357,7 +362,7 @@ function openChoice(i, bypass = false) {
 
 function closeProjects() {
   picker.hidden = true;
-  active?.term.focus();
+  focusInput();
   markSeen(active);
 }
 
@@ -409,7 +414,7 @@ async function moveTab(tab, path) {
   await callOn(tab.machine, { cmd: "set_folder", tab: tab.view.id, path });
   tab.term.reset();
   await startTab(tab);
-  tab.term.focus();
+  focusInput();
 }
 
 function addTab(machine, view) {
@@ -480,10 +485,11 @@ async function setBypass(tab, on) {
   } catch (e) {
     tab.term.write(`\r\n\x1b[31m[could not restart claude: ${e}]\x1b[0m\r\n`);
   }
-  tab.term.focus();
+  focusInput();
 }
 
 function closeTab(tab) {
+  rememberClosed(tab);
   removeTab(tab, true);
   render();
   // The app quits with its last tab while signed out, so the local close goes through its own command.
@@ -522,8 +528,14 @@ function show(tab) {
   }
   refit(tab);
   render();
-  if (!pickerOpen() && !settingsOpen()) tab.term.focus();
+  if (!pickerOpen() && !settingsOpen()) focusInput();
   markSeen(tab);
+}
+
+function focusInput() {
+  if (!active) return;
+  if (guiOn() && document.body.dataset.drawer !== "open") prompt.focus();
+  else active.term.focus();
 }
 
 // A hidden terminal can't measure itself, so each tab fits when it is shown.
@@ -554,6 +566,7 @@ function render() {
     tab.button.title = `${where}${tab.view.cwd}${tab.view.bypass ? "\nPermissions skipped" : ""}`;
   }
   document.body.dataset.empty = !tabs.length;
+  renderGui();
   renderCarousel();
   renderUsage();
   const header = document.querySelector("header");
@@ -737,7 +750,10 @@ window.addEventListener("mousedown", (e) => {
 
 // The panel is nonactivating, so a click alone doesn't give it keyboard focus.
 if (TAURI) {
-  window.addEventListener("mousedown", () => invoke("focus_panel").then(() => settingsOpen() || active?.term.focus()), true);
+  const typesIntoTerminal = (e) => !guiOn() || e.target.closest("#terms");
+  window.addEventListener("mousedown", (e) => invoke("focus_panel").then(() => {
+    if (!settingsOpen() && typesIntoTerminal(e)) focusInput();
+  }), true);
   invoke("focus_panel");
 }
 
@@ -783,9 +799,11 @@ window.addEventListener("keydown", (e) => {
   }
   if (!e.metaKey || e.ctrlKey) return;
   if (e.key === ",") toggleSettings();
+  else if (e.key === "t" && guiOn() && ui.panelOpen) document.getElementById("panel-add").click();
   else if (e.key === "t") toggleProjects();
+  else if (e.key === "w" && guiOn() && ui.panelOpen) closeSurface();
   else if (e.key === "w" && active) closeTab(active);
-  else if (/^[1-9]$/.test(e.key) && tabs[e.key - 1]) activate(tabs[e.key - 1]);
+  else if (/^[1-9]$/.test(e.key) && !guiOn() && tabs[e.key - 1]) activate(tabs[e.key - 1]);
   else return;
   e.preventDefault();
   e.stopPropagation();
@@ -794,7 +812,8 @@ window.addEventListener("keydown", (e) => {
 const UPLOAD_LIMIT = 25 << 20;
 
 // Claude Code attaches an image when a file path is pasted, so an attached file becomes a paste of its escaped path.
-function pastePaths(tab, paths) {
+function pastePaths(tab, paths, files) {
+  if (guiOn() && tab === active) return insertPaths(paths, files);
   tab.term.paste(paths.map((p) => p.replace(/[^\w@%+=:,./-]/g, "\\$&")).join(" ") + " ");
   tab.term.focus();
 }
@@ -805,6 +824,7 @@ attachNote.hidden = true;
 terms.append(attachNote);
 let attachNoteTimer;
 function showAttachNote(text, error = false) {
+  if (guiOn()) return showComposerNote(text, error);
   clearTimeout(attachNoteTimer);
   attachNote.textContent = text;
   attachNote.toggleAttribute("data-error", error);
@@ -835,7 +855,7 @@ async function attachFiles(tab, files) {
   } catch (e) {
     showAttachNote(String(e), true);
   }
-  if (paths.length && tabs.includes(tab)) pastePaths(tab, paths);
+  if (paths.length && tabs.includes(tab)) pastePaths(tab, paths, files);
 }
 
 const attachInput = document.getElementById("attach-input");
@@ -855,7 +875,7 @@ attachInput.onchange = () => {
 
 TAURI?.webview.getCurrentWebview().onDragDropEvent(async ({ payload }) => {
   if (payload.type !== "drop" || !active) return;
-  const tab = active;
+  const tab = threadAt(payload.position) ?? active;
   if (tab.machine === LOCAL) return tab.view.running && pastePaths(tab, payload.paths);
   try {
     const files = await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split("/").pop())));
@@ -957,7 +977,8 @@ document.getElementById("new-tab").onclick = () => toggleProjects();
 document.getElementById("minimize").onclick = () => setView("pill");
 // Clicking outside the expanded panel shrinks it to the pill, as the minimize button does.
 window.addEventListener("blur", () => {
-  if (TAURI && document.body.dataset.view === "expanded" && !choosingFolder) setView("pill");
+  // Focus moving into the side panel's browser blurs the window too.
+  if (TAURI && document.body.dataset.view === "expanded" && !choosingFolder && document.activeElement?.tagName !== "IFRAME") setView("pill");
 });
 track.onclick = async (e) => {
   const tab = tabByKey(e.target.closest(".item")?.dataset.tab);

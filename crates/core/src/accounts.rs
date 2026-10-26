@@ -191,11 +191,13 @@ impl Accounts {
         save(self.dir.as_ref().expect("an added account has a folder"), &added)
     }
 
-    /// The CLI home the account's sessions run on.
+    /// The CLI home the account's sessions run on. A built-in account's sessions inherit pinned's
+    /// own `home_env`, when it has one.
     pub fn home(&self, account: &Account) -> PathBuf {
+        let spec = account.provider.spec();
         match &self.dir {
             Some(dir) if !account.is_builtin() => dir.join("accounts").join(&account.id),
-            _ => self.home.join(account.provider.spec().default_home),
+            _ => std::env::var_os(spec.home_env).map_or_else(|| self.home.join(spec.default_home), PathBuf::from),
         }
     }
 
