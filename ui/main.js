@@ -349,19 +349,9 @@ async function pickFolder(path) {
   }
 }
 
-/** True while a native folder or file dialog is up: it takes focus from the panel, which shouldn't shrink for it. */
-let choosingFolder = false;
-async function chooseFolder(start) {
-  choosingFolder = true;
-  try {
-    return await invoke("pick_folder", { start });
-  } finally {
-    choosingFolder = false;
-  }
-}
 
 async function pickLocalFolder() {
-  const path = await chooseFolder(picking.tab?.view.cwd ?? null);
+  const path = await invoke("pick_folder", { start: picking.tab?.view.cwd ?? null });
   if (path) pickFolder(path);
 }
 
@@ -510,9 +500,15 @@ function focusInput() {
   else active.term.focus();
 }
 
+// The window's minimum height leaves no room for a terminal; a fit there would reflow the
+// buffer into a few cells and claude would redraw at that size, so such a size is ignored.
+const MIN_TERM_COLS = 20;
+const MIN_TERM_ROWS = 4;
 // A hidden terminal can't measure itself, so each tab fits when it is shown.
 function refit(tab) {
   if (!tab || tab.el.hidden || document.body.dataset.view !== "expanded") return;
+  const dims = tab.fit.proposeDimensions();
+  if (!dims || dims.cols < MIN_TERM_COLS || dims.rows < MIN_TERM_ROWS) return;
   tab.fit.fit();
   if (tab.view.running) callOn(tab.machine, { cmd: "resize_pty", tab: tab.view.id, cols: tab.term.cols, rows: tab.term.rows }).catch(() => {});
 }
@@ -823,12 +819,9 @@ let attachTo = null;
 document.getElementById("attach").onclick = () => {
   if (!active) return;
   attachTo = active;
-  choosingFolder = true;
   attachInput.click();
 };
-attachInput.oncancel = () => (choosingFolder = false);
 attachInput.onchange = () => {
-  choosingFolder = false;
   attachFiles(attachTo, [...attachInput.files]);
   attachInput.value = "";
 };
@@ -927,18 +920,23 @@ function renderUsage() {
 }
 setInterval(renderUsage, 60 * 1000);
 
+// set_view resizes the native window. The panel is hidden before the window shrinks and shown
+// after it grows, so it is never laid out in a window too small for it: the terminals would fit
+// to a few cells and claude would redraw at that size.
 async function setView(view) {
   document.body.classList.remove("alert");
-  await invoke("set_view", { view });
+  const previous = document.body.dataset.view;
+  if (view === "pill") document.body.dataset.view = view;
+  try {
+    await invoke("set_view", { view });
+  } catch (e) {
+    document.body.dataset.view = previous;
+    throw e;
+  }
   document.body.dataset.view = view;
 }
 document.getElementById("new-tab").onclick = () => toggleProjects();
 document.getElementById("minimize").onclick = () => setView("pill");
-// Clicking outside the expanded panel shrinks it to the pill, as the minimize button does. This is the
-// window's focus, not the page's: a click into the browser panel's page leaves the window focused.
-win?.onFocusChanged(({ payload: focused }) => {
-  if (!focused && document.body.dataset.view === "expanded" && !choosingFolder && !pageDevtoolsOpen()) setView("pill");
-});
 // The row scrolls sideways: a trackpad swipes it, a mouse wheel turns into a sideways scroll, and a
 // drag pulls it along without opening the thread it started on.
 let dragged = false;
@@ -978,7 +976,7 @@ document.getElementById("folder").onclick = async () => {
   const tab = active;
   if (!tab) return;
   if (tab.machine !== LOCAL) return pickerOpen() ? closeProjects() : showProjects({ machine: tab.machine, tab });
-  const path = await chooseFolder(tab.view.cwd);
+  const path = await invoke("pick_folder", { start: tab.view.cwd });
   if (path) await moveTab(tab, path);
 };
 
