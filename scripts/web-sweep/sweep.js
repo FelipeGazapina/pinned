@@ -580,6 +580,8 @@ async function sweep(profileName) {
     if (touch) await page.tap((await page.locator("#pill-actions .pill").first().isVisible()) ? "#pill-actions .pill >> nth=0" : "#send");
     else {
       // Enter in the `/` menu picks its highlighted command, so a word sent as typed closes it first.
+      // The menu lists the machine's commands, which a new thread has yet to ask for, so it can open late.
+      if (/^\//.test(words)) await waitFor("the / menu", () => page.locator('#composer-menu[data-kind="slash"]').isVisible());
       if (await page.locator('#composer-menu:is([data-kind="slash"], [data-kind="mention"])').isVisible()) await page.press("#prompt", "Escape");
       await page.press("#prompt", "Enter");
     }
@@ -4272,7 +4274,10 @@ async function sweep(profileName) {
     const merged = () => readLog("gh.log").split("\n").filter((l) => l.startsWith("merge-async 41 ")).map((l) => JSON.parse(l.slice(15)));
     await waitFor("GitHub's merge-async", async () => merged().some((b) => /^[0-9a-f]{40}$/.test(b.sha) && sortedJson({ ...b, sha: "" }) === sortedJson({ merge_action: "default", merge_method: "merge", sha: "" })), 15000);
     await waitFor("#41 merged", async () => /Merged/.test(await text("#panel-body .pr > .crumbs")), 10000);
+    // Reopening #41 for the later steps undoes what GitHub never does, so the app, which asks gh no
+    // more about a merged pull request, forgets it too.
     fs.writeFileSync(path.join(HOME, ".fake-gh-41"), "open");
+    await page.evaluate(() => prStatuses.delete("https://github.com/example/alpha/pull/41"));
     fs.rmSync(path.join(HOME, ".fake-gh-stack.json"));
     await closePanelIfOpen();
     await page.evaluate(() => openPage("pull-requests"));
@@ -7846,7 +7851,8 @@ async function sweep(profileName) {
   await step("shortcuts: ⌘⇧H opens T3's Run on picker of the machines", async () => {
     if (touch) return "touch: no keyboard";
     await calm();
-    await openRow(await keyFor("alpha"));
+    const alpha = await keyFor("alpha");
+    await openRow(alpha);
     const opened = await page.evaluate(() => tabs.map((t) => t.key));
     try {
       await page.evaluate(() => newThreadIn(active));
@@ -7857,7 +7863,10 @@ async function sweep(profileName) {
       check((await page.locator("#composer-menu button.checked .label").allTextContents()).join() === "sweep-node", "this machine isn't checked");
       await page.keyboard.press("Escape");
     } finally {
+      // Closing a tab moves to its neighbour, which is beta, not the thread this started from.
       await page.evaluate((keep) => tabs.filter((t) => !keep.includes(t.key)).forEach((t) => closeTab(t)), opened);
+      await page.evaluate((k) => activate(tabByKey(k)), alpha);
+      await waitFor("alpha again", () => page.evaluate((k) => active?.key === k, alpha));
     }
   });
 
