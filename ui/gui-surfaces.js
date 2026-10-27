@@ -417,7 +417,8 @@ function closeGoneShells() {
       machines.get(entry.tab.machine)?.transport.detach(entry.shell);
       callOn(entry.tab.machine, { cmd: "close_shell", shell: entry.shell }).catch(() => {});
     }
-    entry.term.dispose();
+    // xterm's open() leaves a timer that reads the renderer, which a dispose in the same task has torn down.
+    setTimeout(() => entry.term.dispose());
   }
 }
 
