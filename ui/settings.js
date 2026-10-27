@@ -66,12 +66,11 @@ async function toggleSettings() {
   showPage(page);
 }
 
-function onHubSettings(latest) {
+function onSettings(latest) {
   settings = latest;
   if (!settingsOpen() || page !== "connectors") return;
   if (view.name === "list") return redraw();
-  const line = document.getElementById("checked");
-  if (line) line.textContent = checkedText();
+  drawRuns();
 }
 
 function showPage(name) {
@@ -389,9 +388,17 @@ function cardHtml(c, i) {
       <span class="chain">${steps.map(([id]) => iconHtml(STEPS[id])).join("<i></i>")}</span>
       <b>${esc(c.name)}</b>
       <span class="hint">${esc(sentence(c))}</span>
+      ${runCountHtml(c)}
     </button>
     ${switchHtml('data-toggle="enabled"', c.enabled)}
   </div>`;
+}
+
+function runCountHtml(c) {
+  const counts = ["running", "queued", "failed"]
+    .map((state) => [state, (settings.runs ?? []).filter((r) => r.connector === c.id && r.state === state).length])
+    .filter(([, n]) => n);
+  return counts.length ? `<span class="run-count">${counts.map(([state, n]) => `<span data-state="${state}">${n} ${state}</span>`).join(" · ")}</span>` : "";
 }
 
 function sentence(c) {
@@ -437,6 +444,7 @@ function editorHtml() {
     </div>
     <p class="error" id="editor-error"></p>
     <div class="flow">${flowOf(c).map(([id, edge]) => stepHtml(c, id, edge)).join("")}</div>
+    ${c.id ? `<section class="runs"><h3>Runs</h3><p class="error" id="runs-error"></p><div id="runs">${runsHtml(c)}</div></section>` : ""}
     ${c.id ? `<div class="actions start"><button class="secondary danger" data-action="delete-connector">Delete workflow</button></div>` : ""}`;
 }
 
@@ -457,6 +465,81 @@ function stepHtml(c, id, edge) {
     </button>
     ${open ? `<div class="details">${step.fields(c)}${step.optional ? `<div class="actions start"><button class="secondary" data-action="remove-step">Remove step</button></div>` : ""}</div>` : ""}
   </div>`;
+}
+
+const RUN_STATES = {
+  queued: { label: () => "queued", action: "cancel" },
+  running: { label: (r) => `running on ${runMachineName(r.machine)}`, action: "cancel" },
+  idle: { label: () => "idle", action: "cancel" },
+  failed: { label: () => "failed", action: "retry" },
+  cancelled: { label: () => "cancelled", action: "retry" },
+};
+const RUN_ACTIONS = { retry: "Retry", cancel: "Cancel" };
+const STAGES = { picked: "picked up", coding: "coding", review: "pull request open" };
+const RUNS_SHOWN = 20;
+const openRuns = new Set();
+
+const runMachineName = (id) => (machines.has(localIdOf(id)) ? machineName(localIdOf(id)) : id);
+const withMachineNames = (text) =>
+  [...machines.keys()].map((id) => [hubIdOf(id), machineName(id)]).reduce((t, [id, name]) => (id ? t.replaceAll(id, name) : t), text);
+const runTime = (unix) => {
+  const at = new Date(unix * 1000);
+  const time = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+};
+
+function runsHtml(c) {
+  const runs = (settings.runs ?? []).filter((r) => r.connector === c.id);
+  if (!runs.length) return `<p class="hint">No runs yet. Each ${subject(c)} this workflow starts shows here, with where it runs and what happened to it.</p>`;
+  const more = runs.length - RUNS_SHOWN;
+  return `${runs.slice(0, RUNS_SHOWN).map(runHtml).join("")}${more > 0 ? `<p class="hint">${more} older run${more === 1 ? "" : "s"} not shown.</p>` : ""}`;
+}
+
+function runHtml(r) {
+  const state = RUN_STATES[r.state];
+  const now = Date.now() / 1000;
+  const since = ago(r.updated) === "now" ? "just now" : `${ago(r.updated)} ago`;
+  const meta = [
+    r.attempt > 1 && `attempt ${r.attempt} of ${r.maxAttempts}`,
+    r.stage && STAGES[r.stage],
+    r.status === "needs-input" && "needs input",
+    r.limit > now && `waits for the usage limit until ${runTime(r.limit)}`,
+    since,
+  ].filter(Boolean);
+  const open = openRuns.has(r.key);
+  const details = open
+    ? `<div class="run-details">
+        ${r.state === "failed" ? `<p class="error">${esc(r.error)}</p>` : ""}
+        <ol class="run-events">${r.events.map((e) => `<li><time>${esc(runTime(e.at))}</time><span>${esc(withMachineNames(e.text))}</span></li>`).join("") || `<li class="hint">Nothing happened yet.</li>`}</ol>
+      </div>`
+    : "";
+  return `<div class="run"${open ? " data-open" : ""} data-key="${esc(r.key)}">
+    <div class="run-row">
+      <button class="run-head" data-action="toggle-run" aria-expanded="${open}">
+        <span class="chevron">›</span>
+        <span class="who"><b>${esc(r.title)}</b><span class="hint">${esc(meta.join(" · "))}</span></span>
+        <span class="run-state" data-state="${esc(r.state)}">${esc(state.label(r))}</span>
+      </button>
+      <button class="secondary${state.action === "cancel" ? " danger" : ""}" data-action="${state.action}-run">${RUN_ACTIONS[state.action]}</button>
+    </div>
+    ${details}
+  </div>`;
+}
+
+function drawRuns() {
+  const list = document.getElementById("runs");
+  if (list) list.innerHTML = runsHtml(view.draft);
+}
+
+async function runCall(cmd, button) {
+  const error = document.getElementById("runs-error");
+  error.textContent = "";
+  try {
+    await connectorCall(cmd, { key: button.closest(".run").dataset.key });
+    onSettings(await connectorCall("get_settings"));
+  } catch (e) {
+    error.textContent = e;
+  }
 }
 
 const changed = () => JSON.stringify(view.draft) !== view.original;
@@ -713,6 +796,15 @@ const actions = {
       error.textContent = err;
     }
   },
+  "toggle-run"(button) {
+    const key = button.closest(".run").dataset.key;
+    if (!openRuns.delete(key)) openRuns.add(key);
+    drawRuns();
+  },
+  "retry-run": (button) => runCall("retry_run", button),
+  "cancel-run"(button) {
+    if (armed(button, "Click again to cancel")) runCall("cancel_run", button);
+  },
   async "delete-connector"(button) {
     if (!armed(button, "Click again to delete")) return;
     await connectorCall("delete_connector", { id: view.draft.id });
@@ -768,8 +860,10 @@ for (const b of document.querySelectorAll("#settings-nav [data-page]")) b.onclic
 document.getElementById("settings-toggle").onclick = toggleSettings;
 document.getElementById("settings-back").onclick = toggleSettings;
 
-listen("connectors-checked", (payload) => {
+listen("connectors-checked", async (payload) => {
   settings.checked = payload;
   const line = document.getElementById("checked");
   if (line) line.textContent = checkedText();
+  const pushedByHub = Boolean(hub);
+  if (!pushedByHub && settingsOpen() && page === "connectors") onSettings(await connectorCall("get_settings"));
 });

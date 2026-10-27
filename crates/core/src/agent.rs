@@ -48,7 +48,8 @@ pub struct AgentEvent {
 }
 
 /// Where a connector's session is in its work on an issue. Each stage maps to a Linear column.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+/// Ordered as a session reaches them.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
 pub enum Stage {
     /// The harness picked the issue up and opened a session for it.

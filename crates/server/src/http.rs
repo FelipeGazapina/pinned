@@ -467,7 +467,9 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 // of sessions it runs, so a prompt-injected session can't act for another connector or thread,
                 // import into an account with no connectors yet, and sync its projects.
                 let work = match &call {
-                    HubCall::Stage { connector, subject, .. } => Some((connector.clone(), subject.clone())),
+                    HubCall::Stage { connector, subject, .. } | HubCall::Checkpoint { connector, subject, .. } => {
+                        Some((connector.clone(), subject.clone()))
+                    }
                     HubCall::SlackReply { connector, channel, thread, .. }
                     | HubCall::LinearCreate { connector, channel, thread, .. }
                     | HubCall::LinearTake { connector, channel, thread, .. } => {
@@ -476,7 +478,12 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                     _ => None,
                 };
                 let result = match work {
-                    Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
+                    Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine).is_some() => {
+                        match hub.held_by(&account, &connector, &subject, &machine).await {
+                            Ok(()) => hub.hub_call(&account, call).await,
+                            Err(e) => Err(e),
+                        }
+                    }
                     Some(_) => Err("this machine runs no session of that workflow on that subject".into()),
                     // An app's first sign-in moves its own connectors in, which only an empty account takes,
                     // and every machine keeps its projects' files in step with the account's.

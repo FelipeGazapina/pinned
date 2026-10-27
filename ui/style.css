@@ -273,6 +273,36 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .edge span { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); padding: 1px 7px; white-space: nowrap;
   border: 1px solid var(--border); border-radius: 9px; background: var(--s-bg, rgb(15 17 21)); color: var(--muted); font-size: 11px; }
 
+.runs { margin-top: 16px; }
+#settings-page .runs h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+.run { margin: 6px 0; border: 1px solid var(--border); border-radius: 8px; background: rgb(var(--s-ink-rgb, 255 255 255) / 0.02); }
+.run-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 6px; }
+.run-head { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; text-align: left; }
+.run-head .who { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.run-head .who > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run .chevron { flex: none; width: 14px; text-align: center; color: var(--muted); font-size: 15px; transition: transform 0.15s; }
+.run[data-open] .chevron { transform: rotate(90deg); }
+:is(.run-state, .run-count span)[data-state="queued"], :is(.run-state, .run-count span)[data-state="cancelled"] { --run-tone: var(--muted); }
+:is(.run-state, .run-count span)[data-state="running"] { --run-tone: var(--working); }
+:is(.run-state, .run-count span)[data-state="idle"] { --run-tone: var(--done); }
+:is(.run-state, .run-count span)[data-state="failed"] { --run-tone: var(--s-error, #ff6b6b); }
+.run-state { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 10px;
+  font-size: 11px; color: var(--run-tone); border: 1px solid color-mix(in srgb, var(--run-tone) 40%, transparent);
+  background: color-mix(in srgb, var(--run-tone) 10%, transparent); }
+.run-count { margin-top: 2px; font-size: 11px; color: var(--muted); }
+.run-count span { color: var(--run-tone); }
+.run-details { padding: 0 12px 10px 28px; }
+#settings-page .run-details .error { margin: 0 0 8px; }
+.run-events { list-style: none; margin: 0; padding: 0 0 0 12px; display: flex; flex-direction: column; gap: 4px; border-left: 2px solid var(--s-line, #3d434d); }
+.run-events li { display: flex; gap: 10px; line-height: 1.45; }
+.run-events time { flex: none; min-width: 4.5em; color: var(--muted); font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) {
+  .run-head { flex-wrap: wrap; row-gap: 4px; }
+  .run-head .who { flex-basis: calc(100% - 22px); }
+  .run-head .who > .hint { white-space: normal; }
+  .run-state { max-width: none; margin-left: 22px; }
+}
+
 #settings-page .projects { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
 #settings-page .project { display: flex; justify-content: space-between; gap: 12px; text-align: left; padding: 6px 8px; border-radius: 6px; }
 #settings-page .project:hover { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.039); }

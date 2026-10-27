@@ -2,7 +2,9 @@
 //! with a claude session already working on what it found.
 
 use crate::agent::{self, Stage, Subject};
-use crate::wire::RunSpec;
+use crate::checkpoint::Checkpoint;
+use crate::runs::{self, Job, Online, Step};
+use crate::wire::{MachineId, RunSpec, TabId};
 use crate::{github, linear, slack};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -10,10 +12,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
 use tokio::sync::Notify;
 
-const INTERVAL: Duration = Duration::from_secs(60);
 const LINEAR_KEY: &str = "linear-key";
 const SLACK_KEY: &str = "slack-key";
 const GITHUB_KEY: &str = "github-key";
@@ -281,6 +281,9 @@ struct Store {
     #[serde(default)]
     github: Option<github::Account>,
     connectors: Vec<Connector>,
+    /// Every run the connectors started, by `runs::key`.
+    #[serde(default)]
+    runs: BTreeMap<String, Job>,
 }
 
 impl Store {
@@ -338,6 +341,9 @@ pub struct Settings {
     pub github: Option<github::Account>,
     pub connectors: Vec<Connector>,
     pub checked: Option<Check>,
+    /// The connectors' runs, the most recently changed first.
+    #[serde(default)]
+    pub runs: Vec<runs::View>,
 }
 
 /// The integrations' keys, which never leave a store but by `export`.
@@ -358,6 +364,19 @@ pub struct Run {
     pub subject: Subject,
     /// The Slack messages the bot reacts to once a tab takes the run, by ts.
     pub mentioned: Vec<String>,
+    /// What the runs list calls it.
+    pub title: String,
+    /// The worktree a machine that resumes the run restores its work into.
+    pub worktree: String,
+    /// The run's conversation, when it has one. `args` start the run over on a machine that can't resume it.
+    pub resume: Option<Resume>,
+}
+
+/// A conversation to go on with: `claude --resume <session>`, then `args`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Resume {
+    pub session: String,
+    pub args: Vec<String>,
 }
 
 impl Run {
@@ -368,7 +387,17 @@ impl Run {
             args: self.args.clone(),
             env: agent::session_env(&self.connector, &self.subject),
             token: None,
+            checkpoint: None,
+            worktree: None,
         }
+    }
+
+    /// The spec that resumes the run's conversation, from `checkpoint` on a machine that hasn't it.
+    pub fn resume_spec(&self, checkpoint: Option<Checkpoint>) -> Option<RunSpec> {
+        let resume = self.resume.as_ref()?;
+        let session = checkpoint.as_ref().map_or(&resume.session, |cp| &cp.session);
+        let args = ["--resume".to_owned(), session.clone()].into_iter().chain(resume.args.iter().cloned()).collect();
+        Some(RunSpec { args, worktree: Some(self.worktree.clone()), checkpoint, ..self.spec() })
     }
 }
 
@@ -378,6 +407,22 @@ pub enum Work {
     Run(Run),
     /// New messages for the session that answers a Slack thread.
     Delivery(Delivery),
+    /// A prompt for the live session of a run, such as after its turn failed.
+    Prompt { connector: String, subject: Subject, text: String },
+    /// A tab of a run on a machine that no longer holds the run.
+    Close { machine: MachineId, tab: TabId },
+}
+
+impl Work {
+    /// The environment of the session the work goes to, for a prompt or a delivery.
+    pub fn env(&self) -> Vec<(String, String)> {
+        match self {
+            Work::Delivery(d) => d.env(),
+            Work::Prompt { connector, subject, .. } => agent::session_env(connector, subject),
+            Work::Run(run) => agent::session_env(&run.connector, &run.subject),
+            Work::Close { .. } => vec![],
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -394,8 +439,12 @@ pub struct Delivery {
 }
 
 impl Delivery {
+    pub fn subject(&self) -> Subject {
+        Subject::SlackThread { channel: self.channel.clone(), thread: self.thread.clone() }
+    }
+
     pub fn env(&self) -> Vec<(String, String)> {
-        agent::session_env(&self.connector, &Subject::SlackThread { channel: self.channel.clone(), thread: self.thread.clone() })
+        agent::session_env(&self.connector, &self.subject())
     }
 
     pub fn text(&self) -> String {
@@ -505,6 +554,15 @@ pub struct Connectors {
     /// Held while a session files or takes a Linear issue, and while a check hands out issues, so
     /// two calls from one thread can't both file one and a check never starts an issue a thread holds.
     filing: tokio::sync::Mutex<()>,
+    /// When each run's machine last showed it alive, by `runs::key`. Kept in memory: after a
+    /// restart every run counts from `started`, so machines get their grace to reconnect.
+    seen: Mutex<HashMap<String, u64>>,
+    started: u64,
+    timing: runs::Timing,
+}
+
+fn now() -> u64 {
+    Utc::now().timestamp().max(0) as u64
 }
 
 impl Connectors {
@@ -518,7 +576,14 @@ impl Connectors {
             wake: Notify::new(),
             channels: Mutex::new(HashMap::new()),
             filing: tokio::sync::Mutex::new(()),
+            seen: Mutex::new(HashMap::new()),
+            started: now(),
+            timing: runs::Timing::default(),
         }
+    }
+
+    pub fn with_timing(self, timing: runs::Timing) -> Self {
+        Self { timing, ..self }
     }
 
     fn save(&self, store: &Store) -> Result<(), String> {
@@ -622,42 +687,245 @@ impl Connectors {
     }
 
     /// Gives `work` to the tabs. A thread's cursor moves only once its messages reached a session,
-    /// its own or a new one, so messages that didn't are passed on again at the next check. A run
-    /// no tab took gives its subject back, so the next check tries it again.
+    /// its own or a new one, so messages that didn't are passed on again at the next check. A new
+    /// run no tab took gives its subject back, so the next check finds it again; a run already
+    /// recorded stays queued for the next check.
     async fn hand_over<F, Fut>(&self, work: Work, open: &F) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
-        Fut: Future<Output = bool>,
+        Fut: Future<Output = Option<MachineId>>,
     {
         match work {
             Work::Run(run) => {
                 let (connector, subject, folder, mentioned) = (run.connector.clone(), run.subject.clone(), run.cwd.clone(), run.mentioned.clone());
-                if !open(Work::Run(run)).await {
+                let key = runs::key(&connector, &subject);
+                let recorded = self.store.lock().unwrap().runs.contains_key(&key);
+                let Some(machine) = open(Work::Run(run.clone())).await else {
+                    if recorded {
+                        return Err(format!("no machine took the run of {}; the next check tries again", run.title));
+                    }
                     return Err(self.unclaim(&connector, &subject, &folder));
+                };
+                self.dispatched(run, &machine, false)?;
+                if recorded {
+                    return self.acknowledge_thread(&subject, &mentioned).await;
                 }
                 // The session starts even when Linear won't move the issue or Slack won't take the
                 // reaction; the check reports why. A Slack thread has no issue to pick until its
                 // session files one.
                 match &subject {
                     Subject::LinearIssue { .. } => self.stage(&connector, &subject, Stage::Picked).await.map(drop),
-                    Subject::SlackThread { channel, .. } => self.acknowledge(channel, &mentioned).await,
+                    Subject::SlackThread { .. } => self.acknowledge_thread(&subject, &mentioned).await,
                 }
             }
             Work::Delivery(d) => {
-                let cursor = if open(Work::Delivery(d.clone())).await {
+                let cursor = if open(Work::Delivery(d.clone())).await.is_some() {
                     d.cursor.clone()
                 } else {
+                    let key = runs::key(&d.connector, &d.subject());
+                    if self.store.lock().unwrap().runs.get(&key).is_some_and(|job| matches!(job.phase, runs::Phase::Queued { .. } | runs::Phase::Running { .. })) {
+                        return Err("a Slack thread's new messages wait for its run's machine; the next check passes them on".into());
+                    }
                     let (run, newest) = self.fallback(&d).await?;
                     let folder = run.cwd.clone();
-                    if !open(Work::Run(run)).await {
+                    let Some(machine) = open(Work::Run(run.clone())).await else {
                         return Err(format!("could not open a session in {} for a Slack thread; the next check tries again", folder.display()));
-                    }
+                    };
+                    self.dispatched(run, &machine, true)?;
                     newest
                 };
                 self.follow(&d.connector, &d.channel, &d.thread, cursor)?;
                 self.acknowledge(&d.channel, &d.mentioned).await
             }
+            work @ (Work::Prompt { .. } | Work::Close { .. }) => {
+                open(work).await;
+                Ok(())
+            }
         }
+    }
+
+    /// Records that `machine` took `run`, as its first start or a later one. A run someone woke
+    /// with new work starts its attempts over; one cancelled while it started stays cancelled.
+    fn dispatched(&self, run: Run, machine: &MachineId, woken: bool) -> Result<(), String> {
+        let now = now();
+        let key = runs::key(&run.connector, &run.subject);
+        let mut store = self.store.lock().unwrap();
+        let job = store.runs.entry(key.clone()).or_insert_with(|| Job {
+            connector: run.connector,
+            subject: run.subject,
+            title: run.title,
+            phase: runs::Phase::Queued { after: now },
+            attempt: 0,
+            session: None,
+            status: None,
+            limit: None,
+            retried: None,
+            stage: None,
+            replies: vec![],
+            cwd: run.cwd,
+            repo: run.repo,
+            args: run.args,
+            worktree: run.worktree,
+            created: now,
+            updated: now,
+            events: vec![],
+        });
+        if job.phase == runs::Phase::Cancelled && !woken {
+            return Ok(());
+        }
+        if woken {
+            job.attempt = 0;
+            job.retried = None;
+        }
+        job.dispatched(machine, now);
+        self.seen.lock().unwrap().insert(key, now);
+        self.save(&store)
+    }
+
+    async fn acknowledge_thread(&self, subject: &Subject, mentioned: &[String]) -> Result<(), String> {
+        match subject {
+            Subject::SlackThread { channel, .. } => self.acknowledge(channel, mentioned).await,
+            Subject::LinearIssue { .. } => Ok(()),
+        }
+    }
+
+    /// Moves every run on from the tabs `online` shows, and does what each needs: starts it on a
+    /// machine, continues its failed turn, closes its stale tab, or reports why it stopped.
+    async fn reconcile<F, Fut>(&self, online: &Online, open: &F) -> Option<String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = Option<MachineId>>,
+    {
+        let now = now();
+        let mut todo = vec![];
+        {
+            let mut store = self.store.lock().unwrap();
+            let mut seen = self.seen.lock().unwrap();
+            let mut changed = false;
+            let before = store.runs.len();
+            store.runs.retain(|_, job| !job.stale(now));
+            changed |= store.runs.len() != before;
+            for (key, job) in store.runs.iter_mut() {
+                let was = job.clone();
+                let last = seen.entry(key.clone()).or_insert(self.started);
+                for step in job.reconcile(online, last, now, self.timing.grace) {
+                    todo.push((job.clone(), step));
+                }
+                changed |= *job != was;
+            }
+            if changed {
+                if let Err(e) = self.save(&store) {
+                    return Some(e);
+                }
+            }
+        }
+        let machines_reconnecting = now < self.started + self.timing.grace;
+        let mut errors = vec![];
+        for (job, step) in todo {
+            let done = match step {
+                Step::Dispatch if machines_reconnecting => Ok(()),
+                Step::Dispatch => match self.redispatch(&job) {
+                    Ok(run) => self.hand_over(Work::Run(run), open).await,
+                    Err(e) => Err(e),
+                },
+                Step::Continue => {
+                    let text = crate::sessions::CONTINUE_PROMPT.to_owned();
+                    self.hand_over(Work::Prompt { connector: job.connector.clone(), subject: job.subject.clone(), text }, open).await
+                }
+                Step::Close { machine, tab } => self.hand_over(Work::Close { machine, tab }, open).await,
+                Step::Report(error) => self.report(&job, &error).await,
+            };
+            if let Err(e) = done {
+                errors.push(e);
+            }
+        }
+        (!errors.is_empty()).then(|| errors.join("; "))
+    }
+
+    /// The run that starts `job` again: resuming its conversation where a machine can, else over.
+    fn redispatch(&self, job: &Job) -> Result<Run, String> {
+        let store = self.store.lock().unwrap();
+        let c = store.connector(&job.connector)?;
+        let mut args = job.args.clone();
+        if let Some(prompt) = args.last_mut() {
+            *prompt += START_OVER;
+        }
+        let resume = job.session.as_deref().map(|session| resume_args(c, session, RESUMED.to_owned()));
+        Ok(Run {
+            cwd: job.cwd.clone(),
+            repo: job.repo.clone(),
+            args,
+            connector: job.connector.clone(),
+            subject: job.subject.clone(),
+            mentioned: vec![],
+            title: job.title.clone(),
+            worktree: job.worktree.clone(),
+            resume,
+        })
+    }
+
+    /// Tells the run's issue or thread that it stopped, and why.
+    async fn report(&self, job: &Job, error: &str) -> Result<(), String> {
+        let text = format!("pinned stopped working on this: {error}. Retry it from the workflow's runs in pinned.");
+        match &job.subject {
+            Subject::LinearIssue { issue } => {
+                let key = self.key(LINEAR_KEY).ok_or("Linear is not connected")?;
+                linear::comment(&key, issue, &text).await
+            }
+            Subject::SlackThread { channel, thread } => {
+                let token = self.key(SLACK_KEY).ok_or("Slack is not connected")?;
+                slack::post(&token, channel, thread, &text).await
+            }
+        }
+    }
+
+    /// Refuses a run's callback from a session that must stop working on it, as an earlier
+    /// attempt's on a machine that came back after the run moved on or stopped.
+    pub fn held_by(&self, connector: &str, subject: &Subject, machine: &str) -> Result<(), String> {
+        let store = self.store.lock().unwrap();
+        match store.runs.get(&runs::key(connector, subject)).and_then(|job| job.refuses(machine)) {
+            Some(why) => Err(why.into()),
+            None => Ok(()),
+        }
+    }
+
+    /// The machine whose session a run's messages and prompts go to, while one holds it.
+    pub fn holder(&self, connector: &str, subject: &Subject) -> Option<MachineId> {
+        self.store.lock().unwrap().runs.get(&runs::key(connector, subject)).and_then(Job::machine).cloned()
+    }
+
+    /// Records the conversation a checkpoint of the run holds, which a resume continues even when
+    /// no check saw the session's tab name it before its machine went offline.
+    pub fn checkpointed(&self, connector: &str, subject: &Subject, session: &str) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        let Some(job) = store.runs.get_mut(&runs::key(connector, subject)) else { return Ok(()) };
+        if job.session.as_deref() == Some(session) {
+            return Ok(());
+        }
+        job.session = Some(session.to_owned());
+        self.save(&store)
+    }
+
+    /// Starts a failed or cancelled run again, from its first attempt.
+    pub fn retry_run(&self, key: &str) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        let job = store.runs.get_mut(key).ok_or("that run is gone")?;
+        if !job.ended() {
+            return Err("only a failed or cancelled run can be retried".into());
+        }
+        job.retry(now());
+        self.save(&store)?;
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    /// Stops a run and closes its tabs at the next check.
+    pub fn cancel_run(&self, key: &str) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        store.runs.get_mut(key).ok_or("that run is gone")?.cancel(now());
+        self.save(&store)?;
+        self.wake.notify_one();
+        Ok(())
     }
 
     /// Reacts to the messages a session took, so people can tell the bot didn't ignore them.
@@ -696,7 +964,9 @@ impl Connectors {
         let newest = posts.last().map_or_else(|| d.cursor.clone(), |p| p.ts.clone());
         let note = c.created.get(&thread_key(&d.channel, &d.thread)).map(filed_note);
         let run = slack_run(&c, &d.channel, channel_name(name), &d.thread, &posts, note.as_deref(), &self.exe);
-        Ok((Run { mentioned: d.mentioned.clone(), ..run }, newest))
+        let session = self.store.lock().unwrap().runs.get(&runs::key(&c.id, &run.subject)).and_then(|j| j.session.clone());
+        let resume = session.map(|session| resume_args(&c, &session, d.text()));
+        Ok((Run { mentioned: d.mentioned.clone(), resume, ..run }, newest))
     }
 
     /// Records that the thread's session has every message up to `cursor`, someone else's among them.
@@ -755,19 +1025,32 @@ impl Connectors {
         Ok(id)
     }
 
-    /// Moves the session's issue to the column the connector maps `stage` to.
+    /// Moves the session's issue to the column the connector maps `stage` to, once: a run that
+    /// already reached the stage, as a resumed session repeating itself, leaves the issue alone.
     pub async fn stage(&self, connector: &str, subject: &Subject, stage: Stage) -> Result<String, String> {
+        let run = runs::key(connector, subject);
         let (issue, column) = {
             let store = self.store.lock().unwrap();
             let c = store.connector(connector)?;
+            if store.runs.get(&run).and_then(|j| j.stage).is_some_and(|reached| reached >= stage) {
+                return Ok("this run already reported that stage, so the issue stays where it is".into());
+            }
             (c.issue(subject)?, c.columns.get(stage).to_owned())
         };
-        if column.is_empty() {
-            return Ok("this workflow has no column for that stage, so the issue stays where it is".into());
+        if !column.is_empty() {
+            let key = self.key(LINEAR_KEY).ok_or("Linear is not connected")?;
+            linear::move_issue(&key, &issue, &column).await?;
         }
-        let key = self.key(LINEAR_KEY).ok_or("Linear is not connected")?;
-        linear::move_issue(&key, &issue, &column).await?;
-        Ok(format!("moved the issue to {column}"))
+        let mut store = self.store.lock().unwrap();
+        if let Some(job) = store.runs.get_mut(&run) {
+            job.stage = Some(stage);
+            job.log(now(), format!("reached {}", arg(stage)));
+            self.save(&store)?;
+        }
+        Ok(match column.is_empty() {
+            true => "this workflow has no column for that stage, so the issue stays where it is".into(),
+            false => format!("moved the issue to {column}"),
+        })
     }
 
     /// Files a Linear issue for the Slack thread, linking back to it, unless the thread already
@@ -816,13 +1099,28 @@ impl Connectors {
         Ok(format!("{}\n\n{}\n\n{description}", filed.answer(), issue.title).trim_end().to_owned())
     }
 
-    /// Posts `text` in the Slack thread the connector's session answers.
+    /// Posts `text` in the Slack thread the connector's session answers, once: the same reply
+    /// from a resumed session that repeats itself is not posted again.
     pub async fn slack_reply(&self, connector: &str, channel: &str, thread: &str, text: &str) -> Result<String, String> {
-        if !self.store.lock().unwrap().connectors.iter().any(|c| c.id == connector) {
-            return Err("the workflow was deleted".into());
+        let run = runs::key(connector, &Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() });
+        let hash = reply_hash(text);
+        {
+            let store = self.store.lock().unwrap();
+            if !store.connectors.iter().any(|c| c.id == connector) {
+                return Err("the workflow was deleted".into());
+            }
+            if store.runs.get(&run).is_some_and(|j| j.replies.contains(&hash)) {
+                return Ok("this reply is already in the Slack thread, so it was not posted again".into());
+            }
         }
         let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
         slack::post(&token, channel, thread, text).await?;
+        let mut store = self.store.lock().unwrap();
+        if let Some(job) = store.runs.get_mut(&run) {
+            job.replies.push(hash);
+            job.updated = now();
+            self.save(&store)?;
+        }
         Ok("posted the reply in the Slack thread".into())
     }
 }
@@ -831,13 +1129,40 @@ fn arg<T: Serialize>(value: T) -> String {
     serde_json::to_value(value).unwrap().as_str().unwrap().to_owned()
 }
 
-/// The `claude` arguments every connector session starts with, before its prompt.
-fn claude_args(c: &Connector, worktree: &str, name: String) -> Vec<String> {
+/// The model, effort and permission flags of the connector's sessions.
+fn flags(c: &Connector) -> Vec<String> {
     let mut args = vec![];
     if !c.model.trim().is_empty() {
         args.extend(["--model".into(), c.model.trim().to_owned()]);
     }
     args.extend(["--effort".into(), arg(c.effort), "--permission-mode".into(), arg(c.permission_mode)]);
+    args
+}
+
+/// What a session is told when pinned resumes it after it stopped: its machine went offline,
+/// claude exited, or someone retried it.
+const RESUMED: &str = "pinned resumed this session after it stopped before finishing. Your conversation is restored. \
+    The working tree holds your work as of the last checkpoint, uncommitted changes included, or newer where this machine has it. \
+    Check `git status`, `git log` and any pull request you opened before redoing work, then continue from where you left off.";
+/// What a run that starts over, its conversation lost with its machine, is told.
+const START_OVER: &str = "\n\nAn earlier attempt at this was lost with its machine before it could be resumed. \
+    Look for its branch and pull request first, and carry that work on instead of starting a second one.";
+
+/// What resumes the connector session `session` with `prompt`.
+fn resume_args(c: &Connector, session: &str, prompt: String) -> Resume {
+    let mut args = flags(c);
+    args.push(prompt);
+    Resume { session: session.to_owned(), args }
+}
+
+fn reply_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.trim().as_bytes()).iter().take(12).map(|b| format!("{b:02x}")).collect()
+}
+
+/// The `claude` arguments every connector session starts with, before its prompt.
+fn claude_args(c: &Connector, worktree: &str, name: String) -> Vec<String> {
+    let mut args = flags(c);
     if c.worktree {
         args.push(format!("--worktree={worktree}"));
     }
@@ -872,7 +1197,17 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
         issue.description.as_deref().unwrap_or("(no description)"),
     );
     args.push(prompt);
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() }, mentioned: vec![] }
+    Run {
+        cwd: c.folder.clone(),
+        repo: c.repo(),
+        args,
+        connector: c.id.clone(),
+        subject: Subject::LinearIssue { issue: issue.id.clone() },
+        mentioned: vec![],
+        title: format!("{} {}", issue.identifier, issue.title),
+        worktree: issue.identifier.to_lowercase(),
+        resume: None,
+    }
 }
 
 /// What every connector session that may open a pull request must do to prove the change works.
@@ -964,7 +1299,9 @@ fn slack_run(
 ) -> Run {
     let opening = posts.first().and_then(|p| p.text.lines().next()).unwrap_or_default();
     let opening: String = opening.chars().take(TAB_NAME_CHARS).collect();
-    let mut args = claude_args(c, &format!("slack-{}", thread.replace('.', "-")), format!("#{channel_name} {opening}"));
+    let worktree = format!("slack-{}", thread.replace('.', "-"));
+    let title = format!("#{channel_name} {opening}");
+    let mut args = claude_args(c, &worktree, title.clone());
     let mut prompt = c.instructions.trim().to_owned();
     prompt += &format!(
         "\n\nAnswer in the Slack thread below by running `'{}' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Keep every answer short. Before each `slack reply`, invoke the `pinned:bro` skill on your draft and post the message it gives you, not the draft. \
@@ -983,7 +1320,7 @@ fn slack_run(
     prompt += note.unwrap_or_default();
     args.push(prompt);
     let subject = Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() };
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![] }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], title, worktree, resume: None }
 }
 
 fn reply_header(author: &str) -> String {
@@ -1006,10 +1343,10 @@ fn filed_note(filed: &Filed) -> String {
 impl Connectors {
     /// Polls forever. `open` receives what each check found and answers whether a tab took it,
     /// and `on_check` hears how each check went. A settings change wakes it early.
-    pub async fn watch<F, Fut>(&self, open: F, on_check: impl Fn(&Check))
+    pub async fn watch<F, Fut>(&self, open: F, online: impl Fn() -> Vec<(MachineId, Vec<crate::wire::TabView>)>, on_check: impl Fn(&Check))
     where
         F: Fn(Work) -> Fut,
-        Fut: Future<Output = bool>,
+        Fut: Future<Output = Option<MachineId>>,
     {
         loop {
             let (work, mut error) = self.poll().await;
@@ -1018,10 +1355,13 @@ impl Connectors {
                     error.get_or_insert(e);
                 }
             }
+            if let Some(e) = self.reconcile(&online(), &open).await {
+                error.get_or_insert(e);
+            }
             let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
             *self.checked.lock().unwrap() = Some(check.clone());
             on_check(&check);
-            let _ = tokio::time::timeout(INTERVAL, self.wake.notified()).await;
+            let _ = tokio::time::timeout(self.timing.check, self.wake.notified()).await;
         }
     }
 
@@ -1033,6 +1373,7 @@ impl Connectors {
             github: store.github.clone(),
             connectors: store.connectors.clone(),
             checked: self.checked.lock().unwrap().clone(),
+            runs: runs::views(&store.runs),
         }
     }
 
@@ -1146,6 +1487,7 @@ impl Connectors {
     pub fn delete_connector(&self, id: &str) -> Result<(), String> {
         let mut store = self.store.lock().unwrap();
         store.connectors.retain(|c| c.id != id);
+        store.runs.retain(|_, job| job.connector != id);
         self.save(&store)
     }
 
@@ -1175,6 +1517,7 @@ impl Connectors {
                 None => self.storage.remove_key(name),
             }
         }
+        imported.runs.retain(|_, job| !job.ran_signed_out());
         self.channels.lock().unwrap().clear();
         *current = imported;
         self.save(&current)?;
@@ -1192,6 +1535,7 @@ impl Connectors {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn block_on<F: Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(future)
@@ -1228,7 +1572,7 @@ mod tests {
         slack.handled = vec!["C0123ABCD:1792400050.000200".into()];
         slack.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
         let (connectors, dir) = stored("unclaim", vec![linear, slack]);
-        let refuse = |_: Work| async { false };
+        let refuse = |_: Work| async { None };
 
         let issue_run = run(&linear_connector(), &issue(), "/bin/pinned");
         assert_eq!(
@@ -1246,6 +1590,96 @@ mod tests {
         let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
         assert_eq!(reloaded[0].handled, ["older"]);
         assert_eq!((reloaded[1].handled.len(), reloaded[1].followed.len()), (0, 0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn quiet_linear() -> Connector {
+        Connector { columns: Columns::default(), ..linear_connector() }
+    }
+
+    fn taken(_: Work) -> std::future::Ready<Option<MachineId>> {
+        std::future::ready(Some("m1".to_owned()))
+    }
+
+    #[test]
+    fn a_run_reports_each_stage_once() {
+        let (connectors, dir) = stored("stage-once", vec![quiet_linear()]);
+        assert_eq!(block_on(connectors.hand_over(Work::Run(run(&quiet_linear(), &issue(), "/bin/pinned")), &taken)), Ok(()));
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let stage = |stage| block_on(connectors.stage("c1", &subject, stage));
+        assert_eq!(stage(Stage::Review), Ok("this workflow has no column for that stage, so the issue stays where it is".into()));
+        assert_eq!(stage(Stage::Review), Ok("this run already reported that stage, so the issue stays where it is".into()));
+        assert_eq!(stage(Stage::Coding), Ok("this run already reported that stage, so the issue stays where it is".into()), "a resumed session can't move the issue back");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_reply_already_in_the_thread_is_not_posted_again() {
+        let (connectors, dir) = stored("reply-once", vec![slack_connector()]);
+        let thread_run = slack_run(&slack_connector(), "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &taken)), Ok(()));
+        let key = runs::key("c2", &Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() });
+        connectors.store.lock().unwrap().runs.get_mut(&key).unwrap().replies.push(reply_hash("Fixed in #42."));
+        let reply = |text| block_on(connectors.slack_reply("c2", "C0123ABCD", "1792400050.000200", text));
+        assert_eq!(reply(" Fixed in #42.\n"), Ok("this reply is already in the Slack thread, so it was not posted again".into()));
+        assert_eq!(reply("Something new."), Err("Slack is not connected: connect it in pinned's Connectors settings".into()), "a new reply goes to Slack");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_that_moved_refuses_its_old_machine() {
+        let (connectors, dir) = stored("held", vec![quiet_linear()]);
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        assert_eq!(connectors.held_by("c1", &subject, "m9"), Ok(()), "an unknown run holds no machine");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(run(&quiet_linear(), &issue(), "/bin/pinned")), &taken)), Ok(()));
+        assert_eq!(connectors.held_by("c1", &subject, "m1"), Ok(()));
+        assert_eq!(connectors.holder("c1", &subject).as_deref(), Some("m1"), "its messages and prompts go to m1 alone");
+        assert_eq!(
+            connectors.held_by("c1", &subject, "m2"),
+            Err("this run moved to another machine after this one went offline: stop working on it here".into())
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_signed_out_macs_own_runs_stay_behind_when_it_signs_in() {
+        let (local, dir) = stored("import-runs", vec![quiet_linear()]);
+        assert_eq!(block_on(local.hand_over(Work::Run(run(&quiet_linear(), &issue(), "/bin/pinned")), &|_| async { Some(runs::THIS_MAC.to_owned()) })), Ok(()));
+        let mut queued = local.store.lock().unwrap().runs["c1/uuid"].clone();
+        queued.subject = Subject::LinearIssue { issue: "uuid-2".into() };
+        queued.phase = runs::Phase::Queued { after: 0 };
+        local.store.lock().unwrap().runs.insert("c1/uuid-2".into(), queued);
+        let (store, keys) = local.export();
+        let (account, account_dir) = stored("import-runs-account", vec![]);
+        assert_eq!(account.import(store, keys), Ok(true));
+        let kept: Vec<String> = account.get_settings().runs.into_iter().map(|r| r.key).collect();
+        assert_eq!(kept, ["c1/uuid-2"], "the queued run moves; the one running on this Mac stays its own");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(account_dir);
+    }
+
+    #[test]
+    fn a_run_whose_machine_is_gone_resumes_its_conversation_on_another() {
+        let (connectors, dir) = stored("redispatch", vec![quiet_linear()]);
+        let connectors = connectors.with_timing(runs::Timing { check: Duration::from_secs(1), grace: 0 });
+        assert_eq!(block_on(connectors.hand_over(Work::Run(run(&quiet_linear(), &issue(), "/bin/pinned")), &taken)), Ok(()));
+        connectors.checkpointed("c1", &Subject::LinearIssue { issue: "uuid".into() }, "s1").unwrap();
+        let sent = Mutex::new(vec![]);
+        let open = |work: Work| {
+            if let Work::Run(run) = &work {
+                sent.lock().unwrap().push((run.resume.clone(), run.args.last().cloned().unwrap_or_default()));
+            }
+            std::future::ready(Some("m2".to_owned()))
+        };
+        assert_eq!(block_on(connectors.reconcile(&[("m3".to_owned(), vec![])], &open)), None);
+        let sent = sent.into_inner().unwrap();
+        let resume = sent[0].0.clone().unwrap();
+        assert_eq!(resume.session, "s1");
+        assert_eq!(resume.args[..4], ["--model", "sonnet", "--effort", "xhigh"]);
+        assert_eq!(resume.args.last().map(String::as_str), Some(RESUMED));
+        assert!(sent[0].1.ends_with(START_OVER), "the arguments that start over say an attempt was lost");
+        let view = &connectors.get_settings().runs[0];
+        assert_eq!((&view.phase, view.attempt), (&runs::Phase::Running { machine: "m2".into() }, 2));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1268,10 +1702,57 @@ mod tests {
         let slack = Connector { id: "c2".into(), handled: vec!["C0123ABCD:1792400050.000200".into()], ..slack_connector() };
         let (connectors, dir) = stored("claimed", vec![slack]);
         let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
-        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { true })), Ok(()));
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { Some("m1".to_owned()) })), Ok(()));
         assert_eq!(connectors.get_settings().connectors[0].handled, ["C0123ABCD:1792400050.000200"]);
         assert_eq!(block_on(connectors.acknowledge("C0123ABCD", &[])), Ok(()), "nothing to react to needs no Slack");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_threads_messages_wait_for_its_running_run_instead_of_starting_another() {
+        let (connectors, dir) = stored("waiting", vec![slack_connector()]);
+        let thread_run = slack_run(&slack_connector(), "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &taken)), Ok(()));
+        let delivery = Delivery {
+            connector: "c2".into(),
+            channel: "C0123ABCD".into(),
+            thread: "1792400050.000200".into(),
+            messages: vec!["yes, file it".into()],
+            cursor: "1792400090.000000".into(),
+            mentioned: vec![],
+        };
+        let opened = Mutex::new(vec![]);
+        let offline = |work: Work| {
+            opened.lock().unwrap().push(matches!(work, Work::Run(_)));
+            std::future::ready(None)
+        };
+        let waits = Err("a Slack thread's new messages wait for its run's machine; the next check passes them on".to_owned());
+        assert_eq!(block_on(connectors.hand_over(Work::Delivery(delivery), &offline)), waits);
+        assert_eq!(opened.into_inner().unwrap(), [false], "no second session was opened");
+        assert!(!connectors.get_settings().connectors[0].followed.contains_key("C0123ABCD:1792400050.000200"), "the cursor stayed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_cancelled_while_it_starts_stays_cancelled_and_only_an_ended_run_retries() {
+        let (connectors, dir) = stored("cancelled", vec![quiet_linear()]);
+        let started = run(&quiet_linear(), &issue(), "/bin/pinned");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(started.clone()), &taken)), Ok(()));
+        let key = runs::key("c1", &Subject::LinearIssue { issue: "uuid".into() });
+        assert_eq!(connectors.retry_run(&key), Err("only a failed or cancelled run can be retried".into()));
+        connectors.cancel_run(&key).unwrap();
+        connectors.dispatched(started, &"m2".to_owned(), false).unwrap();
+        assert_eq!(connectors.get_settings().runs[0].phase, runs::Phase::Cancelled);
+        assert_eq!(connectors.retry_run(&key), Ok(()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_resume_continues_the_conversation_its_checkpoint_holds() {
+        let started = Run { resume: Some(Resume { session: "s1".into(), args: vec!["go on".into()] }), ..run(&quiet_linear(), &issue(), "/bin/pinned") };
+        let checkpoint = Checkpoint { session: "s2".into(), transcript: crate::wire::Bytes(vec![]), worktree: None, code: None };
+        assert_eq!(started.resume_spec(Some(checkpoint)).unwrap().args, ["--resume", "s2", "go on"]);
+        assert_eq!(started.resume_spec(None).unwrap().args, ["--resume", "s1", "go on"]);
     }
 
     #[test]
@@ -1281,7 +1762,7 @@ mod tests {
         let not_connected = Err("Slack is not connected: connect it in pinned's Connectors settings".to_owned());
         let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
         let thread_run = Run { mentioned: vec!["1792400050.000200".into()], ..thread_run };
-        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { true })), not_connected);
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { Some("m1".to_owned()) })), not_connected);
         assert_eq!(connectors.get_settings().connectors[0].handled, ["C0123ABCD:1792400050.000200"], "the run stays claimed");
 
         let delivery = Delivery {
@@ -1292,7 +1773,7 @@ mod tests {
             cursor: "1792400090.000000".into(),
             mentioned: vec!["1792400090.000000".into()],
         };
-        assert_eq!(block_on(connectors.hand_over(Work::Delivery(delivery), &|_| async { true })), not_connected);
+        assert_eq!(block_on(connectors.hand_over(Work::Delivery(delivery), &|_| async { Some("m1".to_owned()) })), not_connected);
         let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
         assert_eq!(reloaded[0].followed["C0123ABCD:1792400050.000200"].cursor, "1792400090.000000", "the cursor moved all the same");
         let _ = std::fs::remove_dir_all(dir);

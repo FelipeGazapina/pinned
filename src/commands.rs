@@ -95,6 +95,16 @@ pub fn delete_connector(connectors: State<Connectors>, id: String) -> Result<(),
 }
 
 #[tauri::command]
+pub fn retry_run(connectors: State<Connectors>, key: String) -> Result<(), String> {
+    connectors.retry_run(&key)
+}
+
+#[tauri::command]
+pub fn cancel_run(connectors: State<Connectors>, key: String) -> Result<(), String> {
+    connectors.cancel_run(&key)
+}
+
+#[tauri::command]
 pub async fn pick_folder(app: AppHandle, start: Option<String>) -> Option<String> {
     let mut dialog = app.dialog().file();
     if let Some(start) = start.filter(|s| !s.is_empty()) {

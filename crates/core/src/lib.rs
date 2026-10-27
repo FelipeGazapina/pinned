@@ -1,6 +1,7 @@
 pub mod account;
 pub mod agent;
 pub mod branches;
+pub mod checkpoint;
 pub mod cli;
 pub mod commands;
 pub mod connectors;
@@ -19,6 +20,7 @@ pub mod projects;
 pub mod pty;
 pub mod pulls;
 pub mod reminders;
+pub mod runs;
 pub mod scaffold;
 pub mod scripts;
 pub mod sessions;

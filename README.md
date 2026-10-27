@@ -320,7 +320,8 @@ message mentions the bot, pinned types it into the session's tab with every mess
 since the last one the session got, each as a prompt that starts with
 `[Slack reply from <name> in the thread]`, and the session answers in the thread. Messages
 from the bot and from other bots are skipped. If the thread's tab is closed, or pinned
-restarted without resuming it, pinned opens a new session with the whole thread instead.
+restarted without resuming it, pinned resumes the thread's conversation with the new messages
+on a machine that can, and otherwise opens a new session with the whole thread.
 pinned follows threads that started in the last 7 days.
 
 When a session starts on a message that mentions the bot, the bot reacts to it with
@@ -409,6 +410,47 @@ says `No video: <reason>` and holds the test or command output that proves the c
 The **Prove it works** step is on by default. Remove it to leave the block out of a
 workflow's sessions. A Slack workflow that only replies never opens a pull request, so its
 flow has no such step.
+
+### Runs that outlive their machine
+
+Every session a workflow starts is a run. The account keeps each run with its state: queued,
+running on a machine, idle after its turn, failed, or cancelled. A workflow's flow lists its
+runs, with each run's timeline. **Retry** starts a failed or cancelled run again, and
+**Cancel** stops a run and closes its tab.
+
+While a run's session works, its machine sends the hub a checkpoint every 30 seconds if the
+transcript changed. A checkpoint holds the transcript and the code: a git bundle with the
+whole working tree, uncommitted and untracked files included, and every commit no remote has.
+Nothing is pushed to your repository.
+
+When a run's machine stays offline for 5 minutes, as when you close a laptop's lid, another
+online machine takes the run:
+
+1. It finds or clones the repository, as for any run.
+2. It restores the checkpoint into `.claude/worktrees/<issue>` of its checkout, and puts the
+   transcript where Claude Code finds it.
+3. It starts `claude --resume` on the conversation. The session is told that it moved, and to
+   check `git status`, `git log` and its pull request before it redoes any work.
+
+Work after the last checkpoint is lost. A run with no checkpoint starts over, and its session
+is told to look for the earlier attempt's branch and pull request first. A run that a usage
+limit stopped waits for the limit to lift before it moves.
+
+When the first machine comes back, pinned closes its copy of the session, and the hub refuses
+that copy's `pinned stage`, `pinned slack reply` and `pinned linear` commands.
+
+A run that moves never repeats itself to people: each stage moves the issue once per run, and
+the same reply is never posted twice in a thread. A turn that fails with an error is continued
+once per failure. A run gets 3 starts: the first, one for each move, and one for each failed
+turn it continues. After that it stops, and it says why in a comment on the Linear issue or in
+the Slack thread.
+
+The hub keeps the runs in Postgres, so a hub restart loses none. After a restart, machines have
+the same 5 minutes to reconnect before their runs move.
+
+A signed-out Mac keeps the same records for its own runs. It has no other machine to move
+them to, but it still continues failed turns, and **Retry** and **Cancel** work. Runs still
+running on the Mac stay with it when it signs in to an account.
 
 ## Updates
 

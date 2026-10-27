@@ -358,7 +358,7 @@ pub fn sha(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn pack(bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn pack(bytes: &[u8]) -> Vec<u8> {
     let mut gz = GzEncoder::new(vec![], flate2::Compression::default());
     gz.write_all(bytes).unwrap();
     gz.finish().unwrap()
