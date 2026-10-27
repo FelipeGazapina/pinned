@@ -392,9 +392,10 @@ function markModelJumps(list) {
 }
 for (let n = 1; n <= 9; n++) onGuiCommand(`modelPicker.jump.${n}`, () => composerMenu.querySelectorAll(".list .model[data-row]:not(.legacy)")[n - 1]?.click());
 
-/** The keys a focused terminal takes, as T3 Code's terminal drawer: ⌘N opens another terminal beside
- * it and ⌘W closes it. A panel Terminal tab opens or closes a tab; in the drawer a shell opens, and
- * claude's own terminal hides the drawer, since it can't close. */
+/** The keys a focused terminal takes, as T3 Code's terminal drawer: ⌘D and ⌘⇧D split it, ⌘N opens
+ * another terminal beside it and ⌘W closes it. A panel Terminal tab splits and closes its own
+ * terminals and opens another tab; in the drawer a shell opens, and claude's own terminal hides the
+ * drawer, since it can't close. */
 const focusedTerminal = () => {
   const el = document.activeElement;
   if (el?.closest?.("#panel-body")) return { panel: true };
@@ -414,7 +415,8 @@ onGuiCommand("terminal.new", () => {
 const MAX_TERMINALS_PER_GROUP = 4;
 function splitDrawerTerminal(vertical) {
   const at = focusedTerminal();
-  if (!active || at.panel) return;
+  if (!active) return;
+  if (at.panel) return shownTerminal() && splitTerminal(active, shownTerminal(), vertical ? "vertical" : "horizontal");
   const t = threadOf(active);
   const group = (at.shell ? at.shell.group : t.claudeGroup) ?? { vertical, members: [at.shell] };
   if (group.members.length >= MAX_TERMINALS_PER_GROUP) return;
@@ -426,7 +428,7 @@ onGuiCommand("terminal.split", () => splitDrawerTerminal(false));
 onGuiCommand("terminal.splitVertical", () => splitDrawerTerminal(true));
 onGuiCommand("terminal.close", () => {
   const at = focusedTerminal();
-  if (at.panel) return closeSurface();
+  if (at.panel) return closeFocusedTerminal() || closeSurface();
   if (at.shell) return closeShell(at.shell);
   toggleDrawer(false);
 });
