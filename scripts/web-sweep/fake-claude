@@ -440,7 +440,7 @@ function submit() {
       side({ type: "user", uuid: "sub-1", message: { role: "user", content: "Find where the parser drops the last line." } }),
       side({ type: "assistant", uuid: "sub-2", message: { role: "assistant", content: [{ type: "tool_use", id: "sub-tool", name: "Grep", input: { pattern: "lines()" } }] } }),
       side({ type: "user", uuid: "sub-3", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "sub-tool", content: "src/parse.rs:12" }] } }),
-      side({ type: "assistant", uuid: "sub-4", message: { role: "assistant", content: [{ type: "text", text: "The subagent found it in src/parse.rs." }] } }),
+      side({ type: "assistant", uuid: "sub-4", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "The subagent found it in src/parse.rs." }] } }),
     ].join("\n") + "\n");
     said([{ type: "tool_result", tool_use_id: id, content: "The parser drops the last line in src/parse.rs:12." }]);
     wrote([{ type: "text", text: "The agent reported back." }]);
