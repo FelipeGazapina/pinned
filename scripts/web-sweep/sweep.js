@@ -7840,7 +7840,8 @@ async function sweep(profileName) {
   await step("shortcuts: ⌘⇧H opens T3's Run on picker of the machines", async () => {
     if (touch) return "touch: no keyboard";
     await calm();
-    await openRow(await keyFor("alpha"));
+    const alpha = await keyFor("alpha");
+    await openRow(alpha);
     const opened = await page.evaluate(() => tabs.map((t) => t.key));
     try {
       await page.evaluate(() => newThreadIn(active));
@@ -7851,7 +7852,10 @@ async function sweep(profileName) {
       check((await page.locator("#composer-menu button.checked .label").allTextContents()).join() === "sweep-node", "this machine isn't checked");
       await page.keyboard.press("Escape");
     } finally {
+      // Closing a tab moves to its neighbour, which is beta, not the thread this started from.
       await page.evaluate((keep) => tabs.filter((t) => !keep.includes(t.key)).forEach((t) => closeTab(t)), opened);
+      await page.evaluate((k) => activate(tabByKey(k)), alpha);
+      await waitFor("alpha again", () => page.evaluate((k) => active?.key === k, alpha));
     }
   });
 
