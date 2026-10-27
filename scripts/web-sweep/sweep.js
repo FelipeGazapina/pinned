@@ -2136,6 +2136,11 @@ async function sweep(profileName) {
     await press(row("notes.md").locator(".open-diff"));
     await waitFor("the diff panel", () => page.locator("#panel-body .file").first().isVisible());
     await tapOrClick("#toggle-panel");
+    // The diff steps take beta for a thread that never opened Diff, so it forgets the scope it kept.
+    await page.evaluate(() => {
+      threadOf(active).diff = undefined;
+      save(`gui-diff:${threadKey(active)}`, null);
+    });
     return summary;
   });
 
