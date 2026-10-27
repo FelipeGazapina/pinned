@@ -7557,29 +7557,30 @@ async function sweep(profileName) {
     return excerpt;
   });
 
+  // A new thread, since by now every open one has linked a pull request.
   await step("palette: arrows pass over a disabled row, and ⌘K opens over Settings", async () => {
     if (touch) return "touch: no keyboard";
     await calm();
-    const beta = await keyFor("beta");
-    await openRow(beta);
-    check(await page.evaluate((k) => !linkedPrs(tabByKey(k)).length, beta), "beta has linked pull requests");
-    await openPaletteKeys();
-    await page.keyboard.type(">pull request");
-    await waitFor("the disabled row", () => paletteRow("Show linked pull requests").evaluate((el) => el.getAttribute("aria-disabled") === "true"));
-    const items = await paletteItems();
-    const lit = [];
-    for (let i = 0; i < items.length + 1; i++) {
-      await page.keyboard.press("ArrowDown");
-      lit.push(...(await page.locator("#palette .item.hi .name").allTextContents()));
-    }
-    check(lit.length === items.length + 1 && !lit.includes("Show linked pull requests"), `highlighted: ${lit.join(", ")} among ${items.join(" | ")}`);
-    await page.keyboard.press("Escape");
-    await page.evaluate(() => toggleSettings());
-    await waitFor("Settings", () => page.locator("#settings-page").isVisible());
-    await page.keyboard.press("Meta+k");
-    await waitFor("the palette over Settings", () => page.locator("#palette").isVisible());
-    await page.keyboard.press("Escape");
-    await page.evaluate(() => settingsOpen() && toggleSettings());
+    return inNewThread(async () => {
+      check(await page.evaluate(() => !linkedPrs(active).length), "the new thread has linked pull requests");
+      await openPaletteKeys();
+      await page.keyboard.type(">pull request");
+      await waitFor("the disabled row", () => paletteRow("Show linked pull requests").evaluate((el) => el.getAttribute("aria-disabled") === "true"));
+      const items = await paletteItems();
+      const lit = [];
+      for (let i = 0; i < items.length + 1; i++) {
+        await page.keyboard.press("ArrowDown");
+        lit.push(...(await page.locator("#palette .item.hi .name").allTextContents()));
+      }
+      check(lit.length === items.length + 1 && !lit.includes("Show linked pull requests"), `highlighted: ${lit.join(", ")} among ${items.join(" | ")}`);
+      await page.keyboard.press("Escape");
+      await page.evaluate(() => toggleSettings());
+      await waitFor("Settings", () => page.locator("#settings-page").isVisible());
+      await page.keyboard.press("Meta+k");
+      await waitFor("the palette over Settings", () => page.locator("#palette").isVisible());
+      await page.keyboard.press("Escape");
+      await page.evaluate(() => settingsOpen() && toggleSettings());
+    });
   });
 
   await step("palette: ⌘N with several projects lists them with ⌘1, ⌥⌘N and the rest, numbered before a query", async () => {
