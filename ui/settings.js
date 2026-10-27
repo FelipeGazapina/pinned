@@ -700,7 +700,7 @@ function editorHtml() {
     <div class="editor">
       <div class="canvas-wrap">
         <div class="canvas"></div>
-        <div class="zoom" role="toolbar" aria-label="Zoom">
+        <div class="canvas-zoom" role="toolbar" aria-label="Zoom">
           <button data-action="zoom-fit" title="Fit to view">${icon("maximize")}</button>
           <button data-action="zoom-in" title="Zoom in">${icon("zoom-in")}</button>
           <button data-action="zoom-out" title="Zoom out">${icon("zoom-out")}</button>

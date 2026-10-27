@@ -261,13 +261,13 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
   background: radial-gradient(circle, var(--dot) 1px, transparent 1.3px) 0 0 / 20px 20px local, var(--ground); }
 .canvas.panning { cursor: grabbing; }
 .flow :is(.step, .branch, .stub, .end, .add-menu) { cursor: auto; }
-.zoom { position: absolute; z-index: 2; left: 16px; bottom: 16px; display: flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 10px;
+.canvas-zoom { position: absolute; z-index: 2; left: 16px; bottom: 16px; display: flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 10px;
   background: var(--tile); box-shadow: 0 1px 3px rgb(0 0 0 / 0.12); }
-.zoom button { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 7px; color: var(--muted); }
-.zoom button:hover:not(:disabled) { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.06); color: var(--fg); }
-.zoom button:disabled { opacity: 0.4; }
-.zoom .i { width: 16px; height: 16px; }
-@media (pointer: coarse) { .zoom button { width: 40px; height: 40px; } }
+.canvas-zoom button { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 7px; color: var(--muted); }
+.canvas-zoom button:hover:not(:disabled) { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.06); color: var(--fg); }
+.canvas-zoom button:disabled { opacity: 0.4; }
+.canvas-zoom .i { width: 16px; height: 16px; }
+@media (pointer: coarse) { .canvas-zoom button { width: 40px; height: 40px; } }
 /* Auto margins centre a small flow and start a big one at the edge, where it scrolls. */
 .flow { position: relative; flex: none; margin: auto; }
 .flow .edges { position: absolute; inset: 0; pointer-events: none; }
