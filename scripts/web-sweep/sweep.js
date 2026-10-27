@@ -2279,7 +2279,11 @@ async function sweep(profileName) {
 
   await step("app view: Edit from here gives back a prompt's pictures as attachments", async () => {
     await sendPrompt("pictures");
-    await answered("Two dots.");
+    // An earlier step already drew "Two dots.", so the answer waited for is the newest turn's.
+    await waitFor("the pictures' answer in the newest turn", () => page.evaluate(() => {
+      const turn = [...document.querySelectorAll("#thread .lane > .turn")].at(-1);
+      return /compare these/.test(turn?.querySelector(".user")?.textContent ?? "") && /Two dots\./.test(turn.textContent);
+    }), 10000);
     const user = lastTurn(".user");
     if (!touch) await user.hover();
     await press(user.locator("[data-rewind]"));
