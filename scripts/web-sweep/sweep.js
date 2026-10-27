@@ -985,8 +985,11 @@ async function sweep(profileName) {
     const steer = lastTurn(".user");
     check((await steer.locator(".steer").textContent()).trim() === "Steer", "the steer has no marker");
     check((await steer.locator(".bubble").textContent()).trim() === "also check the docs", `the steer reads ${await steer.locator(".bubble").textContent()}`);
-    const folds = await page.locator("#thread .turn .work > summary .label").allTextContents();
-    check(/^Continued( for |$)/.test(folds.at(-1)) && /^Worked( for |$)/.test(folds.at(-2)), `the folds read ${folds.slice(-2).join(" | ")}`);
+    // The reply's text can draw a moment before the turn ends, while its fold still reads Working.
+    const folds = () => page.locator("#thread .turn .work > summary .label").allTextContents();
+    const settled = (f) => /^Continued( for |$)/.test(f.at(-1)) && /^Worked( for |$)/.test(f.at(-2));
+    await waitFor("the turn to end", async () => !/^Working/.test((await folds()).at(-1)), 3000).catch(() => {});
+    check(settled(await folds()), `the folds read ${(await folds()).slice(-2).join(" | ")}`);
     await sendPrompt("Continue from where you left off.");
     await answered("echo: Continue from where you left off.");
     check((await text("#thread .turn:last-of-type .sent-by")) === "Sent by Pinned", "pinned's own prompt isn't marked");
