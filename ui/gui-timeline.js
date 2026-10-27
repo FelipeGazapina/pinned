@@ -864,6 +864,12 @@ function turnHtml(tab, turn, change, live, first, t) {
 const TURNS_SHOWN = 40;
 /** A turn's height before it is drawn: about two of T3 Code's 90px row estimates. */
 const TURN_ESTIMATE = 180;
+/** A turn's height before it is drawn, once others are: their mean, which the window's spacers and the
+ * minimap's offsets both take, so a scroll to a turn lands where the spacers put it. */
+function turnEstimate(t) {
+  const known = [...(t.heights?.values() ?? [])];
+  return known.length ? known.reduce((a, b) => a + b, 0) / known.length : TURN_ESTIMATE;
+}
 
 /** The subagent thread open over the active one, as T3 Code opens a subagent's own thread. */
 let subagentView = null;
@@ -889,8 +895,7 @@ function anchorOf() {
  * with spacers at the other turns' measured or estimated heights. */
 function windowOf(t, ids, anchor, scrolled) {
   const heights = (t.heights ??= new Map());
-  const known = [...heights.values()];
-  const estimate = known.length ? known.reduce((a, b) => a + b, 0) / known.length : TURN_ESTIMATE;
+  const estimate = turnEstimate(t);
   const h = ids.map((id) => heights.get(id) ?? estimate);
   const sum = (from, to) => h.slice(from, to).reduce((a, b) => a + b, 0);
   const view = threadView.clientHeight || 800;
@@ -1108,10 +1113,11 @@ function renderMinimap(shown, t) {
   const turns = shown.filter((x) => x.user);
   mini.items = turns.map((x) => ({ id: x.id, user: x.user.text.split("\n")[0] || "User message", answer: (x.answer?.text ?? "").replace(/\s+/g, " ").slice(0, 400) }));
   mini.offsets = new Map();
+  const estimate = turnEstimate(t);
   let y = 0;
   for (const x of shown) {
     mini.offsets.set(x.id, y);
-    y += t.heights?.get(x.id) ?? TURN_ESTIMATE;
+    y += t.heights?.get(x.id) ?? estimate;
   }
   minimap.hidden = mini.items.length < 2 || !!finder.open;
   if (minimap.hidden) return;
