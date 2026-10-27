@@ -308,8 +308,8 @@ function filesHtml(files, key, opts = {}) {
     return `<section class="file" data-id="${esc(id)}" data-path="${esc(f.path)}" data-status="${f.status}"${collapsed ? " data-collapsed" : ""}${fresh ? " data-fresh" : ""}>
       <header><span class="fold" title="${collapsed ? "Expand diff" : "Collapse diff"}">${icon(collapsed ? "chevron-right" : "chevron-down")}</span>${pierreSymbol(CHANGE_ICON[f.status], "change")}${f.from ? `<span class="from"><bdi>${esc(f.from)}</bdi></span>${pierreSymbol("diffs-icon-arrow-right-short", "moved")}` : ""}<span class="path"><bdi>${esc(f.path)}</bdi></span>
         <button type="button" class="copy" data-copy="${esc(f.path)}" title="Copy path" aria-label="Copy file path">${icon("copy")}</button>${opts.partial === f ? `<span class="partial" title="This file is too large to show in full." aria-label="Partial diff preview">${icon("info")}</span>` : ""}<span class="spacer"></span>
-        ${viewed ? `<label class="viewed${viewed.changed ? " changed" : ""}"${viewed.changed ? ' title="This file has been pushed to since you marked it viewed."' : ""}><input type="checkbox" data-viewed="${esc(f.path)}" aria-label="${viewed.changed ? "Changed" : "Viewed"}"${viewed.on ? " checked" : ""}>${viewed.changed ? "Changed" : "Viewed"}</label>` : ""}
-        ${counts}</header>
+        ${counts}
+        ${viewed ? `<label class="viewed${viewed.changed ? " changed" : ""}"${viewed.changed ? ' title="This file has been pushed to since you marked it viewed."' : ""}><input type="checkbox" data-viewed="${esc(f.path)}" aria-label="${viewed.changed ? "Changed" : "Viewed"}"${viewed.on ? " checked" : ""}>${viewed.changed ? "Changed" : "Viewed"}</label>` : ""}</header>
       ${collapsed ? "" : `<div class="hunks">${f.binary ? `<p class="panel-empty">Binary file</p>` : body}</div>`}</section>`;
   }).join("");
 }
