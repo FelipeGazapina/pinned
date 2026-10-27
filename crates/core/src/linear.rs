@@ -1,3 +1,4 @@
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -201,19 +202,31 @@ pub async fn issue(key: &str, id: &str) -> Result<Issue, String> {
     serde_json::from_value(data["issue"].clone()).map_err(|e| format!("Linear sent a bad issue: {e}"))
 }
 
-/// Issues carrying `label` that were created after `since` (RFC 3339).
+/// The issues in `data` that were created after `since`, or had `label` added after it.
+fn labeled(data: &Value, label: &str, since: &str) -> Result<Vec<Issue>, String> {
+    let since = DateTime::parse_from_rfc3339(since).map_err(|e| format!("bad time {since:?}: {e}"))?;
+    let after = |v: &Value| v.as_str().and_then(|t| DateTime::parse_from_rfc3339(t).ok()).is_some_and(|t| t > since);
+    let adds_label = |h: &Value| h["addedLabels"].as_array().into_iter().flatten().any(|l| l["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(label)));
+    nodes(&data["issues"])
+        .filter(|i| after(&i["createdAt"]) || nodes(&i["history"]).any(|h| after(&h["createdAt"]) && adds_label(h)))
+        .map(|i| serde_json::from_value(i.clone()).map_err(|e| format!("Linear sent a bad issue: {e}")))
+        .collect()
+}
+
+/// Issues carrying `label` that were created after `since` (RFC 3339), or that had `label` added
+/// after it. Adding a label bumps `updatedAt`, so filtering on that finds both kinds.
 pub async fn labeled_issues(key: &str, label: &str, since: &str) -> Result<Vec<Issue>, String> {
     let data = query(
         key,
         "query($label: String!, $since: DateTimeOrDuration!) {
-           issues(first: 50, filter: { createdAt: { gt: $since }, labels: { some: { name: { eqIgnoreCase: $label } } } }) {
-             nodes { id identifier title description url }
+           issues(first: 50, orderBy: updatedAt, filter: { updatedAt: { gt: $since }, labels: { some: { name: { eqIgnoreCase: $label } } } }) {
+             nodes { id identifier title description url createdAt history(first: 50) { nodes { createdAt addedLabels { name } } } }
            }
          }",
         json!({ "label": label, "since": since }),
     )
     .await?;
-    serde_json::from_value(data["issues"]["nodes"].clone()).map_err(|e| e.to_string())
+    labeled(&data, label, since)
 }
 
 #[cfg(test)]
@@ -297,5 +310,47 @@ mod tests {
             })
         );
         assert_eq!(created(&json!({ "issueCreate": { "success": false } })), Err("Linear refused to create the issue".into()));
+    }
+
+    fn issue_node(identifier: &str, created_at: &str, history: Value) -> Value {
+        json!({
+            "id": identifier, "identifier": identifier, "title": "t", "description": null, "url": "u",
+            "createdAt": created_at, "history": { "nodes": history },
+        })
+    }
+
+    #[test]
+    fn an_issue_counts_when_created_or_given_the_label_after_since() {
+        let data = json!({ "issues": { "nodes": [
+            issue_node("NEW-1", "2026-10-22T10:00:00.000Z", json!([
+                { "createdAt": "2026-10-22T10:00:00.000Z", "addedLabels": [{ "name": "AGENTIC" }] },
+            ])),
+            issue_node("OLD-1", "2026-10-08T10:00:00.000Z", json!([
+                { "createdAt": "2026-10-22T20:42:30.126Z", "addedLabels": [{ "name": "agentic" }] },
+                { "createdAt": "2026-10-08T10:00:00.000Z", "addedLabels": null },
+            ])),
+            issue_node("OLD-2", "2026-10-08T10:00:00.000Z", json!([
+                { "createdAt": "2026-10-23T09:00:00.000Z", "addedLabels": null },
+                { "createdAt": "2026-10-09T10:00:00.000Z", "addedLabels": [{ "name": "AGENTIC" }] },
+            ])),
+            issue_node("OLD-3", "2026-10-08T10:00:00.000Z", json!([
+                { "createdAt": "2026-10-23T09:00:00.000Z", "addedLabels": [{ "name": "Bug" }] },
+                { "createdAt": "2026-10-09T10:00:00.000Z", "addedLabels": [{ "name": "AGENTIC" }] },
+            ])),
+        ] } });
+        let found = labeled(&data, "AGENTIC", "2026-10-21T17:52:43.772566+00:00").unwrap();
+        assert_eq!(found.iter().map(|i| i.identifier.as_str()).collect::<Vec<_>>(), ["NEW-1", "OLD-1"]);
+        assert_eq!(
+            found[1],
+            Issue { id: "OLD-1".into(), identifier: "OLD-1".into(), title: "t".into(), description: None, url: "u".into() }
+        );
+    }
+
+    #[test]
+    fn a_bad_since_is_an_error() {
+        assert_eq!(
+            labeled(&json!({ "issues": { "nodes": [] } }), "AGENTIC", "yesterday"),
+            Err("bad time \"yesterday\": premature end of input".into())
+        );
     }
 }
