@@ -545,7 +545,9 @@ const BEST_GUESS = "Use its best guess";
 const fallbackOf = (decide) => (decide.fallback ? decide.categories.find((cat) => cat.name.trim() === decide.fallback) : undefined);
 
 function fallbackHtml(decide) {
-  const names = decide.categories.filter((cat) => cat.name.trim() && (!cat.mention?.trim() || cat === fallbackOf(decide))).map((cat) => cat.name.trim());
+  const pingsNoOne = (cat) => !cat.mention?.trim();
+  const chosen = (cat) => cat === fallbackOf(decide);
+  const names = decide.categories.filter((cat) => cat.name.trim() && (pingsNoOne(cat) || chosen(cat))).map((cat) => cat.name.trim());
   return select("trigger.decide.fallback", ["", ...new Set(names)], (name) => name || BEST_GUESS, decide.fallback ?? "");
 }
 
@@ -860,7 +862,7 @@ function applyZoom() {
   settingsPage.querySelector('[data-action="zoom-out"]').disabled = zoom <= MIN_ZOOM;
 }
 
-function zoomTo(zoom, at) {
+function zoomAround(zoom, at) {
   const canvas = settingsPage.querySelector(".canvas");
   const flow = canvas.firstElementChild;
   const box = canvas.getBoundingClientRect();
@@ -1166,8 +1168,8 @@ const actions = {
     view.menu = !view.menu;
     refresh();
   },
-  "zoom-in": () => zoomTo(Math.floor(zoomNow() * 10 + 1e-6) / 10 + 0.1),
-  "zoom-out": () => zoomTo(Math.ceil(zoomNow() * 10 - 1e-6) / 10 - 0.1),
+  "zoom-in": () => zoomAround(Math.floor(zoomNow() * 10 + 1e-6) / 10 + 0.1),
+  "zoom-out": () => zoomAround(Math.ceil(zoomNow() * 10 - 1e-6) / 10 - 0.1),
   "zoom-fit"() {
     view.zoom = fitZoom(MIN_ZOOM);
     view.pan = [0, 0];
@@ -1278,7 +1280,7 @@ settingsPage.addEventListener(
     if (!(e.ctrlKey || e.metaKey) || !e.target.closest(".canvas")) return;
     e.preventDefault();
     // A mouse notch is about 100 and a pinch frame a few units, so both zoom by at most 10% a frame.
-    zoomTo(zoomNow() * Math.exp(-Math.max(-10, Math.min(10, e.deltaY)) / 100), [e.clientX, e.clientY]);
+    zoomAround(zoomNow() * Math.exp(-Math.max(-10, Math.min(10, e.deltaY)) / 100), [e.clientX, e.clientY]);
   },
   { passive: false },
 );
