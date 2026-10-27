@@ -949,13 +949,14 @@ impl Machine {
     }
 
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
-        // Dropping the old session kills it silently, so its exit can't be mistaken for the new one's.
-        let screen = self.tab(tab, |t| {
-            t.session = None;
+        let (old, screen) = self.tab(tab, |t| {
             t.held.clear();
-            t.screen.clone()
+            (t.session.take(), t.screen.clone())
         })?;
         let session = screen.lock().unwrap().restart();
+        // Only once the screen has moved on: dropping a session echoes the EOF it sends as "^D", which
+        // would otherwise reach the viewers. It kills it silently, so its exit can't be mistaken for the new one's.
+        drop(old);
         let started = SystemTime::now();
         let (me, exited) = (self.me.clone(), tab.to_owned());
         let pty = pty::Session::spawn(
