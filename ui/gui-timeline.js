@@ -1734,6 +1734,8 @@ threadView.addEventListener("scroll", () => {
   if (threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight <= 40) return showScrollEnd();
   scrollTimer = setTimeout(showScrollEnd, 150);
 }, { passive: true });
+// The composer rests smaller while the thread scrolls and grows back on focus, and the pill sits just above it.
+new ResizeObserver(showScrollEnd).observe(composer);
 scrollEnd.addEventListener("pointerdown", (e) => e.preventDefault());
 scrollEnd.onclick = () => {
   threadView.scrollTo({ top: threadView.scrollHeight, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
