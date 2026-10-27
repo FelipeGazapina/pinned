@@ -6118,7 +6118,7 @@ async function sweep(profileName) {
     await page.fill("#project-menu input", "nothing like it");
     check((await text("#project-menu .empty")) === "No matching projects.", `empty: ${await text("#project-menu .empty")}`);
     await page.fill("#project-menu input", "bet");
-    const betaItem = page.locator("#project-menu .item", { hasText: /^beta$/ });
+    const betaItem = page.locator("#project-menu .item").filter({ has: page.locator(".label", { hasText: /^beta$/ }) });
     if (touch) await press(betaItem);
     else await page.press("#project-menu input", "Enter");
     await waitFor("only beta's rows", async () => (await sideOrder()).every((p) => p === "beta") && (await text("#project-filter .label")) === "beta");
