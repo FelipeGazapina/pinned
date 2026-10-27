@@ -584,6 +584,11 @@ async function sweep(profileName) {
       await page.press("#prompt", "Enter");
     }
   };
+  // A phone's composer stays open after a tap on one of its controls until a tap lands outside it, here the thread's gutter.
+  const tapOutsideComposer = async () => {
+    const r = await rect("#thread");
+    await page.touchscreen.tap(r.left + 4, r.top + r.height / 2);
+  };
   const showSidebar = async () => {
     if (await page.locator("#sidebar").isVisible()) return;
     await tapOrClick("#chat-sidebar-toggle");
@@ -4657,6 +4662,7 @@ async function sweep(profileName) {
     await page.evaluate(() => document.activeElement.blur());
     await page.evaluate(() => (threadView.scrollTop = 0));
     if (touch) {
+      await tapOutsideComposer();
       // A phone's composer doesn't rest on a scroll: unfocused, it is T3 Code's collapsed row wherever the thread is.
       await sleep(300);
       const up = await page.evaluate(() => composer.dataset.collapsed);
@@ -5046,6 +5052,8 @@ async function sweep(profileName) {
 
   await step("composer: the context ring shows how full the window is, and a cold long session compacts first", async () => {
     await sendPrompt("full");
+    // A phone's composer rests as T3 Code's one row, which a tap opens to its controls.
+    if (touch) await tapOrClick("#prompt");
     await waitFor("the context ring", () => page.locator("#context-meter").isVisible());
     check((await page.getAttribute("#context-meter", "aria-label")) === "Context window 23% used", `ring: ${await page.getAttribute("#context-meter", "aria-label")}`);
     await tapOrClick("#context-meter");
@@ -5671,6 +5679,7 @@ async function sweep(profileName) {
   await step("composer: on a phone the unfocused composer collapses to one Ask anything... row", async () => {
     const state = () => page.evaluate(() => composer.dataset.collapsed);
     await page.evaluate(() => (prompt.blur(), rest()));
+    if (touch) await tapOutsideComposer();
     if (!touch) {
       check((await state()) === "false", "a desktop composer collapsed");
       return "a desktop composer stays open";
