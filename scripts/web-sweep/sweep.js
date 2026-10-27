@@ -580,6 +580,8 @@ async function sweep(profileName) {
     if (touch) await page.tap((await page.locator("#pill-actions .pill").first().isVisible()) ? "#pill-actions .pill >> nth=0" : "#send");
     else {
       // Enter in the `/` menu picks its highlighted command, so a word sent as typed closes it first.
+      // The menu lists the machine's commands, which a new thread has yet to ask for, so it can open late.
+      if (/^\//.test(words)) await waitFor("the / menu", () => page.locator('#composer-menu[data-kind="slash"]').isVisible());
       if (await page.locator('#composer-menu:is([data-kind="slash"], [data-kind="mention"])').isVisible()) await page.press("#prompt", "Escape");
       await page.press("#prompt", "Enter");
     }
