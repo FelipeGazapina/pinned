@@ -2874,64 +2874,71 @@ async function sweep(profileName) {
     await typed(`localhost:${port}/a`);
     await page.evaluate(() => { save("gui-browser-search", ""); save("gui-browser-search-url", ""); });
 
-    await fromPlus("Terminal");
-    await waitFor("the shell", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1, 10000);
-    await page.locator("#panel-body .xterm-helper-textarea").focus();
-    const wrapped = `http://localhost:${port}/a?w=${"q".repeat(220)}END`;
-    // Quoted, as the panel's shell can be zsh, which takes the ? for a glob.
-    await page.keyboard.type(`clear; echo '${wrapped}'; echo ./notes.md:1\n`);
-    const spot = (needle, back) => page.evaluate(([n, b]) => {
-      for (const row of document.querySelectorAll("#panel-body .xterm-rows > div")) {
-        const i = row.textContent.indexOf(n);
-        if (i < 0 || row.textContent.includes("echo")) continue;
-        const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
-        let seen = 0;
-        for (let t = walker.nextNode(); t; t = walker.nextNode()) {
-          if (seen + t.length > i - b) {
-            const range = document.createRange();
-            range.setStart(t, i - b - seen);
-            range.setEnd(t, i - b - seen + 1);
-            const r = range.getBoundingClientRect();
-            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    // The steps after this one count terminals from 1, so this one closes its own whatever happens.
+    try {
+      await fromPlus("Terminal");
+      await waitFor("the shell", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1, 10000);
+      await page.locator("#panel-body .xterm-helper-textarea").focus();
+      const wrapped = `http://localhost:${port}/a?w=${"q".repeat(220)}END`;
+      // Quoted, as the panel's shell can be zsh, which takes the ? for a glob.
+      await page.keyboard.type(`clear; echo '${wrapped}'; echo ./notes.md:1\n`);
+      const spot = (needle, back) => page.evaluate(([n, b]) => {
+        for (const row of document.querySelectorAll("#panel-body .xterm-rows > div")) {
+          const i = row.textContent.indexOf(n);
+          if (i < 0 || row.textContent.includes("echo")) continue;
+          const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+          let seen = 0;
+          for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+            if (seen + t.length > i - b) {
+              const range = document.createRange();
+              range.setStart(t, i - b - seen);
+              range.setEnd(t, i - b - seen + 1);
+              const r = range.getBoundingClientRect();
+              return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            }
+            seen += t.length;
           }
-          seen += t.length;
         }
+        return null;
+      }, [needle, back]);
+      // The typed command shows the address too, so wait for the row echo printed.
+      await waitFor("the wrapped link", async () => !!(await spot("END", 3)) && !!(await spot("notes.md:1", -3)), 10000);
+      const clickAt = async (at, modifiers = []) => {
+        await page.mouse.move(at.x, at.y);
+        // xterm looks for a link once the pointer rests on a row, and shows the hand when it has one.
+        await waitFor("the hand over the link", () => page.evaluate(([x, y]) => getComputedStyle(document.elementFromPoint(x, y)).cursor === "pointer", [at.x, at.y]), 5000);
+        for (const m of modifiers) await page.keyboard.down(m);
+        await page.mouse.click(at.x, at.y);
+        for (const m of modifiers) await page.keyboard.up(m);
+      };
+      const tail = await spot("END", 3);
+      check(tail, "the wrapped link's last row isn't on screen");
+      const popup = page.context().waitForEvent("page", { timeout: 8000 });
+      await clickAt(tail);
+      const outside = await popup;
+      check(outside.url() === wrapped, `a plain click with the default setting opened ${outside.url().slice(0, 60)} outside`);
+      await outside.close();
+      check(await openTab("terminal").isVisible(), "the default setting opened the preview");
+      await page.evaluate(() => save("gui-browser-links", "app"));
+      await clickAt(tail);
+      await waitFor("the wrapped link in the preview", async () => (await page.evaluate(() => shownSurface(active)?.url)) === wrapped, 10000);
+      await page.click('#panel-tabs .ptab[data-panel="terminal"]');
+      await waitFor("the shell again", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1);
+      const popup2 = page.context().waitForEvent("page", { timeout: 8000 });
+      await clickAt(await spot("END", 3), [(await page.evaluate(() => IS_MAC)) ? "Meta" : "Control"]);
+      const forced = await popup2;
+      check(forced.url() === wrapped, "⌘-click didn't open the link outside");
+      await forced.close();
+      await clickAt(await spot("notes.md:1", -3));
+      await waitFor("notes.md in a File tab", async () => /notes\.md/.test(await text("#panel-tabs .ptab.active")), 10000);
+    } finally {
+      await page.evaluate(() => save("gui-browser-links", ""));
+      for (let n = await page.locator('#panel-tabs .ptab[data-panel="terminal"]').count(); n > 0; n--) {
+        await page.click('#panel-tabs .ptab[data-panel="terminal"]');
+        await press(gui('#panel-tabs .ptab[data-panel="terminal"] .lead'));
       }
-      return null;
-    }, [needle, back]);
-    // The typed command shows the address too, so wait for the row echo printed.
-    await waitFor("the wrapped link", async () => !!(await spot("END", 3)) && !!(await spot("notes.md:1", -3)), 10000);
-    const clickAt = async (at, modifiers = []) => {
-      await page.mouse.move(at.x, at.y);
-      await sleep(300);
-      for (const m of modifiers) await page.keyboard.down(m);
-      await page.mouse.click(at.x, at.y);
-      for (const m of modifiers) await page.keyboard.up(m);
-    };
-    const tail = await spot("END", 3);
-    check(tail, "the wrapped link's last row isn't on screen");
-    const popup = page.context().waitForEvent("page", { timeout: 8000 });
-    await clickAt(tail);
-    const outside = await popup;
-    check(outside.url() === wrapped, `a plain click with the default setting opened ${outside.url().slice(0, 60)} outside`);
-    await outside.close();
-    check(await openTab("terminal").isVisible(), "the default setting opened the preview");
-    await page.evaluate(() => save("gui-browser-links", "app"));
-    await clickAt(tail);
-    await waitFor("the wrapped link in the preview", async () => (await page.evaluate(() => shownSurface(active)?.url)) === wrapped, 10000);
-    await page.click('#panel-tabs .ptab[data-panel="terminal"]');
-    await waitFor("the shell again", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1);
-    const popup2 = page.context().waitForEvent("page", { timeout: 8000 });
-    await clickAt(await spot("END", 3), [(await page.evaluate(() => IS_MAC)) ? "Meta" : "Control"]);
-    const forced = await popup2;
-    check(forced.url() === wrapped, "⌘-click didn't open the link outside");
-    await forced.close();
-    await clickAt(await spot("notes.md:1", -3));
-    await waitFor("notes.md in a File tab", async () => /notes\.md/.test(await text("#panel-tabs .ptab.active")), 10000);
-    await page.evaluate(() => save("gui-browser-links", ""));
-    await page.click('#panel-tabs .ptab[data-panel="terminal"]');
-    await press(gui('#panel-tabs .ptab[data-panel="terminal"] .lead'));
-    await closePanelIfOpen();
+      await closePanelIfOpen();
+    }
   });
 
   await step("browser: an unreachable address and a file show T3's screens in place of the page", async () => {
