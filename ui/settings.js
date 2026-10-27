@@ -304,7 +304,6 @@ const CLAUDE_RAYS = Array.from({ length: 12 }, (_, i) => {
   const r = i % 2 ? 8.5 : 11;
   return `M${(12 + 2.6 * Math.cos(a)).toFixed(2)} ${(12 + 2.6 * Math.sin(a)).toFixed(2)}L${(12 + r * Math.cos(a)).toFixed(2)} ${(12 + r * Math.sin(a)).toFixed(2)}`;
 }).join("");
-/** Each app's mark, drawn in its theme-aware colours by the stylesheet. Steps of other apps keep their glyph. */
 const LOGOS = {
   slack: `<svg viewBox="0 0 24 24">${SLACK_MARK.map(([part, d]) => `<path class="${part}" d="${d}"/>`).join("")}</svg>`,
   linear: `<svg viewBox="0 0 24 24"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg>`,
@@ -545,7 +544,6 @@ function decideHtml(c) {
 const BEST_GUESS = "Use its best guess";
 const fallbackOf = (decide) => (decide.fallback ? decide.categories.find((cat) => cat.name.trim() === decide.fallback) : undefined);
 
-/** Only a category that pings no one can take the unsure messages; one that gained a mention stays listed so its issue reads. */
 function fallbackHtml(decide) {
   const names = decide.categories.filter((cat) => cat.name.trim() && (!cat.mention?.trim() || cat === fallbackOf(decide))).map((cat) => cat.name.trim());
   return select("trigger.decide.fallback", ["", ...new Set(names)], (name) => name || BEST_GUESS, decide.fallback ?? "");
@@ -721,7 +719,6 @@ const STUB = 40;
 const END = 24;
 const MENU_W = 280;
 
-/** Optional steps of the flow that are off, which the ＋ after the chain's last node offers. */
 const offSteps = (c) => flowOf(c).map(([id]) => id).filter((id) => !shown(c, id));
 
 function layoutOf(c) {
@@ -773,7 +770,6 @@ function flowHtml(c) {
   </div>`;
 }
 
-/** The ＋ at an open end: after the chain it lists the steps that are off, after a category that stops it picks what comes next. */
 function endHtml(c, { from, menu, category }) {
   const x = from.cx + TILE / 2 + STUB;
   const at = `left:${x}px;top:${from.cy - END / 2}px`;
@@ -847,14 +843,12 @@ const READABLE_ZOOM = 0.75;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 1.5;
 
-/** The zoom that shows the whole flow, never above 1. Opening a workflow floors it at a readable size; the Fit button doesn't. */
 function fitZoom(floor) {
   const canvas = settingsPage.querySelector(".canvas");
   const flow = canvas.firstElementChild;
   return Math.max(floor, Math.min(1, canvas.clientWidth / flow.dataset.width, canvas.clientHeight / flow.dataset.height));
 }
 
-/** Draws the flow at the view's zoom and pan; a null zoom fits it. */
 function applyZoom() {
   const canvas = settingsPage.querySelector(".canvas");
   const flow = canvas?.firstElementChild;
@@ -866,7 +860,6 @@ function applyZoom() {
   settingsPage.querySelector('[data-action="zoom-out"]').disabled = zoom <= MIN_ZOOM;
 }
 
-/** Zooms keeping the point under `at` (the canvas's centre by default) where it is. */
 function zoomTo(zoom, at) {
   const canvas = settingsPage.querySelector(".canvas");
   const flow = canvas.firstElementChild;
@@ -1233,7 +1226,6 @@ const actions = {
   },
 };
 
-/** A mouse drag on the canvas's ground pans it, and the click that ends it does nothing. Touch pans by scrolling. */
 let canvasPan = null;
 let canvasPanned = false;
 

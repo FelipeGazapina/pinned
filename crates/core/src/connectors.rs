@@ -25,7 +25,6 @@ const SLACK_OVERLAP: chrono::Duration = chrono::Duration::seconds(60);
 /// A mention older than this when pinned picks it up arrived while pinned was closed.
 const OFFLINE_AFTER: chrono::Duration = chrono::Duration::minutes(5);
 const MIN_CONFIDENCE_TO_PAGE: f64 = 0.85;
-/// Below this probability for its own choice, a decision sends the message to its fallback.
 const UNSURE_BELOW: f64 = 0.6;
 const PAGE_COOLDOWN: chrono::Duration = chrono::Duration::minutes(30);
 
@@ -181,17 +180,11 @@ impl Decide {
     }
 }
 
-/// Where a message goes once the decision model answered, by category position.
 #[derive(Debug, PartialEq)]
 enum Pick {
-    /// The category the model chose.
     Sure(usize),
-    /// The model's probability for its guess was below `UNSURE_BELOW`, so the fallback takes the message.
     Unsure { guess: usize, likelihood: f64, fallback: usize },
-    /// The model chose a category that pages without being sure enough to page, so the likeliest
-    /// category that pages no one takes the message.
     Downgraded(usize),
-    /// Every category pages and the model was not sure enough to page, so the message stops.
     Nowhere,
 }
 
@@ -203,8 +196,6 @@ impl Pick {
         }
     }
 
-    /// What the routed run's prompt says about how its thread got here. A message that stops is
-    /// routed nowhere, so it gets none.
     fn note(&self, categories: &[Category], router: &str) -> String {
         match *self {
             Pick::Sure(i) | Pick::Downgraded(i) => routed_note(router, &categories[i].name),
@@ -265,8 +256,6 @@ pub struct Connector {
     /// How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.
     #[serde(default)]
     pub followed: BTreeMap<String, Followed>,
-    /// The escalation a message workflow posted in each Slack thread, by `<channel id>:<thread ts>`.
-    /// A thread gets one, however often it is sorted again.
     #[serde(default)]
     pub paged: BTreeMap<String, Paged>,
     /// Whether a session that opens a pull request must prove it works, with a Playwright video.
@@ -285,9 +274,7 @@ fn on() -> bool {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Paged {
-    /// RFC 3339.
     pub at: String,
-    /// Whether the post pinged the group, rather than pointing at a thread it pinged a moment ago.
     pub ping: bool,
 }
 
@@ -379,8 +366,6 @@ impl Connector {
         true
     }
 
-    /// What the router posts in a thread whose category pages a group: nothing once it posted
-    /// there, a link to the thread it paged within the cooldown, or else the ping.
     fn escalation_reply(&self, channel: &str, thread: &str, paging: Paging, now: DateTime<Utc>) -> Option<Reply> {
         if self.paged.contains_key(&thread_key(channel, thread)) {
             return None;
@@ -396,7 +381,6 @@ impl Connector {
         self.paged.insert(thread_key(channel, thread), Paged { at: now.to_rfc3339(), ping });
     }
 
-    /// The thread this router last pinged a group in, within the cooldown.
     fn recent_page(&self, channel: &str, now: DateTime<Utc>) -> Option<String> {
         let prefix = thread_key(channel, "");
         self.paged
@@ -722,7 +706,6 @@ enum Found {
         thread: String,
         category: String,
         workflow: String,
-        /// What the run's prompt says about how the thread got here.
         note: String,
         posts: Vec<slack::Post>,
         page: Option<Paging>,

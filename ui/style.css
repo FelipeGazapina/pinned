@@ -207,7 +207,6 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 [data-tone="vercel"] { --tone: #000; }
 #settings .icon { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; flex: none;
   background: var(--tone, rgb(var(--s-ink-rgb, 255 255 255) / 0.078)); color: #fff; font-size: 14px; }
-/* An app's mark stands on the tile itself, as n8n draws it, in the app's colours: Vercel and GitHub in the text colour. */
 #settings .icon[data-logo] { background: none; }
 #settings .icon[data-logo] svg { width: 80%; height: 80%; }
 [data-logo] svg { fill: var(--tone); }
