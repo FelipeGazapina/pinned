@@ -6640,6 +6640,11 @@ async function sweep(profileName) {
     check(/^Archive thread ".+"\?$/.test(await text("#side-dialog h3")), `asks: ${await text("#side-dialog h3")}`);
     await press(gui("#side-dialog .primary"));
     await waitFor("the copy archived", async () => !(await page.locator(rowSel(copy)).count()), 10000);
+    // The Archive page's step expects to find the archive empty.
+    await page.evaluate(() => {
+      archived.splice(archived.findIndex((a) => a.cwd.endsWith("alpha-two")), 1);
+      saveArchived();
+    });
     await sideSetting("confirmArchive", false);
 
     const loose = await openThreadIn("work");
@@ -7527,7 +7532,8 @@ async function sweep(profileName) {
       await other.goto(full);
       await other.waitForFunction(() => document.querySelector("#prompt")?.value === "Fix the flaky test" && location.pathname === "/", null, { timeout: 20000 });
       const landed = await other.evaluate(() => [projectName(active), document.querySelector("#side-notice").textContent.trim()]);
-      check(landed[0] === "alpha", `the link opened in ${landed[0]}`);
+      // alpha-two, from the settings step, is a second checkout of example/alpha; the link takes the one used last.
+      check(["alpha", "alpha-two"].includes(landed[0]), `the link opened in ${landed[0]}`);
       check(landed[1].startsWith("Prompt added from a link. Read it before you send."), `notice: ${landed[1]}`);
       await other.goto(`${HUB}/new?prompt=hi&repo=example/nowhere`);
       await other.waitForFunction(() => document.querySelector("#page-view h2")?.textContent === "You don't have example/nowhere", null, { timeout: 20000 });
@@ -8411,7 +8417,7 @@ async function sweep(profileName) {
     await page.waitForSelector("#projects[data-mode=move] .choices button");
     await press(page.locator("#projects .choices button", { hasText: "Browse folders…" }));
     await page.fill("#projects .browse input", "~/work/");
-    await waitFor("listing", async () => (await page.locator("#projects .folders button", { hasText: "alpha" }).count()) === 1);
+    await waitFor("listing", async () => (await page.locator("#projects .folders button", { has: page.locator('.name:text-is("alpha")') }).count()) === 1);
     await page.fill("#projects .browse input", `${HOME}/`);
     await waitFor("home listing", async () => (await page.locator("#projects .folders button", { hasText: "work" }).count()) === 1);
     await press(page.locator("#projects .folders button").first());
