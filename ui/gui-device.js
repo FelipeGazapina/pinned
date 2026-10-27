@@ -193,7 +193,7 @@ function deviceScreen(tab, s) {
   const el = document.createElement("div");
   el.className = "device-phone";
   el.innerHTML = `<div class="device-screen" tabindex="0" role="application" aria-label="${esc(s.target.name)} screen"><canvas></canvas><img alt="" hidden><div class="ax-layer"></div></div>`;
-  const entry = { el, tab, s, target: `${s.target.platform}:${s.target.id}`, size: null, mode: null, socket: null, hid: null, decoder: null, timer: null, tree: null, treeTimer: null };
+  const entry = { el, screen: el.firstElementChild, tab, s, target: `${s.target.platform}:${s.target.id}`, size: null, mode: null, socket: null, hid: null, decoder: null, timer: null, tree: null, treeTimer: null };
   deviceScreens.set(s.id, entry);
   wireDeviceInput(entry);
   startDeviceStream(entry);
@@ -260,7 +260,7 @@ function streamAndroid(entry) {
           sizeDeviceScreen(entry, frame.displayWidth, frame.displayHeight);
           draw.drawImage(frame, 0, 0, canvas.width, canvas.height);
           frame.close();
-          entry.el.dataset.live = "video";
+          entry.screen.dataset.live = "video";
         },
         error: () => fallBackToScreenshots(entry),
       });
@@ -295,7 +295,7 @@ function streamIos(entry) {
   entry.timer = setInterval(() => {
     if (!img.naturalWidth) return;
     sizeDeviceScreen(entry, img.naturalWidth, img.naturalHeight);
-    entry.el.dataset.live = "mjpeg";
+    entry.screen.dataset.live = "mjpeg";
   }, 250);
   img.onerror = () => {
     clearInterval(entry.timer);
@@ -330,7 +330,7 @@ function pollDeviceScreen(entry) {
     busy = true;
     try {
       img.src = await deviceCall(tab, { op: "screenshot", platform: s.target.platform, id: s.target.id });
-      entry.el.dataset.live = "screenshots";
+      entry.screen.dataset.live = "screenshots";
     } catch {}
     busy = false;
   };
