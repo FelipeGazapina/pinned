@@ -138,7 +138,8 @@ if (cmd === "pr" && sub === "view") {
     const after = args.find((a) => a.startsWith("after="))?.slice(6);
     const many = Array.from({ length: after ? 50 : 100 }, (_, i) => pr(1000 + i + (after ? 100 : 0), "example/alpha", `Bulk change ${i + (after ? 100 : 0)}`, "hubot", { labels: { nodes: [{ name: "many", color: "ededed" }] } }));
     process.stdout.write(JSON.stringify({ data: { viewer: { login: "sweeper" }, search: { pageInfo: { hasNextPage: !after, endCursor: after ? null : "page-2" }, nodes: many } } }));
-    process.exit(0);
+    // Not process.exit: on macOS that drops what a pipe hasn't taken yet, past its first 64 KB.
+    return;
   }
   // The typed text arrives as one quoted phrase; the filters as label:"a","b", author:"x", draft:, review: and status:.
   const tokens = q.match(/(?:[^\s"]|"(?:[^"\\]|\\.)*")+/g) ?? [];

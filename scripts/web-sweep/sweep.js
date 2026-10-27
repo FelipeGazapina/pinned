@@ -4775,7 +4775,8 @@ async function sweep(profileName) {
     check((await page.inputValue("#prompt")) === "", "the file's path went into the text");
     await press(page.locator("#attachments .zoom"));
     await waitFor("the picture full size", () => page.locator("#image-zoom").isVisible());
-    await press(page.locator("#image-zoom"));
+    await tapOrClick("#image-zoom .media-close");
+    await waitFor("the picture to close", async () => !(await page.locator("#image-zoom").isVisible()));
     await sendPrompt("what is in this picture");
     await waitTerm(/echo: what is in this picture \S*shot\.png/);
     await waitFor("the strip to go", async () => !(await page.locator("#attachments").isVisible()));
@@ -5759,9 +5760,12 @@ async function sweep(profileName) {
   });
 
   await step("app view: the terminal drawer shows the same session", async () => {
+    // A prompt of its own: the one sent about a hundred steps back is gone from the drawer by now.
+    await sendPrompt("seen in the drawer");
+    await waitFor("the answer", async () => (await page.locator("#thread .assistant", { hasText: "echo: seen in the drawer" }).count()) > 0);
     await tapOrClick("#toggle-terminal");
     await waitFor("the drawer", () => page.locator(".term:not([hidden])").evaluate((el) => getComputedStyle(el).visibility === "visible" && el.getBoundingClientRect().height > 60));
-    check(/hello from the app/.test(await termText()), "the drawer's terminal lacks the prompt sent from the composer");
+    check(/seen in the drawer/.test(await termText()), "the drawer's terminal lacks the prompt sent from the composer");
     await tapOrClick("#toggle-terminal");
   });
 
@@ -6000,10 +6004,9 @@ async function sweep(profileName) {
 
     await tapOrClick("#add-project");
     await press(page.locator("#palette .item", { hasText: "Local folder" }));
-    await waitFor("the path field", () => page.locator("#projects .browse input").isVisible());
+    await waitFor("the path field", async () => (await page.getAttribute("#palette input", "placeholder")) === "Enter path (e.g. ~/projects/my-app)");
     await page.keyboard.press("Escape");
-    await page.keyboard.press("Escape");
-    await waitFor("the picker to close", () => page.locator("#projects").isHidden());
+    await waitFor("the palette to close", () => page.locator("#palette").isHidden());
     await openRow(await keyFor("alpha"));
   });
 
@@ -6153,7 +6156,7 @@ async function sweep(profileName) {
     await page.fill("#project-menu input", "nothing like it");
     check((await text("#project-menu .empty")) === "No matching projects.", `empty: ${await text("#project-menu .empty")}`);
     await page.fill("#project-menu input", "bet");
-    const betaItem = page.locator("#project-menu .item", { hasText: /^beta$/ });
+    const betaItem = page.locator("#project-menu .item").filter({ has: page.locator(".label", { hasText: /^beta$/ }) });
     if (touch) await press(betaItem);
     else await page.press("#project-menu input", "Enter");
     await waitFor("only beta's rows", async () => (await sideOrder()).every((p) => p === "beta") && (await text("#project-filter .label")) === "beta");
@@ -6480,9 +6483,9 @@ async function sweep(profileName) {
     const sources = await paletteNames();
     check(sources.includes("Local folder") && sources.includes("New project"), `sources: ${sources.join(", ")}`);
     await press(page.locator("#palette .item", { hasText: "Local folder" }));
-    await waitFor("the folder browser", () => page.locator("#projects").isVisible(), 5000);
+    await waitFor("the folder browser", async () => (await page.getAttribute("#palette input", "placeholder")) === "Enter path (e.g. ~/projects/my-app)", 5000);
     await page.keyboard.press("Escape");
-    await waitFor("the picker to close", () => page.locator("#projects").isHidden());
+    await waitFor("the palette to close", () => page.locator("#palette").isHidden());
 
     await rowMenu(rowSel(alpha));
     check(!(await page.locator("#side-menu button", { hasText: "Mark unread" }).isDisabled()), "Mark unread is off for a thread that isn't done");
@@ -6559,7 +6562,7 @@ async function sweep(profileName) {
     await closeSettings();
 
     await openRow(beta);
-    await sendPrompt("limit");
+    await sendPrompt("limited");
     const status = `${rowSel(beta)} .stamp.status`;
     await showSidebar();
     await waitFor("beta Limited", async () => (await page.locator(status).count()) && /Limited/.test(await text(status)), 10000);
@@ -6601,7 +6604,7 @@ async function sweep(profileName) {
     await sideSetting("grouping", true);
     await closeSettings();
     await press(page.locator("#project-filter"));
-    await press(page.locator("#project-menu .item", { hasText: /^alpha$/ }));
+    await press(page.locator("#project-menu .item").filter({ has: page.locator(".label", { hasText: /^alpha$/ }) }));
     await waitFor("both checkouts under alpha", async () => (await rowsNow()) === 2 && (await page.locator(rowSel(copy)).count()) === 1 && (await page.locator(rowSel(alpha)).count()) === 1);
     await press(page.locator("#project-filter"));
     await press(page.locator("#project-menu .item", { hasText: "All projects" }));
@@ -7592,29 +7595,30 @@ async function sweep(profileName) {
     return excerpt;
   });
 
+  // A new thread, since by now every open one has linked a pull request.
   await step("palette: arrows pass over a disabled row, and ⌘K opens over Settings", async () => {
     if (touch) return "touch: no keyboard";
     await calm();
-    const beta = await keyFor("beta");
-    await openRow(beta);
-    check(await page.evaluate((k) => !linkedPrs(tabByKey(k)).length, beta), "beta has linked pull requests");
-    await openPaletteKeys();
-    await page.keyboard.type(">pull request");
-    await waitFor("the disabled row", () => paletteRow("Show linked pull requests").evaluate((el) => el.getAttribute("aria-disabled") === "true"));
-    const items = await paletteItems();
-    const lit = [];
-    for (let i = 0; i < items.length + 1; i++) {
-      await page.keyboard.press("ArrowDown");
-      lit.push(...(await page.locator("#palette .item.hi .name").allTextContents()));
-    }
-    check(lit.length === items.length + 1 && !lit.includes("Show linked pull requests"), `highlighted: ${lit.join(", ")} among ${items.join(" | ")}`);
-    await page.keyboard.press("Escape");
-    await page.evaluate(() => toggleSettings());
-    await waitFor("Settings", () => page.locator("#settings-page").isVisible());
-    await page.keyboard.press("Meta+k");
-    await waitFor("the palette over Settings", () => page.locator("#palette").isVisible());
-    await page.keyboard.press("Escape");
-    await page.evaluate(() => settingsOpen() && toggleSettings());
+    return inNewThread(async () => {
+      check(await page.evaluate(() => !linkedPrs(active).length), "the new thread has linked pull requests");
+      await openPaletteKeys();
+      await page.keyboard.type(">pull request");
+      await waitFor("the disabled row", () => paletteRow("Show linked pull requests").evaluate((el) => el.getAttribute("aria-disabled") === "true"));
+      const items = await paletteItems();
+      const lit = [];
+      for (let i = 0; i < items.length + 1; i++) {
+        await page.keyboard.press("ArrowDown");
+        lit.push(...(await page.locator("#palette .item.hi .name").allTextContents()));
+      }
+      check(lit.length === items.length + 1 && !lit.includes("Show linked pull requests"), `highlighted: ${lit.join(", ")} among ${items.join(" | ")}`);
+      await page.keyboard.press("Escape");
+      await page.evaluate(() => toggleSettings());
+      await waitFor("Settings", () => page.locator("#settings-page").isVisible());
+      await page.keyboard.press("Meta+k");
+      await waitFor("the palette over Settings", () => page.locator("#palette").isVisible());
+      await page.keyboard.press("Escape");
+      await page.evaluate(() => settingsOpen() && toggleSettings());
+    });
   });
 
   await step("palette: ⌘N with several projects lists them with ⌘1, ⌥⌘N and the rest, numbered before a query", async () => {

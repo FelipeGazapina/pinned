@@ -1,6 +1,7 @@
 /* The right panel's pull request: T3 Code's crumbs, header, summary, composer, guide and threads. */
-.pr { display: flex; flex-direction: column; min-height: 100%; }
-.pr > * { flex: none; }
+/* The panel's own .pr, not the PR badges of the sidebar's rows and the composer footer. */
+#panel-body > .pr { display: flex; flex-direction: column; min-height: 100%; }
+#panel-body > .pr > * { flex: none; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 .pr > .crumbs { position: sticky; top: 0; z-index: 7; display: flex; align-items: center; gap: 6px; height: 28px; padding: 4px 16px 0; background: var(--g-bg); font-size: 12px; }

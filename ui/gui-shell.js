@@ -124,11 +124,19 @@ const startsWord = (field, token) => {
   for (let i = field.indexOf(token); i !== -1; i = field.indexOf(token, i + 1)) if (i === 0 || !/[\p{L}\p{N}]/u.test(field[i - 1])) return true;
   return false;
 };
+/** T3 Code's search fields: the item's title as plain text, then its keywords. */
+function searchFields(item) {
+  const html = document.createElement("template");
+  html.innerHTML = item.title ?? "";
+  const name = html.content.textContent;
+  const terms = item.terms.filter(Boolean);
+  return name && normalize(name) !== normalize(terms[0]) ? [name, ...terms] : terms;
+}
 /** T3 Code's ranking: 3 exact, 2 field prefix, 1 every token starts a word, 0 mid-word; a thread's
  * title ties prefix and word-start matches so its recency decides. */
 function rankItem(item, query, tokens) {
   let best = 0;
-  item.terms.filter(Boolean).forEach((term, index) => {
+  searchFields(item).forEach((term, index) => {
     const field = normalize(term);
     if (!tokens.every((t) => field.includes(t))) return;
     const rank = field === query ? 3 : field.startsWith(query) ? 2 : tokens.every((t) => startsWord(field, t)) ? 1 : 0;
@@ -146,7 +154,7 @@ function filterGroups(groups, raw) {
       ...g,
       items: g.items
         .map((item, index) => ({ item, index, rank: rankItem(item, query, tokens) }))
-        .filter(({ item }) => tokens.every((t) => normalize(item.terms.join(" ")).includes(t)))
+        .filter(({ item }) => tokens.every((t) => normalize(searchFields(item).join(" ")).includes(t)))
         .sort((a, b) => Number(!!a.item.secondary) - Number(!!b.item.secondary) || b.rank - a.rank || (b.item.recency ?? 0) - (a.item.recency ?? 0) || a.index - b.index)
         .map((r) => r.item),
     }))
