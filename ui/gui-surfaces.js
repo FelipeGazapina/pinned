@@ -263,7 +263,7 @@ function shellTerm(tab, s, id) {
   const term = new Terminal({ ...look, cursorBlink: true, allowTransparency: true, rightClickSelectsWord: false, theme: { background: "#00000000" } });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
-  const entry = { el, term, fit, tab, id, shell: null, opened: false, typed: [], look: JSON.stringify(look) };
+  const entry = { el, term, fit, tab, surface: s.id, id, shell: null, opened: false, typed: [], look: JSON.stringify(look) };
   shellTerms.set(key, entry);
   wireTerminalLinks(term);
   // Keys typed while the shell starts wait for it.

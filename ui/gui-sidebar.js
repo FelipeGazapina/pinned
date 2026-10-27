@@ -413,7 +413,7 @@ function prBadge(tab, tag = "span", pr = prOf(tab)) {
 }
 /** The shells open beside a thread, in panel Terminal tabs and drawer terminals: `{ id, surface }` or `{ id, script }`. */
 const threadShells = (tab) => [
-  ...[...shellTerms].filter(([, e]) => e.tab === tab && e.shell).map(([surface, e]) => ({ id: e.shell, surface })),
+  ...[...shellTerms.values()].filter((e) => e.tab === tab && e.shell).map((e) => ({ id: e.shell, surface: e.surface })),
   ...scriptShells.filter((s) => s.tab === tab && s.id).map((script) => ({ id: script.id, script })),
 ];
 /** Shells running a command, which pulse a terminal glyph on their thread's row, as T3 Code's do.
