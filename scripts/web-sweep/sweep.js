@@ -4651,10 +4651,14 @@ async function sweep(profileName) {
     await page.evaluate(() => document.activeElement.blur());
     await page.evaluate(() => (threadView.scrollTop = 0));
     if (touch) {
+      // A phone's composer doesn't rest on a scroll: unfocused, it is T3 Code's collapsed row wherever the thread is.
       await sleep(300);
-      check(await page.evaluate(() => composer.dataset.resting !== "true"), "a phone's composer rested, which T3 Code's doesn't");
+      const up = await page.evaluate(() => composer.dataset.collapsed);
       await page.evaluate(() => (threadView.scrollTop = threadView.scrollHeight));
-      return "no resting on a phone";
+      await sleep(300);
+      const end = await page.evaluate(() => composer.dataset.collapsed);
+      check(up === "true" && end === "true", `a phone's unfocused composer collapsed ${up} scrolled up and ${end} at the end`);
+      return "a phone collapses instead";
     }
     await waitFor("the resting composer", () => page.evaluate(() => composer.dataset.resting === "true"));
     const resting = (await rect("#composer .box")).height;
