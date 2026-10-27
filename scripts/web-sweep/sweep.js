@@ -4737,7 +4737,8 @@ async function sweep(profileName) {
     check((await page.inputValue("#prompt")) === "", "the file's path went into the text");
     await press(page.locator("#attachments .zoom"));
     await waitFor("the picture full size", () => page.locator("#image-zoom").isVisible());
-    await press(page.locator("#image-zoom"));
+    await tapOrClick("#image-zoom .media-close");
+    await waitFor("the picture to close", async () => !(await page.locator("#image-zoom").isVisible()));
     await sendPrompt("what is in this picture");
     await waitTerm(/echo: what is in this picture \S*shot\.png/);
     await waitFor("the strip to go", async () => !(await page.locator("#attachments").isVisible()));
