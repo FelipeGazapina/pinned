@@ -1227,21 +1227,30 @@ function openedAgo(at) {
 }
 let prHover = { link: null, timer: 0, close: 0 };
 
+/** The card's status, title, author and age, from one `gh pr view`. An older pinned's status lacks the
+ * author, so there the card reads the whole pull request. */
+async function prCardDetail(tab, url) {
+  const status = await callOn(tab.machine, { cmd: "pr_status", tab: tab.view.id, pr: url });
+  if (status.author !== undefined) return status;
+  const d = await callOn(tab.machine, { cmd: "pull_request", tab: tab.view.id, pr: url });
+  return { ...status, number: d.number, url: d.url, author: d.author, created_at: d.createdAt };
+}
+
 function prCardHtml(d) {
-  const state = d.isDraft && d.state === "OPEN" ? "draft" : (d.state ?? "open").toLowerCase();
-  const [label, glyph] = PR_CARD_STATES[state] ?? PR_CARD_STATES.open;
+  const state = PR_CARD_STATES[d.state] ? d.state : "open";
+  const [label, glyph] = PR_CARD_STATES[state];
   const repo = /github\.com\/([^/]+\/[^/]+)\/pull/.exec(d.url ?? "")?.[1] ?? "";
   const login = d.author?.login ?? "ghost";
   const who = d.author?.name && d.author.name !== login ? `${d.author.name} (@${login})` : login;
   return `<div class="head"><span class="repo">${esc(repo)}</span><span>#${esc(String(d.number))}</span><span aria-hidden="true">·</span><span class="state ${state}">${icon(glyph)}${label}</span></div>
     <p class="title">${esc(d.title ?? "")}</p>
-    <div class="who"><img alt="" loading="lazy" src="https://github.com/${encodeURIComponent(login)}.png?size=32"><span class="name">${esc(who)}</span><span aria-hidden="true">·</span><span>opened ${esc(openedAgo(d.createdAt))}</span></div>`;
+    <div class="who"><img alt="" loading="lazy" src="https://github.com/${encodeURIComponent(login)}.png?size=32"><span class="name">${esc(who)}</span><span aria-hidden="true">·</span><span>opened ${esc(openedAgo(d.created_at))}</span></div>`;
 }
 
 async function showPrCard(link) {
   const url = link.dataset.pr;
   const tab = active;
-  if (!prDetails.has(url)) prDetails.set(url, callOn(tab.machine, { cmd: "pull_request", tab: tab.view.id, pr: url }).catch(() => null));
+  if (!prDetails.has(url)) prDetails.set(url, prCardDetail(tab, url).catch(() => null));
   const detail = await prDetails.get(url);
   if (prHover.link !== link || !detail) return;
   prCard.innerHTML = prCardHtml(detail);
