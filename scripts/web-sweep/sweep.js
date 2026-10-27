@@ -5722,9 +5722,12 @@ async function sweep(profileName) {
   });
 
   await step("app view: the terminal drawer shows the same session", async () => {
+    // A prompt of its own: the one sent about a hundred steps back is gone from the drawer by now.
+    await sendPrompt("seen in the drawer");
+    await waitFor("the answer", async () => (await page.locator("#thread .assistant", { hasText: "echo: seen in the drawer" }).count()) > 0);
     await tapOrClick("#toggle-terminal");
     await waitFor("the drawer", () => page.locator(".term:not([hidden])").evaluate((el) => getComputedStyle(el).visibility === "visible" && el.getBoundingClientRect().height > 60));
-    check(/hello from the app/.test(await termText()), "the drawer's terminal lacks the prompt sent from the composer");
+    check(/seen in the drawer/.test(await termText()), "the drawer's terminal lacks the prompt sent from the composer");
     await tapOrClick("#toggle-terminal");
   });
 
