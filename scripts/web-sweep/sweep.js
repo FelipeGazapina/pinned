@@ -4395,7 +4395,7 @@ async function sweep(profileName) {
 
   await step("app view: claude's folder trust menu, answered from the banner", async () => {
     await showSidebar();
-    await page.evaluate(() => openPalette({ mode: "add-project" }));
+    await tapOrClick("#add-project");
     await press(page.locator("#palette .item", { hasText: "Local folder" }));
     await page.fill("#palette input", `${HOME}/work/gamma/`);
     await waitFor("gamma's folders listed", async () => !(await page.locator("#palette .notice").isVisible()) && (await text("#palette .accessory [data-submit]")).startsWith("Add"));
