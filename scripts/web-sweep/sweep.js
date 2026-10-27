@@ -2420,6 +2420,8 @@ async function sweep(profileName) {
     await press(gui(`#panel-menu button:has-text("${label}")`));
   };
   const readLog = (name) => (fs.existsSync(path.join(HOME, name)) ? fs.readFileSync(path.join(HOME, name), "utf8") : "");
+  // pinned's JSON keeps its keys in the order the code writes them, which a check shouldn't hang on.
+  const sortedJson = (value) => JSON.stringify(value, (_, v) => (v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1))) : v));
   const threadCount = () => page.locator("#thread-list .thread-row").count();
 
   await step("app view: panel tabs open from + and the launcher, close, and stay with their thread", async () => {
@@ -3985,7 +3987,7 @@ async function sweep(profileName) {
     await press(gui("#panel-body [data-review-submit]"));
     const review = () => JSON.parse(readLog("gh.log").split("\n").find((l) => l.startsWith("review "))?.slice(7) ?? "null");
     await waitFor("the review", async () => !!review(), 10000);
-    check(JSON.stringify(review()) === JSON.stringify({ body: "Two small notes.", comments: [{ body: "Say why", line: 2, path: "notes.md", side: "RIGHT" }], event: "REQUEST_CHANGES" }), `review: ${JSON.stringify(review())}`);
+    check(sortedJson(review()) === sortedJson({ body: "Two small notes.", comments: [{ body: "Say why", line: 2, path: "notes.md", side: "RIGHT" }], event: "REQUEST_CHANGES" }), `review: ${JSON.stringify(review())}`);
     await press(gui('#panel-body [data-pr-tab="summary"]'));
     await closePanelIfOpen();
   });
@@ -4227,7 +4229,8 @@ async function sweep(profileName) {
     await press(gui("#panel-body [data-stack-merge]"));
     await waitFor("the merge dialog", async () => (await text("#shell-dialog h2")) === "Merge 1 pull requests?");
     await press(gui("#shell-dialog [data-stack-run]"));
-    await waitFor("GitHub's merge-async", async () => /^merge-async 41 \{"merge_action":"default","merge_method":"merge","sha":"[0-9a-f]{40}"\}$/m.test(readLog("gh.log")), 15000);
+    const merged = () => readLog("gh.log").split("\n").filter((l) => l.startsWith("merge-async 41 ")).map((l) => JSON.parse(l.slice(15)));
+    await waitFor("GitHub's merge-async", async () => merged().some((b) => /^[0-9a-f]{40}$/.test(b.sha) && sortedJson({ ...b, sha: "" }) === sortedJson({ merge_action: "default", merge_method: "merge", sha: "" })), 15000);
     await waitFor("#41 merged", async () => /Merged/.test(await text("#panel-body .pr > .crumbs")), 10000);
     fs.writeFileSync(path.join(HOME, ".fake-gh-41"), "open");
     fs.rmSync(path.join(HOME, ".fake-gh-stack.json"));
