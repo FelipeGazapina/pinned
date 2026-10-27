@@ -512,13 +512,15 @@ html[data-appearance="light"] #composer-footer { box-shadow: 0 12px 28px -18px r
 
 /* T3 Code's phone composer, collapsed while unfocused to one row: the prompt, its pictures, Send. */
 #composer[data-collapsed="true"] .box { padding: 8px 12px 8px 0; }
-#composer[data-collapsed="true"] #prompt { padding: 0 12px; font-size: 14px; }
+#composer[data-collapsed="true"] #prompt { padding: 0 12px; }
 #composer[data-collapsed="true"] .tools { padding: 0; gap: 0; order: 2; }
 #composer[data-collapsed="true"] .tools > :not(#send, #stop, #pill-actions) { display: none !important; }
 #composer[data-collapsed="true"] .send { width: 32px; height: 32px; margin-left: 8px; }
 #composer[data-collapsed="true"] #attachments { order: 1; flex-direction: row; padding: 0; }
 #composer[data-collapsed="true"] #attachments .rows, #composer[data-collapsed="true"] #attachments .tile .remove { display: none; }
 #composer[data-collapsed="true"] #attachments .tile { width: 32px; height: 32px; border-radius: 6px; }
+/* A finger's 40px Send fills the row that a 32px one pads. */
+@media (pointer: coarse) { #composer[data-collapsed="true"] .box { padding-top: 4px; padding-bottom: 4px; } }
 
 /* T3 Code's code block in the prompt (ComposerCodeBlockNodeView.tsx): a framed, highlighted block
    whose fence line carries the language picker. The fences stay in the text, drawn transparent. */

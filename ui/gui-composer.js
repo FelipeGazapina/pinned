@@ -118,8 +118,8 @@ function menuKind(menu) {
 const declineOption = (menu) => menuKind(menu) === "approval" && menu.options.findLast((o) => /^No\b/.test(o.head));
 const freeOption = (menu) => menuKind(menu) !== "approval" && menu.options.find((o) => /^(Type something|Tell Claude what to change)/.test(o.head));
 
+/** The collapsed phone row still says what its Send does while claude waits on an approval or a plan. */
 function placeholderFor(tab, t) {
-  if (composer.dataset.collapsed === "true") return "Ask anything...";
   const menu = tab.menu;
   if (menu && menuKind(menu) === "approval") {
     if (!declineOption(menu)) return "Choose an option above";
@@ -127,6 +127,7 @@ function placeholderFor(tab, t) {
   }
   if (menu && menuKind(menu) === "plan") return "Add feedback to refine the plan, or leave this blank to implement it";
   if (menu) return freeOption(menu) ? "Type your own answer, or leave this blank to use the selected option" : "Choose an option above";
+  if (composer.dataset.collapsed === "true") return "Ask anything...";
   if (machines.get(tab.machine)?.view.online === false) return "Ask for changes, send follow-ups, or attach images";
   if (!tab.view.running) return "claude isn't running. Press Enter to start it.";
   return "Ask anything, @tag files/folders, $use skills, or / for commands";

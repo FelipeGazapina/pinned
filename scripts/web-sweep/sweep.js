@@ -584,6 +584,11 @@ async function sweep(profileName) {
       await page.press("#prompt", "Enter");
     }
   };
+  // A phone's composer stays open after a tap on one of its controls until a tap lands outside it, here the thread's gutter.
+  const tapOutsideComposer = async () => {
+    const r = await rect("#thread");
+    await page.touchscreen.tap(r.left + 4, r.top + r.height / 2);
+  };
   const showSidebar = async () => {
     if (await page.locator("#sidebar").isVisible()) return;
     await tapOrClick("#chat-sidebar-toggle");
@@ -1004,8 +1009,11 @@ async function sweep(profileName) {
     const steer = lastTurn(".user");
     check((await steer.locator(".steer").textContent()).trim() === "Steer", "the steer has no marker");
     check((await steer.locator(".bubble").textContent()).trim() === "also check the docs", `the steer reads ${await steer.locator(".bubble").textContent()}`);
-    const folds = await page.locator("#thread .turn .work > summary .label").allTextContents();
-    check(/^Continued( for |$)/.test(folds.at(-1)) && /^Worked( for |$)/.test(folds.at(-2)), `the folds read ${folds.slice(-2).join(" | ")}`);
+    // The reply's text can draw a moment before the turn ends, while its fold still reads Working.
+    const folds = () => page.locator("#thread .turn .work > summary .label").allTextContents();
+    const settled = (f) => /^Continued( for |$)/.test(f.at(-1)) && /^Worked( for |$)/.test(f.at(-2));
+    await waitFor("the turn to end", async () => !/^Working/.test((await folds()).at(-1)), 3000).catch(() => {});
+    check(settled(await folds()), `the folds read ${(await folds()).slice(-2).join(" | ")}`);
     await sendPrompt("Continue from where you left off.");
     await answered("echo: Continue from where you left off.");
     check((await text("#thread .turn:last-of-type .sent-by")) === "Sent by Pinned", "pinned's own prompt isn't marked");
@@ -2300,8 +2308,11 @@ async function sweep(profileName) {
 
   await step("app view: Edit from here gives back a prompt's pictures as attachments", async () => {
     await sendPrompt("pictures");
-    // An earlier step's "pictures" already answered "Two dots.", so this waits for its own turn to be the last.
-    await waitFor("the pictures' turn", async () => (await page.locator("#thread .turn:last-of-type .answer", { hasText: "Two dots." }).count()) > 0, 10000);
+    // An earlier step already drew "Two dots.", so the answer waited for is the newest turn's.
+    await waitFor("the pictures' answer in the newest turn", () => page.evaluate(() => {
+      const turn = [...document.querySelectorAll("#thread .lane > .turn")].at(-1);
+      return /compare these/.test(turn?.querySelector(".user")?.textContent ?? "") && /Two dots\./.test(turn.textContent);
+    }), 10000);
     const user = lastTurn(".user");
     if (!touch) await user.hover();
     await press(user.locator("[data-rewind]"));
@@ -3068,7 +3079,9 @@ async function sweep(profileName) {
       check(saved.scope === "base" && saved.base === "origin/feature-base", `saved: ${JSON.stringify(saved)}`);
       await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
       await waitFor("beta", async () => /beta/.test(await text("#chat-head .crumb")));
-      check(!(await page.evaluate(() => load(`gui-diff:${threadKey(active)}`))), "beta took alpha's diff scope");
+      // Beta keeps its own scope, such as the turn an Open diff showed earlier, but not alpha's.
+      const betaScope = JSON.parse((await page.evaluate(() => load(`gui-diff:${threadKey(active)}`))) ?? "null");
+      check(betaScope?.base !== "origin/feature-base", `beta took alpha's diff scope: ${JSON.stringify(betaScope)}`);
       await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
       await openPanelTo("diff", "Diff");
       await waitFor("alpha's scope back", async () => (await text("#diff-scope")) === "Changes" && (await text("#panel-body .base-pick")) === "origin/feature-base", 10000);
@@ -4433,7 +4446,7 @@ async function sweep(profileName) {
 
   await step("app view: claude's folder trust menu, answered from the banner", async () => {
     await showSidebar();
-    await page.evaluate(() => openPalette({ mode: "add-project" }));
+    await tapOrClick("#add-project");
     await press(page.locator("#palette .item", { hasText: "Local folder" }));
     await page.fill("#palette input", `${HOME}/work/gamma/`);
     await waitFor("gamma's folders listed", async () => !(await page.locator("#palette .notice").isVisible()) && (await text("#palette .accessory [data-submit]")).startsWith("Add"));
@@ -4686,10 +4699,15 @@ async function sweep(profileName) {
     await page.evaluate(() => document.activeElement.blur());
     await page.evaluate(() => (threadView.scrollTop = 0));
     if (touch) {
+      await tapOutsideComposer();
+      // A phone's composer doesn't rest on a scroll: unfocused, it is T3 Code's collapsed row wherever the thread is.
       await sleep(300);
-      check(await page.evaluate(() => composer.dataset.resting !== "true"), "a phone's composer rested, which T3 Code's doesn't");
+      const up = await page.evaluate(() => composer.dataset.collapsed);
       await page.evaluate(() => (threadView.scrollTop = threadView.scrollHeight));
-      return "no resting on a phone";
+      await sleep(300);
+      const end = await page.evaluate(() => composer.dataset.collapsed);
+      check(up === "true" && end === "true", `a phone's unfocused composer collapsed ${up} scrolled up and ${end} at the end`);
+      return "a phone collapses instead";
     }
     await waitFor("the resting composer", () => page.evaluate(() => composer.dataset.resting === "true"));
     const resting = (await rect("#composer .box")).height;
@@ -4775,7 +4793,8 @@ async function sweep(profileName) {
     check((await page.inputValue("#prompt")) === "", "the file's path went into the text");
     await press(page.locator("#attachments .zoom"));
     await waitFor("the picture full size", () => page.locator("#image-zoom").isVisible());
-    await tapOrClick("#image-zoom .media-close");
+    // A 1px picture leaves its caption at the dialog's center, which a tap there would hit.
+    await press(page.locator("#image-zoom .media-close"));
     await waitFor("the picture to close", async () => !(await page.locator("#image-zoom").isVisible()));
     await sendPrompt("what is in this picture");
     await waitTerm(/echo: what is in this picture \S*shot\.png/);
@@ -5070,6 +5089,8 @@ async function sweep(profileName) {
 
   await step("composer: the context ring shows how full the window is, and a cold long session compacts first", async () => {
     await sendPrompt("full");
+    // A phone's composer rests as T3 Code's one row, which a tap opens to its controls.
+    if (touch) await tapOrClick("#prompt");
     await waitFor("the context ring", () => page.locator("#context-meter").isVisible());
     check((await page.getAttribute("#context-meter", "aria-label")) === "Context window 23% used", `ring: ${await page.getAttribute("#context-meter", "aria-label")}`);
     await tapOrClick("#context-meter");
@@ -5695,6 +5716,7 @@ async function sweep(profileName) {
   await step("composer: on a phone the unfocused composer collapses to one Ask anything... row", async () => {
     const state = () => page.evaluate(() => composer.dataset.collapsed);
     await page.evaluate(() => (prompt.blur(), rest()));
+    if (touch) await tapOutsideComposer();
     if (!touch) {
       check((await state()) === "false", "a desktop composer collapsed");
       return "a desktop composer stays open";
