@@ -6524,7 +6524,7 @@ async function sweep(profileName) {
     await closeSettings();
 
     await openRow(beta);
-    await sendPrompt("limit");
+    await sendPrompt("limited");
     const status = `${rowSel(beta)} .stamp.status`;
     await showSidebar();
     await waitFor("beta Limited", async () => (await page.locator(status).count()) && /Limited/.test(await text(status)), 10000);
@@ -6566,7 +6566,7 @@ async function sweep(profileName) {
     await sideSetting("grouping", true);
     await closeSettings();
     await press(page.locator("#project-filter"));
-    await press(page.locator("#project-menu .item", { hasText: /^alpha$/ }));
+    await press(page.locator("#project-menu .item").filter({ has: page.locator(".label", { hasText: /^alpha$/ }) }));
     await waitFor("both checkouts under alpha", async () => (await rowsNow()) === 2 && (await page.locator(rowSel(copy)).count()) === 1 && (await page.locator(rowSel(alpha)).count()) === 1);
     await press(page.locator("#project-filter"));
     await press(page.locator("#project-menu .item", { hasText: "All projects" }));
