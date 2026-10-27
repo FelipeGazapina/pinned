@@ -757,8 +757,16 @@ async function sweep(profileName) {
     check((await cards.count()) === 1, `${await cards.count()} artifact cards, but only one Artifact call published`);
     check((await cards.locator("h3").textContent()) === "payouts.html", `the card is titled ${await cards.locator("h3").textContent()}`);
     check((await cards.locator(".about").textContent()) === "Follows an invoice to the bank.", `the card says ${await cards.locator(".about").textContent()}`);
-    await page.evaluate(() => (window.open = (url) => (window.openedUrl = url)));
-    await press(cards.locator("a[href]"));
+    // window.open stands in for the browser while the card opens, then comes back for the steps after.
+    await page.evaluate(() => {
+      window.realOpen = window.open;
+      window.open = (url) => (window.openedUrl = url);
+    });
+    try {
+      await press(cards.locator("a[href]"));
+    } finally {
+      await page.evaluate(() => (window.open = window.realOpen));
+    }
     const opened = await page.evaluate(() => window.openedUrl);
     check(opened === "https://claude.ai/artifact/PgGFrq1LMW2iDhYZThVQcD", `Open went to ${opened}`);
     return opened;
