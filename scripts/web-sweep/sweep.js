@@ -3638,7 +3638,8 @@ async function sweep(profileName) {
     check(/Pixel_9\nsweep-node · Android 16/.test(await page.getAttribute('#panel-tabs .ptab.active[data-panel="device"]', "title")), "the tab's tooltip lacks the machine and version");
     await waitFor("the H.264 stream", async () => (await page.getAttribute("#panel-body .device-screen", "data-live").catch(() => null)) === "video", 15000);
     const pixel = await page.evaluate(() => [...document.querySelector("#panel-body .device-screen canvas").getContext("2d").getImageData(108, 240, 1, 1).data]);
-    check(Math.abs(pixel[0] - 42) < 12 && Math.abs(pixel[1] - 157) < 12 && Math.abs(pixel[2] - 143) < 12, `the decoded frame's center is ${pixel}`);
+    // Teal, within the engines' YUV conversions: headless Chromium draws the frame at 37,157,138 and WebKit at 59,165,150.
+    check(Math.abs(pixel[0] - 42) < 24 && Math.abs(pixel[1] - 157) < 24 && Math.abs(pixel[2] - 143) < 24, `the decoded frame's center is ${pixel}`);
     check(/stream emulator-5554 \?device=emulator-5554&frame-meta=1/.test(readLog("hub.log")), "the screen didn't open serve-emu's socket");
     check((await page.locator("#panel-body .device-rail button").evaluateAll((bs) => bs.map((b) => b.getAttribute("aria-label")))).join("|") === "Home|Back|Recents|Rotate device|Switch device to dark mode|Device text size|Device tools|Save screenshot|More device actions", "the rail isn't T3's");
     await press(gui("#panel-body .device-screen"));
