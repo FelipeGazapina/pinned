@@ -3039,7 +3039,9 @@ async function sweep(profileName) {
       check(saved.scope === "base" && saved.base === "origin/feature-base", `saved: ${JSON.stringify(saved)}`);
       await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
       await waitFor("beta", async () => /beta/.test(await text("#chat-head .crumb")));
-      check(!(await page.evaluate(() => load(`gui-diff:${threadKey(active)}`))), "beta took alpha's diff scope");
+      // Beta keeps its own scope, such as the turn an Open diff showed earlier, but not alpha's.
+      const betaScope = JSON.parse((await page.evaluate(() => load(`gui-diff:${threadKey(active)}`))) ?? "null");
+      check(betaScope?.base !== "origin/feature-base", `beta took alpha's diff scope: ${JSON.stringify(betaScope)}`);
       await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/alpha"))));
       await openPanelTo("diff", "Diff");
       await waitFor("alpha's scope back", async () => (await text("#diff-scope")) === "Changes" && (await text("#panel-body .base-pick")) === "origin/feature-base", 10000);
