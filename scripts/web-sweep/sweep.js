@@ -6592,7 +6592,8 @@ async function sweep(profileName) {
     await sideSetting("snoozeLimited", true);
     await closeSettings();
     await showSidebar();
-    await waitFor("beta snoozed until the limit lifts", async () => (await text('#thread-list .settled-head[data-shelf="snoozed"]')) === "Snoozed (1)", 5000);
+    // The shelf is open since the snooze step pressed it, so its head counts nothing; beta's row shows under it either way.
+    await waitFor("beta snoozed until the limit lifts", async () => /^Snoozed( \(1\))?$/.test(await text('#thread-list .settled-head[data-shelf="snoozed"]')) && (await page.locator(`${rowSel(beta)} .wake-at`).count()) === 1, 5000);
     await rowMenu(rowSel(beta));
     await menuPick("Wake thread");
     await waitFor("beta awake", async () => !(await page.locator('#thread-list .settled-head[data-shelf="snoozed"]').count()));
