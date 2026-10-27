@@ -7257,8 +7257,9 @@ async function sweep(profileName) {
     check(groups.join() === "Authored,Review requested,Others", `groups: ${groups.join()}`);
     const rows = [await prNumbers("authored"), await prNumbers("reviewing"), await prNumbers("others")].map((n) => n.join());
     check(rows.join(" | ") === "#42 | #41 | #43", `rows: ${rows.join(" | ")}`);
-    const search = readLog("gh.log").match(/ -f (q=.*)$/m)?.[1];
-    check(/^q=is:pr is:open sort:updated-desc repo:example\/\w+ repo:example\/\w+$/.test(search ?? ""), `gh searched: ${search}`);
+    // The page shows the rows it last loaded while it searches again, so the search can land after them.
+    const searched = () => readLog("gh.log").match(/ -f (q=.*)$/m)?.[1];
+    await waitFor("gh's search of the open projects", () => /^q=is:pr is:open sort:updated-desc repo:example\/\w+ repo:example\/\w+$/.test(searched() ?? ""), 10000);
     const busy = '#page-view .pr-row[data-url$="/pull/43"]';
     check(await page.locator(`${busy} .conflict`).isVisible(), "#43's conflict isn't marked");
     check((await page.getAttribute(`${busy} .checks`, "title")) === "Checks failing", "#43's failing checks aren't shown");
