@@ -1907,7 +1907,7 @@ async function sweep(profileName) {
       await mono.fill("Georgia");
       await mono.press("Enter");
       const monoState = await page.evaluate(() => [document.getElementById("look-mono-font").tagName, document.getElementById("look-mono-font").getAttribute("aria-invalid"), localStorage.getItem("look-mono-font"), fontAvailable("Georgia"), fontMonospace("Georgia")].join("|"));
-      check(/^INPUT\|true\|null\|/.test(monoState), `a proportional code font was taken: ${monoState}`);
+      check(/^INPUT\|true\|(null)?\|/.test(monoState), `a proportional code font was taken: ${monoState}`);
       await mono.press("Escape");
       const placeholders = await page.evaluate(() => [document.getElementById("look-sans-font").placeholder, document.getElementById("look-mono-font").placeholder]);
       check(await page.evaluate((names) => names.every((p) => /^SF /.test(p) || fontAvailable(p)), placeholders), `the default faces read ${placeholders.join(" | ")}`);
@@ -2468,8 +2468,8 @@ async function sweep(profileName) {
 
   await step("app view: diff scopes, hidden whitespace, file tree and highlighting", async () => {
     await sendPrompt("code");
-    await waitFor("the code turn's changes", async () => (await page.locator("#thread .open-diff").count()) >= 2, 15000);
-    await press(page.locator("#thread .open-diff").last());
+    await waitFor("the code turn's changes", async () => (await page.locator("#thread .turn:last-of-type", { hasText: "I wrote app.js" }).locator("summary .open-diff").count()) === 1, 15000);
+    await press(page.locator("#thread .turn:last-of-type summary .open-diff"));
     await waitFor("app.js in the diff", () => page.locator('#panel-body .file[data-path="app.js"]').isVisible());
     const open = await page.locator("#panel-body .file").evaluateAll((els) => els.filter((e) => !e.hasAttribute("data-collapsed")).map((e) => e.dataset.path));
     check(!open.length, `open by default: ${open.join(", ")}`);
