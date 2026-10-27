@@ -2276,7 +2276,8 @@ async function sweep(profileName) {
 
   await step("app view: Edit from here gives back a prompt's pictures as attachments", async () => {
     await sendPrompt("pictures");
-    await answered("Two dots.");
+    // An earlier step's "pictures" already answered "Two dots.", so this waits for its own turn to be the last.
+    await waitFor("the pictures' turn", async () => (await page.locator("#thread .turn:last-of-type .answer", { hasText: "Two dots." }).count()) > 0, 10000);
     const user = lastTurn(".user");
     if (!touch) await user.hover();
     await press(user.locator("[data-rewind]"));
