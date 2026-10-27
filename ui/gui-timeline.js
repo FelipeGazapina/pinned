@@ -931,7 +931,7 @@ function renderThread() {
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
-  const stick = threadView.dataset.tab !== place || threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
+  const stick = threadView.dataset.tab !== place || threadAtEnd || threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
   const anchor = stick ? null : anchorOf();
   const spacer = !stick && threadView.querySelector(".lane > .spacer");
   const scrolled = spacer ? threadView.getBoundingClientRect().top - spacer.getBoundingClientRect().top : null;
@@ -954,6 +954,8 @@ function renderThread() {
   const card = threadView.querySelector("#dialog-slot > .dialog-card");
   const focused = card?.contains(document.activeElement);
   threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
+  laneGrowth.disconnect();
+  laneGrowth.observe(threadView.firstElementChild);
   if (card) document.getElementById("dialog-slot")?.append(card);
   if (focused && card.isConnected) card.focus({ preventScroll: true });
   threadView.dataset.key = key;
@@ -967,8 +969,10 @@ function renderThread() {
   for (const el of threadView.querySelectorAll(".lane > .turn")) t.heights?.set(el.dataset.turnId, el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().top);
   const kept = anchor && threadView.querySelector(`.lane > .turn[data-turn-id="${CSS.escape(anchor.id)}"]`);
   renderDialog(tab);
-  if (stick) threadView.scrollTop = threadView.scrollHeight;
-  else if (kept) threadView.scrollTop += kept.getBoundingClientRect().top - threadView.getBoundingClientRect().top - anchor.delta;
+  if (stick) {
+    threadView.scrollTop = threadView.scrollHeight;
+    threadAtEnd = true;
+  } else if (kept) threadView.scrollTop += kept.getBoundingClientRect().top - threadView.getBoundingClientRect().top - anchor.delta;
   if (finder.open) findMatches();
   showScrollEnd();
   renderMinimap(shown, t);
@@ -1043,6 +1047,16 @@ new MutationObserver(() => {
   threadView.scrollTop = threadView.scrollHeight;
   rerender();
 }).observe(composer, { attributes: true, attributeFilter: ["data-sending"] });
+
+/** Whether the thread sits at its end, as the reader last left it. Pictures, diagrams and code draw
+ * after a render and grow the lane, so a thread at its end follows them there instead of falling short. */
+let threadAtEnd = true;
+threadView.addEventListener("scroll", () => {
+  threadAtEnd = threadView.scrollHeight - threadView.scrollTop - threadView.clientHeight < 40;
+}, { passive: true });
+const laneGrowth = new ResizeObserver(() => {
+  if (threadAtEnd) threadView.scrollTop = threadView.scrollHeight;
+});
 
 /** Whether scrolling has brought a spacer within half a screen of the viewport, so more turns must be drawn. */
 function windowStale() {
