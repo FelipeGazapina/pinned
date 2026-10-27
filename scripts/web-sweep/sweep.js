@@ -3429,24 +3429,25 @@ async function sweep(profileName) {
       await page.evaluate(() => toggleSettings());
     }
   });
+  // The row sits on Appearance, as in T3's settings.
   async function motionRow() {
-    await tapOrClick('#settings-nav [data-page="general"]');
-    await waitFor("the Motion row", () => page.locator("#panel-animation-row").isVisible());
-    const slider = await page.locator("#panel-animation").evaluate((el) => [el.type, el.min, el.max, el.step].join(" "));
+    await settingsNav("appearance");
+    const row = "#settings-page #panel-animations";
+    await waitFor("the Motion row", () => page.locator(row).isVisible());
+    const slider = await page.locator("#panel-animation-duration").evaluate((el) => [el.type, el.min, el.max, el.step].join(" "));
     check(slider === "range 0 400 25", `the control is ${slider}`);
-    check((await text("#panel-animation-row label")) === "Panel animations" && (await page.locator("#panel-animation-row").evaluate((el) => el.previousElementSibling?.textContent)) === "Motion", "the row isn't Motion › Panel animations");
-    check((await text("#panel-animation-row output")) === "0 ms" && (await page.locator("[data-panel-animation-reset]").isHidden()), "at the default the readout isn't 0 ms with no reset");
-    await page.locator("#panel-animation").evaluate((el) => {
-      el.value = "225";
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    check((await text("#panel-animation-row output")) === "225 ms" && (await page.evaluate(() => load("gui-panel-animation"))) === "225", `set to 225 the readout is ${await text("#panel-animation-row output")}`);
-    const duration = await page.locator("[data-panel-animation-preview] .side").evaluate((el) => getComputedStyle(el).transitionDuration);
+    check((await text(`${row} h4`)) === "Panel animations" && (await page.locator(row).evaluate((el) => el.closest(".settings-section")?.querySelector("h3")?.textContent)) === "Motion", "the row isn't Motion › Panel animations");
+    check((await text(`${row} output`)) === "0 ms" && (await page.locator('[data-reset="motion"]').isHidden()), "at the default the readout isn't 0 ms with no reset");
+    await page.locator("#panel-animation-duration").fill("225");
+    check((await text(`${row} output`)) === "225 ms" && (await page.evaluate(() => load("gui-panel-animation"))) === "225", `set to 225 the readout is ${await text(`${row} output`)}`);
+    const duration = await page.locator(`${row} .motion-preview .side`).evaluate((el) => getComputedStyle(el).transitionDuration);
     check(duration.split(", ").every((d) => d === "0.225s"), `the preview takes ${duration}`);
-    await press(gui("[data-panel-animation-preview]"));
-    check(!(await page.locator("[data-panel-animation-preview].open").count()), "the preview didn't close");
-    await press(gui("[data-panel-animation-reset]"));
-    check((await text("#panel-animation-row output")) === "0 ms" && (await page.evaluate(() => load("gui-panel-animation"))) === null, "reset didn't return to 0 ms");
+    await press(gui(`${row} .motion-preview`));
+    check(await page.locator(`${row} .motion-preview.closed`).count(), "the preview didn't fold");
+    await press(gui(`${row} .motion-preview`));
+    check(!(await page.locator(`${row} .motion-preview.closed`).count()), "the preview didn't unfold");
+    await press(gui('[data-reset="motion"]'));
+    check((await text(`${row} output`)) === "0 ms" && (await page.evaluate(() => load("gui-panel-animation"))) === null, "reset didn't return to 0 ms");
   }
 
   await step("app view: the diff steps clean up", async () => {
