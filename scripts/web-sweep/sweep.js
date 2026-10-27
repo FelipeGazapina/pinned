@@ -5963,10 +5963,9 @@ async function sweep(profileName) {
 
     await tapOrClick("#add-project");
     await press(page.locator("#palette .item", { hasText: "Local folder" }));
-    await waitFor("the path field", () => page.locator("#projects .browse input").isVisible());
+    await waitFor("the path field", async () => (await page.getAttribute("#palette input", "placeholder")) === "Enter path (e.g. ~/projects/my-app)");
     await page.keyboard.press("Escape");
-    await page.keyboard.press("Escape");
-    await waitFor("the picker to close", () => page.locator("#projects").isHidden());
+    await waitFor("the palette to close", () => page.locator("#palette").isHidden());
     await openRow(await keyFor("alpha"));
   });
 
@@ -6443,9 +6442,9 @@ async function sweep(profileName) {
     const sources = await paletteNames();
     check(sources.includes("Local folder") && sources.includes("New project"), `sources: ${sources.join(", ")}`);
     await press(page.locator("#palette .item", { hasText: "Local folder" }));
-    await waitFor("the folder browser", () => page.locator("#projects").isVisible(), 5000);
+    await waitFor("the folder browser", async () => (await page.getAttribute("#palette input", "placeholder")) === "Enter path (e.g. ~/projects/my-app)", 5000);
     await page.keyboard.press("Escape");
-    await waitFor("the picker to close", () => page.locator("#projects").isHidden());
+    await waitFor("the palette to close", () => page.locator("#palette").isHidden());
 
     await rowMenu(rowSel(alpha));
     check(!(await page.locator("#side-menu button", { hasText: "Mark unread" }).isDisabled()), "Mark unread is off for a thread that isn't done");
