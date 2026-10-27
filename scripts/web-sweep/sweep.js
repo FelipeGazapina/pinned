@@ -627,7 +627,8 @@ async function sweep(profileName) {
     await sendPrompt("rich");
     await waitFor("the code block", async () => (await page.locator("#thread .answer .codeblock").count()) > 0, 10000);
     const fold = lastTurn(".work > summary");
-    check(/^Worked for /.test(await fold.textContent()), `the fold reads ${await fold.textContent()}`);
+    // A turn whose lines all landed in the same millisecond took no time, and reads just Worked.
+    check(/^Worked( for .+)?$/.test(await fold.locator(".label").textContent()), `the fold reads ${await fold.textContent()}`);
     check(/\d{4}$/.test(await fold.locator(".when").getAttribute("title")), "the fold row has no time to show on hover");
     check(/Looked around/.test(await text("#thread .turn:last-of-type > .assistant")), "the first message is not in sight");
     await press(fold);
@@ -842,7 +843,7 @@ async function sweep(profileName) {
     check(/^cargo test batch_\d$/.test(later), `the step line reads ${later}`);
     await waitFor("claude's turn to end", () => page.evaluate(() => statusOf(active) === "done"), 5000);
     check((await page.evaluate(() => phaseOf(active))) === "delegating", `the phase is ${await page.evaluate(() => phaseOf(active))}`);
-    check(/^Worked for /.test(await lastTurn(".work > summary").textContent()), "the turn's own work did not settle");
+    check(/^Worked( for .+)?$/.test(await lastTurn(".work > summary .label").textContent()), `the turn's own work did not settle: ${await lastTurn(".work > summary").textContent()}`);
     const footer = (await text("#thread .agents-working")).replace(/\s+/g, " ");
     check(/^2 agents working \d/.test(footer), `the footer reads ${footer}`);
     check(/2 agents working/.test(await rowStatus()), `the sidebar row reads ${await rowStatus()}`);
