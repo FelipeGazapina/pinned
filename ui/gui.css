@@ -407,5 +407,6 @@ body[data-panel-max="true"] #panel-resize { display: none; }
   #sidebar .icon, #chat .icon, #panel .icon, #composer .round, #composer .pick, body[data-mode="terminal"] #mode-gui { min-width: 40px; min-height: 40px; }
   .diff-bar { height: 48px; }
   .file > header { top: 48px; }
-  #composer-footer > *, #panel-tabs [data-panel], .diff-bar .scope, #approval .options button, #approval .actions button { min-height: 40px; }
+  #composer-footer > *, #panel-tabs [data-panel], .diff-bar .scope, #approval .options button, #approval .actions button, #hero-head button { min-height: 40px; }
+  #composer-footer .pr { min-width: 40px; }
 }
