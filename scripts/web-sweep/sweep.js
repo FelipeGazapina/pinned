@@ -620,6 +620,16 @@ async function sweep(profileName) {
   const lastTurn = (selector = "") => gui(`#thread .turn:last-of-type ${selector}`);
   const clipboard = () => (engine === "chromium" ? page.evaluate(() => navigator.clipboard.readText()) : null);
   const answered = (words) => waitFor(`the answer "${words}"`, async () => (await page.locator("#thread .assistant", { hasText: words }).count()) > 0, 10000);
+  /** The thread's PR #n line, which sits in an older turn: the thread draws only the turns near the
+   * screen, so it scrolls up to it as a reader would. */
+  const threadPrLink = async (n) => {
+    const link = `#thread .pr-link[data-pr$="/pull/${n}"]`;
+    for (let i = 0; i < 30 && !(await page.locator(link).count()); i++) {
+      await page.evaluate(() => (threadView.scrollTop -= threadView.clientHeight / 2));
+      await sleep(100);
+    }
+    return link;
+  };
 
   await step("app view: tool runs group under a summary, with thinking and highlighted code", async () => {
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
@@ -2393,7 +2403,7 @@ async function sweep(profileName) {
     await waitFor("the PR panel", prPanelSettled, 15000);
     check(await page.locator('#panel-tabs [data-panel="pr"].active').isVisible(), "the PR tab is not the active one");
     const shown = (await text("#panel-body")).slice(0, 80);
-    await tapOrClick('#thread .pr-link[data-pr$="/pull/41"]');
+    await tapOrClick(await threadPrLink(41));
     await waitFor("#41 in the PR panel", async () => /#41/.test(await text("#panel-body")) && !/Loading/.test(await text("#panel-body")), 15000);
     check(/#41/.test(await text('#panel-tabs [data-panel="pr"].active')), `the PR tab reads ${await text('#panel-tabs [data-panel="pr"].active')} after clicking #41`);
     if (!touch) {
@@ -2648,7 +2658,7 @@ async function sweep(profileName) {
     await waitFor("gh to merge", async () => /pr merge --merge -- https:\/\/github\.com\/example\/alpha\/pull\/42/.test(readLog("gh.log")));
     await waitFor("the Merged state", async () => /Merged/.test(await text("#panel-body .pr > .crumbs")), 15000);
     await tapOrClick("#toggle-panel");
-    await tapOrClick('#thread .pr-link[data-pr$="/pull/41"]');
+    await tapOrClick(await threadPrLink(41));
     await waitFor("#41's details", async () => /Draft the notes/.test(await text("#panel-body .pr-head h3")), 15000);
     check((await text('#panel-body [data-pr-do="ready"]')) === "Ready for review", `a draft's main button reads ${await text("#panel-body [data-pr-do]")}`);
     await press(gui('#panel-body [data-pr-do="ready"]'));
@@ -3900,7 +3910,7 @@ async function sweep(profileName) {
   });
 
   await step("app view: a pull request's title and description edit, its menu closes, reopens, reverts and auto-merges, and its checks, stack, threads and crumbs show", async () => {
-    await tapOrClick('#thread .pr-link[data-pr$="/pull/41"]');
+    await tapOrClick(await threadPrLink(41));
     await waitFor("#41", async () => /Draft the notes/.test(await text("#panel-body .pr-head h3")), 15000);
     await press(gui("#panel-body [data-edit=title]"));
     await page.fill('#panel-body [data-pr-edit="title"]', "Draft the better notes");
@@ -3937,7 +3947,7 @@ async function sweep(profileName) {
     await press(gui("#panel-body [data-pr-more]"));
     await press(menuItem("Reopen pull request"));
     await waitFor("#41 reopened", async () => /pr reopen -- https:\/\/github\.com\/example\/alpha\/pull\/41/.test(readLog("gh.log")) && !/Closed/.test(await text("#panel-body .pr > .crumbs")), 10000);
-    await tapOrClick('#thread .pr-link[data-pr$="/pull/42"]');
+    await tapOrClick(await threadPrLink(42));
     await waitFor("#42", async () => /Merged/.test(await text("#panel-body .pr > .crumbs")), 15000);
     await press(gui('#panel-body [data-pr-tab="summary"]'));
     await waitFor("its stack", () => gui("#panel-body [data-pr-stack]").isVisible(), 10000);
@@ -3964,7 +3974,7 @@ async function sweep(profileName) {
   });
 
   await step("app view: pull request comments filter, sort, reply and comment, and the Code tab submits a review with line comments", async () => {
-    await tapOrClick('#thread .pr-link[data-pr$="/pull/42"]');
+    await tapOrClick(await threadPrLink(42));
     await waitFor("#42", async () => /#42/.test(await text("#panel-body .pr > .crumbs")), 15000);
     await press(gui('#panel-body [data-pr-tab="summary"]'));
     await waitFor("#42's comments", async () => /Why a second line\?/.test(await text("#panel-body .conversation")), 15000);
@@ -4009,7 +4019,7 @@ async function sweep(profileName) {
   });
 
   await step("app view: the Guide tab has claude write a review guide and walks its stops", async () => {
-    await tapOrClick('#thread .pr-link[data-pr$="/pull/42"]');
+    await tapOrClick(await threadPrLink(42));
     await waitFor("#42", async () => /#42/.test(await text("#panel-body .pr > .crumbs")), 15000);
     await press(gui('#panel-body [data-pr-tab="guide"]'));
     await waitFor("the empty guide", () => gui("#panel-body [data-guide-write]").isVisible());
@@ -4026,7 +4036,7 @@ async function sweep(profileName) {
   });
 
   const openPrPanel = async (n) => {
-    await tapOrClick(`#thread .pr-link[data-pr$="/pull/${n}"]`);
+    await tapOrClick(await threadPrLink(n));
     await waitFor(`#${n}`, async () => new RegExp(`#${n}`).test(await text("#panel-body .pr > .crumbs")) && !(await page.locator("#panel-body .pr-ghost").count()), 15000);
   };
   const style = (selector, prop) => page.locator(selector).first().evaluate((el, p) => getComputedStyle(el)[p], prop);
@@ -4315,7 +4325,7 @@ async function sweep(profileName) {
       await page.click("#composer-footer .pr[data-pr]", { modifiers: ["Meta"] });
       await waitFor("the badge to open GitHub", async () => /github\.com\/example\/alpha\/pull\/4\d/.test((await page.evaluate(() => window.__opened)) ?? ""));
       await page.evaluate(() => (window.__opened = ""));
-      await page.click('#thread .pr-link[data-pr$="/pull/41"]', { button: "middle" });
+      await page.click(await threadPrLink(41), { button: "middle" });
       await waitFor("a middle click to open GitHub", async () => /pull\/41$/.test((await page.evaluate(() => window.__opened)) ?? ""));
     }
     await openPanelTo("browser", "Browser");
