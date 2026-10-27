@@ -4274,7 +4274,10 @@ async function sweep(profileName) {
     const merged = () => readLog("gh.log").split("\n").filter((l) => l.startsWith("merge-async 41 ")).map((l) => JSON.parse(l.slice(15)));
     await waitFor("GitHub's merge-async", async () => merged().some((b) => /^[0-9a-f]{40}$/.test(b.sha) && sortedJson({ ...b, sha: "" }) === sortedJson({ merge_action: "default", merge_method: "merge", sha: "" })), 15000);
     await waitFor("#41 merged", async () => /Merged/.test(await text("#panel-body .pr > .crumbs")), 10000);
+    // Reopening #41 for the later steps undoes what GitHub never does, so the app, which asks gh no
+    // more about a merged pull request, forgets it too.
     fs.writeFileSync(path.join(HOME, ".fake-gh-41"), "open");
+    await page.evaluate(() => prStatuses.delete("https://github.com/example/alpha/pull/41"));
     fs.rmSync(path.join(HOME, ".fake-gh-stack.json"));
     await closePanelIfOpen();
     await page.evaluate(() => openPage("pull-requests"));
