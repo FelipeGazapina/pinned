@@ -620,6 +620,16 @@ async function sweep(profileName) {
   const lastTurn = (selector = "") => gui(`#thread .turn:last-of-type ${selector}`);
   const clipboard = () => (engine === "chromium" ? page.evaluate(() => navigator.clipboard.readText()) : null);
   const answered = (words) => waitFor(`the answer "${words}"`, async () => (await page.locator("#thread .assistant", { hasText: words }).count()) > 0, 10000);
+  /** The thread's PR #n line, which sits in an older turn: the thread draws only the turns near the
+   * screen, so it scrolls up to it as a reader would. */
+  const threadPrLink = async (n) => {
+    const link = `#thread .pr-link[data-pr$="/pull/${n}"]`;
+    for (let i = 0; i < 30 && !(await page.locator(link).count()); i++) {
+      await page.evaluate(() => (threadView.scrollTop -= threadView.clientHeight / 2));
+      await sleep(100);
+    }
+    return link;
+  };
 
   await step("app view: tool runs group under a summary, with thinking and highlighted code", async () => {
     await page.evaluate(() => activate(tabs.find((t) => t.view.cwd.endsWith("/beta"))));
@@ -627,7 +637,8 @@ async function sweep(profileName) {
     await sendPrompt("rich");
     await waitFor("the code block", async () => (await page.locator("#thread .answer .codeblock").count()) > 0, 10000);
     const fold = lastTurn(".work > summary");
-    check(/^Worked for /.test(await fold.textContent()), `the fold reads ${await fold.textContent()}`);
+    // A turn whose lines all landed in the same millisecond took no time, and reads just Worked.
+    check(/^Worked( for .+)?$/.test(await fold.locator(".label").textContent()), `the fold reads ${await fold.textContent()}`);
     check(/\d{4}$/.test(await fold.locator(".when").getAttribute("title")), "the fold row has no time to show on hover");
     check(/Looked around/.test(await text("#thread .turn:last-of-type > .assistant")), "the first message is not in sight");
     await press(fold);
@@ -756,8 +767,16 @@ async function sweep(profileName) {
     check((await cards.count()) === 1, `${await cards.count()} artifact cards, but only one Artifact call published`);
     check((await cards.locator("h3").textContent()) === "payouts.html", `the card is titled ${await cards.locator("h3").textContent()}`);
     check((await cards.locator(".about").textContent()) === "Follows an invoice to the bank.", `the card says ${await cards.locator(".about").textContent()}`);
-    await page.evaluate(() => (window.open = (url) => (window.openedUrl = url)));
-    await press(cards.locator("a[href]"));
+    // window.open stands in for the browser while the card opens, then comes back for the steps after.
+    await page.evaluate(() => {
+      window.realOpen = window.open;
+      window.open = (url) => (window.openedUrl = url);
+    });
+    try {
+      await press(cards.locator("a[href]"));
+    } finally {
+      await page.evaluate(() => (window.open = window.realOpen));
+    }
     const opened = await page.evaluate(() => window.openedUrl);
     check(opened === "https://claude.ai/artifact/PgGFrq1LMW2iDhYZThVQcD", `Open went to ${opened}`);
     return opened;
@@ -842,7 +861,7 @@ async function sweep(profileName) {
     check(/^cargo test batch_\d$/.test(later), `the step line reads ${later}`);
     await waitFor("claude's turn to end", () => page.evaluate(() => statusOf(active) === "done"), 5000);
     check((await page.evaluate(() => phaseOf(active))) === "delegating", `the phase is ${await page.evaluate(() => phaseOf(active))}`);
-    check(/^Worked for /.test(await lastTurn(".work > summary").textContent()), "the turn's own work did not settle");
+    check(/^Worked( for .+)?$/.test(await lastTurn(".work > summary .label").textContent()), `the turn's own work did not settle: ${await lastTurn(".work > summary").textContent()}`);
     const footer = (await text("#thread .agents-working")).replace(/\s+/g, " ");
     check(/^2 agents working \d/.test(footer), `the footer reads ${footer}`);
     check(/2 agents working/.test(await rowStatus()), `the sidebar row reads ${await rowStatus()}`);
@@ -2136,6 +2155,11 @@ async function sweep(profileName) {
     await press(row("notes.md").locator(".open-diff"));
     await waitFor("the diff panel", () => page.locator("#panel-body .file").first().isVisible());
     await tapOrClick("#toggle-panel");
+    // The diff steps take beta for a thread that never opened Diff, so it forgets the scope it kept.
+    await page.evaluate(() => {
+      threadOf(active).diff = undefined;
+      save(`gui-diff:${threadKey(active)}`, null);
+    });
     return summary;
   });
 
@@ -2323,19 +2347,20 @@ async function sweep(profileName) {
   });
 
   await step("app view: resting on a PR link previews the pull request", async () => {
-    await sendPrompt("prlink");
-    await answered("Opened the pull request");
-    if (!touch) {
+    try {
+      await sendPrompt("prlink");
+      await answered("Opened the pull request");
+      if (touch) return "a touch screen has no hover";
       await gui('#thread .turn:last-of-type a[data-pr]').hover();
       await waitFor("the preview card", () => page.locator("#pr-card").isVisible(), 8000);
       const card = await page.evaluate(() => [...document.querySelectorAll("#pr-card .head > *, #pr-card .title, #pr-card .who > *")].map((el) => el.textContent.trim()).filter(Boolean).join(" | "));
       check(/^example\/alpha \| #42 \| · \| Open \| Add notes \| sweeper \| · \| opened .+ ago$/.test(card), `the card reads ${card}`);
       await page.mouse.move(5, 5);
       await waitFor("the card to close", async () => !(await page.locator("#pr-card").isVisible()), 2000);
+    } finally {
+      // The steps after this block expect alpha, whether or not the card showed.
+      await toThread("alpha");
     }
-    // The steps after this block expect alpha.
-    await toThread("alpha");
-    if (touch) return "a touch screen has no hover";
   });
 
   await step("app view: a prompt from the composer reaches the same session", async () => {
@@ -2379,7 +2404,7 @@ async function sweep(profileName) {
     await waitFor("the PR panel", prPanelSettled, 15000);
     check(await page.locator('#panel-tabs [data-panel="pr"].active').isVisible(), "the PR tab is not the active one");
     const shown = (await text("#panel-body")).slice(0, 80);
-    await tapOrClick('#thread .pr-link[data-pr$="/pull/41"]');
+    await tapOrClick(await threadPrLink(41));
     await waitFor("#41 in the PR panel", async () => /#41/.test(await text("#panel-body")) && !/Loading/.test(await text("#panel-body")), 15000);
     check(/#41/.test(await text('#panel-tabs [data-panel="pr"].active')), `the PR tab reads ${await text('#panel-tabs [data-panel="pr"].active')} after clicking #41`);
     if (!touch) {
@@ -2415,6 +2440,8 @@ async function sweep(profileName) {
     await press(gui(`#panel-menu button:has-text("${label}")`));
   };
   const readLog = (name) => (fs.existsSync(path.join(HOME, name)) ? fs.readFileSync(path.join(HOME, name), "utf8") : "");
+  // pinned's JSON keeps its keys in the order the code writes them, which a check shouldn't hang on.
+  const sortedJson = (value) => JSON.stringify(value, (_, v) => (v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1))) : v));
   const threadCount = () => page.locator("#thread-list .thread-row").count();
 
   await step("app view: panel tabs open from + and the launcher, close, and stay with their thread", async () => {
@@ -2632,7 +2659,7 @@ async function sweep(profileName) {
     await waitFor("gh to merge", async () => /pr merge --merge -- https:\/\/github\.com\/example\/alpha\/pull\/42/.test(readLog("gh.log")));
     await waitFor("the Merged state", async () => /Merged/.test(await text("#panel-body .pr > .crumbs")), 15000);
     await tapOrClick("#toggle-panel");
-    await tapOrClick('#thread .pr-link[data-pr$="/pull/41"]');
+    await tapOrClick(await threadPrLink(41));
     await waitFor("#41's details", async () => /Draft the notes/.test(await text("#panel-body .pr-head h3")), 15000);
     check((await text('#panel-body [data-pr-do="ready"]')) === "Ready for review", `a draft's main button reads ${await text("#panel-body [data-pr-do]")}`);
     await press(gui('#panel-body [data-pr-do="ready"]'));
@@ -2866,63 +2893,71 @@ async function sweep(profileName) {
     await typed(`localhost:${port}/a`);
     await page.evaluate(() => { save("gui-browser-search", ""); save("gui-browser-search-url", ""); });
 
-    await fromPlus("Terminal");
-    await waitFor("the shell", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1, 10000);
-    await page.locator("#panel-body .xterm-helper-textarea").focus();
-    const wrapped = `http://localhost:${port}/a?w=${"q".repeat(220)}END`;
-    await page.keyboard.type(`clear; echo ${wrapped}; echo ./notes.md:1\n`);
-    const spot = (needle, back) => page.evaluate(([n, b]) => {
-      for (const row of document.querySelectorAll("#panel-body .xterm-rows > div")) {
-        const i = row.textContent.indexOf(n);
-        if (i < 0 || row.textContent.includes("echo")) continue;
-        const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
-        let seen = 0;
-        for (let t = walker.nextNode(); t; t = walker.nextNode()) {
-          if (seen + t.length > i - b) {
-            const range = document.createRange();
-            range.setStart(t, i - b - seen);
-            range.setEnd(t, i - b - seen + 1);
-            const r = range.getBoundingClientRect();
-            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    // The steps after this one count terminals from 1, so this one closes its own whatever happens.
+    try {
+      await fromPlus("Terminal");
+      await waitFor("the shell", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1, 10000);
+      await page.locator("#panel-body .xterm-helper-textarea").focus();
+      const wrapped = `http://localhost:${port}/a?w=${"q".repeat(220)}END`;
+      // Quoted, as the panel's shell can be zsh, which takes the ? for a glob.
+      await page.keyboard.type(`clear; echo '${wrapped}'; echo ./notes.md:1\n`);
+      const spot = (needle, back) => page.evaluate(([n, b]) => {
+        for (const row of document.querySelectorAll("#panel-body .xterm-rows > div")) {
+          const i = row.textContent.indexOf(n);
+          if (i < 0 || row.textContent.includes("echo")) continue;
+          const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+          let seen = 0;
+          for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+            if (seen + t.length > i - b) {
+              const range = document.createRange();
+              range.setStart(t, i - b - seen);
+              range.setEnd(t, i - b - seen + 1);
+              const r = range.getBoundingClientRect();
+              return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            }
+            seen += t.length;
           }
-          seen += t.length;
         }
+        return null;
+      }, [needle, back]);
+      // The typed command shows the address too, so wait for the row echo printed.
+      await waitFor("the wrapped link", async () => !!(await spot("END", 3)) && !!(await spot("notes.md:1", -3)), 10000);
+      const clickAt = async (at, modifiers = []) => {
+        await page.mouse.move(at.x, at.y);
+        // xterm looks for a link once the pointer rests on a row, and shows the hand when it has one.
+        await waitFor("the hand over the link", () => page.evaluate(([x, y]) => getComputedStyle(document.elementFromPoint(x, y)).cursor === "pointer", [at.x, at.y]), 5000);
+        for (const m of modifiers) await page.keyboard.down(m);
+        await page.mouse.click(at.x, at.y);
+        for (const m of modifiers) await page.keyboard.up(m);
+      };
+      const tail = await spot("END", 3);
+      check(tail, "the wrapped link's last row isn't on screen");
+      const popup = page.context().waitForEvent("page", { timeout: 8000 });
+      await clickAt(tail);
+      const outside = await popup;
+      check(outside.url() === wrapped, `a plain click with the default setting opened ${outside.url().slice(0, 60)} outside`);
+      await outside.close();
+      check(await openTab("terminal").isVisible(), "the default setting opened the preview");
+      await page.evaluate(() => save("gui-browser-links", "app"));
+      await clickAt(tail);
+      await waitFor("the wrapped link in the preview", async () => (await page.evaluate(() => shownSurface(active)?.url)) === wrapped, 10000);
+      await page.click('#panel-tabs .ptab[data-panel="terminal"]');
+      await waitFor("the shell again", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1);
+      const popup2 = page.context().waitForEvent("page", { timeout: 8000 });
+      await clickAt(await spot("END", 3), [(await page.evaluate(() => IS_MAC)) ? "Meta" : "Control"]);
+      const forced = await popup2;
+      check(forced.url() === wrapped, "⌘-click didn't open the link outside");
+      await forced.close();
+      await clickAt(await spot("notes.md:1", -3));
+      await waitFor("notes.md in a File tab", async () => /notes\.md/.test(await text("#panel-tabs .ptab.active")), 10000);
+    } finally {
+      await page.evaluate(() => save("gui-browser-links", ""));
+      for (let n = await page.locator('#panel-tabs .ptab[data-panel="terminal"]').count(); n > 0; n--) {
+        await page.click('#panel-tabs .ptab[data-panel="terminal"]');
+        await press(gui('#panel-tabs .ptab[data-panel="terminal"] .lead'));
       }
-      return null;
-    }, [needle, back]);
-    // The typed command shows the address too, so wait for the row echo printed.
-    await waitFor("the wrapped link", async () => !!(await spot("END", 3)) && !!(await spot("notes.md:1", -3)), 10000);
-    const clickAt = async (at, modifiers = []) => {
-      await page.mouse.move(at.x, at.y);
-      await sleep(300);
-      for (const m of modifiers) await page.keyboard.down(m);
-      await page.mouse.click(at.x, at.y);
-      for (const m of modifiers) await page.keyboard.up(m);
-    };
-    const tail = await spot("END", 3);
-    check(tail, "the wrapped link's last row isn't on screen");
-    const popup = page.context().waitForEvent("page", { timeout: 8000 });
-    await clickAt(tail);
-    const outside = await popup;
-    check(outside.url() === wrapped, `a plain click with the default setting opened ${outside.url().slice(0, 60)} outside`);
-    await outside.close();
-    check(await openTab("terminal").isVisible(), "the default setting opened the preview");
-    await page.evaluate(() => save("gui-browser-links", "app"));
-    await clickAt(tail);
-    await waitFor("the wrapped link in the preview", async () => (await page.evaluate(() => shownSurface(active)?.url)) === wrapped, 10000);
-    await page.click('#panel-tabs .ptab[data-panel="terminal"]');
-    await waitFor("the shell again", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1);
-    const popup2 = page.context().waitForEvent("page", { timeout: 8000 });
-    await clickAt(await spot("END", 3), [(await page.evaluate(() => IS_MAC)) ? "Meta" : "Control"]);
-    const forced = await popup2;
-    check(forced.url() === wrapped, "⌘-click didn't open the link outside");
-    await forced.close();
-    await clickAt(await spot("notes.md:1", -3));
-    await waitFor("notes.md in a File tab", async () => /notes\.md/.test(await text("#panel-tabs .ptab.active")), 10000);
-    await page.evaluate(() => save("gui-browser-links", ""));
-    await page.click('#panel-tabs .ptab[data-panel="terminal"]');
-    await press(gui('#panel-tabs .ptab[data-panel="terminal"] .lead'));
-    await closePanelIfOpen();
+      await closePanelIfOpen();
+    }
   });
 
   await step("browser: an unreachable address and a file show T3's screens in place of the page", async () => {
@@ -3423,24 +3458,25 @@ async function sweep(profileName) {
       await page.evaluate(() => toggleSettings());
     }
   });
+  // The row sits on Appearance, as in T3's settings.
   async function motionRow() {
-    await tapOrClick('#settings-nav [data-page="general"]');
-    await waitFor("the Motion row", () => page.locator("#panel-animation-row").isVisible());
-    const slider = await page.locator("#panel-animation").evaluate((el) => [el.type, el.min, el.max, el.step].join(" "));
+    await settingsNav("appearance");
+    const row = "#settings-page #panel-animations";
+    await waitFor("the Motion row", () => page.locator(row).isVisible());
+    const slider = await page.locator("#panel-animation-duration").evaluate((el) => [el.type, el.min, el.max, el.step].join(" "));
     check(slider === "range 0 400 25", `the control is ${slider}`);
-    check((await text("#panel-animation-row label")) === "Panel animations" && (await page.locator("#panel-animation-row").evaluate((el) => el.previousElementSibling?.textContent)) === "Motion", "the row isn't Motion › Panel animations");
-    check((await text("#panel-animation-row output")) === "0 ms" && (await page.locator("[data-panel-animation-reset]").isHidden()), "at the default the readout isn't 0 ms with no reset");
-    await page.locator("#panel-animation").evaluate((el) => {
-      el.value = "225";
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    check((await text("#panel-animation-row output")) === "225 ms" && (await page.evaluate(() => load("gui-panel-animation"))) === "225", `set to 225 the readout is ${await text("#panel-animation-row output")}`);
-    const duration = await page.locator("[data-panel-animation-preview] .side").evaluate((el) => getComputedStyle(el).transitionDuration);
+    check((await text(`${row} h4`)) === "Panel animations" && (await page.locator(row).evaluate((el) => el.closest(".settings-section")?.querySelector("h3")?.textContent)) === "Motion", "the row isn't Motion › Panel animations");
+    check((await text(`${row} output`)) === "0 ms" && (await page.locator('[data-reset="motion"]').isHidden()), "at the default the readout isn't 0 ms with no reset");
+    await page.locator("#panel-animation-duration").fill("225");
+    check((await text(`${row} output`)) === "225 ms" && (await page.evaluate(() => load("gui-panel-animation"))) === "225", `set to 225 the readout is ${await text(`${row} output`)}`);
+    const duration = await page.locator(`${row} .motion-preview .side`).evaluate((el) => getComputedStyle(el).transitionDuration);
     check(duration.split(", ").every((d) => d === "0.225s"), `the preview takes ${duration}`);
-    await press(gui("[data-panel-animation-preview]"));
-    check(!(await page.locator("[data-panel-animation-preview].open").count()), "the preview didn't close");
-    await press(gui("[data-panel-animation-reset]"));
-    check((await text("#panel-animation-row output")) === "0 ms" && (await page.evaluate(() => load("gui-panel-animation"))) === null, "reset didn't return to 0 ms");
+    await press(gui(`${row} .motion-preview`));
+    check(await page.locator(`${row} .motion-preview.closed`).count(), "the preview didn't fold");
+    await press(gui(`${row} .motion-preview`));
+    check(!(await page.locator(`${row} .motion-preview.closed`).count()), "the preview didn't unfold");
+    await press(gui('[data-reset="motion"]'));
+    check((await text(`${row} output`)) === "0 ms" && (await page.evaluate(() => load("gui-panel-animation"))) === null, "reset didn't return to 0 ms");
   }
 
   await step("app view: the diff steps clean up", async () => {
@@ -3875,7 +3911,7 @@ async function sweep(profileName) {
   });
 
   await step("app view: a pull request's title and description edit, its menu closes, reopens, reverts and auto-merges, and its checks, stack, threads and crumbs show", async () => {
-    await tapOrClick('#thread .pr-link[data-pr$="/pull/41"]');
+    await tapOrClick(await threadPrLink(41));
     await waitFor("#41", async () => /Draft the notes/.test(await text("#panel-body .pr-head h3")), 15000);
     await press(gui("#panel-body [data-edit=title]"));
     await page.fill('#panel-body [data-pr-edit="title"]', "Draft the better notes");
@@ -3912,7 +3948,7 @@ async function sweep(profileName) {
     await press(gui("#panel-body [data-pr-more]"));
     await press(menuItem("Reopen pull request"));
     await waitFor("#41 reopened", async () => /pr reopen -- https:\/\/github\.com\/example\/alpha\/pull\/41/.test(readLog("gh.log")) && !/Closed/.test(await text("#panel-body .pr > .crumbs")), 10000);
-    await tapOrClick('#thread .pr-link[data-pr$="/pull/42"]');
+    await tapOrClick(await threadPrLink(42));
     await waitFor("#42", async () => /Merged/.test(await text("#panel-body .pr > .crumbs")), 15000);
     await press(gui('#panel-body [data-pr-tab="summary"]'));
     await waitFor("its stack", () => gui("#panel-body [data-pr-stack]").isVisible(), 10000);
@@ -3939,7 +3975,7 @@ async function sweep(profileName) {
   });
 
   await step("app view: pull request comments filter, sort, reply and comment, and the Code tab submits a review with line comments", async () => {
-    await tapOrClick('#thread .pr-link[data-pr$="/pull/42"]');
+    await tapOrClick(await threadPrLink(42));
     await waitFor("#42", async () => /#42/.test(await text("#panel-body .pr > .crumbs")), 15000);
     await press(gui('#panel-body [data-pr-tab="summary"]'));
     await waitFor("#42's comments", async () => /Why a second line\?/.test(await text("#panel-body .conversation")), 15000);
@@ -3978,13 +4014,13 @@ async function sweep(profileName) {
     await press(gui("#panel-body [data-review-submit]"));
     const review = () => JSON.parse(readLog("gh.log").split("\n").find((l) => l.startsWith("review "))?.slice(7) ?? "null");
     await waitFor("the review", async () => !!review(), 10000);
-    check(JSON.stringify(review()) === JSON.stringify({ body: "Two small notes.", comments: [{ body: "Say why", line: 2, path: "notes.md", side: "RIGHT" }], event: "REQUEST_CHANGES" }), `review: ${JSON.stringify(review())}`);
+    check(sortedJson(review()) === sortedJson({ body: "Two small notes.", comments: [{ body: "Say why", line: 2, path: "notes.md", side: "RIGHT" }], event: "REQUEST_CHANGES" }), `review: ${JSON.stringify(review())}`);
     await press(gui('#panel-body [data-pr-tab="summary"]'));
     await closePanelIfOpen();
   });
 
   await step("app view: the Guide tab has claude write a review guide and walks its stops", async () => {
-    await tapOrClick('#thread .pr-link[data-pr$="/pull/42"]');
+    await tapOrClick(await threadPrLink(42));
     await waitFor("#42", async () => /#42/.test(await text("#panel-body .pr > .crumbs")), 15000);
     await press(gui('#panel-body [data-pr-tab="guide"]'));
     await waitFor("the empty guide", () => gui("#panel-body [data-guide-write]").isVisible());
@@ -4001,7 +4037,7 @@ async function sweep(profileName) {
   });
 
   const openPrPanel = async (n) => {
-    await tapOrClick(`#thread .pr-link[data-pr$="/pull/${n}"]`);
+    await tapOrClick(await threadPrLink(n));
     await waitFor(`#${n}`, async () => new RegExp(`#${n}`).test(await text("#panel-body .pr > .crumbs")) && !(await page.locator("#panel-body .pr-ghost").count()), 15000);
   };
   const style = (selector, prop) => page.locator(selector).first().evaluate((el, p) => getComputedStyle(el)[p], prop);
@@ -4220,7 +4256,8 @@ async function sweep(profileName) {
     await press(gui("#panel-body [data-stack-merge]"));
     await waitFor("the merge dialog", async () => (await text("#shell-dialog h2")) === "Merge 1 pull requests?");
     await press(gui("#shell-dialog [data-stack-run]"));
-    await waitFor("GitHub's merge-async", async () => /^merge-async 41 \{"merge_action":"default","merge_method":"merge","sha":"[0-9a-f]{40}"\}$/m.test(readLog("gh.log")), 15000);
+    const merged = () => readLog("gh.log").split("\n").filter((l) => l.startsWith("merge-async 41 ")).map((l) => JSON.parse(l.slice(15)));
+    await waitFor("GitHub's merge-async", async () => merged().some((b) => /^[0-9a-f]{40}$/.test(b.sha) && sortedJson({ ...b, sha: "" }) === sortedJson({ merge_action: "default", merge_method: "merge", sha: "" })), 15000);
     await waitFor("#41 merged", async () => /Merged/.test(await text("#panel-body .pr > .crumbs")), 10000);
     fs.writeFileSync(path.join(HOME, ".fake-gh-41"), "open");
     fs.rmSync(path.join(HOME, ".fake-gh-stack.json"));
@@ -4289,7 +4326,7 @@ async function sweep(profileName) {
       await page.click("#composer-footer .pr[data-pr]", { modifiers: ["Meta"] });
       await waitFor("the badge to open GitHub", async () => /github\.com\/example\/alpha\/pull\/4\d/.test((await page.evaluate(() => window.__opened)) ?? ""));
       await page.evaluate(() => (window.__opened = ""));
-      await page.click('#thread .pr-link[data-pr$="/pull/41"]', { button: "middle" });
+      await page.click(await threadPrLink(41), { button: "middle" });
       await waitFor("a middle click to open GitHub", async () => /pull\/41$/.test((await page.evaluate(() => window.__opened)) ?? ""));
     }
     await openPanelTo("browser", "Browser");

@@ -249,9 +249,6 @@ function closeFocusedTerminal() {
   closeTerminal(active, s, document.activeElement.closest(".term-pane").dataset.term);
   return true;
 }
-onGuiKey("d", () => splitTerminal(active, shownTerminal(), "horizontal"), { when: panelTerminalFocused });
-onGuiKey("d", () => splitTerminal(active, shownTerminal(), "vertical"), { shift: true, when: panelTerminalFocused });
-onGuiKey("n", () => newTerminalSurface(active), { when: panelTerminalFocused });
 
 const shellKey = (s, id) => `${s.id}\n${id}`;
 function shellTerm(tab, s, id) {

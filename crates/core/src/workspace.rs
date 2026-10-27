@@ -70,11 +70,23 @@ pub struct PrStatus {
     /// The branches it merges from and into, which chain a thread's pull requests into a stack.
     pub head: Option<String>,
     pub base: Option<String>,
+    /// What the thread's preview card shows besides, read in the same gh call.
+    pub number: Option<u64>,
+    pub url: Option<String>,
+    pub author: Option<PrAuthor>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct PrAuthor {
+    pub login: String,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 pub fn pr_status(cwd: &Path, pr: &str, path: Option<&str>) -> Result<PrStatus, String> {
     check_pr(pr)?;
-    parse_pr_status(&gh(cwd, path, &["pr", "view", "--json", "state,isDraft,title,mergedAt,closedAt,headRefName,baseRefName", "--", pr])?)
+    parse_pr_status(&gh(cwd, path, &["pr", "view", "--json", "state,isDraft,title,mergedAt,closedAt,headRefName,baseRefName,number,url,author,createdAt", "--", pr])?)
 }
 
 fn parse_pr_status(view: &str) -> Result<PrStatus, String> {
@@ -90,6 +102,10 @@ fn parse_pr_status(view: &str) -> Result<PrStatus, String> {
         closed_at: Option<String>,
         head_ref_name: Option<String>,
         base_ref_name: Option<String>,
+        number: Option<u64>,
+        url: Option<String>,
+        author: Option<PrAuthor>,
+        created_at: Option<String>,
     }
     let view: View = serde_json::from_str(view).map_err(|e| format!("gh sent a bad answer: {e}"))?;
     let state = match view.state.as_str() {
@@ -98,7 +114,18 @@ fn parse_pr_status(view: &str) -> Result<PrStatus, String> {
         _ if view.is_draft => PrState::Draft,
         _ => PrState::Open,
     };
-    Ok(PrStatus { state, title: view.title, merged_at: view.merged_at, closed_at: view.closed_at, head: view.head_ref_name, base: view.base_ref_name })
+    Ok(PrStatus {
+        state,
+        title: view.title,
+        merged_at: view.merged_at,
+        closed_at: view.closed_at,
+        head: view.head_ref_name,
+        base: view.base_ref_name,
+        number: view.number,
+        url: view.url,
+        author: view.author,
+        created_at: view.created_at,
+    })
 }
 
 /// Checks out the pull request `pr`, a number or URL, in `cwd` with gh.
@@ -629,7 +656,7 @@ mod tests {
         assert_eq!(status(r#"{"state":"OPEN","isDraft":true,"title":"t","mergedAt":null,"closedAt":null}"#).state, PrState::Draft);
         assert_eq!(status(r#"{"state":"CLOSED","isDraft":true,"title":"t","mergedAt":null,"closedAt":"2026-01-02T00:00:00Z"}"#).state, PrState::Closed);
         assert_eq!(
-            status(r#"{"state":"MERGED","isDraft":false,"title":"Add notes","mergedAt":"2026-01-01T10:40:00Z","closedAt":"2026-01-01T10:40:00Z","headRefName":"notes","baseRefName":"main"}"#),
+            status(r#"{"state":"MERGED","isDraft":false,"title":"Add notes","mergedAt":"2026-01-01T10:40:00Z","closedAt":"2026-01-01T10:40:00Z","headRefName":"notes","baseRefName":"main","number":42,"url":"https://github.com/example/alpha/pull/42","author":{"id":"U_1","is_bot":false,"login":"sweeper","name":"Sweep"},"createdAt":"2026-01-01T10:00:00Z"}"#),
             PrStatus {
                 state: PrState::Merged,
                 title: "Add notes".into(),
@@ -637,6 +664,10 @@ mod tests {
                 closed_at: Some("2026-01-01T10:40:00Z".into()),
                 head: Some("notes".into()),
                 base: Some("main".into()),
+                number: Some(42),
+                url: Some("https://github.com/example/alpha/pull/42".into()),
+                author: Some(PrAuthor { login: "sweeper".into(), name: Some("Sweep".into()) }),
+                created_at: Some("2026-01-01T10:00:00Z".into()),
             }
         );
         assert!(parse_pr_status("not json").unwrap_err().contains("bad answer"));
