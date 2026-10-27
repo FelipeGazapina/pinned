@@ -2875,7 +2875,8 @@ async function sweep(profileName) {
     await waitFor("the shell", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1, 10000);
     await page.locator("#panel-body .xterm-helper-textarea").focus();
     const wrapped = `http://localhost:${port}/a?w=${"q".repeat(220)}END`;
-    await page.keyboard.type(`clear; echo ${wrapped}; echo ./notes.md:1\n`);
+    // Quoted, as the panel's shell can be zsh, which takes the ? for a glob.
+    await page.keyboard.type(`clear; echo '${wrapped}'; echo ./notes.md:1\n`);
     const spot = (needle, back) => page.evaluate(([n, b]) => {
       for (const row of document.querySelectorAll("#panel-body .xterm-rows > div")) {
         const i = row.textContent.indexOf(n);
