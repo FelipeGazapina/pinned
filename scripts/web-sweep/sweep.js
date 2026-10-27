@@ -7736,9 +7736,10 @@ async function sweep(profileName) {
     await openPaletteKeys();
     await page.keyboard.type("chat width");
     await waitFor("the setting", async () => (await page.locator("#palette .group:has(.label:text-is('Settings')) .item .name").allTextContents())[0] === "Chat width");
-    check((await text("#palette .group:has(.label:text-is('Settings')) .item .sub")) === "Settings · General", `subtitle: ${await text("#palette .group:has(.label:text-is('Settings')) .item .sub")}`);
+    check((await text("#palette .group:has(.label:text-is('Settings')) .item .sub")) === "Settings · Appearance", `subtitle: ${await text("#palette .group:has(.label:text-is('Settings')) .item .sub")}`);
     await press(paletteRow("Chat width"));
-    await waitFor("General with Chat width marked", () => page.locator("#settings-page .setting-found").first().isVisible());
+    await waitFor("the Appearance page", async () => (await text("#settings-page h2")) === "Appearance");
+    await waitFor("the Chat width row in focus", () => page.evaluate(() => document.activeElement?.id === "chat-width"));
     await page.evaluate(() => settingsOpen() && toggleSettings());
   });
 
