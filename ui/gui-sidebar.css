@@ -219,7 +219,7 @@ body.dragging-row .settled-head.drop-target .line { background: rgb(var(--g-prim
   #sidebar-resize, #chat-head .crumb .stats { display: none; }
 }
 @media (pointer: coarse) {
-  #side-menu button { min-height: 40px; }
+  #side-menu button, #chat-head .crumb :is(.project, .parent, button.title) { min-height: 40px; }
   #sidebar .search .clear { width: 40px; height: 40px; }
 }
 
