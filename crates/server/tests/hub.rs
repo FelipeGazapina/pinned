@@ -17,7 +17,10 @@ use std::time::{Duration, Instant};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
-const POSTGRES: &str = "postgres://pinned@127.0.0.1:5499";
+/// The test Postgres, where the role `pinned` owns a database `pinned`. Override with PINNED_TEST_POSTGRES.
+fn postgres() -> String {
+    std::env::var("PINNED_TEST_POSTGRES").unwrap_or_else(|_| "postgres://pinned@127.0.0.1:5499".into())
+}
 const WAIT: Duration = Duration::from_secs(10);
 
 struct TestHub {
@@ -46,7 +49,7 @@ impl TestHub {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let running = runtime
             .block_on(pinned_server::start(pinned_server::Config {
-                db: format!("{POSTGRES}/{database}"),
+                db: format!("{}/{database}", postgres()),
                 listen: "127.0.0.1:0".into(),
                 ui: dir.join("ui"),
                 downloads: dir.join("downloads"),
@@ -81,7 +84,7 @@ fn admin(sql: &str) {
 fn admin_on(database: &str, sql: &str) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let (client, connection) = tokio_postgres::connect(&format!("{POSTGRES}/{database}"), tokio_postgres::NoTls).await.unwrap();
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
         tokio::spawn(connection);
         client.batch_execute(sql).await.unwrap();
     });
@@ -711,7 +714,7 @@ fn integration_keys_reach_postgres_sealed() {
     let sealed = || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            let (db, connection) = tokio_postgres::connect(&format!("{POSTGRES}/{}", hub.database), tokio_postgres::NoTls).await.unwrap();
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
             tokio::spawn(connection);
             db.query_one("select secrets::text from accounts", &[]).await.unwrap().get::<_, String>(0)
         })
