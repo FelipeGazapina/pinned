@@ -13,7 +13,7 @@ if ! command -v gh >/dev/null 2>&1 && [ ! -x "$DIR/bin/gh" ]; then
 fi
 # The hub boots a box only while its node is offline: a node left running holds a token the hub replaced.
 if [ -f "$DIR/node.pid" ]; then
-  kill "$(cat "$DIR/node.pid")" 2>/dev/null || true
+  grep -qs pinned-server "/proc/$(cat "$DIR/node.pid")/cmdline" && { kill "$(cat "$DIR/node.pid")" 2>/dev/null || true; }
   rm -f "$DIR/node.pid"
 fi
 sh "$DIR/start.sh"

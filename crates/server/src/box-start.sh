@@ -2,8 +2,9 @@
 # what a restart may have reset outside /workspace/home.
 DIR=/workspace/home/.pinned
 [ -f "$DIR/account.json" ] && [ -x "$DIR/pinned-server" ] || exit 0
-# Never `pkill -f`: inside `box exec` it matches its own `sh -c` line.
-[ -f "$DIR/node.pid" ] && kill -0 "$(cat "$DIR/node.pid")" 2>/dev/null && exit 0
+# Never `pkill -f`: inside `box exec` it matches its own `sh -c` line. The pid file outlives a
+# container restart, where its number may belong to another process, so the command line must match.
+[ -f "$DIR/node.pid" ] && grep -qs pinned-server "/proc/$(cat "$DIR/node.pid")/cmdline" && exit 0
 grep -qs "$DIR/bin" "$HOME/.profile" || echo "export PATH=\"$DIR/bin:\$PATH\"" >>"$HOME/.profile"
 export PATH="$DIR/bin:$PATH"
 # Interactive claude stops at the theme picker, the folder-trust dialog and, for a workflow that
