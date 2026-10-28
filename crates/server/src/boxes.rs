@@ -11,6 +11,7 @@ use pinned_core::connectors::{BoxSize, BoxStep, Run};
 use pinned_core::upstash::{self, BoxId, Exec, Keys, Listed, NewBox};
 use pinned_core::wire::{Call, RunSpec};
 use pinned_core::github;
+use pinned_core::machine;
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -249,8 +250,10 @@ pub fn bootstrap_script(hub: &str) -> String {
 }
 
 /// The script that starts the box's node on every container start. It carries no secret.
-pub fn start_script(login: &str) -> String {
-    START.replace("{{login}}", &quoted(login))
+/// `repo` is the run's repository, whose clone it marks trusted for claude.
+pub fn start_script(login: &str, repo: Option<&str>) -> String {
+    let clones = serde_json::to_string(&repo.and_then(machine::repo_name).into_iter().collect::<Vec<_>>()).unwrap();
+    START.replace("{{login}}", &quoted(login)).replace("{{clones}}", &quoted(&clones))
 }
 
 /// The secrets the node and its sessions run with, as `start.sh` sources them.
@@ -450,7 +453,7 @@ impl Boxes {
         }
         self.api.write(key, id, &format!("{DIR}/account.json"), serde_json::to_string_pretty(&creds).unwrap()).await?;
         self.api.write(key, id, &format!("{DIR}/box.env"), box_env(keys, connectors.github_token().as_deref())).await?;
-        self.api.write(key, id, &format!("{DIR}/start.sh"), start_script(&login)).await?;
+        self.api.write(key, id, &format!("{DIR}/start.sh"), start_script(&login, row.spec.repo.as_deref())).await?;
         let exec = self.api.exec(key, id, bootstrap_script(&hub.public_url)).await?;
         if exec.exit_code != 0 {
             return Err(format!("the bootstrap failed: {}", tail(&exec)));
@@ -682,7 +685,7 @@ mod tests {
     #[test]
     fn the_scripts_a_box_runs_carry_no_secret() {
         let keys = Keys { api_key: "box_SECRETKEY".into(), claude_token: "sk-ant-oat01-SECRETCLAUDE".into() };
-        let scripts = [bootstrap_script("https://hub.example"), start_script("felipe")];
+        let scripts = [bootstrap_script("https://hub.example"), start_script("felipe", Some("acme/app"))];
         for script in &scripts {
             for secret in ["box_SECRETKEY", "SECRETCLAUDE", "ghp_SECRETGITHUB", "machine-token"] {
                 assert!(!script.contains(secret), "{secret} in {script}");
@@ -691,11 +694,13 @@ mod tests {
         }
         assert!(scripts[0].contains("curl -fsSL 'https://hub.example/download/pinned-server-aarch64-unknown-linux-musl'"));
         assert!(scripts[1].contains("git config --global user.email 'felipe@users.noreply.github.com'"));
+        assert!(scripts[1].contains(r#"const clones = ["app"].map"#), "{}", scripts[1]);
+        assert!(start_script("felipe", None).contains("const clones = [].map"));
         assert_eq!(
             box_env(&keys, Some("ghp_SECRETGITHUB")),
             "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-SECRETCLAUDE'\nGH_TOKEN='ghp_SECRETGITHUB'\n"
         );
-        assert_eq!(start_script("o'brien").lines().find(|l| l.contains("user.name")), Some("git config --global user.name 'o'\\''brien'"));
+        assert_eq!(start_script("o'brien", None).lines().find(|l| l.contains("user.name")), Some("git config --global user.name 'o'\\''brien'"));
     }
 
     #[test]

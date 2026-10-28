@@ -6,15 +6,21 @@ DIR=/workspace/home/.pinned
 [ -f "$DIR/node.pid" ] && kill -0 "$(cat "$DIR/node.pid")" 2>/dev/null && exit 0
 grep -qs "$DIR/bin" "$HOME/.profile" || echo "export PATH=\"$DIR/bin:\$PATH\"" >>"$HOME/.profile"
 export PATH="$DIR/bin:$PATH"
-# Interactive claude stops at the theme picker and the folder-trust dialog unless these are set.
+# Interactive claude stops at the theme picker, the folder-trust dialog and, for a workflow that
+# bypasses permissions, the bypass warning, unless these are set. Trusting a parent covers plain
+# folders but not a git repository, so the run's clone gets its own entry.
 node -e '
 const fs = require("fs"), os = require("os"), file = os.homedir() + "/.claude.json";
-let c = {};
-try { c = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+const read = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return {}; } };
+const settings = os.homedir() + "/.claude/settings.json";
+fs.mkdirSync(os.homedir() + "/.claude", { recursive: true });
+fs.writeFileSync(settings, JSON.stringify({ ...read(settings), skipDangerousModePermissionPrompt: true }, null, 2));
+const c = read(file);
 c.hasCompletedOnboarding = true;
 c.theme = c.theme || "dark";
 c.projects = c.projects || {};
-for (const p of ["/workspace/home", "/home/boxuser", os.homedir()]) c.projects[p] = { ...c.projects[p], hasTrustDialogAccepted: true };
+const clones = {{clones}}.map((name) => os.homedir() + "/pinned/" + name);
+for (const p of ["/workspace/home", "/home/boxuser", os.homedir(), ...clones]) c.projects[p] = { ...c.projects[p], hasTrustDialogAccepted: true };
 fs.writeFileSync(file, JSON.stringify(c, null, 2));
 '
 set -a
