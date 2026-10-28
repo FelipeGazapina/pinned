@@ -8671,6 +8671,8 @@ async function sweep(profileName) {
     await page.waitForSelector("#limit-note:not([hidden]) [data-switch-account=spare]", { timeout: 15000 });
     const note = await text("#limit-note");
     check(/hit its usage limit/.test(note), `the note reads "${note}"`);
+    // The phone's sidebar sheet, open from the step before, covers the composer's note.
+    if (touch) await hideSidebar();
     await press(page.locator("#limit-note [data-switch-account=spare]"));
     await waitFor("the thread under Spare", () => page.evaluate(() => active?.view.account === "spare" && !active.view.resume_at), 15000);
     check(await page.locator("#limit-note").isHidden(), "the limit note stayed");
