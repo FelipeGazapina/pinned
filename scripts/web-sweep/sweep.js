@@ -5753,8 +5753,12 @@ async function sweep(profileName) {
       check((await page.locator("#prompt-mirror .fence").evaluateAll((els) => els.map((e) => getComputedStyle(e).color))).every((c) => /rgba\(.*, 0\)|transparent/.test(c)), "the fences show");
       const picker = page.locator("#prompt-blocks .block-lang");
       check((await picker.innerText()).trim() === "TypeScript" && (await picker.getAttribute("aria-label")) === "Code language: TypeScript", `the picker reads ${await picker.innerText()}`);
-      const [button, fence] = [await rect("#prompt-blocks .block-lang"), await rect("#prompt-mirror .fence-open")];
-      check(Math.abs(button.top + button.height / 2 - (fence.top + fence.height / 2)) <= 3, "the picker isn't on the fence line");
+      // The picker is placed apart from the mirror's redraw, so it can trail it.
+      const offFence = async () => {
+        const [button, fence] = [await rect("#prompt-blocks .block-lang"), await rect("#prompt-mirror .fence-open")];
+        return Math.abs(button.top + button.height / 2 - (fence.top + fence.height / 2));
+      };
+      await waitFor("the picker on the fence line", async () => (await offFence()) <= 3, 2000).catch(async () => check(false, `the picker sits ${await offFence()}px off the fence line`));
       await press(picker);
       await waitFor("the languages", () => page.locator('#composer-menu[data-kind="languages"]').isVisible());
       check((await page.getAttribute('#composer-menu[data-kind="languages"] .search', "placeholder")) === "Search languages", "the search isn't T3's");
