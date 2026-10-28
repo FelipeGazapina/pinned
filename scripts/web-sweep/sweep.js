@@ -120,9 +120,11 @@ async function sweep(profileName) {
   page.on("requestfailed", (r) => seen.push(`requestfailed: ${r.method()} ${r.url()} ${r.failure()?.errorText}`));
   page.on("response", (r) => r.status() >= 400 && seen.push(`HTTP ${r.status()}: ${r.request().method()} ${r.url()}`));
 
-  // On a phone the chat header folds these into its Options menu, so a hidden one is reached there.
+  // On a phone the chat header folds these into its Options menu, so a hidden one is reached there,
+  // and the sidebar's sheet covers the header, so it closes first.
   const HEAD_MENU = { "#toggle-panel": /side panel$/, "#toggle-terminal": /terminal$/, "#toggle-details": /^Thread details$/ };
   const tapOrClick = async (selector) => {
+    if (HEAD_MENU[selector] && touch) await hideSidebar();
     if (HEAD_MENU[selector] && !(await page.locator(selector).isVisible())) {
       await tapOrClick("#head-more");
       return press(page.locator("#panel-menu button", { hasText: HEAD_MENU[selector] }));
@@ -596,11 +598,18 @@ async function sweep(profileName) {
   const openComposer = async () => {
     if (touch) await tapOrClick("#prompt");
   };
+  // The phone's sheet is still visible while it slides out, so the body's state says whether it is open.
+  const sidebarShown = async () => (await page.evaluate(() => document.body.dataset.sidebar === "open")) && (await page.locator("#sidebar").isVisible());
+  const hideSidebar = async () => {
+    if (!(await sidebarShown())) return;
+    await tapOrClick("#sidebar-toggle");
+    await waitFor("the sidebar to close", async () => !(await page.locator("#sidebar").isVisible()));
+  };
   // A page's header carries its own toggle while the chat's is hidden under it.
   const showSidebar = async () => {
-    if (await page.locator("#sidebar").isVisible()) return;
+    if (await sidebarShown()) return;
     await tapOrClick((await page.locator("#chat-sidebar-toggle").isVisible()) ? "#chat-sidebar-toggle" : "#page-view .side-toggle");
-    await waitFor("the sidebar", () => page.locator("#sidebar").isVisible());
+    await waitFor("the sidebar", sidebarShown);
   };
 
   await step("app view: switch from the terminal, threads in the sidebar", async () => {
@@ -6543,6 +6552,8 @@ async function sweep(profileName) {
     await showSidebar();
     check((await tone(`${rowSel(alpha)} .l3 .branch`)) === "rgba(129, 129, 129, 0.4)", `the branch is ${await tone(`${rowSel(alpha)} .l3 .branch`)}`);
 
+    // The phone's sidebar sheet covers the chat header's Options menu, which opens the panel there.
+    if (touch) await hideSidebar();
     await openPanelTo("terminal", "Terminal");
     await waitFor("the shell", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1, 10000);
     await sleep(500);
@@ -6562,6 +6573,7 @@ async function sweep(profileName) {
     await page.locator("#panel-body .xterm-helper-textarea").focus();
     await page.keyboard.press("Control+c");
     await waitFor("the pulse to stop", async () => !(await page.locator(pulse).count()), 8000);
+    if (touch) await hideSidebar();
     await press(gui('#panel-tabs .ptab[data-panel="terminal"] .lead'));
     await closePanelIfOpen();
 
@@ -6843,10 +6855,7 @@ async function sweep(profileName) {
   // At phone width the metric and period are T3 Code's selects: a button and its menu.
   const USAGE_LABELS = { cost: "Cost", tokens: "Tokens", limits: "Limits", 1: "Past 24h", 7: "7 days", 30: "30 days", 90: "90 days" };
   const usagePick = async (seg, value) => {
-    if (touch && (await page.locator("#sidebar").isVisible())) {
-      await tapOrClick("#sidebar-toggle");
-      await waitFor("the sidebar to close", async () => !(await page.locator("#sidebar").isVisible()));
-    }
+    if (touch) await hideSidebar();
     if (await page.locator(`#page-view .seg[data-seg="${seg}"]`).isVisible()) return press(page.locator(`#page-view .seg[data-seg="${seg}"] button[data-value="${value}"]`));
     await press(page.locator(`#page-view .pick[data-pick="${seg}"]`));
     await press(page.locator("#usage-menu button", { hasText: USAGE_LABELS[value] }));
