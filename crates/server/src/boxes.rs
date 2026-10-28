@@ -197,6 +197,13 @@ struct Timers {
     offline_since: Option<Instant>,
 }
 
+/// How far `boot` brought a row.
+enum Boot {
+    Online,
+    /// Another hub process moved the row on, as during a deploy, so this one stops driving it.
+    Moved,
+}
+
 /// Whether a running row's session has ended. Every end rule lives here.
 fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
     let (offline, gone, exited, quiet) = match seen {
@@ -343,7 +350,7 @@ impl Boxes {
             upstash: None,
             connector: run.connector,
             subject: run.subject,
-            spec,
+            spec: spec.clone(),
             size: step.size,
             phase: Phase::Creating,
             age: Duration::ZERO,
@@ -358,19 +365,37 @@ impl Boxes {
         let Some(_driving) = driving else {
             return Err("Upstash Box: its box is still booting; the next check tries again".into());
         };
-        self.drive(hub, account, row, &keys).await.map_err(|e| format!("Upstash Box: {e}"))
+        // The run asked for now, which may carry newer thread messages than the one the row was made with.
+        self.drive(hub, account, row, &spec, &keys).await.map_err(|e| format!("Upstash Box: {e}"))
     }
 
-    /// Brings the row to running: its run answered by its box's node.
-    async fn drive(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow, keys: &Keys) -> Result<(), String> {
+    /// Brings the row to running: its box's node online within `boot_wait`, then `spec` answered
+    /// by it within `RUN_WAIT`, which leaves a slow clone its time. A row another hub process moved
+    /// is left to that process.
+    async fn drive(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow, spec: &RunSpec, keys: &Keys) -> Result<(), String> {
         if row.phase == Phase::Running {
-            return self.dispatch(hub, account, &row).await;
+            return self.dispatch(hub, account, &row, spec).await;
         }
-        let left = self.policy.boot_wait.saturating_sub(row.age);
-        let booted = match tokio::time::timeout(left, self.boot(hub, account, &row, keys)).await {
-            Ok(booted) => booted,
-            Err(_) => Err(format!("the box did not boot within {} s", self.policy.boot_wait.as_secs())),
+        let machine = row.machine.to_string();
+        let booted = if row.phase == Phase::Booting && account.is_online(&machine) {
+            Ok(Boot::Online)
+        } else {
+            // A row resumed after a restart keeps some time, since its age counts the hub's downtime.
+            let left = self.policy.boot_wait.saturating_sub(row.age).max(self.policy.boot_wait / 2);
+            match tokio::time::timeout(left, self.boot(hub, account, &row, keys)).await {
+                Ok(booted) => booted,
+                Err(_) => Err(format!("the box did not boot within {} s", left.as_secs())),
+            }
         };
+        let booted = match booted {
+            Ok(Boot::Moved) => return Err(format!("box {} is driven by another hub; the next check tries again", row.id)),
+            Ok(Boot::Online) => self.dispatch(hub, account, &row, spec).await,
+            Err(e) => Err(e),
+        };
+        if booted.is_ok() {
+            // Another hub may have moved it on already, which is just as good.
+            hub.db.set_box_phase(&row.id, &Phase::Booting, &Phase::Running).await?;
+        }
         if let Err(e) = &booted {
             eprintln!("pinned-server: box {} of account {} failed: {e}", row.id, account.id);
             self.cooling.lock().unwrap().insert((account.id, row.connector.clone()), Instant::now());
@@ -389,11 +414,10 @@ impl Boxes {
         booted
     }
 
-    /// Creating → booting → running. Each step checks what is done already: the box, by the row or
-    /// by its label; the node, by whether it is online; the run, by the node's tabs.
-    async fn boot(&self, hub: &Hub, account: &Arc<Account>, row: &BoxRow, keys: &Keys) -> Result<(), String> {
+    /// Creating → booting, until the box's node is online. Each step checks what is done already:
+    /// the box, by the row or by its label; the node, by whether it is online.
+    async fn boot(&self, hub: &Hub, account: &Arc<Account>, row: &BoxRow, keys: &Keys) -> Result<Boot, String> {
         let key = keys.api_key.as_str();
-        let moved = || format!("box {} was taken over by another hub", row.id);
         let mut upstash = row.upstash.clone();
         if row.phase == Phase::Creating {
             let id = match upstash {
@@ -412,7 +436,7 @@ impl Boxes {
                 },
             };
             if !hub.db.box_created(&row.id, &id).await? {
-                return Err(moved());
+                return Ok(Boot::Moved);
             }
             upstash = Some(id);
         }
@@ -424,11 +448,7 @@ impl Boxes {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
-        self.dispatch(hub, account, row).await?;
-        if !hub.db.set_box_phase(&row.id, &Phase::Booting, &Phase::Running).await? {
-            return Err(moved());
-        }
-        Ok(())
+        Ok(Boot::Online)
     }
 
     /// Gives the box's machine a fresh token, writes what its node signs in and runs with, and
@@ -463,12 +483,12 @@ impl Boxes {
 
     /// Hands the run to the row's machine, unless its session there already works on it. The
     /// machine answers a run sent again with the session it started.
-    async fn dispatch(&self, hub: &Hub, account: &Arc<Account>, row: &BoxRow) -> Result<(), String> {
+    async fn dispatch(&self, hub: &Hub, account: &Arc<Account>, row: &BoxRow, spec: &RunSpec) -> Result<(), String> {
         let machine = row.machine.to_string();
         if account.working_on(&row.connector, &row.subject, |id| *id == machine) {
             return Ok(());
         }
-        let mut spec = row.spec.clone();
+        let mut spec = spec.clone();
         spec.token = hub.connectors(account).await?.github_token().filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
         hub.call_machine(account, &machine, Call::Run { run: spec }, RUN_WAIT).await.map(drop).map_err(String::from)
     }
@@ -564,7 +584,7 @@ impl Boxes {
                         let (hub, account, keys) = (hub.clone(), account.clone(), keys.clone());
                         tokio::spawn(async move {
                             let Some(_driving) = hub.boxes.drive_guard(&row.id) else { return };
-                            if let Err(e) = hub.boxes.drive(&hub, &account, row, &keys).await {
+                            if let Err(e) = hub.boxes.drive(&hub, &account, row.clone(), &row.spec, &keys).await {
                                 eprintln!("pinned-server: could not finish booting a box of account {}: {e}", account.id);
                             }
                         });
