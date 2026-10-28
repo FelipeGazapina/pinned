@@ -96,6 +96,14 @@ const projectName = (tab) => (threadOf(tab).workspace?.scratch ? "No project" : 
 const firstPrompt = (tab) => threadOf(tab).items.find((i) => i.kind === "user")?.text.split("\n")[0];
 const threadTitle = (tab) => sideMarks.titles[threadKey(tab)] || tab.view.title || firstPrompt(tab) || "New thread";
 /** `text` as a head that CSS truncates and its last 8 characters, once it is longer than `over`. */
+/** Puts `html` in `el` unless it is already there. A redraw that rewrites a control swaps the node a press
+ * landed on, and WebKit then drops the click, so controls that redraw on every render draw through this. */
+const drawnHtml = new WeakMap();
+function setHtml(el, html) {
+  if (drawnHtml.get(el) === html && el.isConnected) return;
+  drawnHtml.set(el, html);
+  el.innerHTML = html;
+}
 const middle = (text, over = 14) => (text.length > over ? `<span class="head">${esc(text.slice(0, -8))}</span><span class="tail">${esc(text.slice(-8))}</span>` : `<span class="head">${esc(text)}</span>`);
 const prOf = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kind === "pr");
 /** claude's hooks report no answer to a permission menu, so a permission notice with no menu on

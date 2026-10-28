@@ -146,7 +146,7 @@ function renderComposer(tab) {
   const send = document.getElementById("send");
   const blocked = tab && sendBlocked(tab);
   const spinning = composer.dataset.sending === "true" || blocked === "Connecting" || blocked === "Preparing worktree";
-  send.innerHTML = icon(spinning ? "loader-circle" : working && !empty ? "list-plus" : "arrow-up");
+  setHtml(send, icon(spinning ? "loader-circle" : working && !empty ? "list-plus" : "arrow-up"));
   composer.dataset.spinning = spinning;
   send.disabled = !!blocked;
   const keys = needsMod(prompt.value) ? `${SEND_MOD}Enter` : "Enter";
@@ -171,15 +171,13 @@ function renderComposer(tab) {
   renderDrawer();
   if (tab) drainIdle(tab);
   const footer = document.getElementById("composer-footer");
-  if (!tab) return (footer.innerHTML = "");
+  if (!tab) return setHtml(footer, "");
   const pr = prOf(tab);
   const ws = t.workspace;
-  footer.innerHTML = `${workspaceHtml(tab)}
+  setHtml(footer, `${workspaceHtml(tab)}
     <span class="spacer"></span>
     ${prBadge(tab, "button", pr)}
-    ${ws?.branch ? `<button type="button" class="branch" title="${esc(ws.branch)} · ${bindingLabel("composer.branch") ?? ""}">${icon("git-branch")}<span>${esc(ws.branch)}</span>${icon("chevron-down", "chev")}</button>` : ""}`;
-  const branchLabel = footer.querySelector(".branch > span");
-  if (branchLabel) branchLabel.innerHTML = middle(ws.branch, 24);
+    ${ws?.branch ? `<button type="button" class="branch" title="${esc(ws.branch)} · ${bindingLabel("composer.branch") ?? ""}">${icon("git-branch")}<span>${middle(ws.branch, 24)}</span>${icon("chevron-down", "chev")}</button>` : ""}`);
   hostControls();
   renderHero(tab);
   prompt.placeholder = placeholderFor(tab, t);
@@ -193,7 +191,7 @@ function renderLimitNote(tab) {
   if (!at) return;
   const time = new Date(at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const buttons = switchTargets(tab).map((a) => `<button type="button" class="outline" data-switch-account="${esc(a.id)}">Continue under ${esc(a.name)}</button>`);
-  note.innerHTML = `<span>${icon("circle-alert")}${esc(accountName(tab.machine, tab.view.account))} hit its usage limit. This thread continues by itself at ${esc(time)}.</span>${buttons.join("")}`;
+  setHtml(note, `<span>${icon("circle-alert")}${esc(accountName(tab.machine, tab.view.account))} hit its usage limit. This thread continues by itself at ${esc(time)}.</span>${buttons.join("")}`);
 }
 
 document.getElementById("limit-note").onclick = (e) => {
@@ -1345,10 +1343,7 @@ function renderControls(tab) {
   const label = tab?.view.running && traitsLabel(tab);
   const traitsBlock = document.getElementById("traits-block");
   traitsBlock.hidden = !label || !traitEntries(tab).length;
-  if (!traitsBlock.hidden && traitsButton.dataset.label !== label) {
-    traitsButton.dataset.label = label;
-    traitsButton.innerHTML = `${icon("brain")}<span class="name">${esc(label)}</span>${icon("chevron-down")}`;
-  }
+  if (!traitsBlock.hidden) setHtml(traitsButton, `${icon("brain")}<span class="name">${esc(label)}</span>${icon("chevron-down")}`);
   traitsButton.setAttribute("aria-label", label || "Reasoning");
   const mode = tab?.view.running && MODES[tab.mode] && tab.mode;
   document.getElementById("mode-block").hidden = !mode;
@@ -2296,7 +2291,7 @@ function renderGitAction(tab) {
     main.disabled = true;
     main.dataset.action = "";
     main.title = gitRun.status;
-    main.innerHTML = `${icon("loader-circle", "spin")}<span class="progress">${esc(gitRun.status)}</span><span class="elapsed">${Math.floor((Date.now() - gitRun.at) / 1000)}s</span>`;
+    setHtml(main, `${icon("loader-circle", "spin")}<span class="progress">${esc(gitRun.status)}</span><span class="elapsed">${Math.floor((Date.now() - gitRun.at) / 1000)}s</span>`);
     more.hidden = true;
     return renderDetails(tab);
   }
@@ -2309,7 +2304,7 @@ function renderGitAction(tab) {
   else for (const k of ["tip", "tipSide", "tipDelay"]) delete main.dataset[k];
   main.dataset.action = quick.disabled ? "" : quick.action ?? "";
   main.removeAttribute("title");
-  main.innerHTML = `${icon(GIT_ICONS[quick.action] ?? "git-commit")}<span class="label">${esc(quick.label)}</span>`;
+  setHtml(main, `${icon(GIT_ICONS[quick.action] ?? "git-commit")}<span class="label">${esc(quick.label)}</span>`);
   more.hidden = !t.workspace.repo;
   renderDetails(tab);
 }
