@@ -210,7 +210,8 @@ function popAttr(html) {
 let popHide = 0;
 function showUsagePop(trigger, pinned = false) {
   clearTimeout(popHide);
-  usagePop.innerHTML = usagePops.get(Number(trigger.dataset.pop)) ?? "";
+  usagePop.html = usagePops.get(Number(trigger.dataset.pop)) ?? "";
+  usagePop.innerHTML = usagePop.html;
   usagePop.trigger = trigger;
   usagePop.pinned = pinned;
   usagePop.hidden = false;
@@ -224,10 +225,19 @@ const hideUsagePop = () => {
   usagePop.hidden = true;
   usagePop.trigger = null;
 };
+/** Whether `trigger` is the one the popover shows for. The page redraws as limits and usage arrive,
+ * which swaps in a new trigger for the same popover, so a detached one is matched by what it says. */
+function popShownFor(trigger) {
+  if (usagePop.hidden || !usagePop.trigger) return false;
+  if (usagePop.trigger === trigger) return true;
+  if (usagePop.trigger.isConnected || usagePops.get(Number(trigger.dataset.pop)) !== usagePop.html) return false;
+  usagePop.trigger = trigger;
+  return true;
+}
 document.addEventListener("pointerover", (e) => {
   if (e.pointerType === "touch") return;
   const trigger = e.target.closest?.("[data-pop]");
-  if (trigger && trigger !== usagePop.trigger) showUsagePop(trigger);
+  if (trigger && !popShownFor(trigger)) showUsagePop(trigger);
   else if (trigger || e.target.closest?.("#usage-pop")) clearTimeout(popHide);
   else if (!usagePop.hidden && !usagePop.pinned) {
     clearTimeout(popHide);
@@ -236,7 +246,7 @@ document.addEventListener("pointerover", (e) => {
 });
 document.addEventListener("click", (e) => {
   const trigger = e.target.closest?.("[data-pop]");
-  if (trigger) return usagePop.trigger === trigger && usagePop.pinned ? hideUsagePop() : showUsagePop(trigger, true);
+  if (trigger) return popShownFor(trigger) && usagePop.pinned ? hideUsagePop() : showUsagePop(trigger, true);
   if (!e.target.closest?.("#usage-pop")) hideUsagePop();
 });
 window.addEventListener("keydown", (e) => {
