@@ -591,9 +591,10 @@ async function sweep(profileName) {
     const r = await rect("#thread");
     await page.touchscreen.tap(r.left + 4, r.top + r.height / 2);
   };
+  // A page's header carries its own toggle while the chat's is hidden under it.
   const showSidebar = async () => {
     if (await page.locator("#sidebar").isVisible()) return;
-    await tapOrClick("#chat-sidebar-toggle");
+    await tapOrClick((await page.locator("#chat-sidebar-toggle").isVisible()) ? "#chat-sidebar-toggle" : "#page-view .side-toggle");
     await waitFor("the sidebar", () => page.locator("#sidebar").isVisible());
   };
 
@@ -6827,11 +6828,6 @@ async function sweep(profileName) {
       "claude-opus-5-5": { input_cost_per_token: 5e-6, output_cost_per_token: 25e-6, cache_read_input_token_cost: 0.5e-6, cache_creation_input_token_cost: 6.25e-6 },
     }));
   };
-  const pageSidebar = async () => {
-    if (await page.locator("#sidebar").isVisible()) return;
-    await tapOrClick("#page-view .side-toggle");
-    await waitFor("the sidebar", () => page.locator("#sidebar").isVisible());
-  };
   // At phone width the metric and period are T3 Code's selects: a button and its menu.
   const USAGE_LABELS = { cost: "Cost", tokens: "Tokens", limits: "Limits", 1: "Past 24h", 7: "7 days", 30: "30 days", 90: "90 days" };
   const usagePick = async (seg, value) => {
@@ -6852,7 +6848,7 @@ async function sweep(profileName) {
     await tapOrClick('#sidebar footer [data-open-page="usage"]');
     await waitFor("the Usage page", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
     check(!(await page.locator("#chat").isVisible()), "the thread still shows beside Usage");
-    await pageSidebar();
+    await showSidebar();
     check(await page.locator("#sidebar footer .back").isVisible(), "the footer has no Back button");
     await waitFor("four limit windows", async () => (await page.locator("#page-view .limit-card").count()) === 4, 15000);
     const left = await page.locator("#page-view .limit-card .figure b").allTextContents();
@@ -6892,7 +6888,7 @@ async function sweep(profileName) {
     check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
     check(JSON.parse(await page.evaluate(() => load("gui-usage-page"))).days === 1, "the period wasn't saved");
     if (touch) {
-      await pageSidebar();
+      await showSidebar();
       await tapOrClick("#sidebar footer .back");
     } else await page.keyboard.press("Escape");
     await waitFor("the thread again", () => page.locator("#chat").isVisible());
@@ -6953,7 +6949,7 @@ async function sweep(profileName) {
     const bad = await overflowing();
     check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
     if (touch) {
-      await pageSidebar();
+      await showSidebar();
       await tapOrClick("#sidebar footer .back");
     } else await page.keyboard.press("Escape");
     await waitFor("the thread again", () => page.locator("#chat").isVisible());
@@ -6971,7 +6967,7 @@ async function sweep(profileName) {
   };
   const leaveUsage = async () => {
     if (touch) {
-      await pageSidebar();
+      await showSidebar();
       await tapOrClick("#sidebar footer .back");
     } else await page.keyboard.press("Escape");
     await waitFor("the thread again", () => page.locator("#chat").isVisible());
@@ -7307,7 +7303,7 @@ async function sweep(profileName) {
     await waitFor("#42's details", async () => (await page.locator("#panel-body", { hasText: "Add notes" }).count()) > 0, 10000);
     if (touch) {
       await page.evaluate(() => closePanel());
-      await pageSidebar();
+      await showSidebar();
       await tapOrClick("#sidebar footer .back");
     } else {
       await page.keyboard.press("Escape");
@@ -7393,7 +7389,7 @@ async function sweep(profileName) {
       await page.evaluate(() => closePanel());
       await page.keyboard.press("Escape");
     } else {
-      await pageSidebar();
+      await showSidebar();
       await tapOrClick("#sidebar footer .back");
     }
     await waitFor("the thread again", () => page.locator("#chat").isVisible());
@@ -7967,7 +7963,7 @@ async function sweep(profileName) {
   const leavePulls = async () => {
     if (await page.evaluate(() => document.body.dataset.panel === "open")) await page.evaluate(() => closePanel());
     if (touch) {
-      await pageSidebar();
+      await showSidebar();
       await tapOrClick("#sidebar footer .back");
     } else {
       await page.evaluate(() => document.activeElement?.blur());
