@@ -1338,12 +1338,17 @@ function renderControls(tab) {
   const t = tab && threadOf(tab);
   const name = tab ? modelName(tab) : "Default";
   const modelButton = document.getElementById("model-button");
-  modelButton.querySelector(".name").textContent = name;
+  // An unchanged label is left alone: rewriting it swaps the node a press landed on, and WebKit then drops the click.
+  const nameEl = modelButton.querySelector(".name");
+  if (nameEl.textContent !== name) nameEl.textContent = name;
   modelButton.title = `${name} · ${bindingLabel("modelPicker.toggle") ?? ""}`;
   const label = tab?.view.running && traitsLabel(tab);
   const traitsBlock = document.getElementById("traits-block");
   traitsBlock.hidden = !label || !traitEntries(tab).length;
-  if (!traitsBlock.hidden) traitsButton.innerHTML = `${icon("brain")}<span class="name">${esc(label)}</span>${icon("chevron-down")}`;
+  if (!traitsBlock.hidden && traitsButton.dataset.label !== label) {
+    traitsButton.dataset.label = label;
+    traitsButton.innerHTML = `${icon("brain")}<span class="name">${esc(label)}</span>${icon("chevron-down")}`;
+  }
   traitsButton.setAttribute("aria-label", label || "Reasoning");
   const mode = tab?.view.running && MODES[tab.mode] && tab.mode;
   document.getElementById("mode-block").hidden = !mode;
