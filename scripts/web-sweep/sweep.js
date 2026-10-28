@@ -120,9 +120,11 @@ async function sweep(profileName) {
   page.on("requestfailed", (r) => seen.push(`requestfailed: ${r.method()} ${r.url()} ${r.failure()?.errorText}`));
   page.on("response", (r) => r.status() >= 400 && seen.push(`HTTP ${r.status()}: ${r.request().method()} ${r.url()}`));
 
-  // On a phone the chat header folds these into its Options menu, so a hidden one is reached there.
+  // On a phone the chat header folds these into its Options menu, so a hidden one is reached there,
+  // and the sidebar's sheet covers the header, so it closes first.
   const HEAD_MENU = { "#toggle-panel": /side panel$/, "#toggle-terminal": /terminal$/, "#toggle-details": /^Thread details$/ };
   const tapOrClick = async (selector) => {
+    if (HEAD_MENU[selector] && touch) await hideSidebar();
     if (HEAD_MENU[selector] && !(await page.locator(selector).isVisible())) {
       await tapOrClick("#head-more");
       return press(page.locator("#panel-menu button", { hasText: HEAD_MENU[selector] }));
@@ -591,10 +593,23 @@ async function sweep(profileName) {
     const r = await rect("#thread");
     await page.touchscreen.tap(r.left + 4, r.top + r.height / 2);
   };
+  // A phone's composer collapses to one row whenever the prompt loses focus, hiding its controls until a tap on the
+  // prompt reopens it. It collapses a moment after Send's tap, so the tap doesn't wait on the collapsed state.
+  const openComposer = async () => {
+    if (touch) await tapOrClick("#prompt");
+  };
+  // The phone's sheet is still visible while it slides out, so the body's state says whether it is open.
+  const sidebarShown = async () => (await page.evaluate(() => document.body.dataset.sidebar === "open")) && (await page.locator("#sidebar").isVisible());
+  const hideSidebar = async () => {
+    if (!(await sidebarShown())) return;
+    await tapOrClick("#sidebar-toggle");
+    await waitFor("the sidebar to close", async () => !(await page.locator("#sidebar").isVisible()));
+  };
+  // A page's header carries its own toggle while the chat's is hidden under it.
   const showSidebar = async () => {
-    if (await page.locator("#sidebar").isVisible()) return;
-    await tapOrClick("#chat-sidebar-toggle");
-    await waitFor("the sidebar", () => page.locator("#sidebar").isVisible());
+    if (await sidebarShown()) return;
+    await tapOrClick((await page.locator("#chat-sidebar-toggle").isVisible()) ? "#chat-sidebar-toggle" : "#page-view .side-toggle");
+    await waitFor("the sidebar", sidebarShown);
   };
 
   await step("app view: switch from the terminal, threads in the sidebar", async () => {
@@ -4791,6 +4806,7 @@ async function sweep(profileName) {
 
   await step("composer: attached files show above the prompt and go out with it", async () => {
     const attach = async (file) => {
+      await openComposer();
       const [chooser] = await Promise.all([page.waitForEvent("filechooser"), tapOrClick("#composer-attach")]);
       await chooser.setFiles(file);
     };
@@ -4817,6 +4833,7 @@ async function sweep(profileName) {
     await press(page.locator("#attachments .file .name"));
     await waitFor("the preview", async () => (await text("#file-preview pre")) === "hi there");
     await press(page.locator("#file-preview [data-close]"));
+    await openComposer();
     await press(page.locator("#attachments .remove"));
     check(!(await page.locator("#attachments").isVisible()), "the row's X left it there");
     await page.evaluate((data) => {
@@ -4829,6 +4846,7 @@ async function sweep(profileName) {
       prompt.dispatchEvent(paste);
     }, png.toString("base64"));
     await waitFor("the pasted picture in the strip", async () => (await page.getAttribute("#attachments .tile img", "alt").catch(() => null)) === "pasted.png");
+    await openComposer();
     await press(page.locator("#attachments .remove"));
     await attach({ name: "huge.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(26 << 20) });
     await waitFor("the upload error", async () => /over 25 MB/.test(await text("#composer-note")));
@@ -5099,8 +5117,7 @@ async function sweep(profileName) {
 
   await step("composer: the context ring shows how full the window is, and a cold long session compacts first", async () => {
     await sendPrompt("full");
-    // A phone's composer rests as T3 Code's one row, which a tap opens to its controls.
-    if (touch) await tapOrClick("#prompt");
+    await openComposer();
     await waitFor("the context ring", () => page.locator("#context-meter").isVisible());
     check((await page.getAttribute("#context-meter", "aria-label")) === "Context window 23% used", `ring: ${await page.getAttribute("#context-meter", "aria-label")}`);
     await tapOrClick("#context-meter");
@@ -5108,11 +5125,16 @@ async function sweep(profileName) {
     const card = (await text("#context-card .head")).replace(/\s+/g, " ");
     check(card === "Context Window23%·231k/1m", `card: ${card}`);
     check(await page.locator("#context-card [data-compact]").isVisible(), "no Compact context button");
-    await tapOrClick("#context-meter");
+    // The phone's composer collapses under the open card and takes the ring with it, so a tap outside closes the card there.
+    if (touch) await tapOutsideComposer();
+    else await tapOrClick("#context-meter");
+    await waitFor("the card to close", () => page.locator("#context-card").isHidden());
+    await openComposer();
     await waitFor("the compact pill", async () => (await text("#compact-pill")) === "Compact231k");
     check((await page.getAttribute("#send", "title")) === "Summarize 231k tokens of history, then send", `send says ${await page.getAttribute("#send", "title")}`);
     await tapOrClick("#compact-pill");
     check((await text("#compact-pill")) === "Full231k", "the pill didn't switch to keeping the history");
+    await openComposer();
     await tapOrClick("#compact-pill");
     await sendPrompt("after the break");
     await waitTerm(/\/compact[\s\S]*echo: after the break/);
@@ -6539,6 +6561,8 @@ async function sweep(profileName) {
     await showSidebar();
     check((await tone(`${rowSel(alpha)} .l3 .branch`)) === "rgba(129, 129, 129, 0.4)", `the branch is ${await tone(`${rowSel(alpha)} .l3 .branch`)}`);
 
+    // The phone's sidebar sheet covers the chat header's Options menu, which opens the panel there.
+    if (touch) await hideSidebar();
     await openPanelTo("terminal", "Terminal");
     await waitFor("the shell", async () => (await page.locator("#panel-body .xterm-rows").count()) === 1, 10000);
     await sleep(500);
@@ -6558,6 +6582,7 @@ async function sweep(profileName) {
     await page.locator("#panel-body .xterm-helper-textarea").focus();
     await page.keyboard.press("Control+c");
     await waitFor("the pulse to stop", async () => !(await page.locator(pulse).count()), 8000);
+    if (touch) await hideSidebar();
     await press(gui('#panel-tabs .ptab[data-panel="terminal"] .lead'));
     await closePanelIfOpen();
 
@@ -6836,18 +6861,10 @@ async function sweep(profileName) {
       "claude-opus-5-5": { input_cost_per_token: 5e-6, output_cost_per_token: 25e-6, cache_read_input_token_cost: 0.5e-6, cache_creation_input_token_cost: 6.25e-6 },
     }));
   };
-  const pageSidebar = async () => {
-    if (await page.locator("#sidebar").isVisible()) return;
-    await tapOrClick("#page-view .side-toggle");
-    await waitFor("the sidebar", () => page.locator("#sidebar").isVisible());
-  };
   // At phone width the metric and period are T3 Code's selects: a button and its menu.
   const USAGE_LABELS = { cost: "Cost", tokens: "Tokens", limits: "Limits", 1: "Past 24h", 7: "7 days", 30: "30 days", 90: "90 days" };
   const usagePick = async (seg, value) => {
-    if (touch && (await page.locator("#sidebar").isVisible())) {
-      await tapOrClick("#sidebar-toggle");
-      await waitFor("the sidebar to close", async () => !(await page.locator("#sidebar").isVisible()));
-    }
+    if (touch) await hideSidebar();
     if (await page.locator(`#page-view .seg[data-seg="${seg}"]`).isVisible()) return press(page.locator(`#page-view .seg[data-seg="${seg}"] button[data-value="${value}"]`));
     await press(page.locator(`#page-view .pick[data-pick="${seg}"]`));
     await press(page.locator("#usage-menu button", { hasText: USAGE_LABELS[value] }));
@@ -6861,7 +6878,7 @@ async function sweep(profileName) {
     await tapOrClick('#sidebar footer [data-open-page="usage"]');
     await waitFor("the Usage page", () => page.locator("#page-view h1", { hasText: "Usage" }).isVisible());
     check(!(await page.locator("#chat").isVisible()), "the thread still shows beside Usage");
-    await pageSidebar();
+    await showSidebar();
     check(await page.locator("#sidebar footer .back").isVisible(), "the footer has no Back button");
     await waitFor("four limit windows", async () => (await page.locator("#page-view .limit-card").count()) === 4, 15000);
     const left = await page.locator("#page-view .limit-card .figure b").allTextContents();
@@ -6901,7 +6918,7 @@ async function sweep(profileName) {
     check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
     check(JSON.parse(await page.evaluate(() => load("gui-usage-page"))).days === 1, "the period wasn't saved");
     if (touch) {
-      await pageSidebar();
+      await showSidebar();
       await tapOrClick("#sidebar footer .back");
     } else await page.keyboard.press("Escape");
     await waitFor("the thread again", () => page.locator("#chat").isVisible());
@@ -6962,7 +6979,7 @@ async function sweep(profileName) {
     const bad = await overflowing();
     check(!bad.length, `wider than the screen: ${bad.join(", ")}`);
     if (touch) {
-      await pageSidebar();
+      await showSidebar();
       await tapOrClick("#sidebar footer .back");
     } else await page.keyboard.press("Escape");
     await waitFor("the thread again", () => page.locator("#chat").isVisible());
@@ -6980,7 +6997,7 @@ async function sweep(profileName) {
   };
   const leaveUsage = async () => {
     if (touch) {
-      await pageSidebar();
+      await showSidebar();
       await tapOrClick("#sidebar footer .back");
     } else await page.keyboard.press("Escape");
     await waitFor("the thread again", () => page.locator("#chat").isVisible());
@@ -7316,7 +7333,7 @@ async function sweep(profileName) {
     await waitFor("#42's details", async () => (await page.locator("#panel-body", { hasText: "Add notes" }).count()) > 0, 10000);
     if (touch) {
       await page.evaluate(() => closePanel());
-      await pageSidebar();
+      await showSidebar();
       await tapOrClick("#sidebar footer .back");
     } else {
       await page.keyboard.press("Escape");
@@ -7402,7 +7419,7 @@ async function sweep(profileName) {
       await page.evaluate(() => closePanel());
       await page.keyboard.press("Escape");
     } else {
-      await pageSidebar();
+      await showSidebar();
       await tapOrClick("#sidebar footer .back");
     }
     await waitFor("the thread again", () => page.locator("#chat").isVisible());
@@ -7976,7 +7993,7 @@ async function sweep(profileName) {
   const leavePulls = async () => {
     if (await page.evaluate(() => document.body.dataset.panel === "open")) await page.evaluate(() => closePanel());
     if (touch) {
-      await pageSidebar();
+      await showSidebar();
       await tapOrClick("#sidebar footer .back");
     } else {
       await page.evaluate(() => document.activeElement?.blur());
@@ -8663,6 +8680,8 @@ async function sweep(profileName) {
     await page.waitForSelector("#limit-note:not([hidden]) [data-switch-account=spare]", { timeout: 15000 });
     const note = await text("#limit-note");
     check(/hit its usage limit/.test(note), `the note reads "${note}"`);
+    // The phone's sidebar sheet, open from the step before, covers the composer's note.
+    if (touch) await hideSidebar();
     await press(page.locator("#limit-note [data-switch-account=spare]"));
     await waitFor("the thread under Spare", () => page.evaluate(() => active?.view.account === "spare" && !active.view.resume_at), 15000);
     check(await page.locator("#limit-note").isHidden(), "the limit note stayed");

@@ -75,9 +75,12 @@ function placePrPop(side = prPop.dataset.side ?? "bottom") {
   if (prPop.hidden || !prPopAt) return;
   prPop.dataset.side = side;
   const r = prPopAt.getBoundingClientRect();
+  // The document's box, not the window's: a phone's layout viewport grows around whatever overflows it, so a
+  // popover kept within the window would hold the page stretched for as long as it stays open.
+  const { clientWidth, clientHeight } = document.documentElement;
   const top = side === "top" ? r.top - prPop.offsetHeight - 6 : r.bottom + 6;
-  prPop.style.top = `${Math.max(8, Math.min(top, innerHeight - prPop.offsetHeight - 8))}px`;
-  prPop.style.left = `${Math.max(8, Math.min(r.left, innerWidth - prPop.offsetWidth - 8))}px`;
+  prPop.style.top = `${Math.max(8, Math.min(top, clientHeight - prPop.offsetHeight - 8))}px`;
+  prPop.style.left = `${Math.max(8, Math.min(r.left, clientWidth - prPop.offsetWidth - 8))}px`;
 }
 function closePrPop() {
   prPop.hidden = true;
@@ -642,7 +645,7 @@ function renderPrPanel(s) {
     ? `<button type="button" class="ghost small" data-pr-stack aria-label="Stack ${st.stack.number}, layer ${st.position} of ${st.stack.layers.length}" title="View stack #${st.stack.number}, layer ${st.position} of ${st.stack.layers.length}">${icon("layers-2")}${st.position}/${st.stack.layers.length}</button>
       ${st.canMerge && ["open", "draft"].includes(st.selected.state) ? `<button type="button" class="primary" data-stack-merge${st.mergeDisabled ? " disabled" : ""} title="Merge stack through #${d.number} into ${esc(st.stack.base)} (${st.mergeLayers.length} ${st.mergeLayers.length === 1 ? "pull request" : "pull requests"})">${icon("git-merge")}Merge stack</button>` : ""}`
     : chained ? `<button type="button" class="icon" data-pr-stack title="Stack">${icon("layers")}</button>` : "";
-  const actions = `<span class="spacer"></span>${stackButtons}
+  const actions = `${stackButtons}
       ${linked.length ? `<button type="button" class="ghost small" data-pr-threads aria-label="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}" title="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}. Search in the command palette.">${icon("message-square")}${linked.length}</button>` : ""}
       ${primary}<button type="button" class="icon" data-pr-more aria-label="More pull request actions" title="More pull request actions">${icon("ellipsis")}</button>`;
   const title = s.editing === "title"
