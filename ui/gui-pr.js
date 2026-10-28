@@ -75,9 +75,12 @@ function placePrPop(side = prPop.dataset.side ?? "bottom") {
   if (prPop.hidden || !prPopAt) return;
   prPop.dataset.side = side;
   const r = prPopAt.getBoundingClientRect();
+  // The document's box, not the window's: a phone's layout viewport grows around whatever overflows it, so a
+  // popover kept within the window would hold the page stretched for as long as it stays open.
+  const { clientWidth, clientHeight } = document.documentElement;
   const top = side === "top" ? r.top - prPop.offsetHeight - 6 : r.bottom + 6;
-  prPop.style.top = `${Math.max(8, Math.min(top, innerHeight - prPop.offsetHeight - 8))}px`;
-  prPop.style.left = `${Math.max(8, Math.min(r.left, innerWidth - prPop.offsetWidth - 8))}px`;
+  prPop.style.top = `${Math.max(8, Math.min(top, clientHeight - prPop.offsetHeight - 8))}px`;
+  prPop.style.left = `${Math.max(8, Math.min(r.left, clientWidth - prPop.offsetWidth - 8))}px`;
 }
 function closePrPop() {
   prPop.hidden = true;
