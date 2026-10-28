@@ -42,6 +42,10 @@ const TRIGGERS = {
 const settingsPage = document.getElementById("settings-page");
 const LINEAR_KEYS = "https://linear.app/settings/account/security";
 const GITHUB_TOKENS = "https://github.com/settings/tokens/new?scopes=repo&description=pinned";
+const UPSTASH_CONSOLE = "https://console.upstash.com/";
+/** The Run on choice that gives each issue or thread its own Upstash Box, as the backend's `RunsOn::FreshBox` stores it. */
+const BOX = "upstash-box";
+const BOX_SIZES = { small: "Small", medium: "Medium", large: "Large" };
 
 /** Mirrors the backend's `get_settings`. Unsaved connectors carry an empty id. */
 let settings = { linear: null, slack: null, connectors: [], checked: null };
@@ -132,8 +136,9 @@ const options = (values, labelOf = (v) => v, selected) =>
 
 /** A row of chips that picks one of the machines, for pages that show one machine at a time. */
 function machineChipsHtml(current, action) {
-  if (machines.size < 2) return "";
-  const chips = [...machines.entries()].map(([id, m]) =>
+  const listed = [...machines.entries()].filter(([, m]) => !m.view.upstash_box);
+  if (listed.length < 2) return "";
+  const chips = listed.map(([id, m]) =>
     `<button class="chip${id === current ? " active" : ""}" data-action="${action}" data-machine="${esc(id)}"${m.view.online ? "" : " disabled"}>${esc(machineName(id))}</button>`);
   return `<div class="chips">${chips.join("")}</div>`;
 }
@@ -159,7 +164,32 @@ function integrationsHtml() {
       ${body}
     </div>
     ${slackCardHtml()}
-    ${githubCardHtml()}`;
+    ${githubCardHtml()}
+    ${upstashCardHtml()}`;
+}
+
+function upstashCardHtml() {
+  const connected = settings.upstash;
+  const body = !account
+    ? `<p class="hint">Sign in to pinned to run sessions in Upstash Boxes.</p>`
+    : connected
+      ? `<p class="connected">Box key <b>${esc(connected.key_hint)}</b> · Claude token <b>${esc(connected.claude_hint)}</b></p>
+         <div class="actions"><span class="hint">Deletes the boxes running now</span><button class="secondary" data-action="disconnect-upstash">Disconnect</button></div>
+         <p class="error" id="upstash-error"></p>`
+      : `<ol class="steps">
+           <li>Create a Box API key in the Box tab of the Upstash console.
+             <button class="secondary" data-action="open-upstash-console">Open Upstash ↗</button>
+             <div class="row"><input id="upstash-key" type="password" placeholder="box_…" autocomplete="off"></div></li>
+           <li>Run <code>claude setup-token</code> in a terminal and paste the token it prints. Boxes then run Claude on your subscription.
+             <div class="row"><input id="claude-token" type="password" placeholder="sk-ant-oat01-…" autocomplete="off">
+             <button class="primary" data-action="connect-upstash">Connect</button></div></li>
+         </ol>
+         <p class="error" id="upstash-error"></p>`;
+  return `<div class="card">
+      <div class="card-head"><span class="logo upstash">▢</span><div><b>Upstash Box</b><div class="hint">A fresh cloud sandbox for each issue or thread a workflow picks up</div></div>
+        <span class="badge" data-on="${!!connected}">${connected ? "Connected" : "Not connected"}</span></div>
+      ${body}
+    </div>`;
 }
 
 function githubCardHtml() {
@@ -268,21 +298,32 @@ const STEPS = {
     app: "Claude Code",
     title: "Run a session",
     summary: (c) =>
-      [folderName(c.folder) || folderName(c.repo.replace(/\.git$/, "")) || "no folder", account && runOnName(c), connectorAccountName(c), c.model.trim() || "default model", c.effort, PERMISSIONS[c.permissionMode]]
+      [
+        isBox(c) ? folderName(c.repo.replace(/\.git$/, "")) || "no repository" : folderName(c.folder) || folderName(c.repo.replace(/\.git$/, "")) || "no folder",
+        (account || isBox(c)) && runOnName(c),
+        connectorAccountName(c),
+        c.model.trim() || "default model",
+        c.effort,
+        PERMISSIONS[c.permissionMode],
+      ]
         .filter(Boolean)
         .join(" · "),
-    issues: (c) => [...(c.folder.trim() || c.repo.trim() ? [] : ["Choose the folder or the repository the session opens in."]), ...codexProjectIssues(c)],
-    fields: (c) => `${account ? `<label>Run on ${runOnHtml(c)}</label>` : ""}
-      <label>Folder${account ? ` on ${esc(machineName(folderMachine(c)))}` : ""}
+    issues: (c) => (isBox(c) ? boxIssues(c) : [...(c.folder.trim() || c.repo.trim() ? [] : ["Choose the folder or the repository the session opens in."]), ...codexProjectIssues(c)]),
+    fields: (c) => `${account || isBox(c) ? `<label>Run on ${runOnHtml(c)}</label>` : ""}
+      ${
+        isBox(c)
+          ? `<label>Size ${select("machine.size", Object.keys(BOX_SIZES), (size) => BOX_SIZES[size], c.machine.size)}</label>`
+          : `<label>Folder${account ? ` on ${esc(machineName(folderMachine(c)))}` : ""}
         <span class="row">${input("folder", c.folder, 'list="folders" placeholder="/path/to/repo" spellcheck="false"')}
-        ${folderMachine(c) === LOCAL ? `<button class="secondary" data-action="pick-folder">Choose…</button>` : ""}</span></label>
+        ${folderMachine(c) === LOCAL ? `<button class="secondary" data-action="pick-folder">Choose…</button>` : ""}</span></label>`
+      }
       <label>Repository ${input("repo", c.repo, `list="github-repos" placeholder="${settings.github ? "owner/name, from your GitHub" : "git URL"}" spellcheck="false"`)}</label>
       <p class="hint" id="repo">${repoHint(c)}</p>
       <div class="grid">
         <label>Model ${input("model", c.model, `list="models" placeholder="claude's default"`)}</label>
         <label>Effort ${select("effort", EFFORTS, undefined, c.effort)}</label>
         <label>Permissions ${select("permissionMode", Object.keys(PERMISSIONS), (p) => PERMISSIONS[p], c.permissionMode)}</label>
-        <label>Account ${accountSelectHtml(c)}</label>
+        ${isBox(c) ? "" : `<label>Account ${accountSelectHtml(c)}</label>`}
       </div>
       ${check("worktree", c.worktree, `Separate git worktree per ${subject(c)}`)}
       <label>Instructions sent before the ${subject(c)}
@@ -348,31 +389,47 @@ const shown = (c, id) => isOn(c, id) || (view.name === "edit" && view.open === i
 
 const hubIdOf = (machine) => (machine === LOCAL ? account?.machine_id ?? "" : machine);
 const localIdOf = (id) => (id && id === account?.machine_id ? LOCAL : id);
-const runOnName = (c) => (c.machine ? machineName(localIdOf(c.machine)) : "any machine");
+/** A connector's `machine` is a machine id, "" for any, or an object for a box per issue. */
+const isBox = (c) => c.machine?.kind === BOX;
+const runOnName = (c) => (isBox(c) ? `Upstash Box (${c.machine.size})` : c.machine ? machineName(localIdOf(c.machine)) : "any machine");
 
 function folderMachine(c) {
-  const preferred = localIdOf(c.machine);
+  const preferred = isBox(c) ? "" : localIdOf(c.machine);
   if (preferred && machines.has(preferred)) return preferred;
   return machines.has(LOCAL) ? LOCAL : onlineMachines()[0];
 }
 
 function runOnHtml(c) {
-  const known = [...machines.entries()].map(([id, m]) => [hubIdOf(id), `${machineName(id)}${m.view.online ? "" : " (offline)"}`]);
-  if (c.machine && !known.some(([id]) => id === c.machine)) known.push([c.machine, "A removed machine"]);
-  const labels = Object.fromEntries([["", "Any online machine"], ...known]);
+  const known = [...machines.entries()].filter(([, m]) => !m.view.upstash_box).map(([id, m]) => [hubIdOf(id), `${machineName(id)}${m.view.online ? "" : " (offline)"}`]);
+  if (c.machine && !isBox(c) && !known.some(([id]) => id === c.machine)) known.push([c.machine, "A removed machine"]);
+  const labels = Object.fromEntries([["", "Any online machine"], ...known, [BOX, `A fresh Upstash Box per ${subject(c)}`]]);
+  if (isBox(c)) {
+    return `${select("machine", Object.keys(labels), (id) => labels[id], BOX)}
+      <span class="hint">Each ${subject(c)} gets its own box. pinned deletes it 30 minutes after the session goes quiet, or when you close its tab, and after 4 hours at most.</span>`;
+  }
   return `${select("machine", Object.keys(labels), (id) => labels[id], c.machine)}
     <span class="hint">${c.machine ? "Falls back to another online machine while this one is offline." : "Each run goes to whichever machine is online."}</span>`;
 }
 
+/** What a box run needs: the hub, which runs boxes, Upstash, and the repository the box clones and pushes with GitHub. */
+function boxIssues(c) {
+  if (!account) return ["Sign in to pinned to run sessions in Upstash Boxes."];
+  return [
+    !settings.upstash && "Connect Upstash Box under Connectors.",
+    !c.repo.trim() && "Name the repository the box clones.",
+    !settings.github && "Connect GitHub under Connectors: the box clones, pushes and opens the pull request with it.",
+  ].filter(Boolean);
+}
+
 /** A run under the project's account fails when that account is Codex, which can't run a workflow. */
 function codexProjectIssues(c) {
-  if (c.account) return [];
+  if (c.account || isBox(c)) return [];
   const project = suggestions.projects?.find((p) => p.path === c.folder.trim());
   const account = project && accountOf(folderMachine(c), project.account);
   return account?.provider === "codex" ? [`${folderName(c.folder)} runs under ${account.name}, a Codex account, which can't run a workflow. Pick a Claude Code account under Account.`] : [];
 }
 
-const connectorAccountName = (c) => c.account && accountName(folderMachine(c), c.account);
+const connectorAccountName = (c) => !isBox(c) && c.account && accountName(folderMachine(c), c.account);
 
 /** The Claude Code accounts of the connector's machine; Codex can't run a connector, whose prompts rely on Claude Code's hooks. */
 function accountSelectHtml(c) {
@@ -384,7 +441,9 @@ function accountSelectHtml(c) {
 }
 
 const repoHint = (c) =>
-  !c.repo.trim()
+  isBox(c)
+    ? `The box clones ${c.repo.trim() ? `<code>${esc(c.repo.trim())}</code>` : "the repository"} into <code>~/pinned</code> and pushes${settings.github ? " with your GitHub token" : ""}.`
+    : !c.repo.trim()
     ? "A machine without the folder can't run this session."
     : `A machine without ${c.folder.trim() ? "this folder" : "a clone"} clones <code>${esc(c.repo.trim())}</code> into <code>~/pinned</code>${settings.github ? " with your GitHub token" : ""}.`;
 
@@ -443,9 +502,10 @@ function cardHtml(c, i) {
 }
 
 function sentence(c) {
-  const machine = account && c.machine ? ` on ${runOnName(c)}` : "";
-  const as = c.account ? ` with the ${connectorAccountName(c)} account` : "";
-  const where = (folderName(c.folder) ? ` in ${folderName(c.folder)}${machine}` : machine) + as;
+  const machine = (account || isBox(c)) && c.machine ? ` on ${isBox(c) ? "a fresh Upstash Box" : runOnName(c)}` : "";
+  const as = connectorAccountName(c) ? ` with the ${connectorAccountName(c)} account` : "";
+  const folder = isBox(c) ? folderName(c.repo.replace(/\.git$/, "")) : folderName(c.folder);
+  const where = (folder ? ` in ${folder}${machine}` : machine) + as;
   if (!isSlack(c)) return `When an issue gets the label “${c.trigger.label}”, Claude picks it up${where}.`;
   const then = c.fix === "off" ? "answers in the thread" : "answers in the thread and fixes bugs";
   return `When the bot is mentioned in #${c.trigger.channel.replace(/^#/, "")}, Claude ${then}${where}.`;
@@ -560,7 +620,7 @@ function blank(kind) {
 }
 
 function commandPreview(c) {
-  const parts = [c.account && c.account !== DEFAULT_ACCOUNT ? `CLAUDE_CONFIG_DIR=<${connectorAccountName(c)}'s home> claude` : "claude"];
+  const parts = [connectorAccountName(c) && c.account !== DEFAULT_ACCOUNT ? `CLAUDE_CONFIG_DIR=<${connectorAccountName(c)}'s home> claude` : "claude"];
   if (c.model) parts.push(`--model ${c.model}`);
   parts.push(`--effort ${c.effort}`, `--permission-mode ${c.permissionMode}`);
   if (c.worktree) parts.push(`--worktree=<${subject(c)}>`);
@@ -599,7 +659,7 @@ const defaultText = (c) =>
 const RESHAPES = {
   "trigger.kind": (c, kind) => ({ ...c, trigger: kind === "slack-mention" ? { kind, channel: "" } : { kind, label: "" } }),
   fix: (c, fix) => ({ ...c, fix }),
-  machine: (c, machine) => ({ ...c, machine }),
+  machine: (c, machine) => ({ ...c, machine: machine === BOX ? { kind: BOX, size: "medium" } : machine }),
 };
 
 /** Applies `change` to the draft, swapping in the new defaults where the old ones were untouched. */
@@ -610,7 +670,7 @@ function reshape(change) {
   if (before.instructions.trim() === defaultText(before).trim()) after.instructions = defaultText(after);
   if (before.trigger.kind !== after.trigger.kind) view.open = flowOf(after)[0][0];
   view.draft = after;
-  if (before.machine !== after.machine) {
+  if (JSON.stringify(before.machine) !== JSON.stringify(after.machine)) {
     loadFolders(after);
     fillRepo();
   }
@@ -674,6 +734,30 @@ const actions = {
     } catch (e) {
       document.getElementById("slack-error").textContent = e;
     }
+  },
+  "open-upstash-console": () => (TAURI ? invoke("open_url", { url: UPSTASH_CONSOLE }) : window.open(UPSTASH_CONSOLE, "_blank", "noopener")),
+  async "connect-upstash"() {
+    const key = document.getElementById("upstash-key").value;
+    const claude_token = document.getElementById("claude-token").value;
+    if (!key.trim() || !claude_token.trim()) return;
+    try {
+      settings.upstash = await connectorCall("connect_upstash", { key, claude_token });
+      showPage("integrations");
+    } catch (e) {
+      document.getElementById("upstash-error").textContent = e;
+    }
+  },
+  async "disconnect-upstash"(button) {
+    if (!armed(button, "Delete the boxes?")) return;
+    try {
+      await connectorCall("disconnect_upstash");
+    } catch (e) {
+      // The hub keeps the key until every box is deleted, so a later try can still delete them.
+      document.getElementById("upstash-error").textContent = e;
+      return;
+    }
+    settings.upstash = null;
+    showPage("integrations");
   },
   "open-github-tokens": () => (TAURI ? invoke("open_github_tokens") : window.open(GITHUB_TOKENS, "_blank", "noopener")),
   async "connect-github"() {
@@ -782,6 +866,7 @@ settingsPage.addEventListener("click", (e) => {
 settingsPage.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "linear-key") actions["connect-linear"]();
   if (e.key === "Enter" && e.target.id === "slack-token") actions["connect-slack"]();
+  if (e.key === "Enter" && e.target.id === "claude-token") actions["connect-upstash"]();
   if (view.name !== "edit" || page !== "connectors") return;
   if (e.key === "s" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
@@ -827,6 +912,7 @@ settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show:
   { title: "Linear", terms: ["api key issues labels connector"] },
   { title: "Slack", terms: ["bot token channels mentions connector"] },
   { title: "GitHub", terms: ["token repositories clone connector"] },
+  { title: "Upstash Box", terms: ["sandbox cloud box claude setup-token subscription connector"] },
 ] });
 settingsSection({ page: "projects", label: "Projects", icon: "folder", show: () => showProjectsPage(), search: [{ title: "Projects", terms: ["history turns changed files"] }] });
 settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show: () => redraw(), search: [{ title: "Workflows", terms: ["linear label slack mention automation trigger"] }] });

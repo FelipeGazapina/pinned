@@ -175,10 +175,13 @@ function machineEntryHtml(id, view) {
   const name =
     machinesUi.renaming === id
       ? `<input class="rename" value="${esc(view.name)}" spellcheck="false" autocomplete="off">`
-      : `<b>${esc(view.name)}</b>`;
+      : view.upstash_box
+        ? `<span><b>${esc(view.name)}</b><span class="badge box" title="Upstash Box ${esc(view.upstash_box)}">Box</span></span>`
+        : `<b>${esc(view.name)}</b>`;
+  const leaves = view.upstash_box ? "Its Upstash Box is deleted, and the session in it with it." : "It leaves the account and its sessions stop showing on your devices.";
   const confirm =
     machinesUi.removing === id
-      ? `<div class="confirm" data-machine="${esc(id)}">Remove ${esc(view.name)}? It leaves the account and its sessions stop showing on your devices.
+      ? `<div class="confirm" data-machine="${esc(id)}">Remove ${esc(view.name)}? ${leaves}
            <span class="actions start"><button class="secondary danger" data-action="confirm-remove">Remove</button>
            <button class="secondary" data-action="cancel-remove">Cancel</button></span></div>`
       : "";
