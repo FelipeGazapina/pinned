@@ -499,7 +499,8 @@ impl Account {
         let Some(m) = live.machines.get(machine) else { return Seen::Offline };
         match m.tabs.iter().find(|t| t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)) {
             None => Seen::NoTab,
-            Some(t) => Seen::Tab { running: t.running, quiet: !matches!(t.status, Some(AgentStatus::Working | AgentStatus::NeedsInput)) },
+            // Claude reports a finished turn as waiting for input a minute later, so only Working holds a box.
+            Some(t) => Seen::Tab { running: t.running, quiet: t.status != Some(AgentStatus::Working) },
         }
     }
 

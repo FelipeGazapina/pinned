@@ -59,7 +59,7 @@ impl BoxApi for Upstash {
 pub struct Policy {
     /// Creating the box, booting its node and handing it the run.
     pub boot_wait: Duration,
-    /// With the session neither working nor asking for input.
+    /// With the session not working.
     pub idle: Duration,
     /// With claude exited; restarting it from a client brings it back.
     pub exited: Duration,
@@ -182,7 +182,7 @@ impl Phase {
 pub enum Seen {
     Offline,
     NoTab,
-    /// `quiet`: the session is neither working nor asking for input.
+    /// `quiet`: the session is not working.
     Tab { running: bool, quiet: bool },
 }
 
@@ -644,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn working_resets_quiet_and_a_question_is_not_quiet() {
+    fn working_resets_quiet() {
         let p = policy();
         let (start, mut t) = (Instant::now(), Timers::default());
         let quiet = Seen::Tab { running: true, quiet: true };
