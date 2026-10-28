@@ -244,19 +244,14 @@ mod tests {
     #[test]
     fn a_listed_box_parses_into_its_id_and_labels() {
         let listed = parse_list(&fixture("list.json")).unwrap();
-        assert_eq!(
-            listed,
-            [
-                Listed { id: BoxId("box_2pQx7c".into()), labels: vec!["hub:3f9a1c2b7d4e".into(), "p:00c0ffee12345678".into()] },
-                Listed { id: BoxId("box_9ZkLm0".into()), labels: vec![] },
-            ]
-        );
+        assert_eq!(listed, [Listed { id: BoxId("tough-seal-18518".into()), labels: vec!["hub:000000000000".into(), "p:00000000000000ff".into()] }]);
+        assert_eq!(parse_list(&json!([{ "id": "b" }])), Ok(vec![Listed { id: BoxId("b".into()), labels: vec![] }]));
     }
 
     #[test]
     fn a_created_box_parses_into_its_id_and_waits_while_creating() {
         let created = fixture("create.json");
-        assert_eq!(parse_id(&created), Ok(BoxId("box_2pQx7c".into())));
+        assert_eq!(parse_id(&created), Ok(BoxId("tough-seal-18518".into())));
         assert_eq!(parse_status(&created), Status::Creating);
         assert_eq!(parse_status(&fixture("get.json")), Status::Ready);
         assert_eq!(parse_status(&json!({ "id": "b", "status": "error" })), Status::Failed);
@@ -264,7 +259,8 @@ mod tests {
 
     #[test]
     fn an_exec_result_parses_its_exit_code_and_output() {
-        assert_eq!(parse_exec(&fixture("exec.json")), Ok(Exec { exit_code: 1, output: "curl: (22) 404\n".into(), error: "bootstrap failed".into() }));
+        let exec = parse_exec(&fixture("exec.json")).unwrap();
+        assert_eq!((exec.exit_code, exec.output.lines().next(), exec.error.as_str()), (3, Some("hello"), "err\n"));
         assert!(parse_exec(&json!({ "output": "" })).is_err());
     }
 

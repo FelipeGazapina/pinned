@@ -1,12 +1,36 @@
 {
-  "id": "box_2pQx7c",
-  "name": "pinned-00c0ffee",
-  "labels": ["hub:3f9a1c2b7d4e", "p:00c0ffee12345678"],
-  "size": "medium",
-  "keep_alive": true,
+  "id": "tough-seal-18518",
+  "customer_id": "user@example.test",
+  "name": "pinned-wireprobe",
+  "labels": [
+    "hub:000000000000",
+    "p:00000000000000ff"
+  ],
+  "model": "",
   "runtime": "node",
   "browser": true,
   "status": "creating",
-  "created_at": 1793179000,
-  "updated_at": 1793179000
+  "agent_id": "keepalive-1",
+  "use_managed_key": true,
+  "mcp_servers": [
+    {
+      "name": "chrome-devtools",
+      "source": "npm",
+      "package_or_url": "chrome-devtools-mcp@1.7.0",
+      "enabled": true,
+      "args": [
+        "--browser-url=http://127.0.0.1:9222",
+        "--no-usage-statistics",
+        "--no-performance-crux"
+      ]
+    }
+  ],
+  "git_user_name": "Upstash Box",
+  "git_user_email": "box@upstash.com",
+  "size": "small",
+  "resource_plan_id": "small",
+  "storage_gb": 10,
+  "keep_alive": true,
+  "created_at": 1793196904,
+  "updated_at": 1793196904
 }
