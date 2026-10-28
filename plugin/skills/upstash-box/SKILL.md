@@ -21,7 +21,7 @@ An Upstash Box is a Linux container in the cloud with Node, Python, git, Claude 
 box --box <id> exec -C <repo> -- claude -p "<task>" --dangerously-skip-permissions --output-format stream-json
 ```
 
-Claude in the box needs a login. Either the user signs in once over SSH (`ssh <id>@us-east-1.box.upstash.com`, password: the Box key, then `claude auth login` with the Claude account option), or the box gets `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`. Check with `claude auth status`, which must show `authMethod: "claude.ai"`. Skipping permissions is acceptable only inside a box.
+Claude in the box needs a login. Either the user signs in once over SSH (`ssh <id>@us-east-1.box.upstash.com`, password: the Box key, then `claude auth login` with the Claude account option), or the box gets `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`. Check with `claude auth status`. It must show `authMethod: "claude.ai"` after a login, or `"oauth_token"` with the token, and never an API key. Claude Code removes `CLAUDE_CODE_OAUTH_TOKEN` from its own Bash tool's environment, so a session that can't see the variable is still signed in. Skipping permissions is acceptable only inside a box.
 
 ## Common commands
 
@@ -54,4 +54,8 @@ The same flags work for a Playwright script (`executablePath`, `headless: true`,
 
 ## Interactive `claude` in a box
 
-`claude -p` starts straight away. An interactive `claude` stops at the theme picker and then the folder-trust dialog. Seed `~/.claude.json` before starting one: set `hasCompletedOnboarding` to `true`, set `theme` to `"dark"`, and set `projects["/workspace/home"].hasTrustDialogAccepted` and `projects["/home/boxuser"].hasTrustDialogAccepted` to `true`. Trusting a parent folder covers the folders inside it.
+`claude -p` starts straight away. An interactive `claude` stops at the theme picker and then the folder-trust dialog. With `--dangerously-skip-permissions` or the bypass permission mode, it also stops at a bypass warning. Before you start one:
+
+- In `~/.claude.json`, set `hasCompletedOnboarding` to `true`, set `theme` to `"dark"`, and set `hasTrustDialogAccepted` to `true` under `projects["/workspace/home"]` and `projects["/home/boxuser"]`.
+- Trusting a parent folder covers plain folders inside it, but not a git repository. Add a `projects["<repo folder>"]` entry with `hasTrustDialogAccepted: true` for each clone.
+- For the bypass warning, set `skipDangerousModePermissionPrompt` to `true` in `~/.claude/settings.json`.
