@@ -3304,7 +3304,8 @@ async function sweep(profileName) {
     const letters = {};
     for (const name of ["sep.txt", "new-name.txt", "gone.txt", "page.astro"]) letters[name] = await text(`${leaf(name)} .git`);
     check(letters["sep.txt"] === "M" && letters["new-name.txt"] === "R" && letters["gone.txt"] === "D" && letters["page.astro"] === "A", `letters: ${JSON.stringify(letters)}`);
-    const added = await page.locator(`${leaf("page.astro")} .name`).evaluate((el) => getComputedStyle(el).color);
+    // The tree redraws as the diff lands, so the row is found and read in one task, never across a redraw.
+    const added = await page.evaluate((sel) => getComputedStyle(document.querySelector(sel)).color, `${leaf("page.astro")} .name`);
     check(added === "rgb(0, 202, 177)", `an added file's name is ${added}`);
     check(/^#file-tree-builtin-/.test((await page.locator(`${leaf("page.astro")} .ficon use`).getAttribute("href")) ?? ""), "the file's icon isn't pierre's");
     check(await page.locator('#panel-body .file-tree [data-tree-dir="diff3"] .git svg').isVisible(), "the folder has no dot for its changes");
