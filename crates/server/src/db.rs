@@ -1,12 +1,14 @@
-//! The hub's Postgres: accounts, logins, machines and pairing codes. Tokens are stored as their
-//! sha256, so the database alone can't sign anyone in.
+//! The hub's Postgres: accounts, logins, machines, pairing codes and the boxes runs live in. Tokens
+//! are stored as their sha256, so the database alone can't sign anyone in.
 
+use crate::boxes::{BoxRow, Phase};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand_core::{OsRng, RngCore};
 use pinned_core::sync;
+use pinned_core::upstash::BoxId;
 use pinned_core::wire::{AccountView, MachineView};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -32,7 +34,12 @@ create table if not exists project_files (account uuid not null references accou
   path text not null, sha text not null, modified bigint not null, data bytea not null, primary key (account, project, path));
 create table if not exists shared_projects (account uuid not null references accounts on delete cascade, key text not null,
   name text not null, repo text not null, updated timestamptz not null default now(), primary key (account, key));
+create table if not exists boxes (id text primary key, account uuid not null references accounts on delete cascade,
+  machine uuid not null, upstash text, connector text not null, subject jsonb not null, spec jsonb not null,
+  size text not null, phase text not null, reason text, created_at timestamptz not null default now(),
+  unique (account, connector, subject));
 ";
+const BOX_COLUMNS: &str = "id, account, machine, upstash, connector, subject, spec, size, phase, reason, extract(epoch from now() - created_at)::float8";
 /// Compressed bytes of synced project files one account may keep on the hub.
 const SYNC_QUOTA: i64 = 1 << 30;
 
@@ -75,6 +82,8 @@ pub struct MachineRow {
     pub id: Uuid,
     pub account: Uuid,
     pub name: String,
+    /// The machine runs in one of the account's boxes, so it takes only that box's run.
+    pub dedicated: bool,
 }
 
 pub struct Connectors {
@@ -142,6 +151,23 @@ async fn open(url: &str) -> Result<Client, String> {
 
 fn err(e: tokio_postgres::Error) -> String {
     e.to_string()
+}
+
+fn box_row(r: &tokio_postgres::Row) -> Result<BoxRow, String> {
+    let id: String = r.get(0);
+    let unreadable = |e: serde_json::Error| format!("box {id} has an unreadable row: {e}");
+    Ok(BoxRow {
+        account: r.get(1),
+        machine: r.get(2),
+        upstash: r.get::<_, Option<String>>(3).map(BoxId),
+        connector: r.get(4),
+        subject: serde_json::from_value(r.get(5)).map_err(unreadable)?,
+        spec: serde_json::from_value(r.get(6)).map_err(unreadable)?,
+        size: serde_json::from_value(Value::String(r.get(7))).map_err(unreadable)?,
+        phase: Phase::load(r.get(8), r.get(9)),
+        age: std::time::Duration::from_secs_f64(r.get::<_, f64>(10).max(0.0)),
+        id,
+    })
 }
 
 impl Db {
@@ -303,7 +329,7 @@ impl Db {
             )
             .await
             .map_err(err)?;
-        let view = MachineView { id: id.to_string(), name: name.to_owned(), os: os.to_owned(), online: false, last_seen: row.get(0) };
+        let view = MachineView { id: id.to_string(), name: name.to_owned(), os: os.to_owned(), online: false, last_seen: row.get(0), upstash_box: None };
         Ok((view, token.text))
     }
 
@@ -311,10 +337,14 @@ impl Db {
     pub async fn machine_connected(&self, token: &str, os: &str) -> Result<Option<MachineRow>, String> {
         let row = self
             .client().await?
-            .query_opt("update machines set os = $2, last_seen = now() where token_hash = $1 returning id, account, name", &[&hash(token), &os])
+            .query_opt(
+                "update machines set os = $2, last_seen = now() where token_hash = $1
+                 returning id, account, name, exists (select 1 from boxes where boxes.machine = machines.id)",
+                &[&hash(token), &os],
+            )
             .await
             .map_err(err)?;
-        Ok(row.map(|r| MachineRow { id: r.get(0), account: r.get(1), name: r.get(2) }))
+        Ok(row.map(|r| MachineRow { id: r.get(0), account: r.get(1), name: r.get(2), dedicated: r.get(3) }))
     }
 
     pub async fn machine_seen(&self, machine: Uuid) -> Result<(), String> {
@@ -326,15 +356,15 @@ impl Db {
         let rows = self
             .client().await?
             .query(
-                "select id, name, os, extract(epoch from coalesce(last_seen, created_at))::bigint from machines
-                 where account = $1 order by created_at, id",
+                "select m.id, m.name, m.os, extract(epoch from coalesce(m.last_seen, m.created_at))::bigint, b.upstash from machines m
+                 left join boxes b on b.machine = m.id where m.account = $1 order by m.created_at, m.id",
                 &[&account],
             )
             .await
             .map_err(err)?;
         Ok(rows
             .iter()
-            .map(|r| MachineView { id: r.get::<_, Uuid>(0).to_string(), name: r.get(1), os: r.get(2), online: false, last_seen: r.get(3) })
+            .map(|r| MachineView { id: r.get::<_, Uuid>(0).to_string(), name: r.get(1), os: r.get(2), online: false, last_seen: r.get(3), upstash_box: r.get(4) })
             .collect())
     }
 
@@ -351,6 +381,88 @@ impl Db {
     pub async fn remove_machine(&self, account: Uuid, machine: Uuid) -> Result<bool, String> {
         let n = self.client().await?.execute("delete from machines where id = $1 and account = $2", &[&machine, &account]).await.map_err(err)?;
         Ok(n == 1)
+    }
+
+    /// Gives the machine `id` of the account a fresh token, adding it when it is new. The hub adds a
+    /// box's machine itself, under the id its box row holds, so no pairing code is involved.
+    pub async fn put_machine(&self, id: Uuid, account: Uuid, name: &str, os: &str) -> Result<String, String> {
+        let token = Token::new();
+        let row = self
+            .client().await?
+            .query_opt(
+                "insert into machines (id, account, name, os, token_hash) values ($1, $2, $3, $4, $5)
+                 on conflict (id) do update set token_hash = excluded.token_hash, name = excluded.name
+                 where machines.account = excluded.account returning id",
+                &[&id, &account, &name, &os, &token.hash],
+            )
+            .await
+            .map_err(err)?;
+        row.map(|_| token.text).ok_or_else(|| format!("machine {id} belongs to another account"))
+    }
+
+    /// Writes `row` unless the account has a box for its workflow's subject already: the stored
+    /// row, and whether it is the one just written.
+    pub async fn reserve_box(&self, row: &BoxRow) -> Result<(BoxRow, bool), String> {
+        let client = self.client().await?;
+        let (subject, spec) = (serde_json::to_value(&row.subject).unwrap(), serde_json::to_value(&row.spec).unwrap());
+        let (phase, reason) = row.phase.stored();
+        let size = serde_json::to_value(row.size).unwrap().as_str().unwrap().to_owned();
+        let inserted = client
+            .execute(
+                "insert into boxes (id, account, machine, connector, subject, spec, size, phase, reason) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 on conflict (account, connector, subject) do nothing",
+                &[&row.id, &row.account, &row.machine, &row.connector, &subject, &spec, &size, &phase, &reason],
+            )
+            .await
+            .map_err(err)?;
+        let stored = client
+            .query_one(&format!("select {BOX_COLUMNS} from boxes where account = $1 and connector = $2 and subject = $3"), &[&row.account, &row.connector, &subject])
+            .await
+            .map_err(err)?;
+        Ok((box_row(&stored)?, inserted == 1))
+    }
+
+    pub async fn boxes(&self, account: Uuid) -> Result<Vec<BoxRow>, String> {
+        let rows = self.client().await?.query(&format!("select {BOX_COLUMNS} from boxes where account = $1 order by created_at"), &[&account]).await.map_err(err)?;
+        rows.iter().map(box_row).collect()
+    }
+
+    pub async fn box_of(&self, account: Uuid, machine: Uuid) -> Result<Option<BoxRow>, String> {
+        let row = self.client().await?.query_opt(&format!("select {BOX_COLUMNS} from boxes where account = $1 and machine = $2"), &[&account, &machine]).await.map_err(err)?;
+        row.as_ref().map(box_row).transpose()
+    }
+
+    /// Moves the row from `from` to `to`, and answers false when it was no longer at `from`:
+    /// another hub, as during a deploy, moved it first.
+    pub async fn set_box_phase(&self, id: &str, from: &Phase, to: &Phase) -> Result<bool, String> {
+        let ((from, _), (to, reason)) = (from.stored(), to.stored());
+        let n = self
+            .client().await?
+            .execute("update boxes set phase = $3, reason = $4 where id = $1 and phase = $2", &[&id, &from, &to, &reason])
+            .await
+            .map_err(err)?;
+        Ok(n == 1)
+    }
+
+    /// Records the row's box and moves it on to booting, as `set_box_phase` does.
+    pub async fn box_created(&self, id: &str, upstash: &BoxId) -> Result<bool, String> {
+        let (from, _) = Phase::Creating.stored();
+        let (to, _) = Phase::Booting.stored();
+        let n = self
+            .client().await?
+            .execute("update boxes set upstash = $3, phase = $4 where id = $1 and phase = $2", &[&id, &from, &upstash.0, &to])
+            .await
+            .map_err(err)?;
+        Ok(n == 1)
+    }
+
+    pub async fn box_exists(&self, id: &str) -> Result<bool, String> {
+        let row = self.client().await?.query_one("select exists (select 1 from boxes where id = $1)", &[&id]).await.map_err(err)?;
+        Ok(row.get(0))
+    }
+
+    pub async fn delete_box(&self, id: &str) -> Result<(), String> {
+        self.client().await?.execute("delete from boxes where id = $1", &[&id]).await.map_err(err).map(drop)
     }
 
     /// A fresh pairing code for the account and when it expires, in Unix seconds.
