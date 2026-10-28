@@ -3680,12 +3680,13 @@ async function sweep(profileName) {
     await waitFor("the camera granted", async () => readLog("adb.log").includes("shell pm grant com.example.app android.permission.CAMERA"));
     await press(gui('#panel-body .device-tools [aria-label="Overlay element frames"]'));
     await waitFor("the frames over the screen", async () => (await text("#panel-body .device-screen .ax .chip")) === "Sign in", 10000);
+    // A phone's tools cover the screen, so it is measured once they close; the overlay outlives them.
+    await press(gui('#panel-body .device-tools [aria-label="Close tools"]'));
     const frame = await page.evaluate(() => {
       const [screen, box] = [document.querySelector("#panel-body .device-screen").getBoundingClientRect(), document.querySelector("#panel-body .device-screen .ax").getBoundingClientRect()];
       return [(box.left - screen.left) / screen.width, (box.top - screen.top) / screen.height].map((n) => Math.round(n * 100));
     });
     check(frame.join(",") === "25,75", `the Sign in frame sits at ${frame}`);
-    await press(gui('#panel-body .device-tools [aria-label="Close tools"]'));
     const [download] = await Promise.all([page.waitForEvent("download"), press(gui('#panel-body .device-rail [aria-label="Save screenshot"]'))]);
     check(/^Pixel_9-.+\.png$/.test(download.suggestedFilename()), `the screenshot is ${download.suggestedFilename()}`);
     // Away from the hub's machine the screen is the machine's screenshots, and taps go through it.
