@@ -515,11 +515,27 @@ function renderDeviceWorkspace(tab, s, notices) {
   const floating = panelOf(tab).pip === s.id;
   const html = `<div class="device-panel"><div class="device-ws${s.tools ? " with-tools" : ""}" data-device="${esc(s.id)}">${notices}
     <div class="device-stage">${floating ? `<div class="floating"><p class="muted">This device is floating over the chat.</p><button type="button" class="outline" data-device-unfloat>${icon("picture-in-picture-2")}Return it to the panel</button></div>` : ""}</div>${deviceRailHtml(s)}${s.tools ? deviceToolsHtml(s) : ""}</div></div>`;
+  // A detail read re-renders the tools; what the user typed or picked in their forms survives it.
+  const fields = [...panelBody.querySelectorAll(".device-tools [data-tool-form] [name]")];
+  const same = (field) => panelBody.querySelector(`.device-tools [data-tool-form="${field.closest("[data-tool-form]").dataset.toolForm}"] [name="${field.name}"]`);
+  const edited = fields.filter((field) => field.value !== (field.defaultValue ?? [...field.options].find((o) => o.defaultSelected)?.value ?? "")).map((field) => [field, field.value]);
+  const focusedField = fields.find((field) => field === document.activeElement);
   const focused = document.activeElement?.closest?.("#panel-body .device-tools");
-  if (showPanel(html) || (!floating && entry.el.parentElement !== panelBody.querySelector(".device-stage"))) {
+  const rebuilt = showPanel(html);
+  if (rebuilt || (!floating && entry.el.parentElement !== panelBody.querySelector(".device-stage"))) {
     if (!floating) panelBody.querySelector(".device-stage").append(entry.el);
   }
-  if (focused) panelBody.querySelector(".device-tools .tools-body")?.focus?.();
+  if (rebuilt) {
+    for (const [field, value] of edited) {
+      const again = same(field);
+      if (again) again.value = value;
+    }
+    const again = focusedField && same(focusedField);
+    if (again) {
+      again.focus();
+      if (again.type === "text") again.setSelectionRange(again.value.length, again.value.length);
+    } else if (focused) panelBody.querySelector(".device-tools .tools-body")?.focus?.();
+  }
   syncOverlay(entry);
 }
 
