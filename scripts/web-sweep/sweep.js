@@ -591,6 +591,11 @@ async function sweep(profileName) {
     const r = await rect("#thread");
     await page.touchscreen.tap(r.left + 4, r.top + r.height / 2);
   };
+  // A phone's composer collapses to one row whenever the prompt loses focus, hiding its controls until a tap on the
+  // prompt reopens it. It collapses a moment after Send's tap, so the tap doesn't wait on the collapsed state.
+  const openComposer = async () => {
+    if (touch) await tapOrClick("#prompt");
+  };
   // A page's header carries its own toggle while the chat's is hidden under it.
   const showSidebar = async () => {
     if (await page.locator("#sidebar").isVisible()) return;
@@ -4787,6 +4792,7 @@ async function sweep(profileName) {
 
   await step("composer: attached files show above the prompt and go out with it", async () => {
     const attach = async (file) => {
+      await openComposer();
       const [chooser] = await Promise.all([page.waitForEvent("filechooser"), tapOrClick("#composer-attach")]);
       await chooser.setFiles(file);
     };
@@ -4813,6 +4819,7 @@ async function sweep(profileName) {
     await press(page.locator("#attachments .file .name"));
     await waitFor("the preview", async () => (await text("#file-preview pre")) === "hi there");
     await press(page.locator("#file-preview [data-close]"));
+    await openComposer();
     await press(page.locator("#attachments .remove"));
     check(!(await page.locator("#attachments").isVisible()), "the row's X left it there");
     await page.evaluate((data) => {
@@ -4825,6 +4832,7 @@ async function sweep(profileName) {
       prompt.dispatchEvent(paste);
     }, png.toString("base64"));
     await waitFor("the pasted picture in the strip", async () => (await page.getAttribute("#attachments .tile img", "alt").catch(() => null)) === "pasted.png");
+    await openComposer();
     await press(page.locator("#attachments .remove"));
     await attach({ name: "huge.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(26 << 20) });
     await waitFor("the upload error", async () => /over 25 MB/.test(await text("#composer-note")));
@@ -5095,8 +5103,7 @@ async function sweep(profileName) {
 
   await step("composer: the context ring shows how full the window is, and a cold long session compacts first", async () => {
     await sendPrompt("full");
-    // A phone's composer rests as T3 Code's one row, which a tap opens to its controls.
-    if (touch) await tapOrClick("#prompt");
+    await openComposer();
     await waitFor("the context ring", () => page.locator("#context-meter").isVisible());
     check((await page.getAttribute("#context-meter", "aria-label")) === "Context window 23% used", `ring: ${await page.getAttribute("#context-meter", "aria-label")}`);
     await tapOrClick("#context-meter");
@@ -5104,11 +5111,16 @@ async function sweep(profileName) {
     const card = (await text("#context-card .head")).replace(/\s+/g, " ");
     check(card === "Context Window23%·231k/1m", `card: ${card}`);
     check(await page.locator("#context-card [data-compact]").isVisible(), "no Compact context button");
-    await tapOrClick("#context-meter");
+    // The phone's composer collapses under the open card and takes the ring with it, so a tap outside closes the card there.
+    if (touch) await tapOutsideComposer();
+    else await tapOrClick("#context-meter");
+    await waitFor("the card to close", () => page.locator("#context-card").isHidden());
+    await openComposer();
     await waitFor("the compact pill", async () => (await text("#compact-pill")) === "Compact231k");
     check((await page.getAttribute("#send", "title")) === "Summarize 231k tokens of history, then send", `send says ${await page.getAttribute("#send", "title")}`);
     await tapOrClick("#compact-pill");
     check((await text("#compact-pill")) === "Full231k", "the pill didn't switch to keeping the history");
+    await openComposer();
     await tapOrClick("#compact-pill");
     await sendPrompt("after the break");
     await waitTerm(/\/compact[\s\S]*echo: after the break/);
