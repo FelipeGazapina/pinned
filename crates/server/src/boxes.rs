@@ -531,11 +531,17 @@ impl Boxes {
         let due = self.swept.lock().unwrap().get(&account.id).is_none_or(|at| at.elapsed() >= self.policy.sweep);
         // Listed before the rows are read, so every box listed has its row among them.
         let listed = match &keys {
-            Some(keys) if due => {
-                let listed = self.api.list(&keys.api_key, &self.label).await?;
-                self.swept.lock().unwrap().insert(account.id, Instant::now());
-                Some(listed)
-            }
+            Some(keys) if due => match self.api.list(&keys.api_key, &self.label).await {
+                Ok(listed) => {
+                    self.swept.lock().unwrap().insert(account.id, Instant::now());
+                    Some(listed)
+                }
+                // Only the sweep needs the list; the rows' own steps still run.
+                Err(e) => {
+                    eprintln!("pinned-server: could not list account {}'s boxes: {e}", account.id);
+                    None
+                }
+            },
             _ => None,
         };
         let rows = hub.db.boxes(account.id).await?;
