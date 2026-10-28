@@ -3642,7 +3642,8 @@ async function sweep(profileName) {
     check(/Pixel_9\nsweep-node · Android 16/.test(await page.getAttribute('#panel-tabs .ptab.active[data-panel="device"]', "title")), "the tab's tooltip lacks the machine and version");
     await waitFor("the H.264 stream", async () => (await page.getAttribute("#panel-body .device-screen", "data-live").catch(() => null)) === "video", 15000);
     const pixel = await page.evaluate(() => [...document.querySelector("#panel-body .device-screen canvas").getContext("2d").getImageData(108, 240, 1, 1).data]);
-    check(Math.abs(pixel[0] - 42) < 12 && Math.abs(pixel[1] - 157) < 12 && Math.abs(pixel[2] - 143) < 12, `the decoded frame's center is ${pixel}`);
+    // Teal, within the engines' YUV conversions: headless Chromium draws the frame at 37,157,138 and WebKit at 59,165,150.
+    check(Math.abs(pixel[0] - 42) < 24 && Math.abs(pixel[1] - 157) < 24 && Math.abs(pixel[2] - 143) < 24, `the decoded frame's center is ${pixel}`);
     check(/stream emulator-5554 \?device=emulator-5554&frame-meta=1/.test(readLog("hub.log")), "the screen didn't open serve-emu's socket");
     check((await page.locator("#panel-body .device-rail button").evaluateAll((bs) => bs.map((b) => b.getAttribute("aria-label")))).join("|") === "Home|Back|Recents|Rotate device|Switch device to dark mode|Device text size|Device tools|Save screenshot|More device actions", "the rail isn't T3's");
     await press(gui("#panel-body .device-screen"));
@@ -3681,12 +3682,13 @@ async function sweep(profileName) {
     await waitFor("the camera granted", async () => readLog("adb.log").includes("shell pm grant com.example.app android.permission.CAMERA"));
     await press(gui('#panel-body .device-tools [aria-label="Overlay element frames"]'));
     await waitFor("the frames over the screen", async () => (await text("#panel-body .device-screen .ax .chip")) === "Sign in", 10000);
+    // A phone's tools cover the screen, so it is measured once they close; the overlay outlives them.
+    await press(gui('#panel-body .device-tools [aria-label="Close tools"]'));
     const frame = await page.evaluate(() => {
       const [screen, box] = [document.querySelector("#panel-body .device-screen").getBoundingClientRect(), document.querySelector("#panel-body .device-screen .ax").getBoundingClientRect()];
       return [(box.left - screen.left) / screen.width, (box.top - screen.top) / screen.height].map((n) => Math.round(n * 100));
     });
     check(frame.join(",") === "25,75", `the Sign in frame sits at ${frame}`);
-    await press(gui('#panel-body .device-tools [aria-label="Close tools"]'));
     const [download] = await Promise.all([page.waitForEvent("download"), press(gui('#panel-body .device-rail [aria-label="Save screenshot"]'))]);
     check(/^Pixel_9-.+\.png$/.test(download.suggestedFilename()), `the screenshot is ${download.suggestedFilename()}`);
     // Away from the hub's machine the screen is the machine's screenshots, and taps go through it.

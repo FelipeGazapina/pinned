@@ -193,7 +193,7 @@ function deviceScreen(tab, s) {
   const el = document.createElement("div");
   el.className = "device-phone";
   el.innerHTML = `<div class="device-screen" tabindex="0" role="application" aria-label="${esc(s.target.name)} screen"><canvas></canvas><img alt="" hidden><div class="ax-layer"></div></div>`;
-  const entry = { el, tab, s, target: `${s.target.platform}:${s.target.id}`, size: null, mode: null, socket: null, hid: null, decoder: null, timer: null, tree: null, treeTimer: null };
+  const entry = { el, screen: el.firstElementChild, tab, s, target: `${s.target.platform}:${s.target.id}`, size: null, mode: null, socket: null, hid: null, decoder: null, timer: null, tree: null, treeTimer: null };
   deviceScreens.set(s.id, entry);
   wireDeviceInput(entry);
   startDeviceStream(entry);
@@ -260,7 +260,7 @@ function streamAndroid(entry) {
           sizeDeviceScreen(entry, frame.displayWidth, frame.displayHeight);
           draw.drawImage(frame, 0, 0, canvas.width, canvas.height);
           frame.close();
-          entry.el.dataset.live = "video";
+          entry.screen.dataset.live = "video";
         },
         error: () => fallBackToScreenshots(entry),
       });
@@ -295,7 +295,7 @@ function streamIos(entry) {
   entry.timer = setInterval(() => {
     if (!img.naturalWidth) return;
     sizeDeviceScreen(entry, img.naturalWidth, img.naturalHeight);
-    entry.el.dataset.live = "mjpeg";
+    entry.screen.dataset.live = "mjpeg";
   }, 250);
   img.onerror = () => {
     clearInterval(entry.timer);
@@ -330,7 +330,7 @@ function pollDeviceScreen(entry) {
     busy = true;
     try {
       img.src = await deviceCall(tab, { op: "screenshot", platform: s.target.platform, id: s.target.id });
-      entry.el.dataset.live = "screenshots";
+      entry.screen.dataset.live = "screenshots";
     } catch {}
     busy = false;
   };
@@ -515,11 +515,27 @@ function renderDeviceWorkspace(tab, s, notices) {
   const floating = panelOf(tab).pip === s.id;
   const html = `<div class="device-panel"><div class="device-ws${s.tools ? " with-tools" : ""}" data-device="${esc(s.id)}">${notices}
     <div class="device-stage">${floating ? `<div class="floating"><p class="muted">This device is floating over the chat.</p><button type="button" class="outline" data-device-unfloat>${icon("picture-in-picture-2")}Return it to the panel</button></div>` : ""}</div>${deviceRailHtml(s)}${s.tools ? deviceToolsHtml(s) : ""}</div></div>`;
+  // A detail read re-renders the tools; what the user typed or picked in their forms survives it.
+  const fields = [...panelBody.querySelectorAll(".device-tools [data-tool-form] [name]")];
+  const same = (field) => panelBody.querySelector(`.device-tools [data-tool-form="${field.closest("[data-tool-form]").dataset.toolForm}"] [name="${field.name}"]`);
+  const edited = fields.filter((field) => field.value !== (field.defaultValue ?? [...field.options].find((o) => o.defaultSelected)?.value ?? "")).map((field) => [field, field.value]);
+  const focusedField = fields.find((field) => field === document.activeElement);
   const focused = document.activeElement?.closest?.("#panel-body .device-tools");
-  if (showPanel(html) || (!floating && entry.el.parentElement !== panelBody.querySelector(".device-stage"))) {
+  const rebuilt = showPanel(html);
+  if (rebuilt || (!floating && entry.el.parentElement !== panelBody.querySelector(".device-stage"))) {
     if (!floating) panelBody.querySelector(".device-stage").append(entry.el);
   }
-  if (focused) panelBody.querySelector(".device-tools .tools-body")?.focus?.();
+  if (rebuilt) {
+    for (const [field, value] of edited) {
+      const again = same(field);
+      if (again) again.value = value;
+    }
+    const again = focusedField && same(focusedField);
+    if (again) {
+      again.focus();
+      if (again.type === "text") again.setSelectionRange(again.value.length, again.value.length);
+    } else if (focused) panelBody.querySelector(".device-tools .tools-body")?.focus?.();
+  }
   syncOverlay(entry);
 }
 
