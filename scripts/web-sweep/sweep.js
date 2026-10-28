@@ -2361,6 +2361,8 @@ async function sweep(profileName) {
 
   await step("app view: resting on a PR link previews the pull request", async () => {
     try {
+      // The subagent step before this one goes back to whichever thread it started in, which can be beta's.
+      await toThread("alpha");
       await sendPrompt("prlink");
       await answered("Opened the pull request");
       if (touch) return "a touch screen has no hover";
