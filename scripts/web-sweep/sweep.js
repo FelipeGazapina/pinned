@@ -5522,7 +5522,12 @@ async function sweep(profileName) {
         await tapOrClick('#details-card [data-act="git"]');
       } else await tapOrClick("#git-action .main");
       await waitFor("the progress label", async () => /\.\.\./.test(await text("#git-action .main .progress").catch(() => "")), 5000);
-      await waitFor("gh to open the pull request", async () => /^pr create --fill$/m.test(readLog("gh.log")), 20000);
+      await waitFor("gh to open the pull request", async () => {
+        // A step that fails says why in the composer's note, which a bare timeout would hide.
+        const failed = await page.evaluate(() => !composerNote.hidden && composerNote.hasAttribute("data-error") && composerNote.textContent);
+        check(!failed, `the Git action failed: ${failed}`);
+        return /^pr create --fill$/m.test(readLog("gh.log"));
+      }, 20000);
       await waitFor("the action to end", async () => !(await page.evaluate(() => !!gitRun)), 10000);
       check(git("log", "-1", "--format=%s") === "Write the sweep's notes", `the written message: ${git("log", "-1", "--format=%s")}`);
       const branch = git("symbolic-ref", "--short", "HEAD");
