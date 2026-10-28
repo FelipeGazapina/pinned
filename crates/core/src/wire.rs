@@ -1049,8 +1049,8 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, connectors: vec![], checked: None } },
-            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "connectors": [], "checked": null } }),
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, upstash: None, connectors: vec![], checked: None } },
+            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "upstash": null, "connectors": [], "checked": null } }),
         );
     }
 

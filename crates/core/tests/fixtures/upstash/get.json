@@ -1,0 +1,12 @@
+{
+  "id": "box_2pQx7c",
+  "name": "pinned-00c0ffee",
+  "labels": ["hub:3f9a1c2b7d4e", "p:00c0ffee12345678"],
+  "size": "medium",
+  "keep_alive": true,
+  "runtime": "node",
+  "browser": true,
+  "status": "idle",
+  "created_at": 1793179000,
+  "updated_at": 1793179030
+}

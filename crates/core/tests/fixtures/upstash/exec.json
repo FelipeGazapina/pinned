@@ -1,0 +1,1 @@
+{ "exit_code": 1, "output": "curl: (22) 404\n", "error": "bootstrap failed" }

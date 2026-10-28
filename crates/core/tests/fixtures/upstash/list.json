@@ -1,0 +1,25 @@
+[
+  {
+    "id": "box_2pQx7c",
+    "customer_id": "cus_1",
+    "name": "pinned-00c0ffee",
+    "labels": ["hub:3f9a1c2b7d4e", "p:00c0ffee12345678"],
+    "size": "medium",
+    "keep_alive": true,
+    "runtime": "node",
+    "browser": true,
+    "status": "running",
+    "network_policy": { "mode": "allow-all" },
+    "last_activity_at": 1793180000,
+    "created_at": 1793179000,
+    "updated_at": 1793180000
+  },
+  {
+    "id": "box_9ZkLm0",
+    "name": "scratch",
+    "size": "small",
+    "status": "paused",
+    "created_at": 1793100000,
+    "updated_at": 1793100500
+  }
+]

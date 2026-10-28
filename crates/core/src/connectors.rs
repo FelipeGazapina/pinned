@@ -2,8 +2,8 @@
 //! with a claude session already working on what it found.
 
 use crate::agent::{self, Stage, Subject};
-use crate::wire::RunSpec;
-use crate::{github, linear, slack};
+use crate::wire::{MachineId, RunSpec};
+use crate::{github, linear, slack, upstash};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -17,6 +17,8 @@ const INTERVAL: Duration = Duration::from_secs(60);
 const LINEAR_KEY: &str = "linear-key";
 const SLACK_KEY: &str = "slack-key";
 const GITHUB_KEY: &str = "github-key";
+const UPSTASH_KEY: &str = "upstash-box-key";
+const CLAUDE_TOKEN: &str = "claude-oauth-token";
 /// A Slack watermark trails the check that moved it, so a message Slack shows a little late
 /// is still after it. Threads already handled keep the overlap from starting a session twice.
 const SLACK_OVERLAP: chrono::Duration = chrono::Duration::seconds(60);
@@ -145,6 +147,74 @@ pub struct Connector {
 
 fn on() -> bool {
     true
+}
+
+/// Where a workflow's sessions run. Kept under the connector's original `machine` key: a machine
+/// id string ("" = any), or `{"kind":"upstash-box",…}`. Old stores load as before, and an old UI
+/// that never touches the select saves the object back untouched.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "StoredRunsOn", into = "StoredRunsOn")]
+pub enum RunsOn {
+    /// Whichever of the account's machines is online.
+    #[default]
+    Any,
+    /// This machine first, else whichever is online.
+    Machine(MachineId),
+    /// A new Upstash Box for each issue or thread, which the hub deletes once its session ends.
+    FreshBox(BoxStep),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BoxStep {
+    #[serde(default)]
+    pub size: BoxSize,
+}
+
+/// Serialized names match Upstash's `size`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BoxSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredRunsOn {
+    Machine(String),
+    Box {
+        kind: UpstashBoxKind,
+        #[serde(default)]
+        size: BoxSize,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+enum UpstashBoxKind {
+    #[serde(rename = "upstash-box")]
+    UpstashBox,
+}
+
+impl From<StoredRunsOn> for RunsOn {
+    fn from(stored: StoredRunsOn) -> Self {
+        match stored {
+            StoredRunsOn::Machine(id) if id.is_empty() => RunsOn::Any,
+            StoredRunsOn::Machine(id) => RunsOn::Machine(id),
+            StoredRunsOn::Box { size, .. } => RunsOn::FreshBox(BoxStep { size }),
+        }
+    }
+}
+
+impl From<RunsOn> for StoredRunsOn {
+    fn from(runs_on: RunsOn) -> Self {
+        match runs_on {
+            RunsOn::Any => StoredRunsOn::Machine(String::new()),
+            RunsOn::Machine(id) => StoredRunsOn::Machine(id),
+            RunsOn::FreshBox(step) => StoredRunsOn::Box { kind: UpstashBoxKind::UpstashBox, size: step.size },
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -287,6 +357,8 @@ struct Store {
     slack: Option<slack::Account>,
     #[serde(default)]
     github: Option<github::Account>,
+    #[serde(default)]
+    upstash: Option<upstash::Account>,
     connectors: Vec<Connector>,
 }
 
@@ -343,6 +415,8 @@ pub struct Settings {
     pub slack: Option<slack::Account>,
     #[serde(default)]
     pub github: Option<github::Account>,
+    #[serde(default)]
+    pub upstash: Option<upstash::Account>,
     pub connectors: Vec<Connector>,
     pub checked: Option<Check>,
 }
@@ -1038,6 +1112,7 @@ impl Connectors {
             linear: store.linear.clone(),
             slack: store.slack.clone(),
             github: store.github.clone(),
+            upstash: store.upstash.clone(),
             connectors: store.connectors.clone(),
             checked: self.checked.lock().unwrap().clone(),
         }
@@ -1117,6 +1192,30 @@ impl Connectors {
     /// What a machine clones the account's private GitHub repositories with.
     pub fn github_token(&self) -> Option<String> {
         self.key(GITHUB_KEY)
+    }
+
+    /// Keeps the Box key and the Claude token, which the hub checked with Upstash first.
+    pub fn connect_upstash(&self, keys: &upstash::Keys) -> Result<upstash::Account, String> {
+        self.storage.write_key(UPSTASH_KEY, &keys.api_key)?;
+        self.storage.write_key(CLAUDE_TOKEN, &keys.claude_token)?;
+        let account = keys.account();
+        let mut store = self.store.lock().unwrap();
+        store.upstash = Some(account.clone());
+        self.save(&store)?;
+        Ok(account)
+    }
+
+    pub fn disconnect_upstash(&self) -> Result<(), String> {
+        self.storage.remove_key(UPSTASH_KEY);
+        self.storage.remove_key(CLAUDE_TOKEN);
+        let mut store = self.store.lock().unwrap();
+        store.upstash = None;
+        self.save(&store)
+    }
+
+    /// What the hub creates and boots boxes with. Never serialized, never sent to a client.
+    pub fn box_keys(&self) -> Option<upstash::Keys> {
+        Some(upstash::Keys { api_key: self.key(UPSTASH_KEY)?, claude_token: self.key(CLAUDE_TOKEN)? })
     }
 
     /// Channels the bot was invited to, which a Slack connector can watch.
@@ -1776,5 +1875,22 @@ mod tests {
         }
         assert!(!prompt(Fix::Off, true).contains("Proof"));
         assert_eq!(prompt(Fix::Off, true), prompt(Fix::Off, false));
+    }
+
+    #[test]
+    fn upstash_keys_stay_in_storage_and_only_their_hints_reach_settings() {
+        let (connectors, dir) = stored("upstash", vec![]);
+        assert!(connectors.box_keys().is_none());
+        let keys = upstash::Keys::parse("box_abcdA1b2", "sk-ant-oat01-zz9f3c").unwrap();
+        assert_eq!(connectors.connect_upstash(&keys).unwrap(), upstash::Account { key_hint: "…A1b2".into(), claude_hint: "…9f3c".into() });
+        let kept = connectors.box_keys().unwrap();
+        assert_eq!((kept.api_key.as_str(), kept.claude_token.as_str()), ("box_abcdA1b2", "sk-ant-oat01-zz9f3c"));
+        let settings = serde_json::to_string(&connectors.get_settings()).unwrap();
+        assert!(settings.contains("\"upstash\":{\"key_hint\":\"…A1b2\",\"claude_hint\":\"…9f3c\"}"), "{settings}");
+        assert!(!settings.contains("box_abcd") && !settings.contains("sk-ant-oat01"), "{settings}");
+        connectors.disconnect_upstash().unwrap();
+        assert!(connectors.box_keys().is_none());
+        assert!(connectors.get_settings().upstash.is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
