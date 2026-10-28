@@ -206,17 +206,20 @@ enum Boot {
 
 /// Whether a running row's session has ended. Every end rule lives here.
 fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
+    // `None` is a condition this look can't see, as the session's while its node is offline: its
+    // timer neither starts nor restarts, so a dropped link doesn't buy a quiet box more time.
     let (offline, gone, exited, quiet) = match seen {
-        Seen::Offline => (true, false, false, false),
-        Seen::NoTab => (false, true, false, false),
-        Seen::Tab { running, quiet } => (false, false, !running, quiet),
+        Seen::Offline => (Some(true), None, None, None),
+        Seen::NoTab => (Some(false), Some(true), None, None),
+        Seen::Tab { running, quiet } => (Some(false), Some(false), Some(!running), Some(quiet)),
     };
-    let lasted = |since: &mut Option<Instant>, on: bool, limit: Duration| {
-        if !on {
+    let lasted = |since: &mut Option<Instant>, on: Option<bool>, limit: Duration| match on {
+        Some(false) => {
             *since = None;
-            return false;
+            false
         }
-        now.duration_since(*since.get_or_insert(now)) >= limit
+        Some(true) => now.duration_since(*since.get_or_insert(now)) >= limit,
+        None => since.is_some_and(|at| now.duration_since(at) >= limit),
     };
     let ended = [
         (lasted(&mut t.offline_since, offline, p.offline), End::Offline),
@@ -676,6 +679,17 @@ mod tests {
         assert_eq!(verdict(MIN, quiet, &mut t, start + 16 * MIN, &p), None);
         assert_eq!(verdict(MIN, quiet, &mut t, start + 35 * MIN, &p), None, "quiet for 19 minutes since it worked");
         assert_eq!(verdict(MIN, quiet, &mut t, start + 37 * MIN, &p), Some(End::Idle));
+    }
+
+    #[test]
+    fn a_dropped_link_does_not_restart_the_quiet_clock() {
+        let p = policy();
+        let (start, mut t) = (Instant::now(), Timers::default());
+        let quiet = Seen::Tab { running: true, quiet: true };
+        assert_eq!(verdict(MIN, quiet, &mut t, start, &p), None);
+        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + 10 * MIN, &p), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 19 * MIN, &p), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 21 * MIN, &p), Some(End::Idle));
     }
 
     #[test]
