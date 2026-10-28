@@ -1272,6 +1272,8 @@ async function showPrCard(link) {
   const tab = active;
   if (!prDetails.has(url)) prDetails.set(url, prCardDetail(tab, url).catch(() => null));
   const detail = await prDetails.get(url);
+  // A failed lookup isn't kept, so the next rest on the link asks again.
+  if (!detail) prDetails.delete(url);
   if (prHover.link !== link || !detail) return;
   prCard.innerHTML = prCardHtml(detail);
   prCard.hidden = false;

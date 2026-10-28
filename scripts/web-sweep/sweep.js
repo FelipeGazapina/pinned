@@ -580,6 +580,8 @@ async function sweep(profileName) {
     if (touch) await page.tap((await page.locator("#pill-actions .pill").first().isVisible()) ? "#pill-actions .pill >> nth=0" : "#send");
     else {
       // Enter in the `/` menu picks its highlighted command, so a word sent as typed closes it first.
+      // The menu lists the machine's commands, which a new thread has yet to ask for, so it can open late.
+      if (/^\//.test(words)) await waitFor("the / menu", () => page.locator('#composer-menu[data-kind="slash"]').isVisible());
       if (await page.locator('#composer-menu:is([data-kind="slash"], [data-kind="mention"])').isVisible()) await page.press("#prompt", "Escape");
       await page.press("#prompt", "Enter");
     }
@@ -4273,7 +4275,10 @@ async function sweep(profileName) {
     const merged = () => readLog("gh.log").split("\n").filter((l) => l.startsWith("merge-async 41 ")).map((l) => JSON.parse(l.slice(15)));
     await waitFor("GitHub's merge-async", async () => merged().some((b) => /^[0-9a-f]{40}$/.test(b.sha) && sortedJson({ ...b, sha: "" }) === sortedJson({ merge_action: "default", merge_method: "merge", sha: "" })), 15000);
     await waitFor("#41 merged", async () => /Merged/.test(await text("#panel-body .pr > .crumbs")), 10000);
+    // Reopening #41 for the later steps undoes what GitHub never does, so the app, which asks gh no
+    // more about a merged pull request, forgets it too.
     fs.writeFileSync(path.join(HOME, ".fake-gh-41"), "open");
+    await page.evaluate(() => prStatuses.delete("https://github.com/example/alpha/pull/41"));
     fs.rmSync(path.join(HOME, ".fake-gh-stack.json"));
     await closePanelIfOpen();
     await page.evaluate(() => openPage("pull-requests"));
@@ -6593,7 +6598,8 @@ async function sweep(profileName) {
     await sideSetting("snoozeLimited", true);
     await closeSettings();
     await showSidebar();
-    await waitFor("beta snoozed until the limit lifts", async () => (await text('#thread-list .settled-head[data-shelf="snoozed"]')) === "Snoozed (1)", 5000);
+    // The shelf is open since the snooze step pressed it, so its head counts nothing; beta's row shows under it either way.
+    await waitFor("beta snoozed until the limit lifts", async () => /^Snoozed( \(1\))?$/.test(await text('#thread-list .settled-head[data-shelf="snoozed"]')) && (await page.locator(`${rowSel(beta)} .wake-at`).count()) === 1, 5000);
     await rowMenu(rowSel(beta));
     await menuPick("Wake thread");
     await waitFor("beta awake", async () => !(await page.locator('#thread-list .settled-head[data-shelf="snoozed"]').count()));
@@ -6640,6 +6646,11 @@ async function sweep(profileName) {
     check(/^Archive thread ".+"\?$/.test(await text("#side-dialog h3")), `asks: ${await text("#side-dialog h3")}`);
     await press(gui("#side-dialog .primary"));
     await waitFor("the copy archived", async () => !(await page.locator(rowSel(copy)).count()), 10000);
+    // The Archive page's step expects to find the archive empty.
+    await page.evaluate(() => {
+      archived.splice(archived.findIndex((a) => a.cwd.endsWith("alpha-two")), 1);
+      saveArchived();
+    });
     await sideSetting("confirmArchive", false);
 
     const loose = await openThreadIn("work");
@@ -7527,7 +7538,8 @@ async function sweep(profileName) {
       await other.goto(full);
       await other.waitForFunction(() => document.querySelector("#prompt")?.value === "Fix the flaky test" && location.pathname === "/", null, { timeout: 20000 });
       const landed = await other.evaluate(() => [projectName(active), document.querySelector("#side-notice").textContent.trim()]);
-      check(landed[0] === "alpha", `the link opened in ${landed[0]}`);
+      // alpha-two, from the settings step, is a second checkout of example/alpha; the link takes the one used last.
+      check(["alpha", "alpha-two"].includes(landed[0]), `the link opened in ${landed[0]}`);
       check(landed[1].startsWith("Prompt added from a link. Read it before you send."), `notice: ${landed[1]}`);
       await other.goto(`${HUB}/new?prompt=hi&repo=example/nowhere`);
       await other.waitForFunction(() => document.querySelector("#page-view h2")?.textContent === "You don't have example/nowhere", null, { timeout: 20000 });
@@ -7737,9 +7749,10 @@ async function sweep(profileName) {
     await openPaletteKeys();
     await page.keyboard.type("chat width");
     await waitFor("the setting", async () => (await page.locator("#palette .group:has(.label:text-is('Settings')) .item .name").allTextContents())[0] === "Chat width");
-    check((await text("#palette .group:has(.label:text-is('Settings')) .item .sub")) === "Settings · General", `subtitle: ${await text("#palette .group:has(.label:text-is('Settings')) .item .sub")}`);
+    check((await text("#palette .group:has(.label:text-is('Settings')) .item .sub")) === "Settings · Appearance", `subtitle: ${await text("#palette .group:has(.label:text-is('Settings')) .item .sub")}`);
     await press(paletteRow("Chat width"));
-    await waitFor("General with Chat width marked", () => page.locator("#settings-page .setting-found").first().isVisible());
+    await waitFor("the Appearance page", async () => (await text("#settings-page h2")) === "Appearance");
+    await waitFor("the Chat width row in focus", () => page.evaluate(() => document.activeElement?.id === "chat-width"));
     await page.evaluate(() => settingsOpen() && toggleSettings());
   });
 
@@ -7839,7 +7852,8 @@ async function sweep(profileName) {
   await step("shortcuts: ⌘⇧H opens T3's Run on picker of the machines", async () => {
     if (touch) return "touch: no keyboard";
     await calm();
-    await openRow(await keyFor("alpha"));
+    const alpha = await keyFor("alpha");
+    await openRow(alpha);
     const opened = await page.evaluate(() => tabs.map((t) => t.key));
     try {
       await page.evaluate(() => newThreadIn(active));
@@ -7850,7 +7864,10 @@ async function sweep(profileName) {
       check((await page.locator("#composer-menu button.checked .label").allTextContents()).join() === "sweep-node", "this machine isn't checked");
       await page.keyboard.press("Escape");
     } finally {
+      // Closing a tab moves to its neighbour, which is beta, not the thread this started from.
       await page.evaluate((keep) => tabs.filter((t) => !keep.includes(t.key)).forEach((t) => closeTab(t)), opened);
+      await page.evaluate((k) => activate(tabByKey(k)), alpha);
+      await waitFor("alpha again", () => page.evaluate((k) => active?.key === k, alpha));
     }
   });
 
@@ -8410,7 +8427,7 @@ async function sweep(profileName) {
     await page.waitForSelector("#projects[data-mode=move] .choices button");
     await press(page.locator("#projects .choices button", { hasText: "Browse folders…" }));
     await page.fill("#projects .browse input", "~/work/");
-    await waitFor("listing", async () => (await page.locator("#projects .folders button", { hasText: "alpha" }).count()) === 1);
+    await waitFor("listing", async () => (await page.locator("#projects .folders button", { has: page.locator('.name:text-is("alpha")') }).count()) === 1);
     await page.fill("#projects .browse input", `${HOME}/`);
     await waitFor("home listing", async () => (await page.locator("#projects .folders button", { hasText: "work" }).count()) === 1);
     await press(page.locator("#projects .folders button").first());
