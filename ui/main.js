@@ -408,7 +408,9 @@ async function openRemote(machine, path, bypass) {
     callOn(machine, { cmd: "close_tab", tab: id });
     throw e;
   }
-  await startTab(await revealTab(machine, id));
+  const tab = await revealTab(machine, id);
+  await startTab(tab);
+  return tab;
 }
 
 async function moveTab(tab, path) {
