@@ -790,7 +790,7 @@ struct FakeState {
     accounts: Vec<Credentials>,
     /// What the next bootstrap answers instead of booting a node.
     failing: Option<Exec>,
-    /// The next bootstrap never answers, as when the hub dies during it.
+    /// The next bootstrap never answers, as when the hub dies during it. Other scripts answer at once.
     hanging: bool,
 }
 
@@ -897,9 +897,12 @@ impl BoxApi for FakeBoxes {
             Self::refuse(key)?;
             let hanging = {
                 let mut state = self.state.lock().unwrap();
-                state.scripts.push(script);
-                std::mem::take(&mut state.hanging)
+                state.scripts.push(script.clone());
+                script.contains("start.sh") && std::mem::take(&mut state.hanging)
             };
+            if !script.contains("start.sh") {
+                return Ok(Exec { exit_code: 0, output: String::new(), error: String::new() });
+            }
             if hanging {
                 std::future::pending::<()>().await;
             }
@@ -1091,7 +1094,7 @@ fn a_hub_restarted_mid_boot_finishes_the_run_with_one_box() {
     hub.boxes.state.lock().unwrap().hanging = true;
     let (dying, id, work) = (hub.hub().clone(), ana.id, ana.box_run(issue("uuid-1")));
     hub.runtime.spawn(async move { dying.open(id, work).await });
-    wait_for("the bootstrap to start", || !hub.boxes.state.lock().unwrap().scripts.is_empty());
+    wait_for("the bootstrap to start", || hub.boxes.state.lock().unwrap().scripts.iter().any(|s| s.contains("start.sh")));
     let first = hub.boxes.state.lock().unwrap().accounts[0].clone();
 
     hub.restart();

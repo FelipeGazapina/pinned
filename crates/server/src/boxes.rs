@@ -443,6 +443,11 @@ impl Boxes {
             machine_token: token,
         };
         let login = connectors.get_settings().github.map_or_else(|| "pinned".to_owned(), |g| g.login);
+        // Nothing promises that a file write makes the folders above it.
+        let made = self.api.exec(key, id, format!("mkdir -p {DIR}/bin")).await?;
+        if made.exit_code != 0 {
+            return Err(format!("could not make {DIR}: {}", tail(&made)));
+        }
         self.api.write(key, id, &format!("{DIR}/account.json"), serde_json::to_string_pretty(&creds).unwrap()).await?;
         self.api.write(key, id, &format!("{DIR}/box.env"), box_env(keys, connectors.github_token().as_deref())).await?;
         self.api.write(key, id, &format!("{DIR}/start.sh"), start_script(&login)).await?;
