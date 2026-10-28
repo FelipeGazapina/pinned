@@ -642,7 +642,7 @@ function renderPrPanel(s) {
     ? `<button type="button" class="ghost small" data-pr-stack aria-label="Stack ${st.stack.number}, layer ${st.position} of ${st.stack.layers.length}" title="View stack #${st.stack.number}, layer ${st.position} of ${st.stack.layers.length}">${icon("layers-2")}${st.position}/${st.stack.layers.length}</button>
       ${st.canMerge && ["open", "draft"].includes(st.selected.state) ? `<button type="button" class="primary" data-stack-merge${st.mergeDisabled ? " disabled" : ""} title="Merge stack through #${d.number} into ${esc(st.stack.base)} (${st.mergeLayers.length} ${st.mergeLayers.length === 1 ? "pull request" : "pull requests"})">${icon("git-merge")}Merge stack</button>` : ""}`
     : chained ? `<button type="button" class="icon" data-pr-stack title="Stack">${icon("layers")}</button>` : "";
-  const actions = `<span class="spacer"></span>${stackButtons}
+  const actions = `${stackButtons}
       ${linked.length ? `<button type="button" class="ghost small" data-pr-threads aria-label="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}" title="Linked from ${linked.length} thread${linked.length === 1 ? "" : "s"}. Search in the command palette.">${icon("message-square")}${linked.length}</button>` : ""}
       ${primary}<button type="button" class="icon" data-pr-more aria-label="More pull request actions" title="More pull request actions">${icon("ellipsis")}</button>`;
   const title = s.editing === "title"
