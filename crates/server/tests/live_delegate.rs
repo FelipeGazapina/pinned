@@ -22,8 +22,9 @@ fn live_cursor_and_claude_through_pinned_mcp() {
         .listen(|_| Err("not a connector callback".into()))
         .unwrap();
     let sock = machine.launch().sock.clone();
+    let tab = machine.open_tab(Some(dir.display().to_string()), false).unwrap();
     for (account, model) in [("cursor", "composer-2.5"), ("claude", "claude-haiku-5-5")] {
-        let status = ask(&exe, &sock, account, model);
+        let status = ask(&exe, &sock, &tab, account, model);
         eprintln!("LIVE {account} {model}: {}", status);
         let summary = status["summary"].as_str().unwrap_or("");
         assert!(
@@ -46,15 +47,17 @@ fn server_bin() -> std::path::PathBuf {
     built
 }
 
-fn ask(exe: &Path, sock: &Path, account: &str, model: &str) -> Value {
+fn ask(exe: &Path, sock: &Path, tab: &str, account: &str, model: &str) -> Value {
     let started = mcp(
         exe,
         sock,
+        tab,
         json!({
             "name": "delegate_task",
             "arguments": {
                 "task": "Reply with exactly the word PINEAPPLE and nothing else.",
                 "target": { "providerInstanceId": account, "model": model },
+                "mode": "wait",
                 "timeoutMs": 180000,
             }
         }),
@@ -64,15 +67,16 @@ fn ask(exe: &Path, sock: &Path, account: &str, model: &str) -> Value {
     mcp(
         exe,
         sock,
+        tab,
         json!({ "name": "task_status", "arguments": { "taskId": id } }),
     )
 }
 
-fn mcp(exe: &Path, sock: &Path, params: Value) -> Value {
+fn mcp(exe: &Path, sock: &Path, tab: &str, params: Value) -> Value {
     let mut child = pinned_core::process::command(exe)
         .arg("mcp")
         .env(SOCK_ENV, sock)
-        .env_remove(TAB_ENV)
+        .env(TAB_ENV, tab)
         .env_remove(TASK_ENV)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

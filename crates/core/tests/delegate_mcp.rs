@@ -94,6 +94,18 @@ esac"#,
     std::env::set_var(SOCK_ENV, machine.launch().sock.clone());
     std::env::remove_var(TAB_ENV);
     std::env::remove_var(TASK_ENV);
+    let refused = rpc(
+        true,
+        json!({ "name": "delegate_task", "arguments": { "task": "say done" } }),
+    );
+    let refused_text = refused["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert_eq!(refused["result"]["isError"], true, "{refused_text}");
+    assert!(
+        refused_text.contains("PINNED_TAB") && refused_text.contains("PINNED_TASK"),
+        "{refused_text}"
+    );
+    let tab = machine.open_tab(Some(dir.display().to_string()), false).unwrap();
+    std::env::set_var(TAB_ENV, &tab);
 
     let listed = {
         let (mut client, server) = UnixStream::pair().unwrap();
@@ -125,7 +137,7 @@ esac"#,
         true,
         json!({
             "name": "delegate_task",
-            "arguments": { "task": "say done", "target": { "providerInstanceId": "cursor", "model": "composer-2.5" }, "timeoutMs": 15000 },
+            "arguments": { "task": "say done", "target": { "providerInstanceId": "cursor", "model": "composer-2.5" }, "mode": "wait", "timeoutMs": 15000 },
             "_meta": { "claudecode/toolUseId": "toolu_e2e" },
         }),
     );

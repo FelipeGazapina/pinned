@@ -1422,23 +1422,34 @@ impl Machine {
         crate::delegate::Caller { tab: tab.filter(|id| !id.is_empty()), task: task.filter(|id| !id.is_empty()) }
     }
 
+    /// `delegate_task`, `task_status`, and `task_cancel` need the session that owns the work.
+    /// Without `PINNED_TAB` or `PINNED_TASK` every such process would share one caller key.
+    fn require_caller(tab: Option<String>, task: Option<String>) -> Result<crate::delegate::Caller, String> {
+        let caller = Self::caller(tab, task);
+        if caller.tab.is_none() && caller.task.is_none() {
+            Err("PINNED_TAB or PINNED_TASK must be set to delegate, check, or cancel a task".into())
+        } else {
+            Ok(caller)
+        }
+    }
+
     fn task_status(&self, tab: Option<String>, task: Option<String>, id: &str) -> Result<String, String> {
-        self.delegates.status(&Self::caller(tab, task), id).map(|value| value.to_string())
+        let caller = Self::require_caller(tab, task)?;
+        self.delegates.status(&caller, id).map(|value| value.to_string())
     }
 
     fn task_cancel(&self, tab: Option<String>, task: Option<String>, id: &str, reason: &str) -> Result<String, String> {
-        self.delegates.cancel(&Self::caller(tab, task), id, reason, self.launch.path_env.as_deref()).map(|value| value.to_string())
+        let caller = Self::require_caller(tab, task)?;
+        self.delegates.cancel(&caller, id, reason, self.launch.path_env.as_deref()).map(|value| value.to_string())
     }
 
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         use crate::delegate::{driver_args, resolve_access, spawn, Access, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
-        let caller = Self::caller(tab, parent_task);
+        let caller = Self::require_caller(tab, parent_task)?;
         let parent = if let Some(tab) = caller.tab.clone() {
             Parent::Tab(tab)
-        } else if let Some(task) = caller.task.clone() {
-            Parent::Task(task)
         } else {
-            Parent::Task("detached".into())
+            Parent::Task(caller.task.clone().unwrap_or_default())
         };
         let (account_id, inherited_model, parent_provider, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
             self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.cwd.clone(), Access::derive(t.bypass, t.permission_mode.as_deref() == Some("plan"))))?
@@ -3499,6 +3510,20 @@ echo '{"type":"result","result":"ok"}'
         let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
         assert_eq!(lines, vec!["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"]);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn delegate_calls_without_a_tab_or_task_are_refused() {
+        let m = machine();
+        let request = crate::delegate::parse_request(&json!({ "task": "look" })).unwrap();
+        for err in [
+            m.start_delegate(None, None, None, request).unwrap_err(),
+            m.task_status(None, None, "task-1").unwrap_err(),
+            m.task_cancel(Some(String::new()), Some(String::new()), "task-1", "stop").unwrap_err(),
+        ] {
+            assert!(err.contains("PINNED_TAB") && err.contains("PINNED_TASK"), "{err}");
+        }
+        assert!(m.capabilities(None, None, "").is_ok());
     }
 
     #[test]
