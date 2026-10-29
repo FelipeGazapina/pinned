@@ -334,8 +334,16 @@ impl Delegates {
             .collect()
     }
 
-    /// Cached `--list-models` text. A stale or empty cache refreshes on a background thread and this returns what is already known.
+    /// Cached `--list-models` text. The first call waits up to 10s for that refresh.
+    /// Later calls return the cache and refresh a stale one in the background.
     pub fn cursor_catalog(&self, bin: &Path, path: Option<&str>) -> String {
+        if self.cursor.lock().unwrap().is_none() {
+            self.warm_cursor(bin, path);
+            let start = Instant::now();
+            while self.cursor.lock().unwrap().is_none() && start.elapsed() < super::CATALOG_WAIT {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         let cached = self.cursor.lock().unwrap().clone();
         let stale = match &cached {
             Some(cache) => {

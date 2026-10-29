@@ -225,7 +225,7 @@ fn tool_definitions(reminders: bool) -> Value {
                         "description": "Which account and model run the child. Omit providerInstanceId to use this session's account.",
                         "properties": {
                             "providerInstanceId": { "type": "string", "description": "An account id from orchestrator_capabilities." },
-                            "model": { "type": "string", "description": "A model id that account lists. Omit it to keep this session's model." },
+                            "model": { "type": "string", "description": "A model id that account lists. Omit it on the same provider to keep this session's model. Omit it on a different provider to use that provider's default." },
                             "options": {
                                 "type": "object",
                                 "description": "Model options. Pass effort or reasoning_effort, not both.",
@@ -562,6 +562,10 @@ mod tests {
         assert_eq!(props["task"]["description"], "The whole assignment the child sees. It does not see this session's history.");
         assert_eq!(props["isolation"]["description"], "shared runs in this checkout. worktree makes a separate checkout and runs the child there.");
         assert_eq!(props["target"]["properties"]["options"]["properties"]["effort"]["type"], "string");
+        assert_eq!(
+            props["target"]["properties"]["model"]["description"],
+            "A model id that account lists. Omit it on the same provider to keep this session's model. Omit it on a different provider to use that provider's default."
+        );
         assert_eq!(props["target"]["properties"]["options"]["properties"]["reasoning_effort"]["type"], "string");
     }
 

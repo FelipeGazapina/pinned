@@ -1361,12 +1361,12 @@ impl Machine {
         } else {
             Parent::Task("detached".into())
         };
-        let (account_id, inherited_model, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
-            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.cwd.clone(), Access::derive(t.bypass, false)))?
+        let (account_id, inherited_model, parent_provider, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
+            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.cwd.clone(), Access::derive(t.bypass, false)))?
         } else if let Some(task) = caller.task.as_deref().and_then(|id| self.delegates.lineage(id)) {
-            (Some(task.account), task.model, task.cwd, task.access)
+            (Some(task.account), task.model, task.provider, task.cwd, task.access)
         } else {
-            (None, None, self.default_cwd.clone(), Access::Auto)
+            (None, None, Provider::Claude, self.default_cwd.clone(), Access::Auto)
         };
         let account = if let Some(id) = request.target.account.clone().filter(|id| !id.is_empty()) {
             self.accounts.get(&id).ok_or_else(|| format!("no account {id} on this machine"))?
@@ -1383,7 +1383,7 @@ impl Machine {
             return Err(format!("account {} is not signed in on this machine", account.id));
         }
         let access = resolve_access(ceiling, &request)?;
-        let mut model = request.target.model.clone().filter(|model| !model.is_empty()).or(inherited_model);
+        let mut model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
         let mut effort = request.target.effort.clone().filter(|effort| !effort.is_empty());
         if account.provider == Provider::Cursor {
             if let Some(name) = model.clone() {
@@ -3055,6 +3055,43 @@ mod tests {
         assert_eq!(repo_name("https://github.com/acme/app/"), Some("app"));
         assert_eq!(repo_name("git@host:app.git"), Some("app"));
         assert_eq!(repo_name("https://github.com/acme/.."), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_cursor_child_of_a_claude_tab_does_not_inherit_the_claude_model() {
+        let root = temp("cross-model");
+        let argv = root.join("argv");
+        let cursor = root.join("cursor-agent");
+        let body = r#"#!/bin/sh
+if [ "$1" = status ]; then echo 'Logged in as ana@acme.dev'; exit 0; fi
+if [ "$1" = "--list-models" ]; then sleep 0.3; printf '%s\n' 'composer-2.5-high - Composer High'; exit 0; fi
+printf '%s\n' "$@" > "ARGV"
+echo '{"type":"result","result":"ok"}'
+"#
+        .replace("ARGV", &argv.display().to_string());
+        std::fs::write(&cursor, body).unwrap();
+        std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        m.tab(&tab, |t| t.model = Some("claude-opus-5-5".into())).unwrap();
+        let plain = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "mode": "async" })).unwrap();
+        m.start_delegate(Some(tab.clone()), None, None, plain).unwrap();
+        wait_for("plain argv", || std::fs::read(&argv).is_ok_and(|b| !b.is_empty()));
+        let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
+        assert_eq!(lines, vec!["-p", "--output-format", "stream-json", "--trust", "look"]);
+        let _ = std::fs::remove_file(&argv);
+        let mapped = crate::delegate::parse_request(&json!({
+            "task": "look",
+            "target": { "providerInstanceId": "cursor", "model": "composer-2.5", "options": { "effort": "high" } },
+            "mode": "async",
+        }))
+        .unwrap();
+        m.start_delegate(Some(tab), None, None, mapped).unwrap();
+        wait_for("mapped argv", || std::fs::read(&argv).is_ok_and(|b| String::from_utf8_lossy(&b).contains("composer-2.5-high")));
+        let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
+        assert_eq!(lines, vec!["-p", "--output-format", "stream-json", "--trust", "--model", "composer-2.5-high", "look"]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

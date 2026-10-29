@@ -19,6 +19,20 @@ const STEP_CHARS: usize = 400;
 pub const DEFAULT_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 const MODEL_CACHE: Duration = Duration::from_secs(10 * 60);
 const MODEL_MISS: Duration = Duration::from_secs(15);
+const CATALOG_WAIT: Duration = Duration::from_secs(10);
+
+/// A missing model keeps the parent's model only when the child runs on the same provider.
+/// A different provider gets that provider's own default, which is no `--model`.
+pub fn child_model(parent: Provider, child: Provider, inherited: Option<String>, requested: Option<String>) -> Option<String> {
+    let requested = requested.filter(|model| !model.is_empty());
+    if requested.is_some() {
+        return requested;
+    }
+    if parent != child {
+        return None;
+    }
+    inherited.filter(|model| !model.is_empty())
+}
 
 /// What the child is allowed to do. Never wider than the parent tab: plan narrows a bypassed
 /// parent to read-only, and a parent that asks before acting does not hand the child a bypass.
@@ -1079,15 +1093,35 @@ grok-4.7-high - Grok 4.7  High
 
     #[test]
     #[cfg(unix)]
-    fn the_cursor_catalog_returns_before_a_slow_cli() {
+    fn the_cursor_catalog_waits_for_the_first_list_and_then_returns_the_cache() {
         let dir = std::env::temp_dir().join(format!("pinned-delegate-catalog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = script(&dir, "cursor-agent", "sleep 0.2; printf 'composer-2.5 - Composer\\n'");
+        let delegates = Delegates::default();
+        let start = Instant::now();
+        assert_eq!(delegates.cursor_catalog(&bin, None), "composer-2.5 - Composer\n");
+        assert!(start.elapsed() >= Duration::from_millis(150), "the first catalog read returned before the CLI printed");
+        assert!(start.elapsed() < Duration::from_secs(2), "the first catalog read waited past the CLI");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").unwrap();
+        let start = Instant::now();
+        assert_eq!(delegates.cursor_catalog(&bin, None), "composer-2.5 - Composer\n");
+        assert!(start.elapsed() < Duration::from_millis(200), "a warm catalog waited on the CLI again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_cold_cursor_catalog_gives_up_after_ten_seconds() {
+        let dir = std::env::temp_dir().join(format!("pinned-delegate-catalog-slow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let bin = script(&dir, "cursor-agent", "sleep 30");
         let delegates = Delegates::default();
         let start = Instant::now();
         assert_eq!(delegates.cursor_catalog(&bin, None), "");
-        assert!(start.elapsed() < Duration::from_secs(1), "the catalog lookup blocked the caller");
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_secs(9) && elapsed < Duration::from_secs(13), "cold catalog elapsed {elapsed:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
