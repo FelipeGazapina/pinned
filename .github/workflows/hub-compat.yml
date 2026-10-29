@@ -1,0 +1,69 @@
+name: hub compatibility
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    outputs:
+      breaking:
+        description: true when this change adds a wire break
+        value: ${{ jobs.check.outputs.breaking }}
+      approved:
+        description: true when the owner approved that break
+        value: ${{ jobs.approve.result == 'success' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      breaking: ${{ steps.report.outputs.breaking }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - id: report
+        run: |
+          # A release compares with the previous tag, the hub that is already live.
+          event="${{ github.event_name }}"
+          ref="${{ github.ref }}"
+          if [ "$event" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          elif [ "$event" = "workflow_call" ] || [ "${ref#refs/tags/}" != "$ref" ]; then
+            base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD^)
+          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            base="${{ github.event.before }}"
+          else
+            base="${{ github.sha }}^"
+          fi
+          set +e
+          cargo run -q -p pinned-server --bin wire-contract -- check --base "$base" > wire-report.txt
+          code=$?
+          set -e
+          cat wire-report.txt
+          if [ "$code" -eq 0 ]; then
+            echo "breaking=false" >> "$GITHUB_OUTPUT"
+          elif [ "$code" -eq 1 ]; then
+            echo "breaking=true" >> "$GITHUB_OUTPUT"
+          else
+            exit "$code"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: steps.report.outputs.breaking == 'true'
+        with:
+          name: wire-report
+          path: wire-report.txt
+
+  approve:
+    needs: check
+    if: needs.check.outputs.breaking == 'true'
+    runs-on: ubuntu-latest
+    environment: hub-breaking-change
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wire-report
+          path: wire-report
+      - run: cat wire-report/wire-report.txt

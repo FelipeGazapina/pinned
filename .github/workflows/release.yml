@@ -46,9 +46,14 @@ jobs:
           releaseDraft: false
           args: ${{ matrix.args }}
 
+  compat:
+    uses: ./.github/workflows/hub-compat.yml
+
   # Railway deploys the hub from the railway-hub branch, so point it at the released commit.
+  # A breaking wire waits for the owner on hub-breaking-change. A crashed check does not deploy.
   hub:
-    needs: build
+    needs: [build, compat]
+    if: always() && needs.build.result == 'success' && (needs.compat.outputs.breaking == 'false' || needs.compat.outputs.approved == 'true')
     runs-on: ubuntu-latest
     steps:
       - run: gh api -X PATCH "repos/${{ github.repository }}/git/refs/heads/railway-hub" -f sha="${{ github.sha }}" -F force=true

@@ -8,6 +8,10 @@ cd "$(dirname "$0")/.."
 [[ -z "$(git status --porcelain)" ]] || { echo "commit or stash your changes first" >&2; exit 1; }
 sed -i '' "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
 cargo update -p pinned --quiet
+# Copies current.json and fails when that file does not match the code.
+cargo run -q -p pinned-server --bin wire-contract -- snapshot "$version"
+# `git commit -am` leaves a new file out.
+git add "crates/core/wire-contract/${version}.json"
 git commit -am "Release v$version"
 git tag "v$version"
 git push origin HEAD "v$version"
