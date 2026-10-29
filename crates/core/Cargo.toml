@@ -26,6 +26,8 @@ dunce = "1"
 sha2 = "0.10"
 # Bundled, so FTS5 is there and the musl and Windows builds need no system SQLite.
 rusqlite = { version = "0.41", features = ["bundled"] }
+# fancy-regex instead of the default onig, and no esaxx C++, so the musl and Windows builds stay pure Rust.
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "test-util"] }

@@ -4,8 +4,11 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Memory {
@@ -68,6 +71,18 @@ pub trait Embedder: Send + Sync {
 const DUPLICATE: f32 = 0.9;
 /// How many rows each ranking hands to the fusion.
 const ARM: usize = 40;
+/// The least cosine a vector match needs. potion-multilingual-128M scores a relevant memory
+/// 0.21 to 0.6 and an unrelated one around 0.14, and gives a bare "ok, continue" up to 0.39
+/// against something. `memory_search` is asked on purpose and keeps the weak matches.
+const SEARCH_FLOOR: f32 = 0.2;
+/// Each prompt is searched without being asked, so only closer matches are added to it.
+const RECALL_FLOOR: f32 = 0.3;
+const RECALL_LIMIT: usize = 5;
+/// About 400 tokens.
+const RECALL_CHARS: usize = 1600;
+const RECALL_TEXT_CHARS: usize = 400;
+/// How long a failed model load waits before the next memory asks for it again.
+const RETRY: Duration = Duration::from_secs(600);
 /// Reciprocal Rank Fusion's constant, as in the paper and in coffee-fueled-dev/agent.
 const RRF_K: f64 = 60.0;
 
@@ -293,6 +308,176 @@ fn fuse(rankings: &[Vec<i64>], limit: usize) -> Vec<i64> {
     ids.into_iter().take(limit).map(|(_, id)| id).collect()
 }
 
+/// Builds the vector model. The first time, that downloads it, which can take minutes.
+pub type Loader = Arc<dyn Fn() -> Result<Arc<dyn Embedder>, String> + Send + Sync>;
+
+enum Vectors {
+    /// No project with a memory asked for the model yet.
+    Idle,
+    Loading,
+    Ready(Arc<dyn Embedder>),
+    Failed(Instant),
+}
+
+/// Whether a search also matches by meaning, as the Memory panel shows it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum VectorSearch {
+    Ready,
+    /// The model is downloading or loading; until then, search is by words.
+    Loading,
+    /// By words only: the model is not needed yet, or failed to load.
+    Off,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Status {
+    pub count: u64,
+    pub vectors: VectorSearch,
+}
+
+/// Every project's memory on this machine, and the vector model they share. The machine is the
+/// only writer: sessions reach it through its socket.
+pub struct Memories {
+    /// Where each project's database lives; none keeps no memory.
+    dir: Option<PathBuf>,
+    load: Option<Loader>,
+    stores: Mutex<HashMap<PathBuf, Arc<Mutex<Store>>>>,
+    vectors: Mutex<Vectors>,
+}
+
+impl Memories {
+    /// Without `load`, search is by words only.
+    pub fn new(dir: Option<PathBuf>, load: Option<Loader>) -> Arc<Memories> {
+        Arc::new(Memories { dir, load, stores: Mutex::default(), vectors: Mutex::new(Vectors::Idle) })
+    }
+
+    /// The project's store. A project that never saved a memory has no database, and only `create` makes one.
+    fn store(self: &Arc<Self>, project: &Path, create: bool) -> Result<Option<Arc<Mutex<Store>>>, String> {
+        let dir = self.dir.as_ref().ok_or("this machine keeps no memory")?;
+        let mut stores = self.stores.lock().unwrap();
+        if let Some(store) = stores.get(project) {
+            return Ok(Some(store.clone()));
+        }
+        // A hash names the file, since a path can't, and the canonical path makes it stable.
+        let hash: String = Sha256::digest(project.as_os_str().as_encoded_bytes())[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let file = dir.join(format!("{hash}.sqlite"));
+        if !create && !file.exists() {
+            return Ok(None);
+        }
+        std::fs::create_dir_all(dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
+        let store = Arc::new(Mutex::new(Store::open(&file)?));
+        stores.insert(project.to_owned(), store.clone());
+        drop(stores);
+        if store.lock().unwrap().count()? > 0 {
+            if let Some(vectors) = self.vectors() {
+                let store = store.clone();
+                std::thread::spawn(move || store.lock().unwrap().embed_missing(&*vectors));
+            }
+        }
+        Ok(Some(store))
+    }
+
+    /// The vector model, once loaded. The first call starts loading it in the background, and
+    /// embeds every open store's memories when it is ready.
+    fn vectors(self: &Arc<Self>) -> Option<Arc<dyn Embedder>> {
+        let load = self.load.clone()?;
+        let mut state = self.vectors.lock().unwrap();
+        match &*state {
+            Vectors::Ready(vectors) => return Some(vectors.clone()),
+            Vectors::Loading => return None,
+            Vectors::Failed(at) if at.elapsed() < RETRY => return None,
+            Vectors::Idle | Vectors::Failed(_) => *state = Vectors::Loading,
+        }
+        let me = self.clone();
+        std::thread::spawn(move || match load() {
+            Ok(vectors) => {
+                *me.vectors.lock().unwrap() = Vectors::Ready(vectors.clone());
+                let stores: Vec<_> = me.stores.lock().unwrap().values().cloned().collect();
+                for store in stores {
+                    if let Err(e) = store.lock().unwrap().embed_missing(&*vectors) {
+                        eprintln!("pinned: could not embed memories: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("pinned: memory search is by words only: {e}");
+                *me.vectors.lock().unwrap() = Vectors::Failed(Instant::now());
+            }
+        });
+        None
+    }
+
+    /// The model if it is loaded, without asking for it.
+    fn ready(&self) -> Option<Arc<dyn Embedder>> {
+        match &*self.vectors.lock().unwrap() {
+            Vectors::Ready(vectors) => Some(vectors.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn search(self: &Arc<Self>, project: &Path, query: &str, limit: usize) -> Result<Vec<Memory>, String> {
+        match self.store(project, false)? {
+            Some(store) => store.lock().unwrap().search(query, self.ready().as_deref(), SEARCH_FLOOR, limit),
+            None => Ok(vec![]),
+        }
+    }
+
+    /// The few memories closest to `prompt`, written for the thread to read with it, or nothing.
+    pub fn recall(self: &Arc<Self>, project: &Path, prompt: &str) -> String {
+        if prompt.trim().is_empty() {
+            return String::new();
+        }
+        let Ok(Some(store)) = self.store(project, false) else { return String::new() };
+        let found = store.lock().unwrap().search(prompt, self.ready().as_deref(), RECALL_FLOOR, RECALL_LIMIT).unwrap_or_default();
+        let mut lines: Vec<String> = vec![];
+        for m in found {
+            let line = format!("[{}] {}: {}", m.id, m.title, clip(&m.text, RECALL_TEXT_CHARS));
+            if !lines.is_empty() && lines.iter().map(String::len).sum::<usize>() + line.len() > RECALL_CHARS {
+                break;
+            }
+            lines.push(line);
+        }
+        if lines.is_empty() {
+            return String::new();
+        }
+        format!("Project memory pinned found for this prompt, by id (memory_search finds more; memory_save with an id corrects one):\n{}", lines.join("\n"))
+    }
+
+    /// Saving a project's first memory is what asks for the vector model.
+    pub fn save(self: &Arc<Self>, project: &Path, draft: &Draft, id: Option<i64>) -> Result<Saved, String> {
+        let store = self.store(project, true)?.ok_or("this machine keeps no memory")?;
+        let vectors = self.vectors();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let saved = store.lock().unwrap().save(draft, id, vectors.as_deref(), now);
+        saved
+    }
+
+    pub fn forget(self: &Arc<Self>, project: &Path, id: i64) -> Result<Memory, String> {
+        self.store(project, false)?.ok_or_else(|| format!("no memory #{id}"))?.lock().unwrap().forget(id)
+    }
+
+    pub fn status(self: &Arc<Self>, project: &Path) -> Result<Status, String> {
+        let count = match self.store(project, false)? {
+            Some(store) => store.lock().unwrap().count()?,
+            None => 0,
+        };
+        let vectors = match &*self.vectors.lock().unwrap() {
+            Vectors::Ready(_) => VectorSearch::Ready,
+            Vectors::Loading => VectorSearch::Loading,
+            Vectors::Idle | Vectors::Failed(_) => VectorSearch::Off,
+        };
+        Ok(Status { count, vectors })
+    }
+}
+
+fn clip(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +590,66 @@ mod tests {
         assert!(matches!(store.save(&draft("Tests", "Run cargo test."), None, Some(&vectors), 4), Ok(Saved::Added(Memory { id: 2, .. }))));
         assert!(matches!(store.save(&draft("Shipping", "We ship the hub on every tag."), Some(1), Some(&vectors), 5), Ok(Saved::Updated(Memory { id: 1, .. }))));
         assert_eq!(store.count(), Ok(2));
+    }
+
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !done() {
+            assert!(start.elapsed() < Duration::from_secs(5), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_project_gets_vector_search_once_its_first_memory_asks_for_the_model() {
+        let dir = temp("registry");
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let wait = Mutex::new(wait);
+        let load: Loader = Arc::new(move || {
+            wait.lock().unwrap().recv().unwrap();
+            Ok(Arc::new(Topics("topics-1")) as Arc<dyn Embedder>)
+        });
+        let memories = Memories::new(Some(dir.clone()), Some(load));
+        let app = Path::new("/work/app");
+        assert_eq!(memories.status(app), Ok(Status { count: 0, vectors: VectorSearch::Off }));
+        assert_eq!(memories.search(app, "login", 8), Ok(vec![]));
+        assert_eq!(memories.recall(app, "how do users log in?"), "");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "reading a project's memory made a database");
+
+        assert!(matches!(memories.save(app, &draft("Login", "Users sign in with a magic link; there is no password."), None), Ok(Saved::Added(Memory { id: 1, .. }))));
+        memories.save(app, &draft("Tests", "Run cargo test before each commit."), None).unwrap();
+        assert_eq!(memories.status(app), Ok(Status { count: 2, vectors: VectorSearch::Loading }));
+        assert_eq!(memories.search(app, "esqueci a senha", 8), Ok(vec![]), "matched by meaning before the model loaded");
+        go.send(()).unwrap();
+        wait_for("the model", || memories.status(app).unwrap().vectors == VectorSearch::Ready);
+        wait_for("the memories' vectors", || memories.search(app, "esqueci a senha", 8).unwrap().len() == 1);
+        assert_eq!(
+            memories.recall(app, "esqueci a senha do login"),
+            "Project memory pinned found for this prompt, by id (memory_search finds more; memory_save with an id corrects one):\n[1] Login: Users sign in with a magic link; there is no password."
+        );
+        assert_eq!(memories.recall(app, "  "), "");
+        assert_eq!(memories.forget(app, 1).map(|m| m.title), Ok("Login".into()));
+        assert_eq!(memories.recall(app, "esqueci a senha do login"), "");
+        assert_eq!(memories.forget(Path::new("/work/other"), 3), Err("no memory #3".into()));
+
+        let reopened = Memories::new(Some(dir.clone()), None);
+        assert_eq!(titles(reopened.search(app, "", 8)), ["#2 Tests"]);
+        assert_eq!(Memories::new(None, None).save(app, &draft("Tests", "x"), None), Err("this machine keeps no memory".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_model_that_fails_to_load_leaves_word_search() {
+        let dir = temp("failed-model");
+        let memories = Memories::new(Some(dir.clone()), Some(Arc::new(|| Err("offline".into()))));
+        let app = Path::new("/work/app");
+        memories.save(app, &draft("Deploys", "The hub deploys from railway-hub."), None).unwrap();
+        wait_for("the failure", || memories.status(app).unwrap().vectors == VectorSearch::Off);
+        assert_eq!(titles(memories.search(app, "where does the hub deploy from?", 8)), ["#1 Deploys"]);
+        let long = memories.save(app, &draft("Long", &"word ".repeat(500)), None).unwrap();
+        assert!(matches!(long, Saved::Added(Memory { id: 2, .. })));
+        assert_eq!(memories.recall(app, "word").lines().nth(1), Some(format!("[2] Long: {}…", "word ".repeat(80)).as_str()));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
