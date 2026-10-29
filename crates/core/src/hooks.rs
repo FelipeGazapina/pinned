@@ -128,6 +128,7 @@ pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
         snapshot: matches!(status, AgentStatus::Working | AgentStatus::Done | AgentStatus::Failed)
             .then(|| field("cwd").and_then(|cwd| history::snapshot(Path::new(&cwd))))
             .flatten(),
+        permission_mode: field("permission_mode"),
     })
 }
 
@@ -564,5 +565,8 @@ mod tests {
         assert!(event_from(Some("done"), r#"{"type":"task-complete"}"#).is_none());
         let claude = event_from(Some("done"), r#"{"session_id":"s1","cwd":"/work"}"#).unwrap();
         assert_eq!((claude.status, claude.session.as_deref(), claude.cwd.as_deref()), (AgentStatus::Done, Some("s1"), Some("/work")));
+        assert_eq!(claude.permission_mode, None);
+        let plan = event_from(Some("working"), r#"{"permission_mode":"plan","prompt":"look"}"#).unwrap();
+        assert_eq!(plan.permission_mode.as_deref(), Some("plan"));
     }
 }

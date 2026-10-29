@@ -238,6 +238,8 @@ struct Tab {
     turn_pending: Option<Instant>,
     /// Printable bytes in the terminal's input line. Done does not clear it.
     draft_len: usize,
+    /// Claude's permission mode from the latest hook that reported one. `plan` is read-only.
+    permission_mode: Option<String>,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
     screen: Arc<Mutex<Screen>>,
@@ -1439,7 +1441,7 @@ impl Machine {
             Parent::Task("detached".into())
         };
         let (account_id, inherited_model, parent_provider, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
-            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.cwd.clone(), Access::derive(t.bypass, false)))?
+            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.cwd.clone(), Access::derive(t.bypass, t.permission_mode.as_deref() == Some("plan"))))?
         } else if let Some(task) = caller.task.as_deref().and_then(|id| self.delegates.lineage(id)) {
             (Some(task.account), task.model, task.provider, task.cwd, task.access)
         } else {
@@ -1633,7 +1635,7 @@ impl Machine {
     fn capabilities(&self, tab: Option<&str>, task: Option<&str>, search: &str) -> Result<String, String> {
         use crate::delegate::{capabilities, codex_constraints, cursor_models, provider_models, Access, Inherited, ListedAccount};
         let (account, model, access) = if let Some(tab) = tab.filter(|tab| !tab.is_empty()) {
-            self.tab(tab, |t| (t.account.clone(), t.model.clone(), Access::derive(t.bypass, false))).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
+            self.tab(tab, |t| (t.account.clone(), t.model.clone(), Access::derive(t.bypass, t.permission_mode.as_deref() == Some("plan")))).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
         } else if let Some(lineage) = task.filter(|task| !task.is_empty()).and_then(|id| self.delegates.lineage(id)) {
             let account = self.accounts.get(&lineage.account).unwrap_or_else(|| Account::builtin(lineage.provider));
             (account, lineage.model, lineage.access)
@@ -1735,6 +1737,7 @@ impl Machine {
             held: vec![],
             turn_pending: None,
             draft_len: 0,
+            permission_mode: None,
             screen: Arc::default(),
         };
         self.tabs.lock().unwrap().insert(id.clone(), tab);
@@ -1861,6 +1864,9 @@ impl Machine {
                 t.title = event.title.clone();
             }
             t.message = event.message.clone().filter(|_| event.status == AgentStatus::NeedsInput);
+            if event.permission_mode.is_some() {
+                t.permission_mode = event.permission_mode.clone();
+            }
             before != (t.interrupted, t.resume_at, t.held_at_limit)
         });
         if changed == Ok(true) {
@@ -2607,6 +2613,7 @@ mod tests {
             resume_at: None,
             prompt: None,
             snapshot: None,
+            permission_mode: None,
         };
         m.record_event(event(AgentStatus::NeedsInput, Some("Fix the build"), Some("Claude needs your permission to use Bash")));
         let view = m.view(&tab).unwrap();
@@ -2627,7 +2634,7 @@ mod tests {
         git(&dir, &["branch", "other"]);
         let m = machine();
         let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
-        let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None };
+        let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None };
         m.record_event(working.clone());
         let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false, from: None };
         assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"));
@@ -2760,7 +2767,7 @@ mod tests {
     fn a_session_held_at_its_usage_limit_stays_held_until_the_next_turn() {
         let m = machine();
         let tab = m.open_tab(None, false).unwrap();
-        let failed = |resume_at| AgentEvent { status: AgentStatus::Failed, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at, prompt: None, snapshot: None };
+        let failed = |resume_at| AgentEvent { status: AgentStatus::Failed, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at, prompt: None, snapshot: None, permission_mode: None };
         m.record_status(&tab, &failed(Some(1792400000)));
         m.call(Call::AutoResume { tab: tab.clone(), on: false }).unwrap();
         assert!(m.view(&tab).unwrap().held);
@@ -3470,6 +3477,31 @@ echo '{"type":"result","result":"ok"}'
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_plan_parent_hands_its_child_read_only_even_when_bypass_is_on() {
+        let root = temp("plan-child");
+        let argv = root.join("argv");
+        let claude = root.join("claude");
+        let body = r#"#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ]; then echo '{"loggedIn":true,"email":"ana@acme.dev"}'; exit 0; fi
+printf '%s\n' "$@" > "ARGV"
+echo '{"type":"result","result":"ok"}'
+"#
+        .replace("ARGV", &argv.display().to_string());
+        std::fs::write(&claude, body).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
+        m.record_event(AgentEvent { permission_mode: Some("plan".into()), ..done_event(&tab) });
+        let request = crate::delegate::parse_request(&json!({ "task": "look", "mode": "async" })).unwrap();
+        m.start_delegate(Some(tab), None, None, request).unwrap();
+        wait_for("plan argv", || std::fs::read(&argv).is_ok_and(|b| !b.is_empty()));
+        let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
+        assert_eq!(lines, vec!["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn capabilities_for_a_task_use_that_task_not_builtin_claude() {
         use crate::delegate::{Access, Mode, NewTask, Parent};
         let m = machine();
@@ -3586,6 +3618,7 @@ echo '{"type":"result","result":"ok"}'
             resume_at: None,
             prompt: None,
             snapshot: None,
+            permission_mode: None,
         }
     }
 
