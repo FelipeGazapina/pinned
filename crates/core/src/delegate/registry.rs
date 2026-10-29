@@ -315,7 +315,29 @@ impl Delegates {
             account: task.account.clone(),
             provider: task.provider,
             conversation,
+            isolated: task.isolated,
         })
+    }
+
+    /// Drops isolated worktrees that still have a conversation and whose root tab is `tab`,
+    /// except folders an opened tab already owns.
+    pub fn drop_kept_worktrees(&self, tab: &str, owned: &[PathBuf], path: Option<&str>) {
+        let cwds: Vec<PathBuf> = {
+            let tasks = self.tasks.lock().unwrap();
+            tasks
+                .iter()
+                .filter(|task| {
+                    task.isolated
+                        && task.conversation.is_some()
+                        && root_tab(&tasks, task.parent.clone()).as_deref() == Some(tab)
+                        && !owned.iter().any(|dir| dir == &task.cwd)
+                })
+                .map(|task| task.cwd.clone())
+                .collect()
+        };
+        for cwd in cwds {
+            crate::branches::drop_worktree(&cwd, path);
+        }
     }
 
     pub fn running_under(&self, tab: &str) -> Vec<String> {
@@ -697,7 +719,7 @@ fn postorder(tasks: &[Task], id: &str, out: &mut Vec<String>) {
 }
 
 fn drop_isolated(task: &Task, path: Option<&str>) {
-    if task.isolated && task.conversation.is_none() && matches!(task.state, WorkState::Failed | WorkState::Cancelled) {
+    if task.isolated && task.conversation.is_none() && task.state.terminal() {
         crate::branches::drop_worktree(&task.cwd, path);
     }
 }

@@ -266,6 +266,8 @@ pub struct OpenInfo {
     pub account: AccountId,
     pub provider: Provider,
     pub conversation: String,
+    /// The folder is a worktree this task made. The opened tab owns it.
+    pub isolated: bool,
 }
 
 pub enum ChildEvent {
@@ -1102,6 +1104,60 @@ grok-4.7-high - Grok 4.7  High
         }
         assert!(kept.is_dir(), "a worktree with a conversation was removed");
         assert!(!dropped.exists(), "a worktree with no conversation survived cancel");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_successful_task_drops_its_worktree_when_it_has_no_conversation() {
+        let root = std::env::temp_dir().join(format!("pinned-delegate-success-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            assert!(crate::process::command("git").arg("-C").arg(&repo).args(args).status().unwrap().success(), "{args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let dropped = crate::branches::new_worktree(&repo, None).unwrap();
+        let kept = crate::branches::new_worktree(&repo, None).unwrap();
+        let delegates = Delegates::default();
+        let gone = delegates.begin(NewTask {
+            parent: Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "No conversation".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: dropped.clone(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: true,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        let stay = delegates.begin(NewTask {
+            parent: Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Has conversation".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: kept.clone(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: true,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        delegates.apply(&stay.id, ChildEvent::Line(json!({"type":"system","subtype":"init","session_id":"keep-me"}).to_string()), None);
+        delegates.apply(&gone.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        delegates.apply(&stay.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        assert!(!dropped.exists(), "a successful worktree with no conversation stayed");
+        assert!(kept.is_dir(), "a successful worktree with a conversation was removed");
         let _ = std::fs::remove_dir_all(&root);
     }
 
