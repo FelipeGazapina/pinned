@@ -3,7 +3,7 @@
 
 use crate::agent::{self, Stage, Subject};
 use crate::wire::{MachineId, RunSpec};
-use crate::{github, linear, slack, upstash};
+use crate::{github, linear, slack, upstash, vercel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -17,6 +17,7 @@ const INTERVAL: Duration = Duration::from_secs(60);
 const LINEAR_KEY: &str = "linear-key";
 const SLACK_KEY: &str = "slack-key";
 const GITHUB_KEY: &str = "github-key";
+const VERCEL_KEY: &str = "vercel-key";
 const UPSTASH_KEY: &str = "upstash-box-key";
 const CLAUDE_TOKEN: &str = "claude-oauth-token";
 /// A Slack watermark trails the check that moved it, so a message Slack shows a little late
@@ -477,6 +478,14 @@ pub struct Run {
     /// The account the connector names, or none for its project's.
     pub account: Option<String>,
     pub runs_on: RunsOn,
+    /// The subject text an Ask step reads: the issue, or the Slack thread so far.
+    pub input: String,
+}
+
+/// What an Ask step found for one subject. `Skip` is a workflow with no such step.
+enum Consulted {
+    Skip,
+    Answers(Ask, Vec<(String, String)>),
 }
 
 impl Run {
@@ -747,8 +756,19 @@ impl Connectors {
         Fut: Future<Output = Result<(), String>>,
     {
         match work {
-            Work::Run(run) => {
+            Work::Run(mut run) => {
                 let (connector, subject, folder, mentioned) = (run.connector.clone(), run.subject.clone(), run.cwd.clone(), run.mentioned.clone());
+                match self.consult(&connector, &run.input).await {
+                    Ok(Consulted::Skip) => {}
+                    Ok(Consulted::Answers(ask, answers)) => {
+                        if stops(&ask, &answers).is_some() {
+                            self.keep_stopped(&connector, &subject)?;
+                            return Ok(());
+                        }
+                        append_answers(&mut run, &ask, &answers);
+                    }
+                    Err(why) => return Err(self.unclaim(&connector, &subject, &folder, &why)),
+                }
                 if let Err(why) = open(Work::Run(run)).await {
                     return Err(self.unclaim(&connector, &subject, &folder, &why));
                 }
@@ -792,6 +812,26 @@ impl Connectors {
         result
     }
 
+    /// The connector's Ask step, once, for a subject the check already claimed.
+    async fn consult(&self, connector: &str, input: &str) -> Result<Consulted, String> {
+        let ask = self.store.lock().unwrap().connectors.iter().find(|c| c.id == connector).and_then(|c| c.ask.clone());
+        let Some(ask) = ask else { return Ok(Consulted::Skip) };
+        let key = self.key(VERCEL_KEY).ok_or_else(|| "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".to_owned())?;
+        let answers = vercel::ask(&key, &ask, input).await?;
+        Ok(Consulted::Answers(ask, answers))
+    }
+
+    /// Leaves the subject handled, and drops a Slack thread's cursor so later replies are not delivered.
+    fn keep_stopped(&self, connector: &str, subject: &Subject) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        if let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) {
+            if let Subject::SlackThread { channel, thread } = subject {
+                c.followed.remove(&thread_key(channel, thread));
+            }
+        }
+        self.save(&store)
+    }
+
     fn unclaim(&self, connector: &str, subject: &Subject, folder: &Path, why: &str) -> String {
         let error = format!("could not open a session in {}: {why}; the next check tries again", folder.display());
         let mut store = self.store.lock().unwrap();
@@ -812,8 +852,14 @@ impl Connectors {
         let posts = slack::thread(&token, &d.channel, &d.thread).await?;
         let newest = posts.last().map_or_else(|| d.cursor.clone(), |p| p.ts.clone());
         let note = c.created.get(&thread_key(&d.channel, &d.thread)).map(filed_note);
-        let run = slack_run(&c, &d.channel, channel_name(name), &d.thread, &posts, note.as_deref(), &self.exe);
-        Ok((Run { mentioned: d.mentioned.clone(), ..run }, newest))
+        let mut run = slack_run(&c, &d.channel, channel_name(name), &d.thread, &posts, note.as_deref(), &self.exe);
+        run.mentioned = d.mentioned.clone();
+        // The thread already passed the step, so a stop answer does not end this new session.
+        match self.consult(&run.connector, &run.input).await? {
+            Consulted::Skip => {}
+            Consulted::Answers(ask, answers) => append_answers(&mut run, &ask, &answers),
+        }
+        Ok((run, newest))
     }
 
     /// Records that the thread's session has every message up to `cursor`, someone else's among them.
@@ -982,15 +1028,42 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
         prompt += &proof_of_work(exe);
     }
     prompt += c.box_note();
-    prompt += &format!(
-        "\n\nLinear issue {}: {}\n{}\n\n{}",
+    let input = format!(
+        "{}: {}\n{}\n\n{}",
         issue.identifier,
         issue.title,
         issue.url,
         issue.description.as_deref().unwrap_or("(no description)"),
     );
+    prompt += &format!("\n\nLinear issue {input}");
     args.push(prompt);
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() }, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone() }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() }, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone(), input }
+}
+
+/// The first question whose answer is one of its `stop_on` values, ignoring case.
+fn stops(ask: &Ask, answers: &[(String, String)]) -> Option<(String, String)> {
+    ask.questions.iter().find_map(|question| {
+        let (_, answer) = answers.iter().find(|(name, _)| name == &question.name)?;
+        question.stop_on.iter().any(|stop| stop.eq_ignore_ascii_case(answer)).then(|| (question.name.clone(), answer.clone()))
+    })
+}
+
+fn read_as(subject: &Subject) -> &'static str {
+    match subject {
+        Subject::LinearIssue { .. } => "issue",
+        Subject::SlackThread { .. } => "thread",
+    }
+}
+
+fn answered(model: &str, kind: &str, answers: &[(String, String)]) -> String {
+    let lines = answers.iter().map(|(name, answer)| format!("- {name}: {answer}")).collect::<Vec<_>>().join("\n");
+    format!("\n\nBefore this session, {model} on Vercel's AI Gateway read the {kind} and answered:\n{lines}")
+}
+
+fn append_answers(run: &mut Run, ask: &Ask, answers: &[(String, String)]) {
+    if let Some(prompt) = run.args.last_mut() {
+        prompt.push_str(&answered(&ask.model, read_as(&run.subject), answers));
+    }
 }
 
 /// What every connector session that may open a pull request must do to prove the change works.
@@ -1103,13 +1176,16 @@ fn slack_run(
         prompt += SLACK_PROOF;
     }
     prompt += c.box_note();
-    prompt += &format!("\n\nSlack thread in #{channel_name}, oldest first:\n");
-    let transcript: Vec<String> = posts.iter().map(|p| format!("{}: {}", p.author, p.text)).collect();
-    prompt += &transcript.join("\n");
+    let input = transcript(posts);
+    prompt += &format!("\n\nSlack thread in #{channel_name}, oldest first:\n{input}");
     prompt += note.unwrap_or_default();
     args.push(prompt);
     let subject = Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() };
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone() }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone(), input }
+}
+
+fn transcript(posts: &[slack::Post]) -> String {
+    posts.iter().map(|p| format!("{}: {}", p.author, p.text)).collect::<Vec<_>>().join("\n")
 }
 
 fn reply_header(author: &str) -> String {
@@ -1420,6 +1496,123 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_answer_keeps_the_subject_handled_and_forgets_the_thread() {
+        let ask = Ask {
+            model: "google/gemini-3.5-flash".into(),
+            instructions: "Classify.".into(),
+            questions: vec![
+                Question { name: "kind".into(), ask: "What does it ask for?".into(), choices: vec!["bug".into(), "question".into()], stop_on: vec![] },
+                Question { name: "agent".into(), ask: "Can a coding agent handle it?".into(), choices: vec!["yes".into(), "no".into()], stop_on: vec!["No".into()] },
+            ],
+        };
+        let stopping = [("kind".into(), "bug".into()), ("agent".into(), "no".into())];
+        assert_eq!(stops(&ask, &stopping), Some(("agent".into(), "no".into())));
+        assert_eq!(stops(&ask, &[("kind".into(), "bug".into()), ("agent".into(), "yes".into())]), None);
+        assert_eq!(
+            answered("google/gemini-3.5-flash", "thread", &stopping),
+            "\n\nBefore this session, google/gemini-3.5-flash on Vercel's AI Gateway read the thread and answered:\n- kind: bug\n- agent: no"
+        );
+        assert_eq!(
+            answered("google/gemini-3.5-flash", "issue", &[("kind".into(), "question".into())]),
+            "\n\nBefore this session, google/gemini-3.5-flash on Vercel's AI Gateway read the issue and answered:\n- kind: question"
+        );
+
+        let mut slack = Connector { id: "c2".into(), ask: Some(ask), ..slack_connector() };
+        slack.handled = vec!["C0123ABCD:1792400050.000200".into()];
+        slack.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
+        let (connectors, dir) = stored("ask-stop", vec![slack]);
+        std::fs::write(dir.join("vercel-key"), "vck_testa1b2").unwrap();
+        let _reply = TestReply::set(r#"{"kind":"bug","agent":"No"}"#.into());
+        let opened = std::sync::atomic::AtomicBool::new(false);
+        let open = |_: Work| {
+            opened.store(true, std::sync::atomic::Ordering::Relaxed);
+            async { Ok(()) }
+        };
+        let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &open)), Ok(()));
+        assert!(!opened.load(std::sync::atomic::Ordering::Relaxed), "a stop answer starts no session");
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
+        assert_eq!(reloaded[0].handled, ["C0123ABCD:1792400050.000200"]);
+        assert!(reloaded[0].followed.is_empty(), "later replies are not delivered, and fallback never opens a session");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    static ASK_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct TestReply {
+        _gate: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TestReply {
+        fn set(content: String) -> Self {
+            let gate = ASK_TEST.lock().unwrap();
+            crate::vercel::set_test_content(Some(content));
+            Self { _gate: gate }
+        }
+    }
+
+    impl Drop for TestReply {
+        fn drop(&mut self) {
+            crate::vercel::set_test_content(None);
+        }
+    }
+
+    fn classifying() -> Ask {
+        Ask {
+            model: "google/gemini-3.5-flash".into(),
+            instructions: "Classify.".into(),
+            questions: vec![
+                Question { name: "kind".into(), ask: "What does it ask for?".into(), choices: vec!["bug".into(), "question".into()], stop_on: vec![] },
+                Question { name: "agent".into(), ask: "Can a coding agent handle it?".into(), choices: vec!["yes".into(), "no".into()], stop_on: vec!["no".into()] },
+            ],
+        }
+    }
+
+    fn claimed_thread(name: &str, ask: Option<Ask>) -> (Connectors, PathBuf) {
+        let mut slack = Connector { id: "c2".into(), ask, ..slack_connector() };
+        slack.handled = vec!["C0123ABCD:1792400050.000200".into()];
+        slack.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
+        stored(name, vec![slack])
+    }
+
+    #[test]
+    fn an_answer_that_continues_is_appended_to_the_prompt() {
+        let (connectors, dir) = claimed_thread("ask-go", Some(classifying()));
+        std::fs::write(dir.join("vercel-key"), "vck_testa1b2").unwrap();
+        let _reply = TestReply::set(r#"{"kind":"bug","agent":"yes"}"#.into());
+        let prompt = std::sync::Mutex::new(String::new());
+        let open = |work: Work| {
+            if let Work::Run(run) = work {
+                *prompt.lock().unwrap() = run.args.last().cloned().unwrap_or_default();
+            }
+            async { Ok(()) }
+        };
+        let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &open)), Ok(()));
+        assert_eq!(
+            prompt.lock().unwrap().as_str().rsplit_once("\n\n").unwrap().1,
+            "Before this session, google/gemini-3.5-flash on Vercel's AI Gateway read the thread and answered:\n- kind: bug\n- agent: yes"
+        );
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
+        assert_eq!(reloaded[0].handled, ["C0123ABCD:1792400050.000200"]);
+        assert_eq!(reloaded[0].followed.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_missing_gateway_key_gives_the_subject_back() {
+        let (connectors, dir) = claimed_thread("ask-nokey", Some(classifying()));
+        let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { Ok(()) })),
+            Err("could not open a session in /repo: Vercel AI Gateway is not connected: connect it in pinned's Connectors settings; the next check tries again".into())
+        );
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
+        assert_eq!((reloaded[0].handled.len(), reloaded[0].followed.len()), (0, 0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn the_slack_watermark_waits_for_a_mention_until_a_session_takes_it() {
         let at = |rfc3339: &str| DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&Utc);
         let mut slack = Connector { since: "2026-10-22T16:18:15+00:00".into(), ..slack_connector() };
@@ -1549,6 +1742,7 @@ mod tests {
                 "Fix it.\n\nReport your progress to pinned, the app that started this session. Each command moves the Linear issue to its next column. Run each one once:\n- Run `'/Applications/pinned.app/Contents/MacOS/pinned' stage coding` right before you start changing code.\n\nLinear issue ENG-7: Broken button\nhttps://linear.app/x/issue/ENG-7\n\n(no description)",
             ]
         );
+        assert_eq!(run.input, "ENG-7: Broken button\nhttps://linear.app/x/issue/ENG-7\n\n(no description)");
     }
 
     fn slack_connector() -> Connector {
@@ -1616,6 +1810,7 @@ mod tests {
                 "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Keep every answer short. Before each `slack reply`, invoke the `pinned:bro` skill on your draft and post the message it gives you, not the draft. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\nThis workflow only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here",
             ]
         );
+        assert_eq!(run.input, "ana: @pinned export 500s since today\nsee the log\nbruno: same here");
     }
 
     fn fixing_connector() -> Connector {
