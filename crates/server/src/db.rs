@@ -1,12 +1,13 @@
 //! The hub's Postgres: accounts, logins, machines, pairing codes and the boxes runs live in. Tokens
 //! are stored as their sha256, so the database alone can't sign anyone in.
 
-use crate::boxes::{BoxRow, Phase};
+use crate::boxes::{BoxRow, Phase, Remains};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand_core::{OsRng, RngCore};
+use pinned_core::agent::Subject;
 use pinned_core::sync;
 use pinned_core::upstash::BoxId;
 use pinned_core::wire::{AccountView, MachineView};
@@ -34,7 +35,8 @@ create table if not exists project_files (account uuid not null references accou
   path text not null, sha text not null, modified bigint not null, data bytea not null, primary key (account, project, path));
 create table if not exists shared_projects (account uuid not null references accounts on delete cascade, key text not null,
   name text not null, repo text not null, updated timestamptz not null default now(), primary key (account, key));
-create table if not exists boxes (id text primary key, account uuid not null references accounts on delete cascade,
+-- Without a cascade: an account whose boxes still run can't be deleted, which would orphan them.
+create table if not exists boxes (id text primary key, account uuid not null references accounts,
   machine uuid not null, upstash text, connector text not null, subject jsonb not null, spec jsonb not null,
   size text not null, phase text not null, reason text, created_at timestamptz not null default now(),
   unique (account, connector, subject));
@@ -153,21 +155,26 @@ fn err(e: tokio_postgres::Error) -> String {
     e.to_string()
 }
 
-fn box_row(r: &tokio_postgres::Row) -> Result<BoxRow, String> {
-    let id: String = r.get(0);
-    let unreadable = |e: serde_json::Error| format!("box {id} has an unreadable row: {e}");
+/// The row, or what deleting its box takes when its run is in a shape this hub can't read.
+fn box_row(r: &tokio_postgres::Row) -> Result<BoxRow, Remains> {
+    let (id, machine, upstash): (String, Uuid, _) = (r.get(0), r.get(2), r.get::<_, Option<String>>(3).map(BoxId));
+    let unreadable = |e: serde_json::Error| Remains { id: id.clone(), machine, upstash: upstash.clone(), why: format!("its row is unreadable: {e}") };
     Ok(BoxRow {
         account: r.get(1),
-        machine: r.get(2),
-        upstash: r.get::<_, Option<String>>(3).map(BoxId),
+        machine,
         connector: r.get(4),
         subject: serde_json::from_value(r.get(5)).map_err(unreadable)?,
         spec: serde_json::from_value(r.get(6)).map_err(unreadable)?,
         size: serde_json::from_value(Value::String(r.get(7))).map_err(unreadable)?,
         phase: Phase::load(r.get(8), r.get(9)),
         age: std::time::Duration::from_secs_f64(r.get::<_, f64>(10).max(0.0)),
+        upstash,
         id,
     })
+}
+
+fn readable(row: Result<BoxRow, Remains>) -> Result<BoxRow, String> {
+    row.map_err(|r| format!("box {} {}; the next check deletes it", r.id, r.why))
 }
 
 impl Db {
@@ -419,17 +426,17 @@ impl Db {
             .query_one(&format!("select {BOX_COLUMNS} from boxes where account = $1 and connector = $2 and subject = $3"), &[&row.account, &row.connector, &subject])
             .await
             .map_err(err)?;
-        Ok((box_row(&stored)?, inserted == 1))
+        Ok((readable(box_row(&stored))?, inserted == 1))
     }
 
-    pub async fn boxes(&self, account: Uuid) -> Result<Vec<BoxRow>, String> {
+    pub async fn boxes(&self, account: Uuid) -> Result<Vec<Result<BoxRow, Remains>>, String> {
         let rows = self.client().await?.query(&format!("select {BOX_COLUMNS} from boxes where account = $1 order by created_at"), &[&account]).await.map_err(err)?;
-        rows.iter().map(box_row).collect()
+        Ok(rows.iter().map(box_row).collect())
     }
 
     pub async fn box_of(&self, account: Uuid, machine: Uuid) -> Result<Option<BoxRow>, String> {
         let row = self.client().await?.query_opt(&format!("select {BOX_COLUMNS} from boxes where account = $1 and machine = $2"), &[&account, &machine]).await.map_err(err)?;
-        row.as_ref().map(box_row).transpose()
+        row.as_ref().map(|r| readable(box_row(r))).transpose()
     }
 
     /// Moves the row from `from` to `to`, and answers false when it was no longer at `from`:
@@ -454,6 +461,17 @@ impl Db {
             .await
             .map_err(err)?;
         Ok(n == 1)
+    }
+
+    /// The id of the account's row for the workflow's subject.
+    pub async fn box_for(&self, account: Uuid, connector: &str, subject: &Subject) -> Result<Option<String>, String> {
+        let subject = serde_json::to_value(subject).unwrap();
+        let row = self
+            .client().await?
+            .query_opt("select id from boxes where account = $1 and connector = $2 and subject = $3", &[&account, &connector, &subject])
+            .await
+            .map_err(err)?;
+        Ok(row.map(|r| r.get(0)))
     }
 
     pub async fn box_exists(&self, id: &str) -> Result<bool, String> {

@@ -1,7 +1,7 @@
 use crate::boxes::{self, BoxApi, Boxes, Seen};
 use crate::db::{self, Db};
 use pinned_core::accounts::AccountId;
-use pinned_core::agent::{AgentStatus, Subject, Usage};
+use pinned_core::agent::{AgentStatus, Stage, Subject, Usage};
 use pinned_core::connectors::{Connectors, Delivery, Keys, Run, RunsOn, Storage, Work};
 use pinned_core::upstash;
 use base64::Engine;
@@ -377,7 +377,12 @@ impl Hub {
                 let token = c().await?.github_token().filter(|_| github::hosts(&repo));
                 return Ok(self.call_machine(account, &machine, Call::Clone { repo, token, dest }, RUN_WAIT).await?);
             }
-            HubCall::Stage { connector, subject, stage } => (json(c().await?.stage(&connector, &subject, stage).await?), false),
+            HubCall::Stage { connector, subject, stage } => {
+                if stage == Stage::Review {
+                    self.boxes.work_done(self, account, &connector, &subject).await?;
+                }
+                (json(c().await?.stage(&connector, &subject, stage).await?), false)
+            }
             HubCall::SlackReply { connector, channel, thread, text } => {
                 (json(c().await?.slack_reply(&connector, &channel, &thread, &text).await?), false)
             }

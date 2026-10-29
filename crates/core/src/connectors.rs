@@ -985,7 +985,8 @@ fn proof_of_work(exe: &str) -> String {
 }
 
 /// Ends the instructions of a session that runs in a box, which nothing outlives but what it pushed.
-const BOX_NOTE: &str = "\n\nYou run in a disposable Upstash Box (Linux arm64) that pinned deletes 30 minutes after you go quiet. \
+const BOX_NOTE: &str = "\n\nYou run in a disposable Upstash Box (Linux arm64) that pinned deletes 10 minutes after you go quiet, \
+    or 2 minutes after you stop once you reported the review stage. \
     Push your branch before you finish, because anything not pushed is lost. \
     For proof videos, launch Playwright with `executablePath: '/usr/bin/chromium'` instead of installing a browser, and never attach over CDP to port 9222. \
     If `command -v ffmpeg` finds nothing, check the recording with Playwright screenshots taken at the same steps instead of extracting frames.";

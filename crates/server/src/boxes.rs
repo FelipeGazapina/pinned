@@ -62,6 +62,8 @@ pub struct Policy {
     pub boot_wait: Duration,
     /// With the session not working.
     pub idle: Duration,
+    /// With the session not working after it opened its pull request, which is its work done.
+    pub done: Duration,
     /// With claude exited; restarting it from a client brings it back.
     pub exited: Duration,
     /// With no tab for the run, which covers the time from the run to the node's first tabs.
@@ -82,7 +84,8 @@ impl Default for Policy {
         let minutes = |m: u64| Duration::from_secs(m * 60);
         Policy {
             boot_wait: minutes(6),
-            idle: minutes(30),
+            idle: minutes(10),
+            done: minutes(2),
             exited: minutes(5),
             tab_gone: minutes(2),
             offline: minutes(10),
@@ -114,6 +117,23 @@ pub struct BoxRow {
     pub age: Duration,
 }
 
+impl BoxRow {
+    pub fn remains(&self) -> Remains {
+        Remains { id: self.id.clone(), machine: self.machine, upstash: self.upstash.clone(), why: format!("{:?}", self.phase) }
+    }
+}
+
+/// What deleting a row's box and machine takes, which even a row this hub can't read gives, as
+/// one a hub with another run shape wrote.
+#[derive(Clone, Debug)]
+pub struct Remains {
+    pub id: String,
+    pub machine: Uuid,
+    pub upstash: Option<BoxId>,
+    /// Why it ends, for the log.
+    pub why: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Phase {
     Creating,
@@ -127,6 +147,8 @@ pub enum End {
     TabClosed,
     Exited,
     Idle,
+    /// The session opened its pull request and stopped.
+    Done,
     Offline,
     Expired,
     /// Someone removed its machine.
@@ -137,10 +159,11 @@ pub enum End {
     Failed(String),
 }
 
-const ENDS: [(End, &str); 8] = [
+const ENDS: [(End, &str); 9] = [
     (End::TabClosed, "tab-closed"),
     (End::Exited, "exited"),
     (End::Idle, "idle"),
+    (End::Done, "done"),
     (End::Offline, "offline"),
     (End::Expired, "expired"),
     (End::Removed, "removed"),
@@ -195,6 +218,8 @@ struct Timers {
     exited_since: Option<Instant>,
     gone_since: Option<Instant>,
     offline_since: Option<Instant>,
+    /// The session reported its pull request opened.
+    done: bool,
 }
 
 /// How far `boot` brought a row.
@@ -213,19 +238,21 @@ fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) 
         Seen::NoTab => (Some(false), Some(true), None, None),
         Seen::Tab { running, quiet } => (Some(false), Some(false), Some(!running), Some(quiet)),
     };
-    let lasted = |since: &mut Option<Instant>, on: Option<bool>, limit: Duration| match on {
+    let held = |since: &mut Option<Instant>, on: Option<bool>| match on {
         Some(false) => {
             *since = None;
-            false
+            None
         }
-        Some(true) => now.duration_since(*since.get_or_insert(now)) >= limit,
-        None => since.is_some_and(|at| now.duration_since(at) >= limit),
+        Some(true) => Some(now.duration_since(*since.get_or_insert(now))),
+        None => since.map(|at| now.duration_since(at)),
     };
+    let quiet = held(&mut t.quiet_since, quiet);
     let ended = [
-        (lasted(&mut t.offline_since, offline, p.offline), End::Offline),
-        (lasted(&mut t.gone_since, gone, p.tab_gone), End::TabClosed),
-        (lasted(&mut t.exited_since, exited, p.exited), End::Exited),
-        (lasted(&mut t.quiet_since, quiet, p.idle), End::Idle),
+        (held(&mut t.offline_since, offline).is_some_and(|h| h >= p.offline), End::Offline),
+        (held(&mut t.gone_since, gone).is_some_and(|h| h >= p.tab_gone), End::TabClosed),
+        (held(&mut t.exited_since, exited).is_some_and(|h| h >= p.exited), End::Exited),
+        (t.done && quiet.is_some_and(|h| h >= p.done), End::Done),
+        (quiet.is_some_and(|h| h >= p.idle), End::Idle),
     ];
     if age >= p.max_life {
         return Some(End::Expired);
@@ -407,7 +434,7 @@ impl Boxes {
                 if hub.db.set_box_phase(&row.id, &from, &failed).await? {
                     let mut row = row.clone();
                     row.phase = failed.clone();
-                    if let Err(e) = self.end(hub, account, &row, Some(keys)).await {
+                    if let Err(e) = self.end(hub, account, &row.remains(), Some(keys)).await {
                         eprintln!("pinned-server: could not delete box {}: {e}", row.id);
                     }
                     break;
@@ -423,10 +450,10 @@ impl Boxes {
         let key = keys.api_key.as_str();
         let mut upstash = row.upstash.clone();
         if row.phase == Phase::Creating {
-            let id = match upstash {
-                Some(id) => id,
+            let (id, made) = match upstash {
+                Some(id) => (id, false),
                 None => match self.api.list(key, &row_label(&row.id)).await?.into_iter().next() {
-                    Some(listed) => listed.id,
+                    Some(listed) => (listed.id, false),
                     None => {
                         let new = NewBox {
                             name: format!("pinned-{}", row.id),
@@ -434,11 +461,16 @@ impl Boxes {
                             size: row.size,
                             init_command: format!("sh {DIR}/start.sh || true"),
                         };
-                        self.api.create(key, new).await?
+                        (self.api.create(key, new).await?, true)
                     }
                 },
             };
             if !hub.db.box_created(&row.id, &id).await? {
+                // The row ended or another hub created its own box meanwhile, so nothing else
+                // knows of this one; once its key is disconnected no sweep can find it either.
+                if made {
+                    self.api.delete(key, &id).await?;
+                }
                 return Ok(Boot::Moved);
             }
             upstash = Some(id);
@@ -498,7 +530,7 @@ impl Boxes {
 
     /// Ending → gone, each step a no-op once done: the machine, so its node can't sign in again,
     /// then the box, then the row. Without keys the row stays, to be retried once they are back.
-    async fn end(&self, hub: &Hub, account: &Arc<Account>, row: &BoxRow, keys: Option<&Keys>) -> Result<(), String> {
+    async fn end(&self, hub: &Hub, account: &Arc<Account>, row: &Remains, keys: Option<&Keys>) -> Result<(), String> {
         let machine = row.machine.to_string();
         hub.db.remove_machine(account.id, row.machine).await?;
         account.went_offline(&machine, None);
@@ -515,7 +547,7 @@ impl Boxes {
         }
         hub.db.delete_box(&row.id).await?;
         self.timers.lock().unwrap().remove(&row.id);
-        eprintln!("pinned-server: deleted box {} of account {} ({:?})", row.id, account.id, row.phase);
+        eprintln!("pinned-server: deleted box {} of account {} ({})", row.id, account.id, row.why);
         Ok(())
     }
 
@@ -528,7 +560,15 @@ impl Boxes {
             }
             row.phase = ending;
         }
-        self.end(hub, account, &row, keys).await
+        self.end(hub, account, &row.remains(), keys).await
+    }
+
+    /// The session for `subject` opened its pull request, so its box ends once it stops working.
+    pub async fn work_done(&self, hub: &Hub, account: &Account, connector: &str, subject: &Subject) -> Result<(), String> {
+        if let Some(row) = hub.db.box_for(account.id, connector, subject).await? {
+            self.timers.lock().unwrap().entry(row).or_default().done = true;
+        }
+        Ok(())
     }
 
     /// Removing a box's machine deletes the box too. Answers whether `machine` ran in one.
@@ -543,7 +583,10 @@ impl Boxes {
     pub async fn end_all(&self, hub: &Hub, account: &Arc<Account>) -> Result<(), String> {
         let keys = hub.connectors(account).await?.box_keys();
         for row in hub.db.boxes(account.id).await? {
-            self.finish(hub, account, row, End::Disconnected, keys.as_ref()).await?;
+            match row {
+                Ok(row) => self.finish(hub, account, row, End::Disconnected, keys.as_ref()).await?,
+                Err(remains) => self.end(hub, account, &remains, keys.as_ref()).await?,
+            }
         }
         Ok(())
     }
@@ -578,6 +621,15 @@ impl Boxes {
         let rows = hub.db.boxes(account.id).await?;
         let now = Instant::now();
         for row in rows {
+            let row = match row {
+                Ok(row) => row,
+                Err(remains) => {
+                    if let Err(e) = self.end(hub, account, &remains, keys.as_ref()).await {
+                        eprintln!("pinned-server: could not end a box of account {}: {e}", account.id);
+                    }
+                    continue;
+                }
+            };
             if self.driving.lock().unwrap().contains(&row.id) {
                 continue;
             }
@@ -606,7 +658,7 @@ impl Boxes {
             };
             let finished = match ended {
                 Some(why) => self.finish(hub, account, row, why, keys.as_ref()).await,
-                None if matches!(row.phase, Phase::Ending(_)) => self.end(hub, account, &row, keys.as_ref()).await,
+                None if matches!(row.phase, Phase::Ending(_)) => self.end(hub, account, &row.remains(), keys.as_ref()).await,
                 None => Ok(()),
             };
             if let Err(e) = finished {
@@ -682,6 +734,20 @@ mod tests {
     }
 
     #[test]
+    fn a_box_whose_pull_request_is_open_ends_soon_after_its_session_stops() {
+        let p = Policy { done: 2 * MIN, ..policy() };
+        let (start, mut t) = (Instant::now(), Timers::default());
+        let quiet = Seen::Tab { running: true, quiet: true };
+        assert_eq!(verdict(MIN, quiet, &mut t, start, &p), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 3 * MIN, &p), None, "quiet without a pull request waits out idle");
+        t.done = true;
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 4 * MIN, &p), None, "still working");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 5 * MIN, &p), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 6 * MIN, &p), None, "quiet for 1 of 2 minutes");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 7 * MIN, &p), Some(End::Done));
+    }
+
+    #[test]
     fn a_dropped_link_does_not_restart_the_quiet_clock() {
         let p = policy();
         let (start, mut t) = (Instant::now(), Timers::default());
@@ -700,6 +766,7 @@ mod tests {
             Phase::Running,
             Phase::Ending(End::Idle),
             Phase::Ending(End::TabClosed),
+            Phase::Ending(End::Done),
             Phase::Ending(End::Failed("the bootstrap failed: curl: (22) 404".into())),
         ] {
             let (stored, reason) = phase.stored();

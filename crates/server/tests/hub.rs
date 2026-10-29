@@ -925,6 +925,7 @@ fn fast() -> Policy {
     Policy {
         boot_wait: ms(8000),
         idle: Duration::from_secs(3600),
+        done: Duration::from_secs(3600),
         exited: Duration::from_secs(3600),
         tab_gone: ms(400),
         offline: ms(1000),
@@ -1104,7 +1105,7 @@ fn a_hub_restarted_mid_boot_finishes_the_run_with_one_box() {
     assert_eq!(second.machine_id, first.machine_id, "the same machine, booted again");
     assert_ne!(second.machine_token, first.machine_token);
     assert_eq!(hub.runtime.block_on(hub.hub().db.machine_connected(&first.machine_token, "linux")).unwrap().map(|m| m.id), None, "the old token no longer signs in");
-    let phases = || hub.runtime.block_on(hub.hub().db.boxes(ana.id)).unwrap().into_iter().map(|r| r.phase).collect::<Vec<_>>();
+    let phases = || hub.runtime.block_on(hub.hub().db.boxes(ana.id)).unwrap().into_iter().map(|r| r.unwrap().phase).collect::<Vec<_>>();
     wait_for("the row to run", || phases() == [pinned_server::boxes::Phase::Running]);
 }
 
@@ -1141,4 +1142,35 @@ fn removing_a_box_machine_or_disconnecting_upstash_deletes_its_boxes() {
     ana.client.wait_machines(&[]);
     ana.client.wait("settings without Upstash", |f| f["type"] == "settings" && f["settings"]["upstash"].is_null());
     assert_eq!(open(ana.box_run(issue("uuid-3"))), Err("Upstash Box is not connected: connect it in pinned's Connectors settings".into()));
+}
+
+#[test]
+fn a_box_goes_once_its_session_opened_its_pull_request_and_stopped() {
+    let hub = TestHub::start_with_boxes("box_done", true, Policy { done: Duration::from_millis(300), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    assert_eq!(hub.runtime.block_on(hub.hub().open(account, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let stage = |stage| hub.boxes.with_node(|node| node.link.as_ref().unwrap().forward(agent::Message::Stage { connector: ana.connector.clone(), subject: issue("uuid-1"), stage }));
+    stage(Stage::Coding).unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(hub.boxes.live().len(), 1, "a quiet session without a pull request keeps its box until idle");
+
+    stage(Stage::Review).unwrap();
+    wait_for("the box to be deleted", || hub.boxes.live().is_empty());
+    ana.client.wait_machines(&[]);
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+}
+
+#[test]
+fn a_box_whose_row_this_hub_cannot_read_is_still_deleted() {
+    let hub = TestHub::start_with_boxes("box_unreadable", true, fast());
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    // As a hub whose runs have another shape would have written it.
+    admin_on(&hub.database, "update boxes set spec = '{\"shape\": \"newer\"}'");
+    wait_for("the box to be deleted", || hub.boxes.live().is_empty());
+    ana.client.wait_machines(&[]);
+    wait_for("the row to go", || ana.rows(&hub) == 0);
 }
