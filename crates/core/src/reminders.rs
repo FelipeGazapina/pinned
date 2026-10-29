@@ -345,6 +345,12 @@ fn call(params: &Value, reminders: bool, output: &Mutex<impl Write>) -> Value {
     tool_result(request.and_then(|request| send(&request)))
 }
 
+/// A child task always waits for its own delegate call. A session with no tab does too.
+/// A tab session keeps the mode it asked for.
+fn session_mode(tab: Option<&str>, task: Option<&str>, asked: Mode) -> Mode {
+    if task.is_some() || tab.is_none() { Mode::Wait } else { asked }
+}
+
 fn delegate_call(params: &Value, output: &Mutex<impl Write>) -> Value {
     let mut request = match delegate::parse_request(&params["arguments"]) {
         Ok(request) => request,
@@ -352,9 +358,7 @@ fn delegate_call(params: &Value, output: &Mutex<impl Write>) -> Value {
     };
     let tab = session_var(TAB_ENV);
     let parent = session_var(TASK_ENV);
-    if tab.is_none() {
-        request.mode = Mode::Wait;
-    }
+    request.mode = session_mode(tab.as_deref(), parent.as_deref(), request.mode);
     let wait = request.mode == Mode::Wait;
     let timeout = StdDuration::from_millis(request.timeout_ms);
     let tool = params.get("_meta").and_then(|meta| meta.get("claudecode/toolUseId")).and_then(Value::as_str).map(str::to_owned);
@@ -530,6 +534,14 @@ mod tests {
         assert_eq!(reminders.cancel(2), Ok("Reminder #2 cancelled.".to_owned()));
         assert_eq!(reminders.cancel(2), Err("No pending reminder #2.".to_owned()));
         assert!(reminders.add("three".into(), &When::InMinutes(1.0)).unwrap().starts_with("Reminder #2 set"));
+    }
+
+    #[test]
+    fn a_child_task_waits_for_its_own_delegate_call() {
+        assert_eq!(session_mode(Some("tab-1"), None, Mode::Async), Mode::Async);
+        assert_eq!(session_mode(Some("tab-1"), Some("task-1"), Mode::Async), Mode::Wait);
+        assert_eq!(session_mode(None, Some("task-1"), Mode::Async), Mode::Wait);
+        assert_eq!(session_mode(None, None, Mode::Async), Mode::Wait);
     }
 
     #[test]
