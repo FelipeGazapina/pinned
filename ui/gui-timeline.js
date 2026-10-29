@@ -829,7 +829,7 @@ function userHtml(user, t, tab, first) {
     <div class="meta">${whenHtml(user.at)}${t.editable ? `<button type="button" class="xs" data-rewind="${esc(user.id)}" title="Edit from here"${t.editable === "busy" ? " disabled" : ""}>${icon("undo-2")}</button>` : ""}${user.text ? `<button type="button" class="xs" data-copy-item="${esc(user.id)}" title="Copy">${icon("copy")}</button>` : ""}${promptLinkFor(user.text) ? `<button type="button" class="xs" data-copy-link="${esc(user.id)}" title="Copy prompt link" aria-label="Copy prompt link">${icon("link")}</button>` : ""}</div></div>`;
 }
 
-function turnHtml(tab, turn, change, live, first, t) {
+function turnHtml(tab, turn, change, live, first, t, latest) {
   const cwd = tab.view.cwd;
   const work = live ? turn.work : turn.work.filter((s) => !turn.failed.has(s));
   const shown = live ? turn.shown : turn.steps.filter((s) => turn.shown.includes(s) || turn.failed.has(s));
@@ -855,7 +855,7 @@ function turnHtml(tab, turn, change, live, first, t) {
         <div class="steps">${steps}</div></details>`;
   }
   const notes = turn.notes.filter((n) => !(fold && !live && turn.interrupted && n.text === "Interrupted."));
-  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${fold}${agentCardsHtml(tab, turn)}
+  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${fold}${agentCardsHtml(tab, turn, latest)}
     ${shown.map((s) => shownHtml(s, cwd, t, live ? null : turn.answer, t.editable === true)).join("")}
     ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}
     ${change ? changesHtml(change, t.open) : ""}${turn.dividers.map(dividerHtml).join("")}</section>`;
@@ -950,7 +950,7 @@ function renderThread() {
   const body = turns.length
     ? `${parent}${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}<div class="spacer" style="height:${win.above}px"></div>${shown
         .slice(win.lo, win.hi)
-        .map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + win.lo + i === turns.length - 1, turn === opening, t))
+        .map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + win.lo + i === turns.length - 1, turn === opening, t, first + win.lo + i === turns.length - 1))
         .join("")}<div class="spacer" style="height:${win.below}px"></div>${sub ? "" : agentsFooterHtml(tab)}`
     : `<div class="blank"><p>${blank}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
   const liveRows = threadView.querySelector(".work.live .group[open] > .rows");
@@ -1706,8 +1706,9 @@ function renderUnsupported() {
 function renderTerminalOnly() {
   document.querySelector("#chat-head .crumb").innerHTML = crumbHtml(active);
   threadView.dataset.key = "";
-  const what = active.view.program === "sign-in" ? "This sign-in runs" : `${esc(accountName(active.machine, active.view.account))} runs Codex, which`;
-  threadView.innerHTML = `<div class="blank"><p>${what} in the terminal only.</p><button class="primary" data-mode-terminal>Terminal view</button></div>`;
+  const what = active.view.program === "sign-in" ? "This sign-in runs" : `${esc(accountName(active.machine, active.view.account))} runs`;
+  const strip = active.view.program === "sign-in" ? "" : delegatedStrip(active);
+  threadView.innerHTML = `<div class="blank"><p>${what} in the terminal only.</p>${strip}<button class="primary" data-mode-terminal>Terminal view</button></div>`;
 }
 
 /** T3 Code's media dialog: the image over a dark scrim with a close button, and for a message's

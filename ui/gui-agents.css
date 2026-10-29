@@ -19,3 +19,6 @@
 .agents-working .ticker { font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) { .agent-card .state, .agents-working .i { animation: none; } }
 @media (pointer: coarse) { .agent-card .agent-head { min-height: 40px; } }
+.delegated-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
+.delegated-strip .name { font-size: 13px; font-weight: 500; }
+.delegated-strip .chip { padding: 1px 6px; border-radius: 6px; background: var(--g-hover); color: var(--g-muted); font-size: 11px; }

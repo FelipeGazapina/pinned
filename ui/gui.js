@@ -221,7 +221,10 @@ function renderGui() {
       watchMenu(tab);
     }
     tab.menu = tab.answering ? null : terminalMenu(tab);
-    if (terminalOnly(tab)) continue;
+    if (terminalOnly(tab)) {
+      if (tab.view.program !== "sign-in" && !threadOf(tab).loaded) fetchThread(tab);
+      continue;
+    }
     tab.dialog = tab.menu || tab.answering ? null : terminalDialog(tab);
     if (!t.loaded) fetchThread(tab);
     fetchWorkspace(tab);
@@ -241,7 +244,10 @@ function renderGui() {
 
 setInterval(() => {
   if (!guiOn() || document.hidden) return;
-  for (const tab of tabs) if ((tab === active || turnLive(tab) || phaseOf(tab) === "delegating") && !terminalOnly(tab)) fetchThread(tab);
+  for (const tab of tabs) {
+    if (terminalOnly(tab) && tab.view.program === "sign-in") continue;
+    if (tab === active || turnLive(tab) || phaseOf(tab) === "delegating" || terminalOnly(tab)) fetchThread(tab);
+  }
 }, POLL_MS);
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
 document.addEventListener("visibilitychange", () => markThreadSeen(active));

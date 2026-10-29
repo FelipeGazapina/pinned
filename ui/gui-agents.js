@@ -63,13 +63,23 @@ function agentCardHtml(tab, agent, depth) {
 
 /** A card per agent the turn spawned, below its work fold so they show while the fold is shut, with
  * the agents those spawned indented under them. */
-function agentCardsHtml(tab, turn) {
+function agentCardsHtml(tab, turn, latest) {
   const agents = agentsOf(tab);
   if (!agents.length) return "";
   const tools = new Set(turn.steps.filter((s) => s.kind === "tool").map((s) => s.id));
   const tree = (agent, depth) => [agentCardHtml(tab, agent, depth), ...agents.filter((a) => a.parent === agent.id).flatMap((a) => tree(a, depth + 1))];
-  const cards = agents.filter((a) => !a.parent && tools.has(a.tool)).flatMap((a) => tree(a, 0));
+  const cards = agents.filter((a) => !a.parent && (tools.has(a.tool) || (latest && !a.tool))).flatMap((a) => tree(a, 0));
   return cards.length ? `<div class="agents">${cards.join("")}</div>` : "";
+}
+
+/** Codex and Cursor tabs have no transcript, so their children sit in a strip with Open as thread. */
+function delegatedStrip(tab) {
+  const agents = agentsOf(tab).filter((a) => !a.parent && a.id.startsWith("task-"));
+  if (!agents.length) return "";
+  return `<div class="delegated-strip">${agents.map((a) => {
+    const chip = [a.kind, a.model].filter(Boolean).join(" · ");
+    return `<span class="name">${esc(a.name || "Agent")}</span>${chip ? `<span class="chip">${esc(chip)}</span>` : ""}<button type="button" class="outline" data-open-task="${esc(a.id)}">Open as thread</button>`;
+  }).join("")}</div>`;
 }
 
 /** Under the last turn while claude's turn has ended and its agents work on. */
