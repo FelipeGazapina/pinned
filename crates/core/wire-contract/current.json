@@ -748,12 +748,101 @@
                 ]
               },
               {
-                "description": "`Vec<projects::Memory>`: what the project's orchestrator and workers keep.",
+                "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
                 "type": "object",
                 "properties": {
                   "cmd": {
                     "type": "string",
-                    "const": "project_memories"
+                    "const": "memory_search"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "query"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` saved. With `id`, replaces that memory. Refused when the project\nalready has a memory with the same title or nearly the same meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_save"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "title",
+                  "text"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` removed.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_forget"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id"
+                ]
+              },
+              {
+                "description": "`memory::Status`: how many memories the project has and whether search also matches by meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_status"
                   },
                   "path": {
                     "type": "string"
@@ -762,50 +851,6 @@
                 "required": [
                   "cmd",
                   "path"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after adding `text` to the project's memory.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "remember"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "text": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "text"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after removing the memory `id`.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "forget"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "id": {
-                    "type": "integer",
-                    "format": "uint64",
-                    "minimum": 0
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "id"
                 ]
               },
               {
@@ -5303,12 +5348,101 @@
                 ]
               },
               {
-                "description": "`Vec<projects::Memory>`: what the project's orchestrator and workers keep.",
+                "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
                 "type": "object",
                 "properties": {
                   "cmd": {
                     "type": "string",
-                    "const": "project_memories"
+                    "const": "memory_search"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "query"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` saved. With `id`, replaces that memory. Refused when the project\nalready has a memory with the same title or nearly the same meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_save"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "title",
+                  "text"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` removed.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_forget"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id"
+                ]
+              },
+              {
+                "description": "`memory::Status`: how many memories the project has and whether search also matches by meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_status"
                   },
                   "path": {
                     "type": "string"
@@ -5317,50 +5451,6 @@
                 "required": [
                   "cmd",
                   "path"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after adding `text` to the project's memory.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "remember"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "text": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "text"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after removing the memory `id`.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "forget"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "id": {
-                    "type": "integer",
-                    "format": "uint64",
-                    "minimum": 0
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "id"
                 ]
               },
               {
@@ -9545,7 +9635,7 @@
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
               {
-                "description": "Hands every request to workers and keeps the project's memory.",
+                "description": "Hands every request to workers.",
                 "type": "string",
                 "const": "orchestrator"
               },
@@ -11373,7 +11463,7 @@
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
               {
-                "description": "Hands every request to workers and keeps the project's memory.",
+                "description": "Hands every request to workers.",
                 "type": "string",
                 "const": "orchestrator"
               },
@@ -14142,6 +14232,174 @@
         ]
       }
     },
+    "Memory": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Memory",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "What sort of fact it is, such as a preference, a decision or a convention.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created": {
+            "description": "Unix seconds.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "text",
+          "created",
+          "updated"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Memory",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "What sort of fact it is, such as a preference, a decision or a convention.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created": {
+            "description": "Unix seconds.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "text",
+          "created",
+          "updated"
+        ]
+      }
+    },
+    "MemoryStatus": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Status",
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "vectors": {
+            "$ref": "#/$defs/VectorSearch"
+          }
+        },
+        "required": [
+          "count",
+          "vectors"
+        ],
+        "$defs": {
+          "VectorSearch": {
+            "description": "Whether a search also matches by meaning, as the Memory panel shows it.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ready"
+                ]
+              },
+              {
+                "description": "The model is downloading or loading; until then, search is by words.",
+                "type": "string",
+                "const": "loading"
+              },
+              {
+                "description": "By words only: the model is not needed yet, or failed to load.",
+                "type": "string",
+                "const": "off"
+              }
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Status",
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "vectors": {
+            "$ref": "#/$defs/VectorSearch"
+          }
+        },
+        "required": [
+          "count",
+          "vectors"
+        ],
+        "$defs": {
+          "VectorSearch": {
+            "description": "Whether a search also matches by meaning, as the Memory panel shows it.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ready"
+                ]
+              },
+              {
+                "description": "The model is downloading or loading; until then, search is by words.",
+                "type": "string",
+                "const": "loading"
+              },
+              {
+                "description": "By words only: the model is not needed yet, or failed to load.",
+                "type": "string",
+                "const": "off"
+              }
+            ]
+          }
+        }
+      }
+    },
     "PairCode": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -16477,7 +16735,7 @@
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
               {
-                "description": "Hands every request to workers and keeps the project's memory.",
+                "description": "Hands every request to workers.",
                 "type": "string",
                 "const": "orchestrator"
               },
@@ -16716,7 +16974,7 @@
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
               {
-                "description": "Hands every request to workers and keeps the project's memory.",
+                "description": "Hands every request to workers.",
                 "type": "string",
                 "const": "orchestrator"
               },
@@ -17124,7 +17382,7 @@
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
               {
-                "description": "Hands every request to workers and keeps the project's memory.",
+                "description": "Hands every request to workers.",
                 "type": "string",
                 "const": "orchestrator"
               },
@@ -18479,7 +18737,7 @@
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
               {
-                "description": "Hands every request to workers and keeps the project's memory.",
+                "description": "Hands every request to workers.",
                 "type": "string",
                 "const": "orchestrator"
               },
@@ -20181,12 +20439,101 @@
                 ]
               },
               {
-                "description": "`Vec<projects::Memory>`: what the project's orchestrator and workers keep.",
+                "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
                 "type": "object",
                 "properties": {
                   "cmd": {
                     "type": "string",
-                    "const": "project_memories"
+                    "const": "memory_search"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "query"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` saved. With `id`, replaces that memory. Refused when the project\nalready has a memory with the same title or nearly the same meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_save"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "title",
+                  "text"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` removed.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_forget"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id"
+                ]
+              },
+              {
+                "description": "`memory::Status`: how many memories the project has and whether search also matches by meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_status"
                   },
                   "path": {
                     "type": "string"
@@ -20195,50 +20542,6 @@
                 "required": [
                   "cmd",
                   "path"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after adding `text` to the project's memory.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "remember"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "text": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "text"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after removing the memory `id`.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "forget"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "id": {
-                    "type": "integer",
-                    "format": "uint64",
-                    "minimum": 0
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "id"
                 ]
               },
               {
@@ -23575,12 +23878,101 @@
                 ]
               },
               {
-                "description": "`Vec<projects::Memory>`: what the project's orchestrator and workers keep.",
+                "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
                 "type": "object",
                 "properties": {
                   "cmd": {
                     "type": "string",
-                    "const": "project_memories"
+                    "const": "memory_search"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "query"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` saved. With `id`, replaces that memory. Refused when the project\nalready has a memory with the same title or nearly the same meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_save"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "title",
+                  "text"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` removed.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_forget"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id"
+                ]
+              },
+              {
+                "description": "`memory::Status`: how many memories the project has and whether search also matches by meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_status"
                   },
                   "path": {
                     "type": "string"
@@ -23589,50 +23981,6 @@
                 "required": [
                   "cmd",
                   "path"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after adding `text` to the project's memory.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "remember"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "text": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "text"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after removing the memory `id`.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "forget"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "id": {
-                    "type": "integer",
-                    "format": "uint64",
-                    "minimum": 0
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "id"
                 ]
               },
               {

@@ -15,44 +15,6 @@ pub struct Project {
     /// The account its sessions run under; none runs them under the default one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<AccountId>,
-    /// What the project's orchestrator and its workers keep across conversations.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub memories: Vec<Memory>,
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
-pub struct Memory {
-    pub id: u64,
-    pub text: String,
-    /// Unix seconds.
-    pub created: u64,
-}
-
-impl Project {
-    pub fn remember(&mut self, text: &str, now: u64) -> Result<Memory, String> {
-        let text = text.trim();
-        if text.is_empty() {
-            return Err("a memory needs some text".into());
-        }
-        let id = self.memories.iter().map(|m| m.id).max().map_or(1, |last| last + 1);
-        let memory = Memory { id, text: text.to_owned(), created: now };
-        self.memories.push(memory.clone());
-        Ok(memory)
-    }
-
-    pub fn forget(&mut self, id: u64) -> Result<Memory, String> {
-        let at = self.memories.iter().position(|m| m.id == id).ok_or_else(|| format!("no memory #{id} in {}", self.path.display()))?;
-        Ok(self.memories.remove(at))
-    }
-}
-
-/// The memories as a session's system prompt lists them; nothing when there are none.
-pub fn render(memories: &[Memory]) -> String {
-    if memories.is_empty() {
-        return String::new();
-    }
-    let lines: Vec<String> = memories.iter().map(|m| format!("- [{}] {}", m.id, m.text)).collect();
-    format!("Project memory, by id:\n{}", lines.join("\n"))
 }
 
 pub fn load(file: &Path) -> Vec<Project> {
@@ -66,7 +28,7 @@ pub fn load_or_migrate(file: &Path, last_folder: &Path) -> Vec<Project> {
     }
     let Ok(legacy) = std::fs::read_to_string(last_folder) else { return vec![] };
     let path = dunce::canonicalize(&legacy).unwrap_or(legacy.into());
-    let projects = vec![Project { path, last_opened: 0, account: None, memories: vec![] }];
+    let projects = vec![Project { path, last_opened: 0, account: None }];
     save(file, &projects);
     projects
 }
@@ -81,7 +43,7 @@ pub fn save(file: &Path, projects: &[Project]) {
 pub fn upsert(projects: &mut Vec<Project>, path: PathBuf, now: u64) {
     match projects.iter_mut().find(|p| p.path == path) {
         Some(p) => p.last_opened = now,
-        None => projects.push(Project { path, last_opened: now, account: None, memories: vec![] }),
+        None => projects.push(Project { path, last_opened: now, account: None }),
     }
 }
 
@@ -206,7 +168,7 @@ mod tests {
         upsert(&mut projects, "/a".into(), 30);
         assert_eq!(
             projects,
-            vec![Project { path: "/a".into(), last_opened: 30, account: None, memories: vec![] }, Project { path: "/b".into(), last_opened: 20, account: None, memories: vec![] }]
+            vec![Project { path: "/a".into(), last_opened: 30, account: None }, Project { path: "/b".into(), last_opened: 20, account: None }]
         );
     }
 
@@ -217,9 +179,9 @@ mod tests {
         std::fs::create_dir_all(&old).unwrap();
         std::fs::create_dir_all(&new).unwrap();
         let projects = vec![
-            Project { path: old.clone(), last_opened: 1, account: None, memories: vec![] },
-            Project { path: dir.join("deleted"), last_opened: 3, account: None, memories: vec![] },
-            Project { path: new.clone(), last_opened: 2, account: None, memories: vec![] },
+            Project { path: old.clone(), last_opened: 1, account: None },
+            Project { path: dir.join("deleted"), last_opened: 3, account: None },
+            Project { path: new.clone(), last_opened: 2, account: None },
         ];
         let paths: Vec<&Path> = recent(&projects).into_iter().map(|p| p.path.as_path()).collect();
         assert_eq!(paths, vec![new.as_path(), old.as_path()]);
@@ -232,7 +194,7 @@ mod tests {
         std::fs::write(&file, r#"[{"path": "/a", "last_opened": 5, "color": "red"}, {"path": "/b"}]"#).unwrap();
         assert_eq!(
             load(&file),
-            vec![Project { path: "/a".into(), last_opened: 5, account: None, memories: vec![] }, Project { path: "/b".into(), last_opened: 0, account: None, memories: vec![] }]
+            vec![Project { path: "/a".into(), last_opened: 5, account: None }, Project { path: "/b".into(), last_opened: 0, account: None }]
         );
         let _ = std::fs::remove_file(file);
     }
@@ -240,9 +202,9 @@ mod tests {
     #[test]
     fn projects_survive_a_round_trip() {
         let file = temp("round-trip.json");
-        let projects = vec![Project { path: "/repo".into(), last_opened: 1_760_000_000, account: Some("work".into()), memories: vec![] }];
+        let projects = vec![Project { path: "/repo".into(), last_opened: 1_760_000_000, account: Some("work".into()) }];
         save(&file, &projects);
-        assert_eq!(load(&file), vec![Project { path: "/repo".into(), last_opened: 1_760_000_000, account: Some("work".into()), memories: vec![] }]);
+        assert_eq!(load(&file), vec![Project { path: "/repo".into(), last_opened: 1_760_000_000, account: Some("work".into()) }]);
         let _ = std::fs::remove_file(file);
         assert_eq!(load(Path::new("/nonexistent/projects.json")), vec![]);
     }
@@ -251,30 +213,10 @@ mod tests {
     fn the_legacy_last_folder_seeds_the_first_run_only() {
         let (file, legacy) = (temp("migrate.json"), temp("last-folder"));
         std::fs::write(&legacy, "/old/folder").unwrap();
-        assert_eq!(load_or_migrate(&file, &legacy), vec![Project { path: "/old/folder".into(), last_opened: 0, account: None, memories: vec![] }]);
+        assert_eq!(load_or_migrate(&file, &legacy), vec![Project { path: "/old/folder".into(), last_opened: 0, account: None }]);
         save(&file, &[]);
         assert_eq!(load_or_migrate(&file, &legacy), vec![]);
         let _ = std::fs::remove_file(file);
         let _ = std::fs::remove_file(legacy);
-    }
-
-    #[test]
-    fn memories_take_the_next_id_and_are_kept_with_their_project() {
-        let mut project = Project { path: "/repo".into(), last_opened: 1, account: None, memories: vec![] };
-        assert_eq!(render(&project.memories), "");
-        assert_eq!(project.remember("  Use pnpm, not npm. ", 100).unwrap().id, 1);
-        assert_eq!(project.remember("Tests run with `cargo test --workspace`.", 101).unwrap().id, 2);
-        assert_eq!(project.remember(" ", 102), Err("a memory needs some text".into()));
-        assert_eq!(project.forget(1).map(|m| m.text), Ok("Use pnpm, not npm.".into()));
-        assert_eq!(project.forget(1), Err("no memory #1 in /repo".into()));
-        assert_eq!(project.remember("The API lives in crates/server.", 103).unwrap().id, 3);
-        assert_eq!(render(&project.memories), "Project memory, by id:\n- [2] Tests run with `cargo test --workspace`.\n- [3] The API lives in crates/server.");
-
-        let file = temp("memories.json");
-        save(&file, &[project]);
-        let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-        assert_eq!(raw[0]["memories"][1], serde_json::json!({"id": 3, "text": "The API lives in crates/server.", "created": 103}));
-        assert_eq!(load(&file)[0].memories.iter().map(|m| m.id).collect::<Vec<_>>(), [2, 3]);
-        let _ = std::fs::remove_file(file);
     }
 }

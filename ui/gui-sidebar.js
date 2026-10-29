@@ -365,7 +365,7 @@ function rowShell(tab, cls) {
   row.classList.toggle("active", tab === active);
   row.classList.toggle("selected", selected.has(tab.key));
   row.classList.toggle("titling", titling.has(tab.key));
-  row.setAttribute("aria-label", threadTitle(tab));
+  row.setAttribute("aria-label", tab.view.role === "orchestrator" || tab.view.role === "worker" ? `${threadTitle(tab)}, ${tab.view.role}` : threadTitle(tab));
   return row;
 }
 

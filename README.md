@@ -70,15 +70,28 @@ workers instead of doing the work itself. Open it from a thread's menu (**Open t
 or from the robot button next to the project in the project filter. Its row comes first and
 says **Orchestrator**.
 
-The orchestrator can't edit files. For each request it starts a worker, an ordinary thread
+The orchestrator has no file-editing tools, but it can still change files with a shell command
+you approve. For each request it starts a worker, an ordinary thread
 marked with a robot that you can open and steer. A worker in a git project gets its own
 worktree. When a worker finishes or needs input, pinned tells the orchestrator, which reviews
 the result and answers you.
 
-The orchestrator and its workers keep a project memory: your preferences, decisions,
-conventions and facts about the code. Every new session of either starts with it. To read,
-add or delete memories, open the **Memory** tab in the side panel. The orchestrator needs a
-Claude Code account.
+The orchestrator needs a Claude Code account.
+
+### Project memory
+
+Every thread in a project shares a memory: your preferences, decisions, conventions and facts
+about the code. Agents save to it and search it with the `memory_save`, `memory_search` and
+`memory_forget` tools. When you send a prompt, pinned also adds the few memories that match
+it best. A thread without a project has no memory.
+
+Search matches words and meaning, so a question in Portuguese finds a memory written in
+English. Matching by meaning needs a model of about 530 MB. pinned downloads it in the
+background after the project's first memory is saved. Until then, search matches words only.
+Each project's memories are kept on your machine in pinned's config folder, not in the
+repository.
+
+To search, add or delete memories, open the **Memory** tab in the side panel.
 
 ## App view and terminal view
 

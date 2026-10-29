@@ -9,14 +9,14 @@ pub const TAB_ENV: &str = "PINNED_TAB";
 pub const ROLE_ENV: &str = "PINNED_ROLE";
 pub const PROJECT_ENV: &str = "PINNED_PROJECT";
 
-const ORCHESTRATOR_PROMPT: &str = "You are this project's orchestrator in pinned. You cannot edit files. Hand every piece of work to a worker with the delegate tool, and write each brief so it stands alone: the goal, the files involved, the constraints, and how to verify the result. Workers are threads the user can open and steer; agents lists them. You get a message when a worker finishes or needs input: review what it reports, and tell the user what was done. Save durable facts with remember (the user's preferences, decisions, conventions, architecture facts), remove wrong ones with forget, and follow the memories listed below.";
-const WORKER_PROMPT: &str = "You are a worker of this project's orchestrator in pinned. Do the task you were given fully and verify it. End with a concise report of what changed and how you verified it, which the orchestrator reads. Save durable facts about the project you learn with remember.";
+const ORCHESTRATOR_PROMPT: &str = "You are this project's orchestrator in pinned. You cannot edit files. Hand every piece of work to a worker with the delegate tool, and write each brief so it stands alone: the goal, the files involved, the constraints, and how to verify the result. Workers are threads the user can open and steer; agents lists them. You get a message when a worker finishes or needs input: review what it reports, and tell the user what was done. Keep the project's memory: save durable facts with memory_save (the user's preferences, decisions, conventions, architecture facts), look them up with memory_search, and remove wrong ones with memory_forget.";
+const WORKER_PROMPT: &str = "You are a worker of this project's orchestrator in pinned. Do the task you were given fully and verify it. End with a concise report of what changed and how you verified it, which the orchestrator reads. Save durable facts about the project you learn with memory_save.";
 
 /// The part a session plays in its project's orchestration.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Role {
-    /// Hands every request to workers and keeps the project's memory.
+    /// Hands every request to workers.
     Orchestrator,
     /// Does one task the orchestrator delegated.
     Worker,
@@ -48,10 +48,6 @@ impl Role {
             Role::Worker => &[],
         }
     }
-
-    pub fn may(self, tool: &ProjectTool) -> bool {
-        self == Role::Orchestrator || !matches!(tool, ProjectTool::Delegate { .. } | ProjectTool::Agents)
-    }
 }
 
 /// The role and project a session's environment names, for an orchestrator's or a worker's session.
@@ -66,7 +62,7 @@ pub fn role_env(role: Role, project: &Path) -> Vec<(String, String)> {
 
 /// What an orchestrator or a worker asks of its project through pinned's MCP tools.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
-#[serde(tag = "tool", rename_all = "kebab-case")]
+#[serde(tag = "name", rename_all = "snake_case")]
 pub enum ProjectTool {
     /// Starts a worker on `task`, in a worktree of its own when the project is a git repository.
     Delegate {
@@ -75,9 +71,20 @@ pub enum ProjectTool {
         title: Option<String>,
     },
     Agents,
-    Remember { text: String },
-    Forget { id: u64 },
-    Memories,
+    MemorySearch {
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    MemorySave {
+        title: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<i64>,
+    },
+    MemoryForget { id: i64 },
 }
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";
@@ -237,11 +244,8 @@ pub enum Message {
     Remind { message: String, when: When },
     ListReminders,
     CancelReminder { id: u64 },
-    Project {
-        tab: String,
-        #[serde(flatten)]
-        tool: ProjectTool,
-    },
+    /// Not flattened, since a tool's own `kind` argument would collide with the message's tag.
+    Project { tab: String, tool: ProjectTool },
     Usage {
         #[serde(flatten)]
         usage: Usage,
@@ -271,14 +275,14 @@ mod tests {
 
     #[test]
     fn a_project_tool_message_names_the_tab_and_the_tool() {
-        let line = r#"{"kind":"project","tab":"tab-3","tool":"delegate","task":"Add a --json flag","title":"JSON output"}"#;
+        let line = r#"{"kind":"project","tab":"tab-3","tool":{"name":"delegate","task":"Add a --json flag","title":"JSON output"}}"#;
         let message: Message = serde_json::from_str(line).unwrap();
         let delegate = ProjectTool::Delegate { task: "Add a --json flag".into(), title: Some("JSON output".into()) };
         assert!(matches!(&message, Message::Project { tab, tool } if tab == "tab-3" && *tool == delegate));
         assert_eq!(serde_json::to_string(&message).unwrap(), line);
-        let forget: Message = serde_json::from_str(r#"{"kind":"project","tab":"tab-3","tool":"forget","id":2}"#).unwrap();
-        assert!(matches!(forget, Message::Project { tool: ProjectTool::Forget { id: 2 }, .. }));
-        assert!(Role::Worker.may(&ProjectTool::Memories) && !Role::Worker.may(&delegate) && Role::Orchestrator.may(&delegate));
+        let save: Message = serde_json::from_str(r#"{"kind":"project","tab":"tab-3","tool":{"name":"memory_save","title":"Deploys","text":"From tags.","kind":"decision","id":2}}"#).unwrap();
+        let tool = ProjectTool::MemorySave { title: "Deploys".into(), text: "From tags.".into(), kind: Some("decision".into()), id: Some(2) };
+        assert!(matches!(&save, Message::Project { tool: t, .. } if *t == tool));
     }
 
     #[test]

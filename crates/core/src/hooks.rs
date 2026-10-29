@@ -19,6 +19,10 @@ pub const STATUSLINE_SUBCOMMAND: &str = "statusline";
 /// What the harness answers to each socket line.
 type Reply = Result<String, String>;
 
+/// How long a prompt waits for the project memory the harness recalls for it. Past this the prompt
+/// goes on without it.
+const RECALL_WAIT: Duration = Duration::from_millis(300);
+
 /// Claude Code settings layered onto the harnessed session via `--settings`, so the user's
 /// own ~/.claude/settings.json stays untouched.
 pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
@@ -55,8 +59,8 @@ fn statusline_command(exe: &Path) -> String {
 }
 
 /// Runs inside the hook process Claude Code spawns: read the hook payload from stdin and
-/// forward it to the tab that owns this session. Never fails loudly, so it can't
-/// disturb the agent.
+/// forward it to the tab that owns this session, and print what Claude Code should add to a
+/// prompt. Never fails loudly, so it can't disturb the agent.
 pub fn forward(arg: Option<&str>) {
     let Some(status) = AgentStatus::ALL.iter().find(|(_, a, _)| Some(*a) == arg).map(|(s, _, _)| *s)
     else {
@@ -91,7 +95,26 @@ pub fn forward(arg: Option<&str>) {
             .flatten(),
     };
 
-    tell(&sock, &Message::Agent(event));
+    if let Some(output) = deliver(&sock, event) {
+        println!("{output}");
+    }
+}
+
+/// Sends the hook's event. A prompt waits up to `RECALL_WAIT` for the memories the harness
+/// recalls for it, returned as the hook's JSON output.
+fn deliver(sock: &str, event: AgentEvent) -> Option<String> {
+    if event.status != AgentStatus::Working || event.prompt.is_none() {
+        tell(sock, &Message::Agent(event));
+        return None;
+    }
+    let mut stream = UnixStream::connect(sock).ok()?;
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+    writeln!(stream, "{}", serde_json::to_string(&Message::Agent(event)).unwrap()).ok()?;
+    let _ = stream.set_read_timeout(Some(RECALL_WAIT));
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply).ok()?;
+    let context = serde_json::from_str::<Reply>(&reply).ok()?.ok().filter(|c| !c.is_empty())?;
+    Some(serde_json::json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": context } }).to_string())
 }
 
 /// Sends one message to the running harness without waiting for its answer.
@@ -404,6 +427,34 @@ mod tests {
         assert_eq!(linear(&args(&["take"])), usage);
         assert_eq!(linear(&args(&["create", "--assignee", "Ana", "Export 500s"])), usage);
         assert_eq!(linear(&args(&["file", "a", "b"])), usage);
+        let _ = std::fs::remove_file(sock);
+    }
+
+    #[test]
+    fn a_prompt_gets_the_memory_the_harness_recalls_unless_it_takes_too_long() {
+        let sock = std::env::temp_dir().join(format!("pinned-recall-{}.sock", std::process::id()));
+        listen(sock.clone(), |message| match message {
+            Message::Agent(AgentEvent { prompt: Some(p), .. }) if p == "slow" => {
+                std::thread::sleep(Duration::from_secs(2));
+                Ok("[1] Late: too late".into())
+            }
+            Message::Agent(AgentEvent { prompt: Some(p), .. }) if p == "nothing known" => Ok(String::new()),
+            Message::Agent(AgentEvent { prompt: Some(p), .. }) => Ok(format!("[1] Deploys: the hub deploys from tags ({p})")),
+            _ => Ok("not for a hook that does not wait".into()),
+        })
+        .unwrap();
+        let sock = sock.display().to_string();
+        let event = |status, prompt: Option<&str>| AgentEvent { status, cwd: None, message: None, tab: Some("tab-1".into()), session: None, title: None, resume_at: None, prompt: prompt.map(Into::into), snapshot: None };
+        assert_eq!(
+            deliver(&sock, event(AgentStatus::Working, Some("how do we deploy?"))),
+            Some(r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[1] Deploys: the hub deploys from tags (how do we deploy?)"}}"#.into())
+        );
+        assert_eq!(deliver(&sock, event(AgentStatus::Working, Some("nothing known"))), None);
+        assert_eq!(deliver(&sock, event(AgentStatus::Done, Some("how do we deploy?"))), None);
+        let start = std::time::Instant::now();
+        assert_eq!(deliver(&sock, event(AgentStatus::Working, Some("slow"))), None);
+        assert!(start.elapsed() < Duration::from_millis(800), "the prompt waited {:?}", start.elapsed());
+        assert_eq!(deliver("/nonexistent/pinned.sock", event(AgentStatus::Working, Some("how do we deploy?"))), None);
         let _ = std::fs::remove_file(sock);
     }
 

@@ -469,7 +469,13 @@ function typeInto(tab, data) {
   if (data === "\r") startTab(tab);
 }
 
-async function startTab(tab) {
+const starting = new Map();
+/** `start_claude` replaces a running session, so starts of one tab that overlap share the first. */
+function startTab(tab) {
+  if (!starting.has(tab.key)) starting.set(tab.key, startClaude(tab).finally(() => starting.delete(tab.key)));
+  return starting.get(tab.key);
+}
+async function startClaude(tab) {
   await tab.attached;
   refit(tab);
   try {

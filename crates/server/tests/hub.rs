@@ -260,6 +260,7 @@ impl Node {
             plugin_dir: dir.join("plugin"),
             tutorial_helper: dir.join("plugin/tutorial.mjs"),
             sock: dir.join("sock"),
+            vector_search: false,
         };
         let machine = Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), |_| {});
         let link = link::spawn(creds, machine.clone(), "0.0.0-test");

@@ -204,12 +204,29 @@ pub enum Call {
     SetProjectAccount { path: String, account: Option<AccountId> },
     /// The id of the project's orchestrator tab: the one already open, else a new one, not yet started.
     OpenOrchestrator { path: String },
-    /// `Vec<projects::Memory>`: what the project's orchestrator and workers keep.
-    ProjectMemories { path: String },
-    /// `Vec<projects::Memory>` after adding `text` to the project's memory.
-    Remember { path: String, text: String },
-    /// `Vec<projects::Memory>` after removing the memory `id`.
-    Forget { path: String, id: u64 },
+    /// `Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the
+    /// latest ones for an empty query.
+    MemorySearch {
+        path: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    /// The `memory::Memory` saved. With `id`, replaces that memory. Refused when the project
+    /// already has a memory with the same title or nearly the same meaning.
+    MemorySave {
+        path: String,
+        title: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<i64>,
+    },
+    /// The `memory::Memory` removed.
+    MemoryForget { path: String, id: i64 },
+    /// `memory::Status`: how many memories the project has and whether search also matches by meaning.
+    MemoryStatus { path: String },
     /// The new tab's id, running the CLI's login for the account in the account's home.
     SignIn { account: AccountId },
     /// The tab's folder, as `start_claude`. Moves the tab's conversation to another Claude Code
@@ -540,6 +557,10 @@ impl Call {
                 | Call::PublishProject { .. }
                 | Call::BusyShells { .. }
                 | Call::SearchThreads { .. }
+                | Call::MemorySearch { .. }
+                | Call::MemorySave { .. }
+                | Call::MemoryForget { .. }
+                | Call::MemoryStatus { .. }
         )
     }
 }

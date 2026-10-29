@@ -225,7 +225,7 @@ function addMenu() {
     { label: "Pull request", icon: "git-pull-request", kbd: "P", disabled: !pr, hint: pr ? `#${pr.number}` : "No pull request in this thread", run: () => openSurface("pr") },
     { label: "Linked pull requests", icon: "link-2", kbd: "L", disabled: !tab, run: () => addSurface(tab, { id: "prs", kind: "prs" }) },
     { label: "Device", icon: "smartphone", kbd: "M", disabled: !tab, run: () => addSurface(tab, panelOf(tab).surfaces.find((x) => x.kind === "device") ?? { id: `device:${Date.now().toString(36)}`, kind: "device" }) },
-    { label: "Memory", icon: "book-open", kbd: "Y", disabled: !tab, run: () => addSurface(tab, { id: "memory", kind: "memory" }) },
+    { label: "Memory", icon: "book-open", kbd: "Y", disabled: !hasProject(tab), hint: hasProject(tab) ? "" : "This thread is not in a project", run: () => addSurface(tab, { id: "memory", kind: "memory" }) },
   ];
 }
 
