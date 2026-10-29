@@ -1439,6 +1439,10 @@ impl Machine {
         for id in self.delegates.running() {
             let _ = self.delegates.cancel_tree(&id, "pinned is shutting down", path.as_deref());
         }
+        let tabs: Vec<String> = self.tabs.lock().unwrap().keys().cloned().collect();
+        for tab in &tabs {
+            self.delegates.drop_kept_worktrees(tab, &[], path.as_deref());
+        }
         self.tabs.lock().unwrap().clear();
         self.device_hub.stop();
     }
@@ -2806,6 +2810,41 @@ mod tests {
         assert!(owned.is_dir(), "closing the parent removed a worktree an opened tab owns");
         m.close_tab(&opened);
         assert!(!owned.exists(), "closing the opened tab left its worktree");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn quit_drops_a_kept_worktree() {
+        let dir = temp("quit-worktree");
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let kept = branches::new_worktree(&repo, None).unwrap();
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let parent = m.add_tab(std::fs::canonicalize(&repo).unwrap(), account.clone(), vec![], vec![], false, None);
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(parent.clone()),
+            tool: None,
+            title: "Kept".into(),
+            account: account.id.clone(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: kept.clone(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: true,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.apply(&task.id, crate::delegate::ChildEvent::Line(json!({"type":"system","subtype":"init","session_id":"keep-me"}).to_string()), None);
+        m.delegates.apply(&task.id, crate::delegate::ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        assert!(kept.is_dir(), "the worktree was not created");
+        m.quit();
+        assert!(!kept.exists(), "quit left a worktree that still had a conversation");
         let _ = std::fs::remove_dir_all(dir);
     }
 
