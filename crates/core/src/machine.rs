@@ -1410,9 +1410,14 @@ impl Machine {
             let _ = self.delegates.cancel_tree(&id, "pinned is shutting down", path.as_deref());
         }
         self.delegates.kill_remembered();
-        let tabs: Vec<String> = self.tabs.lock().unwrap().keys().cloned().collect();
+        let (tabs, owned) = {
+            let tabs = self.tabs.lock().unwrap();
+            let owned: Vec<PathBuf> = tabs.values().filter_map(|tab| tab.made.clone()).collect();
+            let ids: Vec<String> = tabs.keys().cloned().collect();
+            (ids, owned)
+        };
         for tab in &tabs {
-            self.delegates.drop_kept_worktrees(tab, &[], path.as_deref());
+            self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
         }
         self.tabs.lock().unwrap().clear();
         self.device_hub.stop();
@@ -2898,6 +2903,50 @@ mod tests {
         assert!(kept.is_dir(), "the worktree was not created");
         m.quit();
         assert!(!kept.exists(), "quit left a worktree that still had a conversation");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn quit_keeps_a_worktree_an_opened_tab_owns() {
+        let dir = temp("quit-owned-worktree");
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let loose = branches::new_worktree(&repo, None).unwrap();
+        let owned = branches::new_worktree(&repo, None).unwrap();
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let parent = m.add_tab(std::fs::canonicalize(&repo).unwrap(), account.clone(), vec![], vec![], false, None);
+        let spec = |title: &str, cwd: PathBuf| crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(parent.clone()),
+            tool: None,
+            title: title.into(),
+            account: account.id.clone(),
+            provider: Provider::Claude,
+            model: None,
+            cwd,
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: true,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        };
+        let loose_task = m.delegates.begin(spec("Loose", loose.clone()));
+        let owned_task = m.delegates.begin(spec("Owned", owned.clone()));
+        let init = |id: &str, session: &str| {
+            m.delegates.apply(id, crate::delegate::ChildEvent::Line(json!({"type":"system","subtype":"init","session_id":session}).to_string()), None);
+            m.delegates.apply(id, crate::delegate::ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        };
+        init(&loose_task.id, "loose-1");
+        init(&owned_task.id, "owned-1");
+        let opened = m.open_delegated(&parent, &owned_task.id).unwrap();
+        assert_eq!(m.tab(&opened, |t| t.made.clone()).unwrap(), Some(owned.clone()));
+        m.quit();
+        assert!(!loose.exists(), "quit left a worktree no tab owns");
+        assert!(owned.is_dir(), "quit removed a worktree an opened tab owns");
         let _ = std::fs::remove_dir_all(dir);
     }
 
