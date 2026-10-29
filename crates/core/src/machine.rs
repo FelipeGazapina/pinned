@@ -19,8 +19,6 @@ pub const OUTPUT_KEEP: usize = 256 * 1024;
 /// Slack after a usage limit's reset time before the session is told to continue.
 const LIMIT_MARGIN_SECS: u64 = 5;
 const UNWATCHED: (u16, u16) = (120, 32);
-/// A parent with no turn hooks is idle once its pty has been this quiet.
-const QUIET: std::time::Duration = std::time::Duration::from_secs(5);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, std::time::Duration) = (25, std::time::Duration::from_millis(200));
 
@@ -102,8 +100,11 @@ impl Launch {
                     cmd.arg(&self.settings);
                     cmd.arg("--plugin-dir");
                     cmd.arg(&self.plugin_dir);
-                } else if provider == Provider::Codex && self.mcp_config.is_some() {
-                    cmd.args(crate::delegate::codex_mcp_flags(&self.exe, &self.sock, Some(tab), None, self.reminders));
+                } else if provider == Provider::Codex {
+                    if self.mcp_config.is_some() {
+                        cmd.args(crate::delegate::codex_mcp_flags(&self.exe, &self.sock, Some(tab), None, self.reminders));
+                    }
+                    cmd.args(crate::delegate::codex_notify_flag(&self.exe));
                 }
                 if bypass {
                     cmd.arg(spec.bypass_flag);
@@ -151,24 +152,18 @@ struct Screen {
     viewers: Vec<(ViewerId, Sink)>,
     /// Counts starts, so a replaced session's last bytes can't land on its successor's screen.
     session: u64,
-    /// When the pty last wrote. A parent with no turn status is idle once this is QUIET old.
-    last_output: Option<std::time::Instant>,
 }
 
 impl Screen {
     fn restart(&mut self) -> u64 {
         self.kept.clear();
         self.session += 1;
-        self.last_output = Some(std::time::Instant::now());
         self.session
     }
 
     fn push(&mut self, session: u64, bytes: &[u8]) {
         if session != self.session {
             return;
-        }
-        if !bytes.is_empty() {
-            self.last_output = Some(std::time::Instant::now());
         }
         self.kept.extend(bytes);
         let excess = self.kept.len().saturating_sub(OUTPUT_KEEP);
@@ -228,6 +223,8 @@ struct Tab {
     message: Option<String>,
     /// Prompts typed before the session took the terminal, typed in once it does.
     held: Vec<String>,
+    /// The user typed after the last turn ended. A notice waits for the next turn end.
+    input_since_turn: bool,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
     screen: Arc<Mutex<Screen>>,
@@ -454,7 +451,10 @@ impl Machine {
             Call::SignIn { account } => json(self.sign_in(&account)?),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from } => json(self.thread(&tab, from)?),
-            Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
+            Call::Prompt { tab, text } => {
+                let _ = self.tab(&tab, |t| t.input_since_turn = true);
+                json(self.type_prompt(&tab, &text)?)
+            },
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
@@ -1052,9 +1052,12 @@ impl Machine {
         if Shells::owns(tab) {
             return self.shells.write(tab, data);
         }
-        self.tab(tab, |t| match t.session.as_mut() {
-            Some(s) => s.write(data).map_err(|e| e.to_string()),
-            None => Ok(()),
+        self.tab(tab, |t| {
+            t.input_since_turn = true;
+            match t.session.as_mut() {
+                Some(s) => s.write(data).map_err(|e| e.to_string()),
+                None => Ok(()),
+            }
         })?
     }
 
@@ -1460,27 +1463,31 @@ impl Machine {
         self.delegates.started_json(&task.id).map(|value| value.to_string())
     }
 
-    /// A hooked parent takes a notice only when its turn is Done. A parent with no turn status takes one once the pty has been quiet for `QUIET`.
+    /// Idle means the turn hook said Done and the user has not typed since that Done.
+    /// A tab with no turn hook, such as Cursor, is never idle, so a notice is never typed there.
     fn parent_idle(&self, tab: &str) -> bool {
-        let Ok((live, status, screen)) = self.tab(tab, |t| (t.session.is_some(), t.status, t.screen.clone())) else { return false };
-        if !live {
-            return false;
-        }
-        match status {
-            Some(AgentStatus::Done) => true,
-            None => screen.lock().unwrap().last_output.is_some_and(|at| at.elapsed() >= QUIET),
-            Some(AgentStatus::Working | AgentStatus::NeedsInput | AgentStatus::Failed) => false,
-        }
+        let Ok((live, status, typed)) = self.tab(tab, |t| (t.session.is_some(), t.status, t.input_since_turn)) else { return false };
+        live && status == Some(AgentStatus::Done) && !typed
     }
 
     fn maybe_deliver(&self, tab: &str) {
         if !self.parent_idle(tab) {
             return;
         }
-        let Some((text, ids)) = self.delegates.pending_notice(tab) else { return };
-        if self.type_prompt(tab, &text).is_ok() {
-            self.delegates.mark_delivered(&ids);
+        let Some((text, ids)) = self.delegates.claim_notice(tab) else { return };
+        if self.write_notice(tab, &text) != Ok(true) {
+            self.delegates.release_notice(&ids);
         }
+    }
+
+    /// Writes `text` into a raw session. `Ok(false)` when the session has not taken the terminal,
+    /// which leaves the notice unclaimed so a later idle can type it. Queuing it is not delivery.
+    fn write_notice(&self, tab: &str, text: &str) -> Result<bool, String> {
+        self.tab(tab, |t| match t.session.as_mut() {
+            Some(s) if s.raw() => s.write(&paste(text)).map(|_| true).map_err(|e| e.to_string()),
+            Some(_) => Ok(false),
+            None => Err(format!("tab {tab} has no running session")),
+        })?
     }
 
     fn arm_notices(&self) {
@@ -1594,6 +1601,7 @@ impl Machine {
             title: None,
             message: None,
             held: vec![],
+            input_since_turn: false,
             screen: Arc::default(),
         };
         self.tabs.lock().unwrap().insert(id.clone(), tab);
@@ -1711,6 +1719,9 @@ impl Machine {
             let idle_notice = event.status == AgentStatus::NeedsInput && t.status == Some(AgentStatus::Done);
             if !idle_notice {
                 t.updated = Some(unix_now());
+            }
+            if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
+                t.input_since_turn = false;
             }
             t.status = Some(event.status);
             if event.title.is_some() {
@@ -2705,7 +2716,10 @@ mod tests {
         let open = |app: &Path, bypass| m.open_tab(Some(app.display().to_string()), bypass).unwrap();
         let config = root.join("config").display().to_string();
         assert_eq!(first_line(&m, &open(&work_app, false)), format!("claude|--settings s --plugin-dir p|{config}/accounts/work||work\r\n"));
-        assert_eq!(first_line(&m, &open(&side_app, true)), format!("codex|--dangerously-bypass-approvals-and-sandbox||{config}/accounts/side|side\r\n"));
+        assert_eq!(
+            first_line(&m, &open(&side_app, true)),
+            format!("codex|-c notify=[\"/opt/pinned/bin/pinned\", \"hook\", \"done\"] --dangerously-bypass-approvals-and-sandbox||{config}/accounts/side|side\r\n")
+        );
         assert_eq!(first_line(&m, &open(&own_app, true)), "claude|--settings s --plugin-dir p --dangerously-skip-permissions|||claude\r\n");
         assert_eq!(m.tabs().into_iter().map(|t| t.account).collect::<Vec<_>>(), ["work", "side", "claude"]);
 
@@ -3071,22 +3085,13 @@ mod tests {
         assert_eq!(missing["runtimeMode"], "auto");
     }
 
-    #[test]
     #[cfg(unix)]
-    fn a_notice_is_typed_only_when_the_parent_is_done_or_has_been_quiet() {
-        use crate::delegate::{ChildEvent, Mode, NewTask, Parent};
-        let file = std::env::temp_dir().join(format!("pinned-notice-{}.bin", std::process::id()));
-        let _ = std::fs::remove_file(&file);
-        let m = machine();
-        let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
-        let (seen, sink) = viewer();
-        m.attach(&tab, "test".into(), sink).unwrap();
-        wait_for("stty", || text(&seen).contains("ready"));
-
+    fn finish_task(m: &Machine, parent: crate::delegate::Parent, title: &str) -> String {
+        use crate::delegate::{ChildEvent, Mode, NewTask};
         let task = m.delegates.begin(NewTask {
-            parent: Parent::Tab(tab.clone()),
+            parent,
             tool: None,
-            title: "Ping".into(),
+            title: title.into(),
             account: "cursor".into(),
             provider: Provider::Cursor,
             model: Some("composer-2.5".into()),
@@ -3094,47 +3099,189 @@ mod tests {
             mode: Mode::Async,
             access: crate::delegate::Access::Auto,
             isolated: false,
-            caller_key: format!("tab:{tab}"),
+            caller_key: "tab:notice".into(),
             client_request_id: None,
             role: None,
         });
         m.delegates.apply(&task.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        task.id
+    }
+
+    #[cfg(unix)]
+    fn pty_file(name: &str) -> (Arc<Machine>, String, PathBuf) {
+        let file = std::env::temp_dir().join(format!("pinned-{name}-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let m = machine();
+        let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        (m, tab, file)
+    }
+
+    #[cfg(unix)]
+    fn read_pty(file: &Path) -> String {
+        String::from_utf8_lossy(&std::fs::read(file).unwrap_or_default()).into_owned()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_notice_waits_until_the_user_stops_typing_and_a_turn_ends() {
+        let (m, tab, file) = pty_file("notice-typed");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.write_input(&tab, b"xyz").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Ping");
         m.maybe_deliver(&tab);
         std::thread::sleep(std::time::Duration::from_millis(200));
-        let early = std::fs::read(&file).unwrap_or_default();
-        assert!(!String::from_utf8_lossy(&early).contains("[pinned]"), "the notice was typed before the pty had been quiet for 5s");
+        let early = read_pty(&file);
+        assert!(early.contains("xyz"), "the pty did not receive the keystrokes: {early:?}");
+        assert!(!early.contains("[pinned]"), "the notice was typed after the user had typed since Done: {early:?}");
+        m.record_event(AgentEvent {
+            status: AgentStatus::Done,
+            cwd: None,
+            message: None,
+            tab: Some(tab.clone()),
+            session: None,
+            title: None,
+            resume_at: None,
+            prompt: None,
+            snapshot: None,
+        });
+        let needle = format!("[pinned] Delegated task {id} \"Ping\"");
+        wait_for("the notice after the next Done", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(file);
+    }
 
-        let screen = m.tab(&tab, |t| t.screen.clone()).unwrap();
-        screen.lock().unwrap().last_output = Some(std::time::Instant::now() - std::time::Duration::from_secs(6));
-        m.maybe_deliver(&tab);
-        let needle = format!("[pinned] Delegated task {} \"Ping\"", task.id);
-        wait_for("the quiet notice", || std::fs::read(&file).is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(&needle)));
+    #[test]
+    #[cfg(unix)]
+    fn two_deliverers_paste_a_notice_once() {
+        let (m, tab, file) = pty_file("notice-once");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Once");
+        let (left, right) = (m.clone(), m.clone());
+        let (tab_left, tab_right) = (tab.clone(), tab.clone());
+        std::thread::scope(|scope| {
+            scope.spawn(|| left.maybe_deliver(&tab_left));
+            scope.spawn(|| right.maybe_deliver(&tab_right));
+        });
+        let needle = format!("[pinned] Delegated task {id} \"Once\"");
+        wait_for("the one notice", || read_pty(&file).contains(&needle));
+        assert_eq!(read_pty(&file).matches(&needle).count(), 1, "the notice was pasted twice: {}", read_pty(&file));
+        let _ = std::fs::remove_file(file);
+    }
 
-        let second = m.delegates.begin(NewTask {
-            parent: Parent::Tab(tab.clone()),
+    #[test]
+    #[cfg(unix)]
+    fn a_grandchild_is_not_typed_into_the_root_tab() {
+        let (m, tab, file) = pty_file("notice-grand");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        let parent = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(tab.clone()),
             tool: None,
-            title: "Second".into(),
+            title: "Parent".into(),
             account: "cursor".into(),
             provider: Provider::Cursor,
-            model: Some("composer-2.5".into()),
+            model: None,
             cwd: std::env::temp_dir(),
-            mode: Mode::Wait,
+            mode: crate::delegate::Mode::Async,
             access: crate::delegate::Access::Auto,
             isolated: false,
             caller_key: format!("tab:{tab}"),
             client_request_id: None,
             role: None,
         });
-        m.delegates.apply(&second.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
-        m.tab(&tab, |t| t.status = Some(AgentStatus::NeedsInput)).unwrap();
-        screen.lock().unwrap().last_output = Some(std::time::Instant::now() - std::time::Duration::from_secs(6));
+        let child = finish_task(&m, crate::delegate::Parent::Task(parent.id.clone()), "Grandchild");
         m.maybe_deliver(&tab);
         std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!std::fs::read(&file).is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(&second.id)), "NeedsInput accepted the notice");
-        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        assert!(!read_pty(&file).contains("Grandchild"), "a grandchild notice was typed: {}", read_pty(&file));
+        assert!(!read_pty(&file).contains(&child), "a grandchild id was typed: {}", read_pty(&file));
+        m.delegates.apply(&parent.id, crate::delegate::ChildEvent::Line(json!({"type":"result","result":"PARENT"}).to_string()), None);
         m.maybe_deliver(&tab);
-        let needle = format!("[pinned] Delegated task {} \"Second\"", second.id);
-        wait_for("the done notice", || std::fs::read(&file).is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(&needle)));
+        let needle = format!("[pinned] Delegated task {} \"Parent\"", parent.id);
+        wait_for("the parent notice", || read_pty(&file).contains(&needle));
+        assert!(!read_pty(&file).contains("Grandchild"), "the parent notice included the grandchild: {}", read_pty(&file));
         let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_cursor_tab_with_no_turn_hook_never_receives_a_notice() {
+        let file = std::env::temp_dir().join(format!("pinned-notice-cursor-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let m = machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Cursor), vec![], vec![], false, None);
+        m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display())), pty::size(80, 24)).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Cursor");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        m.maybe_deliver(&tab);
+        let got = read_pty(&file);
+        assert!(!got.contains(&id), "a Cursor tab with no turn end was typed into: {got}");
+        assert!(!got.contains("[pinned]"), "a Cursor tab received a notice: {got}");
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_codex_notify_marks_the_tab_done_and_the_notice_is_typed() {
+        let root = temp("codex-notify");
+        let sock = std::env::temp_dir().join(format!("pinned-codex-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let file = root.join("notice.bin");
+        let exe = root.join("pinned-hook");
+        let codex = root.join("codex");
+        std::fs::write(&exe, r#"#!/usr/bin/env python3
+import json, os, socket, sys
+payload = json.loads(sys.argv[-1])
+if payload.get("type") != "agent-turn-complete":
+    sys.exit(0)
+msg = {"kind":"agent","status":"done","cwd":payload.get("cwd"),"message":None,"tab":os.environ.get("PINNED_TAB"),"session":payload.get("thread-id"),"title":None,"resume_at":None,"prompt":None,"snapshot":None}
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(os.environ["PINNED_SOCK"])
+s.sendall((json.dumps(msg) + "\n").encode())
+"#).unwrap();
+        std::fs::write(&codex, r#"#!/usr/bin/env python3
+import json, os, subprocess, sys
+payload = {"type":"agent-turn-complete","thread-id":"thr-9","turn-id":"turn-9","cwd":"/repo","input-messages":["ping"],"last-assistant-message":"ok"}
+for arg in sys.argv[1:]:
+    if arg.startswith("notify="):
+        subprocess.run(json.loads(arg[len("notify="):]) + [json.dumps(payload)], check=False)
+        break
+os.system("stty raw -echo")
+print("ready", flush=True)
+out = open(os.environ["NOTICE_FILE"], "wb")
+while True:
+    data = sys.stdin.buffer.read(1)
+    if not data:
+        break
+    out.write(data)
+    out.flush()
+"#).unwrap();
+        for path in [&exe, &codex] {
+            std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        let m = Machine::new(
+            Launch { exe, bins: BTreeMap::from([(Provider::Codex, codex)]), sock: sock.clone(), ..launch() },
+            None,
+            Some(root.clone()),
+            |_| {},
+        );
+        m.listen(|_| Err("not a connector".into())).unwrap();
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Codex), vec![], vec![("NOTICE_FILE".into(), file.display().to_string())], false, None);
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        m.start_claude(&tab, 80, 24).unwrap();
+        wait_for("codex ready", || text(&seen).contains("ready"));
+        wait_for("codex done", || m.view(&tab).unwrap().status == Some(AgentStatus::Done));
+        assert_eq!(m.view(&tab).unwrap().session.as_deref(), Some("thr-9"));
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "From Codex");
+        m.maybe_deliver(&tab);
+        let needle = format!("[pinned] Delegated task {id} \"From Codex\"");
+        wait_for("the codex notice", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

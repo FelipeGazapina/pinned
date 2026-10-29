@@ -904,20 +904,23 @@ grok-4.7-high - Grok 4.7  High
         let delegates = Delegates::default();
         let task = new_cursor(&delegates, Mode::Wait);
         delegates.apply(&task.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
-        let (text, ids) = delegates.pending_notice("tab-1").unwrap();
+        let (text, ids) = delegates.claim_notice("tab-1").unwrap();
         assert_eq!(ids, vec![task.id.clone()]);
         assert_eq!(
             text,
             format!("[pinned] Delegated task {} \"Ping\" (Cursor · composer-2.5) finished: result available. Call task_status with taskId \"{}\".", task.id, task.id)
         );
+        assert!(delegates.claim_notice("tab-1").is_none(), "a second claim pasted the same notice");
+        delegates.release_notice(&ids);
+        assert_eq!(delegates.claim_notice("tab-1").unwrap().1, vec![task.id.clone()]);
         let other = Caller { tab: Some("tab-2".into()), task: None };
         assert_eq!(delegates.status(&other, &task.id).unwrap_err(), format!("task {} belongs to another session", task.id));
         assert_eq!(delegates.cancel(&other, &task.id, "no", None).unwrap_err(), format!("task {} belongs to another session", task.id));
-        assert_eq!(delegates.pending_notice("tab-1").unwrap().1, vec![task.id.clone()]);
+        delegates.release_notice(&ids);
         let status = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
         assert_eq!(status["summary"], "DONE");
         assert_eq!(status["workState"], "result_available");
-        assert!(delegates.pending_notice("tab-1").is_none());
+        assert!(delegates.claim_notice("tab-1").is_none());
     }
 
     #[test]

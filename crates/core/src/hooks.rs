@@ -58,23 +58,41 @@ fn statusline_command(exe: &Path) -> String {
 /// forward it to the tab that owns this session. Never fails loudly, so it can't
 /// disturb the agent.
 pub fn forward(arg: Option<&str>) {
-    let Some(status) = AgentStatus::ALL.iter().find(|(_, a, _)| Some(*a) == arg).map(|(s, _, _)| *s)
-    else {
+    if AgentStatus::ALL.iter().all(|(_, name, _)| Some(*name) != arg) {
         eprintln!("usage: pinned {SUBCOMMAND} <working|done|needs-input|failed>");
         return;
-    };
+    }
     let Ok(sock) = std::env::var(SOCK_ENV) else { return };
+    let Some(event) = event_from(arg, &hook_payload()) else { return };
+    tell(&sock, &Message::Agent(event));
+}
 
+/// Claude writes the payload on stdin. Codex appends it as the last argument.
+fn hook_payload() -> String {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
-    let hook: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
+    if !input.trim().is_empty() {
+        return input;
+    }
+    std::env::args().next_back().filter(|arg| arg.trim_start().starts_with('{')).unwrap_or_default()
+}
+
+/// `done` is Claude's Stop hook and Codex's `agent-turn-complete` notify.
+pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
+    let status = AgentStatus::ALL.iter().find(|(_, a, _)| Some(*a) == arg).map(|(s, _, _)| *s)?;
+    let hook: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
+    if let Some(kind) = hook["type"].as_str() {
+        if kind != "agent-turn-complete" {
+            return None;
+        }
+    }
     let field = |k: &str| hook[k].as_str().map(str::to_owned);
-    let event = AgentEvent {
+    Some(AgentEvent {
         status,
         cwd: field("cwd"),
         message: field("message"),
         tab: std::env::var(TAB_ENV).ok(),
-        session: field("session_id"),
+        session: field("session_id").or_else(|| field("thread-id")).or_else(|| field("thread_id")),
         title: field("transcript_path")
             .and_then(|path| std::fs::File::open(path).ok())
             .and_then(|file| title_from_transcript(BufReader::new(file)))
@@ -85,13 +103,10 @@ pub fn forward(arg: Option<&str>) {
             .and_then(|path| std::fs::File::open(path).ok())
             .and_then(|file| limit_reset_from_transcript(BufReader::new(file))),
         prompt: (status == AgentStatus::Working).then(|| hook["prompt"].as_str().map(history::clip_prompt)).flatten(),
-        // Taken here, in the hook Claude Code waits on, so the agent can't edit before the baseline exists.
         snapshot: matches!(status, AgentStatus::Working | AgentStatus::Done | AgentStatus::Failed)
             .then(|| field("cwd").and_then(|cwd| history::snapshot(Path::new(&cwd))))
             .flatten(),
-    };
-
-    tell(&sock, &Message::Agent(event));
+    })
 }
 
 /// Sends one message to the running harness without waiting for its answer.
@@ -491,5 +506,17 @@ mod tests {
         let message: Message = serde_json::from_str(slack).unwrap();
         assert!(matches!(&message, Message::Stage { subject: Subject::SlackThread { channel, .. }, .. } if channel == "C0123ABCD"));
         assert_eq!(serde_json::to_string(&message).unwrap(), slack);
+    }
+
+    #[test]
+    fn a_codex_turn_complete_payload_is_the_tabs_done() {
+        let payload = r#"{"type":"agent-turn-complete","thread-id":"thr-9","turn-id":"turn-9","cwd":"/repo","input-messages":["ping"],"last-assistant-message":"ok"}"#;
+        let event = event_from(Some("done"), payload).unwrap();
+        assert_eq!(event.status, AgentStatus::Done);
+        assert_eq!(event.session.as_deref(), Some("thr-9"));
+        assert_eq!(event.cwd.as_deref(), Some("/repo"));
+        assert!(event_from(Some("done"), r#"{"type":"task-complete"}"#).is_none());
+        let claude = event_from(Some("done"), r#"{"session_id":"s1","cwd":"/work"}"#).unwrap();
+        assert_eq!((claude.status, claude.session.as_deref(), claude.cwd.as_deref()), (AgentStatus::Done, Some("s1"), Some("/work")));
     }
 }

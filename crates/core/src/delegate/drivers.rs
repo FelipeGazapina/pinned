@@ -168,6 +168,20 @@ fn toml_str(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// Codex runs this when a turn finishes. The JSON payload arrives as the last argument.
+/// `hook done` is the same turn-end pinned already maps for Claude's Stop hook.
+pub fn codex_notify_flag(exe: &Path) -> Vec<String> {
+    vec![
+        "-c".into(),
+        format!(
+            "notify=[{}, {}, {}]",
+            toml_str(&exe.display().to_string()),
+            toml_str(crate::hooks::SUBCOMMAND),
+            toml_str("done"),
+        ),
+    ]
+}
+
 fn parse_claude(line: &str) -> Vec<StreamEvent> {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return vec![];

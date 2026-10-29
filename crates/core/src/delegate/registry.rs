@@ -210,36 +210,35 @@ impl Delegates {
         }
     }
 
-    /// The notice for `tab`, and the task ids it covers. Delivery marks them, so a failed type can retry.
-    pub fn pending_notice(&self, tab: &str) -> Option<(String, Vec<String>)> {
-        let tasks = self.tasks.lock().unwrap();
+    /// Claims the notice for tasks whose direct parent is `tab`, and marks those tasks delivered.
+    /// A grandchild stays out: its headless parent reads it, and it is never typed into the root tab.
+    /// The caller puts the ids back with `release_notice` when the bytes were not written.
+    pub fn claim_notice(&self, tab: &str) -> Option<(String, Vec<String>)> {
+        let mut tasks = self.tasks.lock().unwrap();
         let ready: Vec<usize> = tasks
             .iter()
             .enumerate()
             .filter(|(_, task)| {
-                !task.delivered
-                    && task.state.terminal()
-                    && root_tab(&tasks, task.parent.clone()).as_deref() == Some(tab)
+                !task.delivered && task.state.terminal() && matches!(&task.parent, Parent::Tab(parent) if parent == tab)
             })
             .map(|(index, _)| index)
             .collect();
         if ready.is_empty() {
             return None;
         }
-        let lines = ready
-            .iter()
-            .map(|index| notice_line(&tasks[*index]))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let ids = ready.iter().map(|index| tasks[*index].id.clone()).collect();
+        let lines = ready.iter().map(|index| notice_line(&tasks[*index])).collect::<Vec<_>>().join("\n");
+        let ids: Vec<String> = ready.iter().map(|index| tasks[*index].id.clone()).collect();
+        for index in &ready {
+            tasks[*index].delivered = true;
+        }
         Some((lines, ids))
     }
 
-    pub fn mark_delivered(&self, ids: &[String]) {
+    pub fn release_notice(&self, ids: &[String]) {
         let mut tasks = self.tasks.lock().unwrap();
         for task in tasks.iter_mut() {
             if ids.iter().any(|id| id == &task.id) {
-                task.delivered = true;
+                task.delivered = false;
             }
         }
     }
