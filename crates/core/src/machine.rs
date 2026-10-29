@@ -1537,7 +1537,9 @@ impl Machine {
                 t.tally = Tally::default();
             }
             let mut changed = new;
-            if let Some(worktree) = reported_cwd.and_then(|c| sessions::worktree(&t.cwd, Path::new(c))) {
+            // An orchestrator steps into its workers' worktrees to review them, and stays in the project.
+            let orchestrator = role_of(&t.env).is_some_and(|(role, _)| role == Role::Orchestrator);
+            if let Some(worktree) = reported_cwd.filter(|_| !orchestrator).and_then(|c| sessions::worktree(&t.cwd, Path::new(c))) {
                 t.cwd = worktree;
                 changed = true;
             }
@@ -2993,6 +2995,9 @@ mod tests {
         let prompt = format!("{}\n\n{}\n\nProject memory, by id:\n- [1] Use pnpm, not npm.", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt());
         assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
+        let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
+        m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None });
+        assert_eq!(m.view(&tab).unwrap().cwd, path, "reviewing a worker's worktree moved the orchestrator into it");
         assert_eq!(m.call(Call::Forget { path: path.clone(), id: 1 }), Ok(json!([])));
         assert_eq!(m.call(Call::Forget { path, id: 1 }), Err(format!("no memory #1 in {}", project.display())));
         let _ = std::fs::remove_dir_all(dir);
