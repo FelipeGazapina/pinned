@@ -2421,6 +2421,7 @@ mod tests {
         BTreeMap::from([
             (Provider::Claude, script("claude", "auth status", "CLAUDE_CONFIG_DIR", r#"{"loggedIn":true,"email":"ana@acme.dev","orgName":"Acme","subscriptionType":"max"}"#, r#"{"loggedIn":false}"#)),
             (Provider::Codex, script("codex", "login status", "CODEX_HOME", "Logged in using ChatGPT", "Not logged in")),
+            (Provider::Cursor, script("cursor-agent", "status ", "CURSOR_UNUSED", "Logged in as ana@acme.dev", "Not logged in")),
         ])
     }
 
@@ -2508,6 +2509,10 @@ mod tests {
                 {
                     "id": "codex", "provider": "codex", "name": "Codex", "provider_name": "Codex", "builtin": true,
                     "signed_in": true, "email": null, "org": null, "plan": null,
+                },
+                {
+                    "id": "cursor", "provider": "cursor", "name": "Cursor", "provider_name": "Cursor", "builtin": true,
+                    "signed_in": true, "email": "ana@acme.dev", "org": null, "plan": null,
                 },
                 work,
             ]))
