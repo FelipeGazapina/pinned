@@ -681,19 +681,6 @@ pub fn spawn(
     Ok(pid)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::codex_user_notify;
-
-    #[test]
-    fn a_top_level_notify_array_is_read_and_a_table_one_is_not() {
-        let text = "notify = [\n  \"/bin/echo\",\n  \"hi\",\n]\n[tui]\nnotify = [\"nope\"]\n";
-        assert_eq!(codex_user_notify(text), vec!["/bin/echo".to_owned(), "hi".to_owned()]);
-        assert_eq!(codex_user_notify("model = \"gpt-5.4\"\n"), Vec::<String>::new());
-        assert_eq!(codex_user_notify("notify = \"/bin/echo\"\n"), Vec::<String>::new());
-    }
-}
-
 pub fn kill(pid: u32) {
     #[cfg(unix)]
     unsafe {
@@ -704,5 +691,18 @@ pub fn kill(pid: u32) {
         let _ = crate::process::command("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .status();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::codex_user_notify;
+
+    #[test]
+    fn a_top_level_notify_array_is_read_and_a_table_one_is_not() {
+        let text = "notify = [\n  \"/bin/echo\",\n  \"hi\",\n]\n[tui]\nnotify = [\"nope\"]\n";
+        assert_eq!(codex_user_notify(text), vec!["/bin/echo".to_owned(), "hi".to_owned()]);
+        assert_eq!(codex_user_notify("model = \"gpt-5.4\"\n"), Vec::<String>::new());
+        assert_eq!(codex_user_notify("notify = \"/bin/echo\"\n"), Vec::<String>::new());
     }
 }
