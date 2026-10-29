@@ -195,65 +195,8 @@ impl Screen {
     }
 }
 
-/// A prompt is in flight until the Done of a turn that started after it.
-/// Claude's Working marks that start. Codex never sends Working, so a Done
-/// with no open turn closes one submit. A submit that never gets a turn of its own,
-/// such as a menu answer or a prompt Claude folded into the running turn, is settled
-/// once the tab has sat at Done for `SETTLE` with no new turn.
-#[derive(Default)]
-struct Turn {
-    submit: u64,
-    done: u64,
-    opened: Option<u64>,
-    settle: Option<(Instant, u64)>,
-    draft: bool,
-}
-
-const SETTLE: Duration = Duration::from_secs(5);
-
-impl Turn {
-    fn busy(&self) -> bool {
-        self.submit != self.done || self.opened.is_some()
-    }
-
-    fn note_submit(&mut self) {
-        self.submit += 1;
-        self.draft = false;
-    }
-
-    fn note_working(&mut self) {
-        if self.submit == self.done {
-            self.submit = self.done + 1;
-        }
-        if self.opened.is_none() {
-            self.opened = Some(self.done + 1);
-        }
-        self.settle = None;
-    }
-
-    fn note_terminal(&mut self) {
-        if let Some(gen) = self.opened.take() {
-            self.done = gen;
-        } else if self.done != self.submit {
-            self.done += 1;
-        }
-        self.settle = Some((Instant::now(), self.submit));
-        self.draft = false;
-    }
-
-    /// Closes the submits made before the last Done once no turn followed them.
-    fn settle(&mut self) {
-        let Some((_, upto)) = self.settle.filter(|(at, _)| at.elapsed() >= SETTLE) else { return };
-        if self.opened.is_none() {
-            self.done = self.done.max(upto);
-        }
-        self.settle = None;
-    }
-
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
+/// A Claude slash command reports no Working and no Done. After this long at Done, the submit is over.
+const SLASH_WAIT: Duration = Duration::from_secs(5);
 
 struct Tab {
     cwd: PathBuf,
@@ -290,11 +233,11 @@ struct Tab {
     message: Option<String>,
     /// Prompts typed before the session took the terminal, typed in once it does.
     held: Vec<String>,
-    /// Prompts that arrived while a turn was in flight or the user was drafting.
-    /// One is typed each time a turn ends and the tab is free.
-    queued: Vec<String>,
-    /// Submits in flight, and printable text the user has not submitted.
-    gate: Turn,
+    /// When the latest submit went in. Cleared by Done, Failed, and a new session.
+    /// A provider that reports Working also drops it after `SLASH_WAIT` at Done with no Working.
+    turn_pending: Option<Instant>,
+    /// Printable bytes in the terminal's input line. Done does not clear it.
+    draft_len: usize,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
     screen: Arc<Mutex<Screen>>,
@@ -344,20 +287,20 @@ impl Tab {
 
     /// A notice may be typed. Cursor never reports Done, so it is never idle.
     fn notice_idle(&self) -> bool {
-        self.session.is_some() && self.status == Some(AgentStatus::Done) && !self.gate.busy() && !self.gate.draft
+        self.session.is_some() && self.status == Some(AgentStatus::Done) && self.turn_pending.is_none() && self.draft_len == 0
     }
 
-    fn flush_queued(&mut self) {
-        if self.gate.busy() || self.gate.draft || !matches!(self.status, None | Some(AgentStatus::Done | AgentStatus::Failed)) {
+    fn note_submit(&mut self) {
+        self.turn_pending = Some(Instant::now());
+    }
+
+    /// Claude reports Working when a turn opens. A submit that stays at Done never did.
+    fn release_slash(&mut self) {
+        let Some(at) = self.turn_pending else { return };
+        if !self.account.provider.spec().harness || self.status != Some(AgentStatus::Done) || at.elapsed() < SLASH_WAIT {
             return;
         }
-        let Some(text) = self.queued.first().cloned() else { return };
-        let Some(session) = self.session.as_mut().filter(|session| session.raw()) else { return };
-        if session.write(&paste(&text)).is_err() {
-            return;
-        }
-        self.queued.remove(0);
-        self.gate.note_submit();
+        self.turn_pending = None;
     }
 }
 
@@ -652,6 +595,7 @@ impl Machine {
                 json(thread::read_subagent(&file).map_err(|e| format!("could not read the subagent's transcript: {e}"))?)
             }
             Call::OpenTask { tab, task } => json(self.open_delegated(&tab, &task)?),
+            Call::DeliverTask { tab, task } => json(self.deliver_task(&tab, &task)?),
             Call::CancelTask { tab, task } => {
                 let path = self.launch.path_env.clone();
                 json(self.delegates.cancel(
@@ -1068,7 +1012,6 @@ impl Machine {
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
         let (old, screen) = self.tab(tab, |t| {
             t.held.clear();
-            t.queued.clear();
             (t.session.take(), t.screen.clone())
         })?;
         let session = screen.lock().unwrap().restart();
@@ -1091,7 +1034,8 @@ impl Machine {
             t.session = Some(pty);
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
-            t.gate.reset();
+            t.turn_pending = None;
+            t.draft_len = 0;
         })?;
         self.type_held_once_raw(tab, session);
         Ok(())
@@ -1109,18 +1053,23 @@ impl Machine {
             }
             let done = machine.tab(&tab, |t| match t.session.as_mut() {
                 Some(s) if s.raw() => {
+                    let mut wrote = false;
                     for text in std::mem::take(&mut t.held) {
                         if s.write(&paste(&text)).is_ok() {
-                            t.gate.note_submit();
+                            t.turn_pending = Some(Instant::now());
+                            wrote = true;
                         }
                     }
-                    t.flush_queued();
-                    true
+                    (true, wrote)
                 }
-                Some(_) => false,
-                None => true,
+                Some(_) => (false, false),
+                None => (true, false),
             });
-            if done.unwrap_or(true) {
+            let (done, wrote) = done.unwrap_or((true, false));
+            if wrote {
+                machine.arm_notices();
+            }
+            if done {
                 return;
             }
             drop(machine);
@@ -1151,18 +1100,21 @@ impl Machine {
         if Shells::owns(tab) {
             return self.shells.write(tab, data);
         }
-        self.tab(tab, |t| {
-            match classify_input(data) {
-                Input::Submit => t.gate.note_submit(),
-                Input::Text => t.gate.draft = true,
-                Input::Clear => t.gate.draft = false,
-                Input::Keys => {}
+        let submitted = self.tab(tab, |t| {
+            let submitted = note_draft(&mut t.draft_len, data);
+            if submitted {
+                t.note_submit();
             }
-            match t.session.as_mut() {
-                Some(s) => s.write(data).map_err(|e| e.to_string()),
-                None => Ok(()),
+            if let Some(s) = t.session.as_mut() {
+                s.write(data).map_err(|e| e.to_string())?;
             }
-        })?
+            Ok::<_, String>(submitted)
+        })??;
+        if submitted {
+            self.arm_notices();
+        }
+        self.maybe_deliver(tab);
+        Ok(())
     }
 
     pub fn resize_pty(&self, tab: &str, cols: u16, rows: u16) -> Result<(), String> {
@@ -1290,7 +1242,7 @@ impl Machine {
     /// Types `text` as one prompt into the newest live tab whose environment holds every pair of
     /// `env`, such as the session answering a Slack thread. Answers whether one took it.
     pub fn deliver(&self, env: &[(String, String)], text: &str) -> bool {
-        self.live_tab(env).is_some_and(|tab| self.offer_prompt(&tab, text).is_ok())
+        self.live_tab(env).is_some_and(|tab| self.type_prompt(&tab, text).is_ok())
     }
 
     fn live_tab(&self, env: &[(String, String)]) -> Option<TabId> {
@@ -1349,9 +1301,10 @@ impl Machine {
                     self.pr_watches.update(&tab, &url, crate::prwatch::snapshot(&view));
                 }
             }
-            if self.parent_idle(&tab) {
+            let free = self.tab(&tab, |t| t.session.is_some() && matches!(t.status, None | Some(AgentStatus::Done))).unwrap_or(false);
+            if free {
                 if let Some(text) = self.pr_watches.take_wake(&tab) {
-                    let _ = self.offer_prompt(&tab, &text);
+                    let _ = self.type_prompt(&tab, &text);
                 }
             }
         }
@@ -1362,37 +1315,23 @@ impl Machine {
     /// pty's cooked mode would echo it and turn the submitting \r into \n, and claude would never
     /// see a prompt.
     fn type_prompt(&self, tab: &str, text: &str) -> Result<(), String> {
-        self.tab(tab, |t| match t.session.as_mut() {
+        let wrote = self.tab(tab, |t| match t.session.as_mut() {
             Some(s) if s.raw() => {
                 for held in std::mem::take(&mut t.held) {
                     s.write(&paste(&held)).map_err(|e| e.to_string())?;
-                    t.gate.note_submit();
+                    t.turn_pending = Some(Instant::now());
                 }
                 s.write(&paste(text)).map_err(|e| e.to_string())?;
-                t.gate.note_submit();
-                Ok(())
+                t.turn_pending = Some(Instant::now());
+                Ok(true)
             }
             Some(_) => {
                 t.held.push(text.to_owned());
-                Ok(())
+                Ok(false)
             }
             None => Err(format!("tab {tab} has no running session")),
-        })?
-    }
-
-    /// A prompt pinned sends on someone else's behalf, such as a Slack reply or a pull request
-    /// wake. It waits while a turn is in flight or the user is drafting, and goes in at the
-    /// next turn end, one per turn. The user's own prompts take `type_prompt` and never wait.
-    fn offer_prompt(&self, tab: &str, text: &str) -> Result<(), String> {
-        let waiting = self.tab(tab, |t| {
-            if t.session.is_none() {
-                return Err(format!("tab {tab} has no running session"));
-            }
-            t.queued.push(text.to_owned());
-            t.flush_queued();
-            Ok(!t.queued.is_empty())
         })??;
-        if waiting {
+        if wrote {
             self.arm_notices();
         }
         Ok(())
@@ -1600,10 +1539,21 @@ impl Machine {
         self.delegates.started_json(&task.id).map(|value| value.to_string())
     }
 
-    /// Idle means the turn hook said Done, no prompt is in flight, and the user has not
-    /// typed text since that Done. A tab with no turn hook, such as Cursor, is never idle.
+    /// Idle means the session is up, the last report was Done, no submit is outstanding, and the
+    /// input line is empty. A tab that never reports Done, such as Cursor, is never idle.
     fn parent_idle(&self, tab: &str) -> bool {
         self.tab(tab, |t| t.notice_idle()).unwrap_or(false)
+    }
+
+    /// Types one finished task's notice now. The tab must own the task. The idle gate does not apply.
+    fn deliver_task(&self, tab: &str, task: &str) -> Result<(), String> {
+        let caller = crate::delegate::Caller { tab: Some(tab.to_owned()), task: None };
+        let text = self.delegates.claim_task_notice(&caller, task)?;
+        if let Err(error) = self.type_prompt(tab, &text) {
+            self.delegates.release_notice(&[task.to_owned()]);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn maybe_deliver(&self, tab: &str) {
@@ -1626,7 +1576,7 @@ impl Machine {
             match t.session.as_mut() {
                 Some(s) if s.raw() => {
                     s.write(&paste(text)).map_err(|e| e.to_string())?;
-                    t.gate.note_submit();
+                    t.turn_pending = Some(Instant::now());
                     Ok(true)
                 }
                 Some(_) => Ok(false),
@@ -1635,7 +1585,21 @@ impl Machine {
         })?
     }
 
-    /// Starts the once-a-second pass that settles turns and types waiting notices and offers.
+    /// Drops a Claude submit that stayed at Done, then types a notice if the tab is idle.
+    fn release_unopened(&self, tab: &str) {
+        let released = self
+            .tab(tab, |t| {
+                let pending = t.turn_pending.is_some();
+                t.release_slash();
+                pending && t.turn_pending.is_none()
+            })
+            .unwrap_or(false);
+        if released {
+            self.maybe_deliver(tab);
+        }
+    }
+
+    /// Starts the once-a-second pass that releases slash-command submits and types waiting notices.
     fn arm_notices(&self) {
         if self.notice_loop.swap(true, Ordering::Relaxed) {
             return;
@@ -1649,10 +1613,7 @@ impl Machine {
             }
             let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
             for tab in tabs {
-                let _ = machine.tab(&tab, |t| {
-                    t.gate.settle();
-                    t.flush_queued();
-                });
+                machine.release_unopened(&tab);
                 machine.maybe_deliver(&tab);
             }
         });
@@ -1761,8 +1722,8 @@ impl Machine {
             title: None,
             message: None,
             held: vec![],
-            queued: vec![],
-            gate: Turn::default(),
+            turn_pending: None,
+            draft_len: 0,
             screen: Arc::default(),
         };
         self.tabs.lock().unwrap().insert(id.clone(), tab);
@@ -1881,13 +1842,10 @@ impl Machine {
             if !idle_notice {
                 t.updated = Some(unix_now());
             }
-            match event.status {
-                AgentStatus::Working => t.gate.note_working(),
-                AgentStatus::Done | AgentStatus::Failed => t.gate.note_terminal(),
-                AgentStatus::NeedsInput => {}
+            if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
+                t.turn_pending = None;
             }
             t.status = Some(event.status);
-            t.flush_queued();
             if event.title.is_some() {
                 t.title = event.title.clone();
             }
@@ -2063,6 +2021,7 @@ fn tab_number(id: &str) -> u32 {
 }
 
 #[derive(Debug, PartialEq)]
+#[cfg(test)]
 enum Input {
     /// Enter: whatever was drafted is now a prompt in flight.
     Submit,
@@ -2074,7 +2033,36 @@ enum Input {
     Keys,
 }
 
+/// Counts the terminal's input line. Printable bytes add, including inside a bracketed paste.
+/// Backspace subtracts, floored at 0. Ctrl-C, Ctrl-U, and Enter clear the line.
+/// Enter on a non-empty line is a submit. Escape sequences are ignored.
+fn note_draft(draft_len: &mut usize, data: &[u8]) -> bool {
+    let mut submitted = false;
+    let mut i = 0;
+    while i < data.len() {
+        match data[i] {
+            0x1b => {
+                let Some(len) = escape_len(&data[i + 1..]) else { break };
+                i += len;
+            }
+            b'\r' => {
+                if *draft_len > 0 {
+                    submitted = true;
+                }
+                *draft_len = 0;
+            }
+            0x03 | 0x15 => *draft_len = 0,
+            0x08 | 0x7f => *draft_len = draft_len.saturating_sub(1),
+            byte if byte >= 0x20 => *draft_len += 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    submitted
+}
+
 /// What a write to the terminal means for a notice. Only text holds one back.
+#[cfg(test)]
 fn classify_input(data: &[u8]) -> Input {
     let mut seen = Input::Keys;
     let mut i = 0;
@@ -3539,7 +3527,7 @@ echo '{"type":"result","result":"ok"}'
 
     #[test]
     #[cfg(unix)]
-    fn a_notice_waits_until_the_user_stops_typing_and_a_turn_ends() {
+    fn typed_text_holds_a_notice_across_done_until_backspaces_clear_it() {
         let (m, tab, file) = pty_file("notice-typed");
         m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
         m.write_input(&tab, b"xyz").unwrap();
@@ -3548,20 +3536,13 @@ echo '{"type":"result","result":"ok"}'
         std::thread::sleep(std::time::Duration::from_millis(200));
         let early = read_pty(&file);
         assert!(early.contains("xyz"), "the pty did not receive the keystrokes: {early:?}");
-        assert!(!early.contains("[pinned]"), "the notice was typed after the user had typed since Done: {early:?}");
-        m.record_event(AgentEvent {
-            status: AgentStatus::Done,
-            cwd: None,
-            message: None,
-            tab: Some(tab.clone()),
-            session: None,
-            title: None,
-            resume_at: None,
-            prompt: None,
-            snapshot: None,
-        });
+        assert!(!early.contains("[pinned]"), "the notice was typed over a draft: {early:?}");
+        m.record_event(done_event(&tab));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "Done cleared a draft: {}", read_pty(&file));
+        m.write_input(&tab, b"\x7f\x7f\x7f").unwrap();
         let needle = format!("[pinned] Delegated task {id} \"Ping\"");
-        wait_for("the notice after the next Done", || read_pty(&file).contains(&needle));
+        wait_for("the notice after the draft is cleared", || read_pty(&file).contains(&needle));
         let _ = std::fs::remove_file(file);
     }
 
@@ -3607,13 +3588,28 @@ echo '{"type":"result","result":"ok"}'
         assert_eq!(classify_input(b"hi\r"), Input::Submit);
         assert_eq!(classify_input(b"xyz\x03"), Input::Clear);
         assert_eq!(classify_input(b"\x15ab"), Input::Text);
+        let mut draft = 0usize;
+        assert!(!note_draft(&mut draft, b"\x1b[200~ab\x1b[201~"));
+        assert_eq!(draft, 2, "a bracketed paste counts the text inside it");
+        assert!(note_draft(&mut draft, b"\r"));
+        assert_eq!(draft, 0);
+        assert!(!note_draft(&mut draft, b"\r"), "enter on an empty line is not a submit");
+        note_draft(&mut draft, b"ab");
+        assert!(!note_draft(&mut draft, b"\x08"));
+        assert_eq!(draft, 1);
+        assert!(!note_draft(&mut draft, b"\x7f\x7f"));
+        assert_eq!(draft, 0, "backspace stops at an empty line");
     }
 
     #[test]
     #[cfg(unix)]
-    fn a_second_notice_waits_until_the_done_that_follows_the_first() {
+    fn a_codex_tab_gets_a_second_notice_only_after_the_done_that_follows_the_first() {
         let (m, tab, file) = pty_file("notice-second");
-        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.tab(&tab, |t| {
+            t.account = Account::builtin(Provider::Codex);
+            t.status = Some(AgentStatus::Done);
+        })
+        .unwrap();
         let first = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "First");
         m.maybe_deliver(&tab);
         let first_needle = format!("[pinned] Delegated task {first} \"First\"");
@@ -3665,10 +3661,7 @@ echo '{"type":"result","result":"ok"}'
         let needle_b = format!("[pinned] Delegated task {id_b} \"Before\"");
         wait_for("the notice first", || read_pty(&file_b).contains(&needle_b));
         assert!(m.deliver(&env, "from linear"));
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!read_pty(&file_b).contains("from linear"), "the delivery shared the notice's turn: {}", read_pty(&file_b));
-        m.record_event(done_event(&tab_b));
-        wait_for("the delivery after Done", || read_pty(&file_b).contains("from linear"));
+        wait_for("a delivery types at once", || read_pty(&file_b).contains("from linear"));
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_file(&file_b);
     }
@@ -3678,29 +3671,48 @@ echo '{"type":"result","result":"ok"}'
     fn the_users_own_prompt_goes_in_mid_turn_and_after_an_interrupt() {
         let (m, tab, file) = pty_file("prompt-mid-turn");
         m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
-        m.type_prompt(&tab, "steer this").unwrap();
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "steer this".into() }), Ok(json!(null)));
         wait_for("the prompt typed mid-turn", || read_pty(&file).contains("steer this"));
         m.write_input(&tab, b"\x1b").unwrap();
-        m.type_prompt(&tab, "after esc").unwrap();
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "after esc".into() }), Ok(json!(null)));
         wait_for("the prompt after an interrupt with no Done", || read_pty(&file).contains("after esc"));
         let _ = std::fs::remove_file(&file);
     }
 
     #[test]
-    fn a_submit_with_no_turn_of_its_own_settles_once_the_tab_sits_at_done() {
-        let mut turn = Turn::default();
-        turn.note_submit();
-        turn.note_working();
-        turn.note_submit();
-        turn.note_terminal();
-        assert!(turn.busy(), "a prompt queued during the turn still waits for its own turn");
-        turn.settle();
-        assert!(turn.busy(), "settling waits for SETTLE");
-        turn.settle = turn.settle.map(|(_, upto)| (Instant::now() - SETTLE, upto));
-        turn.settle();
-        assert!(!turn.busy(), "a menu answer or a folded prompt must not hold the tab forever");
-        turn.note_submit();
-        assert!(turn.busy(), "a submit after the settle is in flight");
+    #[cfg(unix)]
+    fn a_claude_slash_command_releases_after_five_seconds_and_a_codex_one_does_not() {
+        let (m, tab, file) = pty_file("slash-claude");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.write_input(&tab, b"/model\r").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Slash");
+        m.maybe_deliver(&tab);
+        m.release_unopened(&tab);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed before the slash command aged out: {}", read_pty(&file));
+        m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - SLASH_WAIT)).unwrap();
+        m.release_unopened(&tab);
+        let needle = format!("[pinned] Delegated task {id} \"Slash\"");
+        wait_for("the notice after a Claude slash command sits at Done", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(&file);
+
+        let (m, tab, file) = pty_file("slash-codex");
+        m.tab(&tab, |t| {
+            t.account = Account::builtin(Provider::Codex);
+            t.status = Some(AgentStatus::Done);
+        })
+        .unwrap();
+        m.write_input(&tab, b"/model\r").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Slash");
+        m.maybe_deliver(&tab);
+        m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - SLASH_WAIT)).unwrap();
+        m.release_unopened(&tab);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "a Codex slash command released without Done: {}", read_pty(&file));
+        m.record_event(done_event(&tab));
+        let needle = format!("[pinned] Delegated task {id} \"Slash\"");
+        wait_for("the notice after Codex Done", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(file);
     }
 
     #[test]
@@ -3708,7 +3720,7 @@ echo '{"type":"result","result":"ok"}'
     fn focus_reports_do_not_hold_a_notice() {
         let (m, tab, file) = pty_file("notice-focus");
         m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
-        for bytes in [b"\x1b[I".as_slice(), b"\x1b[O".as_slice(), b"\x1b".as_slice(), b"\x1b[Z".as_slice(), b"\x1b[A".as_slice()] {
+        for bytes in [b"\x1b[I".as_slice(), b"\x1b[O".as_slice(), b"\x1b".as_slice(), b"\x1b[Z".as_slice(), b"\x1b[A".as_slice(), b"\r".as_slice()] {
             m.write_input(&tab, bytes).unwrap();
         }
         let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Focus");
@@ -3720,21 +3732,23 @@ echo '{"type":"result","result":"ok"}'
 
     #[test]
     #[cfg(unix)]
-    fn a_done_of_the_turn_already_running_keeps_a_later_submit_busy() {
-        let (m, tab, file) = pty_file("notice-queued");
-        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
-        m.write_input(&tab, b"\r").unwrap();
+    fn deliver_task_types_a_held_notice_and_another_tab_cannot() {
+        let (m, tab, file) = pty_file("deliver-task");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.write_input(&tab, b"xyz").unwrap();
         let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Held");
         m.maybe_deliver(&tab);
         std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!read_pty(&file).contains("[pinned]"), "the notice was pasted into the running turn: {}", read_pty(&file));
-        m.record_event(done_event(&tab));
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!read_pty(&file).contains("[pinned]"), "the running turn's Done cleared the queued submit: {}", read_pty(&file));
-        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
-        m.record_event(done_event(&tab));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed over a draft: {}", read_pty(&file));
+        let other = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let refused = m.call(Call::DeliverTask { tab: other, task: id.clone() });
+        assert_eq!(refused, Err(format!("task {id} belongs to another session")));
+        assert!(!read_pty(&file).contains("[pinned]"), "another tab typed the notice: {}", read_pty(&file));
+        assert_eq!(m.call(Call::DeliverTask { tab: tab.clone(), task: id.clone() }), Ok(json!(null)));
         let needle = format!("[pinned] Delegated task {id} \"Held\"");
-        wait_for("the notice after the queued turn", || read_pty(&file).contains(&needle));
+        wait_for("Send to session typed the notice", || read_pty(&file).contains(&needle));
+        let again = m.call(Call::DeliverTask { tab, task: id });
+        assert!(again.is_err(), "a second send typed it again: {again:?}");
         let _ = std::fs::remove_file(file);
     }
 

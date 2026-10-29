@@ -463,6 +463,8 @@ pub enum Call {
     OpenTask { tab: TabId, task: String },
     /// The task_status body. Stops the delegated task when this tab owns it.
     CancelTask { tab: TabId, task: String },
+    /// `null`. Types that finished task's notice into the tab now. The tab must own the task.
+    DeliverTask { tab: TabId, task: String },
 }
 
 fn pulls_limit() -> usize {

@@ -2357,6 +2357,27 @@
                   "tab",
                   "task"
                 ]
+              },
+              {
+                "description": "`null`. Types that finished task's notice into the tab now. The tab must own the task.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "deliver_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
               }
             ]
           },
@@ -6723,6 +6744,27 @@
                   "cmd": {
                     "type": "string",
                     "const": "cancel_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "`null`. Types that finished task's notice into the tab now. The tab must own the task.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "deliver_task"
                   },
                   "tab": {
                     "type": "string"
@@ -20354,6 +20396,27 @@
                   "tab",
                   "task"
                 ]
+              },
+              {
+                "description": "`null`. Types that finished task's notice into the tab now. The tab must own the task.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "deliver_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
               }
             ]
           },
@@ -23682,6 +23745,27 @@
                   "cmd": {
                     "type": "string",
                     "const": "cancel_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "`null`. Types that finished task's notice into the tab now. The tab must own the task.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "deliver_task"
                   },
                   "tab": {
                     "type": "string"

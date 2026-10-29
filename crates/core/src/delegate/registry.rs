@@ -237,6 +237,26 @@ impl Delegates {
         Some((lines, ids))
     }
 
+    /// Claims one finished task's notice for the owning session and marks it delivered.
+    pub fn claim_task_notice(&self, caller: &Caller, id: &str) -> Result<String, String> {
+        let mut tasks = self.tasks.lock().unwrap();
+        if !tasks.iter().any(|task| task.id == id) {
+            return Err(format!("no task {id}"));
+        }
+        if !allows(&tasks, id, caller) {
+            return Err(format!("task {id} belongs to another session"));
+        }
+        let task = tasks.iter_mut().find(|task| task.id == id).unwrap();
+        if !task.state.terminal() {
+            return Err(format!("{id} is still working"));
+        }
+        if task.delivered {
+            return Err(format!("{id} was already sent"));
+        }
+        task.delivered = true;
+        Ok(notice_line(task))
+    }
+
     pub fn release_notice(&self, ids: &[String]) {
         let mut tasks = self.tasks.lock().unwrap();
         for task in tasks.iter_mut() {
@@ -279,6 +299,7 @@ impl Delegates {
                 error: task.error.clone(),
                 conversation: task.conversation.clone(),
                 steps: task.steps.clone(),
+                undelivered: task.state.terminal() && !task.delivered && matches!(&task.parent, Parent::Tab(_)),
             })
             .collect()
     }

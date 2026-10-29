@@ -48,6 +48,9 @@ pub struct Subagent {
     pub conversation: Option<String>,
     /// Its latest tools, thoughts and texts, oldest first, with the results of those tools.
     pub steps: Vec<Item>,
+    /// A finished delegated task whose notice has not been typed into the session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub undelivered: bool,
 }
 
 #[derive(Deserialize, Debug, PartialEq, Clone, Default)]
@@ -193,6 +196,7 @@ pub fn scan(dir: &Path, cache: &mut Cache, process: Option<SystemTime>) -> Vec<S
             error: None,
             conversation: None,
             steps: seen.tail.steps.clone(),
+            undelivered: false,
         };
         found.push((seen.born, meta_file, agent));
     }
@@ -300,6 +304,7 @@ mod tests {
             error: None,
             conversation: None,
             steps: vec![Item::Text { id: "x:0".into(), at: "t5".into(), text: "Mapped.".into() }],
+            undelivered: false,
         };
         let grep = Item::Tool { id: "g1".into(), at: "t6".into(), name: "Grep".into(), summary: "TODO".into(), detail: "".into(), args: vec![("pattern".into(), "TODO".into())] };
         let checking = Subagent {
@@ -315,6 +320,7 @@ mod tests {
             error: None,
             conversation: None,
             steps: vec![grep.clone()],
+            undelivered: false,
         };
         assert_eq!(scan(dir.path(), &mut cache, Some(SystemTime::UNIX_EPOCH)), vec![mapped.clone(), checking.clone()]);
         assert_eq!(scan(dir.path(), &mut cache, None)[1].state, State::Stopped, "an agent of a claude that is gone stopped");

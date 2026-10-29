@@ -10,7 +10,7 @@ const agentsWorking = (n) => `${n} ${n === 1 ? "agent" : "agents"} working`;
 /** Keeps a page's agents on the thread, and answers whether that changes what the cards show. */
 function takeAgents(t, agents = []) {
   const stepKey = (step) => step ? [step.kind, step.id, step.at, step.text, step.summary] : "";
-  const key = JSON.stringify(agents.map((a) => [a.id, a.state, a.updated, a.error ?? "", stepKey(a.steps?.at(-1))]));
+  const key = JSON.stringify(agents.map((a) => [a.id, a.state, a.updated, a.error ?? "", a.undelivered ? 1 : 0, stepKey(a.steps?.at(-1))]));
   t.agents = agents;
   if (t.agentsKey === key) return false;
   t.agentsKey = key;
@@ -48,9 +48,10 @@ const stateLabel = (state) => STATE_LABEL[state] ?? state;
 const taskActions = (agent) => {
   const running = agent.state === "running" && agent.id.startsWith("task-");
   const cancel = running ? `<button type="button" class="outline" data-cancel-task="${esc(agent.id)}">Cancel</button>` : "";
+  const send = agent.undelivered ? `<button type="button" class="outline" data-send-task="${esc(agent.id)}">Send to session</button>` : "";
   const open = agent.id.startsWith("task-") && agent.state !== "running" && agent.conversation
     ? `<button type="button" class="outline" data-open-task="${esc(agent.id)}">Open as thread</button>` : "";
-  return cancel + open;
+  return cancel + send + open;
 };
 const agentError = (agent) => agent.state === "failed" && agent.error ? `<div class="agent-error">${esc(agent.error)}</div>` : "";
 
