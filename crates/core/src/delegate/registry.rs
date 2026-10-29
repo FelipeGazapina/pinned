@@ -275,6 +275,9 @@ impl Delegates {
                 model: task.model.clone(),
                 state: card_state(task.state),
                 updated: stamp(task.ended.unwrap_or(task.started)),
+                started: Some(stamp(task.started)),
+                error: task.error.clone(),
+                conversation: task.conversation.clone(),
                 steps: task.steps.clone(),
             })
             .collect()
@@ -515,7 +518,8 @@ fn card_state(state: WorkState) -> subagents::State {
     match state {
         WorkState::Working | WorkState::WaitingForChildren => subagents::State::Running,
         WorkState::ResultAvailable => subagents::State::Done,
-        WorkState::Failed | WorkState::Cancelled => subagents::State::Stopped,
+        WorkState::Failed => subagents::State::Failed,
+        WorkState::Cancelled => subagents::State::Cancelled,
     }
 }
 

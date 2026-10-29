@@ -461,6 +461,8 @@ pub enum Call {
     SaveFile { tab: TabId, path: String, text: String },
     /// The new tab's id, not yet started: it resumes the delegated task's conversation in the child's folder.
     OpenTask { tab: TabId, task: String },
+    /// The task_status body. Stops the delegated task when this tab owns it.
+    CancelTask { tab: TabId, task: String },
 }
 
 fn pulls_limit() -> usize {

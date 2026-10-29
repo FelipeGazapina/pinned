@@ -567,6 +567,15 @@ impl Machine {
                 json(thread::read_subagent(&file).map_err(|e| format!("could not read the subagent's transcript: {e}"))?)
             }
             Call::OpenTask { tab, task } => json(self.open_delegated(&tab, &task)?),
+            Call::CancelTask { tab, task } => {
+                let path = self.launch.path_env.clone();
+                json(self.delegates.cancel(
+                    &crate::delegate::Caller { tab: Some(tab), task: None },
+                    &task,
+                    "cancelled from the card",
+                    path.as_deref(),
+                )?)
+            }
             Call::Rewind { tab, before, files, cols, rows } => json(self.rewind(&tab, &before, files, cols, rows)?),
             Call::Fork { tab, through } => json(self.fork(&tab, &through)?),
             Call::SaveFile { tab, path, text } => json(save_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, &text)?),
@@ -2564,6 +2573,34 @@ mod tests {
         m.record_status(&tab, &AgentEvent { status: AgentStatus::Working, ..failed(None) });
         let view = m.view(&tab).unwrap();
         assert_eq!((view.held, view.resume_at), (false, None));
+    }
+
+    #[test]
+    fn cancel_task_from_the_owning_tab_cancels_and_another_tab_is_refused() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let tab = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
+        let other = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(tab.clone()),
+            tool: None,
+            title: "Look".into(),
+            account: account.id.clone(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: "/repo".into(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{tab}"),
+            client_request_id: None,
+            role: None,
+        });
+        let body = m.call(Call::CancelTask { tab: tab.clone(), task: task.id.clone() }).unwrap();
+        assert_eq!(body["workState"], "cancelled");
+        assert_eq!(body["error"], json!("cancelled from the card"));
+        let refused = m.call(Call::CancelTask { tab: other, task: task.id.clone() });
+        assert_eq!(refused, Err(format!("task {} belongs to another session", task.id)));
     }
 
     #[test]

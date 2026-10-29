@@ -945,6 +945,28 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[test]
+    fn a_card_carries_the_start_the_error_and_the_conversation() {
+        let delegates = Delegates::default();
+        let failed = new_cursor(&delegates, Mode::Async);
+        delegates.fail(&failed.id, "boom".into(), None);
+        let done = new_cursor(&delegates, Mode::Async);
+        delegates.apply(&done.id, ChildEvent::Line(json!({"type":"system","subtype":"init","session_id":"conv-9"}).to_string()), None);
+        delegates.apply(&done.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        let cards = delegates.cards("tab-1");
+        let failed_card = cards.iter().find(|card| card.id == failed.id).unwrap();
+        assert_eq!(failed_card.state, crate::subagents::State::Failed);
+        assert_eq!(failed_card.error.as_deref(), Some("boom"));
+        assert!(failed_card.started.as_deref().unwrap().contains('T'), "{}", failed_card.started.as_deref().unwrap());
+        let done_card = cards.iter().find(|card| card.id == done.id).unwrap();
+        assert_eq!(done_card.state, crate::subagents::State::Done);
+        assert_eq!(done_card.conversation.as_deref(), Some("conv-9"));
+        let cancelled = new_cursor(&delegates, Mode::Async);
+        delegates.cancel(&Caller { tab: Some("tab-1".into()), task: None }, &cancelled.id, "stop", None).unwrap();
+        let cancelled_card = delegates.cards("tab-1").into_iter().find(|card| card.id == cancelled.id).unwrap();
+        assert_eq!(cancelled_card.state, crate::subagents::State::Cancelled);
+    }
+
+    #[test]
     fn another_tab_cannot_read_or_cancel_a_task_or_consume_its_notice() {
         let delegates = Delegates::default();
         let task = new_cursor(&delegates, Mode::Wait);

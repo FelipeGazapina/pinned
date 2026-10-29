@@ -1359,6 +1359,16 @@ async function editFromHere(id) {
   await attachFiles(tabByKey(tab.key) ?? tab, files);
 }
 
+/** Stops a delegated task this tab owns. The card redraws from the next agents poll. */
+async function cancelDelegated(task) {
+  const tab = active;
+  try {
+    await callOn(tab.machine, { cmd: "cancel_task", tab: tab.view.id, task });
+  } catch (e) {
+    showComposerNote(String(e), true);
+  }
+}
+
 /** Opens the delegated child's conversation as a tab on its folder and account. */
 async function openDelegated(task) {
   const tab = active;
@@ -1550,6 +1560,8 @@ threadView.addEventListener("click", (e) => {
   const t = shownThread();
   const openTask = e.target.closest("[data-open-task]");
   if (openTask) return openDelegated(openTask.dataset.openTask);
+  const cancelTask = e.target.closest("[data-cancel-task]");
+  if (cancelTask) return cancelDelegated(cancelTask.dataset.cancelTask);
   const toggle = e.target.closest("[data-toggle]");
   if (toggle) {
     const key = toggle.dataset.toggle;

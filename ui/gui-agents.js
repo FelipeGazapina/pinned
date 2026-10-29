@@ -9,7 +9,8 @@ const agentsWorking = (n) => `${n} ${n === 1 ? "agent" : "agents"} working`;
 
 /** Keeps a page's agents on the thread, and answers whether that changes what the cards show. */
 function takeAgents(t, agents = []) {
-  const key = JSON.stringify(agents.map((a) => [a.id, a.state, a.updated]));
+  const stepKey = (step) => step ? [step.kind, step.id, step.at, step.text, step.summary] : "";
+  const key = JSON.stringify(agents.map((a) => [a.id, a.state, a.updated, a.error ?? "", stepKey(a.steps?.at(-1))]));
   t.agents = agents;
   if (t.agentsKey === key) return false;
   t.agentsKey = key;
@@ -20,8 +21,13 @@ function takeAgents(t, agents = []) {
 const spawnOf = (t, agent) =>
   (agent.parent ? (t.agents ?? []).find((a) => a.id === agent.parent)?.steps ?? [] : t.items).find((i) => i.kind === "tool" && i.id === agent.tool);
 const spawnedAt = (t, agent) => Date.parse(spawnOf(t, agent)?.at ?? "");
-/** When the earliest running agent was spawned, in ms, or NaN. */
-const delegatedSince = (tab) => Math.min(...runningAgents(tab).map((a) => spawnedAt(threadOf(tab), a)).filter(Number.isFinite));
+/** When a delegated task started, or when its tool use was written, in ms. */
+const startedAt = (tab, agent) => {
+  const started = Date.parse(agent.started ?? "");
+  return Number.isFinite(started) ? started : spawnedAt(threadOf(tab), agent);
+};
+/** When the earliest running agent started, in ms, or NaN. */
+const delegatedSince = (tab) => Math.min(...runningAgents(tab).map((a) => startedAt(tab, a)).filter(Number.isFinite));
 /** The last thing the thread or one of its agents did, in unix seconds. */
 const lastActivity = (tab) => Math.max(tab.view.updated ?? 0, ...agentsOf(tab).map((a) => Date.parse(a.updated) / 1000 || 0));
 
@@ -37,6 +43,17 @@ function stepLine(step, cwd) {
   return { icon: toolIcon(step), label: toolLabel(step, cwd) };
 }
 
+const STATE_LABEL = { running: "working", done: "done", failed: "failed", cancelled: "cancelled", stopped: "stopped" };
+const stateLabel = (state) => STATE_LABEL[state] ?? state;
+const taskActions = (agent) => {
+  const running = agent.state === "running" && agent.id.startsWith("task-");
+  const cancel = running ? `<button type="button" class="outline" data-cancel-task="${esc(agent.id)}">Cancel</button>` : "";
+  const open = agent.id.startsWith("task-") && agent.state !== "running" && agent.conversation
+    ? `<button type="button" class="outline" data-open-task="${esc(agent.id)}">Open as thread</button>` : "";
+  return cancel + open;
+};
+const agentError = (agent) => agent.state === "failed" && agent.error ? `<div class="agent-error">${esc(agent.error)}</div>` : "";
+
 function agentCardHtml(tab, agent, depth) {
   const t = threadOf(tab);
   const cwd = tab.view.cwd;
@@ -44,21 +61,20 @@ function agentCardHtml(tab, agent, depth) {
   const key = `agent:${agent.id}`;
   const open = t.open.has(key);
   const running = agent.state === "running";
-  const since = spawnedAt(t, agent);
+  const since = startedAt(tab, agent);
   const ended = Date.parse(agent.updated);
   const time = !Number.isFinite(since) ? ""
     : running ? `<span class="ticker" data-since="${since}">${duration(Date.now() - since)}</span>`
     : Number.isFinite(ended) ? duration(ended - since) : "";
-  const mark = { running: icon("loader-circle", "state"), done: icon("circle-check", "state"), stopped: icon("circle-stop", "state") }[agent.state] ?? "";
+  const mark = { running: icon("loader-circle", "state"), done: icon("circle-check", "state"), failed: icon("circle-alert", "state"), cancelled: icon("circle-stop", "state"), stopped: icon("circle-stop", "state") }[agent.state] ?? "";
   const chip = [agent.kind, agent.model].filter(Boolean).join(" · ");
   const line = stepLine(steps.at(-1), cwd);
   const body = open
     ? `<div class="agent-steps">${steps.map((s) => (s.kind === "text" ? `<div class="narration md">${markdown(s.text)}</div>` : workRowHtml(s, cwd, t.open))).join("")}</div>`
     : `<div class="agent-step">${icon(line.icon, "kind")}<span class="label${running ? " shimmer" : ""}">${esc(line.label)}</span></div>`;
-  const openThread = agent.id.startsWith("task-") ? `<button type="button" class="outline" data-open-task="${esc(agent.id)}">Open as thread</button>` : "";
   return `<div class="agent-card" data-agent="${esc(agent.id)}" data-state="${esc(agent.state)}" style="--depth:${depth}">
     <button type="button" class="agent-head" data-toggle="${esc(key)}" aria-expanded="${open}" title="${esc(agent.name)}">${icon("bot", "kind")}<span class="name">${esc(agent.name || "Agent")}</span>
-      ${chip ? `<span class="chip">${esc(chip)}</span>` : ""}<span class="time">${time}</span>${mark}</button>${openThread}${body}</div>`;
+      ${chip ? `<span class="chip">${esc(chip)}</span>` : ""}<span class="state-label">${esc(stateLabel(agent.state))}</span><span class="time">${time}</span>${mark}</button>${taskActions(agent)}${agentError(agent)}${body}</div>`;
 }
 
 /** A card per agent the turn spawned, below its work fold so they show while the fold is shut, with
@@ -78,7 +94,7 @@ function delegatedStrip(tab) {
   if (!agents.length) return "";
   return `<div class="delegated-strip">${agents.map((a) => {
     const chip = [a.kind, a.model].filter(Boolean).join(" · ");
-    return `<span class="name">${esc(a.name || "Agent")}</span>${chip ? `<span class="chip">${esc(chip)}</span>` : ""}<button type="button" class="outline" data-open-task="${esc(a.id)}">Open as thread</button>`;
+    return `<div class="delegated" data-state="${esc(a.state)}"><span class="name">${esc(a.name || "Agent")}</span>${chip ? `<span class="chip">${esc(chip)}</span>` : ""}<span class="state-label">${esc(stateLabel(a.state))}</span>${taskActions(a)}${agentError(a)}</div>`;
   }).join("")}</div>`;
 }
 

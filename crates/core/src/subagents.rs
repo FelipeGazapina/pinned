@@ -18,6 +18,8 @@ pub enum State {
     Running,
     Done,
     Stopped,
+    Failed,
+    Cancelled,
 }
 
 /// An agent claude spawned with its `Agent` tool, as of the end of its own transcript.
@@ -35,6 +37,15 @@ pub struct Subagent {
     pub state: State,
     /// When the agent's last message was written.
     pub updated: String,
+    /// When a delegated task started, as RFC3339. Claude's own agents leave it empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<String>,
+    /// Why a failed delegated task stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The conversation an opened thread resumes. Empty until the child has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
     /// Its latest tools, thoughts and texts, oldest first, with the results of those tools.
     pub steps: Vec<Item>,
 }
@@ -178,6 +189,9 @@ pub fn scan(dir: &Path, cache: &mut Cache, process: Option<SystemTime>) -> Vec<S
             model: seen.meta.model.clone(),
             state: state(seen.meta.finished, seen.tail.last, written, process),
             updated: seen.tail.updated.clone(),
+            started: None,
+            error: None,
+            conversation: None,
             steps: seen.tail.steps.clone(),
         };
         found.push((seen.born, meta_file, agent));
@@ -282,6 +296,9 @@ mod tests {
             model: Some("haiku".into()),
             state: State::Done,
             updated: "t5".into(),
+            started: None,
+            error: None,
+            conversation: None,
             steps: vec![Item::Text { id: "x:0".into(), at: "t5".into(), text: "Mapped.".into() }],
         };
         let grep = Item::Tool { id: "g1".into(), at: "t6".into(), name: "Grep".into(), summary: "TODO".into(), detail: "".into(), args: vec![("pattern".into(), "TODO".into())] };
@@ -294,6 +311,9 @@ mod tests {
             model: None,
             state: State::Running,
             updated: "t6".into(),
+            started: None,
+            error: None,
+            conversation: None,
             steps: vec![grep.clone()],
         };
         assert_eq!(scan(dir.path(), &mut cache, Some(SystemTime::UNIX_EPOCH)), vec![mapped.clone(), checking.clone()]);

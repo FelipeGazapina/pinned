@@ -2336,6 +2336,27 @@
                   "tab",
                   "task"
                 ]
+              },
+              {
+                "description": "The task_status body. Stops the delegated task when this tab owns it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
               }
             ]
           },
@@ -6681,6 +6702,27 @@
                   "cmd": {
                     "type": "string",
                     "const": "open_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "The task_status body. Stops the delegated task when this tab owns it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_task"
                   },
                   "tab": {
                     "type": "string"
@@ -20291,6 +20333,27 @@
                   "tab",
                   "task"
                 ]
+              },
+              {
+                "description": "The task_status body. Stops the delegated task when this tab owns it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
               }
             ]
           },
@@ -23598,6 +23661,27 @@
                   "cmd": {
                     "type": "string",
                     "const": "open_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "The task_status body. Stops the delegated task when this tab owns it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_task"
                   },
                   "tab": {
                     "type": "string"
