@@ -411,7 +411,7 @@ impl Machine {
             Call::MakeFolder { path } => {
                 let dir = projects::expand(&path, &home());
                 std::fs::create_dir_all(&dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
-                json(std::fs::canonicalize(&dir).map_err(|e| e.to_string())?)
+                json(dunce::canonicalize(&dir).map_err(|e| e.to_string())?)
             }
             Call::SearchThreads { query } => json(self.search_threads(&query)),
             Call::Run { run } => json(self.run(&run)?),
@@ -1100,7 +1100,7 @@ impl Machine {
         if let Some(id) = account.as_deref().filter(|id| self.accounts.get(id).is_none()) {
             return Err(format!("no account {id} on this machine"));
         }
-        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+        let path = dunce::canonicalize(path).unwrap_or_else(|_| path.into());
         {
             let mut projects = self.projects.lock().unwrap();
             let project = projects.iter_mut().find(|p| p.path == path).ok_or_else(|| format!("{} is not a project on this machine", path.display()))?;
