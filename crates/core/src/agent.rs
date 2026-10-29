@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 pub const SOCK_ENV: &str = "PINNED_SOCK";
 pub const TAB_ENV: &str = "PINNED_TAB";
+/// Set on a delegated child, so its own `pinned mcp` can delegate further and name its parent task.
+pub const TASK_ENV: &str = "PINNED_TASK";
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";
 pub const ISSUE_ENV: &str = "PINNED_ISSUE";
@@ -77,7 +79,10 @@ impl Subject {
         match self {
             Subject::LinearIssue { issue } => vec![(ISSUE_ENV.to_owned(), issue.clone())],
             Subject::SlackThread { channel, thread } => {
-                vec![(SLACK_CHANNEL_ENV.to_owned(), channel.clone()), (SLACK_THREAD_ENV.to_owned(), thread.clone())]
+                vec![
+                    (SLACK_CHANNEL_ENV.to_owned(), channel.clone()),
+                    (SLACK_THREAD_ENV.to_owned(), thread.clone()),
+                ]
             }
         }
     }
@@ -86,7 +91,11 @@ impl Subject {
 /// The connector and subject a session's environment names, for a connector's session.
 pub fn session_of(env: &[(String, String)]) -> Option<(String, Subject)> {
     let var = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
-    let subject = match (var(ISSUE_ENV), var(SLACK_CHANNEL_ENV), var(SLACK_THREAD_ENV)) {
+    let subject = match (
+        var(ISSUE_ENV),
+        var(SLACK_CHANNEL_ENV),
+        var(SLACK_THREAD_ENV),
+    ) {
         (_, Some(channel), Some(thread)) => Subject::SlackThread { channel, thread },
         (Some(issue), _, _) => Subject::LinearIssue { issue },
         _ => return None,
@@ -131,7 +140,10 @@ impl Usage {
     /// until that window resets.
     pub fn over(self, known: Usage, now: u64) -> Usage {
         let live = |w: Option<LimitWindow>| w.filter(|w| w.resets_at > now);
-        Usage { five_hour: self.five_hour.or(live(known.five_hour)), seven_day: self.seven_day.or(live(known.seven_day)) }
+        Usage {
+            five_hour: self.five_hour.or(live(known.five_hour)),
+            seven_day: self.seven_day.or(live(known.seven_day)),
+        }
     }
 }
 
@@ -146,7 +158,12 @@ pub enum Message {
         subject: Subject,
         stage: Stage,
     },
-    SlackReply { connector: String, channel: String, thread: String, text: String },
+    SlackReply {
+        connector: String,
+        channel: String,
+        thread: String,
+        text: String,
+    },
     LinearCreate {
         connector: String,
         channel: String,
@@ -157,10 +174,20 @@ pub enum Message {
         #[serde(default)]
         assignee: String,
     },
-    LinearTake { connector: String, channel: String, thread: String, issue: String },
-    Remind { message: String, when: When },
+    LinearTake {
+        connector: String,
+        channel: String,
+        thread: String,
+        issue: String,
+    },
+    Remind {
+        message: String,
+        when: When,
+    },
     ListReminders,
-    CancelReminder { id: u64 },
+    CancelReminder {
+        id: u64,
+    },
     Usage {
         #[serde(flatten)]
         usage: Usage,
@@ -174,25 +201,55 @@ pub enum Message {
 mod tests {
     use super::*;
 
-    const WINDOW: LimitWindow = LimitWindow { used_percentage: 23.5, resets_at: 1792400000 };
+    const WINDOW: LimitWindow = LimitWindow {
+        used_percentage: 23.5,
+        resets_at: 1792400000,
+    };
 
     #[test]
     fn a_window_left_out_keeps_its_figure_only_until_it_resets() {
-        let known = Usage { five_hour: Some(WINDOW), seven_day: Some(LimitWindow { used_percentage: 41.2, resets_at: 1792900000 }) };
-        let report = Usage { five_hour: None, seven_day: Some(LimitWindow { used_percentage: 42.0, resets_at: 1792900000 }) };
+        let known = Usage {
+            five_hour: Some(WINDOW),
+            seven_day: Some(LimitWindow {
+                used_percentage: 41.2,
+                resets_at: 1792900000,
+            }),
+        };
+        let report = Usage {
+            five_hour: None,
+            seven_day: Some(LimitWindow {
+                used_percentage: 42.0,
+                resets_at: 1792900000,
+            }),
+        };
         assert_eq!(
             report.over(known, 1792399999),
-            Usage { five_hour: Some(WINDOW), seven_day: Some(LimitWindow { used_percentage: 42.0, resets_at: 1792900000 }) },
+            Usage {
+                five_hour: Some(WINDOW),
+                seven_day: Some(LimitWindow {
+                    used_percentage: 42.0,
+                    resets_at: 1792900000
+                })
+            },
         );
         assert_eq!(report.over(known, 1792400000).five_hour, None);
-        assert_eq!(Usage::default().over(known, 1792400000), Usage { five_hour: None, seven_day: known.seven_day });
+        assert_eq!(
+            Usage::default().over(known, 1792400000),
+            Usage {
+                five_hour: None,
+                seven_day: known.seven_day
+            }
+        );
     }
 
     #[test]
     fn a_usage_message_keeps_its_wire_shape() {
-        let line = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":1792400000}}"#;
+        let line =
+            r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":1792400000}}"#;
         let message: Message = serde_json::from_str(line).unwrap();
-        assert!(matches!(&message, Message::Usage { usage, account: None } if *usage == Usage { five_hour: Some(WINDOW), seven_day: None }));
+        assert!(
+            matches!(&message, Message::Usage { usage, account: None } if *usage == Usage { five_hour: Some(WINDOW), seven_day: None })
+        );
         assert_eq!(serde_json::to_string(&message).unwrap(), line);
         let line = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":1792400000},"account":"work"}"#;
         let message: Message = serde_json::from_str(line).unwrap();
