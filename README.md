@@ -247,9 +247,10 @@ can land after that turn. They still have no usage meter and no resume after a r
 
 ## Delegating to other providers
 
-A Claude or Codex session can hand a task to another signed-in account. Ask for it in the
-session. A Cursor session cannot. `cursor-agent` only loads MCP servers from
-`~/.cursor/mcp.json`, and pinned does not write that file.
+pinned wires its MCP server into Claude and Codex tabs only, so a Cursor tab cannot
+delegate unless you add pinned to Cursor's MCP config. `cursor-agent` only loads MCP
+servers from `~/.cursor/mcp.json`, and pinned does not write that file. A Claude or
+Codex session can hand a task to another signed-in account. Ask for it in the session.
 
 pinned shows the child as a card on the turn. The card shows working, done, failed, or
 cancelled, and the error text when it failed. **Cancel** is on the card while the child is
@@ -259,18 +260,20 @@ resume.
 The child sees only the task you give it. It does not see the session's history. A separate
 checkout is `isolation: "worktree"`. The default stays in the session's checkout.
 
-The default returns at once. pinned types a notice into the session when the child finishes,
-after that session's turn has ended, so the session should end its turn instead of polling.
-A wait returns the result in that call, including the summary. If the wait times out, the
-child keeps running and the notice still comes. A child's own delegate calls always wait, so
-a grandchild's result goes back to the child and is not typed into the original session.
+The default returns at once. pinned types a notice into the session when the child finishes
+and the session is live, its status is Done, no submit is waiting, and the input line is
+empty. Otherwise the card's **Send to session** types that notice now. End the turn instead
+of polling. A wait returns the result in that call, including the summary. If the wait times
+out, the child keeps running and the notice still comes. A child's own delegate calls always
+wait, so a grandchild's result goes back to the child and is not typed into the original session.
 
 A child cannot be given a wider mode than the session. A bypassed session can hand a child
 `auto`. `plan` is read-only. Omit the model on a different provider to use that provider's
 default.
 
 Codex and Cursor tabs have no transcript. Their children show in a strip under the terminal
-note, with the same state, **Cancel**, and **Open as thread**.
+note, with the same state, **Cancel**, **Open as thread**, and **Send to session** once the
+child has finished and the notice has not been typed.
 
 ## Machines
 

@@ -517,6 +517,15 @@ mod tests {
             parse_request(&effort).unwrap().target.effort.as_deref(),
             Some("low")
         );
+        let listed = json!({
+            "task": "look",
+            "target": { "driverKind": "codex", "options": [{ "id": "effort", "value": "low" }] },
+        });
+        let listed = parse_request(&listed).unwrap();
+        assert_eq!(listed.target.account.as_deref(), Some("codex"));
+        assert_eq!(listed.target.effort.as_deref(), Some("low"));
+        let named = parse_request(&json!({"task": "look", "target": {"providerInstanceId": "cursor", "driverKind": "claude"}})).unwrap();
+        assert_eq!(named.target.account.as_deref(), Some("cursor"));
         assert_eq!(
             parse_request(&json!({"task": "hello"})).unwrap(),
             Request {
@@ -976,7 +985,16 @@ grok-4.7-high - Grok 4.7  High
         assert_eq!(replay["summary"], "DONE");
         assert_eq!(replay["error"], Value::Null);
         assert_eq!(replay["workState"], "result_available");
-        assert_eq!(replay["next"], "result available: DONE");
+        assert_eq!(replay["next"], "the result is in summary");
+        let failed = new_cursor(&delegates, Mode::Async);
+        delegates.apply(&failed.id, ChildEvent::Exited { code: Some(1), stderr: "boom".into() }, None);
+        let failed = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &failed.id).unwrap();
+        assert_eq!(failed["next"], "the error is in error");
+        assert_eq!(failed["error"], "boom");
+        assert_eq!(merge_cursor_list(Some("composer-2.5 - Composer\n"), ""), "composer-2.5 - Composer\n");
+        assert_eq!(merge_cursor_list(Some("composer-2.5 - Composer\n"), "   "), "composer-2.5 - Composer\n");
+        assert_eq!(merge_cursor_list(None, ""), "");
+        assert_eq!(merge_cursor_list(Some("old\n"), "new\n"), "new\n");
         let fresh_id = match delegates.claim(spec("tab:tab-1", "tab-1", "req-8")) {
             Claim::Fresh(task) => task.id,
             Claim::Existing(id) => id,
@@ -984,7 +1002,7 @@ grok-4.7-high - Grok 4.7  High
         assert_ne!(fresh_id, first);
         let fresh = delegates.started_json(&fresh_id).unwrap();
         assert_eq!(fresh["workState"], "working");
-        assert_eq!(fresh["next"], "keep working; pinned will type a notice into this session when it finishes; then call task_status");
+        assert_eq!(fresh["next"], format!("end your turn and do not poll; pinned types a notice when the child finishes; then call task_status with this taskId \"{fresh_id}\""));
         let other = match delegates.claim(spec("tab:tab-2", "tab-2", "req-7")) {
             Claim::Fresh(task) => task.id,
             Claim::Existing(id) => id,

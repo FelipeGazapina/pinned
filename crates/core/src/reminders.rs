@@ -206,7 +206,7 @@ fn tool_definitions(reminders: bool) -> Value {
     let mut tools = vec![
         json!({
             "name": CAPABILITIES_TOOL,
-            "description": "The accounts this machine can run a child agent on, and the access this session inherits.",
+            "description": "Call this before the first delegate_task and pick providerInstanceId, model, and options from it. It lists the accounts this machine can run a child agent on, and the access this session inherits.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "search": { "type": "string", "description": "Filters accounts and models." } },
@@ -225,14 +225,30 @@ fn tool_definitions(reminders: bool) -> Value {
                         "description": "Which account and model run the child. Omit providerInstanceId to use this session's account.",
                         "properties": {
                             "providerInstanceId": { "type": "string", "description": "An account id from orchestrator_capabilities." },
+                            "driverKind": { "type": "string", "description": "claude, codex, or cursor. When providerInstanceId is omitted, this is that provider's builtin account." },
                             "model": { "type": "string", "description": "A model id that account lists. Omit it on the same provider to keep this session's model. Omit it on a different provider to use that provider's default." },
                             "options": {
-                                "type": "object",
-                                "description": "Model options. Pass effort or reasoning_effort, not both.",
-                                "properties": {
-                                    "effort": { "type": "string", "description": "Reasoning effort, one of the model's option values." },
-                                    "reasoning_effort": { "type": "string", "description": "Same as effort." },
-                                },
+                                "description": "Model options. An object with effort or reasoning_effort, or an array of {id, value}. Pass one effort, not both.",
+                                "oneOf": [
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "effort": { "type": "string", "description": "Reasoning effort, one of the model's option values." },
+                                            "reasoning_effort": { "type": "string", "description": "Same as effort." },
+                                        },
+                                    },
+                                    {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": { "type": "string" },
+                                                "value": { "type": "string" },
+                                            },
+                                            "required": ["id", "value"],
+                                        },
+                                    },
+                                ],
                             },
                         },
                     },
@@ -249,7 +265,7 @@ fn tool_definitions(reminders: bool) -> Value {
         }),
         json!({
             "name": STATUS_TOOL,
-            "description": "The child task's state. Reading a finished task marks its result delivered.",
+            "description": "The child task's state. Do not call this on a running task. Wait for the notice, or use mode \"wait\". Reading a finished task marks its result delivered. A finished body has next.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "taskId": { "type": "string" } },
@@ -395,7 +411,9 @@ fn delegate_call(params: &Value, output: &Mutex<impl Write>) -> Value {
                 latest = latest_step(&status);
                 let state = status["workState"].as_str().unwrap_or("");
                 if state != "working" && state != "waiting_for_children" {
-                    status["next"] = json!("the result is in summary");
+                    if status.get("next").and_then(Value::as_str).is_none() {
+                        status["next"] = json!("the result is in summary");
+                    }
                     return tool_result(Ok(status.to_string()));
                 }
             }
@@ -577,12 +595,14 @@ mod tests {
             "The same caller and clientRequestId returns the task already started. If that task has finished, the answer is its status, including summary and error. A new attempt uses a new id."
         );
         assert_eq!(props["isolation"]["description"], "shared runs in this checkout. worktree makes a separate checkout and runs the child there.");
-        assert_eq!(props["target"]["properties"]["options"]["properties"]["effort"]["type"], "string");
+        assert_eq!(props["target"]["properties"]["options"]["oneOf"][0]["properties"]["effort"]["type"], "string");
+        assert_eq!(props["target"]["properties"]["options"]["oneOf"][1]["type"], "array");
+        assert_eq!(props["target"]["properties"]["driverKind"]["type"], "string");
         assert_eq!(
             props["target"]["properties"]["model"]["description"],
             "A model id that account lists. Omit it on the same provider to keep this session's model. Omit it on a different provider to use that provider's default."
         );
-        assert_eq!(props["target"]["properties"]["options"]["properties"]["reasoning_effort"]["type"], "string");
+        assert_eq!(props["target"]["properties"]["options"]["oneOf"][0]["properties"]["reasoning_effort"]["type"], "string");
     }
 
     #[test]

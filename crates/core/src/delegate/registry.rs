@@ -478,8 +478,10 @@ impl Delegates {
         let bin = bin.to_path_buf();
         let path = path.map(str::to_owned);
         std::thread::spawn(move || {
-            let list = list_cursor_text(&bin, path.as_deref());
-            *cursor.lock().unwrap() = Some(Cache { at: Instant::now(), list });
+            let fresh = list_cursor_text(&bin, path.as_deref());
+            let mut cache = cursor.lock().unwrap();
+            let previous = cache.as_ref().map(|cache| cache.list.as_str());
+            *cache = Some(Cache { at: Instant::now(), list: merge_cursor_list(previous, &fresh) });
             warming.store(false, Ordering::Relaxed);
         });
     }
@@ -540,26 +542,22 @@ impl Task {
 
 fn next_line(task: &Task) -> String {
     match task.mode {
-        Mode::Async => "keep working; pinned will type a notice into this session when it finishes; then call task_status".into(),
+        Mode::Async => format!("end your turn and do not poll; pinned types a notice when the child finishes; then call task_status with this taskId \"{}\"", task.id),
         Mode::Wait => format!("call task_status with taskId \"{}\"", task.id),
     }
 }
 
 fn result_next(task: &Task) -> String {
     match task.state {
-        WorkState::Failed => format!("failed: {}", task.error.as_deref().unwrap_or("the agent failed")),
-        WorkState::Cancelled => format!("cancelled: {}", task.error.as_deref().unwrap_or("cancelled")),
-        WorkState::ResultAvailable => match task.summary.as_deref().filter(|summary| !summary.is_empty()) {
-            Some(summary) => format!("result available: {summary}"),
-            None => "result available".into(),
-        },
+        WorkState::Failed | WorkState::Cancelled => "the error is in error".into(),
+        WorkState::ResultAvailable => "the result is in summary".into(),
         WorkState::Working | WorkState::WaitingForChildren => next_line(task),
     }
 }
 
 fn status_json(task: &Task) -> Value {
     let end = task.ended.unwrap_or_else(unix_millis);
-    json!({
+    let mut body = json!({
         "taskId": task.id,
         "title": task.title,
         "providerInstanceId": task.account,
@@ -571,7 +569,11 @@ fn status_json(task: &Task) -> Value {
         "elapsedSecs": end.saturating_sub(task.started) / 1000,
         "conversationId": task.conversation,
         "cwd": task.cwd.display().to_string(),
-    })
+    });
+    if task.state.terminal() {
+        body["next"] = json!(result_next(task));
+    }
+    body
 }
 
 fn notice_line(task: &Task) -> String {
@@ -796,6 +798,15 @@ fn postorder(tasks: &[Task], id: &str, out: &mut Vec<String>) {
     }
     if tasks.iter().any(|task| task.id == id && !task.state.terminal()) {
         out.push(id.to_owned());
+    }
+}
+
+/// An empty refresh must not wipe a catalog that already has models. The caller still
+/// updates the cache time, so a miss does not refresh again on every read.
+pub(crate) fn merge_cursor_list(previous: Option<&str>, fresh: &str) -> String {
+    match previous {
+        Some(previous) if fresh.trim().is_empty() && !previous.trim().is_empty() => previous.to_owned(),
+        _ => fresh.to_owned(),
     }
 }
 

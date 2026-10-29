@@ -23,15 +23,14 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         ),
     };
     let target = &args["target"];
-    let account = optional_str(&target["providerInstanceId"]);
+    let account = account_from(target)?;
     let model = optional_str(&target["model"]);
     if let Some(model) = &model {
         if !token_ok(model) {
             return Err(format!("{model:?} is not a model id"));
         }
     }
-    let effort = optional_str(&target["options"]["effort"])
-        .or(optional_str(&target["options"]["reasoning_effort"]));
+    let effort = effort_from(&target["options"]);
     if let Some(effort) = &effort {
         if !token_ok(effort) {
             return Err(format!("{effort:?} is not an effort"));
@@ -96,6 +95,31 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         role,
         client_request_id,
     })
+}
+
+fn account_from(target: &Value) -> Result<Option<String>, String> {
+    if let Some(id) = optional_str(&target["providerInstanceId"]) {
+        return Ok(Some(id));
+    }
+    let Some(kind) = optional_str(&target["driverKind"]) else { return Ok(None) };
+    let provider = match kind.as_str() {
+        "claude" => Provider::Claude,
+        "codex" => Provider::Codex,
+        "cursor" => Provider::Cursor,
+        other => return Err(format!("driverKind must be claude, codex, or cursor, not {other:?}")),
+    };
+    Ok(Some(crate::accounts::Account::builtin(provider).id))
+}
+
+fn effort_from(options: &Value) -> Option<String> {
+    optional_str(&options["effort"])
+        .or_else(|| optional_str(&options["reasoning_effort"]))
+        .or_else(|| option_value(options, "effort"))
+        .or_else(|| option_value(options, "reasoning_effort"))
+}
+
+fn option_value(options: &Value, id: &str) -> Option<String> {
+    options.as_array()?.iter().find_map(|item| (item["id"].as_str() == Some(id)).then(|| optional_str(&item["value"])).flatten())
 }
 
 fn optional_str(value: &Value) -> Option<String> {

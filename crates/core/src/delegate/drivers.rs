@@ -165,7 +165,22 @@ pub fn codex_mcp_flags(
 }
 
 fn toml_str(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\u{0008}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{000c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Codex runs this when a turn finishes. The JSON payload arrives as the last argument.
@@ -696,7 +711,7 @@ pub fn kill(pid: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::codex_user_notify;
+    use super::{codex_notify_flag, codex_user_notify};
 
     #[test]
     fn a_top_level_notify_array_is_read_and_a_table_one_is_not() {
@@ -704,5 +719,13 @@ mod tests {
         assert_eq!(codex_user_notify(text), vec!["/bin/echo".to_owned(), "hi".to_owned()]);
         assert_eq!(codex_user_notify("model = \"gpt-5.4\"\n"), Vec::<String>::new());
         assert_eq!(codex_user_notify("notify = \"/bin/echo\"\n"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_notify_flag_escapes_a_tab_in_a_user_argument() {
+        let flag = codex_notify_flag(std::path::Path::new("/bin/pinned"), &["say\thi".into()]);
+        let text = flag.join(" ");
+        assert!(text.contains("say\\thi"), "{text}");
+        assert!(!text.contains('\t'), "{text}");
     }
 }
