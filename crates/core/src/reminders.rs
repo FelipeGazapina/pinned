@@ -168,7 +168,7 @@ pub fn serve(reminders: bool) {
 }
 
 fn tool_definitions(reminders: bool, role: Option<Role>) -> serde_json::Value {
-    let project = project_tools().into_iter().filter(|(orchestrator_only, _)| role.is_some_and(|r| r == Role::Orchestrator || !orchestrator_only)).map(|(_, tool)| tool);
+    let project = project_tools().into_iter().filter(|(orchestrator_only, _)| !orchestrator_only || role == Some(Role::Orchestrator)).map(|(_, tool)| tool);
     let mut tools = if reminders { reminder_tools() } else { vec![] };
     tools.extend(project);
     serde_json::Value::Array(tools)
@@ -195,7 +195,8 @@ fn reminder_tools() -> Vec<serde_json::Value> {
 }
 
 /// Each project tool, named as `ProjectTool` tags it, and whether only an orchestrator has it.
-fn project_tools() -> [(bool, serde_json::Value); 2] {
+/// Every session gets the memory tools; one outside a project is told it has no memory.
+fn project_tools() -> [(bool, serde_json::Value); 5] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     [
         (true, serde_json::json!({
@@ -214,6 +215,41 @@ fn project_tools() -> [(bool, serde_json::Value); 2] {
             "name": "agents",
             "description": "List your workers, each with its tab id, title, status and folder.",
             "inputSchema": no_args,
+        })),
+        (false, serde_json::json!({
+            "name": "memory_search",
+            "description": "Search this project's memory: facts saved by earlier sessions, such as the user's preferences, decisions, conventions and how the code works. Matches by words and by meaning, in any language. Returns one memory per line as [id] title: text.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What you want to know, in a few words or a question. Empty lists the latest memories." },
+                    "limit": { "type": "integer", "description": "At most this many memories; 8 when left out." },
+                },
+                "required": ["query"],
+            },
+        })),
+        (false, serde_json::json!({
+            "name": "memory_save",
+            "description": "Save a durable fact about this project for later sessions: a user preference, a decision, a convention or an architecture fact. One fact per memory. With id, replaces that memory instead. A memory that repeats an existing one is not saved; you get the existing one's id to update.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "A few words naming the subject." },
+                    "text": { "type": "string", "description": "The fact, in one to three sentences." },
+                    "kind": { "type": "string", "description": "preference, decision, convention or fact." },
+                    "id": { "type": "integer", "description": "The memory to replace." },
+                },
+                "required": ["title", "text"],
+            },
+        })),
+        (false, serde_json::json!({
+            "name": "memory_forget",
+            "description": "Remove a memory that is wrong or no longer holds, by its id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "integer", "description": "The memory's id." } },
+                "required": ["id"],
+            },
         })),
     ]
 }
@@ -263,7 +299,7 @@ fn call(params: &serde_json::Value) -> serde_json::Value {
 
 fn project_request(name: &str, args: &serde_json::Value, tab: Option<String>) -> Result<Message, String> {
     let mut tool = if args.is_object() { args.clone() } else { serde_json::json!({}) };
-    tool["tool"] = name.into();
+    tool["name"] = name.into();
     let tool: ProjectTool = serde_json::from_value(tool).map_err(|e| format!("{name}: {e}"))?;
     let tab = tab.filter(|t| !t.is_empty()).ok_or_else(|| format!("{TAB_ENV} is not set: run this inside a pinned tab"))?;
     Ok(Message::Project { tab, tool })
@@ -363,15 +399,18 @@ mod tests {
     #[test]
     fn a_session_gets_the_project_tools_its_role_has() {
         let names = |role| tool_definitions(true, role).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(names(None), ["remind_me", "list_reminders", "cancel_reminder"]);
-        assert_eq!(names(Some(Role::Worker)), ["remind_me", "list_reminders", "cancel_reminder"]);
-        assert_eq!(names(Some(Role::Orchestrator)), ["remind_me", "list_reminders", "cancel_reminder", "delegate", "agents"]);
-        let on_a_node = tool_definitions(false, Some(Role::Orchestrator)).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(on_a_node, ["delegate", "agents"]);
-        assert_eq!(permissions()[3..], ["mcp__pinned__delegate", "mcp__pinned__agents"]);
+        let memory = ["memory_search", "memory_save", "memory_forget"];
+        assert_eq!(names(None), [&["remind_me", "list_reminders", "cancel_reminder"][..], &memory].concat());
+        assert_eq!(names(Some(Role::Worker)), names(None));
+        assert_eq!(names(Some(Role::Orchestrator)), [&["remind_me", "list_reminders", "cancel_reminder", "delegate", "agents"][..], &memory].concat());
+        let on_a_node = tool_definitions(false, None).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(on_a_node, memory);
+        assert_eq!(permissions()[3..], ["mcp__pinned__delegate", "mcp__pinned__agents", "mcp__pinned__memory_search", "mcp__pinned__memory_save", "mcp__pinned__memory_forget"]);
 
         let ask = |name, args, tab: Option<&str>| project_request(name, &args, tab.map(Into::into)).map(|m| serde_json::to_string(&m).unwrap());
-        assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":"agents"}"#.into()));
+        assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"agents"}}"#.into()));
+        assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
+        assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
         assert_eq!(ask("delegate", serde_json::json!({}), Some("tab-2")), Err("delegate: missing field `task`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
     }

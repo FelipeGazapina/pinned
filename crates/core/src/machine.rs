@@ -3,7 +3,7 @@ use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Messa
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, FileServer, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, panel, plugin, process, projects, pty, pulls, reminders, scaffold, scripts, sessions, subagents, sync, thread, titles, uploads, usage, workspace};
+use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reminders, scaffold, scripts, sessions, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -41,6 +41,8 @@ pub struct Launch {
     pub plugin_dir: PathBuf,
     pub tutorial_helper: PathBuf,
     pub sock: PathBuf,
+    /// Whether project memory also searches by meaning, with a model it downloads on first use.
+    pub vector_search: bool,
 }
 
 impl Launch {
@@ -72,6 +74,7 @@ impl Launch {
             plugin_dir,
             tutorial_helper,
             sock: files.join("pinned.sock"),
+            vector_search: true,
         })
     }
 
@@ -294,6 +297,7 @@ pub struct Machine {
     quitting: AtomicBool,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     agents: Mutex<subagents::Cache>,
+    memories: Arc<memory::Memories>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -321,6 +325,9 @@ impl Machine {
         if let Some(uploads) = &uploads {
             uploads::sweep(uploads);
         }
+        let models = dir.as_ref().map(|d| d.join("models")).filter(|_| launch.vector_search);
+        let load = models.map(|models| -> memory::Loader { Arc::new(move || Ok(Arc::new(model2vec::Model2Vec::load(&model2vec::fetch(&models)?)?) as Arc<dyn memory::Embedder>)) });
+        let memories = memory::Memories::new(dir.as_ref().map(|d| d.join("memory")), load);
         let home = home();
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
@@ -349,6 +356,7 @@ impl Machine {
             quitting: AtomicBool::new(false),
             usage: Mutex::default(),
             agents: Mutex::default(),
+            memories,
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -435,6 +443,16 @@ impl Machine {
             }
             Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
             Call::OpenOrchestrator { path } => json(self.open_orchestrator(&path)?),
+            Call::MemorySearch { path, query, limit } => json(self.memories.search(&self.known_project(&path)?, &query, limit.unwrap_or(SEARCH_LIMIT))?),
+            Call::MemorySave { path, title, text, kind, id } => {
+                let draft = memory::Draft::new(&title, &text, kind.as_deref())?;
+                match self.memories.save(&self.known_project(&path)?, &draft, id)? {
+                    memory::Saved::Added(m) | memory::Saved::Updated(m) => json(m),
+                    memory::Saved::Duplicate(m) => Err(format!("Memory #{} \"{}\" already says nearly this. Change that one instead.", m.id, m.title)),
+                }
+            }
+            Call::MemoryForget { path, id } => json(self.memories.forget(&self.known_project(&path)?, id)?),
+            Call::MemoryStatus { path } => json(self.memories.status(&self.known_project(&path)?)?),
             Call::SignIn { account } => json(self.sign_in(&account)?),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from } => json(self.thread(&tab, from)?),
@@ -1147,13 +1165,53 @@ impl Machine {
     }
 
     fn project_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
-        let (role, project) = self.tab(tab, |t| role_of(&t.env))?.ok_or("only a project's orchestrator and its workers have this tool")?;
-        if !role.may(&tool) {
-            return Err("only the project's orchestrator has this tool".into());
-        }
         match tool {
-            ProjectTool::Delegate { task, title } => self.delegate(tab, &project, task, title),
-            ProjectTool::Agents => Ok(self.workers(&project)),
+            ProjectTool::Delegate { task, title } => self.delegate(tab, &self.orchestrated(tab)?, task, title),
+            ProjectTool::Agents => Ok(self.workers(&self.orchestrated(tab)?)),
+            ProjectTool::MemorySearch { query, limit } => {
+                let found = self.memories.search(&self.project_of_tab(tab)?, &query, limit.unwrap_or(SEARCH_LIMIT))?;
+                if found.is_empty() {
+                    return Ok("No memory matches that.".into());
+                }
+                Ok(found.iter().map(|m| format!("[{}] {}{}: {}", m.id, m.title, m.kind.as_ref().map_or(String::new(), |k| format!(" ({k})")), m.text)).collect::<Vec<_>>().join("\n"))
+            }
+            ProjectTool::MemorySave { title, text, kind, id } => {
+                let draft = memory::Draft::new(&title, &text, kind.as_deref())?;
+                Ok(match self.memories.save(&self.project_of_tab(tab)?, &draft, id)? {
+                    memory::Saved::Added(m) => format!("Saved #{}.", m.id),
+                    memory::Saved::Updated(m) => format!("Updated #{}.", m.id),
+                    memory::Saved::Duplicate(m) => format!("Not saved: #{} \"{}\" already says nearly this: {}\nTo change it, call memory_save with id {}.", m.id, m.title, m.text, m.id),
+                })
+            }
+            ProjectTool::MemoryForget { id } => self.memories.forget(&self.project_of_tab(tab)?, id).map(|m| format!("Forgot #{} \"{}\".", m.id, m.title)),
+        }
+    }
+
+    /// The project whose orchestrator `tab` is.
+    fn orchestrated(&self, tab: &str) -> Result<PathBuf, String> {
+        match self.tab(tab, |t| role_of(&t.env))? {
+            Some((Role::Orchestrator, project)) => Ok(project),
+            _ => Err("only the project's orchestrator has this tool".into()),
+        }
+    }
+
+    /// The project `path` names, if it is one of this machine's.
+    fn known_project(&self, path: &str) -> Result<PathBuf, String> {
+        let path = canonical(path);
+        if self.projects.lock().unwrap().iter().any(|p| p.path == path) {
+            Ok(path)
+        } else {
+            Err(format!("{} is not a project on this machine", path.display()))
+        }
+    }
+
+    /// The project a tab works in; a worktree's is the repository's. A scratch thread has none.
+    fn project_of_tab(&self, tab: &str) -> Result<PathBuf, String> {
+        let project = history::project_of(&self.tab(tab, |t| t.cwd.clone())?);
+        if self.projects.lock().unwrap().iter().any(|p| p.path == project) {
+            Ok(project)
+        } else {
+            Err("This thread is not in a project, so it has no memory. Memory belongs to a project folder opened in pinned.".into())
         }
     }
 
@@ -1758,6 +1816,9 @@ fn canonical(path: &str) -> PathBuf {
     dunce::canonicalize(path).unwrap_or_else(|_| path.into())
 }
 
+/// How many memories a search returns when not told.
+const SEARCH_LIMIT: usize = 8;
+
 /// Most of a worker's last message an orchestrator is sent; the rest stays in the worker's thread.
 const REPORT_CHARS: usize = 4000;
 
@@ -1960,6 +2021,7 @@ mod tests {
             plugin_dir: "p".into(),
             tutorial_helper: "t".into(),
             sock: "k".into(),
+            vector_search: false,
         }
     }
 
@@ -3032,11 +3094,11 @@ mod tests {
         let path = project.display().to_string();
         let orchestrator = m.open_orchestrator(&path).unwrap();
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
-        let tool = |tab: &str, tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}",{tool}}}"#));
-        let delegate = r#""tool":"delegate","task":"Add a --json flag to the CLI.","title":"JSON output""#;
+        let tool = |tab: &str, tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":{{{tool}}}}}"#));
+        let delegate = r#""name":"delegate","task":"Add a --json flag to the CLI.","title":"JSON output""#;
         let worker_of = |reply: &str| reply.strip_prefix("Started worker ").and_then(|r| r.split(' ').next()).unwrap().to_owned();
 
-        assert_eq!(tool(&plain, delegate), Err("only a project's orchestrator and its workers have this tool".into()));
+        assert_eq!(tool(&plain, delegate), Err("only the project's orchestrator has this tool".into()));
         let reply = tool(&orchestrator, delegate).unwrap();
         let worker = worker_of(&reply);
         let args = started(&claude, &worker);
@@ -3048,16 +3110,67 @@ mod tests {
         let view = m.view(&worker).unwrap();
         assert_eq!((view.role, view.title.as_deref(), view.running), (Some(Role::Worker), Some("JSON output"), true));
 
-        let second = worker_of(&tool(&orchestrator, r#""tool":"delegate","task":"- Fix the README typo.""#).unwrap());
+        let second = worker_of(&tool(&orchestrator, r#""name":"delegate","task":"- Fix the README typo.""#).unwrap());
         let args = started(&claude, &second);
         assert_ne!(args[0], tree.display().to_string(), "two workers share a checkout");
         assert_eq!(args[7..9], ["\n- Fix the README typo.", "--append-system-prompt"]);
 
         assert_eq!(tool(&worker, delegate), Err("only the project's orchestrator has this tool".into()));
         assert_eq!(
-            tool(&orchestrator, r#""tool":"agents""#),
+            tool(&orchestrator, r#""name":"agents""#),
             Ok(format!("{worker}: JSON output (starting) in {}\n{second}: untitled (starting) in {}", tree.display(), args[0]))
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn any_thread_in_a_project_keeps_its_memory_and_a_scratch_thread_has_none() {
+        let dir = temp("memory-tools");
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let sock = dir.join("pinned.sock");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+        let plain = m.open_tab(Some(path.clone()), false).unwrap();
+        let worktree = m.add_tab(PathBuf::from(&path).join(".claude/worktrees/pinned-1"), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let scratch = m.open_tab(Some(m.scratch.display().to_string()), false).unwrap();
+        let tool = |tab: &str, tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":{{{tool}}}}}"#));
+
+        assert_eq!(tool(&plain, r#""name":"memory_save","title":"Package manager","text":"Use pnpm, not npm.","kind":"convention""#), Ok("Saved #1.".into()));
+        assert_eq!(tool(&worktree, r#""name":"memory_save","title":"Deploys","text":"The hub deploys from railway-hub.""#), Ok("Saved #2.".into()));
+        assert_eq!(
+            tool(&plain, r#""name":"memory_save","title":"package manager","text":"pnpm only""#),
+            Ok("Not saved: #1 \"Package manager\" already says nearly this: Use pnpm, not npm.\nTo change it, call memory_save with id 1.".into())
+        );
+        assert_eq!(tool(&worktree, r#""name":"memory_search","query":"which package manager?""#), Ok("[1] Package manager (convention): Use pnpm, not npm.".into()));
+        assert_eq!(tool(&plain, r#""name":"memory_save","title":"Deploys","text":"The hub deploys from version tags.","id":2"#), Ok("Updated #2.".into()));
+        assert_eq!(tool(&plain, r#""name":"memory_search","query":"""#), Ok("[2] Deploys: The hub deploys from version tags.\n[1] Package manager (convention): Use pnpm, not npm.".into()));
+        assert_eq!(tool(&plain, r#""name":"memory_forget","id":2"#), Ok("Forgot #2 \"Deploys\".".into()));
+        assert_eq!(tool(&plain, r#""name":"memory_search","query":"deploys""#), Ok("No memory matches that.".into()));
+        assert_eq!(tool(&plain, r#""name":"memory_save","title":" ","text":"x""#), Err("a memory needs a title and a text".into()));
+        let none = Err("This thread is not in a project, so it has no memory. Memory belongs to a project folder opened in pinned.".into());
+        assert_eq!(tool(&scratch, r#""name":"memory_search","query":"pnpm""#), none);
+        assert_eq!(tool(&scratch, r#""name":"memory_save","title":"Scratch","text":"x""#), none);
+        assert_eq!(tool(&plain, r#""name":"agents""#), Err("only the project's orchestrator has this tool".into()));
+
+        let call = |c: Call| m.call(c);
+        assert_eq!(
+            call(Call::MemorySave { path: path.clone(), title: "Tests".into(), text: "Run cargo test.".into(), kind: None, id: None }).map(|v| (v["id"].clone(), v["title"].clone())),
+            Ok((json!(3), json!("Tests")))
+        );
+        assert_eq!(
+            call(Call::MemorySave { path: path.clone(), title: "TESTS".into(), text: "Run them.".into(), kind: None, id: None }),
+            Err("Memory #3 \"Tests\" already says nearly this. Change that one instead.".into())
+        );
+        let found = call(Call::MemorySearch { path: path.clone(), query: "".into(), limit: Some(1) }).unwrap();
+        assert_eq!(found.as_array().unwrap().iter().map(|m| m["title"].clone()).collect::<Vec<_>>(), [json!("Tests")]);
+        assert_eq!(call(Call::MemoryStatus { path: path.clone() }), Ok(json!({ "count": 2, "vectors": "off" })));
+        assert_eq!(call(Call::MemoryForget { path: path.clone(), id: 3 }).map(|v| v["text"].clone()), Ok(json!("Run cargo test.")));
+        assert_eq!(call(Call::MemoryForget { path: path.clone(), id: 3 }), Err("no memory #3".into()));
+        let elsewhere = dir.join("elsewhere").display().to_string();
+        assert_eq!(call(Call::MemoryStatus { path: elsewhere.clone() }), Err(format!("{elsewhere} is not a project on this machine")));
         let _ = std::fs::remove_dir_all(dir);
     }
 
