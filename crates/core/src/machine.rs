@@ -1,5 +1,5 @@
 use crate::accounts::{self, Account, Accounts, Provider};
-use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
+use crate::agent::{role_of, session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, FileServer, Shells};
@@ -259,6 +259,7 @@ impl Tab {
             updated: self.updated,
             session: self.claude_session.clone(),
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
+            role: role_of(&self.env).map(|(role, _)| role),
         }
     }
 }

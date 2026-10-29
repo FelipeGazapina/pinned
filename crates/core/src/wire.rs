@@ -2,7 +2,7 @@
 //! Every enum is internally tagged and unknown fields are ignored, so versions can drift.
 
 use crate::accounts::{self, AccountId, Provider};
-use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
+use crate::agent::{AgentEvent, AgentStatus, Role, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
 use crate::branches::GitStep;
 use crate::scripts::Script;
@@ -103,6 +103,9 @@ pub struct TabView {
     /// What the conversation's work came to so far, once its transcript holds any of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<ThreadStats>,
+    /// The tab is its project's orchestrator, or a worker the orchestrator started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -851,6 +854,7 @@ mod tests {
             updated: Some(1792400000),
             session: Some("s1".into()),
             stats: Some(ThreadStats { active_ms: Some(4_320_000), cost_usd: Some(3.42) }),
+            role: None,
         }
     }
 
