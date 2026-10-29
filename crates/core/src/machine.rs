@@ -940,7 +940,7 @@ impl Machine {
             t.account = to;
             t.resume_at = None;
             if let Some(saved) = t.saved() {
-                (t.launch, t.resume_at) = saved.reopen(unix_now());
+                (t.launch, t.resume_at) = saved.reopen(unix_now(), t.account.provider);
             }
         })?;
         self.start_claude(tab, cols, rows)
@@ -1025,7 +1025,7 @@ impl Machine {
         self.tab(tab, |t| {
             t.model = Some(model.to_owned());
             if let Some(saved) = t.saved() {
-                (t.launch, t.resume_at) = saved.reopen(unix_now());
+                (t.launch, t.resume_at) = saved.reopen(unix_now(), t.account.provider);
             }
         })?;
         self.start_claude(tab, cols, rows)
@@ -1036,7 +1036,7 @@ impl Machine {
     pub fn restart_claude(&self, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
         self.tab(tab, |t| {
             if let Some(saved) = t.saved() {
-                (t.launch, t.resume_at) = saved.reopen(unix_now());
+                (t.launch, t.resume_at) = saved.reopen(unix_now(), t.account.provider);
             }
         })?;
         self.start_claude(tab, cols, rows)
@@ -1375,7 +1375,7 @@ impl Machine {
             .filter_map(|s| {
                 // The transcript is in its account's home: with that account gone, nothing can resume it.
                 let account = self.account_for(Some(&s.account), &s.cwd).ok()?;
-                let (launch, resume_at) = s.reopen(now);
+                let (launch, resume_at) = s.reopen(now, account.provider);
                 let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session));
                 let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model) = (s.interrupted, resume_at, s.held, s.model));
                 Some(id)
@@ -3169,6 +3169,27 @@ mod tests {
         let tabs = m.restore_tabs();
         assert_eq!(m.view(&tabs[0]).unwrap().account, "claude");
         assert_eq!(first_line(&m, &tabs[0]), "claude|--settings s --plugin-dir p --resume s1|||claude\r\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_codex_session_reopens_with_resume_not_claudes_flag() {
+        let root = temp("codex-resume");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let m = accounts_machine(&root);
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        std::fs::write(
+            root.join("config/sessions.json"),
+            format!(r#"[{{"cwd": "{}", "session": "thr-9", "env": [], "bypass": false, "interrupted": false, "resume_at": null, "account": "side"}}]"#, app.display()),
+        )
+        .unwrap();
+        let tabs = m.restore_tabs();
+        assert_eq!(tabs.len(), 1);
+        let line = first_line(&m, &tabs[0]);
+        assert!(line.contains(" resume thr-9"), "codex was not resumed with `resume`: {line}");
+        assert!(!line.contains("--resume"), "codex was passed claude's --resume: {line}");
         let _ = std::fs::remove_dir_all(root);
     }
 

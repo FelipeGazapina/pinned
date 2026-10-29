@@ -37,8 +37,8 @@ impl Saved {
     /// The `claude` arguments that reopen this session, and the usage limit still to wait for.
     /// An interrupted one picks its work back up at once, unless a limit still blocks it or it was
     /// held at one.
-    pub fn reopen(&self, now: u64) -> (Vec<String>, Option<u64>) {
-        let mut args = vec!["--resume".to_owned(), self.session.clone()];
+    pub fn reopen(&self, now: u64, provider: crate::accounts::Provider) -> (Vec<String>, Option<u64>) {
+        let mut args = crate::delegate::resume_args(provider, &self.session);
         let waiting = self.resume_at.filter(|&at| self.interrupted && at > now);
         if self.interrupted && waiting.is_none() && !(self.held && self.resume_at.is_some()) {
             args.push(CONTINUE_PROMPT.to_owned());
@@ -83,12 +83,16 @@ mod tests {
         let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, held: false, account: "claude".into(), model: None };
         let resumed = vec!["--resume".to_owned(), "s1".to_owned()];
         let continued = [resumed.clone(), vec![CONTINUE_PROMPT.to_owned()]].concat();
-        assert_eq!(saved(false, None).reopen(100), (resumed.clone(), None));
-        assert_eq!(saved(true, None).reopen(100), (continued.clone(), None));
-        assert_eq!(saved(true, Some(100)).reopen(100), (continued, None));
-        assert_eq!(saved(true, Some(101)).reopen(100), (resumed.clone(), Some(101)));
+        let claude = crate::accounts::Provider::Claude;
+        assert_eq!(saved(false, None).reopen(100, claude), (resumed.clone(), None));
+        assert_eq!(saved(true, None).reopen(100, claude), (continued.clone(), None));
+        assert_eq!(saved(true, Some(100)).reopen(100, claude), (continued, None));
+        assert_eq!(saved(true, Some(101)).reopen(100, claude), (resumed.clone(), Some(101)));
         let held = Saved { held: true, ..saved(true, Some(100)) };
-        assert_eq!(held.reopen(100), (resumed, None), "a session held at its limit waits for a prompt");
+        assert_eq!(held.reopen(100, claude), (resumed, None), "a session held at its limit waits for a prompt");
+        let codex = crate::accounts::Provider::Codex;
+        assert_eq!(saved(false, None).reopen(100, codex), (vec!["resume".to_owned(), "s1".to_owned()], None));
+        assert_eq!(saved(true, None).reopen(100, codex), (vec!["resume".to_owned(), "s1".to_owned(), CONTINUE_PROMPT.to_owned()], None));
     }
 
     #[test]
