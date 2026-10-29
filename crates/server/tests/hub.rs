@@ -412,7 +412,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     client.wait("the saved connector", |f| f["type"] == "settings" && f["settings"]["connectors"][0]["id"] == id);
     let account_id = uuid::Uuid::parse_str(&account.id).unwrap();
     let run = |subject: Subject| {
-        Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![], account: None, runs_on: RunsOn::Machine(mac_mini.clone()) })
+        Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![], account: None, runs_on: RunsOn::Machine(mac_mini.clone()), input: String::new() })
     };
     let open = |work| hub.runtime.block_on(hub.hub().open(account_id, work));
     let connector_tabs = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.connector.as_deref() == Some(&id) && t.running).count();
@@ -469,6 +469,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
         mentioned: vec![],
         account: Some("work".into()),
         runs_on: RunsOn::Machine(mac_mini.clone()),
+        input: String::new(),
     };
     assert_eq!(open(Work::Run(work)), Ok(()), "mac-mini has no account work and refuses, so vps runs it");
     let on_work = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.account == "work").count();
@@ -500,12 +501,12 @@ fn an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only() {
         "id": "c1", "name": "Bugs", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
         "folder": "/repo", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "",
     }] });
-    assert_eq!(link.call_hub(HubCall::Import { store: local, linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None }), Ok(json!(true)));
+    assert_eq!(link.call_hub(HubCall::Import { store: local, linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None, vercel_key: None }), Ok(json!(true)));
     let mut client = Client::connect(&url, &token);
     client.wait("hello", |f| f["type"] == "hello");
     assert_eq!(client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["name"], "Bugs");
 
-    let other = HubCall::Import { store: json!({ "connectors": [] }), linear_key: None, slack_key: Some("xoxb-2".into()), github_key: None };
+    let other = HubCall::Import { store: json!({ "connectors": [] }), linear_key: None, slack_key: Some("xoxb-2".into()), github_key: None, vercel_key: None };
     assert_eq!(link.call_hub(other), Ok(json!(false)), "a later machine can't replace the account's connectors");
     assert_eq!(client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["name"], "Bugs");
     assert_eq!(link.call_hub(HubCall::GetSettings), Err("a machine may only forward a workflow session's callbacks".into()));
@@ -971,7 +972,7 @@ impl BoxAccount {
 
     fn run(&self, subject: Subject, runs_on: RunsOn) -> Work {
         let args = vec!["--name".into(), "ENG-7 Fix login".into()];
-        Work::Run(Run { cwd: self.repo.clone(), repo: None, args, connector: self.connector.clone(), subject, mentioned: vec![], account: None, runs_on })
+        Work::Run(Run { cwd: self.repo.clone(), repo: None, args, connector: self.connector.clone(), subject, mentioned: vec![], account: None, runs_on, input: String::new() })
     }
 
     fn box_run(&self, subject: Subject) -> Work {

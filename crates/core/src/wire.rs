@@ -611,6 +611,11 @@ pub enum HubCall {
     DisconnectGithub,
     /// `Vec<github::Repo>`, most recently pushed first.
     GithubRepos,
+    /// `vercel::Account`, once the gateway took the key.
+    ConnectVercel { key: String },
+    DisconnectVercel,
+    /// `Vec<vercel::Model>`: chat models tagged `structured-output`, and every decision model. The list needs no key.
+    VercelModels,
     /// `upstash::Account`, once Upstash took the key. Only a signed-in app runs boxes, so this has no Tauri command.
     ConnectUpstash { key: String, claude_token: String },
     /// Deletes the account's boxes before it forgets the keys.
@@ -649,6 +654,8 @@ pub enum HubCall {
         slack_key: Option<String>,
         #[serde(default)]
         github_key: Option<String>,
+        #[serde(default)]
+        vercel_key: Option<String>,
     },
     Stage {
         connector: String,
@@ -1013,9 +1020,12 @@ mod tests {
             json!({ "cmd": "linear_take", "connector": "c2", "channel": "C1", "thread": "1.2", "issue": "ENG-7" }),
         );
         round_trip(
-            HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None },
-            json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": "lin_api_1", "slack_key": null, "github_key": null }),
+            HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None, vercel_key: None },
+            json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": "lin_api_1", "slack_key": null, "github_key": null, "vercel_key": null }),
         );
+        round_trip(HubCall::ConnectVercel { key: "vck_1".into() }, json!({ "cmd": "connect_vercel", "key": "vck_1" }));
+        round_trip(HubCall::DisconnectVercel, json!({ "cmd": "disconnect_vercel" }));
+        round_trip(HubCall::VercelModels, json!({ "cmd": "vercel_models" }));
     }
 
     #[test]
@@ -1061,8 +1071,8 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, upstash: None, connectors: vec![], checked: None } },
-            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "upstash": null, "connectors": [], "checked": null } }),
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, connectors: vec![], checked: None } },
+            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
     }
 

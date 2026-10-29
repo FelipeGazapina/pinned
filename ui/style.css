@@ -186,6 +186,7 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .logo.slack { background: #4a154b; }
 .logo.github { background: #24292f; }
 .logo.upstash { background: #00c98d; }
+.logo.vercel { background: #000; }
 .badge.box { margin-left: 6px; }
 .logo.claude { background: #d97757; }
 .logo.codex { background: #10a37f; }
@@ -207,6 +208,7 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 [data-tone="slack"] { --tone: #611f69; }
 [data-tone="claude"] { --tone: #d97757; }
 [data-tone="proof"] { --tone: #2ead33; }
+[data-tone="vercel"] { --tone: #000; }
 #settings .icon { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; flex: none;
   background: var(--tone, rgb(var(--s-ink-rgb, 255 255 255) / 0.078)); color: #fff; font-size: 14px; }
 

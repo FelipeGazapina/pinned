@@ -52,7 +52,7 @@ impl Keys {
     }
 }
 
-fn hint(secret: &str) -> String {
+pub(crate) fn hint(secret: &str) -> String {
     let tail: String = secret.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
     format!("…{tail}")
 }

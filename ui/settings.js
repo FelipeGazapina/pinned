@@ -43,6 +43,7 @@ const settingsPage = document.getElementById("settings-page");
 const LINEAR_KEYS = "https://linear.app/settings/account/security";
 const GITHUB_TOKENS = "https://github.com/settings/tokens/new?scopes=repo&description=pinned";
 const UPSTASH_CONSOLE = "https://console.upstash.com/";
+const VERCEL_KEYS = "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys";
 /** The Run on choice that gives each issue or thread its own Upstash Box, as the backend's `RunsOn::FreshBox` stores it. */
 const BOX = "upstash-box";
 const BOX_SIZES = { small: "Small", medium: "Medium", large: "Large" };
@@ -63,7 +64,7 @@ function settingsSection(section) {
 const settingsSectionOf = (name) => settingsSections.find((s) => s.page === name);
 let page = load("settings-page") || "general";
 /** Names from the connected Linear workspace and Slack channels, for the connector form's suggestions. */
-let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [] };
+let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [], models: [] };
 
 const settingsOpen = () => document.body.dataset.page === "settings";
 
@@ -121,6 +122,13 @@ function showPage(name) {
       fillList("github-repos", suggestions.repos);
     }, console.warn);
   }
+  if (name === "connectors" && !suggestions.models.length) {
+    connectorCall("vercel_models").then((models) => {
+      suggestions.models = models;
+      fillVercelModels();
+      if (view.name === "edit" && document.getElementById("save-connector")) refresh();
+    }, console.warn);
+  }
   settingsPage.scrollTop = 0;
   return section.show();
 }
@@ -128,6 +136,20 @@ function showPage(name) {
 function fillList(id, names) {
   const list = document.getElementById(id);
   if (list) list.innerHTML = options(names);
+}
+
+function vercelModelOptions(models) {
+  return models
+    .map((model) => {
+      const label = model.kind === "decision" ? `${model.id} · decision` : model.id;
+      return `<option value="${esc(model.id)}">${esc(label)}</option>`;
+    })
+    .join("");
+}
+
+function fillVercelModels() {
+  const list = document.getElementById("vercel-models");
+  if (list) list.innerHTML = vercelModelOptions(suggestions.models);
 }
 
 const esc = (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -165,6 +187,7 @@ function integrationsHtml() {
     </div>
     ${slackCardHtml()}
     ${githubCardHtml()}
+    ${vercelCardHtml()}
     ${upstashCardHtml()}`;
 }
 
@@ -188,6 +211,26 @@ function upstashCardHtml() {
   return `<div class="card">
       <div class="card-head"><span class="logo upstash">▢</span><div><b>Upstash Box</b><div class="hint">A fresh cloud sandbox for each issue or thread a workflow picks up</div></div>
         <span class="badge" data-on="${!!connected}">${connected ? "Connected" : "Not connected"}</span></div>
+      ${body}
+    </div>`;
+}
+
+function vercelCardHtml() {
+  const account = settings.vercel;
+  const body = account
+    ? `<p class="connected">Key <b>${esc(account.key_hint)}</b></p>
+       <div class="actions"><button class="secondary" data-action="disconnect-vercel">Disconnect</button></div>`
+    : `<ol class="steps">
+         <li>Create an AI Gateway API key in your Vercel dashboard.
+           <button class="secondary" data-action="open-vercel-keys">Open Vercel ↗</button></li>
+         <li>Paste the key here.
+           <div class="row"><input id="vercel-key" type="password" placeholder="vck_…" autocomplete="off">
+           <button class="primary" data-action="connect-vercel">Connect</button></div></li>
+       </ol>
+       <p class="error" id="vercel-error"></p>`;
+  return `<div class="card">
+      <div class="card-head"><span class="logo vercel">▲</span><div><b>Vercel AI Gateway</b><div class="hint">Models that read and classify what a workflow picks up</div></div>
+        <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
 }
@@ -359,6 +402,79 @@ const STEPS = {
   },
   coding: moveStep("coding", "Move the issue when Claude starts changing code"),
   review: moveStep("review", "Move the issue when the pull request is open"),
+  ask: {
+    tone: "vercel",
+    icon: "▲",
+    app: "Vercel",
+    title: "Ask a model",
+    ghost: "Ask a model before the session starts",
+    optional: true,
+    on: (c) => !!c.ask,
+    add: (c) =>
+      (c.ask = {
+        model: "typesafe-ai/jev",
+        instructions: "Classify the request below for an engineering team. Answer from the text only.",
+        questions: [
+          { name: "kind", ask: "What does it ask for?", choices: ["bug", "question", "critique", "enhancement"], stopOn: [] },
+          { name: "agent", ask: "Can a coding agent handle it on its own, without a person deciding first?", choices: ["yes", "no"], stopOn: ["no"] },
+        ],
+      }),
+    remove: (c) => (c.ask = null),
+    summary: (c) => {
+      const ask = c.ask;
+      if (!ask) return "";
+      const questions = ask.questions ?? [];
+      const n = questions.length;
+      const stops = questions
+        .filter((q) => (q.stopOn ?? []).some((s) => s.trim()))
+        .map((q) => `stops on ${q.name.trim() || "?"} = ${(q.stopOn ?? []).map((s) => s.trim()).filter(Boolean).join(", ")}`);
+      return [`${ask.model.trim() || "no model"} · ${n} question${n === 1 ? "" : "s"}`, ...stops].join(" · ");
+    },
+    issues: (c) => {
+      const ask = c.ask;
+      if (!ask) return [];
+      const questions = ask.questions ?? [];
+      const model = ask.model.trim();
+      const decision = suggestions.models.some((m) => m.id === model && m.kind === "decision");
+      const bare = decision && questions.some((q) => !(q.choices ?? []).some((choice) => choice.trim()));
+      const stray = questions.flatMap((q) =>
+        (q.stopOn ?? [])
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .filter((s) => !(q.choices ?? []).some((choice) => choice.trim().toLowerCase() === s.toLowerCase()))
+          .map((s) => `“${s}” is not a choice for ${q.name.trim() || "a question"}.`),
+      );
+      return [
+        !settings.vercel && "Connect Vercel AI Gateway under Connectors.",
+        !ask.model.trim() && "Name the model.",
+        questions.some((q) => !q.name.trim()) && "Name each question.",
+        questions.some((q) => !q.ask.trim()) && "Write what each question asks.",
+        bare && `${model} is a decision model: give every question choices.`,
+        ...stray,
+      ].filter(Boolean);
+    },
+    fields: (c) => {
+      const ask = c.ask;
+      const rows = (ask?.questions ?? [])
+        .map(
+          (q, i) => `<div class="grid">
+          <label>Name ${input(`ask.questions.${i}.name`, q.name, 'placeholder="kind" spellcheck="false"')}</label>
+          <label>Question ${input(`ask.questions.${i}.ask`, q.ask, 'placeholder="What does it ask for?"')}</label>
+        </div>
+        <div class="grid">
+          <label>Choices <input data-bind="ask.questions.${i}.choices" data-list="" value="${esc((q.choices ?? []).join(", "))}" placeholder="bug, question"></label>
+          <label>Stop on <input data-bind="ask.questions.${i}.stopOn" data-list="" value="${esc((q.stopOn ?? []).join(", "))}" placeholder="none"></label>
+        </div>
+        <div class="actions start"><button class="secondary" data-action="remove-question" data-index="${i}">Remove</button></div>`,
+        )
+        .join("");
+      return `<label>Model ${input("ask.model", ask?.model ?? "", 'list="vercel-models" placeholder="typesafe-ai/jev" spellcheck="false"')}</label>
+        <label>Instructions
+          <textarea data-bind="ask.instructions" rows="4">${esc(ask?.instructions ?? "")}</textarea></label>
+        ${rows}
+        <div class="actions start"><button class="secondary" data-action="add-question">Add question</button></div>`;
+    },
+  },
   proof: {
     tone: "proof",
     icon: "▶",
@@ -377,10 +493,10 @@ const STEPS = {
 /** A connector's steps in run order, each with the event that leads into it. */
 function flowOf(c) {
   if (!isSlack(c)) {
-    return [["linear-trigger"], ["picked", "new issue"], ["agent", ""], ["coding", "starts changing code"], ["review", "pull request opened"], ["proof", ""]];
+    return [["linear-trigger"], ["ask", "new issue"], ["picked", ""], ["agent", ""], ["coding", "starts changing code"], ["review", "pull request opened"], ["proof", ""]];
   }
   const fixing = c.fix === "off" ? [] : [["coding", "starts the fix"], ["review", "pull request opened"], ["proof", ""]];
-  return [["slack-trigger"], ["agent", "new thread"], ["reply", ""], ["bug", ""], ...fixing];
+  return [["slack-trigger"], ["ask", "new thread"], ["agent", ""], ["reply", ""], ["bug", ""], ...fixing];
 }
 
 const isOn = (c, id) => !STEPS[id].optional || STEPS[id].on(c);
@@ -506,9 +622,10 @@ function sentence(c) {
   const as = connectorAccountName(c) ? ` with the ${connectorAccountName(c)} account` : "";
   const folder = isBox(c) ? folderName(c.repo.replace(/\.git$/, "")) : folderName(c.folder);
   const where = (folder ? ` in ${folder}${machine}` : machine) + as;
-  if (!isSlack(c)) return `When an issue gets the label “${c.trigger.label}”, Claude picks it up${where}.`;
+  const who = c.ask ? `${c.ask.model.trim() || "a model"} classifies it, then Claude` : "Claude";
+  if (!isSlack(c)) return `When an issue gets the label “${c.trigger.label}”, ${who} picks it up${where}.`;
   const then = c.fix === "off" ? "answers in the thread" : "answers in the thread and fixes bugs";
-  return `When the bot is mentioned in #${c.trigger.channel.replace(/^#/, "")}, Claude ${then}${where}.`;
+  return `When the bot is mentioned in #${c.trigger.channel.replace(/^#/, "")}, ${who} ${then}${where}.`;
 }
 
 const TEMPLATES = [
@@ -538,6 +655,7 @@ function editorHtml() {
     <datalist id="models">${options(MODELS)}</datalist>
     <datalist id="folders">${options(suggestions.folders)}</datalist>
     <datalist id="github-repos">${options(suggestions.repos)}</datalist>
+    <datalist id="vercel-models">${vercelModelOptions(suggestions.models)}</datalist>
     <div class="editor-bar">
       <button class="secondary" data-action="close-editor" title="Back to workflows">←</button>
       ${input("name", c.name, 'class="title" placeholder="Workflow name"')}
@@ -637,7 +755,8 @@ function checkedText() {
 /** The draft with its typed names trimmed, as the backend matches them. */
 function tidy(c) {
   const t = (s) => (s ?? "").trim();
-  return {
+  const list = (values) => (values ?? []).map(t).filter(Boolean);
+  const out = {
     ...c,
     name: t(c.name),
     folder: t(c.folder),
@@ -649,6 +768,14 @@ function tidy(c) {
     trigger: isSlack(c) ? { kind: c.trigger.kind, channel: t(c.trigger.channel) } : { kind: c.trigger.kind, label: t(c.trigger.label) },
     columns: Object.fromEntries(Object.entries(c.columns).map(([stage, column]) => [stage, t(column)])),
   };
+  if (c.ask) {
+    out.ask = {
+      model: t(c.ask.model),
+      instructions: t(c.ask.instructions),
+      questions: (c.ask.questions ?? []).map((q) => ({ name: t(q.name), ask: t(q.ask), choices: list(q.choices), stopOn: list(q.stopOn) })),
+    };
+  } else delete out.ask;
+  return out;
 }
 
 const DEFAULT_NAMES = { "linear-label": "Resolve labeled Linear issues", "slack-mention": "Triage Slack mentions" };
@@ -777,6 +904,30 @@ const actions = {
     suggestions.repos = [];
     showPage("integrations");
   },
+  "open-vercel-keys": () => (TAURI ? invoke("open_url", { url: VERCEL_KEYS }) : window.open(VERCEL_KEYS, "_blank", "noopener")),
+  async "connect-vercel"() {
+    const key = document.getElementById("vercel-key").value;
+    if (!key.trim()) return;
+    try {
+      settings.vercel = await connectorCall("connect_vercel", { key });
+      showPage("integrations");
+    } catch (e) {
+      document.getElementById("vercel-error").textContent = e;
+    }
+  },
+  async "disconnect-vercel"() {
+    await connectorCall("disconnect_vercel");
+    settings.vercel = null;
+    showPage("integrations");
+  },
+  "add-question"() {
+    view.draft.ask.questions.push({ name: "", ask: "", choices: [], stopOn: [] });
+    redraw();
+  },
+  "remove-question"(button) {
+    view.draft.ask.questions.splice(Number(button.dataset.index), 1);
+    redraw();
+  },
   async "disconnect-slack"() {
     await connectorCall("disconnect_slack");
     settings.slack = null;
@@ -878,7 +1029,8 @@ settingsPage.addEventListener("keydown", (e) => {
 settingsPage.addEventListener("input", (e) => {
   const path = e.target.dataset.bind;
   if (!path || path in RESHAPES) return;
-  bind(path, e.target.type === "checkbox" ? e.target.checked : e.target.value);
+  const listed = "list" in e.target.dataset;
+  bind(path, e.target.type === "checkbox" ? e.target.checked : listed ? e.target.value.split(",").map((s) => s.trim()) : e.target.value);
   refresh();
 });
 
@@ -912,6 +1064,7 @@ settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show:
   { title: "Linear", terms: ["api key issues labels connector"] },
   { title: "Slack", terms: ["bot token channels mentions connector"] },
   { title: "GitHub", terms: ["token repositories clone connector"] },
+  { title: "Vercel AI Gateway", terms: ["api key models classify connector"] },
   { title: "Upstash Box", terms: ["sandbox cloud box claude setup-token subscription connector"] },
 ] });
 settingsSection({ page: "projects", label: "Projects", icon: "folder", show: () => showProjectsPage(), search: [{ title: "Projects", terms: ["history turns changed files"] }] });
