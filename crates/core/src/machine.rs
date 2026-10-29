@@ -19,6 +19,8 @@ pub const OUTPUT_KEEP: usize = 256 * 1024;
 /// Slack after a usage limit's reset time before the session is told to continue.
 const LIMIT_MARGIN_SECS: u64 = 5;
 const UNWATCHED: (u16, u16) = (120, 32);
+/// A parent with no turn hooks is idle once its pty has been this quiet.
+const QUIET: std::time::Duration = std::time::Duration::from_secs(5);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, std::time::Duration) = (25, std::time::Duration::from_millis(200));
 
@@ -149,18 +151,24 @@ struct Screen {
     viewers: Vec<(ViewerId, Sink)>,
     /// Counts starts, so a replaced session's last bytes can't land on its successor's screen.
     session: u64,
+    /// When the pty last wrote. A parent with no turn status is idle once this is QUIET old.
+    last_output: Option<std::time::Instant>,
 }
 
 impl Screen {
     fn restart(&mut self) -> u64 {
         self.kept.clear();
         self.session += 1;
+        self.last_output = Some(std::time::Instant::now());
         self.session
     }
 
     fn push(&mut self, session: u64, bytes: &[u8]) {
         if session != self.session {
             return;
+        }
+        if !bytes.is_empty() {
+            self.last_output = Some(std::time::Instant::now());
         }
         self.kept.extend(bytes);
         let excess = self.kept.len().saturating_sub(OUTPUT_KEEP);
@@ -296,6 +304,8 @@ pub struct Machine {
     pr_watches: crate::prwatch::Watches,
     clones: PathBuf,
     quitting: AtomicBool,
+    /// Wakes parents whose pty has gone quiet, once, for the life of the machine.
+    notice_loop: AtomicBool,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
@@ -352,6 +362,7 @@ impl Machine {
             pr_watches: Default::default(),
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
+            notice_loop: AtomicBool::new(false),
             usage: Mutex::default(),
             agents: Mutex::default(),
             delegates: crate::delegate::Delegates::default(),
@@ -1059,8 +1070,9 @@ impl Machine {
 
     /// Ends the tab's session and forgets it. Answers whether no tab is left.
     pub fn close_tab(&self, tab: &str) -> bool {
+        let path = self.launch.path_env.clone();
         for id in self.delegates.running_under(tab) {
-            let _ = self.delegates.cancel(&id, "the parent tab closed");
+            let _ = self.delegates.cancel_tree(&id, "the parent tab closed", path.as_deref());
         }
         let last = {
             let mut tabs = self.tabs.lock().unwrap();
@@ -1222,8 +1234,7 @@ impl Machine {
                     self.pr_watches.update(&tab, &url, crate::prwatch::snapshot(&view));
                 }
             }
-            let free = self.tab(&tab, |t| t.session.is_some() && matches!(t.status, None | Some(AgentStatus::Done))).unwrap_or(false);
-            if free {
+            if self.parent_idle(&tab) {
                 if let Some(text) = self.pr_watches.take_wake(&tab) {
                     let _ = self.type_prompt(&tab, &text);
                 }
@@ -1306,9 +1317,9 @@ impl Machine {
                     Ok(String::new())
                 }
                 Message::Delegate { tab, task, tool, request } => machine.start_delegate(tab, task, tool, *request),
-                Message::TaskStatus { id, .. } => machine.delegates.status(&id).map(|value| value.to_string()),
-                Message::TaskCancel { id, reason, .. } => machine.delegates.cancel(&id, &reason).map(|value| value.to_string()),
-                Message::Capabilities { tab, search, .. } => machine.capabilities(tab.as_deref(), &search),
+                Message::TaskStatus { tab, task, id } => machine.task_status(tab, task, &id),
+                Message::TaskCancel { tab, task, id, reason } => machine.task_cancel(tab, task, &id, &reason),
+                Message::Capabilities { tab, task, search } => machine.capabilities(tab.as_deref(), task.as_deref(), &search),
                 message => other(message),
             }
         })
@@ -1317,27 +1328,39 @@ impl Machine {
     /// Ends every session as the machine shuts down, keeping them saved for the next launch.
     pub fn quit(&self) {
         self.quitting.store(true, Ordering::SeqCst);
+        let path = self.launch.path_env.clone();
         for id in self.delegates.running() {
-            let _ = self.delegates.cancel(&id, "pinned is shutting down");
+            let _ = self.delegates.cancel_tree(&id, "pinned is shutting down", path.as_deref());
         }
         self.tabs.lock().unwrap().clear();
         self.device_hub.stop();
     }
 
+    fn caller(tab: Option<String>, task: Option<String>) -> crate::delegate::Caller {
+        crate::delegate::Caller { tab: tab.filter(|id| !id.is_empty()), task: task.filter(|id| !id.is_empty()) }
+    }
+
+    fn task_status(&self, tab: Option<String>, task: Option<String>, id: &str) -> Result<String, String> {
+        self.delegates.status(&Self::caller(tab, task), id).map(|value| value.to_string())
+    }
+
+    fn task_cancel(&self, tab: Option<String>, task: Option<String>, id: &str, reason: &str) -> Result<String, String> {
+        self.delegates.cancel(&Self::caller(tab, task), id, reason, self.launch.path_env.as_deref()).map(|value| value.to_string())
+    }
+
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
-        use crate::delegate::{driver_args, spawn, tighten, Access, ChildSpec, Isolation, NewTask, Parent, SpawnSpec};
-        let tab = tab.filter(|id| !id.is_empty());
-        let parent_task = parent_task.filter(|id| !id.is_empty());
-        let parent = if let Some(tab) = tab.clone() {
+        use crate::delegate::{driver_args, resolve_access, spawn, Access, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
+        let caller = Self::caller(tab, parent_task);
+        let parent = if let Some(tab) = caller.tab.clone() {
             Parent::Tab(tab)
-        } else if let Some(task) = parent_task.clone() {
+        } else if let Some(task) = caller.task.clone() {
             Parent::Task(task)
         } else {
             Parent::Task("detached".into())
         };
-        let (account_id, inherited_model, mut cwd, ceiling) = if let Some(tab) = tab.as_deref() {
+        let (account_id, inherited_model, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
             self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.cwd.clone(), Access::derive(t.bypass, false)))?
-        } else if let Some(task) = parent_task.as_deref().and_then(|id| self.delegates.lineage(id)) {
+        } else if let Some(task) = caller.task.as_deref().and_then(|id| self.delegates.lineage(id)) {
             (Some(task.account), task.model, task.cwd, task.access)
         } else {
             (None, None, self.default_cwd.clone(), Access::Auto)
@@ -1356,7 +1379,7 @@ impl Machine {
         if !self.status(&account).signed_in {
             return Err(format!("account {} is not signed in on this machine", account.id));
         }
-        let access = tighten(ceiling, if request.plan { Access::ReadOnly } else { ceiling });
+        let access = resolve_access(ceiling, &request)?;
         let mut model = request.target.model.clone().filter(|model| !model.is_empty()).or(inherited_model);
         let mut effort = request.target.effort.clone().filter(|effort| !effort.is_empty());
         if account.provider == Provider::Cursor {
@@ -1367,10 +1390,7 @@ impl Machine {
             effort = None;
         }
         let isolated = request.isolation == Isolation::Worktree;
-        if isolated {
-            cwd = branches::new_worktree(&cwd, self.launch.path_env.as_deref())?;
-        }
-        let task = self.delegates.begin(NewTask {
+        let task = match self.delegates.claim(NewTask {
             parent,
             tool,
             title: request.title.clone(),
@@ -1380,7 +1400,26 @@ impl Machine {
             cwd: cwd.clone(),
             mode: request.mode,
             access,
-        });
+            isolated: false,
+            caller_key: caller.key(),
+            client_request_id: request.client_request_id.clone(),
+            role: request.role.clone(),
+        }) {
+            Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
+            Claim::Fresh(task) => *task,
+        };
+        if isolated {
+            match branches::new_worktree(&cwd, self.launch.path_env.as_deref()) {
+                Ok(dir) => {
+                    cwd = dir;
+                    self.delegates.place(&task.id, cwd.clone(), true);
+                }
+                Err(error) => {
+                    self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
+                    return Err(error);
+                }
+            }
+        }
         let argv = driver_args(
             account.provider,
             &SpawnSpec {
@@ -1405,27 +1444,37 @@ impl Machine {
             ChildSpec { bin: &bin, argv: &argv, cwd: &cwd, env: &env, path: self.launch.path_env.as_deref(), strip: &INHERITED_SESSION_ENV },
             move |event| {
                 let Some(machine) = me.upgrade() else { return };
-                if let Some(tab) = machine.delegates.apply(&id, event) {
+                if let Some(tab) = machine.delegates.apply(&id, event, path_env.as_deref()) {
                     machine.maybe_deliver(&tab);
                 }
             },
         ) {
             Ok(pid) => pid,
             Err(error) => {
-                self.delegates.fail(&task.id, error.clone());
-                if isolated {
-                    branches::drop_worktree(&cwd, path_env.as_deref());
-                }
+                self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
                 return Err(error);
             }
         };
         self.delegates.remember_pid(&task.id, pid);
+        self.arm_notices();
         self.delegates.started_json(&task.id).map(|value| value.to_string())
     }
 
+    /// A hooked parent takes a notice only when its turn is Done. A parent with no turn status takes one once the pty has been quiet for `QUIET`.
+    fn parent_idle(&self, tab: &str) -> bool {
+        let Ok((live, status, screen)) = self.tab(tab, |t| (t.session.is_some(), t.status, t.screen.clone())) else { return false };
+        if !live {
+            return false;
+        }
+        match status {
+            Some(AgentStatus::Done) => true,
+            None => screen.lock().unwrap().last_output.is_some_and(|at| at.elapsed() >= QUIET),
+            Some(AgentStatus::Working | AgentStatus::NeedsInput | AgentStatus::Failed) => false,
+        }
+    }
+
     fn maybe_deliver(&self, tab: &str) {
-        let idle = self.tab(tab, |t| t.session.is_some() && t.status != Some(AgentStatus::Working)).unwrap_or(false);
-        if !idle {
+        if !self.parent_idle(tab) {
             return;
         }
         let Some((text, ids)) = self.delegates.pending_notice(tab) else { return };
@@ -1434,10 +1483,31 @@ impl Machine {
         }
     }
 
-    fn capabilities(&self, tab: Option<&str>, search: &str) -> Result<String, String> {
+    fn arm_notices(&self) {
+        if self.notice_loop.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let me = self.me.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let Some(machine) = me.upgrade() else { return };
+            if machine.quitting.load(Ordering::Relaxed) {
+                return;
+            }
+            let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
+            for tab in tabs {
+                machine.maybe_deliver(&tab);
+            }
+        });
+    }
+
+    fn capabilities(&self, tab: Option<&str>, task: Option<&str>, search: &str) -> Result<String, String> {
         use crate::delegate::{capabilities, codex_constraints, cursor_models, provider_models, Access, Inherited, ListedAccount};
-        let (account, model, access) = if let Some(tab) = tab {
+        let (account, model, access) = if let Some(tab) = tab.filter(|tab| !tab.is_empty()) {
             self.tab(tab, |t| (t.account.clone(), t.model.clone(), Access::derive(t.bypass, false))).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
+        } else if let Some(lineage) = task.filter(|task| !task.is_empty()).and_then(|id| self.delegates.lineage(id)) {
+            let account = self.accounts.get(&lineage.account).unwrap_or_else(|| Account::builtin(lineage.provider));
+            (account, lineage.model, lineage.access)
         } else {
             (Account::builtin(Provider::Claude), None, Access::Auto)
         };
@@ -1469,7 +1539,7 @@ impl Machine {
     }
 
     fn open_delegated(&self, tab: &str, task: &str) -> Result<TabId, String> {
-        let info = self.delegates.open(task)?;
+        let info = self.delegates.open(&crate::delegate::Caller { tab: Some(tab.to_owned()), task: None }, task)?;
         let account = self.accounts.get(&info.account).ok_or_else(|| format!("no account {} on this machine", info.account))?;
         let bypass = self.tab(tab, |t| t.bypass).unwrap_or(false);
         let launch = crate::delegate::resume_args(info.provider, &info.conversation);
@@ -1488,9 +1558,7 @@ impl Machine {
             if new_session || turn_ended {
                 self.refresh_stats(tab, turn_ended);
             }
-            if event.status != AgentStatus::Working {
-                self.maybe_deliver(tab);
-            }
+            self.maybe_deliver(tab);
             self.continue_when_limit_lifts(tab);
             self.emit_tabs();
         }
@@ -2973,5 +3041,100 @@ mod tests {
         assert_eq!(repo_name("https://github.com/acme/app/"), Some("app"));
         assert_eq!(repo_name("git@host:app.git"), Some("app"));
         assert_eq!(repo_name("https://github.com/acme/.."), None);
+    }
+
+    #[test]
+    fn capabilities_for_a_task_use_that_task_not_builtin_claude() {
+        use crate::delegate::{Access, Mode, NewTask, Parent};
+        let m = machine();
+        let task = m.delegates.begin(NewTask {
+            parent: Parent::Tab("tab-9".into()),
+            tool: None,
+            title: "Look".into(),
+            account: "codex".into(),
+            provider: Provider::Codex,
+            model: Some("gpt-5.4".into()),
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Full,
+            isolated: false,
+            caller_key: "tab:tab-9".into(),
+            client_request_id: None,
+            role: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&m.capabilities(None, Some(&task.id), "").unwrap()).unwrap();
+        assert_eq!(value["inheritedProviderInstanceId"], "codex");
+        assert_eq!(value["inheritedModel"], "gpt-5.4");
+        assert_eq!(value["runtimeMode"], "full-access");
+        let missing: serde_json::Value = serde_json::from_str(&m.capabilities(None, None, "").unwrap()).unwrap();
+        assert_eq!(missing["inheritedProviderInstanceId"], "claude");
+        assert_eq!(missing["runtimeMode"], "auto");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_notice_is_typed_only_when_the_parent_is_done_or_has_been_quiet() {
+        use crate::delegate::{ChildEvent, Mode, NewTask, Parent};
+        let file = std::env::temp_dir().join(format!("pinned-notice-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let m = machine();
+        let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+
+        let task = m.delegates.begin(NewTask {
+            parent: Parent::Tab(tab.clone()),
+            tool: None,
+            title: "Ping".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: Some("composer-2.5".into()),
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{tab}"),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.apply(&task.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        m.maybe_deliver(&tab);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let early = std::fs::read(&file).unwrap_or_default();
+        assert!(!String::from_utf8_lossy(&early).contains("[pinned]"), "the notice was typed before the pty had been quiet for 5s");
+
+        let screen = m.tab(&tab, |t| t.screen.clone()).unwrap();
+        screen.lock().unwrap().last_output = Some(std::time::Instant::now() - std::time::Duration::from_secs(6));
+        m.maybe_deliver(&tab);
+        let needle = format!("[pinned] Delegated task {} \"Ping\"", task.id);
+        wait_for("the quiet notice", || std::fs::read(&file).is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(&needle)));
+
+        let second = m.delegates.begin(NewTask {
+            parent: Parent::Tab(tab.clone()),
+            tool: None,
+            title: "Second".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: Some("composer-2.5".into()),
+            cwd: std::env::temp_dir(),
+            mode: Mode::Wait,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{tab}"),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.apply(&second.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        m.tab(&tab, |t| t.status = Some(AgentStatus::NeedsInput)).unwrap();
+        screen.lock().unwrap().last_output = Some(std::time::Instant::now() - std::time::Duration::from_secs(6));
+        m.maybe_deliver(&tab);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!std::fs::read(&file).is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(&second.id)), "NeedsInput accepted the notice");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.maybe_deliver(&tab);
+        let needle = format!("[pinned] Delegated task {} \"Second\"", second.id);
+        wait_for("the done notice", || std::fs::read(&file).is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(&needle)));
+        let _ = std::fs::remove_file(file);
     }
 }

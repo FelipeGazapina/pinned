@@ -1,12 +1,5 @@
 use super::*;
 
-pub(crate) fn last_text(steps: &[Item]) -> Option<String> {
-    steps.iter().rev().find_map(|item| match item {
-        Item::Text { text, .. } => Some(text.clone()),
-        _ => None,
-    })
-}
-
 /// T3's `delegate_task` arguments, accepted under those names.
 pub fn parse_request(args: &Value) -> Result<Request, String> {
     let task = args["task"]
@@ -65,7 +58,28 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
             .filter(|ms| *ms > 0)
             .ok_or("timeoutMs must be a number of milliseconds above 0")?,
     };
-    let plan = args["interactionMode"].as_str() == Some("plan");
+    let interaction = match args["interactionMode"].as_str() {
+        None | Some("inherit") => Interaction::Inherit,
+        Some("default") => Interaction::Default,
+        Some("plan") => Interaction::Plan,
+        Some(other) => {
+            return Err(format!(
+                "interactionMode must be inherit, default, or plan, not {other:?}"
+            ))
+        }
+    };
+    let runtime = match args["runtimeMode"].as_str() {
+        None => None,
+        Some("auto") => Some(RuntimeMode::Auto),
+        Some("full-access") => Some(RuntimeMode::FullAccess),
+        Some(other) => {
+            return Err(format!(
+                "runtimeMode must be auto or full-access, not {other:?}"
+            ))
+        }
+    };
+    let role = optional_str(&args["role"]);
+    let client_request_id = optional_str(&args["clientRequestId"]);
     Ok(Request {
         task,
         title,
@@ -77,7 +91,10 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         isolation,
         mode,
         timeout_ms,
-        plan,
+        interaction,
+        runtime,
+        role,
+        client_request_id,
     })
 }
 

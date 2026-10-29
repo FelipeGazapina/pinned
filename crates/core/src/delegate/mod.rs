@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -47,6 +47,42 @@ impl Access {
             Access::ReadOnly => "read-only",
         }
     }
+
+    /// The `runtimeMode` string. Plan is read-only, which is narrower than `auto` and is not a mode of its own.
+    pub fn runtime_mode(self) -> &'static str {
+        match self {
+            Access::Full => "full-access",
+            Access::Auto | Access::ReadOnly => "auto",
+        }
+    }
+}
+
+/// `asked` cannot be wider than `ceiling`. A plan request is already read-only before this.
+pub fn resolve_access(ceiling: Access, request: &Request) -> Result<Access, String> {
+    if request.interaction == Interaction::Plan {
+        return Ok(Access::ReadOnly);
+    }
+    let asked = match request.runtime {
+        None => ceiling,
+        Some(RuntimeMode::Auto) => Access::Auto,
+        Some(RuntimeMode::FullAccess) => Access::Full,
+    };
+    if tighten(ceiling, asked) != asked {
+        return Err(format!(
+            "runtimeMode \"{}\" is wider than this session's \"{}\"",
+            match asked {
+                Access::Full => "full-access",
+                Access::Auto => "auto",
+                Access::ReadOnly => "read-only",
+            },
+            match ceiling {
+                Access::Full => "full-access",
+                Access::Auto => "auto",
+                Access::ReadOnly => "read-only",
+            }
+        ));
+    }
+    Ok(asked)
 }
 
 /// `asked` cannot be wider than `ceiling`. A plan request is already read-only before this.
@@ -72,6 +108,24 @@ pub enum Mode {
     Wait,
 }
 
+/// How wide a child may act. Omitted means the parent's own mode.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeMode {
+    FullAccess,
+    Auto,
+}
+
+/// `plan` is read-only. `inherit` and `default` leave the parent's mode alone.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Interaction {
+    #[default]
+    Inherit,
+    Default,
+    Plan,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct Target {
     #[serde(default)]
@@ -91,12 +145,21 @@ pub struct Request {
     pub isolation: Isolation,
     pub mode: Mode,
     pub timeout_ms: u64,
-    pub plan: bool,
+    #[serde(default)]
+    pub interaction: Interaction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkState {
     Working,
+    /// The process exited and a descendant is still working.
+    WaitingForChildren,
     ResultAvailable,
     Failed,
     Cancelled,
@@ -106,15 +169,43 @@ impl WorkState {
     pub fn as_str(self) -> &'static str {
         match self {
             WorkState::Working => "working",
-            WorkState::ResultAvailable => "result-available",
+            WorkState::WaitingForChildren => "waiting_for_children",
+            WorkState::ResultAvailable => "result_available",
             WorkState::Failed => "failed",
             WorkState::Cancelled => "cancelled",
         }
     }
 
-    fn terminal(self) -> bool {
-        self != WorkState::Working
+    pub fn terminal(self) -> bool {
+        matches!(self, WorkState::ResultAvailable | WorkState::Failed | WorkState::Cancelled)
     }
+}
+
+/// Who is calling. A tab session sends `PINNED_TAB`. A child sends `PINNED_TASK`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Caller {
+    pub tab: Option<String>,
+    pub task: Option<String>,
+}
+
+impl Caller {
+    pub fn key(&self) -> String {
+        if let Some(tab) = self.tab.as_deref().filter(|tab| !tab.is_empty()) {
+            return format!("tab:{tab}");
+        }
+        if let Some(task) = self.task.as_deref().filter(|task| !task.is_empty()) {
+            return format!("task:{task}");
+        }
+        "none".into()
+    }
+}
+
+/// The process ended, and the task is waiting on descendants before this becomes its state.
+#[derive(Clone, Debug)]
+pub struct HeldExit {
+    pub summary: Option<String>,
+    pub error: Option<String>,
+    pub failed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,8 +233,17 @@ pub struct Task {
     pub error: Option<String>,
     pub conversation: Option<String>,
     pub steps: Vec<Item>,
+    /// The full latest assistant message, kept after the step ring drops it.
+    pub assistant: Option<String>,
     pub mode: Mode,
     pub delivered: bool,
+    /// This task's folder is a worktree `new_worktree` made.
+    pub isolated: bool,
+    /// `tab:<id>` or `task:<id>` of the session that started it. Idempotency and ownership use it.
+    pub caller_key: String,
+    pub client_request_id: Option<String>,
+    pub role: Option<String>,
+    pub held: Option<HeldExit>,
 }
 
 #[derive(Clone, Debug)]
@@ -390,7 +490,10 @@ mod tests {
                 isolation: Isolation::Worktree,
                 mode: Mode::Wait,
                 timeout_ms: 5000,
-                plan: true,
+                interaction: Interaction::Plan,
+                runtime: None,
+                role: None,
+                client_request_id: None,
             }
         );
         let effort = json!({"task": "x", "target": {"options": {"effort": "low"}}});
@@ -411,7 +514,10 @@ mod tests {
                 isolation: Isolation::Shared,
                 mode: Mode::Async,
                 timeout_ms: DEFAULT_TIMEOUT_MS,
-                plan: false,
+                interaction: Interaction::Inherit,
+                runtime: None,
+                role: None,
+                client_request_id: None,
             }
         );
         assert_eq!(parse_request(&json!({})).unwrap_err(), "task is required");
@@ -505,34 +611,46 @@ grok-4.7-high - Grok 4.7  High
             access: Access::Auto,
         };
         let value = capabilities(&parent, &accounts, None);
-        assert_eq!(value["providerInstanceId"], "claude");
-        assert_eq!(value["model"], "claude-haiku-5-5");
-        assert_eq!(value["access"], "auto");
-        assert_eq!(value["accounts"][0]["driverKind"], "claude");
-        assert_eq!(value["accounts"][0]["models"][3]["id"], "claude-haiku-5-5");
+        assert_eq!(value["inheritedProviderInstanceId"], "claude");
+        assert_eq!(value["inheritedModel"], "claude-haiku-5-5");
+        assert_eq!(value["runtimeMode"], "auto");
+        assert_eq!(value["features"]["appOwnedSubagents"], true);
+        assert_eq!(value["features"]["asyncPolling"], false);
+        assert_eq!(value["features"]["cancellation"], true);
+        assert_eq!(value["providers"][0]["driverKind"], "claude");
+        assert_eq!(value["providers"][0]["models"][3]["id"], "claude-haiku-5-5");
         assert_eq!(
-            value["accounts"][0]["models"][3]["options"][0]["values"],
+            value["providers"][0]["models"][3]["options"][0]["values"],
             json!(["low", "medium", "high", "xhigh", "max"])
         );
-        assert_eq!(value["accounts"][0]["canRunChildTask"], true);
-        assert_eq!(value["accounts"][1]["canRunChildTask"], false);
+        assert_eq!(value["providers"][0]["models"][3]["options"][0]["default"], Value::Null);
+        assert_eq!(value["providers"][0]["runtimeModes"], json!(["auto", "full-access"]));
+        assert_eq!(value["providers"][0]["canRunChildTask"], true);
+        assert_eq!(value["providers"][0]["canRunCrossProviderChildTask"], true);
+        assert_eq!(value["providers"][1]["canRunChildTask"], false);
+        assert_eq!(value["providers"][1]["canRunCrossProviderChildTask"], false);
         assert_eq!(
-            value["accounts"][1]["constraints"][0],
+            value["providers"][1]["constraints"][0],
             "Any model id works. Pass it as target.model."
         );
-        assert_eq!(value["accounts"][1]["models"], json!([]));
+        assert_eq!(value["providers"][1]["models"], json!([]));
         assert_eq!(
-            value["accounts"][2]["models"][0],
-            json!({"id": "grok-4.7", "label": "Grok 4.7", "options": [{"id": "effort", "values": ["high"]}]})
+            value["providers"][2]["models"][0],
+            json!({"id": "grok-4.7", "label": "Grok 4.7", "options": [{"id": "effort", "values": ["high"], "default": null}]})
         );
+        assert_eq!(value["providers"][2]["canRunCrossProviderChildTask"], false);
         assert_eq!(
-            value["accounts"][2]["constraints"][0],
+            value["providers"][2]["constraints"][0],
             "Cursor supports only its built-in account."
         );
+        assert_eq!(
+            value["providers"][2]["constraints"][1],
+            "Cursor sessions can't delegate further."
+        );
         let found = capabilities(&parent, &accounts, Some("grok"));
-        assert_eq!(found["accounts"].as_array().unwrap().len(), 1);
-        assert_eq!(found["accounts"][0]["providerInstanceId"], "cursor");
-        assert_eq!(found["accounts"][0]["models"][0]["id"], "grok-4.7");
+        assert_eq!(found["providers"].as_array().unwrap().len(), 1);
+        assert_eq!(found["providers"][0]["providerInstanceId"], "cursor");
+        assert_eq!(found["providers"][0]["models"][0]["id"], "grok-4.7");
     }
 
     #[test]
@@ -628,6 +746,10 @@ grok-4.7-high - Grok 4.7  High
             cwd: PathBuf::from("/tmp"),
             mode,
             access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
         })
     }
 
@@ -667,13 +789,13 @@ grok-4.7-high - Grok 4.7  High
                 strip: &[],
             },
             move |event| {
-                sink.apply(&id, event);
+                sink.apply(&id, event, None);
             },
         )
         .unwrap();
         let start = Instant::now();
         let status = loop {
-            let status = shared.status(&task.id).unwrap();
+            let status = shared.status(&Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
             if status["workState"] != "working" {
                 break status;
             }
@@ -684,14 +806,14 @@ grok-4.7-high - Grok 4.7  High
             std::thread::sleep(Duration::from_millis(20));
         };
         assert_eq!(status["summary"], "DONE");
-        assert_eq!(status["workState"], "result-available");
+        assert_eq!(status["workState"], "result_available");
         assert_eq!(
             status["conversationId"],
             "9fa2e973-3c1c-4a8e-9ab7-9790584c944c"
         );
-        let kept = shared.cancel(&task.id, "too late").unwrap();
+        let kept = shared.cancel(&Caller { tab: Some("tab-1".into()), task: None }, &task.id, "too late", None).unwrap();
         assert_eq!(kept["summary"], "DONE");
-        assert_eq!(kept["workState"], "result-available");
+        assert_eq!(kept["workState"], "result_available");
 
         let sleeper = script(
             &dir,
@@ -711,12 +833,12 @@ grok-4.7-high - Grok 4.7  High
                 strip: &[],
             },
             move |event| {
-                sink.apply(&run_id, event);
+                sink.apply(&run_id, event, None);
             },
         )
         .unwrap();
         shared.remember_pid(&running.id, pid);
-        let cancelled = shared.cancel(&running.id, "the parent asked").unwrap();
+        let cancelled = shared.cancel(&Caller { tab: Some("tab-1".into()), task: None }, &running.id, "the parent asked", None).unwrap();
         assert_eq!(cancelled["workState"], "cancelled");
         let start = Instant::now();
         while unsafe { libc::kill(pid as i32, 0) } == 0 {
@@ -727,6 +849,242 @@ grok-4.7-high - Grok 4.7  High
             std::thread::sleep(Duration::from_millis(20));
         }
         let _ = pid;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_registry_does_not_reuse_task_ids() {
+        let first = new_cursor(&Delegates::default(), Mode::Async).id;
+        let second = new_cursor(&Delegates::default(), Mode::Async).id;
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 13);
+        assert_eq!(&first[..5], "task-");
+        assert!(first[5..].bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(&second[..5], "task-");
+        assert_ne!(first, "task-1");
+        assert_ne!(second, "task-1");
+    }
+
+    #[test]
+    fn the_same_caller_and_client_request_id_returns_the_existing_task() {
+        let delegates = Delegates::default();
+        let spec = |key: &str, tab: &str| NewTask {
+            parent: Parent::Tab(tab.into()),
+            tool: None,
+            title: "Ping".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: PathBuf::from("/tmp"),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: key.into(),
+            client_request_id: Some("req-7".into()),
+            role: None,
+        };
+        let first = match delegates.claim(spec("tab:tab-1", "tab-1")) {
+            Claim::Fresh(task) => task.id,
+            Claim::Existing(id) => id,
+        };
+        let again = match delegates.claim(spec("tab:tab-1", "tab-1")) {
+            Claim::Existing(id) => id,
+            Claim::Fresh(task) => task.id,
+        };
+        assert_eq!(again, first);
+        let other = match delegates.claim(spec("tab:tab-2", "tab-2")) {
+            Claim::Fresh(task) => task.id,
+            Claim::Existing(id) => id,
+        };
+        assert_ne!(other, first);
+    }
+
+    #[test]
+    fn another_tab_cannot_read_or_cancel_a_task_or_consume_its_notice() {
+        let delegates = Delegates::default();
+        let task = new_cursor(&delegates, Mode::Wait);
+        delegates.apply(&task.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        let (text, ids) = delegates.pending_notice("tab-1").unwrap();
+        assert_eq!(ids, vec![task.id.clone()]);
+        assert_eq!(
+            text,
+            format!("[pinned] Delegated task {} \"Ping\" (Cursor · composer-2.5) finished: result available. Call task_status with taskId \"{}\".", task.id, task.id)
+        );
+        let other = Caller { tab: Some("tab-2".into()), task: None };
+        assert_eq!(delegates.status(&other, &task.id).unwrap_err(), format!("task {} belongs to another session", task.id));
+        assert_eq!(delegates.cancel(&other, &task.id, "no", None).unwrap_err(), format!("task {} belongs to another session", task.id));
+        assert_eq!(delegates.pending_notice("tab-1").unwrap().1, vec![task.id.clone()]);
+        let status = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
+        assert_eq!(status["summary"], "DONE");
+        assert_eq!(status["workState"], "result_available");
+        assert!(delegates.pending_notice("tab-1").is_none());
+    }
+
+    #[test]
+    fn a_full_assistant_message_survives_eight_later_steps() {
+        let delegates = Delegates::default();
+        let task = delegates.begin(NewTask {
+            parent: Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Look".into(),
+            account: "codex".into(),
+            provider: Provider::Codex,
+            model: Some("gpt-5.4".into()),
+            cwd: PathBuf::from("/tmp"),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        let answer = "A".repeat(500);
+        delegates.apply(
+            &task.id,
+            ChildEvent::Line(json!({"type":"item.completed","item":{"id":"m","type":"agent_message","text":answer}}).to_string()),
+            None,
+        );
+        for n in 0..8 {
+            delegates.apply(
+                &task.id,
+                ChildEvent::Line(json!({"type":"item.completed","item":{"id":format!("c{n}"),"type":"command_execution","command":"cargo test","aggregated_output":"ok\n","exit_code":0,"status":"completed"}}).to_string()),
+                None,
+            );
+        }
+        delegates.apply(&task.id, ChildEvent::Exited { code: Some(0), stderr: String::new() }, None);
+        let status = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
+        assert_eq!(status["summary"], answer);
+        assert_eq!(status["workState"], "result_available");
+        assert_eq!(status["error"], Value::Null);
+    }
+
+    #[test]
+    fn a_parent_waits_for_a_working_child_then_keeps_its_own_summary() {
+        let delegates = Delegates::default();
+        let parent = new_cursor(&delegates, Mode::Async);
+        let child = delegates.begin(NewTask {
+            parent: Parent::Task(parent.id.clone()),
+            tool: None,
+            title: "Child".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: Some("composer-2.5".into()),
+            cwd: PathBuf::from("/tmp"),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("task:{}", parent.id),
+            client_request_id: None,
+            role: None,
+        });
+        delegates.apply(&parent.id, ChildEvent::Line(json!({"type":"result","result":"PARENT"}).to_string()), None);
+        let waiting = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &parent.id).unwrap();
+        assert_eq!(waiting["workState"], "waiting_for_children");
+        assert_eq!(waiting["summary"], Value::Null);
+        delegates.apply(&child.id, ChildEvent::Line(json!({"type":"result","result":"CHILD"}).to_string()), None);
+        let done = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &parent.id).unwrap();
+        assert_eq!(done["workState"], "result_available");
+        assert_eq!(done["summary"], "PARENT");
+        let child_status = delegates.status(&Caller { tab: None, task: Some(parent.id.clone()) }, &child.id).unwrap();
+        assert_eq!(child_status["summary"], "CHILD");
+        assert_eq!(child_status["workState"], "result_available");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cancel_stops_a_working_descendant_and_drops_a_worktree_without_a_conversation() {
+        let root = std::env::temp_dir().join(format!("pinned-delegate-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            assert!(crate::process::command("git").arg("-C").arg(&repo).args(args).status().unwrap().success(), "{args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let kept = crate::branches::new_worktree(&repo, None).unwrap();
+        let dropped = crate::branches::new_worktree(&repo, None).unwrap();
+        let delegates = std::sync::Arc::new(Delegates::default());
+        let parent = delegates.begin(NewTask {
+            parent: Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Parent".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: kept.clone(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: true,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        delegates.apply(&parent.id, ChildEvent::Line(json!({"type":"system","subtype":"init","session_id":"keep-me"}).to_string()), None);
+        let child = delegates.begin(NewTask {
+            parent: Parent::Task(parent.id.clone()),
+            tool: None,
+            title: "Child".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: dropped.clone(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: true,
+            caller_key: format!("task:{}", parent.id),
+            client_request_id: None,
+            role: None,
+        });
+        let sleeper = script(&root, "sleep-child", "sleep 30");
+        let child_id = child.id.clone();
+        let sink = delegates.clone();
+        let pid = spawn(
+            ChildSpec { bin: &sleeper, argv: &[], cwd: &root, env: &[], path: None, strip: &[] },
+            move |event| { sink.apply(&child_id, event, None); },
+        ).unwrap();
+        delegates.remember_pid(&child.id, pid);
+        let cancelled = delegates.cancel(&Caller { tab: Some("tab-1".into()), task: None }, &parent.id, "stop the tree", None).unwrap();
+        assert_eq!(cancelled["workState"], "cancelled");
+        let child_status = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &child.id).unwrap();
+        assert_eq!(child_status["workState"], "cancelled");
+        let start = Instant::now();
+        while unsafe { libc::kill(pid as i32, 0) } == 0 {
+            assert!(start.elapsed() < Duration::from_secs(2), "cancel left descendant pid {pid} running");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(kept.is_dir(), "a worktree with a conversation was removed");
+        assert!(!dropped.exists(), "a worktree with no conversation survived cancel");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_wider_runtime_mode_is_rejected_and_a_bypassed_parent_can_hand_over_auto() {
+        let mut request = parse_request(&json!({"task": "look"})).unwrap();
+        request.runtime = Some(RuntimeMode::FullAccess);
+        assert_eq!(
+            resolve_access(Access::Auto, &request).unwrap_err(),
+            "runtimeMode \"full-access\" is wider than this session's \"auto\""
+        );
+        request.runtime = Some(RuntimeMode::Auto);
+        assert_eq!(resolve_access(Access::Full, &request).unwrap(), Access::Auto);
+        request.runtime = None;
+        request.interaction = Interaction::Plan;
+        assert_eq!(resolve_access(Access::Full, &request).unwrap(), Access::ReadOnly);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_cursor_catalog_returns_before_a_slow_cli() {
+        let dir = std::env::temp_dir().join(format!("pinned-delegate-catalog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = script(&dir, "cursor-agent", "sleep 30");
+        let delegates = Delegates::default();
+        let start = Instant::now();
+        assert_eq!(delegates.cursor_catalog(&bin, None), "");
+        assert!(start.elapsed() < Duration::from_secs(1), "the catalog lookup blocked the caller");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

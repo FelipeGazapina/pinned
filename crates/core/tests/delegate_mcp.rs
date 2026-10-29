@@ -130,7 +130,8 @@ esac"#,
         }),
     );
     let body: Value = serde_json::from_str(&tool_text(&started)).unwrap();
-    assert_eq!(body["workState"], "result-available");
+    assert_eq!(body["workState"], "result_available");
+    assert_eq!(body["summary"], "DONE");
     assert_eq!(body["providerInstanceId"], "cursor");
     let id = body["taskId"].as_str().unwrap();
 

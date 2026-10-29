@@ -160,10 +160,15 @@ pub fn capabilities(parent: &Inherited, accounts: &[ListedAccount], search: Opti
         .filter_map(|account| account_json(account, needle.as_deref()))
         .collect::<Vec<_>>();
     json!({
-        "providerInstanceId": parent.account,
-        "model": parent.model,
-        "access": parent.access.as_str(),
-        "accounts": accounts,
+        "inheritedProviderInstanceId": parent.account,
+        "inheritedModel": parent.model,
+        "runtimeMode": parent.access.runtime_mode(),
+        "providers": accounts,
+        "features": {
+            "appOwnedSubagents": true,
+            "asyncPolling": false,
+            "cancellation": true,
+        },
     })
 }
 
@@ -191,12 +196,15 @@ fn account_json(account: &ListedAccount, needle: Option<&str>) -> Option<Value> 
     if !account_hit && models.is_empty() {
         return None;
     }
+    let ready = account.signed_in && account.bin_found;
     Some(json!({
         "providerInstanceId": account.id,
         "driverKind": driver_kind,
         "displayName": account.name,
         "models": models.iter().map(|model| model_json(model)).collect::<Vec<_>>(),
-        "canRunChildTask": account.signed_in && account.bin_found,
+        "runtimeModes": ["auto", "full-access"],
+        "canRunChildTask": ready,
+        "canRunCrossProviderChildTask": ready && account.provider != Provider::Cursor,
         "constraints": account.constraints,
     }))
 }
@@ -205,7 +213,7 @@ fn model_json(model: &ModelChoice) -> Value {
     let options = if model.efforts.is_empty() {
         vec![]
     } else {
-        vec![json!({"id": "effort", "values": model.efforts})]
+        vec![json!({"id": "effort", "values": model.efforts, "default": null})]
     };
     json!({"id": model.id, "label": model.label, "options": options})
 }
@@ -215,5 +223,8 @@ pub fn codex_constraints() -> Vec<String> {
 }
 
 pub fn cursor_constraints() -> Vec<String> {
-    vec!["Cursor supports only its built-in account.".into()]
+    vec![
+        "Cursor supports only its built-in account.".into(),
+        "Cursor sessions can't delegate further.".into(),
+    ]
 }
