@@ -311,15 +311,22 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 .prs-empty .title, .device-setup .title, .guide-empty .title { margin: 0; font-size: 14px; font-weight: 500; color: var(--g-fg); }
 .prs-empty p, .device-setup p, .guide-empty p { margin: 0; max-width: 16rem; }
 .memory { display: flex; flex-direction: column; gap: 10px; padding: 12px; font-size: 13px; }
-.memory-about, .memory-empty { margin: 0; font-size: 12px; color: var(--g-muted); }
-.memory-add { display: flex; gap: 6px; }
-.memory-add input { flex: 1; min-width: 0; height: 28px; padding: 0 10px; border: 1px solid var(--g-input); border-radius: 8px; background: none; color: var(--g-fg); font: inherit; outline: none; }
-.memory-add input:focus { border-color: rgb(var(--g-primary-rgb) / 0.5); box-shadow: 0 0 0 2px rgb(var(--g-primary-rgb) / 0.2); }
+.memory-state, .memory-empty { margin: 0; font-size: 12px; color: var(--g-muted); }
+.memory-state:empty { display: none; }
+.memory-find, .memory-add input, .memory-add textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 5px 10px; border: 1px solid var(--g-input); border-radius: 8px; background: none; color: var(--g-fg); font: inherit; outline: none; }
+.memory-find, .memory-add input { height: 28px; }
+.memory-add textarea { resize: vertical; line-height: 1.45; }
+.memory-find:focus, .memory-add input:focus, .memory-add textarea:focus { border-color: rgb(var(--g-primary-rgb) / 0.5); box-shadow: 0 0 0 2px rgb(var(--g-primary-rgb) / 0.2); }
+.memory-add { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--g-border); }
+.memory-add button { align-self: flex-end; }
 .memory-list { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .memory-list li { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 8px; line-height: 1.45; }
 .memory-list li:hover { background: var(--g-hover); }
 .memory-list .id { flex: none; color: var(--g-muted); font-variant-numeric: tabular-nums; }
-.memory-list .text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.memory-list .body { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; flex: 1; min-width: 0; }
+.memory-list .title { font-weight: 500; }
+.memory-list .kind { font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--g-input); color: var(--g-muted); }
+.memory-list .text { flex-basis: 100%; overflow-wrap: anywhere; }
 .memory-list .ghost { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 6px; color: var(--g-muted); }
 .memory-list .ghost:hover { background: var(--g-input); color: var(--g-fg); }
 .memory-list .ghost .i { width: 14px; height: 14px; }

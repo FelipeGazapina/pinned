@@ -528,44 +528,90 @@ panelBody.addEventListener("click", (e) => {
   if (e.target.closest(".prs, .prs-empty")) prsClick(e);
 });
 
-/** Each project's memories as its machine last sent them, by `machine:path`: `{ list, at }`. */
-const memories = new Map();
-const memoryKey = (tab) => `${tab.machine}:${projectPathOf(tab)}`;
-async function memoryCall(tab, call) {
-  const key = memoryKey(tab);
-  try {
-    memories.set(key, { list: await callOn(tab.machine, { ...call, path: projectPathOf(tab) }), at: Date.now() });
-  } catch (e) {
-    memories.set(key, { list: memories.get(key)?.list ?? [], at: Date.now() });
-    flash(`Couldn't ${call.cmd === "project_memories" ? "read" : "change"} the memory: ${String(e)}`);
-  }
-  if (tab === active && shownSurface(tab)?.kind === "memory") renderPanel();
+/** Each project's Memory panel, by `machine:path`: the search, its hits and the status the machine
+ * last sent, and the add form's unsent title and text, which a redraw would otherwise drop. */
+const memoryPanels = new Map();
+const hasProject = (tab) => !!tab && !threadOf(tab).workspace?.scratch;
+function memoryOf(tab) {
+  const key = `${tab.machine}:${projectPathOf(tab)}`;
+  if (!memoryPanels.has(key)) memoryPanels.set(key, { query: "", hits: null, status: null, title: "", text: "", at: 0 });
+  return memoryPanels.get(key);
 }
-/** What the project's orchestrator and its workers start every session with. The agents add to it
- * as they work, so a panel shown again after a few seconds asks the machine again. */
+async function refreshMemory(tab) {
+  const m = memoryOf(tab);
+  const path = projectPathOf(tab);
+  const query = m.query;
+  m.at = Date.now();
+  try {
+    const [hits, status] = await Promise.all([callOn(tab.machine, { cmd: "memory_search", path, query, limit: 50 }), callOn(tab.machine, { cmd: "memory_status", path })]);
+    if (m.query === query) Object.assign(m, { hits, status });
+  } catch (e) {
+    m.hits ??= [];
+    flash(`Couldn't read the memory: ${String(e)}`);
+  }
+  const shown = tab === active && shownSurface(tab)?.kind === "memory";
+  if (shown) renderPanel();
+  // The model downloads in the background, and nothing else would tell the panel it finished.
+  if (shown && m.status?.vectors === "loading") setTimeout(() => m.at < Date.now() - 1500 && refreshMemory(tab), 2000);
+}
+async function changeMemory(tab, call) {
+  try {
+    await callOn(tab.machine, { ...call, path: projectPathOf(tab) });
+    return true;
+  } catch (e) {
+    flash(String(e));
+    return false;
+  } finally {
+    refreshMemory(tab);
+  }
+}
+const VECTORS = { ready: "vector search ready", loading: "downloading model", off: "word search only" };
+/** What any thread of the project can look up: agents save to it as they work, and pinned adds
+ * the closest memories to each prompt. A panel shown again after a few seconds asks again. */
 function renderMemoryPanel() {
   const tab = active;
-  const known = memories.get(memoryKey(tab));
-  if (!known || Date.now() - known.at > 5000) memoryCall(tab, { cmd: "project_memories" });
-  const list = known?.list;
-  const rows = !list
+  if (!hasProject(tab)) return showPanel(`<div class="memory"><p class="memory-empty">This thread is not in a project, so it has no memory.</p></div>`);
+  const m = memoryOf(tab);
+  if (!m.hits || Date.now() - m.at > 5000) refreshMemory(tab);
+  const count = m.status ? `${m.status.count} ${m.status.count === 1 ? "memory" : "memories"} · ${VECTORS[m.status.vectors] ?? m.status.vectors}` : "";
+  const hits = !m.hits
     ? `<p class="memory-empty">Loading…</p>`
-    : list.length
-      ? `<ul class="memory-list">${list.map((m) => `<li><span class="id">#${m.id}</span><span class="text">${esc(m.text)}</span><button type="button" class="ghost" data-forget="${m.id}" title="Forget #${m.id}" aria-label="Forget #${m.id}">${icon("x")}</button></li>`).join("")}</ul>`
-      : `<p class="memory-empty">No memories yet.</p>`;
-  showPanel(`<div class="memory"><p class="memory-about">Every session of the ${esc(projectName(tab))} orchestrator and its workers starts with these.</p>
-    <form class="memory-add"><input name="text" type="text" placeholder="Remember something about this project" aria-label="New memory" autocomplete="off"><button type="submit" class="outline">Add</button></form>${rows}</div>`);
+    : m.hits.length
+      ? `<ul class="memory-list">${m.hits.map((h) => `<li><span class="id">#${h.id}</span><span class="body"><span class="title">${esc(h.title)}</span>${h.kind ? `<span class="kind">${esc(h.kind)}</span>` : ""}<span class="text">${esc(h.text)}</span></span><button type="button" class="ghost" data-forget="${h.id}" title="Forget #${h.id}" aria-label="Forget #${h.id}">${icon("x")}</button></li>`).join("")}</ul>`
+      : `<p class="memory-empty">${m.query ? "No memory matches that." : "No memories yet. Agents save them as they work, or add one below."}</p>`;
+  const focus = panelBody.contains(document.activeElement) ? document.activeElement : null;
+  const shown = showPanel(`<div class="memory"><p class="memory-state">${esc(count)}</p>
+    <input class="memory-find" name="query" type="search" value="${esc(m.query)}" placeholder="Search ${esc(projectName(tab))}'s memory" aria-label="Search memory" autocomplete="off" spellcheck="false">
+    ${hits}
+    <form class="memory-add"><input name="title" type="text" value="${esc(m.title)}" placeholder="Title" aria-label="New memory's title" autocomplete="off"><textarea name="text" rows="3" placeholder="What to remember about this project" aria-label="New memory's text">${esc(m.text)}</textarea><button type="submit" class="outline">Add</button></form></div>`);
+  const again = shown && focus?.name && panelBody.querySelector(`.memory [name="${focus.name}"]`);
+  if (again) {
+    again.focus();
+    again.setSelectionRange(focus.selectionStart, focus.selectionEnd);
+  }
 }
+let memorySearchTimer;
+panelBody.addEventListener("input", (e) => {
+  const field = e.target.closest(".memory [name]");
+  if (!field || !active) return;
+  const tab = active;
+  memoryOf(tab)[field.name] = field.value;
+  if (field.name !== "query") return;
+  clearTimeout(memorySearchTimer);
+  memorySearchTimer = setTimeout(() => refreshMemory(tab), 250);
+});
 panelBody.addEventListener("click", (e) => {
   const forget = e.target.closest(".memory [data-forget]");
-  if (forget && active) memoryCall(active, { cmd: "forget", id: Number(forget.dataset.forget) });
+  if (forget && active) changeMemory(active, { cmd: "memory_forget", id: Number(forget.dataset.forget) });
 });
-panelBody.addEventListener("submit", (e) => {
+panelBody.addEventListener("submit", async (e) => {
   const form = e.target.closest(".memory-add");
   if (!form || !active) return;
   e.preventDefault();
-  const text = form.elements.text.value.trim();
-  if (text) memoryCall(active, { cmd: "remember", text });
+  const tab = active;
+  const m = memoryOf(tab);
+  if (!m.title.trim() || !m.text.trim()) return flash("A memory needs a title and a text.");
+  if (await changeMemory(tab, { cmd: "memory_save", title: m.title, text: m.text })) Object.assign(m, { title: "", text: "", query: "" });
 });
 panelBody.addEventListener("contextmenu", (e) => {
   const row = e.target.closest(".prs [data-prs-open]");
