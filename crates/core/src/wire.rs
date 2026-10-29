@@ -459,6 +459,8 @@ pub enum Call {
     Fork { tab: TabId, through: String },
     /// The path saved, relative to the tab's folder. Writes `text` to `path` inside that folder.
     SaveFile { tab: TabId, path: String, text: String },
+    /// The new tab's id, not yet started: it resumes the delegated task's conversation in the child's folder.
+    OpenTask { tab: TabId, task: String },
 }
 
 fn pulls_limit() -> usize {

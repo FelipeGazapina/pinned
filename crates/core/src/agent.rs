@@ -195,6 +195,41 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account: Option<AccountId>,
     },
+    /// Starts a child agent. `tab` is the session that asked, when it has one. `task` is the
+    /// parent task when the asker is itself a child (`PINNED_TASK`).
+    Delegate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
+        request: Box<crate::delegate::Request>,
+    },
+    TaskStatus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        id: String,
+    },
+    TaskCancel {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        id: String,
+        #[serde(default)]
+        reason: String,
+    },
+    Capabilities {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default)]
+        search: String,
+    },
 }
 
 #[cfg(test)]

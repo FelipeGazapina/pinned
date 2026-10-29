@@ -257,6 +257,7 @@ impl Node {
             path_env: None,
             settings: dir.join("settings.json"),
             mcp_config: None,
+            reminders: true,
             plugin_dir: dir.join("plugin"),
             tutorial_helper: dir.join("plugin/tutorial.mjs"),
             sock: dir.join("sock"),

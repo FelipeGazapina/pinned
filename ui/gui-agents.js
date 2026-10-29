@@ -55,9 +55,10 @@ function agentCardHtml(tab, agent, depth) {
   const body = open
     ? `<div class="agent-steps">${steps.map((s) => (s.kind === "text" ? `<div class="narration md">${markdown(s.text)}</div>` : workRowHtml(s, cwd, t.open))).join("")}</div>`
     : `<div class="agent-step">${icon(line.icon, "kind")}<span class="label${running ? " shimmer" : ""}">${esc(line.label)}</span></div>`;
+  const openThread = agent.id.startsWith("task-") ? `<button type="button" class="outline" data-open-task="${esc(agent.id)}">Open as thread</button>` : "";
   return `<div class="agent-card" data-agent="${esc(agent.id)}" data-state="${esc(agent.state)}" style="--depth:${depth}">
     <button type="button" class="agent-head" data-toggle="${esc(key)}" aria-expanded="${open}" title="${esc(agent.name)}">${icon("bot", "kind")}<span class="name">${esc(agent.name || "Agent")}</span>
-      ${chip ? `<span class="chip">${esc(chip)}</span>` : ""}<span class="time">${time}</span>${mark}</button>${body}</div>`;
+      ${chip ? `<span class="chip">${esc(chip)}</span>` : ""}<span class="time">${time}</span>${mark}</button>${openThread}${body}</div>`;
 }
 
 /** A card per agent the turn spawned, below its work fold so they show while the fold is shut, with

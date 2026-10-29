@@ -1,6 +1,7 @@
 use pinned_core::account::{self, Credentials};
 use pinned_core::link;
 use pinned_core::machine::{Launch, Machine};
+use pinned_core::reminders;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -141,8 +142,11 @@ fn node(args: &[String]) -> Result<(), String> {
     let creds = Credentials::load(&dir).ok_or_else(|| format!("{} has no account.json: run `pinned-server pair <hub url> <code>` first", dir.display()))?;
     let exe = std::env::current_exe().map_err(|e| format!("could not find pinned-server's own binary: {e}"))?;
     let mut launch = Launch::prepare(&exe).map_err(|e| format!("could not prepare claude's settings: {e}"))?;
-    // Reminders notify on a desktop, which a node doesn't have.
-    launch.mcp_config = None;
+    // A node has no desktop for a notification, and it keeps the MCP server so a session can delegate.
+    launch.reminders = false;
+    if let Some(path) = launch.mcp_config.clone() {
+        reminders::write_mcp_config(&path, &exe, false).map_err(|e| format!("could not write the MCP config: {e}"))?;
+    }
     let machine = Machine::new(launch, Some(dir), None, |_| {});
     let link = Arc::new(link::spawn(creds, machine.clone(), VERSION));
     let forward = link.clone();

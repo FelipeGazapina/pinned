@@ -49,6 +49,15 @@ impl Access {
     }
 }
 
+/// `asked` cannot be wider than `ceiling`. A plan request is already read-only before this.
+pub fn tighten(ceiling: Access, asked: Access) -> Access {
+    match (ceiling, asked) {
+        (Access::ReadOnly, _) => Access::ReadOnly,
+        (Access::Auto, Access::Full) => Access::Auto,
+        (_, asked) => asked,
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Isolation {
@@ -124,6 +133,8 @@ pub struct Task {
     pub provider: Provider,
     pub model: Option<String>,
     pub cwd: PathBuf,
+    /// The widest access this task may hand to a child of its own.
+    pub access: Access,
     pub started: u64,
     pub ended: Option<u64>,
     pub state: WorkState,
@@ -569,6 +580,7 @@ fn conversation_or_final(value: &Value) -> Option<StreamEvent> {
     None
 }
 
+#[cfg(test)]
 struct Outcome {
     conversation: Option<String>,
     steps: Vec<Item>,
@@ -577,6 +589,7 @@ struct Outcome {
     error: Option<String>,
 }
 
+#[cfg(test)]
 fn replay(provider: Provider, lines: &str) -> Outcome {
     let mut outcome = Outcome {
         conversation: None,
@@ -896,14 +909,8 @@ fn clean_label(label: &str) -> String {
         " Max",
         " Fast",
     ];
-    loop {
-        let Some(shorter) = suffixes
-            .iter()
-            .find_map(|suffix| label.strip_suffix(suffix))
-        else {
-            break;
-        };
-        label = shorter.trim().to_owned();
+    while let Some(shorter) = suffixes.iter().find_map(|suffix| label.strip_suffix(suffix).map(|rest| rest.trim().to_owned())) {
+        label = shorter;
     }
     label.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -1078,7 +1085,7 @@ pub fn kill(pid: u32) {
 
 struct Cache {
     at: Instant,
-    ids: Vec<String>,
+    list: String,
 }
 
 pub struct Delegates {
@@ -1108,6 +1115,7 @@ pub struct NewTask {
     pub model: Option<String>,
     pub cwd: PathBuf,
     pub mode: Mode,
+    pub access: Access,
 }
 
 impl Delegates {
@@ -1122,6 +1130,7 @@ impl Delegates {
             provider: new.provider,
             model: new.model,
             cwd: new.cwd,
+            access: new.access,
             started: unix_now(),
             ended: None,
             state: WorkState::Working,
@@ -1222,8 +1231,9 @@ impl Delegates {
         self.status(id)
     }
 
-    pub fn take_notice(&self, tab: &str) -> Option<String> {
-        let mut tasks = self.tasks.lock().unwrap();
+    /// The notice for `tab`, and the task ids it covers. Delivery marks them, so a failed type can retry.
+    pub fn pending_notice(&self, tab: &str) -> Option<(String, Vec<String>)> {
+        let tasks = self.tasks.lock().unwrap();
         let ready: Vec<usize> = tasks
             .iter()
             .enumerate()
@@ -1243,10 +1253,29 @@ impl Delegates {
             .map(|index| notice_line(&tasks[*index]))
             .collect::<Vec<_>>()
             .join("\n");
-        for index in ready {
-            tasks[index].delivered = true;
+        let ids = ready.iter().map(|index| tasks[*index].id.clone()).collect();
+        Some((lines, ids))
+    }
+
+    pub fn mark_delivered(&self, ids: &[String]) {
+        let mut tasks = self.tasks.lock().unwrap();
+        for task in tasks.iter_mut() {
+            if ids.iter().any(|id| id == &task.id) {
+                task.delivered = true;
+            }
         }
-        Some(lines)
+    }
+
+    pub fn lineage(&self, id: &str) -> Option<Lineage> {
+        let tasks = self.tasks.lock().unwrap();
+        let task = tasks.iter().find(|task| task.id == id)?;
+        Some(Lineage {
+            account: task.account.clone(),
+            provider: task.provider,
+            model: task.model.clone(),
+            cwd: task.cwd.clone(),
+            access: task.access,
+        })
     }
 
     pub fn cards(&self, tab: &str) -> Vec<Subagent> {
@@ -1325,24 +1354,40 @@ impl Delegates {
             .collect()
     }
 
-    pub fn cursor_ids(&self, bin: &Path, path: Option<&str>) -> Vec<String> {
+    /// `--list-models` text, kept for ten minutes, or fifteen seconds when the CLI said nothing.
+    pub fn cursor_catalog(&self, bin: &Path, path: Option<&str>) -> String {
         if let Some(cache) = self.cursor.lock().unwrap().as_ref() {
-            let fresh = if cache.ids.is_empty() {
+            let fresh = if cache.list.trim().is_empty() {
                 MODEL_MISS
             } else {
                 MODEL_CACHE
             };
             if cache.at.elapsed() < fresh {
-                return cache.ids.clone();
+                return cache.list.clone();
             }
         }
-        let ids = list_cursor_ids(bin, path);
+        let list = list_cursor_text(bin, path);
         *self.cursor.lock().unwrap() = Some(Cache {
             at: Instant::now(),
-            ids: ids.clone(),
+            list: list.clone(),
         });
-        ids
+        list
     }
+
+    pub fn cursor_ids(&self, bin: &Path, path: Option<&str>) -> Vec<String> {
+        parse_model_list(&self.cursor_catalog(bin, path))
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+}
+
+pub struct Lineage {
+    pub account: AccountId,
+    pub provider: Provider,
+    pub model: Option<String>,
+    pub cwd: PathBuf,
+    pub access: Access,
 }
 
 impl Task {
@@ -1452,9 +1497,9 @@ fn root_tab(tasks: &[Task], mut parent: Parent) -> Option<String> {
     None
 }
 
-fn list_cursor_ids(bin: &Path, path: Option<&str>) -> Vec<String> {
+fn list_cursor_text(bin: &Path, path: Option<&str>) -> String {
     if !bin.is_file() {
-        return vec![];
+        return String::new();
     }
     let mut cmd = crate::process::command(bin);
     cmd.arg("--list-models")
@@ -1464,27 +1509,40 @@ fn list_cursor_ids(bin: &Path, path: Option<&str>) -> Vec<String> {
     if let Some(path) = path {
         cmd.env("PATH", path);
     }
-    let Some(output) = output_within(cmd, Duration::from_secs(10)) else {
-        return vec![];
-    };
-    parse_model_list(&String::from_utf8_lossy(&output.stdout))
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect()
+    output_within(cmd, Duration::from_secs(10))
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 fn output_within(mut cmd: std::process::Command, limit: Duration) -> Option<std::process::Output> {
     let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
     let start = Instant::now();
-    while child.try_wait().ok()?.is_none() {
-        if start.elapsed() > limit {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() > limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return None,
         }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    child.wait_with_output().ok()
+    };
+    // try_wait reaps the child, so the stdout thread is what still holds the bytes.
+    let stdout = reader.join().ok()?;
+    Some(std::process::Output {
+        status,
+        stdout,
+        stderr: vec![],
+    })
 }
 
 fn unix_now() -> u64 {
@@ -1934,6 +1992,7 @@ grok-4.7-high - Grok 4.7  High
             model: Some("composer-2.5".into()),
             cwd: PathBuf::from("/tmp"),
             mode,
+            access: Access::Auto,
         })
     }
 

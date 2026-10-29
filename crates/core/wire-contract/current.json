@@ -2315,6 +2315,27 @@
                   "path",
                   "text"
                 ]
+              },
+              {
+                "description": "The new tab's id, not yet started: it resumes the delegated task's conversation in the child's folder.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
               }
             ]
           },
@@ -2388,7 +2409,8 @@
             "type": "string",
             "enum": [
               "claude",
-              "codex"
+              "codex",
+              "cursor"
             ]
           },
           "PrAction": {
@@ -6651,6 +6673,27 @@
                   "path",
                   "text"
                 ]
+              },
+              {
+                "description": "The new tab's id, not yet started: it resumes the delegated task's conversation in the child's folder.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
               }
             ]
           },
@@ -6722,7 +6765,8 @@
             "type": "string",
             "enum": [
               "claude",
-              "codex"
+              "codex",
+              "cursor"
             ]
           },
           "PrAction": {
@@ -20226,6 +20270,27 @@
                   "path",
                   "text"
                 ]
+              },
+              {
+                "description": "The new tab's id, not yet started: it resumes the delegated task's conversation in the child's folder.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
               }
             ]
           },
@@ -20299,7 +20364,8 @@
             "type": "string",
             "enum": [
               "claude",
-              "codex"
+              "codex",
+              "cursor"
             ]
           },
           "PrAction": {
@@ -23524,6 +23590,27 @@
                   "path",
                   "text"
                 ]
+              },
+              {
+                "description": "The new tab's id, not yet started: it resumes the delegated task's conversation in the child's folder.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
               }
             ]
           },
@@ -23595,7 +23682,8 @@
             "type": "string",
             "enum": [
               "claude",
-              "codex"
+              "codex",
+              "cursor"
             ]
           },
           "PrAction": {

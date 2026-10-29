@@ -1,18 +1,25 @@
 use chrono::{DateTime, Duration, Local, NaiveTime, TimeZone};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 
-use crate::agent::{Message, When, SOCK_ENV};
+use crate::agent::{Message, When, SOCK_ENV, TAB_ENV, TASK_ENV};
+use crate::delegate::{self, Mode};
 use crate::ipc::UnixStream;
 
 pub const SUBCOMMAND: &str = "mcp";
 pub const TOOL: &str = "remind_me";
 const LIST_TOOL: &str = "list_reminders";
 const CANCEL_TOOL: &str = "cancel_reminder";
+const CAPABILITIES_TOOL: &str = "orchestrator_capabilities";
+const DELEGATE_TOOL: &str = "delegate_task";
+const STATUS_TOOL: &str = "task_status";
+const CANCEL_TASK_TOOL: &str = "task_cancel";
 pub const SERVER: &str = "pinned";
+const NO_REMINDERS: &str = "--no-reminders";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Reminder {
@@ -114,59 +121,124 @@ fn next_at<Tz: TimeZone>(now: &DateTime<Tz>, time: NaiveTime) -> Option<DateTime
     })
 }
 
-// Claude Code expands `${PINNED_SOCK}` from the session's own environment.
-pub fn write_mcp_config(path: &Path, exe: &Path) -> std::io::Result<()> {
-    let config = serde_json::json!({
+// Claude Code expands `${PINNED_SOCK}` from the session's own environment. A node passes
+// `reminders: false` so the same server can delegate without offering desktop notifications.
+pub fn write_mcp_config(path: &Path, exe: &Path, reminders: bool) -> std::io::Result<()> {
+    let mut args = vec![SUBCOMMAND.to_owned()];
+    if !reminders {
+        args.push(NO_REMINDERS.to_owned());
+    }
+    let config = json!({
         "mcpServers": { SERVER: {
             "command": exe,
-            "args": [SUBCOMMAND],
-            "env": { SOCK_ENV: format!("${{{SOCK_ENV}}}") },
+            "args": args,
+            "env": {
+                SOCK_ENV: format!("${{{SOCK_ENV}}}"),
+                TAB_ENV: format!("${{{TAB_ENV}}}"),
+                TASK_ENV: format!("${{{TASK_ENV}}}"),
+            },
         } }
     });
     std::fs::write(path, serde_json::to_vec_pretty(&config)?)
 }
 
 pub fn permissions() -> Vec<String> {
-    [TOOL, LIST_TOOL, CANCEL_TOOL].map(|tool| format!("mcp__{SERVER}__{tool}")).into()
+    [TOOL, LIST_TOOL, CANCEL_TOOL, CAPABILITIES_TOOL, DELEGATE_TOOL, STATUS_TOOL, CANCEL_TASK_TOOL]
+        .map(|tool| format!("mcp__{SERVER}__{tool}"))
+        .into()
 }
 
-pub fn serve() {
+pub fn serve(args: &[String]) {
+    let reminders = !args.iter().any(|arg| arg == NO_REMINDERS);
     let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    for line in stdin.lock().lines().map_while(Result::ok) {
-        let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-        // Notifications carry no id and get no answer.
+    let _ = serve_io(reminders, stdin.lock(), std::io::stdout());
+}
+
+/// One JSON-RPC session. `reminders` hides the desktop tools; delegation stays.
+pub fn serve_io(reminders: bool, input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
+    for line in input.lines() {
+        let line = line?;
+        let Some(request) = serde_json::from_str::<Value>(&line).ok() else { continue };
         let Some(id) = request.get("id").cloned() else { continue };
         let outcome = match request["method"].as_str() {
-            Some("initialize") => Ok(serde_json::json!({
+            Some("initialize") => Ok(json!({
                 "protocolVersion": request["params"]["protocolVersion"],
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": SERVER, "version": env!("CARGO_PKG_VERSION") },
             })),
-            Some("tools/list") => Ok(serde_json::json!({ "tools": tool_definitions() })),
-            Some("tools/call") => Ok(call(&request["params"])),
-            Some("ping") => Ok(serde_json::json!({})),
+            Some("tools/list") => Ok(json!({ "tools": tool_definitions(reminders) })),
+            Some("tools/call") => Ok(call(&request["params"], reminders)),
+            Some("ping") => Ok(json!({})),
             other => Err(format!("method not found: {other:?}")),
         };
         let response = match outcome {
-            Ok(result) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-            Err(message) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": message } }),
+            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+            Err(message) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": message } }),
         };
-        if writeln!(stdout, "{response}").and_then(|_| stdout.flush()).is_err() {
-            return;
+        if writeln!(output, "{response}").and_then(|_| output.flush()).is_err() {
+            return Ok(());
         }
     }
+    Ok(())
 }
 
-fn tool_definitions() -> serde_json::Value {
-    serde_json::json!([
-        remind_definition(),
-        {
+fn tool_definitions(reminders: bool) -> Value {
+    let mut tools = vec![
+        json!({
+            "name": CAPABILITIES_TOOL,
+            "description": "The accounts this machine can run a child agent on, and the access this session inherits.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "search": { "type": "string", "description": "Filters accounts and models." } },
+            },
+        }),
+        json!({
+            "name": DELEGATE_TOOL,
+            "description": "Run a child agent on another signed-in account. mode \"wait\" blocks until it finishes. mode \"async\" returns at once and pinned types a notice into this session when the result is ready.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string" },
+                    "title": { "type": "string" },
+                    "target": { "type": "object" },
+                    "isolation": { "type": "string", "enum": ["shared", "worktree"] },
+                    "mode": { "type": "string", "enum": ["async", "wait"] },
+                    "timeoutMs": { "type": "number" },
+                    "interactionMode": { "type": "string" },
+                },
+                "required": ["task"],
+            },
+        }),
+        json!({
+            "name": STATUS_TOOL,
+            "description": "The child task's state. Reading a finished task marks its result delivered.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "taskId": { "type": "string" } },
+                "required": ["taskId"],
+            },
+        }),
+        json!({
+            "name": CANCEL_TASK_TOOL,
+            "description": "Stop a child task. A finished task keeps its result.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "taskId": { "type": "string" },
+                    "reason": { "type": "string" },
+                },
+                "required": ["taskId"],
+            },
+        }),
+    ];
+    if reminders {
+        tools.insert(0, remind_definition());
+        tools.insert(1, json!({
             "name": LIST_TOOL,
             "description": "List the reminders still pending, each with its id, time and message.",
             "inputSchema": { "type": "object", "properties": {} },
-        },
-        {
+        }));
+        tools.insert(2, json!({
             "name": CANCEL_TOOL,
             "description": "Cancel a pending reminder by the id list_reminders or remind_me gave.",
             "inputSchema": {
@@ -174,12 +246,13 @@ fn tool_definitions() -> serde_json::Value {
                 "properties": { "id": { "type": "integer", "description": "The reminder's id." } },
                 "required": ["id"],
             },
-        },
-    ])
+        }));
+    }
+    Value::Array(tools)
 }
 
-fn remind_definition() -> serde_json::Value {
-    serde_json::json!({
+fn remind_definition() -> Value {
+    json!({
         "name": TOOL,
         "description": "Show the user a desktop notification later. Pass exactly one of in_minutes (for \"in 5, 10, 20 minutes\") or at (for a clock time such as \"7pm\", written as 24-hour HH:MM in the user's local time). at means the next time the clock reads that, so tomorrow if it already passed today.",
         "inputSchema": {
@@ -204,20 +277,96 @@ fn remind_request(args: &serde_json::Value) -> Result<Message, String> {
     Ok(Message::Remind { message, when })
 }
 
-fn call(params: &serde_json::Value) -> serde_json::Value {
+fn call(params: &Value, reminders: bool) -> Value {
+    let name = params["name"].as_str().unwrap_or("");
+    if !reminders && matches!(name, TOOL | LIST_TOOL | CANCEL_TOOL) {
+        return tool_result(Err("reminders are not available on this machine".into()));
+    }
+    if name == DELEGATE_TOOL {
+        return delegate_call(params);
+    }
     let args = &params["arguments"];
-    let request = match params["name"].as_str() {
-        Some(TOOL) => remind_request(args),
-        Some(LIST_TOOL) => Ok(Message::ListReminders),
-        Some(CANCEL_TOOL) => args["id"].as_u64().map(|id| Message::CancelReminder { id }).ok_or("id is required".to_owned()),
-        _ => Err(format!("unknown tool {}", params["name"])),
+    let request = match name {
+        TOOL => remind_request(args),
+        LIST_TOOL => Ok(Message::ListReminders),
+        CANCEL_TOOL => args["id"].as_u64().map(|id| Message::CancelReminder { id }).ok_or("id is required".to_owned()),
+        CAPABILITIES_TOOL => Ok(Message::Capabilities {
+            tab: session_var(TAB_ENV),
+            task: session_var(TASK_ENV),
+            search: args["search"].as_str().unwrap_or("").to_owned(),
+        }),
+        STATUS_TOOL => required(args, "taskId").map(|id| Message::TaskStatus { tab: session_var(TAB_ENV), task: session_var(TASK_ENV), id }),
+        CANCEL_TASK_TOOL => required(args, "taskId").map(|id| Message::TaskCancel {
+            tab: session_var(TAB_ENV),
+            task: session_var(TASK_ENV),
+            id,
+            reason: args["reason"].as_str().unwrap_or("the parent asked").to_owned(),
+        }),
+        _ => Err(format!("unknown tool {name}")),
     };
-    let reply = request.and_then(|request| send(&request));
+    tool_result(request.and_then(|request| send(&request)))
+}
+
+fn delegate_call(params: &Value) -> Value {
+    let mut request = match delegate::parse_request(&params["arguments"]) {
+        Ok(request) => request,
+        Err(error) => return tool_result(Err(error)),
+    };
+    let tab = session_var(TAB_ENV);
+    let parent = session_var(TASK_ENV);
+    if tab.is_none() {
+        request.mode = Mode::Wait;
+    }
+    let wait = request.mode == Mode::Wait;
+    let timeout = StdDuration::from_millis(request.timeout_ms);
+    let tool = params.get("_meta").and_then(|meta| meta.get("claudecode/toolUseId")).and_then(Value::as_str).map(str::to_owned);
+    let started = match send(&Message::Delegate { tab: tab.clone(), task: parent.clone(), tool, request: Box::new(request) }) {
+        Ok(text) => text,
+        Err(error) => return tool_result(Err(error)),
+    };
+    if !wait {
+        return tool_result(Ok(started));
+    }
+    let mut value: Value = serde_json::from_str(&started).unwrap_or(json!({ "raw": started }));
+    let id = value["taskId"].as_str().unwrap_or("").to_owned();
+    if id.is_empty() {
+        return tool_result(Ok(started));
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        match send(&Message::TaskStatus { tab: tab.clone(), task: parent.clone(), id: id.clone() }) {
+            Ok(text) => {
+                let status: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                if status["workState"] != "working" {
+                    value["workState"] = status["workState"].clone();
+                    value["next"] = json!(format!("call task_status with taskId \"{id}\""));
+                    return tool_result(Ok(value.to_string()));
+                }
+            }
+            Err(error) => return tool_result(Err(error)),
+        }
+        if Instant::now() >= deadline {
+            value["next"] = json!(format!("still working; the wait timed out; call task_status with taskId \"{id}\""));
+            return tool_result(Ok(value.to_string()));
+        }
+        std::thread::sleep(StdDuration::from_millis(200));
+    }
+}
+
+fn session_var(key: &str) -> Option<String> {
+    std::env::var(key).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty() && !value.starts_with('$'))
+}
+
+fn required(args: &Value, key: &str) -> Result<String, String> {
+    args[key].as_str().filter(|value| !value.is_empty()).map(str::to_owned).ok_or_else(|| format!("{key} is required"))
+}
+
+fn tool_result(reply: Result<String, String>) -> Value {
     let (text, is_error) = match reply {
         Ok(text) => (text, false),
         Err(text) => (text, true),
     };
-    serde_json::json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
+    json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
 }
 
 fn send(message: &Message) -> Result<String, String> {

@@ -1359,6 +1359,21 @@ async function editFromHere(id) {
   await attachFiles(tabByKey(tab.key) ?? tab, files);
 }
 
+/** Opens the delegated child's conversation as a tab on its folder and account. */
+async function openDelegated(task) {
+  const tab = active;
+  try {
+    const created = await callOn(tab.machine, { cmd: "open_task", tab: tab.view.id, task });
+    await refreshTabs(tab.machine);
+    const next = tabByKey(keyOf(tab.machine, created));
+    if (!next) return;
+    activate(next);
+    await startTab(next);
+  } catch (e) {
+    showComposerNote(String(e), true);
+  }
+}
+
 /** T3 Code's "Fork from this response": a new thread beside this one whose claude carries on from here. */
 async function forkFrom(id) {
   const tab = active;
@@ -1533,6 +1548,8 @@ threadView.addEventListener("click", (e) => {
   }
   if (e.target.closest(".dialog-card [data-show-terminal]")) return toggleDrawer(true);
   const t = shownThread();
+  const openTask = e.target.closest("[data-open-task]");
+  if (openTask) return openDelegated(openTask.dataset.openTask);
   const toggle = e.target.closest("[data-toggle]");
   if (toggle) {
     const key = toggle.dataset.toggle;

@@ -1,5 +1,5 @@
 use crate::accounts::{self, Account, Accounts, Provider};
-use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
+use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, FileServer, Shells};
@@ -37,6 +37,8 @@ pub struct Launch {
     pub path_env: Option<String>,
     pub settings: PathBuf,
     pub mcp_config: Option<PathBuf>,
+    /// Desktop sessions offer reminders. A node keeps the MCP server for delegation and leaves this false.
+    pub reminders: bool,
     /// The plugin directory holding the skills that ship inside pinned, and its tutorial helper.
     pub plugin_dir: PathBuf,
     pub tutorial_helper: PathBuf,
@@ -59,7 +61,7 @@ impl Launch {
         let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
         let mcp_config = files.join("claude-mcp.json");
-        reminders::write_mcp_config(&mcp_config, exe)?;
+        reminders::write_mcp_config(&mcp_config, exe, true)?;
         let plugin_dir = files.join("plugin");
         let tutorial_helper = plugin::install(&plugin_dir)?;
         let path_env = login_shell_path().or_else(|| std::env::var("PATH").ok());
@@ -69,6 +71,7 @@ impl Launch {
             path_env,
             settings,
             mcp_config: Some(mcp_config),
+            reminders: true,
             plugin_dir,
             tutorial_helper,
             sock: files.join("pinned.sock"),
@@ -97,6 +100,8 @@ impl Launch {
                     cmd.arg(&self.settings);
                     cmd.arg("--plugin-dir");
                     cmd.arg(&self.plugin_dir);
+                } else if provider == Provider::Codex && self.mcp_config.is_some() {
+                    cmd.args(crate::delegate::codex_mcp_flags(&self.exe, &self.sock, Some(tab), None, self.reminders));
                 }
                 if bypass {
                     cmd.arg(spec.bypass_flag);
@@ -293,6 +298,7 @@ pub struct Machine {
     quitting: AtomicBool,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     agents: Mutex<subagents::Cache>,
+    delegates: crate::delegate::Delegates,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -348,6 +354,7 @@ impl Machine {
             quitting: AtomicBool::new(false),
             usage: Mutex::default(),
             agents: Mutex::default(),
+            delegates: crate::delegate::Delegates::default(),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -542,9 +549,13 @@ impl Machine {
                 json(crate::device::Host { port: self.device_hub.port(None, path)?, path }.run(op)?)
             }
             Call::Subagent { tab, tool } => {
+                if let Some(steps) = self.delegates.steps_for(&tab, &tool) {
+                    return json(steps);
+                }
                 let file = thread::subagent(&self.transcript(&tab)?, &tool).ok_or("Claude Code kept no transcript of this subagent")?;
                 json(thread::read_subagent(&file).map_err(|e| format!("could not read the subagent's transcript: {e}"))?)
             }
+            Call::OpenTask { tab, task } => json(self.open_delegated(&tab, &task)?),
             Call::Rewind { tab, before, files, cols, rows } => json(self.rewind(&tab, &before, files, cols, rows)?),
             Call::Fork { tab, through } => json(self.fork(&tab, &through)?),
             Call::SaveFile { tab, path, text } => json(save_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, &text)?),
@@ -642,10 +653,11 @@ impl Machine {
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
         let (session, account, process) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.session.as_ref().and(t.started)))?;
         let Some(file) = session.as_deref().and_then(|s| self.find_transcript(&account, s)) else {
-            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: vec![] });
+            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab) });
         };
         let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
-        let agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
+        let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
+        agents.extend(self.delegates.cards(tab));
         Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
     }
 
@@ -1047,6 +1059,9 @@ impl Machine {
 
     /// Ends the tab's session and forgets it. Answers whether no tab is left.
     pub fn close_tab(&self, tab: &str) -> bool {
+        for id in self.delegates.running_under(tab) {
+            let _ = self.delegates.cancel(&id, "the parent tab closed");
+        }
         let last = {
             let mut tabs = self.tabs.lock().unwrap();
             tabs.remove(tab);
@@ -1290,6 +1305,10 @@ impl Machine {
                     machine.emit(Event::Usage { usage, account });
                     Ok(String::new())
                 }
+                Message::Delegate { tab, task, tool, request } => machine.start_delegate(tab, task, tool, *request),
+                Message::TaskStatus { id, .. } => machine.delegates.status(&id).map(|value| value.to_string()),
+                Message::TaskCancel { id, reason, .. } => machine.delegates.cancel(&id, &reason).map(|value| value.to_string()),
+                Message::Capabilities { tab, search, .. } => machine.capabilities(tab.as_deref(), &search),
                 message => other(message),
             }
         })
@@ -1298,8 +1317,166 @@ impl Machine {
     /// Ends every session as the machine shuts down, keeping them saved for the next launch.
     pub fn quit(&self) {
         self.quitting.store(true, Ordering::SeqCst);
+        for id in self.delegates.running() {
+            let _ = self.delegates.cancel(&id, "pinned is shutting down");
+        }
         self.tabs.lock().unwrap().clear();
         self.device_hub.stop();
+    }
+
+    fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
+        use crate::delegate::{driver_args, spawn, tighten, Access, ChildSpec, Isolation, NewTask, Parent, SpawnSpec};
+        let tab = tab.filter(|id| !id.is_empty());
+        let parent_task = parent_task.filter(|id| !id.is_empty());
+        let parent = if let Some(tab) = tab.clone() {
+            Parent::Tab(tab)
+        } else if let Some(task) = parent_task.clone() {
+            Parent::Task(task)
+        } else {
+            Parent::Task("detached".into())
+        };
+        let (account_id, inherited_model, mut cwd, ceiling) = if let Some(tab) = tab.as_deref() {
+            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.cwd.clone(), Access::derive(t.bypass, false)))?
+        } else if let Some(task) = parent_task.as_deref().and_then(|id| self.delegates.lineage(id)) {
+            (Some(task.account), task.model, task.cwd, task.access)
+        } else {
+            (None, None, self.default_cwd.clone(), Access::Auto)
+        };
+        let account = if let Some(id) = request.target.account.clone().filter(|id| !id.is_empty()) {
+            self.accounts.get(&id).ok_or_else(|| format!("no account {id} on this machine"))?
+        } else if let Some(id) = account_id {
+            self.accounts.get(&id).unwrap_or_else(|| Account::builtin(Provider::Claude))
+        } else {
+            Account::builtin(Provider::Claude)
+        };
+        let bin = self.launch.bin(account.provider);
+        if !bin.is_file() {
+            return Err(format!("{} is not installed on this machine", account.provider.spec().name));
+        }
+        if !self.status(&account).signed_in {
+            return Err(format!("account {} is not signed in on this machine", account.id));
+        }
+        let access = tighten(ceiling, if request.plan { Access::ReadOnly } else { ceiling });
+        let mut model = request.target.model.clone().filter(|model| !model.is_empty()).or(inherited_model);
+        let mut effort = request.target.effort.clone().filter(|effort| !effort.is_empty());
+        if account.provider == Provider::Cursor {
+            if let Some(name) = model.clone() {
+                let ids = self.delegates.cursor_ids(&bin, self.launch.path_env.as_deref());
+                model = Some(crate::delegate::map_cursor_model(&ids, &name, effort.as_deref()));
+            }
+            effort = None;
+        }
+        let isolated = request.isolation == Isolation::Worktree;
+        if isolated {
+            cwd = branches::new_worktree(&cwd, self.launch.path_env.as_deref())?;
+        }
+        let task = self.delegates.begin(NewTask {
+            parent,
+            tool,
+            title: request.title.clone(),
+            account: account.id.clone(),
+            provider: account.provider,
+            model: model.clone(),
+            cwd: cwd.clone(),
+            mode: request.mode,
+            access,
+        });
+        let argv = driver_args(
+            account.provider,
+            &SpawnSpec {
+                task: &request.task,
+                model: model.as_deref(),
+                effort: effort.as_deref(),
+                access,
+                mcp_config: self.launch.mcp_config.as_deref(),
+                exe: &self.launch.exe,
+                sock: &self.launch.sock,
+                task_id: &task.id,
+                reminders: self.launch.reminders,
+            },
+        );
+        let mut env = self.accounts.env(&account);
+        env.push((SOCK_ENV.to_owned(), self.launch.sock.display().to_string()));
+        env.push((TASK_ENV.to_owned(), task.id.clone()));
+        let id = task.id.clone();
+        let me = self.me.clone();
+        let path_env = self.launch.path_env.clone();
+        let pid = match spawn(
+            ChildSpec { bin: &bin, argv: &argv, cwd: &cwd, env: &env, path: self.launch.path_env.as_deref(), strip: &INHERITED_SESSION_ENV },
+            move |event| {
+                let Some(machine) = me.upgrade() else { return };
+                if let Some(tab) = machine.delegates.apply(&id, event) {
+                    machine.maybe_deliver(&tab);
+                }
+            },
+        ) {
+            Ok(pid) => pid,
+            Err(error) => {
+                self.delegates.fail(&task.id, error.clone());
+                if isolated {
+                    branches::drop_worktree(&cwd, path_env.as_deref());
+                }
+                return Err(error);
+            }
+        };
+        self.delegates.remember_pid(&task.id, pid);
+        self.delegates.started_json(&task.id).map(|value| value.to_string())
+    }
+
+    fn maybe_deliver(&self, tab: &str) {
+        let idle = self.tab(tab, |t| t.session.is_some() && t.status != Some(AgentStatus::Working)).unwrap_or(false);
+        if !idle {
+            return;
+        }
+        let Some((text, ids)) = self.delegates.pending_notice(tab) else { return };
+        if self.type_prompt(tab, &text).is_ok() {
+            self.delegates.mark_delivered(&ids);
+        }
+    }
+
+    fn capabilities(&self, tab: Option<&str>, search: &str) -> Result<String, String> {
+        use crate::delegate::{capabilities, codex_constraints, cursor_models, provider_models, Access, Inherited, ListedAccount};
+        let (account, model, access) = if let Some(tab) = tab {
+            self.tab(tab, |t| (t.account.clone(), t.model.clone(), Access::derive(t.bypass, false))).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
+        } else {
+            (Account::builtin(Provider::Claude), None, Access::Auto)
+        };
+        let parent = Inherited { account: account.id, model, access };
+        let listed = self
+            .accounts
+            .list()
+            .into_iter()
+            .map(|account| {
+                let status = self.status(&account);
+                let bin = self.launch.bin(account.provider);
+                let found = bin.is_file();
+                let (models, mut constraints) = match account.provider {
+                    Provider::Claude => (provider_models(Provider::Claude), vec![]),
+                    Provider::Codex => (vec![], codex_constraints()),
+                    Provider::Cursor => (cursor_models(&self.delegates.cursor_catalog(&bin, self.launch.path_env.as_deref())), crate::delegate::cursor_constraints()),
+                };
+                if !status.signed_in {
+                    constraints.push("not signed in on this machine".into());
+                }
+                if !found {
+                    constraints.push(format!("{} is not installed on this machine", account.provider.spec().name));
+                }
+                ListedAccount { id: account.id, provider: account.provider, name: account.name, signed_in: status.signed_in, bin_found: found, models, constraints }
+            })
+            .collect::<Vec<_>>();
+        let search = (!search.is_empty()).then_some(search);
+        Ok(capabilities(&parent, &listed, search).to_string())
+    }
+
+    fn open_delegated(&self, tab: &str, task: &str) -> Result<TabId, String> {
+        let info = self.delegates.open(task)?;
+        let account = self.accounts.get(&info.account).ok_or_else(|| format!("no account {} on this machine", info.account))?;
+        let bypass = self.tab(tab, |t| t.bypass).unwrap_or(false);
+        let launch = crate::delegate::resume_args(info.provider, &info.conversation);
+        let session = (info.provider == Provider::Claude).then(|| info.conversation.clone());
+        let id = self.add_tab(info.cwd, account, launch, vec![], bypass, session);
+        self.emit_tabs();
+        Ok(id)
     }
 
     fn record_event(&self, event: AgentEvent) {
@@ -1310,6 +1487,9 @@ impl Machine {
             let turn_ended = matches!(event.status, AgentStatus::Done | AgentStatus::Failed);
             if new_session || turn_ended {
                 self.refresh_stats(tab, turn_ended);
+            }
+            if event.status != AgentStatus::Working {
+                self.maybe_deliver(tab);
             }
             self.continue_when_limit_lifts(tab);
             self.emit_tabs();
@@ -1824,6 +2004,7 @@ mod tests {
             path_env: None,
             settings: "s".into(),
             mcp_config: None,
+            reminders: true,
             plugin_dir: "p".into(),
             tutorial_helper: "t".into(),
             sock: "k".into(),
