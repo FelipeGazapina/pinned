@@ -175,7 +175,7 @@ fn import_when_empty(app: AppHandle) {
                 connector["machine"] = creds.machine_id.clone().into();
             }
         }
-        if let Err(e) = link.call_hub(HubCall::Import { store, linear_key: keys.linear, slack_key: keys.slack, github_key: keys.github }) {
+        if let Err(e) = link.call_hub(HubCall::Import { store, linear_key: keys.linear, slack_key: keys.slack, github_key: keys.github, vercel_key: keys.vercel }) {
             eprintln!("pinned: could not move this Mac's workflows to the account: {e}");
         }
     });

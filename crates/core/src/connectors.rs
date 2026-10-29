@@ -394,6 +394,8 @@ struct Store {
     #[serde(default)]
     github: Option<github::Account>,
     #[serde(default)]
+    vercel: Option<vercel::Account>,
+    #[serde(default)]
     upstash: Option<upstash::Account>,
     connectors: Vec<Connector>,
 }
@@ -452,6 +454,8 @@ pub struct Settings {
     #[serde(default)]
     pub github: Option<github::Account>,
     #[serde(default)]
+    pub vercel: Option<vercel::Account>,
+    #[serde(default)]
     pub upstash: Option<upstash::Account>,
     pub connectors: Vec<Connector>,
     pub checked: Option<Check>,
@@ -463,6 +467,7 @@ pub struct Keys {
     pub linear: Option<String>,
     pub slack: Option<String>,
     pub github: Option<String>,
+    pub vercel: Option<String>,
 }
 
 /// A session a connector wants opened.
@@ -1233,6 +1238,7 @@ impl Connectors {
             linear: store.linear.clone(),
             slack: store.slack.clone(),
             github: store.github.clone(),
+            vercel: store.vercel.clone(),
             upstash: store.upstash.clone(),
             connectors: store.connectors.clone(),
             checked: self.checked.lock().unwrap().clone(),
@@ -1304,6 +1310,29 @@ impl Connectors {
         let mut store = self.store.lock().unwrap();
         store.github = None;
         self.save(&store)
+    }
+
+    /// Checks the key against the gateway before keeping it.
+    pub async fn connect_vercel(&self, key: &str) -> Result<vercel::Account, String> {
+        let key = key.trim();
+        let account = vercel::account(key).await?;
+        self.storage.write_key(VERCEL_KEY, key)?;
+        let mut store = self.store.lock().unwrap();
+        store.vercel = Some(account.clone());
+        self.save(&store)?;
+        Ok(account)
+    }
+
+    pub fn disconnect_vercel(&self) -> Result<(), String> {
+        self.storage.remove_key(VERCEL_KEY);
+        let mut store = self.store.lock().unwrap();
+        store.vercel = None;
+        self.save(&store)
+    }
+
+    /// Language models that can answer a JSON schema. The list needs no key.
+    pub async fn vercel_models(&self) -> Result<Vec<String>, String> {
+        vercel::models().await
     }
 
     pub async fn github_repos(&self) -> Result<Vec<github::Repo>, String> {
@@ -1382,11 +1411,11 @@ impl Connectors {
     pub fn import(&self, store: serde_json::Value, keys: Keys) -> Result<bool, String> {
         let mut imported: Store = serde_json::from_value(store).map_err(|e| format!("not a connectors store: {e}"))?;
         let mut current = self.store.lock().unwrap();
-        if current.linear.is_some() || current.slack.is_some() || current.github.is_some() || !current.connectors.is_empty() {
+        if current.linear.is_some() || current.slack.is_some() || current.github.is_some() || current.vercel.is_some() || !current.connectors.is_empty() {
             return Ok(false);
         }
         let present = |key: Option<String>| key.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty());
-        let (linear_key, slack_key, github_key) = (present(keys.linear), present(keys.slack), present(keys.github));
+        let (linear_key, slack_key, github_key, vercel_key) = (present(keys.linear), present(keys.slack), present(keys.github), present(keys.vercel));
         if linear_key.is_none() {
             imported.linear = None;
         }
@@ -1396,7 +1425,10 @@ impl Connectors {
         if github_key.is_none() {
             imported.github = None;
         }
-        for (name, key) in [(LINEAR_KEY, linear_key), (SLACK_KEY, slack_key), (GITHUB_KEY, github_key)] {
+        if vercel_key.is_none() {
+            imported.vercel = None;
+        }
+        for (name, key) in [(LINEAR_KEY, linear_key), (SLACK_KEY, slack_key), (GITHUB_KEY, github_key), (VERCEL_KEY, vercel_key)] {
             match key {
                 Some(key) => self.storage.write_key(name, &key)?,
                 None => self.storage.remove_key(name),
@@ -1412,7 +1444,7 @@ impl Connectors {
     /// The store and the integrations' keys, as `import` takes them.
     pub fn export(&self) -> (serde_json::Value, Keys) {
         let store = serde_json::to_value(&*self.store.lock().unwrap()).unwrap();
-        (store, Keys { linear: self.key(LINEAR_KEY), slack: self.key(SLACK_KEY), github: self.key(GITHUB_KEY) })
+        (store, Keys { linear: self.key(LINEAR_KEY), slack: self.key(SLACK_KEY), github: self.key(GITHUB_KEY), vercel: self.key(VERCEL_KEY) })
     }
 }
 
@@ -1669,14 +1701,15 @@ mod tests {
             "slack": { "team": "Acme", "userId": "UBOT", "name": "pinned" },
             "connectors": [serde_json::to_value(Connector { id: "c9".into(), ..slack_connector() }).unwrap()],
         });
-        let keys = Keys { linear: Some(" lin_api_1 ".into()), github: Some("ghp_1".into()), ..Keys::default() };
+        let keys = Keys { linear: Some(" lin_api_1 ".into()), github: Some("ghp_1".into()), vercel: Some(" vck_1 ".into()), ..Keys::default() };
         assert_eq!(connectors.import(exported.clone(), keys), Ok(true));
         let (store, keys) = connectors.export();
-        assert_eq!(keys, Keys { linear: Some("lin_api_1".into()), slack: None, github: Some("ghp_1".into()) });
+        assert_eq!(keys, Keys { linear: Some("lin_api_1".into()), slack: None, github: Some("ghp_1".into()), vercel: Some("vck_1".into()) });
         assert_eq!(store["linear"]["email"], "ana@acme.dev");
         assert_eq!(store["slack"], serde_json::Value::Null);
         assert_eq!(store["connectors"][0]["id"], "c9");
         assert_eq!(std::fs::read_to_string(dir.join("linear-key")).unwrap(), "lin_api_1");
+        assert_eq!(std::fs::read_to_string(dir.join("vercel-key")).unwrap(), "vck_1");
         let other = Keys { slack: Some("xoxb-2".into()), ..Keys::default() };
         assert_eq!(connectors.import(serde_json::json!({ "connectors": [] }), other), Ok(false), "a store with connectors keeps them");
         assert_eq!(connectors.export().1.linear.as_deref(), Some("lin_api_1"));
