@@ -13,6 +13,8 @@ pub const TOOL: &str = "remind_me";
 const LIST_TOOL: &str = "list_reminders";
 const CANCEL_TOOL: &str = "cancel_reminder";
 pub const SERVER: &str = "pinned";
+/// Leaves the reminders tools out, on a machine with no desktop to show them on.
+pub const NO_REMINDERS: &str = "--no-reminders";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Reminder {
@@ -116,11 +118,12 @@ fn next_at<Tz: TimeZone>(now: &DateTime<Tz>, time: NaiveTime) -> Option<DateTime
 
 // Claude Code expands `${PINNED_SOCK}` from the session's own environment, and `${PINNED_ROLE:-}`
 // to nothing in a session without a role.
-pub fn write_mcp_config(path: &Path, exe: &Path) -> std::io::Result<()> {
+pub fn write_mcp_config(path: &Path, exe: &Path, reminders: bool) -> std::io::Result<()> {
+    let args = if reminders { vec![SUBCOMMAND] } else { vec![SUBCOMMAND, NO_REMINDERS] };
     let config = serde_json::json!({
         "mcpServers": { SERVER: {
             "command": exe,
-            "args": [SUBCOMMAND],
+            "args": args,
             "env": {
                 SOCK_ENV: format!("${{{SOCK_ENV}}}"),
                 TAB_ENV: format!("${{{TAB_ENV}:-}}"),
@@ -136,7 +139,7 @@ pub fn permissions() -> Vec<String> {
     [TOOL, LIST_TOOL, CANCEL_TOOL].map(String::from).into_iter().chain(project).map(|tool| format!("mcp__{SERVER}__{tool}")).collect()
 }
 
-pub fn serve() {
+pub fn serve(reminders: bool) {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines().map_while(Result::ok) {
@@ -149,7 +152,7 @@ pub fn serve() {
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": SERVER, "version": env!("CARGO_PKG_VERSION") },
             })),
-            Some("tools/list") => Ok(serde_json::json!({ "tools": tool_definitions(std::env::var(ROLE_ENV).ok().as_deref().and_then(Role::parse)) })),
+            Some("tools/list") => Ok(serde_json::json!({ "tools": tool_definitions(reminders, std::env::var(ROLE_ENV).ok().as_deref().and_then(Role::parse)) })),
             Some("tools/call") => Ok(call(&request["params"])),
             Some("ping") => Ok(serde_json::json!({})),
             other => Err(format!("method not found: {other:?}")),
@@ -164,9 +167,9 @@ pub fn serve() {
     }
 }
 
-fn tool_definitions(role: Option<Role>) -> serde_json::Value {
+fn tool_definitions(reminders: bool, role: Option<Role>) -> serde_json::Value {
     let project = project_tools().into_iter().filter(|(orchestrator_only, _)| role.is_some_and(|r| r == Role::Orchestrator || !orchestrator_only)).map(|(_, tool)| tool);
-    let mut tools = reminder_tools();
+    let mut tools = if reminders { reminder_tools() } else { vec![] };
     tools.extend(project);
     serde_json::Value::Array(tools)
 }
@@ -382,10 +385,12 @@ mod tests {
 
     #[test]
     fn a_session_gets_the_project_tools_its_role_has() {
-        let names = |role| tool_definitions(role).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let names = |role| tool_definitions(true, role).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(names(None), ["remind_me", "list_reminders", "cancel_reminder"]);
         assert_eq!(names(Some(Role::Worker)), ["remind_me", "list_reminders", "cancel_reminder", "remember", "forget", "memories"]);
         assert_eq!(names(Some(Role::Orchestrator)), ["remind_me", "list_reminders", "cancel_reminder", "delegate", "agents", "remember", "forget", "memories"]);
+        let on_a_node = tool_definitions(false, Some(Role::Worker)).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(on_a_node, ["remember", "forget", "memories"]);
         assert_eq!(permissions()[3..], ["mcp__pinned__delegate", "mcp__pinned__agents", "mcp__pinned__remember", "mcp__pinned__forget", "mcp__pinned__memories"]);
 
         let ask = |name, args, tab: Option<&str>| project_request(name, &args, tab.map(Into::into)).map(|m| serde_json::to_string(&m).unwrap());
@@ -398,9 +403,13 @@ mod tests {
     #[test]
     fn the_mcp_server_hears_which_tab_and_role_runs_it() {
         let file = std::env::temp_dir().join(format!("pinned-mcp-config-{}.json", std::process::id()));
-        write_mcp_config(&file, Path::new("/opt/pinned/bin/pinned")).unwrap();
+        write_mcp_config(&file, Path::new("/opt/pinned/bin/pinned"), true).unwrap();
         let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(config["mcpServers"]["pinned"]["env"], serde_json::json!({ "PINNED_SOCK": "${PINNED_SOCK}", "PINNED_TAB": "${PINNED_TAB:-}", "PINNED_ROLE": "${PINNED_ROLE:-}" }));
+        assert_eq!(config["mcpServers"]["pinned"]["args"], serde_json::json!(["mcp"]));
+        write_mcp_config(&file, Path::new("/opt/pinned/bin/pinned"), false).unwrap();
+        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["pinned"]["args"], serde_json::json!(["mcp", "--no-reminders"]));
         let _ = std::fs::remove_file(file);
     }
 }

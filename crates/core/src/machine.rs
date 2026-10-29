@@ -59,7 +59,7 @@ impl Launch {
         let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
         let mcp_config = files.join("claude-mcp.json");
-        reminders::write_mcp_config(&mcp_config, exe)?;
+        reminders::write_mcp_config(&mcp_config, exe, true)?;
         let plugin_dir = files.join("plugin");
         let tutorial_helper = plugin::install(&plugin_dir)?;
         let path_env = login_shell_path().or_else(|| std::env::var("PATH").ok());
@@ -1152,7 +1152,7 @@ impl Machine {
         if !Path::new(path).is_dir() {
             return Err(format!("{path} is not a folder on this machine"));
         }
-        let project = self.open_project(history::project_of(Path::new(path)));
+        let project = self.open_project(path.into());
         let open = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env) == Some((Role::Orchestrator, project.clone()))).map(|(id, _)| id.clone()).min_by_key(|id| tab_number(id));
         if let Some(id) = open {
             return Ok(id);
@@ -1188,9 +1188,11 @@ impl Machine {
         let account = self.account_for(None, project)?;
         let made = project.join(".git").exists().then(|| branches::new_worktree(project, self.launch.path_env.as_deref())).transpose()?;
         let cwd = made.clone().unwrap_or_else(|| project.to_owned());
+        // A thread is titled after its prompt's first line, so the title leads the prompt.
+        let prompt = title.as_ref().map_or_else(|| task.clone(), |t| format!("{t}\n\n{task}"));
         // A prompt starting with a dash would read as an option.
-        let task = if task.starts_with('-') { format!("\n{task}") } else { task };
-        let launch = title.iter().flat_map(|t| ["--name".to_owned(), t.clone()]).chain([task]).collect();
+        let prompt = if prompt.starts_with('-') { format!("\n{prompt}") } else { prompt };
+        let launch = title.iter().flat_map(|t| ["--name".to_owned(), t.clone()]).chain([prompt]).collect();
         let id = self.add_tab(cwd.clone(), account, launch, role_env(Role::Worker, project), bypass, None);
         self.tab(&id, |t| t.made = made.clone())?;
         if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
@@ -3066,7 +3068,7 @@ mod tests {
         assert_eq!(tree.parent(), Some(project.join(".claude/worktrees").as_path()), "{}", tree.display());
         assert!(tree.file_name().unwrap().to_str().unwrap().starts_with("pinned-"));
         assert_eq!(reply, format!("Started worker {worker} in {}. You get a message when it finishes or needs input.", tree.display()));
-        assert_eq!(args[1..], ["worker", &path, "--settings", "s", "--plugin-dir", "p", "--name", "JSON output", "Add a --json flag to the CLI.", "--append-system-prompt", Role::Worker.prompt()]);
+        assert_eq!(args[1..], ["worker", &path, "--settings", "s", "--plugin-dir", "p", "--name", "JSON output", "JSON output\n\nAdd a --json flag to the CLI.", "--append-system-prompt", Role::Worker.prompt()]);
         let view = m.view(&worker).unwrap();
         assert_eq!((view.role, view.title.as_deref(), view.running), (Some(Role::Worker), Some("JSON output"), true));
 
