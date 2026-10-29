@@ -335,7 +335,7 @@ function slackCardHtml() {
     : `<ol class="steps">
          <li>Create a Slack app at <code>api.slack.com/apps</code>. Under OAuth &amp; Permissions, give its bot the scopes
            <code>channels:history</code>, <code>groups:history</code>, <code>channels:read</code>, <code>groups:read</code>,
-           <code>users:read</code>, <code>chat:write</code> and <code>reactions:write</code>, then install it to your workspace.</li>
+           <code>users:read</code>, <code>usergroups:read</code>, <code>chat:write</code> and <code>reactions:write</code>, then install it to your workspace.</li>
          <li>Invite the bot to the channel it should watch, with <code>/invite @your-bot</code>.</li>
          <li>Paste the Bot User OAuth Token here.
            <div class="row"><input id="slack-token" type="password" placeholder="xoxb-…" autocomplete="off">
@@ -466,6 +466,7 @@ const STEPS = {
       const twice = categories.find((cat, i) => names[i] && names.indexOf(names[i]) !== i);
       const vague = categories.find((cat) => cat.name.trim() && !cat.description.trim());
       const removed = categories.find((cat) => cat.workflow && !settings.connectors.some((k) => k.id === cat.workflow));
+      const deaf = categories.find((cat) => !answersThreads(settings.connectors.find((k) => k.id === cat.workflow) ?? { trigger: { kind: "called" } }));
       const fallback = fallbackOf(c.trigger.decide);
       return [
         !settings.vercel && "Connect the Vercel AI Gateway under Connectors.",
@@ -476,6 +477,7 @@ const STEPS = {
         twice && `Two categories are named “${twice.name.trim()}”.`,
         vague && `Describe the category “${vague.name.trim()}”.`,
         removed && `The workflow that “${removed.name.trim()}” routes to was deleted.`,
+        deaf && `“${deaf.name.trim()}” routes to a workflow that can't answer a Slack thread.`,
         fallback?.mention?.trim() && `The fallback can't ping a group, so saving sets it back to “${BEST_GUESS}”.`,
       ].filter(Boolean);
     },
@@ -665,15 +667,22 @@ function branchNodes(category, i) {
 
 const NEW_ROUTE = "＋new";
 
+/** A route's target must answer the thread it is handed, as the backend's `Trigger::answers_threads`. */
+const answersThreads = (k) => ["slack-mention", "called"].includes(k.trigger.kind);
+const routeName = (id) => {
+  const target = settings.connectors.find((k) => k.id === id);
+  return target ? `${target.name} (can't answer threads)` : "A deleted workflow";
+};
+
 function decideHtml(c) {
   const decide = c.trigger.decide;
-  const targets = settings.connectors.filter((k) => k.id !== c.id && ["slack-mention", "called"].includes(k.trigger.kind));
+  const targets = settings.connectors.filter((k) => k.id !== c.id && answersThreads(k));
   const row = (cat, i) => {
     const at = `trigger.decide.categories.${i}`;
     const routes = Object.fromEntries([
       ["", "Stop"],
       ...targets.map((k) => [k.id, k.name]),
-      ...(cat.workflow && !targets.some((k) => k.id === cat.workflow) ? [[cat.workflow, "A deleted workflow"]] : []),
+      ...(cat.workflow && !targets.some((k) => k.id === cat.workflow) ? [[cat.workflow, routeName(cat.workflow)]] : []),
       [NEW_ROUTE, "＋ New workflow for this category"],
     ]);
     return `<div class="category" data-category="${i}">
