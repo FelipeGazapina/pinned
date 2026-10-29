@@ -3089,4 +3089,6 @@ mod tests {
         assert!(connectors.get_settings().upstash.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    include!("legacy_outcome.rs");
 }
