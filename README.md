@@ -339,12 +339,17 @@ The default instructions ask Claude to implement the issue and open a pull reque
 per workflow.
 
 The Workflows page lists each workflow with its steps and a sentence that says what it does.
-The switch on a workflow turns it on or off right away. Click a workflow to open its flow:
-the trigger at the top, then each step it runs, joined by the event that leads to it, as in
-n8n. Click a step to set it up, and click it again to fold it. A dashed **＋** step is optional
-and off: click it to add it, and **Remove step** turns it off again. A **!** marks a step that
-is missing something, and saving opens that step. ⌘S saves. **＋ New workflow** asks what
-starts the agent, Linear or Slack, and opens a flow filled with defaults.
+The switch on a workflow turns it on or off right away. Click a workflow to open its flow on a
+canvas, as in n8n: the trigger on the left, marked ⚡, then each step it runs, joined by the
+event that leads to it. Click a step to set it up in the panel beside the canvas, and press
+Esc or ✕ to close the panel. A dashed **＋** step is optional and off: click it to add it, and
+**Remove step** turns it off again. A **!** marks a step that is missing something, and saving
+opens that step. ⌘S saves. Drag the empty canvas to move around it, and zoom with ⌘ and the
+wheel, a trackpad pinch, or the buttons in its bottom-left corner, where ⛶ fits the whole flow.
+A **＋** at the end of the flow lists the optional steps that are off, and a **＋** after a
+category that stops opens what that category does next. **＋ New workflow** asks what starts the agent and opens a flow
+filled with defaults: a Linear label, a Slack mention, any message in a Slack channel sorted by
+a decision model, or another workflow.
 
 Each workflow has its own column flow. Each **Move the issue** step names the column for a
 stage, and a stage without the step leaves the issue where it is:
@@ -375,7 +380,9 @@ code. Each Slack workflow can also file a Linear issue and fix the bug, as below
 
 To connect Slack, create an app at api.slack.com/apps and give its bot these scopes:
 `channels:history`, `groups:history`, `channels:read`, `groups:read`, `users:read`,
-`chat:write` and `reactions:write`. Install the app, invite the bot to the channel with
+`chat:write` and `reactions:write`. Add `usergroups:read` if a category mentions a user group
+by its handle, as in [Sort messages with a decision model](#sort-messages-with-a-decision-model).
+Install the app, invite the bot to the channel with
 `/invite @your-bot`, and paste the Bot User OAuth Token (`xoxb-…`) under **Connectors**.
 pinned keeps it in `slack-key` next to `linear-key`.
 
@@ -425,6 +432,61 @@ issue already filed. After filing, `pinned stage coding` and `pinned stage revie
 issue through the columns you set. A thread has no issue when pinned picks it up, so a Slack
 workflow has no first column. The session fixes code under the workflow's **Permissions**,
 so pick a mode that lets it run `git` and `gh`.
+
+### Sort messages with a decision model
+
+A **Message in channel** workflow reads every new message that a person starts in a Slack
+channel, without waiting for a mention. It skips thread replies and messages from bots. A
+decision model on the Vercel AI Gateway puts each message in one of the workflow's categories,
+and the category says what happens next. The workflow runs no session of its own.
+
+To connect the gateway, click **Open Vercel ↗** on the **Vercel AI Gateway** card under
+**Connectors**, create an AI Gateway API key, and paste it. pinned checks the key, shows the
+team's balance, and keeps the key in `vercel-key` next to `slack-key`.
+
+Click the **Decide** step to pick the model, such as `typesafe-ai/jev` or
+`openai/gpt-6-luna-decisions`, and to edit the instructions and the categories. The model list
+holds only the gateway's decision models. Each category has a name and a description, and the
+model judges a message by the descriptions. A new workflow starts with four categories:
+
+| Category   | Default description                                                     | Default action      |
+| ---------- | ----------------------------------------------------------------------- | ------------------- |
+| error      | Someone reports a bug or an error                                       | Stop                |
+| doubt      | Someone asks a question                                                 | Stop                |
+| escalation | Production is down or customers are blocked right now and someone on support must act | Mention `prod-engg` |
+| ignore     | Anything else                                                           | Stop                |
+
+Each category does one or both of these, or neither, which stops there:
+
+- **Then** hands the thread to another workflow, which answers it as if the bot had been
+  mentioned there: it replies in the thread, and files and fixes bugs as its steps say. Pick a
+  Slack mention workflow, a **Called by another workflow** workflow, or **＋ New workflow for
+  this category**, which saves a new called workflow for it. A called workflow never reads Slack
+  on its own. It gets only the threads that other workflows hand it, and its trigger names those
+  workflows.
+- **Mention** pings a Slack user group, by its handle (`prod-engg`) or its ID (`S0123ABC`), in
+  the message's thread. Every member of the group is notified.
+
+A mention reaches a whole team, so pinned sends one only when it is needed:
+
+- The model must be at least 85% sure of a category that mentions a group. Below that, the
+  message goes to the likeliest category that mentions no one.
+- A thread is mentioned once, however often it is sorted again.
+- After a mention in a channel, the same workflow mentions no one there for 30 minutes. A new
+  message in that category gets the reply `Already escalated to @prod-engg: <link>`, which
+  links the thread that was mentioned and notifies no one. A thread gets that reply once.
+
+**When the model is less than 60% sure**, under the categories, picks where a message goes when
+the model is unsure of its own choice. **Use its best guess**, the default, keeps the model's
+choice. A category sends unsure messages there instead, and the session it starts is told what
+the model guessed and how sure it was. The fallback can't mention a group: give the chosen
+category a mention, and saving sets the fallback back to **Use its best guess**.
+
+pinned checks the channel every minute and sorts each message once. A message that also
+mentions the bot in a channel that a Slack mention workflow watches starts one session, not
+two. If the gateway or Slack fails, the check reports the error and sorts the message at the
+next minute. A route to a workflow that is deleted, turned off or of the wrong kind stops the
+message and reports the error once.
 
 ### One session per issue
 

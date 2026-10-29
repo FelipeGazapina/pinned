@@ -86,9 +86,10 @@ async function seedConnectors(name) {
     linear: { name: "Sweep Bot", email: "bot@example.test", organization: "Acme" },
     slack: { team: "Acme", userId: "U1", name: "pinned-bot" },
     github: { login: "sweeper", name: "Sweep" },
+    vercel: { key_hint: "…fake" },
     connectors: [],
   };
-  ws.send(JSON.stringify({ type: "call", id: 1, call: { cmd: "import", store, linear_key: "lin_api_fake", slack_key: "xoxb-fake", github_key: "ghp_fake" } }));
+  ws.send(JSON.stringify({ type: "call", id: 1, call: { cmd: "import", store, linear_key: "lin_api_fake", slack_key: "xoxb-fake", github_key: "ghp_fake", vercel_key: "vck_fake" } }));
   const imported = await reply.finally(() => ws.close());
   if (!imported) throw new Error("the account already had connectors, so the seed was not imported");
 }
@@ -8480,7 +8481,7 @@ async function sweep(profileName) {
   await step("settings: Connectors bad keys show errors", async () => {
     await settingsPage("integrations");
     const errors = [];
-    for (const [field, button, error] of [["#linear-key", "connect-linear", "#linear-error"], ["#slack-token", "connect-slack", "#slack-error"], ["#github-token", "connect-github", "#github-error"]]) {
+    for (const [field, button, error] of [["#linear-key", "connect-linear", "#linear-error"], ["#slack-token", "connect-slack", "#slack-error"], ["#vercel-key", "connect-vercel", "#vercel-error"], ["#github-token", "connect-github", "#github-error"]]) {
       await page.fill(field, "definitely-not-a-key");
       await action(button);
       await waitFor(`${error}`, async () => (await text(error)) !== "", 15000);
@@ -8495,7 +8496,8 @@ async function sweep(profileName) {
     await seedConnectors(`seed-${profileName}`);
     await settingsPage("projects");
     await settingsPage("integrations");
-    await waitFor("connected badges", async () => (await page.locator('#settings-page .badge[data-on="true"]').count()) === 3);
+    await waitFor("connected badges", async () => (await page.locator('#settings-page .badge[data-on="true"]').count()) === 4);
+    check(/…fake/.test(await text('#settings-page .card:has(.logo[data-tone=vercel]) .connected')), "the Vercel card lacks the key hint");
     await tapOrClick("#settings-toggle");
     await tapOrClick("#new-tab");
     await page.waitForSelector("#projects .choices button");
@@ -8537,6 +8539,20 @@ async function sweep(profileName) {
     check(saved.columns.picked === "" && saved.trigger.label === "sweep", JSON.stringify(saved.columns));
   });
 
+  await step("Workflows: the ＋ after the last step adds a step that is off", async () => {
+    await action("open-add-menu");
+    const offered = await page.locator("#settings-page .flow .add-menu button").allTextContents();
+    check(offered.join() === "Ask a model before the session starts,Move the issue when pinned picks it up", `the menu offers ${offered}`);
+    await press(page.locator('#settings-page .add-menu [data-step="picked"]'));
+    check((await page.locator("#settings-page .flow .add-menu").count()) === 0, "the menu stays open");
+    await page.fill('#settings-page .node-panel [data-bind="columns.picked"]', "Analyzing");
+    await action("save-connector");
+    await waitFor("Saved", async () => (await text("#save-connector")) === "Saved");
+    const saved = (await hubCall({ cmd: "get_settings" })).connectors[0];
+    check(saved.columns.picked === "Analyzing", JSON.stringify(saved.columns));
+    return offered.join();
+  });
+
   await step("Workflows: the list's switch turns it off", async () => {
     await action("close-editor");
     await page.waitForSelector("#settings-page .flow-card");
@@ -8560,9 +8576,154 @@ async function sweep(profileName) {
     check((await hubCall({ cmd: "get_settings" })).connectors.length === 2, "the hub lacks the Slack workflow");
   });
 
-  await step("Workflows: delete both", async () => {
-    for (let i = 0; i < 2; i++) {
-      if ((await page.locator("#settings-page .editor-bar").count()) === 0) await press(page.locator("#settings-page .flow-card .open").first());
+  await step("Workflows: a saved Slack workflow gets a model that classifies before its session", async () => {
+    await action("open-add-menu");
+    await press(page.locator('#settings-page .add-menu [data-step="ask"]'));
+    check((await page.inputValue('#settings-page .node-panel [data-bind="ask.model"]')) === "typesafe-ai/jev", "the ask step lacks its default model");
+    const x = async (id) => (await page.locator(`#settings-page .step[data-step="${id}"]`).boundingBox()).x;
+    check((await x("slack-trigger")) < (await x("ask")) && (await x("ask")) < (await x("agent")), "the ask step is not between the trigger and the session");
+    await action("save-connector");
+    await waitFor("Saved", async () => (await text("#save-connector")) === "Saved");
+    const saved = (await hubCall({ cmd: "get_settings" })).connectors.find((c) => c.trigger.kind === "slack-mention");
+    check(saved.ask?.model === "typesafe-ai/jev" && saved.ask.questions.map((q) => q.name).join() === "kind,agent", JSON.stringify(saved.ask));
+    check(saved.ask.questions[1].stopOn.join() === "no", "the agent question does not stop on no");
+    return saved.ask.questions.map((q) => `${q.name}: ${q.choices.join("/")}`).join("; ");
+  });
+
+  await step("Workflows: a Slack message workflow routes its categories", async () => {
+    await action("close-editor");
+    await action("new-connector");
+    await press(page.locator('#settings-page [data-action="pick-trigger"][data-kind="slack-message"]'));
+    await page.fill("#settings-page .editor-bar .title", "Route support");
+    await page.fill('#settings-page [data-bind="trigger.channel"]', "support");
+    await press(page.locator('#settings-page .step[data-step="decide"] .node'));
+    const names = await page.locator("#settings-page .category input.name").evaluateAll((els) => els.map((el) => el.value));
+    check(names.join() === "error,doubt,escalation,ignore", `the default categories are ${names}`);
+    check((await page.inputValue('#settings-page [data-bind="trigger.decide.categories.2.mention"]')) === "prod-engg", "escalation does not mention prod-engg");
+    await action("remove-category", 3);
+    await page.fill('#settings-page [data-bind="trigger.decide.categories.1.description"]', "");
+    await action("save-connector");
+    await waitFor("the description error", async () => /“doubt”/.test(await text("#editor-error")));
+    await page.fill('#settings-page [data-bind="trigger.decide.categories.1.description"]', "Someone asks a question");
+    await page.selectOption('#settings-page [data-bind="trigger.decide.categories.0.workflow"]', { label: "＋ New workflow for this category" });
+    await waitFor("the new workflow on the error branch", async () => (await text('#settings-page .branch[data-branch="route"] b')) === "Route support: error");
+    const ports = await page.locator("#settings-page .flow .port-label").allTextContents();
+    const branches = await page.locator("#settings-page .flow .branch b").allTextContents();
+    check(ports.join() === "error,doubt,escalation", `branch labels: ${ports}`);
+    check(branches.join(" | ") === "Route support: error | Stop | Mention @prod-engg", `branch nodes: ${branches.join(" | ")}`);
+    await action("save-connector");
+    await waitFor("Saved", async () => (await text("#save-connector")) === "Saved");
+    const saved = (await hubCall({ cmd: "get_settings" })).connectors;
+    const router = saved.find((k) => k.trigger.kind === "slack-message");
+    const called = saved.find((k) => k.trigger.kind === "called");
+    const [error, doubt, escalation] = router?.trigger.decide.categories ?? [];
+    check(called && error?.workflow === called.id && doubt.workflow === null, `routes: ${JSON.stringify(router?.trigger.decide.categories)}`);
+    check(escalation.mention === "prod-engg" && error.mention === null, `mentions: ${JSON.stringify(router.trigger.decide.categories)}`);
+    const over = await overflowing();
+    check(!over.length, `overflowing: ${over}`);
+    return branches.join(" | ");
+  });
+
+  const zoom = () => page.evaluate(() => Number(document.querySelector("#settings-page .flow").style.zoom));
+  await step("Workflows: zoom in, out and fit, ⌘-wheel zooms and a drag pans", async () => {
+    const opened = await zoom();
+    await action("zoom-in");
+    const zoomedIn = await zoom();
+    await action("zoom-out");
+    await action("zoom-out");
+    const zoomedOut = await zoom();
+    check(zoomedIn > opened && zoomedOut < zoomedIn - 0.15, `zoom ${opened} -> in ${zoomedIn} -> out ${zoomedOut}`);
+    await action("zoom-fit");
+    const fits = await page.evaluate(() => {
+      const canvas = document.querySelector("#settings-page .canvas").getBoundingClientRect();
+      const flow = document.querySelector("#settings-page .flow").getBoundingClientRect();
+      return flow.left >= canvas.left - 1 && flow.right <= canvas.right + 1 && flow.top >= canvas.top - 1 && flow.bottom <= canvas.bottom + 1;
+    });
+    check(fits || (await zoom()) === 0.5, `Fit leaves the flow outside the canvas at ${await zoom()}`);
+    const fitted = await zoom();
+    if (touch) return `${opened} -> ${zoomedIn} -> ${zoomedOut} -> fit ${fitted}`;
+    const canvas = await rect("#settings-page .canvas");
+    await page.mouse.move(canvas.left + canvas.width / 2, canvas.top + canvas.height / 2);
+    await page.keyboard.down("Control");
+    await page.mouse.wheel(0, -300);
+    await page.keyboard.up("Control");
+    await waitFor("the wheel to zoom", async () => (await zoom()) > fitted);
+    for (let i = 0; i < 12 && !(await page.locator('#settings-page [data-action="zoom-in"]').isDisabled()); i++) await action("zoom-in");
+    check((await zoom()) === 1.5, `zoom in stops at ${await zoom()}`);
+    const ground = await page.evaluate(() => {
+      const box = document.querySelector("#settings-page .canvas").getBoundingClientRect();
+      for (let y = box.top + 20; y < box.bottom - 80; y += 20) {
+        for (let x = box.left + 20; x < box.right - 20; x += 20) {
+          if (!document.elementFromPoint(x, y)?.closest("button, .step, .branch, .zoom")) return [x, y];
+        }
+      }
+    });
+    const before = await page.evaluate(() => [document.querySelector("#settings-page .canvas").scrollLeft, document.querySelector("#settings-page .canvas").scrollTop]);
+    await page.mouse.move(...ground);
+    await page.mouse.down();
+    await page.mouse.move(ground[0] - 120, ground[1] - 80, { steps: 6 });
+    await page.mouse.up();
+    const after = await page.evaluate(() => [document.querySelector("#settings-page .canvas").scrollLeft, document.querySelector("#settings-page .canvas").scrollTop]);
+    check(after[0] > before[0] && after[1] > before[1], `the drag scrolled ${before} to ${after}`);
+    await action("zoom-fit");
+    return `${opened} -> ${zoomedIn} -> ${zoomedOut} -> fit ${fitted}, panned ${before} -> ${after}`;
+  });
+
+  await step("Workflows: the ＋ after a category that stops picks its route", async () => {
+    const ends = await page.locator('#settings-page .flow [data-action="choose-route"]').evaluateAll((els) => els.map((el) => el.dataset.category));
+    check(ends.join() === "1,2", `open ends after categories ${ends}`);
+    await action("choose-route");
+    const focused = await page.evaluate(() => document.activeElement?.dataset.bind);
+    check(focused === "trigger.decide.categories.1.workflow", `the ＋ focused ${focused}`);
+    return focused;
+  });
+
+  await step("Workflows: the unsure fallback offers categories that ping no one, follows a rename, saves and reloads", async () => {
+    const fallback = '#settings-page [data-bind="trigger.decide.fallback"]';
+    const offered = await page.locator(`${fallback} option`).evaluateAll((els) => els.map((el) => el.textContent));
+    check(offered.join() === "Use its best guess,error,doubt", `the fallback offers ${offered}`);
+    await page.selectOption(fallback, "doubt");
+    await page.fill('#settings-page [data-bind="trigger.decide.categories.1.name"]', "question");
+    check((await page.inputValue(fallback)) === "question", `after a rename the fallback is ${await page.inputValue(fallback)}`);
+    await page.fill('#settings-page [data-bind="trigger.decide.categories.1.name"]', "doubt");
+    await action("save-connector");
+    await waitFor("Saved", async () => (await text("#save-connector")) === "Saved");
+    const router = () => hubCall({ cmd: "get_settings" }).then((s) => s.connectors.find((k) => k.trigger.kind === "slack-message"));
+    check((await router()).trigger.decide.fallback === "doubt", `the hub has the fallback ${(await router()).trigger.decide.fallback}`);
+    await action("close-editor");
+    await press(page.locator("#settings-page .flow-card .open").filter({ has: page.locator("b", { hasText: /^Route support$/ }) }));
+    await press(page.locator('#settings-page .step[data-step="decide"] .node'));
+    check((await page.inputValue(fallback)) === "doubt", `reopened, the fallback is ${await page.inputValue(fallback)}`);
+    await page.fill('#settings-page [data-bind="trigger.decide.categories.1.mention"]', "support-team");
+    const issue = await page.getAttribute('#settings-page .step[data-step="decide"] .warn', "title");
+    check(/can't ping a group/.test(issue ?? ""), `the Decide step says ${issue}`);
+    await action("save-connector");
+    await waitFor("Saved", async () => (await text("#save-connector")) === "Saved");
+    const pinged = (await router()).trigger.decide;
+    check(pinged.fallback === null && pinged.categories[1].mention === "support-team", `saved ${JSON.stringify(pinged)}`);
+    check((await page.inputValue(fallback)) === "", "the select still shows the cleared fallback");
+    await page.fill('#settings-page [data-bind="trigger.decide.categories.1.mention"]', "");
+    await action("save-connector");
+    await waitFor("Saved", async () => (await text("#save-connector")) === "Saved");
+    return offered.join();
+  });
+
+  await step("Workflows: the called workflow names the workflow that routes to it", async () => {
+    await press(page.locator('#settings-page .branch[data-branch="route"] .node'));
+    await action("open-route");
+    await waitFor("the called workflow", async () => (await page.inputValue("#settings-page .editor-bar .title")) === "Route support: error");
+    await press(page.locator('#settings-page .step[data-step="called-trigger"] .node'));
+    const said = await text("#settings-page .node-panel .details .hint");
+    check(/“Route support” sorts a message into “error”/.test(said), said);
+    check((await page.locator('#settings-page .step[data-step="reply"]').count()) === 1, "the called workflow does not reply in the thread");
+    return said;
+  });
+
+  await step("Workflows: delete them all", async () => {
+    if ((await page.locator("#settings-page .editor-bar").count()) > 0) await action("close-editor");
+    if ((await page.locator("#settings-page .editor-bar").count()) > 0) await action("close-editor");
+    for (let left = (await hubCall({ cmd: "get_settings" })).connectors.length; left > 0; left--) {
+      await press(page.locator("#settings-page .flow-card .open").first());
       await action("delete-connector");
       await action("delete-connector");
       await page.waitForSelector("#settings-page .new-card");
@@ -8622,7 +8783,7 @@ async function sweep(profileName) {
 
   await step("Connectors: disconnect all", async () => {
     await settingsPage("integrations");
-    for (const name of ["disconnect-linear", "disconnect-slack", "disconnect-github"]) {
+    for (const name of ["disconnect-linear", "disconnect-slack", "disconnect-vercel", "disconnect-github"]) {
       await action(name);
       await page.waitForSelector(`#settings-page [data-action="${name}"]`, { state: "detached" });
     }

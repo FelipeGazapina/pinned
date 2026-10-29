@@ -158,6 +158,40 @@ pub async fn channel_id(token: &str, channel: &str) -> Result<String, String> {
         .ok_or_else(|| format!("Slack has no channel #{name} the bot can see"))
 }
 
+pub async fn channel_name(token: &str, id: &str) -> Result<String, String> {
+    let body = call(token, "conversations.info", &[("channel", id)]).await?;
+    body["channel"]["name"].as_str().map(str::to_owned).ok_or_else(|| "Slack sent no channel name".into())
+}
+
+fn is_group_id(group: &str) -> bool {
+    group.len() > 1 && group.starts_with('S') && group.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
+fn group_with_handle(groups: &Value, handle: &str) -> Option<String> {
+    groups.as_array().into_iter().flatten().find(|g| g["handle"].as_str() == Some(handle)).and_then(|g| g["id"].as_str()).map(str::to_owned)
+}
+
+/// The id of the user group `group`, given as its handle (with or without `@`) or as an id.
+pub async fn group_id(token: &str, group: &str) -> Result<String, String> {
+    let handle = group.trim().trim_start_matches('@');
+    if is_group_id(handle) {
+        return Ok(handle.to_owned());
+    }
+    let groups = match call(token, "usergroups.list", &[]).await {
+        Ok(body) => body,
+        Err(e) if e == "Slack: missing_scope" => {
+            return Err(format!("Slack won't let the bot look up @{handle}: add the usergroups:read scope to the Slack app and reinstall it"))
+        }
+        Err(e) => return Err(e),
+    };
+    group_with_handle(&groups["usergroups"], handle).ok_or_else(|| format!("Slack has no user group @{handle}: check the handle, or use the group's id"))
+}
+
+/// How a message mentions the user group `id`, which notifies every member.
+pub fn group_mention(id: &str) -> String {
+    format!("<!subteam^{id}>")
+}
+
 /// Slack's message timestamp (`"1712345678.123456"`) in microseconds, to compare exactly.
 fn micros(ts: &str) -> Option<i64> {
     let (secs, frac) = ts.split_once('.').unwrap_or((ts, ""));
@@ -188,6 +222,28 @@ fn mentions_in(messages: &Value, bot: &str, since: DateTime<Utc>) -> Vec<Mention
             (at > since).then(|| Mention { thread, ts: ts.to_owned(), at })
         })
         .collect()
+}
+
+fn from_people(messages: &Value, bot: &str, since: DateTime<Utc>) -> Vec<Value> {
+    let since = since.timestamp_micros();
+    let mut people: Vec<Value> = messages
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["user"].as_str().is_some_and(|u| u != bot) && m.get("subtype").is_none() && m.get("bot_id").is_none())
+        .filter(|m| m["ts"].as_str().and_then(micros).is_some_and(|at| at > since))
+        .filter(|m| m["thread_ts"].as_str().is_none_or(|thread| Some(thread) == m["ts"].as_str()))
+        .cloned()
+        .collect();
+    people.sort_by_key(|m| m["ts"].as_str().and_then(micros));
+    people
+}
+
+/// The top-level messages people wrote in `channel` after `since`, oldest first, by author name.
+pub async fn messages(token: &str, channel: &str, bot: &str, since: DateTime<Utc>) -> Result<Vec<Post>, String> {
+    let history = call(token, "conversations.history", &[("channel", channel), ("oldest", &ts(since)), ("limit", PAGE)]).await?;
+    let people = Value::Array(from_people(&history["messages"], bot, since));
+    Ok(posts(&people, &names(token, &people).await?))
 }
 
 /// Threads in a history page whose last reply came after `since`.
@@ -463,6 +519,48 @@ mod tests {
         let (newest, people) = after_cursor(&replies, "UBOT", "1792400099.000000").unwrap();
         assert_eq!((newest.as_str(), people.len()), ("1792400105.000000", 0));
         assert_eq!(after_cursor(&replies, "UBOT", "1792400105.000000"), None);
+    }
+
+    #[test]
+    fn new_messages_are_what_people_started_in_the_channel() {
+        let history = json!([
+            { "ts": "1792400110.000000", "user": "U3", "text": "also in the thread", "thread_ts": "1792400050.000200", "subtype": "thread_broadcast" },
+            { "ts": "1792400105.000000", "user": "U2", "text": "replied and sent to the channel", "thread_ts": "1792400050.000200" },
+            { "ts": "1792400100.000300", "user": "U2", "text": "lunch?" },
+            { "ts": "1792400090.000000", "user": "UBOT", "text": "I am the bot" },
+            { "ts": "1792400080.000000", "bot_id": "B9", "user": "U9", "text": "deploy finished" },
+            { "ts": "1792400070.000000", "subtype": "channel_join", "user": "U4", "text": "<@U4> has joined the channel" },
+            { "ts": "1792400050.000200", "user": "U1", "text": "the export button 500s", "thread_ts": "1792400050.000200", "latest_reply": "1792400105.000000" },
+            { "ts": "1792390000.000100", "user": "U1", "text": "before the watermark" },
+        ]);
+        let since = DateTime::from_timestamp(1792395000, 0).unwrap();
+        assert_eq!(
+            from_people(&history, "UBOT", since),
+            [
+                json!({ "ts": "1792400050.000200", "user": "U1", "text": "the export button 500s", "thread_ts": "1792400050.000200", "latest_reply": "1792400105.000000" }),
+                json!({ "ts": "1792400100.000300", "user": "U2", "text": "lunch?" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_user_group_is_named_by_id_or_by_handle() {
+        assert!(is_group_id("S0123ABC"));
+        assert!(!is_group_id("prod-engg"));
+        assert!(!is_group_id("SUPPORT-team"));
+        assert!(!is_group_id("S"));
+        let groups = json!([
+            { "id": "S0AAA111", "handle": "design", "name": "Design" },
+            { "id": "S0123ABC", "handle": "prod-engg", "name": "Production engineers" },
+        ]);
+        assert_eq!(group_with_handle(&groups, "prod-engg"), Some("S0123ABC".into()));
+        assert_eq!(group_with_handle(&groups, "Production engineers"), None);
+        assert_eq!(group_mention("S0123ABC"), "<!subteam^S0123ABC>");
+        assert_eq!(block_on(group_id("xoxb-unused", " @S0123ABC ")), Ok("S0123ABC".into()), "an id needs no lookup");
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(future)
     }
 
     #[test]

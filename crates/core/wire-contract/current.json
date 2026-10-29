@@ -4036,6 +4036,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -4085,6 +4092,7 @@
               "fix",
               "created",
               "followed",
+              "paged",
               "proof",
               "machine",
               "repo",
@@ -4126,7 +4134,107 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories",
+              "fallback"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "workflow",
+              "mention"
             ]
           },
           "Effort": {
@@ -4234,6 +4342,21 @@
             "required": [
               "cursor",
               "replied"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -8345,6 +8468,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -8422,7 +8552,104 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description"
             ]
           },
           "Effort": {
@@ -8529,6 +8756,21 @@
             },
             "required": [
               "cursor"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -10032,6 +10274,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -10081,6 +10330,7 @@
               "fix",
               "created",
               "followed",
+              "paged",
               "proof",
               "machine",
               "repo",
@@ -10122,7 +10372,107 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories",
+              "fallback"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "workflow",
+              "mention"
             ]
           },
           "Effort": {
@@ -10230,6 +10580,21 @@
             "required": [
               "cursor",
               "replied"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -11697,6 +12062,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -11774,7 +12146,104 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description"
             ]
           },
           "Effort": {
@@ -11881,6 +12350,21 @@
             },
             "required": [
               "cursor"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -12291,6 +12775,13 @@
             },
             "default": {}
           },
+          "paged": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/Paged"
+            },
+            "default": {}
+          },
           "proof": {
             "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
             "type": "boolean",
@@ -12340,6 +12831,7 @@
           "fix",
           "created",
           "followed",
+          "paged",
           "proof",
           "machine",
           "repo",
@@ -12381,7 +12873,107 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories",
+              "fallback"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "workflow",
+              "mention"
             ]
           },
           "Effort": {
@@ -12489,6 +13081,21 @@
             "required": [
               "cursor",
               "replied"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -12682,6 +13289,13 @@
             },
             "default": {}
           },
+          "paged": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/Paged"
+            },
+            "default": {}
+          },
           "proof": {
             "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
             "type": "boolean",
@@ -12759,7 +13373,104 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description"
             ]
           },
           "Effort": {
@@ -12866,6 +13577,21 @@
             },
             "required": [
               "cursor"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -13889,6 +14615,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -13938,6 +14671,7 @@
               "fix",
               "created",
               "followed",
+              "paged",
               "proof",
               "machine",
               "repo",
@@ -13979,7 +14713,107 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories",
+              "fallback"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "workflow",
+              "mention"
             ]
           },
           "Effort": {
@@ -14087,6 +14921,21 @@
             "required": [
               "cursor",
               "replied"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -14459,6 +15308,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -14536,7 +15392,104 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description"
             ]
           },
           "Effort": {
@@ -14643,6 +15596,21 @@
             },
             "required": [
               "cursor"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -16397,6 +17365,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -16446,6 +17421,7 @@
               "fix",
               "created",
               "followed",
+              "paged",
               "proof",
               "machine",
               "repo",
@@ -16487,7 +17463,107 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories",
+              "fallback"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "workflow",
+              "mention"
             ]
           },
           "Effort": {
@@ -16595,6 +17671,21 @@
             "required": [
               "cursor",
               "replied"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -17588,6 +18679,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -17665,7 +18763,104 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description"
             ]
           },
           "Effort": {
@@ -17772,6 +18967,21 @@
             },
             "required": [
               "cursor"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
