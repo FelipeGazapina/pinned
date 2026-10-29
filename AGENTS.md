@@ -16,6 +16,8 @@ Run this before pushing. It exits 1 when a snapshot would break. It exits 2 when
 cargo run -p pinned-server --bin wire-contract -- check
 ```
 
-The release gate asks about new breaks only. `check --base <git-rev>` lists breaks this change adds over that revision under New breaks, and lists the rest under Already shipped. It exits 1 only when a new break exists. A pull request uses its base commit. A push to `main` uses the commit before the push. A release uses the previous release tag.
+The release gate asks about new breaks only. `check --base <git-rev>` lists breaks this change adds over that revision under New breaks, and lists the rest under Already shipped. It exits 1 only when a new break exists. A pull request uses its base commit. A push to `main` uses the commit before the push. A hub deploy passes the commit `railway-hub` already points at.
+
+The hub deploys itself. Every push to `main` or version tag runs `hub-deploy.yml`, which moves `railway-hub` to the newest version tag on `main` after the compatibility gate. Never move `railway-hub` by hand.
 
 An agent must not approve the `hub-breaking-change` environment. An agent must not delete or edit a snapshot to make the check pass. Only the owner decides that a break ships.
