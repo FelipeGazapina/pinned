@@ -188,6 +188,50 @@ impl Screen {
     }
 }
 
+/// A prompt is in flight until the Done of a turn that started after it.
+/// Claude's Working marks that start. Codex never sends Working, so a Done
+/// with no open turn closes one submit.
+#[derive(Default)]
+struct Turn {
+    submit: u32,
+    done: u32,
+    opened: Option<u32>,
+    draft: bool,
+}
+
+impl Turn {
+    fn busy(&self) -> bool {
+        self.submit != self.done || self.opened.is_some()
+    }
+
+    fn note_submit(&mut self) {
+        self.submit = self.submit.wrapping_add(1);
+        self.draft = false;
+    }
+
+    fn note_working(&mut self) {
+        if self.submit == self.done {
+            self.submit = self.done.wrapping_add(1);
+        }
+        if self.opened.is_none() {
+            self.opened = Some(self.done.wrapping_add(1));
+        }
+    }
+
+    fn note_terminal(&mut self) {
+        if let Some(gen) = self.opened.take() {
+            self.done = gen;
+        } else if self.done != self.submit {
+            self.done = self.done.wrapping_add(1);
+        }
+        self.draft = false;
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 struct Tab {
     cwd: PathBuf,
     account: Account,
@@ -223,8 +267,11 @@ struct Tab {
     message: Option<String>,
     /// Prompts typed before the session took the terminal, typed in once it does.
     held: Vec<String>,
-    /// The user typed after the last turn ended. A notice waits for the next turn end.
-    input_since_turn: bool,
+    /// Prompts that arrived while a turn was in flight or the user was drafting.
+    /// One is typed each time a turn ends and the tab is free.
+    queued: Vec<String>,
+    /// Submits in flight, and printable text the user has not submitted.
+    gate: Turn,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
     screen: Arc<Mutex<Screen>>,
@@ -270,6 +317,24 @@ impl Tab {
             session: self.claude_session.clone(),
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
         }
+    }
+
+    /// A notice may be typed. Cursor never reports Done, so it is never idle.
+    fn notice_idle(&self) -> bool {
+        self.session.is_some() && self.status == Some(AgentStatus::Done) && !self.gate.busy() && !self.gate.draft
+    }
+
+    fn flush_queued(&mut self) {
+        if self.gate.busy() || self.gate.draft || !matches!(self.status, Some(AgentStatus::Done | AgentStatus::Failed)) {
+            return;
+        }
+        let Some(text) = self.queued.first().cloned() else { return };
+        let Some(session) = self.session.as_mut().filter(|session| session.raw()) else { return };
+        if session.write(&paste(&text)).is_err() {
+            return;
+        }
+        self.queued.remove(0);
+        self.gate.note_submit();
     }
 }
 
@@ -451,10 +516,7 @@ impl Machine {
             Call::SignIn { account } => json(self.sign_in(&account)?),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from } => json(self.thread(&tab, from)?),
-            Call::Prompt { tab, text } => {
-                let _ = self.tab(&tab, |t| t.input_since_turn = true);
-                json(self.type_prompt(&tab, &text)?)
-            },
+            Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
@@ -983,6 +1045,7 @@ impl Machine {
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
         let (old, screen) = self.tab(tab, |t| {
             t.held.clear();
+            t.queued.clear();
             (t.session.take(), t.screen.clone())
         })?;
         let session = screen.lock().unwrap().restart();
@@ -1005,6 +1068,7 @@ impl Machine {
             t.session = Some(pty);
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
+            t.gate.reset();
         })?;
         self.type_held_once_raw(tab, session);
         Ok(())
@@ -1023,8 +1087,11 @@ impl Machine {
             let done = machine.tab(&tab, |t| match t.session.as_mut() {
                 Some(s) if s.raw() => {
                     for text in std::mem::take(&mut t.held) {
-                        let _ = s.write(&paste(&text));
+                        if s.write(&paste(&text)).is_ok() {
+                            t.gate.note_submit();
+                        }
                     }
+                    t.flush_queued();
                     true
                 }
                 Some(_) => false,
@@ -1062,7 +1129,12 @@ impl Machine {
             return self.shells.write(tab, data);
         }
         self.tab(tab, |t| {
-            t.input_since_turn = true;
+            let (text, submit) = classify_input(data);
+            if submit {
+                t.gate.note_submit();
+            } else if text {
+                t.gate.draft = true;
+            }
             match t.session.as_mut() {
                 Some(s) => s.write(data).map_err(|e| e.to_string()),
                 None => Ok(()),
@@ -1271,8 +1343,16 @@ impl Machine {
             Some(s) if s.raw() => {
                 for held in std::mem::take(&mut t.held) {
                     s.write(&paste(&held)).map_err(|e| e.to_string())?;
+                    t.gate.note_submit();
                 }
-                s.write(&paste(text)).map_err(|e| e.to_string())
+                let accept = !t.gate.busy() && !t.gate.draft && t.status != Some(AgentStatus::Working);
+                if !accept {
+                    t.queued.push(text.to_owned());
+                    return Ok(());
+                }
+                s.write(&paste(text)).map_err(|e| e.to_string())?;
+                t.gate.note_submit();
+                Ok(())
             }
             Some(_) => {
                 t.held.push(text.to_owned());
@@ -1480,11 +1560,10 @@ impl Machine {
         self.delegates.started_json(&task.id).map(|value| value.to_string())
     }
 
-    /// Idle means the turn hook said Done and the user has not typed since that Done.
-    /// A tab with no turn hook, such as Cursor, is never idle, so a notice is never typed there.
+    /// Idle means the turn hook said Done, no prompt is in flight, and the user has not
+    /// typed text since that Done. A tab with no turn hook, such as Cursor, is never idle.
     fn parent_idle(&self, tab: &str) -> bool {
-        let Ok((live, status, typed)) = self.tab(tab, |t| (t.session.is_some(), t.status, t.input_since_turn)) else { return false };
-        live && status == Some(AgentStatus::Done) && !typed
+        self.tab(tab, |t| t.notice_idle()).unwrap_or(false)
     }
 
     fn maybe_deliver(&self, tab: &str) {
@@ -1500,10 +1579,19 @@ impl Machine {
     /// Writes `text` into a raw session. `Ok(false)` when the session has not taken the terminal,
     /// which leaves the notice unclaimed so a later idle can type it. Queuing it is not delivery.
     fn write_notice(&self, tab: &str, text: &str) -> Result<bool, String> {
-        self.tab(tab, |t| match t.session.as_mut() {
-            Some(s) if s.raw() => s.write(&paste(text)).map(|_| true).map_err(|e| e.to_string()),
-            Some(_) => Ok(false),
-            None => Err(format!("tab {tab} has no running session")),
+        self.tab(tab, |t| {
+            if !t.notice_idle() {
+                return Ok(false);
+            }
+            match t.session.as_mut() {
+                Some(s) if s.raw() => {
+                    s.write(&paste(text)).map_err(|e| e.to_string())?;
+                    t.gate.note_submit();
+                    Ok(true)
+                }
+                Some(_) => Ok(false),
+                None => Err(format!("tab {tab} has no running session")),
+            }
         })?
     }
 
@@ -1621,7 +1709,8 @@ impl Machine {
             title: None,
             message: None,
             held: vec![],
-            input_since_turn: false,
+            queued: vec![],
+            gate: Turn::default(),
             screen: Arc::default(),
         };
         self.tabs.lock().unwrap().insert(id.clone(), tab);
@@ -1740,10 +1829,13 @@ impl Machine {
             if !idle_notice {
                 t.updated = Some(unix_now());
             }
-            if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
-                t.input_since_turn = false;
+            match event.status {
+                AgentStatus::Working => t.gate.note_working(),
+                AgentStatus::Done | AgentStatus::Failed => t.gate.note_terminal(),
+                AgentStatus::NeedsInput => {}
             }
             t.status = Some(event.status);
+            t.flush_queued();
             if event.title.is_some() {
                 t.title = event.title.clone();
             }
@@ -1916,6 +2008,60 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
 
 fn tab_number(id: &str) -> u32 {
     id.trim_start_matches("tab-").parse().unwrap_or(0)
+}
+
+/// Printable text starts a draft. Enter submits. Escape sequences and other control
+/// bytes do neither: focus reports, DA replies, and menu keys must not hold a notice.
+fn classify_input(data: &[u8]) -> (bool, bool) {
+    let mut i = 0;
+    let mut text = false;
+    let mut submit = false;
+    while i < data.len() {
+        if data[i] == 0x1b {
+            let Some(len) = escape_len(&data[i + 1..]) else { break };
+            i += 1 + len;
+            continue;
+        }
+        if data[i] == b'\r' {
+            submit = true;
+            i += 1;
+            continue;
+        }
+        if data[i] < 0x20 || data[i] == 0x7f {
+            i += 1;
+            continue;
+        }
+        text = true;
+        i += 1;
+    }
+    if submit {
+        text = false;
+    }
+    (text, submit)
+}
+
+fn escape_len(rest: &[u8]) -> Option<usize> {
+    if rest.is_empty() {
+        return Some(0);
+    }
+    match rest[0] {
+        b'[' => rest[1..].iter().position(|b| (0x40..=0x7e).contains(b)).map(|at| at + 2),
+        b']' => {
+            let mut i = 1;
+            while i < rest.len() {
+                if rest[i] == 0x07 {
+                    return Some(i + 1);
+                }
+                if rest[i] == 0x1b && rest.get(i + 1) == Some(&b'\\') {
+                    return Some(i + 2);
+                }
+                i += 1;
+            }
+            None
+        }
+        b'O' | b'N' => rest.get(1).map(|_| 2),
+        _ => Some(1),
+    }
 }
 
 /// `text` as a bracketed paste and Enter, so its lines reach claude as one prompt that it submits.
@@ -3298,6 +3444,132 @@ echo '{"type":"result","result":"ok"}'
         let needle = format!("[pinned] Delegated task {id} \"Once\"");
         wait_for("the one notice", || read_pty(&file).contains(&needle));
         assert_eq!(read_pty(&file).matches(&needle).count(), 1, "the notice was pasted twice: {}", read_pty(&file));
+        let _ = std::fs::remove_file(file);
+    }
+
+    fn done_event(tab: &str) -> AgentEvent {
+        AgentEvent {
+            status: AgentStatus::Done,
+            cwd: None,
+            message: None,
+            tab: Some(tab.into()),
+            session: None,
+            title: None,
+            resume_at: None,
+            prompt: None,
+            snapshot: None,
+        }
+    }
+
+    #[test]
+    fn escape_sequences_are_not_a_draft_and_enter_submits() {
+        assert_eq!(classify_input(b"\x1b[I"), (false, false));
+        assert_eq!(classify_input(b"\x1b[O"), (false, false));
+        assert_eq!(classify_input(b"\x1b"), (false, false));
+        assert_eq!(classify_input(b"\x1b[A"), (false, false));
+        assert_eq!(classify_input(b"\x1b[?1;2c"), (false, false));
+        assert_eq!(classify_input(b"\x1b[1;1R"), (false, false));
+        assert_eq!(classify_input(b"xyz"), (true, false));
+        assert_eq!(classify_input(b"\r"), (false, true));
+        assert_eq!(classify_input(b"hi\r"), (false, true));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_second_notice_waits_until_the_done_that_follows_the_first() {
+        let (m, tab, file) = pty_file("notice-second");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        let first = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "First");
+        m.maybe_deliver(&tab);
+        let first_needle = format!("[pinned] Delegated task {first} \"First\"");
+        wait_for("the first notice", || read_pty(&file).contains(&first_needle));
+        let second = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Second");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mid = read_pty(&file);
+        assert!(!mid.contains("Second"), "a second notice was pasted before the first turn ended: {mid}");
+        m.record_event(done_event(&tab));
+        let second_needle = format!("[pinned] Delegated task {second} \"Second\"");
+        wait_for("the second notice after Done", || read_pty(&file).contains(&second_needle));
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_delivery_and_a_notice_do_not_share_an_idle_gap() {
+        let env = vec![("PINNED_ISSUE".into(), "abc".into())];
+        let file = std::env::temp_dir().join(format!("pinned-notice-deliver-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let m = machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env.clone(), false, None);
+        m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display())), pty::size(80, 24)).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        assert!(m.deliver(&env, "from slack"));
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "After");
+        m.maybe_deliver(&tab);
+        wait_for("the slack prompt", || read_pty(&file).contains("from slack"));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice shared the slack prompt's turn: {}", read_pty(&file));
+        m.record_event(done_event(&tab));
+        let needle = format!("[pinned] Delegated task {id} \"After\"");
+        wait_for("the notice after the delivery's Done", || read_pty(&file).contains(&needle));
+
+        let file_b = std::env::temp_dir().join(format!("pinned-notice-deliver-b-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file_b);
+        let tab_b = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env.clone(), false, None);
+        m.spawn(&tab_b, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file_b.display())), pty::size(80, 24)).unwrap();
+        let (seen_b, sink_b) = viewer();
+        m.attach(&tab_b, "test-b".into(), sink_b).unwrap();
+        wait_for("stty b", || text(&seen_b).contains("ready"));
+        m.tab(&tab_b, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        let id_b = finish_task(&m, crate::delegate::Parent::Tab(tab_b.clone()), "Before");
+        m.maybe_deliver(&tab_b);
+        let needle_b = format!("[pinned] Delegated task {id_b} \"Before\"");
+        wait_for("the notice first", || read_pty(&file_b).contains(&needle_b));
+        assert!(m.deliver(&env, "from linear"));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file_b).contains("from linear"), "the delivery shared the notice's turn: {}", read_pty(&file_b));
+        m.record_event(done_event(&tab_b));
+        wait_for("the delivery after Done", || read_pty(&file_b).contains("from linear"));
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_file(&file_b);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn focus_reports_do_not_hold_a_notice() {
+        let (m, tab, file) = pty_file("notice-focus");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        for bytes in [b"\x1b[I".as_slice(), b"\x1b[O".as_slice(), b"\x1b".as_slice(), b"\x1b[Z".as_slice(), b"\x1b[A".as_slice()] {
+            m.write_input(&tab, bytes).unwrap();
+        }
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Focus");
+        m.maybe_deliver(&tab);
+        let needle = format!("[pinned] Delegated task {id} \"Focus\"");
+        wait_for("the notice after focus reports", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_done_of_the_turn_already_running_keeps_a_later_submit_busy() {
+        let (m, tab, file) = pty_file("notice-queued");
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
+        m.write_input(&tab, b"\r").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Held");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice was pasted into the running turn: {}", read_pty(&file));
+        m.record_event(done_event(&tab));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the running turn's Done cleared the queued submit: {}", read_pty(&file));
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
+        m.record_event(done_event(&tab));
+        let needle = format!("[pinned] Delegated task {id} \"Held\"");
+        wait_for("the notice after the queued turn", || read_pty(&file).contains(&needle));
         let _ = std::fs::remove_file(file);
     }
 
