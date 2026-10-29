@@ -1,0 +1,6 @@
+{
+  "exit_code": 3,
+  "output": "hello\ninit\nuid=1002(boxuser) gid=1002(boxuser) groups=1002(boxuser)\n/usr/local/bin/gh\n/usr/bin/curl\n/usr/bin/setsid\n/usr/local/bin/node\n",
+  "error": "err\n",
+  "cpu_ns": 12643000
+}

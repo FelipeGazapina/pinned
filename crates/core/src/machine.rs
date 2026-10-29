@@ -1659,7 +1659,8 @@ pub fn git_remote(dir: &Path) -> Option<String> {
     (out.status.success() && !url.is_empty()).then_some(url)
 }
 
-fn repo_name(repo: &str) -> Option<&str> {
+/// The folder name a clone of `repo` gets under `~/pinned`.
+pub fn repo_name(repo: &str) -> Option<&str> {
     let name = repo.trim_end_matches('/').rsplit(['/', ':']).next()?.trim_end_matches(".git");
     (!name.is_empty() && name != "." && name != "..").then_some(name)
 }

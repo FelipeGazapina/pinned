@@ -1,3 +1,4 @@
+pub mod boxes;
 pub mod db;
 pub mod http;
 pub mod hub;
@@ -18,6 +19,9 @@ pub struct Config {
     pub key_file: PathBuf,
     /// Lets anyone who reaches the hub create an account; otherwise only the first one can.
     pub open_signup: bool,
+    /// Upstash's Box API; tests pass a fake.
+    pub box_api: Arc<dyn boxes::BoxApi>,
+    pub box_policy: boxes::Policy,
 }
 
 pub struct Running {
@@ -32,7 +36,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
     let listener = tokio::net::TcpListener::bind(&config.listen).await.map_err(|e| format!("could not listen on {}: {e}", config.listen))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let public_url = config.public_url.unwrap_or_else(|| format!("http://{addr}"));
-    let hub = hub::Hub::new(db, public_url);
+    let hub = hub::Hub::new(db, public_url, config.box_api, config.box_policy);
     hub.watch_all().await?;
     let app = http::router(hub.clone(), config.ui, config.downloads, config.open_signup).into_make_service_with_connect_info::<SocketAddr>();
     let server = tokio::spawn(async move {

@@ -611,6 +611,10 @@ pub enum HubCall {
     DisconnectGithub,
     /// `Vec<github::Repo>`, most recently pushed first.
     GithubRepos,
+    /// `upstash::Account`, once Upstash took the key. Only a signed-in app runs boxes, so this has no Tauri command.
+    ConnectUpstash { key: String, claude_token: String },
+    /// Deletes the account's boxes before it forgets the keys.
+    DisconnectUpstash,
     /// The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has
     /// none, or into `dest` when given.
     Clone {
@@ -673,6 +677,9 @@ pub struct MachineView {
     pub online: bool,
     /// Unix seconds.
     pub last_seen: i64,
+    /// The Upstash Box the machine runs in, which pinned deletes with it once its session ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstash_box: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -993,6 +1000,11 @@ mod tests {
         round_trip(HubCall::GetSettings, json!({ "cmd": "get_settings" }));
         round_trip(HubCall::ConnectSlack { token: "xoxb-1".into() }, json!({ "cmd": "connect_slack", "token": "xoxb-1" }));
         round_trip(
+            HubCall::ConnectUpstash { key: "box_1".into(), claude_token: "sk-ant-oat01-1".into() },
+            json!({ "cmd": "connect_upstash", "key": "box_1", "claude_token": "sk-ant-oat01-1" }),
+        );
+        round_trip(HubCall::DisconnectUpstash, json!({ "cmd": "disconnect_upstash" }));
+        round_trip(
             HubCall::Stage { connector: "c1".into(), subject: Subject::LinearIssue { issue: "uuid".into() }, stage: Stage::Coding },
             json!({ "cmd": "stage", "connector": "c1", "issue": "uuid", "stage": "coding" }),
         );
@@ -1034,7 +1046,7 @@ mod tests {
             ToClient::Event { machine: "m1".into(), event: MachineEvent::Exit { tab: "tab-1".into() } },
             json!({ "type": "event", "machine": "m1", "event": { "kind": "exit", "tab": "tab-1" } }),
         );
-        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000 };
+        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000, upstash_box: None };
         round_trip(
             ToClient::Hello {
                 account: AccountView { id: "a1".into(), email: "ana@acme.dev".into() },
@@ -1049,8 +1061,8 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, connectors: vec![], checked: None } },
-            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "connectors": [], "checked": null } }),
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, upstash: None, connectors: vec![], checked: None } },
+            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "upstash": null, "connectors": [], "checked": null } }),
         );
     }
 
@@ -1082,7 +1094,7 @@ mod tests {
             json!({ "type": "call", "id": 3, "call": { "cmd": "resize_pty", "tab": "tab-2", "cols": 80, "rows": 24 } }),
         );
         round_trip(
-            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0 } },
+            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None } },
             json!({ "type": "hello", "machine": { "id": "m2", "name": "vps", "os": "linux", "online": true, "last_seen": 0 } }),
         );
     }

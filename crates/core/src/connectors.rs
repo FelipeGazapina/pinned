@@ -2,8 +2,8 @@
 //! with a claude session already working on what it found.
 
 use crate::agent::{self, Stage, Subject};
-use crate::wire::RunSpec;
-use crate::{github, linear, slack};
+use crate::wire::{MachineId, RunSpec};
+use crate::{github, linear, slack, upstash};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -17,6 +17,8 @@ const INTERVAL: Duration = Duration::from_secs(60);
 const LINEAR_KEY: &str = "linear-key";
 const SLACK_KEY: &str = "slack-key";
 const GITHUB_KEY: &str = "github-key";
+const UPSTASH_KEY: &str = "upstash-box-key";
+const CLAUDE_TOKEN: &str = "claude-oauth-token";
 /// A Slack watermark trails the check that moved it, so a message Slack shows a little late
 /// is still after it. Threads already handled keep the overlap from starting a session twice.
 const SLACK_OVERLAP: chrono::Duration = chrono::Duration::seconds(60);
@@ -134,8 +136,8 @@ pub struct Connector {
     /// Whether a session that opens a pull request must prove it works, with a Playwright video.
     #[serde(default = "on")]
     pub proof: bool,
-    #[serde(default)]
-    pub machine: String,
+    #[serde(default, rename = "machine")]
+    pub runs_on: RunsOn,
     #[serde(default)]
     pub repo: String,
     /// The account its sessions run under; empty runs them under their project's.
@@ -145,6 +147,74 @@ pub struct Connector {
 
 fn on() -> bool {
     true
+}
+
+/// Where a workflow's sessions run. Kept under the connector's original `machine` key: a machine
+/// id string ("" = any), or `{"kind":"upstash-box",…}`. Old stores load as before, and an old UI
+/// that never touches the select saves the object back untouched.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "StoredRunsOn", into = "StoredRunsOn")]
+pub enum RunsOn {
+    /// Whichever of the account's machines is online.
+    #[default]
+    Any,
+    /// This machine first, else whichever is online.
+    Machine(MachineId),
+    /// A new Upstash Box for each issue or thread, which the hub deletes once its session ends.
+    FreshBox(BoxStep),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BoxStep {
+    #[serde(default)]
+    pub size: BoxSize,
+}
+
+/// Serialized names match Upstash's `size`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BoxSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredRunsOn {
+    Machine(String),
+    Box {
+        kind: UpstashBoxKind,
+        #[serde(default)]
+        size: BoxSize,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+enum UpstashBoxKind {
+    #[serde(rename = "upstash-box")]
+    UpstashBox,
+}
+
+impl From<StoredRunsOn> for RunsOn {
+    fn from(stored: StoredRunsOn) -> Self {
+        match stored {
+            StoredRunsOn::Machine(id) if id.is_empty() => RunsOn::Any,
+            StoredRunsOn::Machine(id) => RunsOn::Machine(id),
+            StoredRunsOn::Box { size, .. } => RunsOn::FreshBox(BoxStep { size }),
+        }
+    }
+}
+
+impl From<RunsOn> for StoredRunsOn {
+    fn from(runs_on: RunsOn) -> Self {
+        match runs_on {
+            RunsOn::Any => StoredRunsOn::Machine(String::new()),
+            RunsOn::Machine(id) => StoredRunsOn::Machine(id),
+            RunsOn::FreshBox(step) => StoredRunsOn::Box { kind: UpstashBoxKind::UpstashBox, size: step.size },
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -235,8 +305,9 @@ impl Connector {
         true
     }
 
+    /// A box has only the account its Claude token signs in.
     fn account(&self) -> Option<String> {
-        Some(self.account.trim().to_owned()).filter(|a| !a.is_empty())
+        Some(self.account.trim().to_owned()).filter(|a| !a.is_empty() && !matches!(self.runs_on, RunsOn::FreshBox(_)))
     }
 
     fn unclaim(&mut self, subject: &Subject) {
@@ -246,6 +317,13 @@ impl Connector {
         };
         self.handled.retain(|k| *k != key);
         self.followed.remove(&key);
+    }
+
+    fn box_note(&self) -> &'static str {
+        match self.runs_on {
+            RunsOn::FreshBox(_) => BOX_NOTE,
+            RunsOn::Any | RunsOn::Machine(_) => "",
+        }
     }
 
     /// The Linear issue `pinned stage` moves for a session on `subject`.
@@ -287,6 +365,8 @@ struct Store {
     slack: Option<slack::Account>,
     #[serde(default)]
     github: Option<github::Account>,
+    #[serde(default)]
+    upstash: Option<upstash::Account>,
     connectors: Vec<Connector>,
 }
 
@@ -343,6 +423,8 @@ pub struct Settings {
     pub slack: Option<slack::Account>,
     #[serde(default)]
     pub github: Option<github::Account>,
+    #[serde(default)]
+    pub upstash: Option<upstash::Account>,
     pub connectors: Vec<Connector>,
     pub checked: Option<Check>,
 }
@@ -367,6 +449,7 @@ pub struct Run {
     pub mentioned: Vec<String>,
     /// The account the connector names, or none for its project's.
     pub account: Option<String>,
+    pub runs_on: RunsOn,
 }
 
 impl Run {
@@ -634,13 +717,13 @@ impl Connectors {
     async fn hand_over<F, Fut>(&self, work: Work, open: &F) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
-        Fut: Future<Output = bool>,
+        Fut: Future<Output = Result<(), String>>,
     {
         match work {
             Work::Run(run) => {
                 let (connector, subject, folder, mentioned) = (run.connector.clone(), run.subject.clone(), run.cwd.clone(), run.mentioned.clone());
-                if !open(Work::Run(run)).await {
-                    return Err(self.unclaim(&connector, &subject, &folder));
+                if let Err(why) = open(Work::Run(run)).await {
+                    return Err(self.unclaim(&connector, &subject, &folder, &why));
                 }
                 // The session starts even when Linear won't move the issue or Slack won't take the
                 // reaction; the check reports why. A Slack thread has no issue to pick until its
@@ -651,13 +734,13 @@ impl Connectors {
                 }
             }
             Work::Delivery(d) => {
-                let cursor = if open(Work::Delivery(d.clone())).await {
+                let cursor = if open(Work::Delivery(d.clone())).await.is_ok() {
                     d.cursor.clone()
                 } else {
                     let (run, newest) = self.fallback(&d).await?;
                     let folder = run.cwd.clone();
-                    if !open(Work::Run(run)).await {
-                        return Err(format!("could not open a session in {} for a Slack thread; the next check tries again", folder.display()));
+                    if let Err(why) = open(Work::Run(run)).await {
+                        return Err(format!("could not open a session in {} for a Slack thread: {why}; the next check tries again", folder.display()));
                     }
                     newest
                 };
@@ -682,8 +765,8 @@ impl Connectors {
         result
     }
 
-    fn unclaim(&self, connector: &str, subject: &Subject, folder: &Path) -> String {
-        let error = format!("could not open a session in {}; the next check tries again", folder.display());
+    fn unclaim(&self, connector: &str, subject: &Subject, folder: &Path, why: &str) -> String {
+        let error = format!("could not open a session in {}: {why}; the next check tries again", folder.display());
         let mut store = self.store.lock().unwrap();
         let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) else { return error };
         c.unclaim(subject);
@@ -871,6 +954,7 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
     if c.proof {
         prompt += &proof_of_work(exe);
     }
+    prompt += c.box_note();
     prompt += &format!(
         "\n\nLinear issue {}: {}\n{}\n\n{}",
         issue.identifier,
@@ -879,7 +963,7 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
         issue.description.as_deref().unwrap_or("(no description)"),
     );
     args.push(prompt);
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() }, mentioned: vec![], account: c.account() }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() }, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone() }
 }
 
 /// What every connector session that may open a pull request must do to prove the change works.
@@ -899,6 +983,13 @@ fn proof_of_work(exe: &str) -> String {
         exe
     )
 }
+
+/// Ends the instructions of a session that runs in a box, which nothing outlives but what it pushed.
+const BOX_NOTE: &str = "\n\nYou run in a disposable Upstash Box (Linux arm64) that pinned deletes 10 minutes after you go quiet, \
+    or 2 minutes after you stop once you reported the review stage. \
+    Push your branch before you finish, because anything not pushed is lost. \
+    For proof videos, launch Playwright with `executablePath: '/usr/bin/chromium'` instead of installing a browser, and never attach over CDP to port 9222. \
+    If `command -v ffmpeg` finds nothing, check the recording with Playwright screenshots taken at the same steps instead of extracting frames.";
 
 const SLACK_PROOF: &str = "\nPut the link to the Proof comment in your last reply in the thread too.";
 
@@ -984,13 +1075,14 @@ fn slack_run(
         prompt += &proof_of_work(exe);
         prompt += SLACK_PROOF;
     }
+    prompt += c.box_note();
     prompt += &format!("\n\nSlack thread in #{channel_name}, oldest first:\n");
     let transcript: Vec<String> = posts.iter().map(|p| format!("{}: {}", p.author, p.text)).collect();
     prompt += &transcript.join("\n");
     prompt += note.unwrap_or_default();
     args.push(prompt);
     let subject = Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() };
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account() }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone() }
 }
 
 fn reply_header(author: &str) -> String {
@@ -1011,12 +1103,12 @@ fn filed_note(filed: &Filed) -> String {
 }
 
 impl Connectors {
-    /// Polls forever. `open` receives what each check found and answers whether a tab took it,
-    /// and `on_check` hears how each check went. A settings change wakes it early.
+    /// Polls forever. `open` receives what each check found and answers whether a tab took it, or
+    /// why none did, and `on_check` hears how each check went. A settings change wakes it early.
     pub async fn watch<F, Fut>(&self, open: F, on_check: impl Fn(&Check))
     where
         F: Fn(Work) -> Fut,
-        Fut: Future<Output = bool>,
+        Fut: Future<Output = Result<(), String>>,
     {
         loop {
             let (work, mut error) = self.poll().await;
@@ -1038,6 +1130,7 @@ impl Connectors {
             linear: store.linear.clone(),
             slack: store.slack.clone(),
             github: store.github.clone(),
+            upstash: store.upstash.clone(),
             connectors: store.connectors.clone(),
             checked: self.checked.lock().unwrap().clone(),
         }
@@ -1117,6 +1210,30 @@ impl Connectors {
     /// What a machine clones the account's private GitHub repositories with.
     pub fn github_token(&self) -> Option<String> {
         self.key(GITHUB_KEY)
+    }
+
+    /// Keeps the Box key and the Claude token, which the hub checked with Upstash first.
+    pub fn connect_upstash(&self, keys: &upstash::Keys) -> Result<upstash::Account, String> {
+        self.storage.write_key(UPSTASH_KEY, &keys.api_key)?;
+        self.storage.write_key(CLAUDE_TOKEN, &keys.claude_token)?;
+        let account = keys.account();
+        let mut store = self.store.lock().unwrap();
+        store.upstash = Some(account.clone());
+        self.save(&store)?;
+        Ok(account)
+    }
+
+    pub fn disconnect_upstash(&self) -> Result<(), String> {
+        self.storage.remove_key(UPSTASH_KEY);
+        self.storage.remove_key(CLAUDE_TOKEN);
+        let mut store = self.store.lock().unwrap();
+        store.upstash = None;
+        self.save(&store)
+    }
+
+    /// What the hub creates and boots boxes with. Never serialized, never sent to a client.
+    pub fn box_keys(&self) -> Option<upstash::Keys> {
+        Some(upstash::Keys { api_key: self.key(UPSTASH_KEY)?, claude_token: self.key(CLAUDE_TOKEN)? })
     }
 
     /// Channels the bot was invited to, which a Slack connector can watch.
@@ -1251,18 +1368,19 @@ mod tests {
         slack.handled = vec!["C0123ABCD:1792400050.000200".into()];
         slack.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
         let (connectors, dir) = stored("unclaim", vec![linear, slack]);
-        let refuse = |_: Work| async { false };
+        let refuse = |_: Work| async { Err("Upstash Box: the bootstrap failed: curl: (22) 404".to_owned()) };
 
         let issue_run = run(&linear_connector(), &issue(), "/bin/pinned");
         assert_eq!(
             block_on(connectors.hand_over(Work::Run(issue_run), &refuse)),
-            Err("could not open a session in /repo; the next check tries again".into())
+            Err("could not open a session in /repo: Upstash Box: the bootstrap failed: curl: (22) 404; the next check tries again".into()),
+            "the check line says why no machine took the run"
         );
         let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
         let thread_run = Run { mentioned: vec!["1792400050.000200".into()], ..thread_run };
         assert_eq!(
             block_on(connectors.hand_over(Work::Run(thread_run), &refuse)),
-            Err("could not open a session in /repo; the next check tries again".into()),
+            Err("could not open a session in /repo: Upstash Box: the bootstrap failed: curl: (22) 404; the next check tries again".into()),
             "nothing reacts to a mention no session took"
         );
 
@@ -1291,7 +1409,7 @@ mod tests {
         let slack = Connector { id: "c2".into(), handled: vec!["C0123ABCD:1792400050.000200".into()], ..slack_connector() };
         let (connectors, dir) = stored("claimed", vec![slack]);
         let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
-        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { true })), Ok(()));
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { Ok(()) })), Ok(()));
         assert_eq!(connectors.get_settings().connectors[0].handled, ["C0123ABCD:1792400050.000200"]);
         assert_eq!(block_on(connectors.acknowledge("C0123ABCD", &[])), Ok(()), "nothing to react to needs no Slack");
         let _ = std::fs::remove_dir_all(dir);
@@ -1304,7 +1422,7 @@ mod tests {
         let not_connected = Err("Slack is not connected: connect it in pinned's Connectors settings".to_owned());
         let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
         let thread_run = Run { mentioned: vec!["1792400050.000200".into()], ..thread_run };
-        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { true })), not_connected);
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { Ok(()) })), not_connected);
         assert_eq!(connectors.get_settings().connectors[0].handled, ["C0123ABCD:1792400050.000200"], "the run stays claimed");
 
         let delivery = Delivery {
@@ -1315,7 +1433,7 @@ mod tests {
             cursor: "1792400090.000000".into(),
             mentioned: vec!["1792400090.000000".into()],
         };
-        assert_eq!(block_on(connectors.hand_over(Work::Delivery(delivery), &|_| async { true })), not_connected);
+        assert_eq!(block_on(connectors.hand_over(Work::Delivery(delivery), &|_| async { Ok(()) })), not_connected);
         let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
         assert_eq!(reloaded[0].followed["C0123ABCD:1792400050.000200"].cursor, "1792400090.000000", "the cursor moved all the same");
         let _ = std::fs::remove_dir_all(dir);
@@ -1365,7 +1483,7 @@ mod tests {
             created: BTreeMap::new(),
             followed: BTreeMap::new(),
             proof: false,
-            machine: String::new(),
+            runs_on: RunsOn::Any,
             repo: String::new(),
             account: String::new(),
         }
@@ -1424,7 +1542,7 @@ mod tests {
             created: BTreeMap::new(),
             followed: BTreeMap::new(),
             proof: false,
-            machine: String::new(),
+            runs_on: RunsOn::Any,
             repo: String::new(),
             account: String::new(),
         }
@@ -1776,5 +1894,87 @@ mod tests {
         }
         assert!(!prompt(Fix::Off, true).contains("Proof"));
         assert_eq!(prompt(Fix::Off, true), prompt(Fix::Off, false));
+    }
+
+    #[test]
+    fn run_on_loads_any_machine_or_box_from_the_machine_key_and_saves_it_back_as_it_was() {
+        let base = serde_json::to_value(linear_connector()).unwrap();
+        for (stored, runs_on) in [
+            (serde_json::json!(""), RunsOn::Any),
+            (serde_json::json!("m1"), RunsOn::Machine("m1".into())),
+            (serde_json::json!({ "kind": "upstash-box", "size": "medium" }), RunsOn::FreshBox(BoxStep { size: BoxSize::Medium })),
+            (serde_json::json!({ "kind": "upstash-box", "size": "large" }), RunsOn::FreshBox(BoxStep { size: BoxSize::Large })),
+        ] {
+            let mut saved = base.clone();
+            saved["machine"] = stored.clone();
+            let text = serde_json::to_string(&saved).unwrap();
+            let loaded: Connector = serde_json::from_str(&text).unwrap();
+            assert_eq!(loaded.runs_on, runs_on);
+            assert_eq!(serde_json::to_string(&loaded).unwrap(), text, "{stored} saves back byte for byte");
+        }
+        let mut sizeless = base.clone();
+        sizeless["machine"] = serde_json::json!({ "kind": "upstash-box" });
+        assert_eq!(serde_json::from_value::<Connector>(sizeless).unwrap().runs_on, RunsOn::FreshBox(BoxStep { size: BoxSize::Medium }));
+        let mut unknown = base;
+        unknown["machine"] = serde_json::json!({ "kind": "lambda" });
+        assert!(serde_json::from_value::<Connector>(unknown).is_err());
+    }
+
+    #[test]
+    fn a_store_saved_by_v0_12_still_loads() {
+        let saved = r#"{
+          "linear": { "name": "Felipe", "email": "f@x.com", "organization": "X" },
+          "github": { "login": "felipe", "name": "Felipe" },
+          "connectors": [{
+            "id": "c1", "name": "Resolve", "enabled": true,
+            "trigger": { "kind": "linear-label", "label": "claude" },
+            "folder": "/repo", "model": "opus", "effort": "high", "permissionMode": "auto", "worktree": true,
+            "instructions": "Fix it.", "columns": { "picked": "Analyzing", "coding": "", "review": "" },
+            "since": "2026-10-01T00:00:00+00:00", "handled": ["uuid"], "proof": true,
+            "machine": "7c0d2a9e-1111-4222-8333-944455556666", "repo": "acme/app", "account": "work"
+          }]
+        }"#;
+        let store: Store = serde_json::from_str(saved).unwrap();
+        assert!(store.upstash.is_none());
+        assert_eq!(store.connectors[0].runs_on, RunsOn::Machine("7c0d2a9e-1111-4222-8333-944455556666".into()));
+        assert_eq!(serde_json::to_value(&store.connectors[0]).unwrap()["machine"], "7c0d2a9e-1111-4222-8333-944455556666");
+    }
+
+    #[test]
+    fn a_box_workflows_run_goes_to_a_box_with_the_box_note_and_no_account() {
+        let boxed = Connector { runs_on: RunsOn::FreshBox(BoxStep::default()), account: "work".into(), proof: true, ..linear_connector() };
+        let box_run = run(&boxed, &issue(), "/bin/pinned");
+        assert_eq!(box_run.runs_on, RunsOn::FreshBox(BoxStep { size: BoxSize::Medium }));
+        assert_eq!(box_run.account, None, "a box signs in only with the Claude token");
+        let prompt = box_run.args.last().unwrap();
+        assert!(prompt.contains(&format!("{PROOF}{BOX_NOTE}\n\nLinear issue ENG-7")), "{prompt}");
+
+        let on_machine = Connector { runs_on: RunsOn::Machine("m1".into()), proof: true, ..linear_connector() };
+        let machine_run = run(&on_machine, &issue(), "/bin/pinned");
+        assert_eq!((machine_run.runs_on, machine_run.account), (RunsOn::Machine("m1".into()), None));
+        assert_eq!(machine_run.args.last().unwrap().replace(BOX_NOTE, ""), *machine_run.args.last().unwrap(), "a machine's prompt has no box note");
+        assert_eq!(*machine_run.args.last().unwrap(), prompt.replace(BOX_NOTE, ""));
+
+        let thread = |runs_on| connector_thread_run(&Connector { runs_on, ..fixing_connector() }, "2026-10-19T10:00:00Z", "2026-10-19T10:01:00Z").args.pop().unwrap();
+        let in_box = thread(RunsOn::FreshBox(BoxStep::default()));
+        assert!(in_box.contains(&format!("{BOX_NOTE}\n\nSlack thread in #support")), "{in_box}");
+        assert_eq!(in_box.replace(BOX_NOTE, ""), thread(RunsOn::Any));
+    }
+
+    #[test]
+    fn upstash_keys_stay_in_storage_and_only_their_hints_reach_settings() {
+        let (connectors, dir) = stored("upstash", vec![]);
+        assert!(connectors.box_keys().is_none());
+        let keys = upstash::Keys::parse("box_abcdA1b2", "sk-ant-oat01-zz9f3c").unwrap();
+        assert_eq!(connectors.connect_upstash(&keys).unwrap(), upstash::Account { key_hint: "…A1b2".into(), claude_hint: "…9f3c".into() });
+        let kept = connectors.box_keys().unwrap();
+        assert_eq!((kept.api_key.as_str(), kept.claude_token.as_str()), ("box_abcdA1b2", "sk-ant-oat01-zz9f3c"));
+        let settings = serde_json::to_string(&connectors.get_settings()).unwrap();
+        assert!(settings.contains("\"upstash\":{\"key_hint\":\"…A1b2\",\"claude_hint\":\"…9f3c\"}"), "{settings}");
+        assert!(!settings.contains("box_abcd") && !settings.contains("sk-ant-oat01"), "{settings}");
+        connectors.disconnect_upstash().unwrap();
+        assert!(connectors.box_keys().is_none());
+        assert!(connectors.get_settings().upstash.is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

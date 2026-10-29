@@ -415,13 +415,13 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     };
     let (machine, socket_id) = (row.id.to_string(), hub.next_socket());
     let (out, mut outbox, overflowed) = Outbox::new();
-    let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0 };
+    let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None };
     let _ = out.send(serde_json::to_string(&ToMachine::Hello { machine: view }).unwrap());
     // A machine that reconnects before its old socket timed out goes offline and back, so clients attach again.
     if account.went_offline(&machine, None) {
         hub.push_machines(&account).await;
     }
-    account.came_online(&machine, socket_id, row.name, out);
+    account.came_online(&machine, socket_id, row.name, row.dedicated, out);
     hub.push_machines(&account).await;
     eprintln!("pinned-server: machine {machine} of account {} connected (pinned {version})", account.id);
 

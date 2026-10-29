@@ -185,6 +185,8 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 #settings .row select { width: auto; flex: none; }
 .logo.slack { background: #4a154b; }
 .logo.github { background: #24292f; }
+.logo.upstash { background: #00c98d; }
+.badge.box { margin-left: 6px; }
 .logo.claude { background: #d97757; }
 .logo.codex { background: #10a37f; }
 .actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 10px; }
