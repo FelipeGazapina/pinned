@@ -204,12 +204,6 @@ pub enum Call {
     SetProjectAccount { path: String, account: Option<AccountId> },
     /// The id of the project's orchestrator tab: the one already open, else a new one, not yet started.
     OpenOrchestrator { path: String },
-    /// `Vec<projects::Memory>`: what the project's orchestrator and workers keep.
-    ProjectMemories { path: String },
-    /// `Vec<projects::Memory>` after adding `text` to the project's memory.
-    Remember { path: String, text: String },
-    /// `Vec<projects::Memory>` after removing the memory `id`.
-    Forget { path: String, id: u64 },
     /// The new tab's id, running the CLI's login for the account in the account's home.
     SignIn { account: AccountId },
     /// The tab's folder, as `start_claude`. Moves the tab's conversation to another Claude Code

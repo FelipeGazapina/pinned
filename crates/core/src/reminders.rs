@@ -195,7 +195,7 @@ fn reminder_tools() -> Vec<serde_json::Value> {
 }
 
 /// Each project tool, named as `ProjectTool` tags it, and whether only an orchestrator has it.
-fn project_tools() -> [(bool, serde_json::Value); 5] {
+fn project_tools() -> [(bool, serde_json::Value); 2] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     [
         (true, serde_json::json!({
@@ -213,29 +213,6 @@ fn project_tools() -> [(bool, serde_json::Value); 5] {
         (true, serde_json::json!({
             "name": "agents",
             "description": "List your workers, each with its tab id, title, status and folder.",
-            "inputSchema": no_args,
-        })),
-        (false, serde_json::json!({
-            "name": "remember",
-            "description": "Save a durable fact about this project, such as a user preference, a decision, a convention or an architecture fact. Every later session of the project's orchestrator and its workers starts with it.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "text": { "type": "string", "description": "The fact, in one or two sentences." } },
-                "required": ["text"],
-            },
-        })),
-        (false, serde_json::json!({
-            "name": "forget",
-            "description": "Remove a memory that is wrong or no longer holds, by the id memories lists.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "id": { "type": "integer", "description": "The memory's id." } },
-                "required": ["id"],
-            },
-        })),
-        (false, serde_json::json!({
-            "name": "memories",
-            "description": "List this project's memories with their ids.",
             "inputSchema": no_args,
         })),
     ]
@@ -387,17 +364,16 @@ mod tests {
     fn a_session_gets_the_project_tools_its_role_has() {
         let names = |role| tool_definitions(true, role).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(names(None), ["remind_me", "list_reminders", "cancel_reminder"]);
-        assert_eq!(names(Some(Role::Worker)), ["remind_me", "list_reminders", "cancel_reminder", "remember", "forget", "memories"]);
-        assert_eq!(names(Some(Role::Orchestrator)), ["remind_me", "list_reminders", "cancel_reminder", "delegate", "agents", "remember", "forget", "memories"]);
-        let on_a_node = tool_definitions(false, Some(Role::Worker)).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(on_a_node, ["remember", "forget", "memories"]);
-        assert_eq!(permissions()[3..], ["mcp__pinned__delegate", "mcp__pinned__agents", "mcp__pinned__remember", "mcp__pinned__forget", "mcp__pinned__memories"]);
+        assert_eq!(names(Some(Role::Worker)), ["remind_me", "list_reminders", "cancel_reminder"]);
+        assert_eq!(names(Some(Role::Orchestrator)), ["remind_me", "list_reminders", "cancel_reminder", "delegate", "agents"]);
+        let on_a_node = tool_definitions(false, Some(Role::Orchestrator)).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(on_a_node, ["delegate", "agents"]);
+        assert_eq!(permissions()[3..], ["mcp__pinned__delegate", "mcp__pinned__agents"]);
 
         let ask = |name, args, tab: Option<&str>| project_request(name, &args, tab.map(Into::into)).map(|m| serde_json::to_string(&m).unwrap());
-        assert_eq!(ask("forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":"forget","id":3}"#.into()));
         assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":"agents"}"#.into()));
         assert_eq!(ask("delegate", serde_json::json!({}), Some("tab-2")), Err("delegate: missing field `task`".into()));
-        assert_eq!(ask("memories", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
+        assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
     }
 
     #[test]

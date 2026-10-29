@@ -435,17 +435,6 @@ impl Machine {
             }
             Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
             Call::OpenOrchestrator { path } => json(self.open_orchestrator(&path)?),
-            Call::ProjectMemories { path } => json(self.memories(&canonical(&path))),
-            Call::Remember { path, text } => {
-                let path = canonical(&path);
-                self.change_memory(&path, None, "added", |p| p.remember(&text, unix_now()))?;
-                json(self.memories(&path))
-            }
-            Call::Forget { path, id } => {
-                let path = canonical(&path);
-                self.change_memory(&path, None, "removed", |p| p.forget(id))?;
-                json(self.memories(&path))
-            }
             Call::SignIn { account } => json(self.sign_in(&account)?),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from } => json(self.thread(&tab, from)?),
@@ -817,13 +806,13 @@ impl Machine {
         if self.device_agents.as_ref().is_some_and(|f| f.exists()) {
             prompt.push(crate::device::AGENT_PROMPT.to_owned());
         }
-        if let Some((role, project)) = role_of(&env) {
+        if let Some((role, _)) = role_of(&env) {
             if !role.disallowed_tools().is_empty() {
                 // --disallowedTools takes any number of values, so the prompt's flag after it keeps it from swallowing the rest.
                 args.push("--disallowedTools".to_owned());
                 args.extend(role.disallowed_tools().iter().map(|t| t.to_string()));
             }
-            prompt.extend([role.prompt().to_owned(), projects::render(&self.memories(&project))].into_iter().filter(|p| !p.is_empty()));
+            prompt.push(role.prompt().to_owned());
         }
         if !prompt.is_empty() {
             args.extend(["--append-system-prompt".to_owned(), prompt.join("\n\n")]);
@@ -1126,35 +1115,15 @@ impl Machine {
             return Err(format!("no account {id} on this machine"));
         }
         let path = canonical(path);
-        self.change_project(&path, |p| {
-            p.account = account;
-            Ok(())
-        })?;
+        {
+            let mut projects = self.projects.lock().unwrap();
+            let project = projects.iter_mut().find(|p| p.path == path).ok_or_else(|| format!("{} is not a project on this machine", path.display()))?;
+            project.account = account;
+            if let Some(file) = &self.projects_file {
+                projects::save(file, &projects);
+            }
+        }
         Ok(self.project_view(&path))
-    }
-
-    fn change_project<R>(&self, path: &Path, change: impl FnOnce(&mut projects::Project) -> Result<R, String>) -> Result<R, String> {
-        let mut projects = self.projects.lock().unwrap();
-        let project = projects.iter_mut().find(|p| p.path == path).ok_or_else(|| format!("{} is not a project on this machine", path.display()))?;
-        let changed = change(project)?;
-        if let Some(file) = &self.projects_file {
-            projects::save(file, &projects);
-        }
-        Ok(changed)
-    }
-
-    /// Applies `change` to the project's memory. A running orchestrator that did not make the
-    /// change is told: its prompt keeps the memory it started with, and a resume replays that.
-    fn change_memory(&self, project: &Path, by: Option<Role>, verb: &str, change: impl FnOnce(&mut projects::Project) -> Result<projects::Memory, String>) -> Result<projects::Memory, String> {
-        let memory = self.change_project(project, change)?;
-        if let Some(orchestrator) = self.live_tab(&role_env(Role::Orchestrator, project)).filter(|_| by != Some(Role::Orchestrator)) {
-            let _ = self.type_prompt(&orchestrator, &format!("[pinned] Project memory changed: {verb} #{} \"{}\"", memory.id, memory.text));
-        }
-        Ok(memory)
-    }
-
-    fn memories(&self, project: &Path) -> Vec<projects::Memory> {
-        self.projects.lock().unwrap().iter().find(|p| p.path == project).map(|p| p.memories.clone()).unwrap_or_default()
     }
 
     /// The project's orchestrator tab: the one already open, else a new one, not yet started.
@@ -1185,9 +1154,6 @@ impl Machine {
         match tool {
             ProjectTool::Delegate { task, title } => self.delegate(tab, &project, task, title),
             ProjectTool::Agents => Ok(self.workers(&project)),
-            ProjectTool::Remember { text } => Ok(format!("Remembered #{}.", self.change_memory(&project, Some(role), "added", |p| p.remember(&text, unix_now()))?.id)),
-            ProjectTool::Forget { id } => self.change_memory(&project, Some(role), "removed", |p| p.forget(id)).map(|_| format!("Forgot #{id}.")),
-            ProjectTool::Memories => Ok(Some(projects::render(&self.memories(&project))).filter(|m| !m.is_empty()).unwrap_or_else(|| "No memories yet.".into())),
         }
     }
 
@@ -2988,7 +2954,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn an_orchestrator_cannot_edit_and_starts_with_one_prompt_holding_the_projects_memory() {
+    fn an_orchestrator_cannot_edit_and_starts_with_one_prompt() {
         let dir = temp("orchestrator-args");
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
@@ -2998,18 +2964,14 @@ mod tests {
         m.call(Call::DeviceAgents { allow: Some(true) }).unwrap();
         let path = project.display().to_string();
         let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
-        let remembered = m.call(Call::Remember { path: path.clone(), text: " Use pnpm, not npm. ".into() }).unwrap();
-        assert_eq!((&remembered[0]["id"], &remembered[0]["text"]), (&json!(1), &json!("Use pnpm, not npm.")));
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
-        let prompt = format!("{}\n\n{}\n\nProject memory, by id:\n- [1] Use pnpm, not npm.", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt());
+        let prompt = format!("{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt());
         assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
         m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None });
         assert_eq!(m.view(&tab).unwrap().cwd, path, "reviewing a worker's worktree moved the orchestrator into it");
-        assert_eq!(m.call(Call::Forget { path: path.clone(), id: 1 }), Ok(json!([])));
-        assert_eq!(m.call(Call::Forget { path, id: 1 }), Err(format!("no memory #1 in {}", project.display())));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -3037,21 +2999,20 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn a_resumed_orchestrator_starts_with_its_role_and_memory_again() {
+    fn a_resumed_orchestrator_starts_with_its_role_again() {
         let dir = temp("orchestrator-resume");
         let (project, config) = (dir.join("app"), dir.join("config"));
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&config).unwrap();
         let path = project.display().to_string();
-        std::fs::write(config.join("projects.json"), json!([{ "path": path, "memories": [{ "id": 4, "text": "Deploys go through Railway.", "created": 1 }] }]).to_string()).unwrap();
+        std::fs::write(config.join("projects.json"), json!([{ "path": path }]).to_string()).unwrap();
         let env = json!([["PINNED_ROLE", "orchestrator"], ["PINNED_PROJECT", path]]);
         std::fs::write(config.join("sessions.json"), json!([{ "cwd": path, "session": "s1", "env": env }]).to_string()).unwrap();
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
         let tabs = m.restore_tabs();
         m.start_claude(&tabs[0], 80, 24).unwrap();
-        let prompt = format!("{}\n\nProject memory, by id:\n- [4] Deploys go through Railway.", Role::Orchestrator.prompt());
-        assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt", &prompt]);
+        assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt", Role::Orchestrator.prompt()]);
         assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -3093,9 +3054,6 @@ mod tests {
         assert_eq!(args[7..9], ["\n- Fix the README typo.", "--append-system-prompt"]);
 
         assert_eq!(tool(&worker, delegate), Err("only the project's orchestrator has this tool".into()));
-        assert_eq!(tool(&worker, r#""tool":"remember","text":"The CLI parses flags with clap.""#), Ok("Remembered #1.".into()));
-        assert_eq!(tool(&orchestrator, r#""tool":"memories""#), Ok("Project memory, by id:\n- [1] The CLI parses flags with clap.".into()));
-        assert_eq!(tool(&orchestrator, r#""tool":"forget","id":7"#), Err(format!("no memory #7 in {path}")));
         assert_eq!(
             tool(&orchestrator, r#""tool":"agents""#),
             Ok(format!("{worker}: JSON output (starting) in {}\n{second}: untitled (starting) in {}", tree.display(), args[0]))
@@ -3142,35 +3100,6 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
         assert_eq!(truncate("añb", 2), "añ\n[cut short: the whole message is in the worker's thread]");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_memory_change_the_orchestrator_did_not_make_is_typed_into_it() {
-        let root = temp("memory-note");
-        let (sock, file) = (root.join("pinned.sock"), root.join("typed.bin"));
-        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(root.join("config")), None, |_| {});
-        m.listen(|_| Err("not the machine's".into())).unwrap();
-        let app = m.open_project("/work/app".into());
-        let path = app.display().to_string();
-        let orchestrator = running(&m, role_env(Role::Orchestrator, &app), &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
-        let (seen, sink) = viewer();
-        m.attach(&orchestrator, "test".into(), sink).unwrap();
-        wait_for("stty", || text(&seen).contains("ready"));
-        let worker = m.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &app), false, None);
-        let remember = |tab: &str, text: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":"remember","text":"{text}"}}"#));
-
-        m.call(Call::Remember { path: path.clone(), text: "Use pnpm, not npm.".into() }).unwrap();
-        assert_eq!(remember(&worker, "The CLI parses flags with clap."), Ok("Remembered #2.".into()));
-        assert_eq!(remember(&orchestrator, "Deploys go through Railway."), Ok("Remembered #3.".into()));
-        m.call(Call::Forget { path, id: 1 }).unwrap();
-        let expected = "\x1b[200~[pinned] Project memory changed: added #1 \"Use pnpm, not npm.\"\x1b[201~\r\
-                        \x1b[200~[pinned] Project memory changed: added #2 \"The CLI parses flags with clap.\"\x1b[201~\r\
-                        \x1b[200~[pinned] Project memory changed: removed #1 \"Use pnpm, not npm.\"\x1b[201~\r";
-        wait_for("the notes", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
         let _ = std::fs::remove_dir_all(root);
     }
 }

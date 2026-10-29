@@ -9,14 +9,14 @@ pub const TAB_ENV: &str = "PINNED_TAB";
 pub const ROLE_ENV: &str = "PINNED_ROLE";
 pub const PROJECT_ENV: &str = "PINNED_PROJECT";
 
-const ORCHESTRATOR_PROMPT: &str = "You are this project's orchestrator in pinned. You cannot edit files. Hand every piece of work to a worker with the delegate tool, and write each brief so it stands alone: the goal, the files involved, the constraints, and how to verify the result. Workers are threads the user can open and steer; agents lists them. You get a message when a worker finishes or needs input: review what it reports, and tell the user what was done. Save durable facts with remember (the user's preferences, decisions, conventions, architecture facts), remove wrong ones with forget, and follow the memories listed below.";
-const WORKER_PROMPT: &str = "You are a worker of this project's orchestrator in pinned. Do the task you were given fully and verify it. End with a concise report of what changed and how you verified it, which the orchestrator reads. Save durable facts about the project you learn with remember.";
+const ORCHESTRATOR_PROMPT: &str = "You are this project's orchestrator in pinned. You cannot edit files. Hand every piece of work to a worker with the delegate tool, and write each brief so it stands alone: the goal, the files involved, the constraints, and how to verify the result. Workers are threads the user can open and steer; agents lists them. You get a message when a worker finishes or needs input: review what it reports, and tell the user what was done.";
+const WORKER_PROMPT: &str = "You are a worker of this project's orchestrator in pinned. Do the task you were given fully and verify it. End with a concise report of what changed and how you verified it, which the orchestrator reads.";
 
 /// The part a session plays in its project's orchestration.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Role {
-    /// Hands every request to workers and keeps the project's memory.
+    /// Hands every request to workers.
     Orchestrator,
     /// Does one task the orchestrator delegated.
     Worker,
@@ -75,9 +75,6 @@ pub enum ProjectTool {
         title: Option<String>,
     },
     Agents,
-    Remember { text: String },
-    Forget { id: u64 },
-    Memories,
 }
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";
@@ -276,9 +273,7 @@ mod tests {
         let delegate = ProjectTool::Delegate { task: "Add a --json flag".into(), title: Some("JSON output".into()) };
         assert!(matches!(&message, Message::Project { tab, tool } if tab == "tab-3" && *tool == delegate));
         assert_eq!(serde_json::to_string(&message).unwrap(), line);
-        let forget: Message = serde_json::from_str(r#"{"kind":"project","tab":"tab-3","tool":"forget","id":2}"#).unwrap();
-        assert!(matches!(forget, Message::Project { tool: ProjectTool::Forget { id: 2 }, .. }));
-        assert!(Role::Worker.may(&ProjectTool::Memories) && !Role::Worker.may(&delegate) && Role::Orchestrator.may(&delegate));
+        assert!(!Role::Worker.may(&delegate) && Role::Orchestrator.may(&delegate));
     }
 
     #[test]

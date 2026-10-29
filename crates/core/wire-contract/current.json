@@ -748,67 +748,6 @@
                 ]
               },
               {
-                "description": "`Vec<projects::Memory>`: what the project's orchestrator and workers keep.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "project_memories"
-                  },
-                  "path": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after adding `text` to the project's memory.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "remember"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "text": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "text"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after removing the memory `id`.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "forget"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "id": {
-                    "type": "integer",
-                    "format": "uint64",
-                    "minimum": 0
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "id"
-                ]
-              },
-              {
                 "description": "The new tab's id, running the CLI's login for the account in the account's home.",
                 "type": "object",
                 "properties": {
@@ -5303,67 +5242,6 @@
                 ]
               },
               {
-                "description": "`Vec<projects::Memory>`: what the project's orchestrator and workers keep.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "project_memories"
-                  },
-                  "path": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after adding `text` to the project's memory.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "remember"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "text": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "text"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after removing the memory `id`.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "forget"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "id": {
-                    "type": "integer",
-                    "format": "uint64",
-                    "minimum": 0
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "id"
-                ]
-              },
-              {
                 "description": "The new tab's id, running the CLI's login for the account in the account's home.",
                 "type": "object",
                 "properties": {
@@ -9545,7 +9423,7 @@
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
               {
-                "description": "Hands every request to workers and keeps the project's memory.",
+                "description": "Hands every request to workers.",
                 "type": "string",
                 "const": "orchestrator"
               },
@@ -11373,7 +11251,7 @@
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
               {
-                "description": "Hands every request to workers and keeps the project's memory.",
+                "description": "Hands every request to workers.",
                 "type": "string",
                 "const": "orchestrator"
               },
@@ -16477,7 +16355,7 @@
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
               {
-                "description": "Hands every request to workers and keeps the project's memory.",
+                "description": "Hands every request to workers.",
                 "type": "string",
                 "const": "orchestrator"
               },
@@ -16716,7 +16594,7 @@
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
               {
-                "description": "Hands every request to workers and keeps the project's memory.",
+                "description": "Hands every request to workers.",
                 "type": "string",
                 "const": "orchestrator"
               },
@@ -17124,7 +17002,7 @@
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
               {
-                "description": "Hands every request to workers and keeps the project's memory.",
+                "description": "Hands every request to workers.",
                 "type": "string",
                 "const": "orchestrator"
               },
@@ -18479,7 +18357,7 @@
             "description": "The part a session plays in its project's orchestration.",
             "oneOf": [
               {
-                "description": "Hands every request to workers and keeps the project's memory.",
+                "description": "Hands every request to workers.",
                 "type": "string",
                 "const": "orchestrator"
               },
@@ -20178,67 +20056,6 @@
                 "required": [
                   "cmd",
                   "path"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>`: what the project's orchestrator and workers keep.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "project_memories"
-                  },
-                  "path": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after adding `text` to the project's memory.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "remember"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "text": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "text"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after removing the memory `id`.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "forget"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "id": {
-                    "type": "integer",
-                    "format": "uint64",
-                    "minimum": 0
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "id"
                 ]
               },
               {
@@ -23572,67 +23389,6 @@
                 "required": [
                   "cmd",
                   "path"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>`: what the project's orchestrator and workers keep.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "project_memories"
-                  },
-                  "path": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after adding `text` to the project's memory.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "remember"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "text": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "text"
-                ]
-              },
-              {
-                "description": "`Vec<projects::Memory>` after removing the memory `id`.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "forget"
-                  },
-                  "path": {
-                    "type": "string"
-                  },
-                  "id": {
-                    "type": "integer",
-                    "format": "uint64",
-                    "minimum": 0
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "path",
-                  "id"
                 ]
               },
               {
