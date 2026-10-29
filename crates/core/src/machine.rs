@@ -438,12 +438,12 @@ impl Machine {
             Call::ProjectMemories { path } => json(self.memories(&canonical(&path))),
             Call::Remember { path, text } => {
                 let path = canonical(&path);
-                self.change_project(&path, |p| p.remember(&text, unix_now()))?;
+                self.change_memory(&path, None, "added", |p| p.remember(&text, unix_now()))?;
                 json(self.memories(&path))
             }
             Call::Forget { path, id } => {
                 let path = canonical(&path);
-                self.change_project(&path, |p| p.forget(id))?;
+                self.change_memory(&path, None, "removed", |p| p.forget(id))?;
                 json(self.memories(&path))
             }
             Call::SignIn { account } => json(self.sign_in(&account)?),
@@ -1143,6 +1143,16 @@ impl Machine {
         Ok(changed)
     }
 
+    /// Applies `change` to the project's memory. A running orchestrator that did not make the
+    /// change is told: its prompt keeps the memory it started with, and a resume replays that.
+    fn change_memory(&self, project: &Path, by: Option<Role>, verb: &str, change: impl FnOnce(&mut projects::Project) -> Result<projects::Memory, String>) -> Result<projects::Memory, String> {
+        let memory = self.change_project(project, change)?;
+        if let Some(orchestrator) = self.live_tab(&role_env(Role::Orchestrator, project)).filter(|_| by != Some(Role::Orchestrator)) {
+            let _ = self.type_prompt(&orchestrator, &format!("[pinned] Project memory changed: {verb} #{} \"{}\"", memory.id, memory.text));
+        }
+        Ok(memory)
+    }
+
     fn memories(&self, project: &Path) -> Vec<projects::Memory> {
         self.projects.lock().unwrap().iter().find(|p| p.path == project).map(|p| p.memories.clone()).unwrap_or_default()
     }
@@ -1175,8 +1185,8 @@ impl Machine {
         match tool {
             ProjectTool::Delegate { task, title } => self.delegate(tab, &project, task, title),
             ProjectTool::Agents => Ok(self.workers(&project)),
-            ProjectTool::Remember { text } => Ok(format!("Remembered #{}.", self.change_project(&project, |p| p.remember(&text, unix_now()))?.id)),
-            ProjectTool::Forget { id } => self.change_project(&project, |p| p.forget(id)).map(|_| format!("Forgot #{id}.")),
+            ProjectTool::Remember { text } => Ok(format!("Remembered #{}.", self.change_memory(&project, Some(role), "added", |p| p.remember(&text, unix_now()))?.id)),
+            ProjectTool::Forget { id } => self.change_memory(&project, Some(role), "removed", |p| p.forget(id)).map(|_| format!("Forgot #{id}.")),
             ProjectTool::Memories => Ok(Some(projects::render(&self.memories(&project))).filter(|m| !m.is_empty()).unwrap_or_else(|| "No memories yet.".into())),
         }
     }
@@ -3132,6 +3142,35 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
         assert_eq!(truncate("añb", 2), "añ\n[cut short: the whole message is in the worker's thread]");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_memory_change_the_orchestrator_did_not_make_is_typed_into_it() {
+        let root = temp("memory-note");
+        let (sock, file) = (root.join("pinned.sock"), root.join("typed.bin"));
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(root.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let app = m.open_project("/work/app".into());
+        let path = app.display().to_string();
+        let orchestrator = running(&m, role_env(Role::Orchestrator, &app), &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&orchestrator, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        let worker = m.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &app), false, None);
+        let remember = |tab: &str, text: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":"remember","text":"{text}"}}"#));
+
+        m.call(Call::Remember { path: path.clone(), text: "Use pnpm, not npm.".into() }).unwrap();
+        assert_eq!(remember(&worker, "The CLI parses flags with clap."), Ok("Remembered #2.".into()));
+        assert_eq!(remember(&orchestrator, "Deploys go through Railway."), Ok("Remembered #3.".into()));
+        m.call(Call::Forget { path, id: 1 }).unwrap();
+        let expected = "\x1b[200~[pinned] Project memory changed: added #1 \"Use pnpm, not npm.\"\x1b[201~\r\
+                        \x1b[200~[pinned] Project memory changed: added #2 \"The CLI parses flags with clap.\"\x1b[201~\r\
+                        \x1b[200~[pinned] Project memory changed: removed #1 \"Use pnpm, not npm.\"\x1b[201~\r";
+        wait_for("the notes", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
         let _ = std::fs::remove_dir_all(root);
     }
 }

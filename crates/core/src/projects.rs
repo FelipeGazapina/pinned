@@ -40,13 +40,9 @@ impl Project {
         Ok(memory)
     }
 
-    pub fn forget(&mut self, id: u64) -> Result<(), String> {
-        let before = self.memories.len();
-        self.memories.retain(|m| m.id != id);
-        if self.memories.len() == before {
-            return Err(format!("no memory #{id} in {}", self.path.display()));
-        }
-        Ok(())
+    pub fn forget(&mut self, id: u64) -> Result<Memory, String> {
+        let at = self.memories.iter().position(|m| m.id == id).ok_or_else(|| format!("no memory #{id} in {}", self.path.display()))?;
+        Ok(self.memories.remove(at))
     }
 }
 
@@ -269,7 +265,7 @@ mod tests {
         assert_eq!(project.remember("  Use pnpm, not npm. ", 100).unwrap().id, 1);
         assert_eq!(project.remember("Tests run with `cargo test --workspace`.", 101).unwrap().id, 2);
         assert_eq!(project.remember(" ", 102), Err("a memory needs some text".into()));
-        assert_eq!(project.forget(1), Ok(()));
+        assert_eq!(project.forget(1).map(|m| m.text), Ok("Use pnpm, not npm.".into()));
         assert_eq!(project.forget(1), Err("no memory #1 in /repo".into()));
         assert_eq!(project.remember("The API lives in crates/server.", 103).unwrap().id, 3);
         assert_eq!(render(&project.memories), "Project memory, by id:\n- [2] Tests run with `cargo test --workspace`.\n- [3] The API lives in crates/server.");
