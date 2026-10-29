@@ -365,14 +365,18 @@ impl Delegates {
             .collect()
     }
 
-    /// Cached `--list-models` text. The first call waits up to 10s for that refresh.
-    /// Later calls return the cache and refresh a stale one in the background.
+    /// Cached `--list-models` text. The first call waits up to 2s. Later calls return
+    /// the cache, including a cached miss, and refresh a stale one in the background.
     pub fn cursor_catalog(&self, bin: &Path, path: Option<&str>) -> String {
         if self.cursor.lock().unwrap().is_none() {
             self.warm_cursor(bin, path);
             let start = Instant::now();
             while self.cursor.lock().unwrap().is_none() && start.elapsed() < super::CATALOG_WAIT {
                 std::thread::sleep(Duration::from_millis(20));
+            }
+            let mut cache = self.cursor.lock().unwrap();
+            if cache.is_none() {
+                *cache = Some(Cache { at: Instant::now(), list: String::new() });
             }
         }
         let cached = self.cursor.lock().unwrap().clone();
@@ -397,7 +401,11 @@ impl Delegates {
     }
 
     fn warm_cursor(&self, bin: &Path, path: Option<&str>) {
-        if !bin.is_file() || self.warming.swap(true, Ordering::Relaxed) {
+        if !bin.is_file() {
+            *self.cursor.lock().unwrap() = Some(Cache { at: Instant::now(), list: String::new() });
+            return;
+        }
+        if self.warming.swap(true, Ordering::Relaxed) {
             return;
         }
         let cursor = self.cursor.clone();

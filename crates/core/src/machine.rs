@@ -1642,7 +1642,14 @@ impl Machine {
                 let (models, mut constraints) = match account.provider {
                     Provider::Claude => (provider_models(Provider::Claude), vec![]),
                     Provider::Codex => (vec![], codex_constraints()),
-                    Provider::Cursor => (cursor_models(&self.delegates.cursor_catalog(&bin, self.launch.path_env.as_deref())), crate::delegate::cursor_constraints()),
+                    Provider::Cursor => {
+                        let list = self.delegates.cursor_catalog(&bin, self.launch.path_env.as_deref());
+                        let mut constraints = crate::delegate::cursor_constraints();
+                        if found && list.trim().is_empty() {
+                            constraints.push("the model list is not ready yet".into());
+                        }
+                        (cursor_models(&list), constraints)
+                    }
                 };
                 if !status.signed_in {
                     constraints.push("not signed in on this machine".into());

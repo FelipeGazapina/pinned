@@ -19,7 +19,7 @@ const STEP_CHARS: usize = 400;
 pub const DEFAULT_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 const MODEL_CACHE: Duration = Duration::from_secs(10 * 60);
 const MODEL_MISS: Duration = Duration::from_secs(15);
-const CATALOG_WAIT: Duration = Duration::from_secs(10);
+const CATALOG_WAIT: Duration = Duration::from_secs(2);
 
 /// A missing model keeps the parent's model only when the child runs on the same provider.
 /// A different provider gets that provider's own default, which is no `--model`.
@@ -1219,7 +1219,7 @@ grok-4.7-high - Grok 4.7  High
 
     #[test]
     #[cfg(unix)]
-    fn a_cold_cursor_catalog_gives_up_after_ten_seconds() {
+    fn a_cold_cursor_catalog_gives_up_after_two_seconds() {
         let dir = std::env::temp_dir().join(format!("pinned-delegate-catalog-slow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1228,7 +1228,22 @@ grok-4.7-high - Grok 4.7  High
         let start = Instant::now();
         assert_eq!(delegates.cursor_catalog(&bin, None), "");
         let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_secs(9) && elapsed < Duration::from_secs(13), "cold catalog elapsed {elapsed:?}");
+        assert!(elapsed >= Duration::from_millis(1500) && elapsed < Duration::from_secs(4), "cold catalog elapsed {elapsed:?}");
+        let start = Instant::now();
+        assert_eq!(delegates.cursor_catalog(&bin, None), "");
+        assert!(start.elapsed() < Duration::from_millis(200), "the empty catalog was fetched again");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_cursor_binary_is_remembered_without_waiting() {
+        let delegates = Delegates::default();
+        let missing = Path::new("/no/such/cursor-agent-pinned");
+        let start = Instant::now();
+        assert_eq!(delegates.cursor_catalog(missing, None), "");
+        assert!(start.elapsed() < Duration::from_millis(500), "a missing cursor binary blocked for {:?}", start.elapsed());
+        let start = Instant::now();
+        assert_eq!(delegates.cursor_catalog(missing, None), "");
+        assert!(start.elapsed() < Duration::from_millis(200), "a cached miss waited {:?}", start.elapsed());
     }
 }
