@@ -1187,6 +1187,13 @@ impl Machine {
         }
     }
 
+    /// The memories of the tab's project that bear on the prompt starting a turn, for the hook to
+    /// add to it. Nothing for any other event or a thread outside a project.
+    fn recall(&self, event: &AgentEvent) -> String {
+        let (AgentStatus::Working, Some(tab), Some(prompt)) = (event.status, &event.tab, &event.prompt) else { return String::new() };
+        self.project_of_tab(tab).map(|project| self.memories.recall(&project, prompt)).unwrap_or_default()
+    }
+
     /// The project whose orchestrator `tab` is.
     fn orchestrated(&self, tab: &str) -> Result<PathBuf, String> {
         match self.tab(tab, |t| role_of(&t.env))? {
@@ -1446,8 +1453,9 @@ impl Machine {
             let Some(machine) = me.upgrade() else { return Err("pinned is shutting down".into()) };
             match message {
                 Message::Agent(event) => {
+                    let context = machine.recall(&event);
                     machine.record_event(event);
-                    Ok(String::new())
+                    Ok(context)
                 }
                 Message::Usage { usage: report, account } => {
                     let account = account.unwrap_or_else(accounts::default_account);
@@ -3171,6 +3179,36 @@ mod tests {
         assert_eq!(call(Call::MemoryForget { path: path.clone(), id: 3 }), Err("no memory #3".into()));
         let elsewhere = dir.join("elsewhere").display().to_string();
         assert_eq!(call(Call::MemoryStatus { path: elsewhere.clone() }), Err(format!("{elsewhere} is not a project on this machine")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_prompt_in_a_project_thread_is_answered_with_its_closest_memories() {
+        let dir = temp("recall");
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let sock = dir.join("pinned.sock");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = m.open_project(project).display().to_string();
+        let plain = m.open_tab(Some(path.clone()), false).unwrap();
+        let scratch = m.open_tab(Some(m.scratch.display().to_string()), false).unwrap();
+        for (title, text) in [("Deploys", "The hub deploys itself from version tags on main."), ("Package manager", "Use pnpm, not npm.")] {
+            m.call(Call::MemorySave { path: path.clone(), title: title.into(), text: text.into(), kind: None, id: None }).unwrap();
+        }
+        let prompt = |tab: &str, status, prompt: &str| {
+            let event = AgentEvent { status, cwd: None, message: None, tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: Some(prompt.into()), snapshot: None };
+            ask(&sock, &serde_json::to_string(&Message::Agent(event)).unwrap())
+        };
+        assert_eq!(
+            prompt(&plain, AgentStatus::Working, "when does the hub deploy?"),
+            Ok("Project memory pinned found for this prompt, by id (memory_search finds more; memory_save with an id corrects one):\n[1] Deploys: The hub deploys itself from version tags on main.".into())
+        );
+        assert_eq!(prompt(&plain, AgentStatus::Working, "thanks, that's all"), Ok(String::new()));
+        assert_eq!(prompt(&plain, AgentStatus::Done, "when does the hub deploy?"), Ok(String::new()));
+        assert_eq!(prompt(&scratch, AgentStatus::Working, "when does the hub deploy?"), Ok(String::new()));
+        assert_eq!(m.view(&plain).unwrap().status, Some(AgentStatus::Done), "the events were not recorded");
         let _ = std::fs::remove_dir_all(dir);
     }
 
