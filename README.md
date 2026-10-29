@@ -245,6 +245,28 @@ project keeps its account.
 Codex tabs run the `codex` CLI without pinned's hooks, so they get no status dot, no usage
 meter and no resume after a restart.
 
+## Delegating to other providers
+
+From a Claude session you can hand a task to another signed-in account. Ask for it in the
+session. pinned shows the child as a card on the turn, with **Open as thread** once that
+account has a conversation to resume.
+
+The child sees only the task you give it. It does not see the session's history. A separate
+checkout is `isolation: "worktree"`. The default stays in the session's checkout.
+
+The default returns at once. pinned types a notice into the session when the child finishes,
+so the session should end its turn instead of polling. A wait returns the result in that
+call, including the summary. If the wait times out, the child keeps running and the notice
+still comes.
+
+A child cannot be given a wider mode than the session. A bypassed session can hand a child
+`auto`. `plan` is read-only.
+
+Codex and Cursor tabs have no transcript. Their children show in a strip under the terminal
+note, with **Open as thread**. A Cursor session cannot delegate further: `cursor-agent` only
+loads MCP servers from the project's or the home `.cursor/mcp.json`, and pinned does not
+write those files.
+
 ## Machines
 
 Sign in under **Settings → Account** to use pinned from more than one machine. The hub
