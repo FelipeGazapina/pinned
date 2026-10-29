@@ -882,7 +882,7 @@ grok-4.7-high - Grok 4.7  High
     #[test]
     fn the_same_caller_and_client_request_id_returns_the_existing_task() {
         let delegates = Delegates::default();
-        let spec = |key: &str, tab: &str| NewTask {
+        let spec = |key: &str, tab: &str, request: &str| NewTask {
             parent: Parent::Tab(tab.into()),
             tool: None,
             title: "Ping".into(),
@@ -894,19 +894,33 @@ grok-4.7-high - Grok 4.7  High
             access: Access::Auto,
             isolated: false,
             caller_key: key.into(),
-            client_request_id: Some("req-7".into()),
+            client_request_id: Some(request.into()),
             role: None,
         };
-        let first = match delegates.claim(spec("tab:tab-1", "tab-1")) {
+        let first = match delegates.claim(spec("tab:tab-1", "tab-1", "req-7")) {
             Claim::Fresh(task) => task.id,
             Claim::Existing(id) => id,
         };
-        let again = match delegates.claim(spec("tab:tab-1", "tab-1")) {
+        delegates.apply(&first, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        let again = match delegates.claim(spec("tab:tab-1", "tab-1", "req-7")) {
             Claim::Existing(id) => id,
             Claim::Fresh(task) => task.id,
         };
         assert_eq!(again, first);
-        let other = match delegates.claim(spec("tab:tab-2", "tab-2")) {
+        let replay = delegates.started_json(&again).unwrap();
+        assert_eq!(replay["summary"], "DONE");
+        assert_eq!(replay["error"], Value::Null);
+        assert_eq!(replay["workState"], "result_available");
+        assert_eq!(replay["next"], "result available: DONE");
+        let fresh_id = match delegates.claim(spec("tab:tab-1", "tab-1", "req-8")) {
+            Claim::Fresh(task) => task.id,
+            Claim::Existing(id) => id,
+        };
+        assert_ne!(fresh_id, first);
+        let fresh = delegates.started_json(&fresh_id).unwrap();
+        assert_eq!(fresh["workState"], "working");
+        assert_eq!(fresh["next"], "keep working; pinned will type a notice into this session when it finishes; then call task_status");
+        let other = match delegates.claim(spec("tab:tab-2", "tab-2", "req-7")) {
             Claim::Fresh(task) => task.id,
             Claim::Existing(id) => id,
         };

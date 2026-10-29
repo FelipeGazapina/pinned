@@ -122,11 +122,14 @@ impl Delegates {
     }
 
     pub fn started_json(&self, id: &str) -> Result<Value, String> {
-        let tasks = self.tasks.lock().unwrap();
-        let task = tasks
-            .iter()
-            .find(|task| task.id == id)
-            .ok_or_else(|| format!("no task {id}"))?;
+        let mut tasks = self.tasks.lock().unwrap();
+        let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| format!("no task {id}"))?;
+        if task.state.terminal() {
+            task.delivered = true;
+            let mut body = status_json(task);
+            body["next"] = json!(result_next(task));
+            return Ok(body);
+        }
         Ok(json!({
             "taskId": task.id,
             "title": task.title,
@@ -438,6 +441,18 @@ fn next_line(task: &Task) -> String {
     match task.mode {
         Mode::Async => "keep working; pinned will type a notice into this session when it finishes; then call task_status".into(),
         Mode::Wait => format!("call task_status with taskId \"{}\"", task.id),
+    }
+}
+
+fn result_next(task: &Task) -> String {
+    match task.state {
+        WorkState::Failed => format!("failed: {}", task.error.as_deref().unwrap_or("the agent failed")),
+        WorkState::Cancelled => format!("cancelled: {}", task.error.as_deref().unwrap_or("cancelled")),
+        WorkState::ResultAvailable => match task.summary.as_deref().filter(|summary| !summary.is_empty()) {
+            Some(summary) => format!("result available: {summary}"),
+            None => "result available".into(),
+        },
+        WorkState::Working | WorkState::WaitingForChildren => next_line(task),
     }
 }
 

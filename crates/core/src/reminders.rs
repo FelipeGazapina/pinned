@@ -242,7 +242,7 @@ fn tool_definitions(reminders: bool) -> Value {
                     "interactionMode": { "type": "string", "enum": ["inherit", "default", "plan"], "description": "plan is read-only. inherit and default leave this session's mode as it is." },
                     "runtimeMode": { "type": "string", "enum": ["full-access", "auto"], "description": "How wide the child may act. Anything wider than this session is rejected. A bypassed session can hand the child auto. Omit it to inherit this session's mode." },
                     "role": { "type": "string", "description": "A label for the child, such as explore. The child does not see it." },
-                    "clientRequestId": { "type": "string", "description": "Retrying the same clientRequestId from this session returns the task already started, instead of spawning a second child." },
+                    "clientRequestId": { "type": "string", "description": "The same caller and clientRequestId returns the task already started. If that task has finished, the answer is its status, including summary and error. A new attempt uses a new id." },
                 },
                 "required": ["task"],
             },
@@ -560,6 +560,10 @@ mod tests {
         assert_eq!(props["interactionMode"]["enum"], json!(["inherit", "default", "plan"]));
         assert_eq!(props["runtimeMode"]["enum"], json!(["full-access", "auto"]));
         assert_eq!(props["task"]["description"], "The whole assignment the child sees. It does not see this session's history.");
+        assert_eq!(
+            props["clientRequestId"]["description"],
+            "The same caller and clientRequestId returns the task already started. If that task has finished, the answer is its status, including summary and error. A new attempt uses a new id."
+        );
         assert_eq!(props["isolation"]["description"], "shared runs in this checkout. worktree makes a separate checkout and runs the child there.");
         assert_eq!(props["target"]["properties"]["options"]["properties"]["effort"]["type"], "string");
         assert_eq!(
