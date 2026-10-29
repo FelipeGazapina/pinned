@@ -12,7 +12,7 @@ const READ_LIMIT: u64 = 8 << 20;
 /// The line `fork` adds to a copy, naming the session it was copied from.
 pub const FORK_LINE: &str = "pinned-fork";
 
-#[derive(Serialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Item {
     /// What the user typed, or a slash command as `/name args`. `pictures` holds the `data:` URLs of
@@ -65,7 +65,7 @@ pub enum Item {
     Model { name: String },
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Page {
     pub items: Vec<Item>,
     /// Where the next read starts.
@@ -81,20 +81,20 @@ pub struct Page {
 }
 
 /// A `TodoWrite` call, whose list replaces the one before it.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Todos {
     pub at: String,
     pub steps: Vec<Todo>,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Todo {
     pub step: String,
     /// `pending`, `in_progress` or `completed`, as claude writes it.
     pub status: String,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Context {
     pub tokens: u64,
     pub at: String,
@@ -225,7 +225,7 @@ fn todos_of(line: &Value) -> Option<Todos> {
 /// Claude's task list tool, which the composer shows instead of the thread.
 const TODO_TOOL: &str = "TodoWrite";
 /// A message of a transcript that holds a query, as T3 Code's thread search reports one.
-#[derive(Serialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 pub struct Found {
     /// `user` or `assistant`.
     pub source: &'static str,

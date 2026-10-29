@@ -4,7 +4,7 @@ use crate::accounts::{self, AccountId};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Saved {
     pub cwd: PathBuf,
     /// Claude Code's session id, passed back as `claude --resume`.

@@ -14,7 +14,7 @@ use std::time::Duration;
 /// agent-device CLI.
 pub const AGENT_PROMPT: &str = "Device control is on for this machine: you can see and drive its iOS simulators and Android emulators with the agent-device CLI, `npx -y agent-device@0.21.25`. Run `npx -y agent-device@0.21.25 --help` before your first use to learn its commands.";
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
     Ios,
@@ -30,7 +30,7 @@ impl Platform {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Device {
     pub id: String,
     pub name: String,
@@ -40,7 +40,7 @@ pub struct Device {
 }
 
 /// What a platform needs before its devices can open, as T3's setup checks it.
-#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Support {
     Ready,
@@ -49,7 +49,7 @@ pub enum Support {
     Missing,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Devices {
     pub devices: Vec<Device>,
     /// What the hub couldn't read, for T3's discovery warning.
@@ -59,7 +59,7 @@ pub struct Devices {
     pub android: Support,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum DeviceOp {
     /// `Devices`.
@@ -82,7 +82,7 @@ pub enum DeviceOp {
     Act { platform: Platform, id: String, action: Action },
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Action {
     SetAppearance { value: Appearance },
@@ -103,14 +103,14 @@ pub enum Action {
     SendPush { app_id: String, text: String },
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {
     Light,
     Dark,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum TextSize {
     Small,
@@ -119,7 +119,7 @@ pub enum TextSize {
     ExtraLarge,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum Toggle {
     ReduceMotion,
@@ -127,7 +127,7 @@ pub enum Toggle {
     NetworkEnabled,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Orientation {
     Portrait,
@@ -136,14 +136,14 @@ pub enum Orientation {
     LandscapeRight,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Decision {
     Grant,
     Revoke,
 }
 
-#[derive(Serialize, Debug, PartialEq, Default)]
+#[derive(Serialize, Debug, PartialEq, Default, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Detail {
     #[serde(skip_serializing_if = "Option::is_none")]

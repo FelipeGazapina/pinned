@@ -10,13 +10,13 @@ pub const TOKEN_PAGE: &str = "https://github.com/settings/tokens/new?scopes=repo
 /// Most repositories `repos` lists, newest push first.
 const REPOS_LIMIT: usize = 500;
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Account {
     pub login: String,
     pub name: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Repo {
     /// `owner/name`.
     pub full_name: String,

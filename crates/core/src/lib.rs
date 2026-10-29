@@ -39,4 +39,5 @@ pub mod upstash;
 pub mod usage;
 pub mod vercel;
 pub mod wire;
+pub mod wire_contract;
 pub mod workspace;

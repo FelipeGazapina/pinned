@@ -17,7 +17,7 @@ const PAGE_LIMIT: u64 = 512 * 1024;
 const ICON_LIMIT: u64 = 200 * 1024;
 const HITS: usize = 2_000;
 
-#[derive(Serialize, Debug, PartialEq, Default)]
+#[derive(Serialize, Debug, PartialEq, Default, schemars::JsonSchema)]
 pub struct PageMeta {
     pub title: String,
     /// The page's icon as a `data:` URL, so a client that can't reach the machine's localhost shows it.
@@ -222,7 +222,7 @@ fn unescape(text: &str) -> String {
     out
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Refs {
     pub local: Vec<String>,
     /// As `origin/main`.
@@ -247,7 +247,7 @@ pub fn refs(cwd: &Path, path: Option<&str>) -> Result<Refs, String> {
 }
 
 /// A file as the panel shows it: text, an image, or neither when it is binary.
-#[derive(Serialize, Debug, PartialEq, Default)]
+#[derive(Serialize, Debug, PartialEq, Default, schemars::JsonSchema)]
 pub struct FileText {
     pub text: Option<String>,
     /// An image as a `data:` URL.
@@ -350,7 +350,7 @@ pub fn write_file(cwd: &Path, rel: &str, root: bool, text: &str, since: Option<&
     Ok(hash(text.as_bytes()))
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Hit {
     pub path: String,
     pub line: u32,
@@ -464,7 +464,7 @@ pub fn pr_comment(cwd: &Path, pr: &str, body: &str, reply_to: Option<&str>, path
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ReviewEvent {
     Comment,
@@ -472,7 +472,7 @@ pub enum ReviewEvent {
     RequestChanges,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct ReviewComment {
     pub path: String,
     pub line: u32,
@@ -615,7 +615,7 @@ fn reactions_of(groups: &[Value]) -> Value {
 }
 
 /// GitHub's reactions, by the name its GraphQL API gives them.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Reaction {
     ThumbsUp,
@@ -629,7 +629,7 @@ pub enum Reaction {
 }
 
 /// A change to who is on a pull request, what is on it, and its review threads.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrChange {
     /// Adds or takes back the viewer's `content` on `subject`, a comment, review or the pull request.
@@ -687,7 +687,7 @@ fn path_segment(text: &str) -> String {
     text.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Candidates {
     Reviewers,
@@ -755,7 +755,7 @@ fn label_candidates(repository: &Value) -> Value {
     json!({ "candidates": candidates, "truncated": repository["labels"]["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false) })
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StackAction {
     /// Merges the pull request and the unmerged layers under it, as GitHub's merge-async does.
@@ -764,7 +764,7 @@ pub enum StackAction {
     Rebase,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MergeMethod {
     Merge,
@@ -773,7 +773,7 @@ pub enum MergeMethod {
 }
 
 /// A layer's head as the reader last saw it, so a stack that moved since is not acted on.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct StackHead {
     pub number: u64,
     pub sha: String,

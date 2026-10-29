@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// A slash command claude offers, which the composer's `/` menu lists.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Command {
     /// What follows the slash, such as `compact` or `pstack:unslop`.
     pub name: String,

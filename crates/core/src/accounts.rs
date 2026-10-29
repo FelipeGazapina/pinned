@@ -23,7 +23,7 @@ pub fn default_account() -> AccountId {
 
 /// One row per agent CLI pinned can host. A table, so adding a provider is one entry, not a
 /// branch per call site.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {
     Claude,
@@ -89,7 +89,7 @@ impl Provider {
 /// the user, so a connector saved on one names the same account on another.
 pub type AccountId = String;
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, schemars::JsonSchema)]
 pub struct Account {
     pub id: AccountId,
     pub provider: Provider,
@@ -108,7 +108,7 @@ impl Account {
 }
 
 /// Who the CLI says is signed in, as far as it tells.
-#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug, schemars::JsonSchema)]
 pub struct Status {
     pub signed_in: bool,
     pub email: Option<String>,
@@ -117,7 +117,7 @@ pub struct Status {
 }
 
 /// An account as a client lists it.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, schemars::JsonSchema)]
 pub struct View {
     #[serde(flatten)]
     pub account: Account,

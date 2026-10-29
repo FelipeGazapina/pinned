@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 /// A folder's branches and where its own stands, for the composer's branch picker and Git action.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Branches {
     /// Local branches, then remote ones with no local branch of that name, newest commit first.
     pub refs: Vec<Ref>,
@@ -26,7 +26,7 @@ pub struct Branches {
     pub changed: Vec<String>,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Ref {
     /// `fix-it`, or `origin/fix-it` for a remote one.
     pub name: String,
@@ -149,7 +149,7 @@ pub fn drop_worktree(dir: &Path, path: Option<&str>) {
 }
 
 /// One step of the header's Git action, which the page runs in order to show where it is.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "step", rename_all = "snake_case")]
 pub enum GitStep {
     /// A commit message for `files`, or every change, written by a headless claude.

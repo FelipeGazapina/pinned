@@ -11,8 +11,10 @@ use crate::workspace::{DiffScope, PrAction};
 use crate::stats::ThreadStats;
 use crate::{pulls, subagents, sync, thread, usage};
 use base64::Engine;
+use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
 /// A tab's id, unique within its machine, such as `tab-3`.
@@ -41,8 +43,22 @@ impl<'de> Deserialize<'de> for Bytes {
     }
 }
 
+impl JsonSchema for Bytes {
+    fn schema_name() -> Cow<'static, str> {
+        "Bytes".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::Bytes").into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({ "type": "string" })
+    }
+}
+
 /// What a tab runs.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Program {
     /// The account's agent CLI, a session that may be resumed.
@@ -52,7 +68,7 @@ pub enum Program {
     SignIn,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct TabView {
     pub id: TabId,
     pub cwd: String,
@@ -89,7 +105,7 @@ pub struct TabView {
     pub stats: Option<ThreadStats>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct ProjectView {
     pub path: String,
     pub name: String,
@@ -105,7 +121,7 @@ pub struct ProjectView {
 /// variant names what `Machine::call` answers.
 ///
 /// `{"cmd":"start_claude","tab":"tab-1","cols":120,"rows":32}`
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Call {
     /// `Vec<TabView>`.
@@ -518,7 +534,7 @@ impl Call {
 }
 
 /// A tab whose conversation holds what a `SearchThreads` asked for.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct ThreadMatch {
     pub tab: TabId,
     #[serde(flatten)]
@@ -527,7 +543,7 @@ pub struct ThreadMatch {
 
 /// A step of a tab's conversation. A client holding items of another `session`, or getting a
 /// `reset` page, starts over.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct ThreadPage {
     pub session: Option<String>,
     pub items: Vec<thread::Item>,
@@ -546,7 +562,7 @@ pub struct ThreadPage {
 /// A connector's session, the same on any machine.
 ///
 /// `{"folder":"/repo","repo":"git@github.com:o/r.git","args":["--name","ENG-7"],"env":[["PINNED_CONNECTOR","c1"]]}`
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct RunSpec {
     /// The folder on the machine the connector was set up on.
     pub folder: String,
@@ -568,7 +584,7 @@ pub struct RunSpec {
 /// What a machine reports on its own.
 ///
 /// `{"kind":"exit","tab":"tab-1"}`, `{"kind":"output","tab":"tab-1","data":"aGk="}`
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum MachineEvent {
     /// Every tab, after any of them opened, closed, started, exited or changed status, title or folder.
@@ -591,7 +607,7 @@ pub enum MachineEvent {
 /// forwarding a connector session's callbacks to the hub, which holds the keys.
 ///
 /// `{"cmd":"connect_linear","key":"lin_api_…"}`, `{"cmd":"stage","connector":"c1","issue":"uuid","stage":"coding"}`
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum HubCall {
     /// `connectors::Settings`.
@@ -676,7 +692,7 @@ pub enum HubCall {
     LinearTake { connector: String, channel: String, thread: String, issue: String },
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct MachineView {
     pub id: MachineId,
     pub name: String,
@@ -689,14 +705,14 @@ pub struct MachineView {
     pub upstash_box: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct AccountView {
     pub id: String,
     pub email: String,
 }
 
 /// A one-time code that pairs a headless machine, and the command that does it.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct PairCode {
     pub code: String,
     /// Unix seconds.
@@ -704,21 +720,21 @@ pub struct PairCode {
     pub command: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, schemars::JsonSchema)]
 pub struct Target {
     pub machine: MachineId,
     pub tab: TabId,
 }
 
 /// The answer to the call that carried `id`: `{"id":4,"ok":…}` or `{"id":4,"err":"…"}`.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Reply {
     pub id: u64,
     #[serde(flatten)]
     pub outcome: Outcome,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Ok(Value),
@@ -742,7 +758,7 @@ impl Reply {
 ///
 /// `{"type":"auth","token":"…"}`, `{"type":"call","id":1,"machine":"m1","call":{"cmd":"tabs"}}`,
 /// `{"type":"hub","id":2,"call":{"cmd":"get_settings"}}`, `{"type":"attach","machine":"m1","tab":"tab-1"}`
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientFrame {
     Auth { token: String },
@@ -758,7 +774,7 @@ pub enum ClientFrame {
 /// Hub to client.
 ///
 /// `{"type":"reply","id":1,"ok":[]}`, `{"type":"event","machine":"m1","event":{"kind":"exit","tab":"tab-1"}}`
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToClient {
     /// The answer to `Auth`: the account, its machines and every online machine's tabs.
@@ -775,7 +791,7 @@ pub enum ToClient {
 ///
 /// `{"type":"auth","token":"…","name":"mac-mini","os":"macos","version":"0.6.0"}`,
 /// `{"type":"call","id":7,"call":{"cmd":"slack_reply","connector":"c2","channel":"C1","thread":"1.2","text":"done"}}`
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MachineFrame {
     Auth { token: String, name: String, os: String, version: String },
@@ -791,7 +807,7 @@ pub enum MachineFrame {
 /// Hub to machine.
 ///
 /// `{"type":"call","id":3,"call":{"cmd":"close_tab","tab":"tab-2"}}`, `{"type":"subscribe","tab":"tab-2","viewer":"client-4"}`
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToMachine {
     /// The answer to `Auth`.

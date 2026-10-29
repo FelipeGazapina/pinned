@@ -12,7 +12,7 @@ const DIFF_LIMIT: usize = 400_000;
 const PR_FIELDS: &str = "number,title,state,isDraft,url,body,author,createdAt,updatedAt,mergedAt,closedAt,headRefName,baseRefName,headRefOid,baseRefOid,additions,deletions,changedFiles,reviewDecision,mergeable,statusCheckRollup,reviews,comments,commits,labels,reviewRequests,autoMergeRequest";
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Workspace {
     /// The folder the project's history is kept under, which a worktree shares with its repository.
     pub project: String,
@@ -52,7 +52,7 @@ pub fn pull_request(cwd: &Path, pr: &str, path: Option<&str>) -> Result<Value, S
     Ok(view)
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PrState {
     Open,
@@ -61,7 +61,7 @@ pub enum PrState {
     Closed,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct PrStatus {
     pub state: PrState,
     pub title: String,
@@ -77,7 +77,7 @@ pub struct PrStatus {
     pub created_at: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct PrAuthor {
     pub login: String,
     #[serde(default)]
@@ -142,7 +142,7 @@ pub fn pull_requests(cwd: &Path, path: Option<&str>) -> Result<Value, String> {
     Ok(Value::Array(list))
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PrAction {
     Merge,
@@ -219,7 +219,7 @@ fn clip(text: &mut String) -> bool {
     true
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffScope {
     /// The working tree, untracked files too, against HEAD.
@@ -228,7 +228,7 @@ pub enum DiffScope {
     Base,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Diff {
     pub patch: String,
     pub truncated: bool,
@@ -271,7 +271,7 @@ pub fn diff(cwd: &Path, scope: DiffScope, ignore_whitespace: bool, against: Opti
 }
 
 /// A TCP port a process on the machine listens on and that answers HTTP with a page.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Listener {
     pub port: u16,
     pub pid: u32,
@@ -471,7 +471,7 @@ fn serves_html(port: u16) -> bool {
 }
 
 /// An editor `open_in` can open a folder in: an app bundle on a Mac, a command on PATH elsewhere.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Editor {
     pub id: &'static str,
     pub name: &'static str,

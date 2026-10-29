@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Script {
     #[serde(default)]
@@ -37,7 +37,7 @@ fn play() -> String {
 }
 
 /// A project's own scripts and the ones its `t3.json` offers.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct ProjectScripts {
     pub scripts: Vec<Script>,
     pub file: Vec<Script>,

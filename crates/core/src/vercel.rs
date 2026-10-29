@@ -10,14 +10,14 @@ const API: &str = "https://ai-gateway.vercel.sh/v1";
 const CALL_WAIT: Duration = Duration::from_secs(60);
 
 /// What the Connectors card shows of the key pinned keeps.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Account {
     /// The key's last characters, as `…a1b2`.
     pub key_hint: String,
 }
 
 /// `language` on the gateway is chat. `evaluation` is a decision model.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Chat,
@@ -25,7 +25,7 @@ pub enum Kind {
 }
 
 /// A gateway model id, and whether it answers chat or a decision.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct Model {
     pub id: String,
     pub kind: Kind,

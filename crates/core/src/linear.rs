@@ -6,7 +6,7 @@ const API: &str = "https://api.linear.app/graphql";
 /// Where a signed-in user creates the personal API key pinned asks for.
 pub const KEY_PAGE: &str = "https://linear.app/settings/account/security";
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 pub struct Account {
     pub name: String,
     pub email: String,

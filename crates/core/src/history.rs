@@ -14,7 +14,7 @@ use std::process::Stdio;
 const PATCH_LIMIT: usize = 200_000;
 const PROMPT_CHARS: usize = 400;
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 pub struct FileChange {
     pub path: String,
     pub added: u32,
@@ -22,7 +22,7 @@ pub struct FileChange {
 }
 
 /// Every field but `session` has a default, so a line written by another version still loads.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 pub struct Turn {
     /// Claude Code's session id.
     pub session: String,

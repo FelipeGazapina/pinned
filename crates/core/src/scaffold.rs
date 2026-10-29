@@ -10,7 +10,7 @@ const ICON_BACKGROUNDS: [&str; 15] = [
     "#dc2626", "#ea580c", "#d97706", "#16a34a", "#059669", "#0d9488", "#0891b2", "#0284c7", "#2563eb", "#4f46e5", "#7c3aed", "#9333ea", "#c026d3", "#db2777", "#e11d48",
 ];
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Created {
     pub path: String,
     /// Why git made no first commit, when it couldn't.
