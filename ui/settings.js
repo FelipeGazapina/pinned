@@ -444,7 +444,7 @@ const STEPS = {
         </div>
         <div class="grid">
           <label>Choices <input data-bind="ask.questions.${i}.choices" data-list="" value="${esc((q.choices ?? []).join(", "))}" placeholder="bug, question"></label>
-          <label>Stop on <input data-bind="ask.questions.${i}.stopOn" data-list="" value="${esc((q.stopOn ?? []).join(", "))}" placeholder="no"></label>
+          <label>Stop on <input data-bind="ask.questions.${i}.stopOn" data-list="" value="${esc((q.stopOn ?? []).join(", "))}" placeholder="none"></label>
         </div>
         <div class="actions start"><button class="secondary" data-action="remove-question" data-index="${i}">Remove</button></div>`,
         )

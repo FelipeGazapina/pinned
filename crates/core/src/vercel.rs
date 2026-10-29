@@ -16,18 +16,6 @@ pub struct Account {
     pub key_hint: String,
 }
 
-fn hint(secret: &str) -> String {
-    let tail: String = secret
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("…{tail}")
-}
-
 /// A canned completion body for tests, so a workflow test can run the ask step without the network.
 #[cfg(test)]
 static TEST_CONTENT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -73,6 +61,10 @@ async fn call(
     if status.is_success() {
         return Ok(body);
     }
+    // The gateway's own 401 tells the reader to set an environment variable pinned never reads.
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("Vercel AI Gateway: the key was rejected. Create a new one in the AI Gateway's API Keys page".into());
+    }
     let message = body["error"]["message"]
         .as_str()
         .unwrap_or("request failed");
@@ -83,7 +75,7 @@ async fn call(
 pub async fn account(key: &str) -> Result<Account, String> {
     call(reqwest::Method::GET, "/credits", Some(key.trim()), None).await?;
     Ok(Account {
-        key_hint: hint(key.trim()),
+        key_hint: crate::upstash::hint(key.trim()),
     })
 }
 
