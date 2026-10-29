@@ -150,7 +150,8 @@ async function fetchThread(tab) {
     const moved = takeAgents(t, page.agents);
     if ((grew || moved) && guiOn()) {
       if (tab === active) {
-        renderThread();
+        if (terminalOnly(tab)) renderTerminalOnly();
+        else renderThread();
         markThreadSeen(tab);
       }
       renderSidebar();
@@ -160,7 +161,11 @@ async function fetchThread(tab) {
     t.unsupported = /unknown variant|can't answer/.test(String(e));
     t.loaded = t.unsupported;
     t.error = String(e);
-    if (tab === active && guiOn()) t.unsupported ? renderUnsupported() : renderThread();
+    if (tab === active && guiOn()) {
+      if (terminalOnly(tab)) renderTerminalOnly();
+      else if (t.unsupported) renderUnsupported();
+      else renderThread();
+    }
   } finally {
     t.fetching = false;
   }

@@ -142,7 +142,7 @@ function renderComposer(tab) {
   const empty = !prompt.value.trim() && !t?.attachments?.length;
   composer.dataset.working = working;
   composer.dataset.empty = empty;
-  document.getElementById("chat").dataset.hero = !!tab && t.loaded && !t.items.length && !(t.agents ?? []).length && !tab.menu && !tab.dialog;
+  document.getElementById("chat").dataset.hero = !!tab && t.loaded && !t.items.length && !(t.agents ?? []).length && !tab.menu && !tab.dialog && !terminalOnly(tab);
   const send = document.getElementById("send");
   const blocked = tab && sendBlocked(tab);
   const spinning = composer.dataset.sending === "true" || blocked === "Connecting" || blocked === "Preparing worktree";
