@@ -1246,4 +1246,33 @@ grok-4.7-high - Grok 4.7  High
         assert_eq!(delegates.cursor_catalog(missing, None), "");
         assert!(start.elapsed() < Duration::from_millis(200), "a cached miss waited {:?}", start.elapsed());
     }
+
+    #[test]
+    fn a_task_ending_within_a_second_keeps_millisecond_stamps() {
+        let delegates = Delegates::default();
+        let task = delegates.begin(NewTask {
+            parent: Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Quick".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        delegates.apply(&task.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        let card = delegates.cards("tab-1").into_iter().next().unwrap();
+        let started = card.started.unwrap();
+        assert!(started.contains('.'), "started lost its milliseconds: {started}");
+        assert!(card.updated.contains('.'), "updated lost its milliseconds: {}", card.updated);
+        let start = chrono::DateTime::parse_from_rfc3339(&started).unwrap();
+        let end = chrono::DateTime::parse_from_rfc3339(&card.updated).unwrap();
+        assert!(end > start, "a sub-second task collapsed to one stamp: {started} {end}");
+    }
 }

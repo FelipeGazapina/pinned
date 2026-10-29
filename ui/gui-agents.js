@@ -82,9 +82,9 @@ function agentCardHtml(tab, agent, depth) {
 function agentCardsHtml(tab, turn, latest) {
   const agents = agentsOf(tab);
   if (!agents.length) return "";
-  const tools = new Set(turn.steps.filter((s) => s.kind === "tool").map((s) => s.id));
+  const tools = new Set((turn?.steps ?? []).filter((s) => s.kind === "tool").map((s) => s.id));
   const tree = (agent, depth) => [agentCardHtml(tab, agent, depth), ...agents.filter((a) => a.parent === agent.id).flatMap((a) => tree(a, depth + 1))];
-  const cards = agents.filter((a) => !a.parent && (tools.has(a.tool) || (latest && !a.tool))).flatMap((a) => tree(a, 0));
+  const cards = agents.filter((a) => !a.parent && (!turn || tools.has(a.tool) || (latest && !a.tool))).flatMap((a) => tree(a, 0));
   return cards.length ? `<div class="agents">${cards.join("")}</div>` : "";
 }
 

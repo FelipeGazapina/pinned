@@ -86,7 +86,7 @@ impl Delegates {
             if !task.state.terminal() {
                 task.state = WorkState::Failed;
                 task.error = Some(error);
-                task.ended = Some(unix_now());
+                task.ended = Some(unix_millis());
                 drop_isolated(task, path);
             }
         }
@@ -204,7 +204,7 @@ impl Delegates {
             }
             task.state = WorkState::Cancelled;
             task.error = Some(reason.to_owned());
-            task.ended = Some(unix_now());
+            task.ended = Some(unix_millis());
             drop_isolated(task, path);
             self.pids.lock().unwrap().remove(id)
         };
@@ -493,7 +493,7 @@ fn result_next(task: &Task) -> String {
 }
 
 fn status_json(task: &Task) -> Value {
-    let end = task.ended.unwrap_or_else(unix_now);
+    let end = task.ended.unwrap_or_else(unix_millis);
     json!({
         "taskId": task.id,
         "title": task.title,
@@ -503,7 +503,7 @@ fn status_json(task: &Task) -> Value {
         "summary": task.summary,
         "error": task.error,
         "recentSteps": task.steps,
-        "elapsedSecs": end.saturating_sub(task.started),
+        "elapsedSecs": end.saturating_sub(task.started) / 1000,
         "conversationId": task.conversation,
         "cwd": task.cwd.display().to_string(),
     })
@@ -609,7 +609,7 @@ fn fresh(new: NewTask) -> Task {
         model: new.model,
         cwd: new.cwd,
         access: new.access,
-        started: unix_now(),
+        started: unix_millis(),
         ended: None,
         state: WorkState::Working,
         summary: None,
@@ -637,7 +637,7 @@ fn settle(tasks: &mut [Task], index: usize, held: HeldExit) {
     tasks[index].summary = held.summary;
     tasks[index].error = held.error;
     tasks[index].state = if held.failed { WorkState::Failed } else { WorkState::ResultAvailable };
-    tasks[index].ended = Some(unix_now());
+    tasks[index].ended = Some(unix_millis());
 }
 
 fn release(tasks: &mut [Task], path: Option<&str>) {
@@ -653,7 +653,7 @@ fn release(tasks: &mut [Task], path: Option<&str>) {
             tasks[index].summary = held.summary;
             tasks[index].error = held.error;
             tasks[index].state = if held.failed { WorkState::Failed } else { WorkState::ResultAvailable };
-            tasks[index].ended = Some(unix_now());
+            tasks[index].ended = Some(unix_millis());
             drop_isolated(&tasks[index], path);
             changed = true;
         }
@@ -736,14 +736,14 @@ fn drop_isolated(task: &Task, path: Option<&str>) {
     }
 }
 
-fn unix_now() -> u64 {
+fn unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-fn stamp(secs: u64) -> String {
-    chrono::DateTime::from_timestamp(secs as i64, 0)
-        .map(|time| time.to_rfc3339())
+fn stamp(ms: u64) -> String {
+    chrono::DateTime::from_timestamp((ms / 1000) as i64, ((ms % 1000) * 1_000_000) as u32)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         .unwrap_or_default()
 }

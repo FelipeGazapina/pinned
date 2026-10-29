@@ -947,12 +947,15 @@ function renderThread() {
   const opening = turns.find((x) => x.user);
   const blank = sub ? (t.error ? `This subagent couldn't be read: ${esc(t.error)}` : "Loading…") : t.loaded ? "Send a message to start the conversation." : t.error ? `This thread couldn't be read: ${esc(t.error)}` : "Loading…";
   const parent = sub ? systemDividerHtml({ glyph: "bot", label: "Subagent of", detail: threadTitle(tab), action: "Open parent thread", data: "data-subagent-parent" }) : "";
+  const agentsBare = !sub && !turns.length && (t.agents ?? []).length;
   const body = turns.length
     ? `${parent}${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}<div class="spacer" style="height:${win.above}px"></div>${shown
         .slice(win.lo, win.hi)
         .map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + win.lo + i === turns.length - 1, turn === opening, t, first + win.lo + i === turns.length - 1))
         .join("")}<div class="spacer" style="height:${win.below}px"></div>${sub ? "" : agentsFooterHtml(tab)}`
-    : `<div class="blank"><p>${blank}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
+    : agentsBare
+      ? `${agentCardsHtml(tab, null, true)}${agentsFooterHtml(tab)}`
+      : `<div class="blank"><p>${blank}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
   const liveRows = threadView.querySelector(".work.live .group[open] > .rows");
   const follow = !liveRows || liveRows.scrollHeight - liveRows.scrollTop - liveRows.clientHeight < 24;
   // The window redraws on scroll, so claude's dialog card moves into the new lane, keeping its focus.
@@ -1716,11 +1719,12 @@ function renderUnsupported() {
 }
 
 function renderTerminalOnly() {
+  document.getElementById("chat").dataset.hero = "false";
   document.querySelector("#chat-head .crumb").innerHTML = crumbHtml(active);
   threadView.dataset.key = "";
   const what = active.view.program === "sign-in" ? "This sign-in runs" : `${esc(accountName(active.machine, active.view.account))} runs`;
   const strip = active.view.program === "sign-in" ? "" : delegatedStrip(active);
-  threadView.innerHTML = `<div class="blank"><p>${what} in the terminal only.</p>${strip}<button class="primary" data-mode-terminal>Terminal view</button></div>`;
+  threadView.innerHTML = `<div class="blank"><p>${what} in the terminal only.</p><button class="primary" data-mode-terminal>Terminal view</button></div>${strip}`;
 }
 
 /** T3 Code's media dialog: the image over a dark scrim with a close button, and for a message's

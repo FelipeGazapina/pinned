@@ -231,6 +231,9 @@ fn title_from_transcript(transcript: impl BufRead) -> Option<String> {
 /// Stands in for the title until Claude Code names the session: the prompt's first line.
 fn title_from_prompt(prompt: &str) -> Option<String> {
     let line = prompt.lines().map(str::trim).find(|l| !l.is_empty())?;
+    if line.starts_with("[pinned]") {
+        return None;
+    }
     Some(match line.char_indices().nth(PROMPT_TITLE_CHARS) {
         Some((cut, _)) => format!("{}…", line[..cut].trim_end()),
         None => line.to_owned(),
@@ -380,6 +383,8 @@ mod tests {
             Some("make the pill show every open tab as a carousel that keeps s…".to_owned()),
         );
         assert_eq!(title_from_prompt("  \n"), None);
+        assert_eq!(title_from_prompt("[pinned] Delegated task task-1 \"Ping\" finished: result available."), None);
+        assert_eq!(title_from_prompt("\n  [pinned] Delegated task task-1\nkeep the old title"), None);
     }
 
     /// One test, because the commands read the session's environment, which is process-wide.
