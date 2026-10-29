@@ -928,6 +928,21 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[test]
+    fn open_is_refused_while_the_task_is_working_and_without_a_conversation() {
+        let delegates = Delegates::default();
+        let task = new_cursor(&delegates, Mode::Async);
+        let caller = Caller { tab: Some("tab-1".into()), task: None };
+        delegates.apply(&task.id, ChildEvent::Line(json!({"type":"system","subtype":"init","session_id":"conv-1"}).to_string()), None);
+        assert_eq!(delegates.open(&caller, &task.id).unwrap_err(), format!("{} is still working", task.id));
+        delegates.apply(&task.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        let opened = delegates.open(&caller, &task.id).unwrap();
+        assert_eq!(opened.conversation, "conv-1");
+        let bare = new_cursor(&delegates, Mode::Async);
+        delegates.apply(&bare.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        assert_eq!(delegates.open(&caller, &bare.id).unwrap_err(), format!("{} has no conversation to resume", bare.id));
+    }
+
+    #[test]
     fn another_tab_cannot_read_or_cancel_a_task_or_consume_its_notice() {
         let delegates = Delegates::default();
         let task = new_cursor(&delegates, Mode::Wait);

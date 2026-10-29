@@ -303,6 +303,9 @@ impl Delegates {
             return Err(format!("task {id} belongs to another session"));
         }
         let task = tasks.iter().find(|task| task.id == id).unwrap();
+        if !task.state.terminal() {
+            return Err(format!("{id} is still working"));
+        }
         let conversation = task
             .conversation
             .clone()
