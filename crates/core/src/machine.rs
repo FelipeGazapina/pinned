@@ -1407,6 +1407,7 @@ impl Machine {
         for id in self.delegates.running() {
             let _ = self.delegates.cancel_tree(&id, "pinned is shutting down", path.as_deref());
         }
+        self.delegates.kill_remembered();
         let tabs: Vec<String> = self.tabs.lock().unwrap().keys().cloned().collect();
         for tab in &tabs {
             self.delegates.drop_kept_worktrees(tab, &[], path.as_deref());
@@ -1490,6 +1491,10 @@ impl Machine {
         if isolated {
             match branches::new_worktree(&cwd, self.launch.path_env.as_deref()) {
                 Ok(dir) => {
+                    if self.delegates.is_terminal(&task.id) {
+                        branches::drop_worktree(&dir, self.launch.path_env.as_deref());
+                        return self.delegates.started_json(&task.id).map(|value| value.to_string());
+                    }
                     cwd = dir;
                     self.delegates.place(&task.id, cwd.clone(), true);
                 }
@@ -1498,6 +1503,9 @@ impl Machine {
                     return Err(error);
                 }
             }
+        }
+        if self.quitting.load(Ordering::SeqCst) || self.delegates.is_terminal(&task.id) {
+            return self.delegates.started_json(&task.id).map(|value| value.to_string());
         }
         let argv = driver_args(
             account.provider,
@@ -1535,6 +1543,9 @@ impl Machine {
             }
         };
         self.delegates.remember_pid(&task.id, pid);
+        if self.quitting.load(Ordering::SeqCst) {
+            self.delegates.kill_remembered();
+        }
         self.arm_notices();
         self.delegates.started_json(&task.id).map(|value| value.to_string())
     }

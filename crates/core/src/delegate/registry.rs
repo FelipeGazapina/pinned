@@ -76,8 +76,34 @@ impl Delegates {
         }
     }
 
+    /// Records `pid` for a task that is still working. A task that already finished is killed now,
+    /// so a cancel during startup cannot leave the child running.
     pub fn remember_pid(&self, id: &str, pid: u32) {
-        self.pids.lock().unwrap().insert(id.to_owned(), pid);
+        let kill_now = {
+            let tasks = self.tasks.lock().unwrap();
+            let terminal = tasks.iter().find(|task| task.id == id).is_none_or(|task| task.state.terminal());
+            if terminal {
+                true
+            } else {
+                self.pids.lock().unwrap().insert(id.to_owned(), pid);
+                false
+            }
+        };
+        if kill_now {
+            kill(pid);
+        }
+    }
+
+    pub fn is_terminal(&self, id: &str) -> bool {
+        self.tasks.lock().unwrap().iter().find(|task| task.id == id).is_none_or(|task| task.state.terminal())
+    }
+
+    /// Kills every child whose pid was recorded, including one remembered after `running` was read.
+    pub fn kill_remembered(&self) {
+        let pids: Vec<u32> = self.pids.lock().unwrap().drain().map(|(_, pid)| pid).collect();
+        for pid in pids {
+            kill(pid);
+        }
     }
 
     pub fn fail(&self, id: &str, error: String, path: Option<&str>) {

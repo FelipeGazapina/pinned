@@ -869,6 +869,30 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[test]
+    #[cfg(unix)]
+    fn cancel_between_claim_and_remember_pid_kills_the_process() {
+        use std::os::unix::process::CommandExt;
+        let dir = std::env::temp_dir().join(format!("pinned-delegate-gap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = script(&dir, "sleeper", "sleep 30");
+        let delegates = Delegates::default();
+        let task = new_cursor(&delegates, Mode::Async);
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.process_group(0);
+        let mut child = cmd.spawn().unwrap();
+        let pid = child.id();
+        delegates.cancel(&Caller { tab: Some("tab-1".into()), task: None }, &task.id, "stop", None).unwrap();
+        delegates.remember_pid(&task.id, pid);
+        let start = Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(2), "cancel left pid {pid} running");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_new_registry_does_not_reuse_task_ids() {
         let first = new_cursor(&Delegates::default(), Mode::Async).id;
         let second = new_cursor(&Delegates::default(), Mode::Async).id;
