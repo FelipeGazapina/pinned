@@ -24,6 +24,8 @@ tempfile = "3"
 flate2 = "1"
 dunce = "1"
 sha2 = "0.10"
+# Bundled, so FTS5 is there and the musl and Windows builds need no system SQLite.
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "test-util"] }
