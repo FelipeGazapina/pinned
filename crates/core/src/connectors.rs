@@ -93,6 +93,30 @@ impl Trigger {
     }
 }
 
+/// A model on Vercel's AI Gateway that reads what the trigger found before the session starts.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Ask {
+    /// A gateway model id, as `google/gemini-3.5-flash`.
+    pub model: String,
+    pub instructions: String,
+    pub questions: Vec<Question>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Question {
+    /// The key the answer goes under, as `kind`.
+    pub name: String,
+    pub ask: String,
+    /// The answers the model must pick from; empty takes free text.
+    #[serde(default)]
+    pub choices: Vec<String>,
+    /// Choices that end the workflow without a session.
+    #[serde(default)]
+    pub stop_on: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Connector {
@@ -136,6 +160,9 @@ pub struct Connector {
     /// Whether a session that opens a pull request must prove it works, with a Playwright video.
     #[serde(default = "on")]
     pub proof: bool,
+    /// Asks a gateway model about the trigger's find before the session starts. Empty skips it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<Ask>,
     #[serde(default, rename = "machine")]
     pub runs_on: RunsOn,
     #[serde(default)]
@@ -1358,6 +1385,8 @@ mod tests {
         let named: Connector = serde_json::from_value(named).unwrap();
         assert_eq!(run(&named, &issue(), "/bin/pinned").spec().account.as_deref(), Some("work"));
         assert_eq!(serde_json::to_value(&named).unwrap()["account"], " work ");
+        assert_eq!(old.ask, None, "a connector stored before the ask step has none");
+        assert!(serde_json::to_value(&old).unwrap().get("ask").is_none());
     }
 
     #[test]
@@ -1483,6 +1512,7 @@ mod tests {
             created: BTreeMap::new(),
             followed: BTreeMap::new(),
             proof: false,
+            ask: None,
             runs_on: RunsOn::Any,
             repo: String::new(),
             account: String::new(),
@@ -1542,6 +1572,7 @@ mod tests {
             created: BTreeMap::new(),
             followed: BTreeMap::new(),
             proof: false,
+            ask: None,
             runs_on: RunsOn::Any,
             repo: String::new(),
             account: String::new(),

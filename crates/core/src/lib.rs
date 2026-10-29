@@ -37,5 +37,6 @@ pub mod titles;
 pub mod uploads;
 pub mod upstash;
 pub mod usage;
+pub mod vercel;
 pub mod wire;
 pub mod workspace;
