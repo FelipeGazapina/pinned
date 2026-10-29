@@ -411,7 +411,7 @@ impl Machine {
             Call::MakeFolder { path } => {
                 let dir = projects::expand(&path, &home());
                 std::fs::create_dir_all(&dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
-                json(std::fs::canonicalize(&dir).map_err(|e| e.to_string())?)
+                json(dunce::canonicalize(&dir).map_err(|e| e.to_string())?)
             }
             Call::SearchThreads { query } => json(self.search_threads(&query)),
             Call::Run { run } => json(self.run(&run)?),
