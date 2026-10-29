@@ -86,7 +86,7 @@ pub fn disconnect_vercel(connectors: State<Connectors>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn vercel_models(connectors: State<'_, Connectors>) -> Result<Vec<String>, String> {
+pub async fn vercel_models(connectors: State<'_, Connectors>) -> Result<Vec<vercel::Model>, String> {
     connectors.vercel_models().await
 }
 

@@ -614,7 +614,7 @@ pub enum HubCall {
     /// `vercel::Account`, once the gateway took the key.
     ConnectVercel { key: String },
     DisconnectVercel,
-    /// Language model ids that can answer a JSON schema. The list needs no key.
+    /// `Vec<vercel::Model>`: chat models tagged `structured-output`, and every decision model. The list needs no key.
     VercelModels,
     /// `upstash::Account`, once Upstash took the key. Only a signed-in app runs boxes, so this has no Tauri command.
     ConnectUpstash { key: String, claude_token: String },

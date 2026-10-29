@@ -98,7 +98,7 @@ impl Trigger {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Ask {
-    /// A gateway model id, as `google/gemini-3.5-flash`.
+    /// A gateway model id, as `typesafe-ai/jev`. The id picks chat or decision when the step runs.
     pub model: String,
     pub instructions: String,
     pub questions: Vec<Question>,
@@ -1324,8 +1324,8 @@ impl Connectors {
         self.save(&store)
     }
 
-    /// Language models that can answer a JSON schema. The list needs no key.
-    pub async fn vercel_models(&self) -> Result<Vec<String>, String> {
+    /// Chat models tagged `structured-output`, and every decision model. The list needs no key.
+    pub async fn vercel_models(&self) -> Result<Vec<vercel::Model>, String> {
         vercel::models().await
     }
 

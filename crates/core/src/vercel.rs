@@ -1,5 +1,5 @@
-//! Vercel's AI Gateway. A workflow can ask one of its models about what a trigger found
-//! before the Claude Code session starts. The HTTP JSON is parsed here and never leaves the module.
+//! Vercel's AI Gateway. A workflow can ask one of its models, chat or decision, about what a
+//! trigger found before the Claude Code session starts. The HTTP JSON is parsed here and never leaves the module.
 
 use crate::connectors::{Ask, Question};
 use serde::{Deserialize, Serialize};
@@ -16,22 +16,37 @@ pub struct Account {
     pub key_hint: String,
 }
 
+/// `language` on the gateway is chat. `evaluation` is a decision model.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Chat,
+    Decision,
+}
+
+/// A gateway model id, and whether it answers chat or a decision.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Model {
+    pub id: String,
+    pub kind: Kind,
+}
+
 /// A canned completion body for tests, so a workflow test can run the ask step without the network.
 #[cfg(test)]
 static TEST_CONTENT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// Makes `ask` parse `content` as the model's reply. `None` calls the gateway.
+/// Makes `ask` parse `content` as a chat completion and skip the gateway. `None` calls it.
 #[cfg(test)]
 pub(crate) fn set_test_content(content: Option<String>) {
     *TEST_CONTENT.lock().unwrap() = content;
 }
 
-async fn call(
+async fn exchange(
     method: reqwest::Method,
     path: &str,
     key: Option<&str>,
     body: Option<&Value>,
-) -> Result<Value, String> {
+) -> Result<(reqwest::StatusCode, Value), String> {
     let client = reqwest::Client::builder()
         .timeout(CALL_WAIT)
         .build()
@@ -58,6 +73,10 @@ async fn call(
         serde_json::from_str(&text)
             .map_err(|e| format!("Vercel AI Gateway: sent a bad response: {e}"))?
     };
+    Ok((status, body))
+}
+
+fn accepted(status: reqwest::StatusCode, body: Value) -> Result<Value, String> {
     if status.is_success() {
         return Ok(body);
     }
@@ -71,6 +90,16 @@ async fn call(
     Err(format!("Vercel AI Gateway: {message}"))
 }
 
+async fn call(
+    method: reqwest::Method,
+    path: &str,
+    key: Option<&str>,
+    body: Option<&Value>,
+) -> Result<Value, String> {
+    let (status, body) = exchange(method, path, key, body).await?;
+    accepted(status, body)
+}
+
 /// Checks the key against the gateway before pinned keeps it.
 pub async fn account(key: &str) -> Result<Account, String> {
     call(reqwest::Method::GET, "/credits", Some(key.trim()), None).await?;
@@ -79,30 +108,53 @@ pub async fn account(key: &str) -> Result<Account, String> {
     })
 }
 
-/// Language models that can answer a JSON schema, sorted by id. The list needs no key.
-pub async fn models() -> Result<Vec<String>, String> {
-    model_ids(&call(reqwest::Method::GET, "/models", None, None).await?)
+/// Chat models tagged `structured-output`, and every decision model, sorted by id. The list needs no key.
+pub async fn models() -> Result<Vec<Model>, String> {
+    models_from(&call(reqwest::Method::GET, "/models", None, None).await?)
 }
 
-fn model_ids(body: &Value) -> Result<Vec<String>, String> {
+fn models_from(body: &Value) -> Result<Vec<Model>, String> {
     let data = body["data"]
         .as_array()
         .ok_or_else(|| "Vercel AI Gateway: sent a model list that isn't one".to_owned())?;
-    let mut ids: Vec<String> = data
-        .iter()
-        .filter(|m| {
-            m["type"].as_str() == Some("language")
-                && m["tags"].as_array().is_some_and(|tags| {
-                    tags.iter().any(|t| t.as_str() == Some("structured-output"))
-                })
-        })
-        .filter_map(|m| m["id"].as_str().map(str::to_owned))
-        .collect();
-    ids.sort();
-    Ok(ids)
+    let mut models: Vec<Model> = data.iter().filter_map(listed).collect();
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(models)
 }
 
-/// One chat completion. Answers come back in question order, a choice in that choice's spelling.
+fn kind_of_type(type_name: &str) -> Option<Kind> {
+    match type_name {
+        "language" => Some(Kind::Chat),
+        "evaluation" => Some(Kind::Decision),
+        _ => None,
+    }
+}
+
+fn listed(model: &Value) -> Option<Model> {
+    let id = model["id"].as_str()?.to_owned();
+    let kind = kind_of_type(model["type"].as_str()?)?;
+    let structured = model["tags"].as_array().is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("structured-output")));
+    (kind == Kind::Decision || structured).then_some(Model { id, kind })
+}
+
+fn not_a_model(model: &str) -> String {
+    format!("{model} is not a chat or decision model on the gateway")
+}
+
+fn parse_kind(model: &str, type_name: Option<&str>) -> Result<Kind, String> {
+    type_name.and_then(kind_of_type).ok_or_else(|| not_a_model(model))
+}
+
+async fn kind_of(model: &str) -> Result<Kind, String> {
+    let (status, body) = exchange(reqwest::Method::GET, &format!("/models/{model}"), None, None).await?;
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(not_a_model(model));
+    }
+    let body = accepted(status, body)?;
+    parse_kind(model, body["type"].as_str())
+}
+
+/// One gateway call. Answers come back in question order, a choice in that choice's spelling.
 pub async fn ask(key: &str, ask: &Ask, input: &str) -> Result<Vec<(String, String)>, String> {
     #[cfg(test)]
     if let Some(content) = TEST_CONTENT.lock().unwrap().clone() {
@@ -111,17 +163,28 @@ pub async fn ask(key: &str, ask: &Ask, input: &str) -> Result<Vec<(String, Strin
             &json!({ "choices": [{ "message": { "content": content } }] }),
         );
     }
-    let body = completion_body(ask, input);
-    parse_completion(
-        ask,
-        &call(
-            reqwest::Method::POST,
-            "/chat/completions",
-            Some(key),
-            Some(&body),
-        )
-        .await?,
-    )
+    match kind_of(&ask.model).await? {
+        Kind::Chat => {
+            let body = completion_body(ask, input);
+            parse_completion(
+                ask,
+                &call(
+                    reqwest::Method::POST,
+                    "/chat/completions",
+                    Some(key),
+                    Some(&body),
+                )
+                .await?,
+            )
+        }
+        Kind::Decision => {
+            let body = decision_body(ask, input)?;
+            parse_decision(
+                ask,
+                &call(reqwest::Method::POST, "/decisions", Some(key), Some(&body)).await?,
+            )
+        }
+    }
 }
 
 fn system_prompt(ask: &Ask) -> String {
@@ -145,6 +208,87 @@ fn schema(ask: &Ask) -> Value {
         "required": required,
         "additionalProperties": false,
     })
+}
+
+fn decision_body(ask: &Ask, input: &str) -> Result<Value, String> {
+    let mut questions = Vec::with_capacity(ask.questions.len());
+    for question in &ask.questions {
+        if question.choices.is_empty() {
+            return Err(format!(
+                "{} is a decision model and answers only questions with choices: give {} choices",
+                ask.model, question.name
+            ));
+        }
+        let choices: Vec<Value> = question
+            .choices
+            .iter()
+            .map(|value| json!({ "value": value }))
+            .collect();
+        questions.push(json!({
+            "type": "choice",
+            "name": question.name,
+            "instructions": question.ask,
+            "choices": choices,
+        }));
+    }
+    Ok(json!({
+        "model": ask.model,
+        "input": format!("{}\n\n{}", ask.instructions.trim_end(), input),
+        "questions": questions,
+    }))
+}
+
+enum DecisionReply {
+    Choice(String),
+    Refusal,
+}
+
+fn decision_reply(value: &Value) -> Option<DecisionReply> {
+    match value["type"].as_str()? {
+        "choice" => Some(DecisionReply::Choice(value["choice"].as_str()?.to_owned())),
+        "refusal" => Some(DecisionReply::Refusal),
+        _ => None,
+    }
+}
+
+fn parse_decision(ask: &Ask, body: &Value) -> Result<Vec<(String, String)>, String> {
+    if let Some(message) = body["error"]["message"].as_str() {
+        return Err(format!("Vercel AI Gateway: {message}"));
+    }
+    let answers = body["answers"].as_array().ok_or_else(|| {
+        format!("Vercel AI Gateway: {} sent no answer", ask.model)
+    })?;
+    ask.questions
+        .iter()
+        .enumerate()
+        .map(|(i, question)| decision_answer(ask, question, answers.get(i)))
+        .collect()
+}
+
+fn decision_answer(
+    ask: &Ask,
+    question: &Question,
+    value: Option<&Value>,
+) -> Result<(String, String), String> {
+    let missing = || format!("Vercel AI Gateway: {} did not answer {}", ask.model, question.name);
+    let Some(reply) = value.and_then(decision_reply) else {
+        return Err(missing());
+    };
+    match reply {
+        DecisionReply::Refusal => Err(format!(
+            "Vercel AI Gateway: {} refused {}",
+            ask.model, question.name
+        )),
+        DecisionReply::Choice(raw) => {
+            let answer = choice_spelling(question, &raw).ok_or_else(|| {
+                format!(
+                    "Vercel AI Gateway: {} answered {raw:?} for {}, which is not one of its choices",
+                    ask.model, question.name
+                )
+            })?;
+            Ok((question.name.clone(), answer))
+        }
+    }
 }
 
 fn completion_body(ask: &Ask, input: &str) -> Value {
@@ -209,14 +353,22 @@ fn answer_of(
     let answer = if question.choices.is_empty() {
         raw.to_owned()
     } else {
-        question
-            .choices
-            .iter()
-            .find(|choice| choice.eq_ignore_ascii_case(raw))
-            .cloned()
-            .ok_or_else(|| format!("Vercel AI Gateway: {} answered {raw:?} for {}, which is not one of its choices", ask.model, question.name))?
+        choice_spelling(question, raw).ok_or_else(|| {
+            format!(
+                "Vercel AI Gateway: {} answered {raw:?} for {}, which is not one of its choices",
+                ask.model, question.name
+            )
+        })?
     };
     Ok((question.name.clone(), answer))
+}
+
+fn choice_spelling(question: &Question, raw: &str) -> Option<String> {
+    question
+        .choices
+        .iter()
+        .find(|choice| choice.eq_ignore_ascii_case(raw))
+        .cloned()
 }
 
 #[cfg(test)]
@@ -294,6 +446,139 @@ mod tests {
         assert_eq!(
             parse_completion(&two_questions(), &body),
             Err("Vercel AI Gateway: google/gemini-3.5-flash answered \"enhancement\" for kind, which is not one of its choices".into())
+        );
+    }
+
+    fn decision_ask() -> Ask {
+        Ask {
+            model: "typesafe-ai/jev".into(),
+            instructions: "Classify.\n".into(),
+            questions: vec![
+                Question {
+                    name: "kind".into(),
+                    ask: "What does it ask for?".into(),
+                    choices: vec!["bug".into(), "question".into()],
+                    stop_on: vec![],
+                },
+                Question {
+                    name: "agent".into(),
+                    ask: "Can a coding agent handle it?".into(),
+                    choices: vec!["yes".into(), "no".into()],
+                    stop_on: vec!["no".into()],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_decision_request_is_one_choice_question_per_question() {
+        assert_eq!(
+            decision_body(&decision_ask(), "ENG-7: Broken button"),
+            Ok(json!({
+                "model": "typesafe-ai/jev",
+                "input": "Classify.\n\nENG-7: Broken button",
+                "questions": [
+                    {
+                        "type": "choice",
+                        "name": "kind",
+                        "instructions": "What does it ask for?",
+                        "choices": [{ "value": "bug" }, { "value": "question" }],
+                    },
+                    {
+                        "type": "choice",
+                        "name": "agent",
+                        "instructions": "Can a coding agent handle it?",
+                        "choices": [{ "value": "yes" }, { "value": "no" }],
+                    },
+                ],
+            }))
+        );
+    }
+
+    #[test]
+    fn a_decision_reply_uses_the_choices_spelling() {
+        let body = json!({
+            "answers": [
+                { "type": "choice", "name": "kind", "choice": "Question", "confidence": 0.81 },
+                { "type": "choice", "name": "agent", "choice": "YES", "probabilities": [0.1, 0.9] },
+            ]
+        });
+        assert_eq!(
+            parse_decision(&decision_ask(), &body),
+            Ok(vec![
+                ("kind".into(), "question".into()),
+                ("agent".into(), "yes".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_model_and_the_question() {
+        let body = json!({
+            "answers": [
+                { "type": "choice", "name": "kind", "choice": "bug" },
+                { "type": "refusal", "name": "agent" },
+            ]
+        });
+        assert_eq!(
+            parse_decision(&decision_ask(), &body),
+            Err("Vercel AI Gateway: typesafe-ai/jev refused agent".into())
+        );
+    }
+
+    #[test]
+    fn a_missing_decision_answer_names_the_model_and_the_question() {
+        let body = json!({
+            "answers": [{ "type": "choice", "name": "kind", "choice": "bug" }]
+        });
+        assert_eq!(
+            parse_decision(&decision_ask(), &body),
+            Err("Vercel AI Gateway: typesafe-ai/jev did not answer agent".into())
+        );
+    }
+
+    #[test]
+    fn a_free_text_question_on_a_decision_model_is_an_error() {
+        let mut ask = two_questions();
+        ask.model = "typesafe-ai/jev".into();
+        assert_eq!(
+            decision_body(&ask, "ENG-7: Broken button"),
+            Err("typesafe-ai/jev is a decision model and answers only questions with choices: give note choices".into())
+        );
+    }
+
+    #[test]
+    fn gateway_types_parse_as_chat_or_decision() {
+        assert_eq!(parse_kind("google/gemini-3.5-flash", Some("language")), Ok(Kind::Chat));
+        assert_eq!(parse_kind("typesafe-ai/jev", Some("evaluation")), Ok(Kind::Decision));
+        assert_eq!(
+            parse_kind("vendor/embed", Some("embedding")),
+            Err("vendor/embed is not a chat or decision model on the gateway".into())
+        );
+        assert_eq!(
+            parse_kind("vendor/embed", None),
+            Err("vendor/embed is not a chat or decision model on the gateway".into())
+        );
+    }
+
+    #[test]
+    fn the_list_keeps_structured_chat_models_and_every_decision_model() {
+        let body = json!({
+            "data": [
+                { "id": "openai/gpt", "type": "language", "tags": ["tool-use"] },
+                { "id": "typesafe-ai/jev", "type": "evaluation", "tags": ["tool-use"] },
+                { "id": "google/gemini-3.5-flash", "type": "language", "tags": ["structured-output"] },
+                { "id": "vendor/embed", "type": "embedding" },
+                { "id": "microsoft/microsoft-decision-1", "type": "evaluation" },
+            ]
+        });
+        assert_eq!(
+            serde_json::to_value(models_from(&body).unwrap()).unwrap(),
+            json!([
+                { "id": "google/gemini-3.5-flash", "kind": "chat" },
+                { "id": "microsoft/microsoft-decision-1", "kind": "decision" },
+                { "id": "typesafe-ai/jev", "kind": "decision" },
+            ])
         );
     }
 }
