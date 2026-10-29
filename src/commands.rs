@@ -1,7 +1,7 @@
 use pinned_core::connectors::{Connector, Connectors, Settings, Suggestions};
 use pinned_core::machine::Machine;
 use pinned_core::wire::Call;
-use pinned_core::{github, linear, slack, vercel};
+use pinned_core::{github, linear, process, slack, vercel};
 use serde_json::Value;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
@@ -14,7 +14,7 @@ pub fn get_settings(connectors: State<Connectors>) -> Settings {
 
 #[tauri::command]
 pub fn open_linear_keys() -> Result<(), String> {
-    std::process::Command::new("open").arg(linear::KEY_PAGE).spawn().map(drop).map_err(|e| e.to_string())
+    open(linear::KEY_PAGE)
 }
 
 #[tauri::command]
@@ -48,31 +48,16 @@ pub async fn slack_suggestions(connectors: State<'_, Connectors>) -> Result<Vec<
 }
 
 #[tauri::command]
-pub async fn connect_vercel(connectors: State<'_, Connectors>, key: String) -> Result<vercel::Account, String> {
-    connectors.connect_vercel(&key).await
-}
-
-#[tauri::command]
-pub fn disconnect_vercel(connectors: State<Connectors>) -> Result<(), String> {
-    connectors.disconnect_vercel()
-}
-
-#[tauri::command]
-pub async fn vercel_models(connectors: State<'_, Connectors>) -> Result<Vec<String>, String> {
-    connectors.vercel_models().await
-}
-
-#[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(format!("not a web address: {url}"));
     }
-    std::process::Command::new("open").arg(url).spawn().map(drop).map_err(|e| e.to_string())
+    open(&url)
 }
 
 #[tauri::command]
 pub fn open_github_tokens() -> Result<(), String> {
-    std::process::Command::new("open").arg(github::TOKEN_PAGE).spawn().map(drop).map_err(|e| e.to_string())
+    open(github::TOKEN_PAGE)
 }
 
 #[tauri::command]
@@ -90,13 +75,28 @@ pub async fn github_repos(connectors: State<'_, Connectors>) -> Result<Vec<githu
     connectors.github_repos().await
 }
 
+#[tauri::command]
+pub async fn connect_vercel(connectors: State<'_, Connectors>, key: String) -> Result<vercel::Account, String> {
+    connectors.connect_vercel(&key).await
+}
+
+#[tauri::command]
+pub fn disconnect_vercel(connectors: State<Connectors>) -> Result<(), String> {
+    connectors.disconnect_vercel()
+}
+
+#[tauri::command]
+pub async fn vercel_models(connectors: State<'_, Connectors>) -> Result<Vec<vercel::Model>, String> {
+    connectors.vercel_models().await
+}
+
 /// Clones on this Mac while it's signed out, with this Mac's own GitHub token.
 #[tauri::command]
-pub async fn clone_repo(connectors: State<'_, Connectors>, machine: State<'_, Arc<Machine>>, repo: String) -> Result<Value, String> {
+pub async fn clone_repo(connectors: State<'_, Connectors>, machine: State<'_, Arc<Machine>>, repo: String, dest: Option<String>) -> Result<Value, String> {
     let repo = github::clone_url(&repo);
     let token = connectors.github_token().filter(|_| github::hosts(&repo));
     let machine = machine.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || machine.call(Call::Clone { repo, token })).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || machine.call(Call::Clone { repo, token, dest })).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -116,4 +116,14 @@ pub async fn pick_folder(app: AppHandle, start: Option<String>) -> Option<String
         dialog = dialog.set_directory(start);
     }
     dialog.blocking_pick_folder()?.into_path().ok().map(|p| p.display().to_string())
+}
+
+/// Opens `url` in the default browser. On Windows through explorer.exe, since cmd's `start` would
+/// cut the URL at its first `&`.
+fn open(url: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    let opener = "explorer.exe";
+    #[cfg(not(windows))]
+    let opener = "open";
+    process::command(opener).arg(url).spawn().map(drop).map_err(|e| e.to_string())
 }

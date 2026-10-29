@@ -1,10 +1,11 @@
 use crate::history;
+use crate::ipc::{UnixListener, UnixStream};
+use crate::process;
 use crate::reminders;
 use crate::agent::{
     AgentEvent, AgentStatus, Message, Stage, Subject, Usage, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, SOCK_ENV, TAB_ENV,
 };
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,17 +24,34 @@ type Reply = Result<String, String>;
 pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
     let mut hooks = serde_json::Map::new();
     for (_, arg, hook_event) in AgentStatus::ALL {
-        let command = format!("'{}' {SUBCOMMAND} {arg}", exe.display());
-        hooks.insert(
-            hook_event.into(),
-            serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]),
-        );
+        hooks.insert(hook_event.into(), serde_json::json!([{ "hooks": [hook_command(exe, arg)] }]));
     }
     std::fs::write(path, serde_json::to_vec_pretty(&serde_json::json!({
         "hooks": hooks,
-        "statusLine": { "type": "command", "command": format!("'{}' {STATUSLINE_SUBCOMMAND}", exe.display()) },
+        "statusLine": { "type": "command", "command": statusline_command(exe) },
         "permissions": { "allow": reminders::permissions() },
     }))?)
+}
+
+/// Shell form, which every Claude Code version runs.
+#[cfg(unix)]
+fn hook_command(exe: &Path, arg: &str) -> serde_json::Value {
+    serde_json::json!({ "type": "command", "command": format!("'{}' {SUBCOMMAND} {arg}", exe.display()) })
+}
+
+/// Exec form, with no shell: Windows runs a shell-form hook in Git Bash, or in PowerShell when
+/// Git Bash is missing, and the two quote a path differently.
+#[cfg(windows)]
+fn hook_command(exe: &Path, arg: &str) -> serde_json::Value {
+    serde_json::json!({ "type": "command", "command": exe, "args": [SUBCOMMAND, arg] })
+}
+
+/// A statusline has only shell form. Git Bash, which runs it on Windows, reads a backslash as an escape.
+fn statusline_command(exe: &Path) -> String {
+    let exe = exe.display().to_string();
+    #[cfg(windows)]
+    let exe = exe.replace('\\', "/");
+    format!("'{exe}' {STATUSLINE_SUBCOMMAND}")
 }
 
 /// Runs inside the hook process Claude Code spawns: read the hook payload from stdin and
@@ -90,12 +108,10 @@ pub fn statusline() {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     if let (Some(usage), Ok(sock)) = (usage_from_status(&input), std::env::var(SOCK_ENV)) {
-        tell(&sock, &Message::Usage(usage));
+        tell(&sock, &Message::Usage { usage, account: std::env::var(crate::accounts::ACCOUNT_ENV).ok() });
     }
-    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")));
-    if let Some(command) = config_dir.and_then(|dir| user_statusline(&dir)) {
+    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| crate::machine::home().join(".claude"), PathBuf::from);
+    if let Some(command) = user_statusline(&config_dir) {
         let _ = std::io::stdout().write_all(&run_statusline(&command, &input));
     }
 }
@@ -118,7 +134,8 @@ fn user_statusline(config_dir: &Path) -> Option<String> {
 
 /// What `command` prints when given the statusline JSON, run the way Claude Code runs it.
 fn run_statusline(command: &str, input: &str) -> Vec<u8> {
-    let Ok(mut child) = std::process::Command::new("/bin/sh")
+    let Some(shell) = statusline_shell() else { return vec![] };
+    let Ok(mut child) = process::command(shell)
         .args(["-c", command])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -131,17 +148,33 @@ fn run_statusline(command: &str, input: &str) -> Vec<u8> {
     child.wait_with_output().map(|out| out.stdout).unwrap_or_default()
 }
 
-const LIMIT_ERROR: &[u8] = br#""apiError":"usage_limit_reached""#;
+#[cfg(unix)]
+fn statusline_shell() -> Option<PathBuf> {
+    Some("/bin/sh".into())
+}
 
-/// When the usage limit that last stopped the session lifts, from the error Claude Code
-/// wrote to its transcript. Only lines carrying that error are parsed.
+/// The Git Bash that runs pinned's statusline puts its own bash first on PATH. Searched here
+/// because Windows would try System32 before PATH, and WSL's bash lives there.
+#[cfg(windows)]
+fn statusline_shell() -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join("bash.exe")).find(|p| p.is_file())
+}
+
+const LIMIT_ERROR: &[u8] = br#""apiError":"usage_limit_reached""#;
+const API_ERROR: &[u8] = br#""isApiErrorMessage":true"#;
+
+/// When the usage limit that stopped the session lifts, from the last error Claude Code wrote to
+/// its transcript, unless that error was another, such as a monthly spend limit with no reset.
+/// Only lines carrying an error are parsed.
 fn limit_reset_from_transcript(transcript: impl BufRead) -> Option<u64> {
-    transcript
+    let has = |line: &[u8], mark: &[u8]| line.windows(mark.len()).any(|w| w == mark);
+    let last = transcript
         .split(b'\n')
         .map_while(Result::ok)
-        .filter(|line| line.windows(LIMIT_ERROR.len()).any(|w| w == LIMIT_ERROR))
-        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(&line).ok()?["apiErrorParams"]["rate_limit_info"]["resetsAt"].as_u64())
-        .last()
+        .filter(|line| has(line, LIMIT_ERROR) || has(line, API_ERROR))
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(&line).ok())
+        .last()?;
+    last["apiErrorParams"]["rate_limit_info"]["resetsAt"].as_u64().filter(|_| last["apiError"] == "usage_limit_reached")
 }
 
 const AI_TITLE: &[u8] = br#""type":"ai-title""#;
@@ -298,6 +331,8 @@ mod tests {
         );
         assert_eq!(limit_reset_from_transcript(transcript.as_bytes()), Some(1792400000));
         assert_eq!(limit_reset_from_transcript(r#"{"type":"user"}"#.as_bytes()), None);
+        let spent = format!("{transcript}\n{}", r#"{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"content":[{"type":"text","text":"You've hit your monthly spend limit"}]}}"#);
+        assert_eq!(limit_reset_from_transcript(spent.as_bytes()), None, "a later error without a reset kept the old one");
     }
 
     #[test]
@@ -407,6 +442,44 @@ mod tests {
         assert_eq!(run_statusline(&command, r#"{"cwd":"/repo"}"#), br#"{"CWD":"/REPO"}"#);
         assert_eq!(run_statusline("echo done", &"x".repeat(1 << 20)), b"done\n");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_run_the_hooks_and_statusline_through_the_shell() {
+        let file = std::env::temp_dir().join(format!("pinned-settings-{}.json", std::process::id()));
+        write_settings(&file, Path::new("/Applications/pinned.app/Contents/MacOS/pinned")).unwrap();
+        let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(
+            settings["hooks"]["StopFailure"],
+            serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook failed" }] }])
+        );
+        assert_eq!(
+            settings["statusLine"],
+            serde_json::json!({ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' statusline" })
+        );
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn settings_run_the_hooks_without_a_shell_and_the_statusline_in_git_bash() {
+        let file = std::env::temp_dir().join(format!("pinned-settings-{}.json", std::process::id()));
+        write_settings(&file, Path::new(r"C:\Users\Ana Souza\AppData\Local\pinned\pinned.exe")).unwrap();
+        let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(
+            settings["hooks"]["StopFailure"],
+            serde_json::json!([{ "hooks": [{
+                "type": "command",
+                "command": r"C:\Users\Ana Souza\AppData\Local\pinned\pinned.exe",
+                "args": ["hook", "failed"],
+            }] }])
+        );
+        assert_eq!(
+            settings["statusLine"],
+            serde_json::json!({ "type": "command", "command": "'C:/Users/Ana Souza/AppData/Local/pinned/pinned.exe' statusline" })
+        );
+        let _ = std::fs::remove_file(file);
     }
 
     #[test]

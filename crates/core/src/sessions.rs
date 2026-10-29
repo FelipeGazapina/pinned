@@ -1,9 +1,10 @@
 //! Claude sessions still in progress when pinned quits, so the next launch resumes them.
 
+use crate::accounts::{self, AccountId};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Saved {
     pub cwd: PathBuf,
     /// Claude Code's session id, passed back as `claude --resume`.
@@ -18,6 +19,12 @@ pub struct Saved {
     /// Unix time a usage limit that stopped the turn lifts.
     #[serde(default)]
     pub resume_at: Option<u64>,
+    /// The session waits for a prompt even once that limit lifts.
+    #[serde(default)]
+    pub held: bool,
+    /// The session's transcript is in this account's home, so it resumes only there.
+    #[serde(default = "accounts::default_account")]
+    pub account: AccountId,
     /// The model picked for this conversation alone, passed as `claude --model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -28,11 +35,12 @@ pub const CONTINUE_PROMPT: &str = "Continue from where you left off.";
 
 impl Saved {
     /// The `claude` arguments that reopen this session, and the usage limit still to wait for.
-    /// An interrupted one picks its work back up at once, unless a limit still blocks it.
+    /// An interrupted one picks its work back up at once, unless a limit still blocks it or it was
+    /// held at one.
     pub fn reopen(&self, now: u64) -> (Vec<String>, Option<u64>) {
         let mut args = vec!["--resume".to_owned(), self.session.clone()];
         let waiting = self.resume_at.filter(|&at| self.interrupted && at > now);
-        if self.interrupted && waiting.is_none() {
+        if self.interrupted && waiting.is_none() && !(self.held && self.resume_at.is_some()) {
             args.push(CONTINUE_PROMPT.to_owned());
         }
         (args, waiting)
@@ -72,13 +80,15 @@ mod tests {
 
     #[test]
     fn interrupted_sessions_continue_once_no_limit_blocks_them() {
-        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, model: None };
+        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, held: false, account: "claude".into(), model: None };
         let resumed = vec!["--resume".to_owned(), "s1".to_owned()];
         let continued = [resumed.clone(), vec![CONTINUE_PROMPT.to_owned()]].concat();
         assert_eq!(saved(false, None).reopen(100), (resumed.clone(), None));
         assert_eq!(saved(true, None).reopen(100), (continued.clone(), None));
         assert_eq!(saved(true, Some(100)).reopen(100), (continued, None));
-        assert_eq!(saved(true, Some(101)).reopen(100), (resumed, Some(101)));
+        assert_eq!(saved(true, Some(101)).reopen(100), (resumed.clone(), Some(101)));
+        let held = Saved { held: true, ..saved(true, Some(100)) };
+        assert_eq!(held.reopen(100), (resumed, None), "a session held at its limit waits for a prompt");
     }
 
     #[test]
@@ -91,6 +101,8 @@ mod tests {
             bypass: true,
             interrupted: true,
             resume_at: Some(1792382400),
+            held: true,
+            account: "work".into(),
             model: Some("claude-opus-4-8".into()),
         }];
         save(&file, &saved);

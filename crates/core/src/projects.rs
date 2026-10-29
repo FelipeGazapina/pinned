@@ -1,16 +1,20 @@
 //! Folders the user works in, offered when opening a tab.
 
+use crate::accounts::AccountId;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Every field but `path` has a default, so a file written by another version still loads.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 pub struct Project {
     /// Canonicalized, since it identifies the project.
     pub path: PathBuf,
     /// Unix seconds.
     #[serde(default)]
     pub last_opened: u64,
+    /// The account its sessions run under; none runs them under the default one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AccountId>,
 }
 
 pub fn load(file: &Path) -> Vec<Project> {
@@ -23,8 +27,8 @@ pub fn load_or_migrate(file: &Path, last_folder: &Path) -> Vec<Project> {
         return load(file);
     }
     let Ok(legacy) = std::fs::read_to_string(last_folder) else { return vec![] };
-    let path = std::fs::canonicalize(&legacy).unwrap_or(legacy.into());
-    let projects = vec![Project { path, last_opened: 0 }];
+    let path = dunce::canonicalize(&legacy).unwrap_or(legacy.into());
+    let projects = vec![Project { path, last_opened: 0, account: None }];
     save(file, &projects);
     projects
 }
@@ -39,7 +43,7 @@ pub fn save(file: &Path, projects: &[Project]) {
 pub fn upsert(projects: &mut Vec<Project>, path: PathBuf, now: u64) {
     match projects.iter_mut().find(|p| p.path == path) {
         Some(p) => p.last_opened = now,
-        None => projects.push(Project { path, last_opened: now }),
+        None => projects.push(Project { path, last_opened: now, account: None }),
     }
 }
 
@@ -54,13 +58,13 @@ pub fn recent(projects: &[Project]) -> Vec<&Project> {
 const BROWSE_LIMIT: usize = 500;
 
 /// The folder a typed path lists, and its subfolders that match.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 pub struct Folders {
     pub parent: PathBuf,
     pub entries: Vec<Folder>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 pub struct Folder {
     pub name: String,
     pub path: PathBuf,
@@ -68,10 +72,20 @@ pub struct Folder {
     pub repo: bool,
 }
 
+/// `path` with a leading `~` as the home folder.
+pub fn expand(path: &str, home: &Path) -> PathBuf {
+    match path.trim().strip_prefix('~') {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None => PathBuf::from(path.trim()),
+    }
+}
+
 /// The subfolders matching `typed`, a path as typed so far: `~/pro` lists the folders of `~`
 /// starting with `pro`, and `~/projetos/` every folder in it. A path without a leading `/` or `~`
 /// starts at `home`. Hidden folders show only once the typed name starts with a dot.
 pub fn browse(typed: &str, home: &Path) -> Result<Folders, String> {
+    #[cfg(windows)]
+    let typed = &typed.replace('\\', "/");
     let typed = typed.trim();
     let (folder, prefix) = match typed.rsplit_once('/') {
         _ if typed == "~" => ("~", ""),
@@ -114,6 +128,14 @@ mod tests {
     }
 
     #[test]
+    fn expand_reads_a_leading_tilde_as_home() {
+        let home = Path::new("/home/me");
+        assert_eq!(expand("~", home), PathBuf::from("/home/me"));
+        assert_eq!(expand(" ~/src/app ", home), PathBuf::from("/home/me/src/app"));
+        assert_eq!(expand("/srv/app", home), PathBuf::from("/srv/app"));
+    }
+
+    #[test]
     fn browse_lists_the_typed_folder_or_the_subfolders_matching_its_last_name() {
         let home = temp("browse");
         for dir in ["projetos/pinned/.git", "projetos/Pessoal", "projetos/.cache", "Documents"] {
@@ -146,7 +168,7 @@ mod tests {
         upsert(&mut projects, "/a".into(), 30);
         assert_eq!(
             projects,
-            vec![Project { path: "/a".into(), last_opened: 30 }, Project { path: "/b".into(), last_opened: 20 }]
+            vec![Project { path: "/a".into(), last_opened: 30, account: None }, Project { path: "/b".into(), last_opened: 20, account: None }]
         );
     }
 
@@ -157,9 +179,9 @@ mod tests {
         std::fs::create_dir_all(&old).unwrap();
         std::fs::create_dir_all(&new).unwrap();
         let projects = vec![
-            Project { path: old.clone(), last_opened: 1 },
-            Project { path: dir.join("deleted"), last_opened: 3 },
-            Project { path: new.clone(), last_opened: 2 },
+            Project { path: old.clone(), last_opened: 1, account: None },
+            Project { path: dir.join("deleted"), last_opened: 3, account: None },
+            Project { path: new.clone(), last_opened: 2, account: None },
         ];
         let paths: Vec<&Path> = recent(&projects).into_iter().map(|p| p.path.as_path()).collect();
         assert_eq!(paths, vec![new.as_path(), old.as_path()]);
@@ -172,7 +194,7 @@ mod tests {
         std::fs::write(&file, r#"[{"path": "/a", "last_opened": 5, "color": "red"}, {"path": "/b"}]"#).unwrap();
         assert_eq!(
             load(&file),
-            vec![Project { path: "/a".into(), last_opened: 5 }, Project { path: "/b".into(), last_opened: 0 }]
+            vec![Project { path: "/a".into(), last_opened: 5, account: None }, Project { path: "/b".into(), last_opened: 0, account: None }]
         );
         let _ = std::fs::remove_file(file);
     }
@@ -180,9 +202,9 @@ mod tests {
     #[test]
     fn projects_survive_a_round_trip() {
         let file = temp("round-trip.json");
-        let projects = vec![Project { path: "/repo".into(), last_opened: 1_760_000_000 }];
+        let projects = vec![Project { path: "/repo".into(), last_opened: 1_760_000_000, account: Some("work".into()) }];
         save(&file, &projects);
-        assert_eq!(load(&file), vec![Project { path: "/repo".into(), last_opened: 1_760_000_000 }]);
+        assert_eq!(load(&file), vec![Project { path: "/repo".into(), last_opened: 1_760_000_000, account: Some("work".into()) }]);
         let _ = std::fs::remove_file(file);
         assert_eq!(load(Path::new("/nonexistent/projects.json")), vec![]);
     }
@@ -191,7 +213,7 @@ mod tests {
     fn the_legacy_last_folder_seeds_the_first_run_only() {
         let (file, legacy) = (temp("migrate.json"), temp("last-folder"));
         std::fs::write(&legacy, "/old/folder").unwrap();
-        assert_eq!(load_or_migrate(&file, &legacy), vec![Project { path: "/old/folder".into(), last_opened: 0 }]);
+        assert_eq!(load_or_migrate(&file, &legacy), vec![Project { path: "/old/folder".into(), last_opened: 0, account: None }]);
         save(&file, &[]);
         assert_eq!(load_or_migrate(&file, &legacy), vec![]);
         let _ = std::fs::remove_file(file);

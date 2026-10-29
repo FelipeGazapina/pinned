@@ -10,7 +10,7 @@ const ICON_BACKGROUNDS: [&str; 15] = [
     "#dc2626", "#ea580c", "#d97706", "#16a34a", "#059669", "#0d9488", "#0891b2", "#0284c7", "#2563eb", "#4f46e5", "#7c3aed", "#9333ea", "#c026d3", "#db2777", "#e11d48",
 ];
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Created {
     pub path: String,
     /// Why git made no first commit, when it couldn't.
@@ -150,7 +150,7 @@ mod tests {
         assert_eq!(created, Created { path: dir.display().to_string(), commit_error: None });
         assert!(std::fs::read_to_string(dir.join("README.md")).unwrap().contains("# My App"));
         assert!(std::fs::read_to_string(dir.join("assets/icon.svg")).unwrap().contains(">MA</text>"));
-        let log = std::process::Command::new("git").args(["log", "--format=%s"]).current_dir(&dir).output().unwrap();
+        let log = crate::process::command("git").args(["log", "--format=%s"]).current_dir(&dir).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Initial commit");
     }
 

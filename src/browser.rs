@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
 use std::time::Duration;
-use tauri::webview::{NewWindowResponse, PageLoadEvent, Webview, WebviewBuilder};
+use tauri::webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, Webview, WebviewBuilder};
 use tauri::{AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, Rect, Runtime, WebviewUrl, Window};
 
 #[derive(Deserialize, Clone, Copy)]
@@ -22,7 +22,6 @@ pub enum Action {
     Forward,
     Reload,
     HardReload,
-    Stop,
     Go { url: String },
     Zoom { factor: f64 },
     Devtools,
@@ -50,6 +49,8 @@ pub struct State {
     loading: bool,
     devtools: bool,
     audible: bool,
+    /// Whether the page also has a window of its own, from the More menu.
+    window: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -58,11 +59,36 @@ enum Event {
     State { id: String, state: State },
     Popup { id: String, url: String },
     Key { key: String, code: String, shift: bool, alt: bool },
+    /// The page at `url` didn't load: `description` is Chromium's name for why, as T3 shows it, or the
+    /// system's own words when there is none.
+    Failed { id: String, url: String, code: i64, description: String },
+    /// `url` answered a file the page can't show, saved to `path` in Downloads.
+    Download { id: String, url: String, path: String, success: bool },
+}
+
+/// Chromium's name for a URL loading error, which T3's unreachable page shows and explains.
+fn error_name(code: i64) -> Option<&'static str> {
+    Some(match code {
+        -1003 => "ERR_NAME_NOT_RESOLVED",
+        -1004 => "ERR_CONNECTION_REFUSED",
+        -1005 => "ERR_CONNECTION_RESET",
+        -1001 => "ERR_TIMED_OUT",
+        -1009 => "ERR_INTERNET_DISCONNECTED",
+        -1007 => "ERR_TOO_MANY_REDIRECTS",
+        -1202 | -1203 => "ERR_CERT_AUTHORITY_INVALID",
+        -1201 | -1204 => "ERR_CERT_DATE_INVALID",
+        -1200 => "ERR_SSL_PROTOCOL_ERROR",
+        _ => return None,
+    })
 }
 
 /// Surface ids are `browser:<random>`, which is already a valid webview label.
 fn label(id: &str) -> String {
     format!("preview-{}", id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_', "-"))
+}
+
+fn window_label(id: &str) -> String {
+    format!("preview-window-{}", label(id).trim_start_matches("preview-"))
 }
 
 fn page<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<Webview<R>, String> {
@@ -83,14 +109,29 @@ fn report<R: Runtime>(app: &AppHandle<R>, id: &str) {
     let Ok(webview) = page(&app, &id) else { return };
     let url = webview.url().map(|u| u.to_string()).unwrap_or_default();
     let devtools = webview.is_devtools_open();
+    let window = app.get_webview_window(&window_label(&id)).is_some();
+    #[cfg(target_os = "macos")]
     let _ = webview.with_webview(move |pw| {
-        let mut state = native::state(&pw).unwrap_or_default();
+        let mut state = native::state(&pw);
         if state.url.is_empty() {
             state.url = url;
         }
         state.devtools = devtools;
+        state.window = window;
         emit(&app, Event::State { id, state });
     });
+    // Elsewhere the page answers for itself, the Navigation API telling whether it can step back.
+    #[cfg(not(target_os = "macos"))]
+    let _ = webview.eval_with_callback(
+        "({ title: document.title, back: !!window.navigation?.canGoBack, forward: !!window.navigation?.canGoForward, loading: document.readyState !== 'complete' })",
+        move |out| {
+            let seen: serde_json::Value = serde_json::from_str(&out).unwrap_or_default();
+            let flag = |key: &str| seen[key].as_bool().unwrap_or(false);
+            let title = seen["title"].as_str().unwrap_or_default().to_string();
+            let state = State { url: url.clone(), title, back: flag("back"), forward: flag("forward"), loading: flag("loading"), devtools, audible: false, window };
+            emit(&app, Event::State { id: id.clone(), state });
+        },
+    );
 }
 
 /// Shows the page `id` at `at`, opening it on `url` the first time.
@@ -104,8 +145,9 @@ pub async fn browser_show(app: AppHandle, window: Window, id: String, url: Strin
     if !matches!(url.scheme(), "http" | "https") {
         return Err(format!("not a web address: {url}"));
     }
-    let (on_title, on_load, on_popup) = (app.clone(), app.clone(), app.clone());
-    let (title_id, load_id, popup_id) = (id.clone(), id.clone(), id.clone());
+    let (on_title, on_load, on_popup, on_download) = (app.clone(), app.clone(), app.clone(), app.clone());
+    let (title_id, load_id, popup_id, download_id) = (id.clone(), id.clone(), id.clone(), id.clone());
+    let saving = std::sync::Mutex::new(std::collections::HashMap::<String, String>::new());
     let builder = WebviewBuilder::new(label(&id), WebviewUrl::External(url))
         .devtools(true)
         .data_store_identifier(*b"pinned-preview\0\0")
@@ -118,12 +160,28 @@ pub async fn browser_show(app: AppHandle, window: Window, id: String, url: Strin
         .on_new_window(move |url, _| {
             emit(&on_popup, Event::Popup { id: popup_id.clone(), url: url.to_string() });
             NewWindowResponse::Deny
+        })
+        .on_download(move |_, event| {
+            match event {
+                DownloadEvent::Requested { url, destination } => {
+                    saving.lock().unwrap().insert(url.to_string(), destination.display().to_string());
+                }
+                DownloadEvent::Finished { url, path, success } => {
+                    let saved = saving.lock().unwrap().remove(url.as_str());
+                    let path = path.map(|p| p.display().to_string()).or(saved).unwrap_or_default();
+                    emit(&on_download, Event::Download { id: download_id.clone(), url: url.to_string(), path, success });
+                }
+                _ => {}
+            }
+            true
         });
+    native::watch_failures(&app);
     let webview = window
         .add_child(builder, LogicalPosition::new(at.x, at.y), LogicalSize::new(at.width.max(1.0), at.height.max(1.0)))
         .map_err(|e| e.to_string())?;
     native::watch_keys(&app);
-    webview.with_webview(|pw| native::remember(&pw)).map_err(|e| e.to_string())?;
+    let page_id = id.clone();
+    webview.with_webview(move |pw| native::remember(&pw, &page_id)).map_err(|e| e.to_string())?;
     report(&app, &id);
     Ok(())
 }
@@ -197,17 +255,20 @@ pub fn browser_do(app: AppHandle, id: String, action: Action) -> Result<(), Stri
         Action::Forward => webview.eval("history.forward()"),
         #[cfg(not(target_os = "macos"))]
         Action::HardReload => webview.eval("location.reload()"),
-        #[cfg(not(target_os = "macos"))]
-        Action::Stop => webview.eval("window.stop()"),
         native_action => webview.with_webview(move |pw| native::act(&pw, native_action)),
     };
     result.map_err(|e| e.to_string())?;
-    let (app, later) = (app.clone(), id.clone());
+    report_soon(&app, &id);
+    Ok(())
+}
+
+/// Reports the page once what was just asked of it has had time to happen.
+fn report_soon<R: Runtime>(app: &AppHandle<R>, id: &str) {
+    let (app, id) = (app.clone(), id.to_string());
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(300));
-        report(&app, &later);
+        report(&app, &id);
     });
-    Ok(())
 }
 
 /// Runs `js` in the page and answers its JSON result, for the panel's element picker and media mute.
@@ -234,22 +295,33 @@ pub async fn browser_snapshot(app: AppHandle, id: String) -> Result<tauri::ipc::
     Ok(tauri::ipc::Response::new(png))
 }
 
-/// Opens `url` in a window of its own.
+/// Opens the page `id` at `url` in a window of its own, or closes that window when it is open.
 #[tauri::command]
-pub async fn browser_window(app: AppHandle, url: String) -> Result<(), String> {
+pub async fn browser_window(app: AppHandle, id: String, url: String) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(&window_label(&id)) {
+        window.close().map_err(|e| e.to_string())?;
+        report_soon(&app, &id);
+        return Ok(());
+    }
     let url: tauri::Url = url.parse().map_err(|e| format!("not an address: {e}"))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(format!("not a web address: {url}"));
     }
-    let n = app.webview_windows().keys().filter(|l| l.starts_with("preview-window-")).count();
-    tauri::WebviewWindowBuilder::new(&app, format!("preview-window-{n}"), WebviewUrl::External(url.clone()))
+    let (closed, closed_id) = (app.clone(), id.clone());
+    tauri::WebviewWindowBuilder::new(&app, window_label(&id), WebviewUrl::External(url.clone()))
         .title(url.host_str().unwrap_or("Preview"))
         .inner_size(1024.0, 768.0)
         .data_store_identifier(*b"pinned-preview\0\0")
         .devtools(true)
         .build()
-        .map(drop)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?
+        .on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                report_soon(&closed, &closed_id);
+            }
+        });
+    report_soon(&app, &id);
+    Ok(())
 }
 
 /// Writes `bytes` to the Downloads folder under `name`, numbering it when the name is taken.
@@ -273,11 +345,11 @@ pub fn save_capture(app: AppHandle, name: String, bytes: Vec<u8>) -> Result<Stri
 #[tauri::command]
 pub fn reveal_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    let opened = std::process::Command::new("open").arg("-R").arg(&path).spawn();
+    let opened = pinned_core::process::command("open").arg("-R").arg(&path).spawn();
     #[cfg(windows)]
-    let opened = std::process::Command::new("explorer").arg(format!("/select,{path}")).spawn();
+    let opened = pinned_core::process::command("explorer").arg(format!("/select,{path}")).spawn();
     #[cfg(not(any(target_os = "macos", windows)))]
-    let opened = std::process::Command::new("xdg-open").arg(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/"))).spawn();
+    let opened = pinned_core::process::command("xdg-open").arg(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/"))).spawn();
     opened.map(drop).map_err(|e| e.to_string())
 }
 
@@ -299,7 +371,7 @@ mod native {
     use objc2::runtime::AnyObject;
     use objc2::{msg_send, sel, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSEventType, NSStatusWindowLevel, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBitmapImageFileType, NSBitmapImageRep, NSEvent, NSEventMask, NSEventModifierFlags, NSImage, NSView};
-    use objc2_foundation::{NSDate, NSDictionary, NSError, NSObjectProtocol, NSSet, NSString};
+    use objc2_foundation::{NSDate, NSDictionary, NSError, NSObjectProtocol, NSSet, NSString, NSURL};
     use objc2_web_kit::{WKWebView, WKWebsiteDataTypeCookies, WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeFetchCache, WKWebsiteDataTypeMemoryCache};
     use std::ptr::NonNull;
     use std::sync::{mpsc, OnceLock};
@@ -310,10 +382,10 @@ mod native {
         unsafe { &*(pw.inner() as *const WKWebView) }
     }
 
-    pub fn state(pw: &PlatformWebview) -> Option<State> {
+    pub fn state(pw: &PlatformWebview) -> State {
         let web = view(pw);
         unsafe {
-            Some(State {
+            State {
                 url: web.URL().and_then(|u| u.absoluteString()).map(|s| s.to_string()).unwrap_or_default(),
                 title: web.title().map(|s| s.to_string()).unwrap_or_default(),
                 back: web.canGoBack(),
@@ -321,7 +393,8 @@ mod native {
                 loading: web.isLoading(),
                 devtools: false,
                 audible: web.respondsToSelector(sel!(_isPlayingAudio)) && msg_send![web, _isPlayingAudio],
-            })
+                window: false,
+            }
         }
     }
 
@@ -332,7 +405,6 @@ mod native {
                 Action::Back => drop(web.goBack()),
                 Action::Forward => drop(web.goForward()),
                 Action::HardReload => drop(web.reloadFromOrigin()),
-                Action::Stop => web.stopLoading(),
                 Action::ClearCookies => clear(web, &[WKWebsiteDataTypeCookies]),
                 Action::ClearCache => clear(web, &[WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache, WKWebsiteDataTypeFetchCache]),
                 Action::Appearance { mode } => {
@@ -430,7 +502,7 @@ mod native {
         while let Some(v) = at {
             if v.isKindOfClass(objc2::class!(WKWebView)) {
                 let ptr = Retained::as_ptr(&v) as *const AnyObject as usize;
-                return PAGES.lock().unwrap().contains(&ptr);
+                return PAGES.lock().unwrap().iter().any(|(p, _)| *p == ptr);
             }
             at = unsafe { v.superview() };
         }
@@ -467,29 +539,67 @@ mod native {
         }
     }
 
-    /// The page webviews, by address, so a key chord in one can be told from one in the panel.
-    static PAGES: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+    /// The page webviews, by address with their surface id, so a key chord in one can be told from
+    /// one in the panel, and a failed load tells which page it was.
+    static PAGES: std::sync::Mutex<Vec<(usize, String)>> = std::sync::Mutex::new(Vec::new());
+    static APP: OnceLock<AppHandle> = OnceLock::new();
 
-    pub fn remember(pw: &PlatformWebview) {
-        PAGES.lock().unwrap().push(pw.inner() as usize);
+    pub fn remember(pw: &PlatformWebview, id: &str) {
+        PAGES.lock().unwrap().push((pw.inner() as usize, id.to_string()));
     }
 
     pub fn forget(pw: &PlatformWebview) {
-        PAGES.lock().unwrap().retain(|&p| p != pw.inner() as usize);
+        PAGES.lock().unwrap().retain(|(p, _)| *p != pw.inner() as usize);
+    }
+
+    /// wry's navigation delegate doesn't hear about failed loads, so its class learns the two
+    /// WebKit methods for them before the first page's webview takes it on as delegate; WebKit
+    /// reads what a delegate answers once, then.
+    pub fn watch_failures(app: &AppHandle) {
+        let _ = APP.set(app.clone());
+        static ADDED: OnceLock<()> = OnceLock::new();
+        ADDED.get_or_init(|| {
+            let Some(class) = objc2::runtime::AnyClass::get(c"WryNavigationDelegate") else { return };
+            type Failed = unsafe extern "C-unwind" fn(*mut AnyObject, objc2::runtime::Sel, *mut WKWebView, *mut AnyObject, *mut NSError);
+            let imp: Failed = failed;
+            for name in [sel!(webView:didFailProvisionalNavigation:withError:), sel!(webView:didFailNavigation:withError:)] {
+                unsafe {
+                    objc2::ffi::class_addMethod(class as *const _ as *mut _, name, std::mem::transmute::<Failed, objc2::runtime::Imp>(imp), c"v@:@@@".as_ptr());
+                }
+            }
+        });
+    }
+
+    unsafe extern "C-unwind" fn failed(_: *mut AnyObject, _: objc2::runtime::Sel, web: *mut WKWebView, _: *mut AnyObject, error: *mut NSError) {
+        let (Some(web), Some(error), Some(app)) = (unsafe { web.as_ref() }, unsafe { error.as_ref() }, APP.get()) else { return };
+        let Some(id) = PAGES.lock().unwrap().iter().find(|(p, _)| *p == web as *const WKWebView as usize).map(|(_, id)| id.clone()) else { return };
+        let (domain, code) = (error.domain().to_string(), error.code() as i64);
+        // A stop, a new address typed over a loading one, and a response turned into a download all
+        // end a load without it failing.
+        if (domain == "NSURLErrorDomain" && code == -999) || (domain == "WebKitErrorDomain" && code == 102) {
+            return;
+        }
+        let info = error.userInfo();
+        let url = info.objectForKey(&NSString::from_str("NSErrorFailingURLKey"))
+            .and_then(|u| u.downcast::<NSURL>().ok())
+            .and_then(|u| u.absoluteString())
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        let description = if domain == "NSURLErrorDomain" { super::error_name(code).map(String::from) } else { None }.unwrap_or_else(|| error.localizedDescription().to_string());
+        super::emit(app, Event::Failed { id: id.clone(), url, code, description });
+        super::report(app, &id);
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod native {
-    use super::{Action, State};
+    use super::Action;
     use tauri::webview::PlatformWebview;
     use tauri::AppHandle;
 
-    pub fn state(_: &PlatformWebview) -> Option<State> {
-        None
-    }
     pub fn act(_: &PlatformWebview, _: Action) {}
-    pub fn remember(_: &PlatformWebview) {}
+    pub fn remember(_: &PlatformWebview, _: &str) {}
+    pub fn watch_failures(_: &AppHandle) {}
     pub fn forget(_: &PlatformWebview) {}
     pub fn snapshot(_: &PlatformWebview, tx: std::sync::mpsc::Sender<Result<Vec<u8>, String>>) {
         let _ = tx.send(Err("screenshots need macOS".into()));

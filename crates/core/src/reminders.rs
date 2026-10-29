@@ -1,12 +1,12 @@
 use chrono::{DateTime, Duration, Local, NaiveTime, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
 use crate::agent::{Message, When, SOCK_ENV};
+use crate::ipc::UnixStream;
 
 pub const SUBCOMMAND: &str = "mcp";
 pub const TOOL: &str = "remind_me";
@@ -14,7 +14,7 @@ const LIST_TOOL: &str = "list_reminders";
 const CANCEL_TOOL: &str = "cancel_reminder";
 pub const SERVER: &str = "pinned";
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Reminder {
     pub id: u64,
     pub message: String,

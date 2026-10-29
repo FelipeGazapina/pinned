@@ -185,6 +185,10 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 #settings .row select { width: auto; flex: none; }
 .logo[data-logo] { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.05); box-shadow: inset 0 0 0 1px rgb(var(--s-ink-rgb, 255 255 255) / 0.08); }
 .logo[data-logo] svg { width: 60%; height: 60%; }
+.logo.upstash { background: #00c98d; }
+.badge.box { margin-left: 6px; }
+.logo.claude { background: #d97757; }
+.logo.codex { background: #10a37f; }
 .actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 10px; }
 .actions.start { justify-content: flex-start; }
 #settings button.primary, #settings button.secondary { padding: 4px 12px; border-radius: 6px; white-space: nowrap; }
@@ -333,7 +337,9 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 }
 
 #settings-page .projects { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
-#settings-page .project { display: flex; justify-content: space-between; gap: 12px; text-align: left; padding: 6px 8px; border-radius: 6px; }
+#settings-page .project-row { display: flex; align-items: center; gap: 6px; }
+#settings-page .project-row select { width: auto; flex: none; max-width: 40%; }
+#settings-page .project { flex: 1; min-width: 0; display: flex; justify-content: space-between; gap: 12px; text-align: left; padding: 6px 8px; border-radius: 6px; }
 #settings-page .project:hover { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.039); }
 #settings-page .project .path { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #settings-page .history .empty { color: var(--muted); }
@@ -358,6 +364,7 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .tab .badge { flex: none; padding: 1px 4px; border-radius: 4px; background: rgb(var(--s-ink-rgb, 255 255 255) / 0.102); color: var(--fg);
   font-size: 9px; font-weight: 700; letter-spacing: 0.03em; }
 .tab .badge[hidden] { display: none; }
+.tab .badge.account { max-width: 7em; overflow: hidden; text-overflow: ellipsis; background: color-mix(in srgb, var(--working) 18%, transparent); }
 .dot[data-online="true"] { background: var(--done); }
 .dot[data-online="false"] { background: var(--s-line, #4a515c); }
 

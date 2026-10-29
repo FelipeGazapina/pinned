@@ -2,12 +2,14 @@
 
 Claude Code in a small panel that stays on top of everything on macOS, including fullscreen
 videos and fullscreen apps. When the agent finishes or needs your approval, the panel tells you
-even while you're watching something else.
+even while you're watching something else. It runs on Windows too.
 
 pinned hosts the official `claude` CLI in a terminal. It uses your existing Claude Code login,
 and it never reads your credentials or calls the Anthropic API.
 
 ## Install
+
+### Mac
 
 1. Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and log in with `claude`.
 2. Download the `.dmg` for your Mac from [Releases](https://github.com/FelipeGazapina/pinned/releases/latest).
@@ -21,6 +23,27 @@ Run this once after you install:
 xattr -dr com.apple.quarantine /Applications/pinned.app
 ```
 
+### Windows
+
+1. Install [Git for Windows](https://git-scm.com/downloads/win). Claude Code runs pinned's
+   statusline in its Git Bash.
+2. Install Claude Code with its native installer. In PowerShell:
+
+   ```powershell
+   irm https://claude.ai/install.ps1 | iex
+   ```
+
+   Then run `claude` once and log in.
+3. Download `pinned_<version>_x64-setup.exe` from
+   [Releases](https://github.com/FelipeGazapina/pinned/releases/latest) and run it. It installs
+   pinned for your user only, so it needs no admin rights.
+
+The installer isn't signed, so SmartScreen warns on its first run. Click **More info**, then
+**Run anyway**.
+
+On Windows the tray icon in the taskbar takes the place of the menu-bar icon, and Ctrl takes
+the place of ⌘ in every shortcut below.
+
 ## Use
 
 - pinned starts in the project you opened most recently. Click 📁 to start `claude` in another folder.
@@ -32,7 +55,7 @@ xattr -dr com.apple.quarantine /Applications/pinned.app
 - The header shows how much of your Claude subscription you have used, for example
   `5h 23%  7d 41%`. Each window has a thin bar: blue below 70%, amber from 70%, red from 90%.
   Hover over it to see the exact figures and when each window resets.
-- Quit from the menu-bar icon.
+- Quit from the menu-bar icon (the tray icon on Windows).
 
 From a terminal you can open a specific folder:
 
@@ -61,12 +84,17 @@ The app view has three columns:
   it; double-click the edge to reset it. ⌘B hides the sidebar.
 - **Thread.** Your prompts and Claude's answers. The tool calls of a turn fold into one
   **Worked for** row; click it to see each one. A turn that changed files ends with a card of
-  those files. **Open diff** shows them in the side panel. Type below and press Enter to send.
+  those files. **Open diff** shows them in the side panel. A page Claude published with its
+  Artifact tool shows as a card; **Open** opens it on claude.ai. Type below and press Enter to send.
   While Claude works, Enter queues your message and the red button stops the turn.
   Each agent Claude spawns gets a card under the turn with its name, its kind, what it is doing
   now and how long it has run; click a card to see its recent steps. While any agent runs after
   Claude's turn ended, the thread and its sidebar row read **N agents working**, and you can still
   send a prompt. The menu under the prompt picks the model.
+  A command that opens one of Claude's own screens, such as `/usage`, `/status`, `/mcp` or
+  `/model`, shows that screen live at the end of the thread. Keys you press on it reach Claude,
+  and on a touch screen its buttons send them; Esc or ✕ closes it. Sending a message closes it
+  first, so your words reach the prompt rather than the screen.
 - **Side panel.** Each thread keeps its own panel: its tabs, the one shown, its width, and
   whether it is open or maximized. **+** (⌘T while the panel is open) adds a tab, and ⌘W closes
   the shown tab before it ever closes a thread. ⌘D opens the **Diff**: one turn, the latest
@@ -102,7 +130,7 @@ under the thread at any time; drag its top edge to resize it.
 The composer keeps a draft per thread, and the sidebar marks threads with one. ⌘S sets a draft
 aside in the **Stash** above the prompt. ↑ and ↓ in an empty prompt bring back the thread's
 earlier prompts, and `/` lists Claude's commands with your own and your project's commands and
-skills. Attached files show above the prompt and go out with it. Next to the model menu (⌘⇧M),
+skills, your plugins' and those claude.ai syncs to your account. Attached files show above the prompt and go out with it. Next to the model menu (⌘⇧M),
 the mode menu (⌘⇧A, or ⇧Tab in the prompt) switches Claude between Supervised, Auto-accept
 edits, Plan and Auto. The branch under the prompt (⌘⇧G) switches or creates branches once Claude
 is between turns, and the Git button in the header asks Claude to commit, push or open a pull
@@ -173,6 +201,49 @@ Drop files onto the panel to attach them to the current tab (images included), p
 image from the clipboard, or click **📎** to pick files. A tab on another machine gets each
 file sent there first, up to 25 MB, into a private `uploads` folder in that machine's config
 folder. Uploads older than a day are deleted.
+
+## Accounts
+
+An account is one login of an agent CLI: a Claude Code subscription or a Codex login. Each
+project picks the account that runs its sessions, and pays for them, so a work project and a
+personal one can use different subscriptions on the same Mac.
+
+Settings → **Accounts** lists them, with the email, organization and plan each CLI reports.
+Two are built in and can't be removed: **Claude Code**, the login in `~/.claude`, and
+**Codex**, the login in `~/.codex`. Without changing anything, every project runs under the
+built-in Claude Code account, as before.
+
+To add one, pick the provider, type a name such as `Work` and click **Add account**. Then click
+**Sign in**: pinned opens a tab running the CLI's own login (`claude auth login` or `codex
+login`) for that account. Finish it in the browser page it opens and close the tab. **Sign in
+again** switches the login of an account that already has one.
+
+Each added account keeps its credentials in a home of its own, which pinned passes to the CLI
+as `CLAUDE_CONFIG_DIR` or `CODEX_HOME`: on a Mac,
+`~/Library/Application Support/dev.personal-harness.pinned/accounts/<id>`, and on a server,
+`accounts/<id>` in the node's config directory. pinned never reads the credentials. Removing
+an account leaves its home in place, so adding it again finds it signed in.
+
+Pick a project's account from the menu on its row under Settings → **Projects**. Tabs opened on
+the project from then on run under that account, and a resumed session reopens under the
+account it started with. A tab that runs under an account other than the built-in Claude Code
+one shows that account's name in the tab bar.
+
+A workflow runs under its project's account unless its **Run a session** step picks one
+under **Account**. Only Claude Code accounts can run a workflow. A machine where that account
+is missing or signed out refuses the run, so it goes to the next online machine where it is
+signed in.
+
+The usage meter shows the active tab's account. Each Claude Code account has its own limits.
+
+A tab that hits its account's usage limit continues by itself when the limit lifts. To go on
+sooner, pick **Continue under** another signed-in Claude Code account from the note above the
+prompt or the session menu. pinned copies the conversation into that account's home and resumes
+it there. The same menu offers **Move to** an account at any time. Only the tab moves: the
+project keeps its account.
+
+Codex tabs run the `codex` CLI without pinned's hooks, so they get no status dot, no usage
+meter and no resume after a restart.
 
 ## Machines
 
@@ -488,7 +559,8 @@ install, and restart.
   `ui/` renders it with xterm.js.
 - `crates/core/src/hooks.rs` passes Claude Code a `--settings` file with `UserPromptSubmit`, `Stop` and
   `Notification` hooks. Each hook runs `pinned hook <status>`, which forwards the event to the
-  window over a Unix socket. Your own `~/.claude/settings.json` is not modified.
+  window over a Unix socket, which Windows has had since Windows 10 version 1803. Your own
+  `~/.claude/settings.json` is not modified.
 - The usage meter comes from the data Claude Code gives its statusline. The `--settings` file
   sets `pinned statusline` as the statusline, which forwards the 5-hour and 7-day figures to
   the window. Claude Code reports them only for Pro and Max subscriptions, and only after a
@@ -507,7 +579,12 @@ install, and restart.
 ```sh
 cargo run -- ~/path/to/project    # debug build
 npm run tauri build               # .app and .dmg in target/release/bundle
+npm run tauri build -- --bundles nsis   # on Windows: the setup .exe in target/release/bundle/nsis
 ```
+
+The `windows` workflow runs the tests on Windows and builds the installer for every
+pull request. Download it from the run's `pinned-windows-setup` artifact to try a change on
+Windows before a release.
 
 ## Release
 
@@ -516,7 +593,7 @@ scripts/release.sh 0.2.0
 ```
 
 The script bumps the version in `Cargo.toml`, tags `v0.2.0` and pushes. The `release`
-workflow builds both Mac architectures, signs the update bundles, and publishes the release
+workflow builds both Mac architectures and the Windows installer, signs the update bundles, and publishes the release
 with `latest.json`. Running copies then offer the update.
 
 Update signing needs the `TAURI_SIGNING_PRIVATE_KEY` repository secret. Its public half is

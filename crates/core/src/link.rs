@@ -1,7 +1,7 @@
 //! The binary installs rustls's ring provider before spawning the link.
 
 use crate::account::Credentials;
-use crate::agent::{Message, Usage};
+use crate::agent::Message;
 use crate::machine::{Machine, ViewerId};
 use crate::sync;
 use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
@@ -152,8 +152,7 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
 /// Keeps the machine's projects in step with the account's while the link runs.
 fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<bool>) {
     let Some(file) = machine.sync_file().map(Path::to_path_buf) else { return };
-    let home = crate::machine::home();
-    let mut state = sync::State::load(&file);
+    let mut state = sync::State::load(&file, &crate::machine::home().join(".claude"));
     let mut shared_projects = HashSet::new();
     let mut wait = SYNC_FIRST;
     loop {
@@ -173,7 +172,7 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
             if !shared_projects.contains(&key) && shared.call(HubCall::ShareProject { project: checkout.project.clone() }).is_ok() {
                 shared_projects.insert(key.clone());
             }
-            match sync::sync(shared, &mut state, &home, &checkout, SystemTime::now()) {
+            match sync::sync(shared, &mut state, &checkout, SystemTime::now()) {
                 Ok(done) if !done.pushed.is_empty() || !done.pulled.is_empty() => {
                     eprintln!("pinned: synced {key}: {} up, {} down", done.pushed.len(), done.pulled.len())
                 }
@@ -240,9 +239,8 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     let calls = in_order(machine.clone(), out.clone());
     eprintln!("pinned: connected to {}", creds.hub);
     shared.send(&MachineFrame::Event { event: MachineEvent::Tabs { tabs: machine.tabs() } });
-    let usage = machine.usage();
-    if usage != Usage::default() {
-        shared.send(&MachineFrame::Event { event: MachineEvent::Usage { usage } });
+    for (account, usage) in machine.usage() {
+        shared.send(&MachineFrame::Event { event: MachineEvent::Usage { usage, account } });
     }
 
     let mut ping = tokio::time::interval(PING);

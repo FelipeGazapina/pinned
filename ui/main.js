@@ -10,6 +10,8 @@ const STATUS_TEXT = { idle: "", working: "working…", done: "done", "needs-inpu
 const ALERTS = ["done", "needs-input", "failed"];
 const EDGES = ["top", "bottom", "left", "right"];
 const LOCAL = "local";
+/** The account a tab runs under unless its project picks another: Claude Code's own ~/.claude login. */
+const DEFAULT_ACCOUNT = "claude";
 
 const workspace = document.getElementById("workspace");
 const tabBar = document.getElementById("tab-bar");
@@ -27,11 +29,20 @@ let active = null;
 const keyOf = (machine, id) => `${machine}:${id}`;
 const tabByKey = (key) => tabs.find((t) => t.key === key);
 const callOn = (machine, call) => machines.get(machine).transport.call(call);
+const IS_MAC = /Mac/.test(navigator.platform);
+const COMPUTER = IS_MAC ? "Mac" : "PC";
 const statusOf = (tab) => tab.view.status ?? "idle";
-const machineName = (id) => (id === LOCAL ? "This Mac" : machines.get(id)?.view.name ?? "machine");
+const machineName = (id) => (id === LOCAL ? `This ${COMPUTER}` : machines.get(id)?.view.name ?? "machine");
 const initials = (name) => name.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
 const tilde = (path) => path.replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)(?=\/|$)/, "~");
-const tabName = (tab) => tab.view.cwd.split("/").filter(Boolean).pop() || (tab.view.cwd ? "/" : "claude");
+const accountOf = (machine, id) => machines.get(machine)?.accounts?.find((a) => a.id === id);
+const accountName = (machine, id) => accountOf(machine, id)?.name ?? id;
+/** A tab with no Claude Code transcript to show as a thread: a sign-in, or a Codex session. */
+const terminalOnly = (tab) => tab.view.program === "sign-in" || accountOf(tab.machine, tab.view.account)?.provider === "codex";
+const tabName = (tab) =>
+  tab.view.program === "sign-in"
+    ? `Sign in · ${accountName(tab.machine, tab.view.account)}`
+    : tab.view.cwd.split(/[\\/]/).filter(Boolean).pop() || (tab.view.cwd ? "/" : "claude");
 const isVertical = () => ["left", "right"].includes(document.body.dataset.tabs);
 
 let order = [];
@@ -66,6 +77,42 @@ function setTabs(machine, views, { forget = true } = {}) {
 }
 
 const refreshTabs = async (machine) => setTabs(machine, await callOn(machine, { cmd: "tabs" }));
+
+/** Shows a tab the machine just opened, once its tab list has it. */
+async function revealTab(machine, id) {
+  await refreshTabs(machine);
+  const tab = tabByKey(keyOf(machine, id));
+  activate(tab);
+  return tab;
+}
+
+/** The machine's accounts, asked once and kept for the tab badges and pickers; `fresh` asks again. Each ask runs every account's CLI. */
+function accountsOf(machine, fresh = false) {
+  const m = machines.get(machine);
+  if (fresh || !m.accountsAsked) {
+    // A list asked before a later ask or an add would undo it, so only the newest is kept.
+    const asked = callOn(machine, { cmd: "list_accounts" }).then((list) => (m.accountsAsked === asked ? setAccounts(machine, list) : m.accounts ?? list));
+    asked.catch(() => setTimeout(() => m.accountsAsked === asked && (m.accountsAsked = null), 30 * 1000));
+    m.accountsAsked = asked;
+  }
+  return m.accountsAsked;
+}
+
+function setAccounts(machine, list) {
+  const m = machines.get(machine);
+  if (!m) return list;
+  m.accounts = list;
+  m.accountsAsked = Promise.resolve(list);
+  render();
+  return list;
+}
+
+/** Opens a tab running the CLI's login for the account and shows it. */
+async function signIn(machine, account) {
+  const id = await callOn(machine, { cmd: "sign_in", account });
+  await revealTab(machine, id);
+  if (guiOn()) setMode("terminal");
+}
 
 function updateView(tab, view) {
   const before = statusOf(tab);
@@ -125,10 +172,7 @@ navigator.serviceWorker?.addEventListener("message", ({ data }) => {
 document.addEventListener("visibilitychange", () => markSeen(active));
 
 async function openTab(machine, path, bypass = false) {
-  const id = await callOn(machine, { cmd: "open_tab", path, bypass });
-  await refreshTabs(machine);
-  const tab = tabByKey(keyOf(machine, id));
-  activate(tab);
+  const tab = await revealTab(machine, await callOn(machine, { cmd: "open_tab", path, bypass }));
   await startTab(tab);
   return tab;
 }
@@ -364,10 +408,9 @@ async function openRemote(machine, path, bypass) {
     callOn(machine, { cmd: "close_tab", tab: id });
     throw e;
   }
-  await refreshTabs(machine);
-  const tab = tabByKey(keyOf(machine, id));
-  activate(tab);
+  const tab = await revealTab(machine, id);
   await startTab(tab);
+  return tab;
 }
 
 async function moveTab(tab, path) {
@@ -396,7 +439,7 @@ function addTab(machine, view) {
 
   const button = document.createElement("div");
   button.className = "tab";
-  button.innerHTML = `<span class="dot"></span><span class="badge" hidden></span><span class="name"></span><button class="close" title="Close tab (⌘W)">✕</button><span class="resize" title="Drag to resize the tabs"></span>`;
+  button.innerHTML = `<span class="dot"></span><span class="badge" hidden></span><span class="badge account" hidden></span><span class="name"></span><button class="close" title="Close tab (⌘W)">✕</button><span class="resize" title="Drag to resize the tabs"></span>`;
   tabList.append(button);
 
   const sink = { write: (bytes) => term.write(bytes), reset: () => term.reset() };
@@ -445,6 +488,32 @@ async function setBypass(tab, on) {
     await refreshTabs(tab.machine);
   } catch (e) {
     tab.term.write(`\r\n\x1b[31m[could not restart claude: ${e}]\x1b[0m\r\n`);
+  }
+  focusInput();
+}
+
+/** The other Claude Code accounts signed in on the tab's machine, which can take its conversation over. */
+const switchTargets = (tab) =>
+  tab.view.program === "sign-in" || terminalOnly(tab)
+    ? []
+    : (machines.get(tab.machine)?.accounts ?? []).filter((a) => a.provider === "claude" && a.signed_in && a.id !== tab.view.account);
+
+/** Session menu items that move the tab's conversation to another account, to continue past a usage limit. */
+const switchItems = (tab) =>
+  switchTargets(tab).map((a) => ({
+    label: tab.view.resume_at ? `Continue under ${a.name}` : `Move to ${a.name}`,
+    hint: "Copies this conversation to the account and resumes it there",
+    run: () => switchAccount(tab, a.id),
+  }));
+
+async function switchAccount(tab, account) {
+  refit(tab);
+  try {
+    await callOn(tab.machine, { cmd: "switch_account", tab: tab.view.id, account, cols: tab.term.cols, rows: tab.term.rows });
+    await refreshTabs(tab.machine);
+  } catch (e) {
+    tab.term.write(`\r\n\x1b[31m[could not switch accounts: ${e}]\x1b[0m\r\n`);
+    if (guiOn()) showComposerNote(String(e), true);
   }
   focusInput();
 }
@@ -524,6 +593,13 @@ function render() {
     const badge = tab.button.querySelector(".badge");
     badge.hidden = !remote;
     badge.textContent = remote ? initials(machineName(tab.machine)) : "";
+    const other = tab.view.account !== DEFAULT_ACCOUNT;
+    if ((other || tab.view.resume_at || tab === active) && !machines.get(tab.machine).accountsAsked) accountsOf(tab.machine).catch(console.warn);
+    const named = accountOf(tab.machine, tab.view.account);
+    const accountBadge = tab.button.querySelector(".badge.account");
+    accountBadge.hidden = !other;
+    accountBadge.textContent = other ? accountName(tab.machine, tab.view.account) : "";
+    accountBadge.title = named ? `${named.name} (${named.provider_name})` : tab.view.account;
     tab.button.title = `${where}${tab.view.cwd}${tab.view.bypass ? "\nPermissions skipped" : ""}`;
   }
   document.body.dataset.empty = !tabs.length;
@@ -713,7 +789,6 @@ if (TAURI) {
   invoke("focus_panel");
 }
 
-const IS_MAC = /Mac/.test(navigator.platform);
 const TAB_STEP = { ArrowLeft: -1, ArrowRight: 1 };
 const PICKER_STEP = { ArrowUp: -1, ArrowDown: 1 };
 
@@ -725,6 +800,7 @@ function stepTab(step) {
 
 // Caught before xterm, which would otherwise swallow them.
 window.addEventListener("keydown", (e) => {
+  if (e.target.closest?.("[data-keybinding-capture]")) return;
   if (pickerOpen() && e.target.closest?.(".type-path")) {
     if (e.key === "Escape") showProjects(picking);
     else if (e.key in PICKER_STEP) choose(chosen + PICKER_STEP[e.key]);
@@ -746,8 +822,8 @@ window.addEventListener("keydown", (e) => {
   }
   if (e.shiftKey || e.altKey) return;
   const tabKey = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-  // In settings the arrows keep their text-editing meaning.
-  if (tabKey && e.key in TAB_STEP && active && !settingsOpen()) {
+  // The app view's chords are gui.js's; there, as in settings, the arrows keep their text-editing meaning.
+  if (tabKey && e.key in TAB_STEP && active && !settingsOpen() && !guiOn()) {
     stepTab(TAB_STEP[e.key]);
     e.preventDefault();
     e.stopPropagation();
@@ -755,11 +831,10 @@ window.addEventListener("keydown", (e) => {
   }
   if (!e.metaKey || e.ctrlKey) return;
   if (e.key === ",") toggleSettings();
-  else if (e.key === "t" && guiOn() && ui.panelOpen) document.getElementById("panel-add").click();
+  else if (guiOn()) return;
   else if (e.key === "t") toggleProjects();
-  else if (e.key === "w" && guiOn() && ui.panelOpen) closeSurface();
   else if (e.key === "w" && active) closeTab(active);
-  else if (/^[1-9]$/.test(e.key) && !guiOn() && tabs[e.key - 1]) activate(tabs[e.key - 1]);
+  else if (/^[1-9]$/.test(e.key) && tabs[e.key - 1]) activate(tabs[e.key - 1]);
   else return;
   e.preventDefault();
   e.stopPropagation();
@@ -831,7 +906,7 @@ TAURI?.webview.getCurrentWebview().onDragDropEvent(async ({ payload }) => {
   const tab = threadAt(payload.position) ?? active;
   if (tab.machine === LOCAL) return tab.view.running && pastePaths(tab, payload.paths);
   try {
-    const files = await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split("/").pop())));
+    const files = await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split(/[\\/]/).pop())));
     await attachFiles(tab, files);
   } catch (e) {
     showAttachNote(String(e), true);
@@ -862,9 +937,9 @@ document.addEventListener("paste", (e) => {
   if (!active || settingsOpen() || pickerOpen() || types.includes("text/plain") || !types.includes("Files")) return;
   e.preventDefault();
   e.stopPropagation();
-  // A clipboard image has no text for xterm to paste; on this Mac, Ctrl+V makes Claude Code read the image itself.
-  // The app view attaches it instead, so it shows in the composer before it's sent.
-  if (active.machine === LOCAL && !guiOn()) callOn(LOCAL, { cmd: "write_input", tab: active.view.id, data: "\x16" });
+  // A clipboard image has no text for xterm to paste. On this computer Claude Code reads the image itself
+  // on Ctrl+V, or Alt+V on Windows. The app view attaches it instead, so it shows in the composer before it's sent.
+  if (active.machine === LOCAL && !guiOn()) callOn(LOCAL, { cmd: "write_input", tab: active.view.id, data: IS_MAC ? "\x16" : "\x1bv" });
   else attachFiles(active, [...e.clipboardData.files]);
 }, true);
 
@@ -872,14 +947,16 @@ function onMachineEvent(machine, event) {
   if (!machines.has(machine)) return;
   if (event.kind === "tabs") return setTabs(machine, event.tabs);
   if (event.kind === "usage") {
-    machines.get(machine).usage = event.usage;
+    machines.get(machine).usage[event.account ?? DEFAULT_ACCOUNT] = event.usage;
     return renderUsage();
   }
   if (event.kind !== "exit") return;
   const tab = tabByKey(keyOf(machine, event.tab));
   if (!tab) return;
   tab.view = { ...tab.view, running: false };
-  tab.term.write("\r\n\x1b[2m[claude exited, press Enter to restart]\x1b[0m\r\n");
+  if (tab.view.program !== "sign-in") return tab.term.write("\r\n\x1b[2m[claude exited, press Enter to restart]\x1b[0m\r\n");
+  tab.term.write("\r\n\x1b[2m[sign-in ended, press Enter to run it again]\x1b[0m\r\n");
+  accountsOf(machine, true).then(() => settingsOpen() && page === "accounts" && showAccountsPage(), console.warn);
 }
 listen("machine", (event) => onMachineEvent(LOCAL, event));
 
@@ -898,7 +975,7 @@ function resetsText(resetsAt) {
 
 // A window's figure stops holding once it resets, so it leaves the meter then.
 function renderUsage() {
-  const usage = machines.get(active?.machine ?? LOCAL)?.usage ?? {};
+  const usage = machines.get(active?.machine ?? LOCAL)?.usage[active?.view.account ?? DEFAULT_ACCOUNT] ?? {};
   const now = Date.now() / 1000;
   const shown = LIMITS.filter(([key]) => usage[key]?.resets_at > now);
   usageMeter.hidden = !shown.length;
@@ -1005,6 +1082,7 @@ function openSessionMenu(tab) {
     tab.view.bypass
       ? item("Ask for permissions again", "Restarts claude and resumes this conversation.", () => setBypass(tab, false))
       : item("⚠ Skip all permissions", "Restarts claude with no permission checks and resumes this conversation.", () => setBypass(tab, true), "danger"),
+    ...switchItems(tab).map((s) => item(s.label, `${s.hint}.`, s.run)),
     item("Attach files…", "", () => document.getElementById("attach").click()),
     item("Change folder…", "", () => document.getElementById("folder").click()),
     item("Close tab", "", () => closeTab(tab)),
@@ -1184,12 +1262,14 @@ function disconnectHub() {
 
 async function bootApp() {
   machines.set(LOCAL, {
-    view: { id: LOCAL, name: "This Mac", os: "macos", online: true, last_seen: 0 },
+    view: { id: LOCAL, name: `This ${COMPUTER}`, os: IS_MAC ? "macos" : "windows", online: true, last_seen: 0 },
     tabs: [],
     transport: localTransport,
     usage: {},
   });
-  invoke("get_usage").then((usage) => onMachineEvent(LOCAL, { kind: "usage", usage }));
+  invoke("get_usage").then((byAccount) => {
+    for (const [account, usage] of Object.entries(byAccount)) onMachineEvent(LOCAL, { kind: "usage", usage, account });
+  });
   const restored = await invoke("restore_tabs");
   await refreshTabs(LOCAL);
   for (const id of restored) await startTab(tabByKey(keyOf(LOCAL, id)));

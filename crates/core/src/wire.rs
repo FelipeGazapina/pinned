@@ -1,17 +1,20 @@
 //! The protocol between machines, the hub and clients: one JSON object per WebSocket text frame.
 //! Every enum is internally tagged and unknown fields are ignored, so versions can drift.
 
+use crate::accounts::{self, AccountId, Provider};
 use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
 use crate::branches::GitStep;
 use crate::scripts::Script;
-use crate::panel::{ReviewComment, ReviewEvent};
+use crate::panel::{Candidates, MergeMethod, PrChange, ReviewComment, ReviewEvent, StackAction, StackHead};
 use crate::workspace::{DiffScope, PrAction};
 use crate::stats::ThreadStats;
 use crate::{pulls, subagents, sync, thread, usage};
 use base64::Engine;
+use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
 /// A tab's id, unique within its machine, such as `tab-3`.
@@ -40,10 +43,40 @@ impl<'de> Deserialize<'de> for Bytes {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+impl JsonSchema for Bytes {
+    fn schema_name() -> Cow<'static, str> {
+        "Bytes".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::Bytes").into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({ "type": "string" })
+    }
+}
+
+/// What a tab runs.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Program {
+    /// The account's agent CLI, a session that may be resumed.
+    #[default]
+    Agent,
+    /// The CLI's login for the account, never resumed.
+    SignIn,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct TabView {
     pub id: TabId,
     pub cwd: String,
+    /// The account the tab's sessions run under.
+    #[serde(default = "accounts::default_account")]
+    pub account: AccountId,
+    #[serde(default)]
+    pub program: Program,
     pub bypass: bool,
     pub running: bool,
     pub status: Option<AgentStatus>,
@@ -52,6 +85,9 @@ pub struct TabView {
     pub message: Option<String>,
     /// Unix time a usage limit lifts, while one stopped the turn.
     pub resume_at: Option<u64>,
+    /// The session waits out its usage limit without continuing by itself when it lifts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
     pub connector: Option<String>,
     /// What the connector's session works on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,26 +105,34 @@ pub struct TabView {
     pub stats: Option<ThreadStats>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct ProjectView {
     pub path: String,
     pub name: String,
     /// The origin as `host/owner/name`, which names the project on every machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    /// The account its sessions run under, the default one unless the user picked another.
+    #[serde(default = "accounts::default_account")]
+    pub account: AccountId,
 }
 
 /// Everything a client may ask a machine to do, local or through the hub. The comment on each
 /// variant names what `Machine::call` answers.
 ///
 /// `{"cmd":"start_claude","tab":"tab-1","cols":120,"rows":32}`
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Call {
     /// `Vec<TabView>`.
     Tabs,
     /// The new tab's id. `path: null` opens the machine's default folder.
     OpenTab { path: Option<String>, bypass: bool },
+    /// The new tab's id, in the machine's folder for threads without a project.
+    OpenScratch { bypass: bool },
+    /// Null. Whether the tab's session continues by itself once the usage limit that stopped it
+    /// lifts, which it does unless turned off.
+    AutoResume { tab: TabId, on: bool },
     /// The folder claude runs in. Restarts claude when it is already running.
     StartClaude { tab: TabId, cols: u16, rows: u16 },
     /// The folder claude runs in. Restarts claude with `bypass` turned `on` or off, resuming the
@@ -126,13 +170,20 @@ pub enum Call {
     CreateProject { name: String },
     /// The URL of the private GitHub repository the project at `path` is now pushed to.
     PublishProject { path: String },
-    /// The folder of a clone of `repo`, found among the machine's projects or cloned into `~/pinned`.
+    /// The folder of a clone of `repo`, found among the machine's projects or cloned into `~/pinned`,
+    /// or cloned into `dest` when given, which must not hold files yet.
     /// The hub adds the account's GitHub token, for a private repository.
     Clone {
         repo: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dest: Option<String>,
     },
+    /// The folder `path`, canonical, made first with its parents when it doesn't exist.
+    MakeFolder { path: String },
+    /// `Vec<ThreadMatch>`: the tabs whose conversations hold `query`, prompts' matches first.
+    SearchThreads { query: String },
     /// The new tab's id, with claude already running. Refused when the folder can't be found or cloned.
     Run { run: RunSpec },
     /// `true` when a live tab whose environment holds every pair took `text` as a prompt.
@@ -140,6 +191,19 @@ pub enum Call {
     /// The absolute path the file was saved under, in a private folder of the machine, for a
     /// session to read. Refused past `uploads::LIMIT`.
     Upload { name: String, data: Bytes },
+    /// `Vec<accounts::View>`: the built-in accounts, then the added ones, each as its CLI reports it.
+    ListAccounts,
+    /// The new account's `accounts::View`. Its id is a slug of `name`.
+    AddAccount { provider: Provider, name: String },
+    /// `null`. Projects that ran under it fall back to the default account.
+    RemoveAccount { account: AccountId },
+    /// The project's `ProjectView`. `account: null` runs it under the default account again.
+    SetProjectAccount { path: String, account: Option<AccountId> },
+    /// The new tab's id, running the CLI's login for the account in the account's home.
+    SignIn { account: AccountId },
+    /// The tab's folder, as `start_claude`. Moves the tab's conversation to another Claude Code
+    /// account signed in here and resumes it there, continuing a turn a usage limit stopped.
+    SwitchAccount { tab: TabId, account: AccountId, cols: u16, rows: u16 },
     /// `ThreadPage`: the conversation's items from byte `from` of its transcript on.
     Thread { tab: TabId, from: u64 },
     /// `null`. Types `text` into the session as one prompt and submits it.
@@ -173,12 +237,18 @@ pub enum Call {
     Ports { tab: TabId },
     /// `Vec<workspace::Editor>` installed on the machine.
     Editors,
-    /// `null`. Opens the tab's folder, or `path` inside its repository, in the editor `editor`.
+    /// `null`. Opens the tab's folder, or `path` inside its repository, in the editor `editor`;
+    /// `default` opens it in the app the system picks. `folder` takes `path` from the tab's folder
+    /// instead, and `reveal` shows it in the file manager.
     OpenIn {
         tab: TabId,
         editor: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        folder: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reveal: bool,
     },
     /// `Vec<commands::Command>`, the slash commands claude offers in the tab's folder.
     Commands { tab: TabId },
@@ -203,19 +273,37 @@ pub enum Call {
         involvement: pulls::Involvement,
         #[serde(default)]
         query: String,
+        #[serde(default)]
+        filters: pulls::Filters,
         /// Rows per search at most; the page asks for more 100 at a time.
         #[serde(default = "pulls_limit")]
         limit: usize,
     },
     /// `pulls::Stack` the pull request `number` of github.com's `repo` (`owner/name`) sits in, or `null`.
     PullRequestStack { repo: String, number: u64 },
-    /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since` on.
-    /// `prices` are the user's, per model, which win over LiteLLM's list.
-    TokenUsage {
-        since: u64,
+    /// `pulls::FilterOptions` of `kind` matching `query` in the GitHub repositories of the folders `paths`.
+    PullRequestFilterOptions {
+        paths: Vec<String>,
+        kind: pulls::OptionKind,
         #[serde(default)]
-        prices: HashMap<String, usage::Price>,
+        query: String,
     },
+    /// `Vec<pulls::FileStat>` of pull request `number` of `repo` on `host`, or `null` when it changes too many files.
+    PullRequestFiles { host: String, repo: String, number: u64 },
+    /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since`
+    /// on, priced with the machine's `usage::PriceBook` over LiteLLM's list.
+    TokenUsage { since: u64 },
+    /// `usage::PriceBook`: the prices and model mappings the user set on the machine.
+    UsagePrices,
+    /// The `usage::PriceBook` after setting each model's price and mapping, or clearing it with `null`.
+    SetUsagePrices {
+        #[serde(default)]
+        prices: HashMap<String, Option<usage::Price>>,
+        #[serde(default)]
+        aliases: HashMap<String, Option<String>>,
+    },
+    /// `usage::Limits`: the account and plan limits claude's own usage check reports.
+    UsageLimits,
     /// `panel::PageMeta` of the web page at `url`, fetched from this machine.
     PageMeta { url: String },
     /// `panel::Refs`: the tab's folder's local and remote branches, for picking what to compare with.
@@ -247,6 +335,24 @@ pub enum Call {
         root: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
+    },
+    /// The tab's watched pull request URLs, after starting or stopping the watch on `pr` when given.
+    /// A watched pull request wakes the tab's claude when its checks finish, someone comments, or
+    /// its branch starts to conflict.
+    WatchPr {
+        tab: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pr: Option<String>,
+        #[serde(default)]
+        watching: bool,
+    },
+    /// A loopback URL that serves `path` with the folder around it, for a page that loads its own
+    /// styles and scripts.
+    FileUrl {
+        tab: TabId,
+        path: String,
+        #[serde(default)]
+        root: bool,
     },
     /// The saved file's new hash. Refused when the file changed since the read that answered `since`.
     WriteFile {
@@ -303,16 +409,45 @@ pub enum Call {
         #[serde(default)]
         write: bool,
     },
+    /// `null`. Reacts on `pr` or a remark on it, rewrites a comment, asks for or takes back a
+    /// review, puts a label on or off, or resolves a review thread.
+    PrChange { tab: TabId, pr: String, change: PrChange },
+    /// `{candidates, truncated}`: who `pr` may ask for a review, or the labels it may carry.
+    PrCandidates { tab: TabId, pr: String, of: Candidates },
+    /// `null`. Merges `pr` and the stack layers under it, or rebases its whole GitHub stack, if every
+    /// unmerged layer still has the head in `heads`.
+    PrStack {
+        tab: TabId,
+        pr: String,
+        action: StackAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<MergeMethod>,
+        heads: Vec<StackHead>,
+    },
     /// The id of a new login shell in the tab's folder, which `attach`, `write_input`, `resize_pty`
     /// and `close_shell` take as a tab id.
     OpenShell { tab: TabId, cols: u16, rows: u16 },
     /// `null`. Ends the shell `shell`.
     CloseShell { shell: String },
+    /// `Vec<String>`: those of `shells` running a command, as T3 Code's terminal-running pulse reads them.
+    BusyShells { shells: Vec<String> },
     /// The address of the machine's device hub, which mirrors its simulators and emulators. It
     /// starts on the first call; `embed` is the origin of a page that frames it.
     DeviceHub {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         embed: Option<String>,
+    },
+    /// Whether new sessions may drive the machine's simulators and emulators, after setting it to
+    /// `allow` when given.
+    DeviceAgents {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow: Option<bool>,
+    },
+    /// What `op` answers, run against the machine's device hub, which starts first when it isn't
+    /// running, and its simulator and emulator tools.
+    Device {
+        #[serde(flatten)]
+        op: crate::device::DeviceOp,
     },
     /// `Vec<thread::Item>`: the conversation of the subagent the tab's `Agent` tool call `tool` started.
     Subagent { tab: TabId, tool: String },
@@ -355,15 +490,24 @@ impl Call {
                 | Call::Files { .. }
                 | Call::Branches { .. }
                 | Call::Checkout { .. }
+                | Call::ListAccounts
+                | Call::AddAccount { .. }
+                | Call::SignIn { .. }
+                | Call::SwitchAccount { .. }
                 | Call::TokenUsage { .. }
+                | Call::UsageLimits
                 | Call::PullRequests { .. }
                 | Call::PullRequestStack { .. }
+                | Call::PullRequestFilterOptions { .. }
+                | Call::PullRequestFiles { .. }
                 | Call::PageMeta { .. }
                 | Call::Refs { .. }
                 | Call::CheckoutPr { .. }
                 | Call::Git { .. }
                 | Call::SetWorkspace { .. }
                 | Call::ReadFile { .. }
+                | Call::FileUrl { .. }
+                | Call::WatchPr { .. }
                 | Call::WriteFile { .. }
                 | Call::Search { .. }
                 | Call::PrEdit { .. }
@@ -371,20 +515,35 @@ impl Call {
                 | Call::PrReview { .. }
                 | Call::PrRerun { .. }
                 | Call::PrGuide { .. }
+                | Call::PrChange { .. }
+                | Call::PrCandidates { .. }
+                | Call::PrStack { .. }
                 | Call::DeviceHub { .. }
+                | Call::Device { .. }
+                | Call::DeviceAgents { .. }
                 | Call::Subagent { .. }
                 | Call::Rewind { .. }
                 | Call::Fork { .. }
                 | Call::SaveFile { .. }
                 | Call::CreateProject { .. }
                 | Call::PublishProject { .. }
+                | Call::BusyShells { .. }
+                | Call::SearchThreads { .. }
         )
     }
 }
 
+/// A tab whose conversation holds what a `SearchThreads` asked for.
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct ThreadMatch {
+    pub tab: TabId,
+    #[serde(flatten)]
+    pub found: thread::Found,
+}
+
 /// A step of a tab's conversation. A client holding items of another `session`, or getting a
 /// `reset` page, starts over.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct ThreadPage {
     pub session: Option<String>,
     pub items: Vec<thread::Item>,
@@ -392,6 +551,10 @@ pub struct ThreadPage {
     pub reset: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<thread::Context>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub todos: Option<thread::Todos>,
     /// Every agent the session spawned, whole on each page. A machine on an older pinned leaves it out.
     pub agents: Vec<subagents::Subagent>,
 }
@@ -399,7 +562,7 @@ pub struct ThreadPage {
 /// A connector's session, the same on any machine.
 ///
 /// `{"folder":"/repo","repo":"git@github.com:o/r.git","args":["--name","ENG-7"],"env":[["PINNED_CONNECTOR","c1"]]}`
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct RunSpec {
     /// The folder on the machine the connector was set up on.
     pub folder: String,
@@ -413,12 +576,15 @@ pub struct RunSpec {
     /// The account's GitHub token, added by the hub, which clones a private repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// The agent account the connector names; none runs the session under its project's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AccountId>,
 }
 
 /// What a machine reports on its own.
 ///
 /// `{"kind":"exit","tab":"tab-1"}`, `{"kind":"output","tab":"tab-1","data":"aGk="}`
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum MachineEvent {
     /// Every tab, after any of them opened, closed, started, exited or changed status, title or folder.
@@ -428,7 +594,12 @@ pub enum MachineEvent {
     Output { tab: TabId, data: Bytes },
     /// The tab's claude exited by itself.
     Exit { tab: TabId },
-    Usage { usage: Usage },
+    /// The account's usage, after its session reported it.
+    Usage {
+        usage: Usage,
+        #[serde(default = "accounts::default_account")]
+        account: AccountId,
+    },
 }
 
 /// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
@@ -436,7 +607,7 @@ pub enum MachineEvent {
 /// forwarding a connector session's callbacks to the hub, which holds the keys.
 ///
 /// `{"cmd":"connect_linear","key":"lin_api_…"}`, `{"cmd":"stage","connector":"c1","issue":"uuid","stage":"coding"}`
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum HubCall {
     /// `connectors::Settings`.
@@ -456,13 +627,23 @@ pub enum HubCall {
     DisconnectGithub,
     /// `Vec<github::Repo>`, most recently pushed first.
     GithubRepos,
-    /// `vercel::Account`.
+    /// `vercel::Account`, once the gateway took the key.
     ConnectVercel { key: String },
     DisconnectVercel,
-    /// The ids of the gateway's decision models.
+    /// `Vec<vercel::Model>`: chat models tagged `structured-output`, and every decision model. The list needs no key.
     VercelModels,
-    /// The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has none.
-    Clone { machine: MachineId, repo: String },
+    /// `upstash::Account`, once Upstash took the key. Only a signed-in app runs boxes, so this has no Tauri command.
+    ConnectUpstash { key: String, claude_token: String },
+    /// Deletes the account's boxes before it forgets the keys.
+    DisconnectUpstash,
+    /// The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has
+    /// none, or into `dest` when given.
+    Clone {
+        machine: MachineId,
+        repo: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dest: Option<String>,
+    },
     /// `Vec<sync::Project>`: the account's projects, most recently shared first.
     SharedProjects,
     /// From a machine: a project it syncs, which other machines then offer to clone.
@@ -511,7 +692,7 @@ pub enum HubCall {
     LinearTake { connector: String, channel: String, thread: String, issue: String },
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct MachineView {
     pub id: MachineId,
     pub name: String,
@@ -519,16 +700,19 @@ pub struct MachineView {
     pub online: bool,
     /// Unix seconds.
     pub last_seen: i64,
+    /// The Upstash Box the machine runs in, which pinned deletes with it once its session ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstash_box: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct AccountView {
     pub id: String,
     pub email: String,
 }
 
 /// A one-time code that pairs a headless machine, and the command that does it.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct PairCode {
     pub code: String,
     /// Unix seconds.
@@ -536,21 +720,21 @@ pub struct PairCode {
     pub command: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, schemars::JsonSchema)]
 pub struct Target {
     pub machine: MachineId,
     pub tab: TabId,
 }
 
 /// The answer to the call that carried `id`: `{"id":4,"ok":…}` or `{"id":4,"err":"…"}`.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Reply {
     pub id: u64,
     #[serde(flatten)]
     pub outcome: Outcome,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Ok(Value),
@@ -574,7 +758,7 @@ impl Reply {
 ///
 /// `{"type":"auth","token":"…"}`, `{"type":"call","id":1,"machine":"m1","call":{"cmd":"tabs"}}`,
 /// `{"type":"hub","id":2,"call":{"cmd":"get_settings"}}`, `{"type":"attach","machine":"m1","tab":"tab-1"}`
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientFrame {
     Auth { token: String },
@@ -590,7 +774,7 @@ pub enum ClientFrame {
 /// Hub to client.
 ///
 /// `{"type":"reply","id":1,"ok":[]}`, `{"type":"event","machine":"m1","event":{"kind":"exit","tab":"tab-1"}}`
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToClient {
     /// The answer to `Auth`: the account, its machines and every online machine's tabs.
@@ -607,7 +791,7 @@ pub enum ToClient {
 ///
 /// `{"type":"auth","token":"…","name":"mac-mini","os":"macos","version":"0.6.0"}`,
 /// `{"type":"call","id":7,"call":{"cmd":"slack_reply","connector":"c2","channel":"C1","thread":"1.2","text":"done"}}`
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MachineFrame {
     Auth { token: String, name: String, os: String, version: String },
@@ -623,7 +807,7 @@ pub enum MachineFrame {
 /// Hub to machine.
 ///
 /// `{"type":"call","id":3,"call":{"cmd":"close_tab","tab":"tab-2"}}`, `{"type":"subscribe","tab":"tab-2","viewer":"client-4"}`
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToMachine {
     /// The answer to `Auth`.
@@ -652,12 +836,15 @@ mod tests {
         TabView {
             id: "tab-3".into(),
             cwd: "/repo".into(),
+            account: "work".into(),
+            program: Program::Agent,
             bypass: false,
             running: true,
             status: Some(AgentStatus::NeedsInput),
             title: Some("Fix the build".into()),
             message: Some("Claude needs your permission to use Bash".into()),
             resume_at: None,
+            held: false,
             connector: Some("c1".into()),
             subject: Some(Subject::LinearIssue { issue: "uuid".into() }),
             opened: 3,
@@ -679,8 +866,17 @@ mod tests {
             json!({ "cmd": "set_bypass", "tab": "tab-1", "on": true, "cols": 120, "rows": 32 }),
         );
         round_trip(Call::PullRequestStack { repo: "o/r".into(), number: 7 }, json!({ "cmd": "pull_request_stack", "repo": "o/r", "number": 7 }));
+        round_trip(
+            Call::PullRequestFilterOptions { paths: vec!["/w/a".into()], kind: pulls::OptionKind::Authors, query: "oc".into() },
+            json!({ "cmd": "pull_request_filter_options", "paths": ["/w/a"], "kind": "authors", "query": "oc" }),
+        );
+        round_trip(Call::PullRequestFiles { host: "github.com".into(), repo: "o/r".into(), number: 7 }, json!({ "cmd": "pull_request_files", "host": "github.com", "repo": "o/r", "number": 7 }));
         round_trip(Call::CreateProject { name: "My App".into() }, json!({ "cmd": "create_project", "name": "My App" }));
         round_trip(Call::PublishProject { path: "/p".into() }, json!({ "cmd": "publish_project", "path": "/p" }));
+        round_trip(Call::SearchThreads { query: "flaky".into() }, json!({ "cmd": "search_threads", "query": "flaky" }));
+        round_trip(Call::MakeFolder { path: "~/new".into() }, json!({ "cmd": "make_folder", "path": "~/new" }));
+        round_trip(Call::Clone { repo: "https://h/o/r.git".into(), token: None, dest: Some("~/src/r".into()) }, json!({ "cmd": "clone", "repo": "https://h/o/r.git", "dest": "~/src/r" }));
+        assert_eq!(serde_json::from_value::<Call>(json!({ "cmd": "clone", "repo": "o/r" })).unwrap(), Call::Clone { repo: "o/r".into(), token: None, dest: None });
         round_trip(
             Call::RestartClaude { tab: "tab-1".into(), cols: 120, rows: 32 },
             json!({ "cmd": "restart_claude", "tab": "tab-1", "cols": 120, "rows": 32 }),
@@ -693,6 +889,7 @@ mod tests {
                     args: vec!["--name".into(), "ENG-7 Broken button".into(), "Run `'{{pinned}}' stage coding`".into()],
                     env: vec![("PINNED_CONNECTOR".into(), "c1".into()), ("PINNED_ISSUE".into(), "uuid".into())],
                     token: None,
+                    account: Some("work".into()),
                 },
             },
             json!({
@@ -702,8 +899,21 @@ mod tests {
                     "repo": "git@github.com:acme/app.git",
                     "args": ["--name", "ENG-7 Broken button", "Run `'{{pinned}}' stage coding`"],
                     "env": [["PINNED_CONNECTOR", "c1"], ["PINNED_ISSUE", "uuid"]],
+                    "account": "work",
                 },
             }),
+        );
+        round_trip(Call::ListAccounts, json!({ "cmd": "list_accounts" }));
+        round_trip(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }, json!({ "cmd": "add_account", "provider": "codex", "name": "Side" }));
+        round_trip(Call::SignIn { account: "work".into() }, json!({ "cmd": "sign_in", "account": "work" }));
+        round_trip(
+            Call::SwitchAccount { tab: "tab-1".into(), account: "spare".into(), cols: 120, rows: 32 },
+            json!({ "cmd": "switch_account", "tab": "tab-1", "account": "spare", "cols": 120, "rows": 32 }),
+        );
+        round_trip(Call::RemoveAccount { account: "side".into() }, json!({ "cmd": "remove_account", "account": "side" }));
+        round_trip(
+            Call::SetProjectAccount { path: "/repo".into(), account: None },
+            json!({ "cmd": "set_project_account", "path": "/repo", "account": null }),
         );
         round_trip(
             Call::Deliver { env: vec![("PINNED_SLACK_THREAD".into(), "1.2".into())], text: "yes".into() },
@@ -726,6 +936,23 @@ mod tests {
             json!({ "cmd": "read_file", "tab": "tab-1", "path": "src/a.rs", "root": true, "rev": "HEAD" }),
         );
         round_trip(
+            Call::PrChange { tab: "tab-1".into(), pr: "https://github.com/o/r/pull/7".into(), change: PrChange::React { subject: "IC_1".into(), content: crate::panel::Reaction::ThumbsUp, on: true } },
+            json!({ "cmd": "pr_change", "tab": "tab-1", "pr": "https://github.com/o/r/pull/7", "change": { "kind": "react", "subject": "IC_1", "content": "THUMBS_UP", "on": true } }),
+        );
+        round_trip(
+            Call::PrChange { tab: "tab-1".into(), pr: "7".into(), change: PrChange::Reviewer { login: "acme/core".into(), team: true, on: false } },
+            json!({ "cmd": "pr_change", "tab": "tab-1", "pr": "7", "change": { "kind": "reviewer", "login": "acme/core", "team": true, "on": false } }),
+        );
+        round_trip(
+            Call::PrChange { tab: "tab-1".into(), pr: "7".into(), change: PrChange::Comment { id: "PRRC_1".into(), review: true, body: "Fixed.".into() } },
+            json!({ "cmd": "pr_change", "tab": "tab-1", "pr": "7", "change": { "kind": "comment", "id": "PRRC_1", "review": true, "body": "Fixed." } }),
+        );
+        round_trip(Call::PrCandidates { tab: "tab-1".into(), pr: "7".into(), of: Candidates::Labels }, json!({ "cmd": "pr_candidates", "tab": "tab-1", "pr": "7", "of": "labels" }));
+        round_trip(
+            Call::PrStack { tab: "tab-1".into(), pr: "7".into(), action: StackAction::Merge, method: Some(MergeMethod::Squash), heads: vec![StackHead { number: 7, sha: "abc".into() }] },
+            json!({ "cmd": "pr_stack", "tab": "tab-1", "pr": "7", "action": "merge", "method": "squash", "heads": [{ "number": 7, "sha": "abc" }] }),
+        );
+        round_trip(
             Call::PrReview {
                 tab: "tab-1".into(),
                 pr: "https://github.com/o/r/pull/7".into(),
@@ -743,13 +970,23 @@ mod tests {
             Call::PrAction { tab: "tab-1".into(), pr: "7".into(), action: PrAction::Ready },
             json!({ "cmd": "pr_action", "tab": "tab-1", "pr": "7", "action": "ready" }),
         );
-        round_trip(Call::OpenIn { tab: "tab-1".into(), editor: "zed".into(), path: None }, json!({ "cmd": "open_in", "tab": "tab-1", "editor": "zed" }));
+        round_trip(Call::OpenIn { tab: "tab-1".into(), editor: "zed".into(), path: None, folder: false, reveal: false }, json!({ "cmd": "open_in", "tab": "tab-1", "editor": "zed" }));
+        round_trip(
+            Call::Device { op: crate::device::DeviceOp::Screenshot { platform: crate::device::Platform::Android, id: "emulator-5554".into() } },
+            json!({ "cmd": "device", "op": "screenshot", "platform": "android", "id": "emulator-5554" }),
+        );
+        round_trip(Call::Device { op: crate::device::DeviceOp::List }, json!({ "cmd": "device", "op": "list" }));
+        round_trip(
+            Call::OpenIn { tab: "tab-1".into(), editor: "default".into(), path: Some("src/a.rs".into()), folder: true, reveal: true },
+            json!({ "cmd": "open_in", "tab": "tab-1", "editor": "default", "path": "src/a.rs", "folder": true, "reveal": true }),
+        );
+        round_trip(Call::OpenIn { tab: "tab-1".into(), editor: "finder".into(), path: Some("src/a.rs".into()), folder: false, reveal: true }, json!({ "cmd": "open_in", "tab": "tab-1", "editor": "finder", "path": "src/a.rs", "reveal": true }));
     }
 
     #[test]
     fn unknown_fields_are_ignored_and_a_run_needs_only_folder_and_args() {
         let call: Call = serde_json::from_value(json!({ "cmd": "run", "run": { "folder": "/repo", "args": [], "later": 1 }, "extra": true })).unwrap();
-        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![], token: None } });
+        assert_eq!(call, Call::Run { run: RunSpec { folder: "/repo".into(), repo: None, args: vec![], env: vec![], token: None, account: None } });
         assert!(serde_json::from_value::<Call>(json!({ "cmd": "format_disk" })).is_err());
     }
 
@@ -763,16 +1000,21 @@ mod tests {
         round_trip(
             MachineEvent::Tabs { tabs: vec![tab_view()] },
             json!({ "kind": "tabs", "tabs": [{
-                "id": "tab-3", "cwd": "/repo", "bypass": false, "running": true, "status": "needs-input",
+                "id": "tab-3", "cwd": "/repo", "account": "work", "program": "agent", "bypass": false, "running": true, "status": "needs-input",
                 "title": "Fix the build", "message": "Claude needs your permission to use Bash",
                 "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3, "updated": 1792400000, "session": "s1",
                 "stats": { "active_ms": 4320000, "cost_usd": 3.42 },
             }] }),
         );
         round_trip(
-            MachineEvent::Usage { usage: Usage { five_hour: Some(crate::agent::LimitWindow { used_percentage: 23.5, resets_at: 1792400000 }), seven_day: None } },
-            json!({ "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 1792400000 } } }),
+            MachineEvent::Usage {
+                usage: Usage { five_hour: Some(crate::agent::LimitWindow { used_percentage: 23.5, resets_at: 1792400000 }), seven_day: None },
+                account: "work".into(),
+            },
+            json!({ "kind": "usage", "usage": { "five_hour": { "used_percentage": 23.5, "resets_at": 1792400000 } }, "account": "work" }),
         );
+        let old: MachineEvent = serde_json::from_value(json!({ "kind": "usage", "usage": {} })).unwrap();
+        assert!(matches!(old, MachineEvent::Usage { account, .. } if account == "claude"), "a machine before accounts reports the default account's usage");
         assert!(serde_json::from_value::<MachineEvent>(json!({ "kind": "output", "tab": "t", "data": "not base64!" })).is_err());
     }
 
@@ -780,6 +1022,11 @@ mod tests {
     fn hub_calls_match_the_tauri_commands() {
         round_trip(HubCall::GetSettings, json!({ "cmd": "get_settings" }));
         round_trip(HubCall::ConnectSlack { token: "xoxb-1".into() }, json!({ "cmd": "connect_slack", "token": "xoxb-1" }));
+        round_trip(
+            HubCall::ConnectUpstash { key: "box_1".into(), claude_token: "sk-ant-oat01-1".into() },
+            json!({ "cmd": "connect_upstash", "key": "box_1", "claude_token": "sk-ant-oat01-1" }),
+        );
+        round_trip(HubCall::DisconnectUpstash, json!({ "cmd": "disconnect_upstash" }));
         round_trip(
             HubCall::Stage { connector: "c1".into(), subject: Subject::LinearIssue { issue: "uuid".into() }, stage: Stage::Coding },
             json!({ "cmd": "stage", "connector": "c1", "issue": "uuid", "stage": "coding" }),
@@ -830,7 +1077,7 @@ mod tests {
             ToClient::Event { machine: "m1".into(), event: MachineEvent::Exit { tab: "tab-1".into() } },
             json!({ "type": "event", "machine": "m1", "event": { "kind": "exit", "tab": "tab-1" } }),
         );
-        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000 };
+        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000, upstash_box: None };
         round_trip(
             ToClient::Hello {
                 account: AccountView { id: "a1".into(), email: "ana@acme.dev".into() },
@@ -845,8 +1092,8 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, connectors: vec![], checked: None } },
-            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "connectors": [], "checked": null } }),
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, connectors: vec![], checked: None } },
+            json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
     }
 
@@ -878,7 +1125,7 @@ mod tests {
             json!({ "type": "call", "id": 3, "call": { "cmd": "resize_pty", "tab": "tab-2", "cols": 80, "rows": 24 } }),
         );
         round_trip(
-            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0 } },
+            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None } },
             json!({ "type": "hello", "machine": { "id": "m2", "name": "vps", "os": "linux", "online": true, "last_seen": 0 } }),
         );
     }

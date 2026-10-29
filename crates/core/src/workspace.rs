@@ -5,14 +5,14 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 const DIFF_LIMIT: usize = 400_000;
 const PR_FIELDS: &str = "number,title,state,isDraft,url,body,author,createdAt,updatedAt,mergedAt,closedAt,headRefName,baseRefName,headRefOid,baseRefOid,additions,deletions,changedFiles,reviewDecision,mergeable,statusCheckRollup,reviews,comments,commits,labels,reviewRequests,autoMergeRequest";
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Workspace {
     /// The folder the project's history is kept under, which a worktree shares with its repository.
     pub project: String,
@@ -20,6 +20,8 @@ pub struct Workspace {
     pub repo: bool,
     pub branch: Option<String>,
     pub worktree: bool,
+    /// The folder is the machine's own for threads without a project.
+    pub scratch: bool,
 }
 
 pub fn of(cwd: &Path) -> Workspace {
@@ -28,7 +30,7 @@ pub fn of(cwd: &Path) -> Workspace {
     let branch = git(&["symbolic-ref", "--short", "-q", "HEAD"]);
     let dir = git(&["rev-parse", "--git-dir"]);
     let worktree = matches!((&dir, git(&["rev-parse", "--git-common-dir"])), (Some(dir), Some(common)) if *dir != common);
-    Workspace { project: history::project_of(cwd).display().to_string(), repo: dir.is_some(), branch, worktree }
+    Workspace { project: history::project_of(cwd).display().to_string(), repo: dir.is_some(), branch, worktree, scratch: false }
 }
 
 /// What `gh` knows of the pull request `pr`, a number or URL, with its diff under `diff`. `path` is
@@ -50,7 +52,7 @@ pub fn pull_request(cwd: &Path, pr: &str, path: Option<&str>) -> Result<Value, S
     Ok(view)
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PrState {
     Open,
@@ -59,17 +61,32 @@ pub enum PrState {
     Closed,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct PrStatus {
     pub state: PrState,
     pub title: String,
     pub merged_at: Option<String>,
     pub closed_at: Option<String>,
+    /// The branches it merges from and into, which chain a thread's pull requests into a stack.
+    pub head: Option<String>,
+    pub base: Option<String>,
+    /// What the thread's preview card shows besides, read in the same gh call.
+    pub number: Option<u64>,
+    pub url: Option<String>,
+    pub author: Option<PrAuthor>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, schemars::JsonSchema)]
+pub struct PrAuthor {
+    pub login: String,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 pub fn pr_status(cwd: &Path, pr: &str, path: Option<&str>) -> Result<PrStatus, String> {
     check_pr(pr)?;
-    parse_pr_status(&gh(cwd, path, &["pr", "view", "--json", "state,isDraft,title,mergedAt,closedAt", "--", pr])?)
+    parse_pr_status(&gh(cwd, path, &["pr", "view", "--json", "state,isDraft,title,mergedAt,closedAt,headRefName,baseRefName,number,url,author,createdAt", "--", pr])?)
 }
 
 fn parse_pr_status(view: &str) -> Result<PrStatus, String> {
@@ -83,6 +100,12 @@ fn parse_pr_status(view: &str) -> Result<PrStatus, String> {
         title: String,
         merged_at: Option<String>,
         closed_at: Option<String>,
+        head_ref_name: Option<String>,
+        base_ref_name: Option<String>,
+        number: Option<u64>,
+        url: Option<String>,
+        author: Option<PrAuthor>,
+        created_at: Option<String>,
     }
     let view: View = serde_json::from_str(view).map_err(|e| format!("gh sent a bad answer: {e}"))?;
     let state = match view.state.as_str() {
@@ -91,7 +114,18 @@ fn parse_pr_status(view: &str) -> Result<PrStatus, String> {
         _ if view.is_draft => PrState::Draft,
         _ => PrState::Open,
     };
-    Ok(PrStatus { state, title: view.title, merged_at: view.merged_at, closed_at: view.closed_at })
+    Ok(PrStatus {
+        state,
+        title: view.title,
+        merged_at: view.merged_at,
+        closed_at: view.closed_at,
+        head: view.head_ref_name,
+        base: view.base_ref_name,
+        number: view.number,
+        url: view.url,
+        author: view.author,
+        created_at: view.created_at,
+    })
 }
 
 /// Checks out the pull request `pr`, a number or URL, in `cwd` with gh.
@@ -108,7 +142,7 @@ pub fn pull_requests(cwd: &Path, path: Option<&str>) -> Result<Value, String> {
     Ok(Value::Array(list))
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PrAction {
     Merge,
@@ -185,7 +219,7 @@ fn clip(text: &mut String) -> bool {
     true
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffScope {
     /// The working tree, untracked files too, against HEAD.
@@ -194,7 +228,7 @@ pub enum DiffScope {
     Base,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Diff {
     pub patch: String,
     pub truncated: bool,
@@ -223,7 +257,7 @@ pub fn diff(cwd: &Path, scope: DiffScope, ignore_whitespace: bool, against: Opti
             (fork, Some(base))
         }
     };
-    let mut args = vec!["diff", "--no-color", "--no-renames", "--no-ext-diff"];
+    let mut args = vec!["diff", "--no-color", "--find-renames", "--no-ext-diff"];
     if ignore_whitespace {
         args.push("-w");
     }
@@ -237,7 +271,7 @@ pub fn diff(cwd: &Path, scope: DiffScope, ignore_whitespace: bool, against: Opti
 }
 
 /// A TCP port a process on the machine listens on and that answers HTTP with a page.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Listener {
     pub port: u16,
     pub pid: u32,
@@ -267,6 +301,7 @@ pub fn listeners(root: Option<u32>, path: Option<&str>) -> Vec<Listener> {
 }
 
 /// `(port, pid, command)` of every listening TCP socket, from lsof, or /proc where lsof is missing.
+#[cfg(not(windows))]
 fn listening(path: Option<&str>) -> Vec<(u16, u32, String)> {
     // macOS keeps lsof in /usr/sbin, which a PATH may leave out.
     let lsof = if Path::new("/usr/sbin/lsof").exists() { "/usr/sbin/lsof" } else { "lsof" };
@@ -278,6 +313,59 @@ fn listening(path: Option<&str>) -> Vec<(u16, u32, String)> {
     }
 }
 
+/// `(port, pid, command)` of every listening TCP socket, from netstat.
+#[cfg(windows)]
+fn listening(path: Option<&str>) -> Vec<(u16, u32, String)> {
+    let names: HashMap<u32, String> = processes().into_iter().map(|(pid, _, name)| (pid, name)).collect();
+    let out = run(Path::new("/"), path, "netstat", &["-ano"]).unwrap_or_default();
+    parse_netstat(&out).into_iter().map(|(port, pid)| (port, pid, names.get(&pid).cloned().unwrap_or_default())).collect()
+}
+
+/// `(port, pid)` of each listening TCP socket in `netstat -ano`. netstat names the state in the
+/// system's language, so a listening socket is told by its unset foreign address.
+#[cfg(any(windows, test))]
+fn parse_netstat(out: &str) -> Vec<(u16, u32)> {
+    out.lines()
+        .filter_map(|line| {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            let [proto, local, foreign, _, pid] = cols[..] else { return None };
+            if proto != "TCP" || !matches!(foreign, "0.0.0.0:0" | "[::]:0") {
+                return None;
+            }
+            Some((local.rsplit(':').next()?.parse().ok()?, pid.parse().ok()?))
+        })
+        .collect()
+}
+
+/// `(pid, parent pid, program)` of every process, the program without its .exe.
+#[cfg(windows)]
+fn processes() -> Vec<(u32, u32, String)> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if handle == INVALID_HANDLE_VALUE {
+        return vec![];
+    }
+    // SAFETY: a valid snapshot handle this function owns, closed when `snapshot` drops.
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(handle) };
+    // SAFETY: PROCESSENTRY32W is plain data, valid zeroed.
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut found = vec![];
+    let mut more = unsafe { Process32FirstW(handle, &mut entry) } != 0;
+    while more {
+        let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+        let exe = String::from_utf16_lossy(&entry.szExeFile[..len]);
+        let program = exe.strip_suffix(".exe").unwrap_or(&exe).to_owned();
+        found.push((entry.th32ProcessID, entry.th32ParentProcessID, program));
+        more = unsafe { Process32NextW(handle, &mut entry) } != 0;
+    }
+    drop(snapshot);
+    found
+}
+
+#[cfg(any(not(windows), test))]
 fn parse_lsof(out: &str) -> Vec<(u16, u32, String)> {
     let (mut pid, mut command) = (0, String::new());
     let mut found = vec![];
@@ -297,6 +385,7 @@ fn parse_lsof(out: &str) -> Vec<(u16, u32, String)> {
     found
 }
 
+#[cfg(not(windows))]
 fn proc_listening() -> Vec<(u16, u32, String)> {
     let mut ports = HashMap::new();
     for file in ["/proc/net/tcp", "/proc/net/tcp6"] {
@@ -324,15 +413,11 @@ fn proc_listening() -> Vec<(u16, u32, String)> {
     found
 }
 
-/// `root` and every process under it, from `ps`.
+/// `root` and every process under it.
 fn descendants(root: u32, path: Option<&str>) -> HashSet<u32> {
-    let out = run(Path::new("/"), path, "ps", &["-A", "-o", "pid=,ppid="]).unwrap_or_default();
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    for line in out.lines() {
-        let mut cols = line.split_whitespace().filter_map(|c| c.parse().ok());
-        if let (Some(pid), Some(ppid)) = (cols.next(), cols.next()) {
-            children.entry(ppid).or_default().push(pid);
-        }
+    for (pid, ppid) in parents(path) {
+        children.entry(ppid).or_default().push(pid);
     }
     let mut tree = HashSet::from([root]);
     let mut next = vec![root];
@@ -344,6 +429,23 @@ fn descendants(root: u32, path: Option<&str>) -> HashSet<u32> {
         }
     }
     tree
+}
+
+/// `(pid, parent pid)` of every process, from `ps`.
+#[cfg(not(windows))]
+fn parents(path: Option<&str>) -> Vec<(u32, u32)> {
+    let out = run(Path::new("/"), path, "ps", &["-A", "-o", "pid=,ppid="]).unwrap_or_default();
+    out.lines()
+        .filter_map(|line| {
+            let mut cols = line.split_whitespace().filter_map(|c| c.parse().ok());
+            Some((cols.next()?, cols.next()?))
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn parents(_path: Option<&str>) -> Vec<(u32, u32)> {
+    processes().into_iter().map(|(pid, ppid, _)| (pid, ppid)).collect()
 }
 
 fn serves_html(port: u16) -> bool {
@@ -369,7 +471,7 @@ fn serves_html(port: u16) -> bool {
 }
 
 /// An editor `open_in` can open a folder in: an app bundle on a Mac, a command on PATH elsewhere.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Editor {
     pub id: &'static str,
     pub name: &'static str,
@@ -391,7 +493,7 @@ const EDITORS: &[(&str, &str, &str, &[&str])] = &[
     ("goland", "GoLand", "GoLand", &["goland"]),
     ("rustrover", "RustRover", "RustRover", &["rustrover"]),
     ("clion", "CLion", "CLion", &["clion"]),
-    ("finder", "Finder", "Finder", &["xdg-open"]),
+    ("finder", "Finder", "Finder", &["xdg-open", "explorer"]),
 ];
 
 /// Where `id` lives on this machine: its app bundle, or its command.
@@ -404,18 +506,30 @@ fn editor_at(id: &str, home: &Path, path: Option<&str>) -> Option<PathBuf> {
         let bundle = format!("{app}.app");
         return [home.join("Applications"), PathBuf::from("/Applications")].into_iter().map(|dir| dir.join(&bundle)).find(|b| b.is_dir());
     }
+    // Windows editors put a .cmd launcher on PATH, and explorer is an .exe.
+    let suffixes: &[&str] = if cfg!(windows) { &[".exe", ".cmd"] } else { &[""] };
     let dirs: Vec<PathBuf> = std::env::split_paths(path.unwrap_or_default()).collect();
-    commands.iter().flat_map(|c| dirs.iter().map(move |d| d.join(c))).find(|f| f.is_file())
+    commands.iter().flat_map(|c| dirs.iter().flat_map(move |d| suffixes.iter().map(move |s| d.join(format!("{c}{s}"))))).find(|f| f.is_file())
 }
 
 pub fn editors(home: &Path, path: Option<&str>) -> Vec<Editor> {
-    let name = |id, name| if id == "finder" && !cfg!(target_os = "macos") { "File manager" } else { name };
+    let name = |id, name| if id == "finder" && !cfg!(target_os = "macos") { if cfg!(windows) { "File Explorer" } else { "File manager" } } else { name };
     EDITORS.iter().filter(|e| editor_at(e.0, home, path).is_some()).map(|&(id, n, ..)| Editor { id, name: name(id, n) }).collect()
 }
 
-/// Opens `cwd`, or `file` inside its repository, in the editor `id`.
-pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, home: &Path, path: Option<&str>) -> Result<(), String> {
-    let editor = editor_at(id, home, path).ok_or_else(|| format!("{id} isn't installed on this machine"))?;
+#[derive(Clone, Copy, Default)]
+pub struct OpenHow {
+    /// `file` is from `cwd` rather than its repository's top.
+    pub folder: bool,
+    /// Shows `file` in the file manager instead of opening it.
+    pub reveal: bool,
+}
+
+/// Opens `cwd`, or `file` inside its repository, in the editor `id`. `default` opens it with the
+/// app the system picks for it, and the file manager, `default` or `finder`, shows it selected in its
+/// folder with `how.reveal`.
+pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, how: OpenHow, home: &Path, path: Option<&str>) -> Result<(), String> {
+    let editor = if id == "default" { None } else { Some(editor_at(id, home, path).ok_or_else(|| format!("{id} isn't installed on this machine"))?) };
     let target = match file {
         None => cwd.to_owned(),
         Some(file) => {
@@ -423,18 +537,13 @@ pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, home: &Path, path: Opti
             if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
                 return Err(format!("{file:?} is not a path inside the project"));
             }
-            let top = run(cwd, None, "git", &["rev-parse", "--show-toplevel"]).map(|t| PathBuf::from(t.trim())).unwrap_or_else(|_| cwd.to_owned());
+            let top = if how.folder { cwd.to_owned() } else { run(cwd, None, "git", &["rev-parse", "--show-toplevel"]).map(|t| PathBuf::from(t.trim())).unwrap_or_else(|_| cwd.to_owned()) };
             top.join(rel)
         }
     };
-    let mut command = if cfg!(target_os = "macos") {
-        let mut open = Command::new("open");
-        open.arg("-a").arg(&editor);
-        open
-    } else {
-        Command::new(&editor)
-    };
-    command.arg(&target).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let (program, args) = open_command(cfg!(target_os = "macos"), cfg!(windows), id, editor.as_deref(), &target, how.reveal);
+    let mut command = crate::process::command(program);
+    command.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(path) = path {
         command.env("PATH", path);
     }
@@ -443,13 +552,33 @@ pub fn open_in(cwd: &Path, id: &str, file: Option<&str>, home: &Path, path: Opti
     Ok(())
 }
 
+/// The program and arguments that open `target` in the editor `id`, found at `editor`, or with no
+/// editor in the app the system picks. The file manager, `finder` or no editor, shows `target`
+/// selected in its folder with `reveal`.
+fn open_command(mac: bool, windows: bool, id: &str, editor: Option<&Path>, target: &Path, reveal: bool) -> (PathBuf, Vec<PathBuf>) {
+    let manager = editor.is_none() || id == "finder";
+    if mac {
+        return match editor {
+            _ if manager && reveal => ("open".into(), vec!["-R".into(), target.to_owned()]),
+            Some(editor) if !manager => ("open".into(), vec!["-a".into(), editor.to_owned(), target.to_owned()]),
+            _ => ("open".into(), vec![target.to_owned()]),
+        };
+    }
+    if windows && manager {
+        let arg = if reveal { format!("/select,{}", target.display()) } else { target.display().to_string() };
+        return ("explorer".into(), vec![arg.into()]);
+    }
+    let program = editor.map_or_else(|| "xdg-open".into(), Path::to_owned);
+    (program, vec![if manager && reveal { target.parent().unwrap_or(target) } else { target }.to_owned()])
+}
+
 pub(crate) enum Failure {
     Missing,
     Said(String),
 }
 
 pub(crate) fn run(cwd: &Path, path: Option<&str>, program: &str, args: &[&str]) -> Result<String, Failure> {
-    let mut command = Command::new(program);
+    let mut command = crate::process::command(program);
     command.args(args).current_dir(cwd).stdin(Stdio::null());
     if let Some(path) = path {
         command.env("PATH", path);
@@ -467,7 +596,7 @@ mod tests {
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) {
-        assert!(Command::new("git").args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "git {args:?}");
+        assert!(crate::process::command("git").args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "git {args:?}");
     }
 
     #[test]
@@ -512,8 +641,11 @@ mod tests {
         for pr in ["--web", "-R other/repo", "", "12a", "http://github.com/o/r/pull/1"] {
             assert!(pull_request(dir.path(), pr, None).unwrap_err().contains("is not a pull request"), "{pr:?}");
         }
-        let missing = pull_request(dir.path(), "7", Some(dir.path().to_str().unwrap())).unwrap_err();
-        assert!(missing.contains("isn't installed"), "{missing}");
+        // Windows also looks for a program on pinned's own PATH, so an empty PATH can't hide gh there.
+        if cfg!(unix) {
+            let missing = pull_request(dir.path(), "7", Some(dir.path().to_str().unwrap())).unwrap_err();
+            assert!(missing.contains("isn't installed"), "{missing}");
+        }
         assert!(pr_status(dir.path(), "--web", None).unwrap_err().contains("is not a pull request"));
     }
 
@@ -524,8 +656,19 @@ mod tests {
         assert_eq!(status(r#"{"state":"OPEN","isDraft":true,"title":"t","mergedAt":null,"closedAt":null}"#).state, PrState::Draft);
         assert_eq!(status(r#"{"state":"CLOSED","isDraft":true,"title":"t","mergedAt":null,"closedAt":"2026-01-02T00:00:00Z"}"#).state, PrState::Closed);
         assert_eq!(
-            status(r#"{"state":"MERGED","isDraft":false,"title":"Add notes","mergedAt":"2026-01-01T10:40:00Z","closedAt":"2026-01-01T10:40:00Z"}"#),
-            PrStatus { state: PrState::Merged, title: "Add notes".into(), merged_at: Some("2026-01-01T10:40:00Z".into()), closed_at: Some("2026-01-01T10:40:00Z".into()) }
+            status(r#"{"state":"MERGED","isDraft":false,"title":"Add notes","mergedAt":"2026-01-01T10:40:00Z","closedAt":"2026-01-01T10:40:00Z","headRefName":"notes","baseRefName":"main","number":42,"url":"https://github.com/example/alpha/pull/42","author":{"id":"U_1","is_bot":false,"login":"sweeper","name":"Sweep"},"createdAt":"2026-01-01T10:00:00Z"}"#),
+            PrStatus {
+                state: PrState::Merged,
+                title: "Add notes".into(),
+                merged_at: Some("2026-01-01T10:40:00Z".into()),
+                closed_at: Some("2026-01-01T10:40:00Z".into()),
+                head: Some("notes".into()),
+                base: Some("main".into()),
+                number: Some(42),
+                url: Some("https://github.com/example/alpha/pull/42".into()),
+                author: Some(PrAuthor { login: "sweeper".into(), name: Some("Sweep".into()) }),
+                created_at: Some("2026-01-01T10:00:00Z".into()),
+            }
         );
         assert!(parse_pr_status("not json").unwrap_err().contains("bad answer"));
     }
@@ -553,6 +696,11 @@ mod tests {
         let trimmed = diff(repo, DiffScope::Uncommitted, true, None).unwrap();
         assert!(!trimmed.patch.contains("+    fn b() {}") && trimmed.patch.contains("+fn c() {}"), "{}", trimmed.patch);
         assert_eq!((all.base, all.truncated), (None, false));
+
+        commit(repo, "second");
+        std::fs::rename(repo.join("untracked.md"), repo.join("moved.md")).unwrap();
+        let moved = diff(repo, DiffScope::Uncommitted, false, None).unwrap();
+        assert!(moved.patch.contains("rename from untracked.md\nrename to moved.md"), "{}", moved.patch);
     }
 
     #[test]
@@ -588,6 +736,12 @@ mod tests {
     }
 
     #[test]
+    fn netstat_output_names_each_listening_port_with_its_process() {
+        let out = "\r\nConexões ativas\r\n\r\n  Proto  Endereço local  Endereço externo  Estado\r\n  TCP    0.0.0.0:5173   0.0.0.0:0  ESCUTANDO  501\r\n  TCP    127.0.0.1:5173  127.0.0.1:61000  ESTABELECIDA  501\r\n  TCP    [::1]:3000  [::]:0  ESCUTANDO  77\r\n  UDP    0.0.0.0:5353  *:*  88\r\n";
+        assert_eq!(parse_netstat(out), vec![(5173, 501), (3000, 77)]);
+    }
+
+    #[test]
     fn a_web_server_the_session_started_is_listed_as_its_own() {
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = server.local_addr().unwrap().port();
@@ -611,19 +765,45 @@ mod tests {
     fn editors_open_only_known_ids_and_paths_inside_the_project() {
         let dir = tempfile::tempdir().unwrap();
         let empty = dir.path().to_str().unwrap();
-        assert!(open_in(dir.path(), "notepad", None, dir.path(), Some(empty)).unwrap_err().contains("isn't installed"));
+        assert!(open_in(dir.path(), "notepad", None, OpenHow::default(), dir.path(), Some(empty)).unwrap_err().contains("isn't installed"));
         for path in ["../secret", "/etc/passwd", "a/../../b"] {
-            let err = open_in(dir.path(), "finder", Some(path), dir.path(), Some(empty));
+            let err = open_in(dir.path(), "finder", Some(path), OpenHow::default(), dir.path(), Some(empty));
             if cfg!(target_os = "macos") {
                 assert!(err.unwrap_err().contains("not a path inside"), "{path}");
             }
+            let err = open_in(dir.path(), "default", Some(path), OpenHow { folder: true, reveal: true }, dir.path(), Some(empty));
+            assert!(err.unwrap_err().contains("not a path inside"), "{path}");
         }
         assert!(pr_action(dir.path(), "--admin", PrAction::Merge, None).unwrap_err().contains("is not a pull request"));
     }
 
     #[test]
+    fn the_file_manager_opens_a_file_in_its_app_or_reveals_it() {
+        let file = Path::new("/w/src/a.rs");
+        let run = |mac, id, editor: &str, reveal| {
+            let (program, args) = open_command(mac, false, id, Some(Path::new(editor)), file, reveal);
+            [program].into_iter().chain(args).map(|a| a.display().to_string()).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(run(true, "finder", "/System/Library/CoreServices/Finder.app", true), "open -R /w/src/a.rs");
+        assert_eq!(run(true, "finder", "/System/Library/CoreServices/Finder.app", false), "open /w/src/a.rs");
+        assert_eq!(run(true, "zed", "/Applications/Zed.app", false), "open -a /Applications/Zed.app /w/src/a.rs");
+        assert_eq!(run(false, "finder", "/usr/bin/xdg-open", true), "/usr/bin/xdg-open /w/src");
+        assert_eq!(run(false, "finder", "/usr/bin/xdg-open", false), "/usr/bin/xdg-open /w/src/a.rs");
+        assert_eq!(run(false, "zed", "/usr/bin/zed", true), "/usr/bin/zed /w/src/a.rs");
+        let default = |mac, windows, reveal| {
+            let (program, args) = open_command(mac, windows, "default", None, file, reveal);
+            [program].into_iter().chain(args).map(|a| a.display().to_string()).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(default(true, false, false), "open /w/src/a.rs");
+        assert_eq!(default(true, false, true), "open -R /w/src/a.rs");
+        assert_eq!(default(false, true, true), "explorer /select,/w/src/a.rs");
+        assert_eq!(default(false, false, false), "xdg-open /w/src/a.rs");
+        assert_eq!(default(false, false, true), "xdg-open /w/src");
+    }
+
+    #[test]
     fn a_plain_folder_has_no_branch() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(of(dir.path()), Workspace { project: dir.path().display().to_string(), repo: false, branch: None, worktree: false });
+        assert_eq!(of(dir.path()), Workspace { project: dir.path().display().to_string(), repo: false, branch: None, worktree: false, scratch: false });
     }
 }

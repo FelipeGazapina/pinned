@@ -6,6 +6,20 @@ const fs = require("fs");
 const path = require("path");
 
 const args = process.argv.slice(2);
+// An account's home is CLAUDE_CONFIG_DIR, signed in once `auth login` ran there; the default home always is.
+const home = process.env.CLAUDE_CONFIG_DIR ?? path.join(process.env.HOME, ".claude");
+if (args[0] === "auth") {
+  const signedIn = !process.env.CLAUDE_CONFIG_DIR || fs.existsSync(path.join(home, "signed-in"));
+  if (args[1] === "status") {
+    const name = path.basename(process.env.CLAUDE_CONFIG_DIR ?? "personal");
+    console.log(JSON.stringify(signedIn ? { loggedIn: true, email: `${name}@example.test`, subscriptionType: "max" } : { loggedIn: false }));
+    process.exit(signedIn ? 0 : 1);
+  }
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, "signed-in"), "");
+  console.log("Signed in");
+  process.exit(0);
+}
 // `claude -p`, which pinned runs to title a conversation: the title names the thread's first prompt.
 if (args.includes("-p") && /USER: /.test(args.at(-1) ?? "")) {
   process.stdout.write(`${JSON.stringify({ title: `Titled ${args.at(-1).match(/USER: (.*)/)?.[1] ?? "nothing"}` })}\n`);
@@ -15,6 +29,33 @@ if (args.includes("-p") && /USER: /.test(args.at(-1) ?? "")) {
 if (args.includes("-p") && /git commit message/.test(args.at(-1) ?? "")) {
   process.stdout.write("Write the sweep's notes\n");
   process.exit(0);
+}
+// `claude -p` over the SDK's control protocol, as the Usage page checks limits: it answers
+// initialize with the account and get_usage with the plan's windows, then waits to be killed.
+if (args.includes("-p") && args.includes("--input-format")) {
+  const resetsIn = (s) => new Date(Date.now() + s * 1000).toISOString();
+  const answers = {
+    initialize: { account: { email: "sweep@example.test", subscriptionType: "max", tokenSource: "claude.ai" } },
+    get_usage: { subscription_type: "max", rate_limits_available: true, rate_limits: {
+      five_hour: { utilization: 23.5, resets_at: resetsIn(3600) },
+      seven_day: { utilization: 74, resets_at: resetsIn(86400) },
+      model_scoped: [{ display_name: "Fable", utilization: 40, resets_at: resetsIn(86400) }],
+      extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1250, utilization: 25 },
+    } },
+  };
+  let buffered = "";
+  process.stdin.on("data", (chunk) => {
+    buffered += chunk;
+    for (let at; (at = buffered.indexOf("\n")) >= 0; ) {
+      const line = buffered.slice(0, at);
+      buffered = buffered.slice(at + 1);
+      const message = JSON.parse(line);
+      fs.appendFileSync(path.join(process.env.HOME, "claude-control.log"), `${message.request.subtype}\n`);
+      const response = answers[message.request.subtype] ?? {};
+      process.stdout.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response } })}\n`);
+    }
+  });
+  return;
 }
 // Any other `claude -p`, as the pull request guide runs it: the prompt on stdin, one JSON answer, then exit.
 if (args.includes("-p")) {
@@ -56,7 +97,7 @@ const hook = (event, extra = {}) => {
     record({ type: "cost-state", startTime: started, totalCostUSD: turnsDone * 0.42, hasUnknownModelCost: false });
   }
 };
-const transcript = path.join(process.env.HOME, ".claude", "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${session}.jsonl`);
+const transcript = path.join(home, "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${session}.jsonl`);
 fs.mkdirSync(path.dirname(transcript), { recursive: true });
 let lines = 0;
 function record(entry) {
@@ -109,10 +150,17 @@ function spawnAgents() {
 }
 
 const DOT_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+// 48 by 32 pixels, big enough to click.
+const TILE_PNG = "iVBORw0KGgoAAAANSUhEUgAAADAAAAAgCAIAAADbtmxLAAAAMUlEQVR42u3OQQ0AAAgEoItjRCMayxbOBxsBSPW8EiEhISEhISEhISEhISEhISGhSwvNGXB5IWPlbwAAAABJRU5ErkJggg==";
 // Each takes a while, as claude would, and ends the turn itself.
 const SLOW = {
-  "/compact": () => record({ type: "user", isCompactSummary: true, message: { role: "user", content: "This session is being continued from a previous conversation." } }),
+  "/compact": () => {
+    record({ type: "system", subtype: "compact_boundary", content: "Conversation compacted", isMeta: false, compactMetadata: { trigger: "manual", preTokens: 258550, postTokens: 25325 } });
+    record({ type: "user", isCompactSummary: true, message: { role: "user", content: "This session is being continued from a previous conversation." } });
+    said("<local-command-stdout>Compacted </local-command-stdout>");
+  },
   think: () => wrote([{ type: "text", text: "Done thinking." }]),
+  "todos-live": () => wrote([{ type: "text", text: "Finished the list." }]),
   build: () => {
     said([{ type: "tool_result", tool_use_id: building, content: "built in 4s" }]);
     wrote([{ type: "text", text: "Built." }]);
@@ -138,17 +186,62 @@ function drawTrust() {
   TRUST.forEach((c, i) => out(`${i + 1 === trusting ? " ❯" : "  "} ${c}\r\n`));
   out("\r\n Enter to confirm · Esc to cancel\r\n");
 }
-const greet = () => out(`fake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}${args.includes("--model") ? ` (model ${args[args.indexOf("--model") + 1]})` : ""}\r\n> `);
+const greet = () =>
+  out(`account ${process.env.PINNED_ACCOUNT}${resumed ? `, resuming ${resumed}` : ""}\r\nfake claude in ${process.cwd()}${args.includes("--dangerously-skip-permissions") ? " (bypass)" : ""}${args.includes("--model") ? ` (model ${args[args.indexOf("--model") + 1]})` : ""}\r\n> `);
 if (resumed) out(`resumed ${resumed}\r\n`);
 if (trusting) drawTrust();
 else greet();
+
+// Settings as claude 2.1 draws them for /usage: under a ▔ rule, with no transcript line. Tab
+// switches the shown tab and Esc closes it.
+const SETTINGS = { Status: ["Version: 2.1.310", "Model: opus"], Usage: ["Current session", "█▌        3% used", "Resets 12:10pm"] };
+// Like claude's renderer, a screen under a ▔ rule redraws over the rows it drew before, wrapped
+// ones included, and closing it erases them, so the rule never outlives its screen.
+let drawn = 0;
+const rowsOf = (line) => Math.max(1, Math.ceil(line.replace(/\x1b\[[0-9;]*m/g, "").length / (process.stdout.columns || 80)));
+function eraseScreen() {
+  out(drawn ? `\x1b[${drawn}A\r\x1b[J` : "\r\x1b[J");
+  drawn = 0;
+}
+function drawScreen(lines) {
+  eraseScreen();
+  out(lines.join("\r\n"));
+  drawn = lines.reduce((n, l) => n + rowsOf(l), 0) - 1;
+}
+let showing = null;
+function drawSettings() {
+  drawScreen(["▔".repeat(30), `Settings ${Object.keys(SETTINGS).map((k) => (k === showing ? `\x1b[7m ${k} \x1b[27m` : ` ${k} `)).join(" ")}`, "", ...SETTINGS[showing], "", "Esc to cancel"]);
+}
+function answerSettings(key) {
+  if (key === "\t") showing = showing === "Usage" ? "Status" : "Usage";
+  else if (key === "\x1b") {
+    showing = null;
+    eraseScreen();
+    return prompt();
+  }
+  drawSettings();
+}
 
 let line = "";
 function submit() {
   out("\r\n");
   if (line === "/exit") process.exit(0);
+  if (line === "/usage") {
+    showing = "Usage";
+    line = "";
+    return drawSettings();
+  }
   hook("UserPromptSubmit", { prompt: line });
-  said(line);
+  // "pictures" stands for a prompt with images, which claude writes as one message below.
+  if (line !== "pictures") said(line);
+  // A usage limit stops the turn as claude's does: the error goes to the transcript, then StopFailure.
+  if (line === "/limit") {
+    record({ type: "assistant", apiError: "usage_limit_reached", apiErrorParams: { rate_limit_info: { status: "rejected", resetsAt: Math.floor(Date.now() / 1000) + 3600 } }, message: { role: "assistant", content: [{ type: "text", text: "You've hit your limit" }] } });
+    out("You've hit your limit\r\n");
+    hook("StopFailure", { transcript_path: transcript });
+    line = "";
+    return prompt();
+  }
   if (line === "/modes") {
     mode = "manual";
     line = "";
@@ -199,6 +292,15 @@ function submit() {
     line = "";
     return drawQuestion();
   }
+  // A usage limit stops the turn as claude's does: an API error line, then StopFailure.
+  if (line === "limited" || line === "spent") {
+    const resetsAt = Math.floor(Date.now() / 1000) + 2 * 3600;
+    const text = line === "limited" ? "You've hit your limit · resets 5pm (UTC)" : "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage?from=cc";
+    record({ type: "assistant", isApiErrorMessage: true, error: "rate_limit", apiErrorStatus: 429, ...(line === "limited" ? { apiError: "usage_limit_reached", apiErrorParams: { rate_limit_info: { status: "rejected", resetsAt, rateLimitType: "five_hour" } } } : {}), message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text }] } });
+    hook("StopFailure", { transcript_path: transcript });
+    line = "";
+    return prompt();
+  }
   if (line === "/ask") {
     wrote([{ type: "tool_use", id: `ask-${lines}`, name: "Bash", input: { command: "rm -rf build", description: "Remove the build folder" } }]);
     hook("Notification", { message: "Claude needs your permission to use Bash" });
@@ -208,6 +310,7 @@ function submit() {
     return;
   } else if (SLOW[line]) {
     const finish = SLOW[line];
+    if (line === "todos-live") used("TodoWrite", { todos: TODOS.map((t) => ({ ...t, status: "completed" })) }, TODOS_SAVED);
     if (line === "think") wrote([{ type: "thinking", thinking: "**Weighing the options**\n\nComparing the two approaches before answering.", signature: "c2ln" }]);
     if (line === "build") {
       building = `tool-${lines}`;
@@ -231,6 +334,22 @@ function submit() {
     wrote([{ type: "text", text: "Looked around; one check failed." }]);
     used("Grep", { pattern: "TODO" }, "No matches found");
     wrote([{ type: "text", text: "Here is the fix:\n\n```rust\nfn main() {\n    let answer = 42;\n}\n```\n\nSee [the pull request](https://github.com/example/beta/pull/7) and [the docs](https://example.com/docs)." }]);
+  } else if (line === "tools") {
+    const cwd = process.cwd();
+    used("Read", { file_path: path.join(cwd, "notes.md") }, "1\tnotes");
+    used("Bash", { command: "git status --short", description: "Show the working tree" }, " M notes.md");
+    fs.appendFileSync("notes.md", "tools\n");
+    used("Edit", { file_path: path.join(cwd, "notes.md"), old_string: "a", new_string: "b" }, "The file has been updated.");
+    used("Glob", { pattern: "**/*.rs" }, "src/main.rs");
+    used("Grep", { pattern: "TODO", path: path.join(cwd, "src"), glob: "*.rs" }, "src/main.rs:3");
+    const search = `tool-${lines}`;
+    wrote([{ type: "tool_use", id: search, name: "WebSearch", input: { query: "rust parser crates" } }]);
+    record({ type: "user", toolUseResult: { query: "rust parser crates", results: [{ tool_use_id: "srv", content: [{ title: "nom on crates.io", url: "https://crates.io/crates/nom" }] }] }, message: { role: "user", content: [{ type: "tool_result", tool_use_id: search, content: "Web search results for query: \"rust parser crates\"" }] } });
+    used("WebFetch", { url: "https://example.com/docs", prompt: "Summarize" }, "The docs say hello.");
+    used("Skill", { skill: "deploy", args: "prod" }, "Launching skill: deploy");
+    used("mcp__claude_ai_Linear__create_issue", { title: "Fix the parser", team: "ENG" }, '{"id":"ENG-1"}');
+    used("mcp__claude_ai_Linear__list_issues", { query: "parser" }, "[]");
+    wrote([{ type: "text", text: "Used the tools." }]);
   } else if (line === "plan") {
     const steps = Array.from({ length: 24 }, (_, i) => `${i + 1}. Step ${i + 1} of the plan`).join("\n");
     used("ExitPlanMode", { plan: `# Ship the fix\n\n## Summary\n\nPatch the parser, then test it.\n\n${steps}` }, "User has approved your plan. You can now start coding.");
@@ -239,6 +358,12 @@ function submit() {
     used("AskUserQuestion", { questions: [{ question: "Which color should the button be?", header: "Color", multiSelect: false, options: [{ label: "Blue", description: "Calm" }, { label: "Red", description: "Loud" }] }] },
       'Your questions have been answered: "Which color should the button be?"="Blue". You can now continue with these answers in mind.');
     wrote([{ type: "text", text: "Blue it is." }]);
+  } else if (line === "artifact") {
+    const file = path.join(process.cwd(), "payouts.html");
+    used("Artifact", { file_path: file, icon: "flow", description: "Follows an invoice to the bank." },
+      `Published ${file} at https://claude.ai/artifact/PgGFrq1LMW2iDhYZThVQcD (Version 1, version id 1792690604-cdcc) Icon: "flow".\n\nTo update: publish the same file path here.`);
+    used("Artifact", { action: "quickstart", intent: "other" }, "Start from the Dashboard type.");
+    wrote([{ type: "text", text: "Published the page." }]);
   } else if (line === "oops") {
     record({ type: "assistant", isApiErrorMessage: true, message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "API Error: 529 Overloaded\nThe service is busy. Try again in a moment." }] } });
   } else if (line === "fail") {
@@ -250,6 +375,28 @@ function submit() {
   } else if (line === "picture") {
     said([{ type: "text", text: "What is in this picture?" }, { type: "image", source: { type: "base64", media_type: "image/png", data: DOT_PNG } }]);
     wrote([{ type: "text", text: "A single dot." }]);
+  } else if (line === "media") {
+    fs.writeFileSync("shot.png", Buffer.from(TILE_PNG, "base64"));
+    wrote([{ type: "text", text: [
+      "Two images: ![dot](data:image/png;base64," + TILE_PNG + ") and ![shot](shot.png), and ![gone](missing.png).",
+      "",
+      "<details><summary>More</summary>",
+      "",
+      "Hidden **bold** text",
+      "",
+      "</details>",
+      "",
+      'Press <kbd>Ctrl</kbd>+<kbd>C</kbd><br>then <script>alert(1)</script><span onclick="steal()" style="color:red" class="evil">plain</span> and `notes.md:1`.',
+      "",
+      "```mermaid",
+      "flowchart LR",
+      "  A[Start] --> B[Done]",
+      "```",
+    ].join("\n") }]);
+  } else if (line === "pictures") {
+    const image = { type: "image", source: { type: "base64", media_type: "image/png", data: DOT_PNG } };
+    said([{ type: "text", text: "[Image #1] [Image #2] compare these" }, image, image]);
+    wrote([{ type: "text", text: "Two dots." }]);
   } else if (line === "long-prompt") {
     const paragraph = "Please read @src/app/main.rs and explain every line of it in detail, with examples.";
     said(Array.from({ length: 12 }, (_, i) => `${i + 1}. ${paragraph}`).join("\n"));
@@ -293,7 +440,7 @@ function submit() {
       side({ type: "user", uuid: "sub-1", message: { role: "user", content: "Find where the parser drops the last line." } }),
       side({ type: "assistant", uuid: "sub-2", message: { role: "assistant", content: [{ type: "tool_use", id: "sub-tool", name: "Grep", input: { pattern: "lines()" } }] } }),
       side({ type: "user", uuid: "sub-3", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "sub-tool", content: "src/parse.rs:12" }] } }),
-      side({ type: "assistant", uuid: "sub-4", message: { role: "assistant", content: [{ type: "text", text: "The subagent found it in src/parse.rs." }] } }),
+      side({ type: "assistant", uuid: "sub-4", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "The subagent found it in src/parse.rs." }] } }),
     ].join("\n") + "\n");
     said([{ type: "tool_result", tool_use_id: id, content: "The parser drops the last line in src/parse.rs:12." }]);
     wrote([{ type: "text", text: "The agent reported back." }]);
@@ -302,6 +449,12 @@ function submit() {
     wrote([{ type: "text", text: "Wrote revert.txt." }]);
   } else if (line === "prlink") {
     wrote([{ type: "text", text: "Opened [the pull request](https://github.com/example/alpha/pull/42)." }]);
+  } else if (line === "todos" || line === "todos-done") {
+    used("TodoWrite", { todos: line === "todos" ? TODOS : TODOS.map((t) => ({ ...t, status: "completed" })) }, TODOS_SAVED);
+    wrote([{ type: "text", text: line === "todos" ? "Working through the list." : "All done." }]);
+  } else if (line === "elsewhere") {
+    // Claude names the branch it ran on in every line; this one ran on another.
+    record({ type: "assistant", gitBranch: "elsewhere", message: { role: "assistant", content: [{ type: "text", text: "Ran on elsewhere." }] } });
   } else if (line === "notice") {
     said("<local-command-stdout>Set model to Haiku 5.5\nfor this session</local-command-stdout>");
   } else if (line === "limit") {
@@ -342,6 +495,10 @@ function submit() {
       if (req.url === "/a") {
         res.setHeader("content-type", "text/html; charset=utf-8");
         return res.end('<!doctype html><title>Page A</title><link rel="icon" href="/dot.png"><p>page a</p><a href="/">home</a>');
+      }
+      if (req.url === "/report.zip") {
+        res.setHeader("content-type", "application/zip");
+        return res.end("PK sweep");
       }
       if (req.url === "/dot.png") {
         res.setHeader("content-type", "image/png");
@@ -407,9 +564,16 @@ function answerEffort(key) {
 const MODEL_ROWS = [["Default (recommended) ✔", "Sonnet 5.5"], ["Sonnet", "Sonnet 5.5"], ["Fable", "Fable 5.1"], ["Opus", "Opus 5.5"], ["Haiku", "Haiku 5.5"]];
 let modelMenu = 0;
 function drawModels() {
-  out(`${"▔".repeat(60)}\r\n   Select model\r\n   Switch between Claude models. Your pick becomes the default for new sessions.\r\n\r\n`);
-  MODEL_ROWS.forEach(([name, model], i) => out(`   ${i + 1 === modelMenu ? "❯" : " "} ${i + 1}. ${name.padEnd(24)} ${model}\r\n`));
-  out(`\r\n   ${GLYPHS[traits?.effort ?? "medium"]} ${traits?.effort ?? "medium"} effort ←/→ to adjust\r\n   Enter to set as default · s to use this session only · Esc to cancel\r\n`);
+  drawScreen([
+    "▔".repeat(60),
+    "   Select model",
+    "   Switch between Claude models. Your pick becomes the default for new sessions.",
+    "",
+    ...MODEL_ROWS.map(([name, model], i) => `   ${i + 1 === modelMenu ? "❯" : " "} ${i + 1}. ${name.padEnd(24)} ${model}`),
+    "",
+    `   ${GLYPHS[traits?.effort ?? "medium"]} ${traits?.effort ?? "medium"} effort ←/→ to adjust`,
+    "   Enter to set as default · s to use this session only · Esc to cancel",
+  ]);
 }
 function answerModels(key) {
   if (key === "\x1b[B" || key === "\x1b[A") {
@@ -417,6 +581,7 @@ function answerModels(key) {
     return drawModels();
   }
   if (key !== "s" && key !== "\r" && key !== "\x1b") return;
+  eraseScreen();
   if (key !== "\x1b") {
     const name = MODEL_ROWS[modelMenu - 1][1];
     record({ type: "attachment", attachment: { type: "model", identity: { modelId: name, marketingName: name } } });
@@ -537,6 +702,12 @@ function answerQuestion(key) {
   prompt();
 }
 
+const TODOS = [
+  { content: "Read the parser", status: "completed", activeForm: "Reading the parser" },
+  { content: "Fix the off-by-one", status: "in_progress", activeForm: "Fixing the off-by-one" },
+  { content: "Add a test", status: "pending", activeForm: "Adding a test" },
+];
+const TODOS_SAVED = "Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable";
 // As claude 2.1 asks: Tab on "No" opens a line for telling Claude what to do instead.
 const CHOICES = ["Yes", "Yes, and don't ask again for rm commands", "No"];
 let asking = 0;
@@ -609,6 +780,10 @@ process.stdin.on("data", (chunk) => {
   }
   if (questioning) {
     for (const key of text.match(/\x1b\[[AB]|[\s\S]/g)) answerQuestion(key);
+    return;
+  }
+  if (showing) {
+    for (const key of text.match(/\x1b\[[A-D]|[\s\S]/g)) answerSettings(key);
     return;
   }
   if (effortMenu) {

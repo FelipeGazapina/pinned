@@ -9,7 +9,7 @@ use std::time::Duration;
 
 const FILE: &str = "account.json";
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Credentials {
     pub hub: String,
     pub email: String,
@@ -25,14 +25,11 @@ impl Credentials {
 
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let tmp = dir.join(format!("{FILE}.tmp"));
         let _ = std::fs::remove_file(&tmp);
-        std::fs::OpenOptions::new()
-            .write(true)
+        crate::private::file()
             .create_new(true)
-            .mode(0o600)
             .open(&tmp)
             .and_then(|mut f| f.write_all(&serde_json::to_vec_pretty(self).unwrap()))
             .and_then(|()| std::fs::rename(&tmp, dir.join(FILE)))
@@ -45,47 +42,47 @@ impl Credentials {
 }
 
 /// `POST /api/signup` and `/api/login` take this.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SignIn {
     pub email: String,
     pub password: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Session {
     pub token: String,
     pub account: AccountView,
 }
 
 /// `POST /api/password`, with the user token as bearer, takes this.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewPassword {
     pub current: String,
     pub password: String,
 }
 
 /// `POST /api/machines`, with the user token as bearer, takes this.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewMachine {
     pub name: String,
     pub os: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Registered {
     pub machine: MachineView,
     pub token: String,
 }
 
 /// `POST /api/pair` takes this.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Pairing {
     pub code: String,
     pub name: String,
     pub os: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Paired {
     pub machine: MachineView,
     pub token: String,
@@ -94,7 +91,7 @@ pub struct Paired {
     pub email: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Failure {
     pub error: String,
 }
@@ -145,7 +142,7 @@ pub fn logout(hub: &str, user_token: &str) -> Result<(), String> {
 }
 
 pub fn hostname() -> String {
-    let out = std::process::Command::new("hostname").stderr(std::process::Stdio::null()).output();
+    let out = crate::process::command("hostname").stderr(std::process::Stdio::null()).output();
     let name = out.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
     let name = name.strip_suffix(".local").unwrap_or(&name);
     if name.is_empty() {
@@ -185,7 +182,6 @@ fn post<T: DeserializeOwned>(hub: &str, path: &str, bearer: Option<&str>, body: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn credentials_are_saved_for_the_user_only_and_removed() {
@@ -201,7 +197,8 @@ mod tests {
         };
         creds.save(&dir).unwrap();
         creds.save(&dir).unwrap();
-        assert_eq!(std::fs::metadata(dir.join("account.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.join("account.json")).unwrap().permissions()) & 0o777, 0o600);
         assert_eq!(Credentials::load(&dir), Some(creds));
         Credentials::remove(&dir);
         assert_eq!(Credentials::load(&dir), None);

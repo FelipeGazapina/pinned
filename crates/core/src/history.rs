@@ -4,16 +4,17 @@
 //! prompt was submitted and one when the turn ended. A snapshot is a git tree written through a
 //! throwaway index, so the user's own index and branches are never touched.
 
+use crate::process;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// A turn's patch is cut here, so one huge generated file can't bloat the history.
 const PATCH_LIMIT: usize = 200_000;
 const PROMPT_CHARS: usize = 400;
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 pub struct FileChange {
     pub path: String,
     pub added: u32,
@@ -21,7 +22,7 @@ pub struct FileChange {
 }
 
 /// Every field but `session` has a default, so a line written by another version still loads.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 pub struct Turn {
     /// Claude Code's session id.
     pub session: String,
@@ -89,7 +90,7 @@ pub fn load(file: &Path) -> Vec<Turn> {
 }
 
 fn git(cwd: &Path, args: &[&str], index: Option<&Path>) -> Option<Vec<u8>> {
-    let mut cmd = Command::new("git");
+    let mut cmd = process::command("git");
     cmd.args(args).current_dir(cwd).stdin(Stdio::null()).stderr(Stdio::null());
     if let Some(index) = index {
         cmd.env("GIT_INDEX_FILE", index);
@@ -130,7 +131,7 @@ pub fn diff(cwd: &Path, before: &str, after: &str) -> Option<(Vec<FileChange>, S
     if files.is_empty() {
         return None;
     }
-    let mut patch = git(cwd, &["diff", "--no-color", "--no-renames", before, after], None)?;
+    let mut patch = git(cwd, &["diff", "--no-color", "--find-renames", before, after], None)?;
     let truncated = patch.len() > PATCH_LIMIT;
     if truncated {
         let mut cut = PATCH_LIMIT;
@@ -163,7 +164,7 @@ pub fn restore(cwd: &Path, snapshot: &str) -> Result<(), String> {
     let index = std::env::temp_dir().join(format!("pinned-restore-{}-{:x}", std::process::id(), nanos()));
     let restored = (|| {
         git(&top, &["read-tree", snapshot], Some(&index)).ok_or("could not read the checkpoint")?;
-        let mut cmd = Command::new("git");
+        let mut cmd = process::command("git");
         cmd.args(["checkout-index", "-f", "-z", "--stdin"]).current_dir(&top).env("GIT_INDEX_FILE", &index).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
         let mut child = cmd.spawn().map_err(|e| e.to_string())?;
         child.stdin.take().unwrap().write_all(changed.join("\0").as_bytes()).map_err(|e| e.to_string())?;
@@ -203,7 +204,7 @@ mod tests {
     }
 
     fn run(cwd: &Path, args: &[&str]) {
-        let ok = Command::new("git").args(args).current_dir(cwd).output().unwrap().status.success();
+        let ok = process::command("git").args(args).current_dir(cwd).output().unwrap().status.success();
         assert!(ok, "git {args:?} failed");
     }
 
@@ -214,6 +215,7 @@ mod tests {
         run(&dir, &["init", "-q"]);
         run(&dir, &["config", "user.email", "t@t"]);
         run(&dir, &["config", "user.name", "t"]);
+        run(&dir, &["config", "core.autocrlf", "false"]);
         dir
     }
 
@@ -243,6 +245,9 @@ mod tests {
         assert!(patch.contains("+c\n") && patch.contains("+hello\n") && !patch.contains("two"));
         assert!(!truncated);
         assert_eq!(diff(&dir, &after, &snapshot(&dir).unwrap()), None);
+        std::fs::rename(dir.join("edited.txt"), dir.join("renamed.txt")).unwrap();
+        let (_, moved, _) = diff(&dir, &after, &snapshot(&dir).unwrap()).unwrap();
+        assert!(moved.contains("rename from edited.txt\nrename to renamed.txt"), "{moved}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -265,7 +270,7 @@ mod tests {
 
         let read = |p: &str| std::fs::read_to_string(dir.join(p)).ok();
         assert_eq!([read("src/kept.txt"), read("gone.txt"), read("src/new.txt"), read("dirty.txt")], [Some("one\n".into()), Some("bye\n".into()), None, Some("mine\n".into())]);
-        let staged = Command::new("git").args(["diff", "--cached", "--name-only"]).current_dir(&dir).output().unwrap().stdout;
+        let staged = process::command("git").args(["diff", "--cached", "--name-only"]).current_dir(&dir).output().unwrap().stdout;
         assert!(staged.is_empty());
         assert!(restore(&dir, "0123456789abcdef0123456789abcdef01234567").is_err());
         let _ = std::fs::remove_dir_all(dir);
@@ -279,7 +284,7 @@ mod tests {
         std::fs::write(dir.join("b.txt"), "y\n").unwrap();
         let (files, ..) = diff(&dir, &before, &snapshot(&dir).unwrap()).unwrap();
         assert_eq!(files, vec![FileChange { path: "b.txt".into(), added: 1, removed: 0 }]);
-        let staged = Command::new("git").args(["diff", "--cached", "--name-only"]).current_dir(&dir).output().unwrap().stdout;
+        let staged = process::command("git").args(["diff", "--cached", "--name-only"]).current_dir(&dir).output().unwrap().stdout;
         assert!(staged.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }

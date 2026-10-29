@@ -1,3 +1,4 @@
+use crate::accounts::AccountId;
 use serde::{Deserialize, Serialize};
 
 pub const SOCK_ENV: &str = "PINNED_SOCK";
@@ -9,7 +10,7 @@ pub const ISSUE_ENV: &str = "PINNED_ISSUE";
 pub const SLACK_CHANNEL_ENV: &str = "PINNED_SLACK_CHANNEL";
 pub const SLACK_THREAD_ENV: &str = "PINNED_SLACK_THREAD";
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentStatus {
     Working,
@@ -28,7 +29,7 @@ impl AgentStatus {
     ];
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 pub struct AgentEvent {
     pub status: AgentStatus,
     pub cwd: Option<String>,
@@ -48,7 +49,7 @@ pub struct AgentEvent {
 }
 
 /// Where a connector's session is in its work on an issue. Each stage maps to a Linear column.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Stage {
     /// The harness picked the issue up and opened a session for it.
@@ -61,7 +62,7 @@ pub enum Stage {
 
 /// What a connector's session works on, which its callbacks into pinned report against.
 /// Untagged, so a stage message from a Linear session reads `"issue": "<id>"` as it always has.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Subject {
     /// Linear's id for the issue, which `pinned stage` moves.
@@ -99,7 +100,7 @@ pub fn session_env(connector: &str, subject: &Subject) -> Vec<(String, String)> 
     env
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum When {
     InMinutes(f64),
@@ -109,7 +110,7 @@ pub enum When {
 
 /// How much of the subscription's rate limits the account has used, as Claude Code's statusline
 /// data reports it. Claude Code leaves out a window it has no figure for.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, schemars::JsonSchema)]
 pub struct Usage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub five_hour: Option<LimitWindow>,
@@ -117,7 +118,7 @@ pub struct Usage {
     pub seven_day: Option<LimitWindow>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 pub struct LimitWindow {
     /// From 0 to 100.
     pub used_percentage: f64,
@@ -135,7 +136,7 @@ impl Usage {
 }
 
 /// One line on the harness socket.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Message {
     Agent(AgentEvent),
@@ -160,7 +161,13 @@ pub enum Message {
     Remind { message: String, when: When },
     ListReminders,
     CancelReminder { id: u64 },
-    Usage(Usage),
+    Usage {
+        #[serde(flatten)]
+        usage: Usage,
+        /// The account whose usage this is; sessions of pinned before accounts name none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<AccountId>,
+    },
 }
 
 #[cfg(test)]
@@ -185,7 +192,11 @@ mod tests {
     fn a_usage_message_keeps_its_wire_shape() {
         let line = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":1792400000}}"#;
         let message: Message = serde_json::from_str(line).unwrap();
-        assert!(matches!(&message, Message::Usage(usage) if *usage == Usage { five_hour: Some(WINDOW), seven_day: None }));
+        assert!(matches!(&message, Message::Usage { usage, account: None } if *usage == Usage { five_hour: Some(WINDOW), seven_day: None }));
+        assert_eq!(serde_json::to_string(&message).unwrap(), line);
+        let line = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":1792400000},"account":"work"}"#;
+        let message: Message = serde_json::from_str(line).unwrap();
+        assert!(matches!(&message, Message::Usage { account: Some(a), .. } if a == "work"));
         assert_eq!(serde_json::to_string(&message).unwrap(), line);
     }
 }

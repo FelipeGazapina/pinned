@@ -146,8 +146,9 @@ async function projectsWithRepo(repo) {
   return lists.flat().filter((p) => p.repo?.toLowerCase() === want);
 }
 async function openThreadWith(machine, path, link) {
-  await (machine === LOCAL || path === null ? openTab(machine, path) : openRemote(machine, path, false));
-  const tab = active;
+  // The tab the link opened, which a page still restoring its own tabs may have moved off by now.
+  const tab = await (machine === LOCAL || path === null ? openTab(machine, path) : openRemote(machine, path, false));
+  if (active !== tab) activate(tab);
   linkLanding.state = OPENED;
   if (link.prompt) placeLinkedPrompt(tab, link.prompt, link.kind === "new" ? pickLinkedModel(tab, link) : []);
   return tab;

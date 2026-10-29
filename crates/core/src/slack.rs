@@ -13,7 +13,7 @@ pub const RATE_LIMITED: &str = "Slack: ratelimited";
 /// The reaction that tells people a session is working on their message.
 pub const WORKING: &str = "robot_face";
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub team: String,

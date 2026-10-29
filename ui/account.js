@@ -30,7 +30,7 @@ function showAccount() {
       <div class="card-head"><span class="logo account">@</span>
         <div><b>${esc(account.email || "…")}</b><div class="hint">${esc(account.hub)}</div></div>
         <span class="badge" data-on="${state === "online"}">${badge}</span></div>
-      ${TAURI ? `<p>This Mac is <b>${esc(name ?? "…")}</b> in the account. It stays signed in, with its sessions open to your other devices, until you sign out.</p>` : ""}
+      ${TAURI ? `<p>This ${COMPUTER} is <b>${esc(name ?? "…")}</b> in the account. It stays signed in, with its sessions open to your other devices, until you sign out.</p>` : ""}
       ${state === "refused" ? `<p class="error">The hub no longer accepts this sign-in. Sign out, then sign in again.</p>` : ""}
       <div class="actions"><button class="secondary" data-action="sign-out">Sign out</button></div>
     </div>
@@ -171,14 +171,17 @@ function showMachinesPage() {
 function machineEntryHtml(id, view) {
   if (!view) return "";
   const local = id === LOCAL;
-  const where = [view.os, local && (TAURI ? "this Mac" : null), !view.online && lastSeen(view.last_seen)].filter(Boolean).join(" · ");
+  const where = [view.os, local && (TAURI ? `this ${COMPUTER}` : null), !view.online && lastSeen(view.last_seen)].filter(Boolean).join(" · ");
   const name =
     machinesUi.renaming === id
       ? `<input class="rename" value="${esc(view.name)}" spellcheck="false" autocomplete="off">`
-      : `<b>${esc(view.name)}</b>`;
+      : view.upstash_box
+        ? `<span><b>${esc(view.name)}</b><span class="badge box" title="Upstash Box ${esc(view.upstash_box)}">Box</span></span>`
+        : `<b>${esc(view.name)}</b>`;
+  const leaves = view.upstash_box ? "Its Upstash Box is deleted, and the session in it with it." : "It leaves the account and its sessions stop showing on your devices.";
   const confirm =
     machinesUi.removing === id
-      ? `<div class="confirm" data-machine="${esc(id)}">Remove ${esc(view.name)}? It leaves the account and its sessions stop showing on your devices.
+      ? `<div class="confirm" data-machine="${esc(id)}">Remove ${esc(view.name)}? ${leaves}
            <span class="actions start"><button class="secondary danger" data-action="confirm-remove">Remove</button>
            <button class="secondary" data-action="cancel-remove">Cancel</button></span></div>`
       : "";

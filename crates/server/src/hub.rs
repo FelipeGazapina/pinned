@@ -1,6 +1,9 @@
+use crate::boxes::{self, BoxApi, Boxes, Seen};
 use crate::db::{self, Db};
-use pinned_core::agent::{Subject, Usage};
-use pinned_core::connectors::{Connectors, Keys, Storage, Work};
+use pinned_core::accounts::AccountId;
+use pinned_core::agent::{AgentStatus, Stage, Subject, Usage};
+use pinned_core::connectors::{Connectors, Delivery, Keys, Run, RunsOn, Storage, Work};
+use pinned_core::upstash;
 use base64::Engine;
 use pinned_core::{github, sync};
 use pinned_core::wire::{
@@ -17,7 +20,7 @@ use uuid::Uuid;
 
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
 /// A run may clone a large repository before its session starts.
-const RUN_WAIT: Duration = Duration::from_secs(30 * 60);
+pub(crate) const RUN_WAIT: Duration = Duration::from_secs(30 * 60);
 
 /// Why a call to a machine has no answer.
 pub enum Unanswered {
@@ -70,6 +73,7 @@ pub type Sent = (String, oneshot::Receiver<Result<Value, String>>);
 pub struct Hub {
     pub db: Db,
     pub public_url: String,
+    pub boxes: Boxes,
     accounts: Mutex<HashMap<Uuid, Arc<Account>>>,
     /// Numbers every socket, so a machine's old connection can't unregister its new one.
     sockets: AtomicU64,
@@ -96,8 +100,10 @@ struct Online {
     pending: HashMap<u64, oneshot::Sender<Result<Value, String>>>,
     next_call: u64,
     tabs: Vec<TabView>,
-    /// The last usage the machine reported, for clients that connect after it.
-    usage: Option<Usage>,
+    /// The last usage the machine reported for each account, for clients that connect after it.
+    usage: BTreeMap<AccountId, Usage>,
+    /// It runs in one of the account's boxes, so no other run goes to it.
+    dedicated: bool,
 }
 
 struct Client {
@@ -123,8 +129,10 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
 }
 
 impl Hub {
-    pub fn new(db: Db, public_url: String) -> Arc<Hub> {
-        Arc::new(Hub { db, public_url: public_url.trim_end_matches('/').to_owned(), accounts: Mutex::default(), sockets: AtomicU64::new(1) })
+    pub fn new(db: Db, public_url: String, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy) -> Arc<Hub> {
+        let public_url = public_url.trim_end_matches('/').to_owned();
+        let boxes = Boxes::new(box_api, box_policy, &public_url);
+        Arc::new(Hub { db, public_url, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1) })
     }
 
     pub fn next_socket(&self) -> u64 {
@@ -148,7 +156,7 @@ impl Hub {
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
-    async fn connectors(&self, account: &Account) -> Result<Arc<Connectors>, String> {
+    pub(crate) async fn connectors(&self, account: &Account) -> Result<Arc<Connectors>, String> {
         let connectors = account
             .connectors
             .get_or_try_init(|| async {
@@ -178,57 +186,74 @@ impl Hub {
             };
             connectors.watch(open, on_check).await
         });
+        let (hub, account) = (self.clone(), account.clone());
+        tokio::spawn(async move {
+            loop {
+                hub.boxes.reap(&hub, &account).await;
+                tokio::time::sleep(hub.boxes.policy.tick).await;
+            }
+        });
         Ok(())
     }
 
-    /// Hands a connector's work to a machine of the account, and answers whether one took it.
-    /// A run goes to the connector's machine when it is online, else to the others, the most
-    /// recently connected first. New thread messages go to whichever machine runs a session of
-    /// that connector and has the thread's.
-    pub async fn open(&self, account: Uuid, work: Work) -> bool {
-        let Ok(account) = self.account(account).await else { return false };
+    /// Hands a connector's work to a machine of the account, and answers whether one took it, or
+    /// why none did. A box run goes to its own box. Any other run goes to the connector's machine
+    /// when it is online, else to the others, the most recently connected first, never to a box.
+    /// New thread messages go to whichever machine runs a session of that connector and has the thread's.
+    pub async fn open(&self, account: Uuid, work: Work) -> Result<(), String> {
+        let account = self.account(account).await?;
         match work {
             Work::Run(run) => {
                 if account.working_on(&run.connector, &run.subject, |_| true) {
-                    return true;
+                    return Ok(());
                 }
-                let (preferred, token) = match self.connectors(&account).await {
-                    Ok(c) => (
-                        c.get_settings().connectors.into_iter().find(|c| c.id == run.connector).map(|c| c.machine).unwrap_or_default(),
-                        c.github_token(),
-                    ),
-                    Err(_) => (String::new(), None),
-                };
-                let mut spec = run.spec();
-                spec.token = token.filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
-                for machine in account.dispatch_order(&preferred, |_| true) {
-                    match self.call_machine(&account, &machine, Call::Run { run: spec.clone() }, RUN_WAIT).await {
-                        Ok(_) => return true,
-                        Err(Unanswered::Refused(e)) => eprintln!("pinned-server: {machine} refused a run of workflow {}: {e}", run.connector),
-                        // The run may have started there, so it doesn't go to a second machine. The next
-                        // check finds its tab, or sends it again, and a machine answers a run it has with that session.
-                        Err(Unanswered::Lost(e)) => {
-                            eprintln!("pinned-server: lost {machine}'s answer to a run of workflow {}: {e}", run.connector);
-                            return false;
-                        }
-                    }
+                match run.runs_on.clone() {
+                    RunsOn::FreshBox(step) => self.boxes.open(self, &account, run, step).await,
+                    RunsOn::Any => self.open_on_pool(&account, run, "").await,
+                    RunsOn::Machine(id) => self.open_on_pool(&account, run, &id).await,
                 }
-                false
             }
-            Work::Delivery(d) => {
-                let runs_connector = |tabs: &[TabView]| tabs.iter().any(|t| t.running && t.connector.as_deref() == Some(&d.connector));
-                for machine in account.dispatch_order("", runs_connector) {
-                    let call = Call::Deliver { env: d.env(), text: d.text() };
-                    match self.call_machine(&account, &machine, call, MACHINE_CALL_WAIT).await {
-                        Ok(Value::Bool(true)) => return true,
-                        // The messages were likely typed; opening another session for the thread would answer it twice.
-                        Err(Unanswered::Lost(_)) => return true,
-                        _ => {}
-                    }
+            Work::Delivery(d) => self.deliver(&account, d).await,
+        }
+    }
+
+    async fn open_on_pool(&self, account: &Account, run: Run, preferred: &str) -> Result<(), String> {
+        let token = self.connectors(account).await.ok().and_then(|c| c.github_token());
+        let mut spec = run.spec();
+        spec.token = token.filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
+        let mut refused = vec![];
+        for machine in account.run_pool(preferred) {
+            match self.call_machine(account, &machine, Call::Run { run: spec.clone() }, RUN_WAIT).await {
+                Ok(_) => return Ok(()),
+                Err(Unanswered::Refused(e)) => {
+                    eprintln!("pinned-server: {machine} refused a run of workflow {}: {e}", run.connector);
+                    refused.push(e);
                 }
-                false
+                // The run may have started there, so it doesn't go to a second machine. The next
+                // check finds its tab, or sends it again, and a machine answers a run it has with that session.
+                Err(Unanswered::Lost(e)) => {
+                    eprintln!("pinned-server: lost {machine}'s answer to a run of workflow {}: {e}", run.connector);
+                    return Err(e);
+                }
             }
         }
+        match refused.is_empty() {
+            true => Err("no machine of the account is online".into()),
+            false => Err(refused.join("; ")),
+        }
+    }
+
+    async fn deliver(&self, account: &Account, d: Delivery) -> Result<(), String> {
+        for machine in account.running(&d.connector) {
+            let call = Call::Deliver { env: d.env(), text: d.text() };
+            match self.call_machine(account, &machine, call, MACHINE_CALL_WAIT).await {
+                Ok(Value::Bool(true)) => return Ok(()),
+                // The messages were likely typed; opening another session for the thread would answer it twice.
+                Err(Unanswered::Lost(_)) => return Ok(()),
+                _ => {}
+            }
+        }
+        Err("no session answers that thread".into())
     }
 
     pub async fn call_machine(&self, account: &Account, machine: &str, call: Call, wait: Duration) -> Result<Value, Unanswered> {
@@ -276,6 +301,9 @@ impl Hub {
             }
             HubCall::RemoveMachine { id } => {
                 let machine = Uuid::parse_str(&id).map_err(|_| format!("this account has no machine {id}"))?;
+                if self.boxes.end_for_machine(self, account, machine).await? {
+                    return Ok(Value::Null);
+                }
                 if !self.db.remove_machine(account.id, machine).await? {
                     return Err(format!("this account has no machine {id}"));
                 }
@@ -298,8 +326,7 @@ impl Hub {
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
             HubCall::Import { store, linear_key, slack_key, github_key, vercel_key } => {
-                let keys = Keys { linear: linear_key, slack: slack_key, github: github_key, vercel: vercel_key };
-                let imported = c().await?.import(store, keys)?;
+                let imported = c().await?.import(store, Keys { linear: linear_key, slack: slack_key, github: github_key, vercel: vercel_key })?;
                 (json(imported), imported)
             }
             HubCall::SharedProjects => return json(self.db.shared_projects(account.id).await?),
@@ -339,12 +366,26 @@ impl Hub {
             HubCall::ConnectVercel { key } => (json(c().await?.connect_vercel(&key).await?), true),
             HubCall::DisconnectVercel => (json(c().await?.disconnect_vercel()?), true),
             HubCall::VercelModels => (json(c().await?.vercel_models().await?), false),
-            HubCall::Clone { machine, repo } => {
+            HubCall::ConnectUpstash { key, claude_token } => {
+                let keys = upstash::Keys::parse(&key, &claude_token)?;
+                self.boxes.check_key(&keys.api_key).await?;
+                (json(c().await?.connect_upstash(&keys)?), true)
+            }
+            HubCall::DisconnectUpstash => {
+                self.boxes.end_all(self, account).await?;
+                (json(c().await?.disconnect_upstash()?), true)
+            }
+            HubCall::Clone { machine, repo, dest } => {
                 let repo = github::clone_url(&repo);
                 let token = c().await?.github_token().filter(|_| github::hosts(&repo));
-                return Ok(self.call_machine(account, &machine, Call::Clone { repo, token }, RUN_WAIT).await?);
+                return Ok(self.call_machine(account, &machine, Call::Clone { repo, token, dest }, RUN_WAIT).await?);
             }
-            HubCall::Stage { connector, subject, stage } => (json(c().await?.stage(&connector, &subject, stage).await?), false),
+            HubCall::Stage { connector, subject, stage } => {
+                if stage == Stage::Review {
+                    self.boxes.work_done(self, account, &connector, &subject).await?;
+                }
+                (json(c().await?.stage(&connector, &subject, stage).await?), false)
+            }
             HubCall::SlackReply { connector, channel, thread, text } => {
                 (json(c().await?.slack_reply(&connector, &channel, &thread, &text).await?), false)
             }
@@ -394,8 +435,8 @@ impl Hub {
 
 impl Account {
     /// Registers a machine's connection. An older one must have gone offline first.
-    pub fn came_online(&self, machine: &str, socket: u64, name: String, out: Outbox) {
-        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: vec![], usage: None };
+    pub fn came_online(&self, machine: &str, socket: u64, name: String, dedicated: bool, out: Outbox) {
+        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: vec![], usage: BTreeMap::new(), dedicated };
         self.live.lock().unwrap().machines.insert(machine.to_owned(), online);
     }
 
@@ -439,11 +480,36 @@ impl Account {
             .any(|t| t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject))
     }
 
-    fn dispatch_order(&self, preferred: &str, wanted: impl Fn(&[TabView]) -> bool) -> Vec<MachineId> {
+    /// Machines a workflow run may go to: online, never a box's, `preferred` first, then the most recently connected.
+    fn run_pool(&self, preferred: &str) -> Vec<MachineId> {
         let live = self.live.lock().unwrap();
-        let mut online: Vec<(&MachineId, &Online)> = live.machines.iter().filter(|(_, m)| wanted(&m.tabs)).collect();
+        let mut online: Vec<(&MachineId, &Online)> = live.machines.iter().filter(|(_, m)| !m.dedicated).collect();
         online.sort_by_key(|(id, m)| (id.as_str() != preferred, std::cmp::Reverse(m.socket)));
         online.into_iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    /// Machines with a running session of `connector`, boxes' included, the most recently connected first.
+    fn running(&self, connector: &str) -> Vec<MachineId> {
+        let live = self.live.lock().unwrap();
+        let mut online: Vec<(&MachineId, &Online)> =
+            live.machines.iter().filter(|(_, m)| m.tabs.iter().any(|t| t.running && t.connector.as_deref() == Some(connector))).collect();
+        online.sort_by_key(|(_, m)| std::cmp::Reverse(m.socket));
+        online.into_iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    pub fn is_online(&self, machine: &str) -> bool {
+        self.live.lock().unwrap().machines.contains_key(machine)
+    }
+
+    /// What a box's machine shows of the session of `connector` on `subject`.
+    pub fn seen(&self, machine: &str, connector: &str, subject: &Subject) -> Seen {
+        let live = self.live.lock().unwrap();
+        let Some(m) = live.machines.get(machine) else { return Seen::Offline };
+        match m.tabs.iter().find(|t| t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)) {
+            None => Seen::NoTab,
+            // Claude reports a finished turn as waiting for input a minute later, so only Working holds a box.
+            Some(t) => Seen::Tab { running: t.running, quiet: t.status != Some(AgentStatus::Working) },
+        }
     }
 
     /// Sends the call at once, so calls reach the machine in the order they came, and answers
@@ -475,7 +541,9 @@ impl Account {
         let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return };
         match &event {
             MachineEvent::Tabs { tabs } => m.tabs = tabs.clone(),
-            MachineEvent::Usage { usage } => m.usage = Some(*usage),
+            MachineEvent::Usage { usage, account } => {
+                m.usage.insert(account.clone(), *usage);
+            }
             _ => {}
         }
         let text = frame(&ToClient::Event { machine: machine.to_owned(), event });
@@ -512,8 +580,9 @@ impl Account {
         let account = pinned_core::wire::AccountView { id: self.id.to_string(), email: self.email.clone() };
         let _ = out.send(frame(&ToClient::Hello { account, machines, tabs }));
         for (id, m) in &live.machines {
-            if let Some(usage) = m.usage {
-                let _ = out.send(frame(&ToClient::Event { machine: id.clone(), event: MachineEvent::Usage { usage } }));
+            for (account, usage) in &m.usage {
+                let event = MachineEvent::Usage { usage: *usage, account: account.clone() };
+                let _ = out.send(frame(&ToClient::Event { machine: id.clone(), event }));
             }
         }
         live.clients.insert(id, Client { out, login, attached: HashSet::new() });

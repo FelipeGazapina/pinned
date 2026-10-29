@@ -76,11 +76,16 @@ const lastPrompt = (tab) => [...threadOf(tab).items].reverse().find((i) => i.kin
 const latestUserAt = (tab) => unixOf(lastPrompt(tab)?.at) || tab.view.updated || 0;
 const isPinned = (tab) => sideMarks.pins.includes(threadKey(tab));
 const canSnooze = (tab) => !["asking", "input"].includes(phaseOf(tab));
-const raisedHand = (tab) => !canSnooze(tab) || (phaseOf(tab) === "failed" && (tab.view.updated ?? 0) > (sideMarks.snoozed[threadKey(tab)]?.at ?? 0));
+const raisedHand = (tab) => {
+  const snoozed = sideMarks.snoozed[threadKey(tab)];
+  return !canSnooze(tab) || (phaseOf(tab) === "failed" && snoozed?.limit !== tab.view.resume_at && (tab.view.updated ?? 0) > (snoozed?.at ?? 0));
+};
 const snoozedNow = (tab) => !!sideMarks.snoozed[threadKey(tab)] && sideMarks.snoozed[threadKey(tab)].until > nowS() && !raisedHand(tab);
 const wokeNow = (tab) => !!sideMarks.snoozed[threadKey(tab)] && !snoozedNow(tab);
-/** The sidebar's settings, as T3 Code's: the Working shelf, and when threads settle on their own. */
-const sideSettings = { working: false, onMerge: true, days: 3, keepPrs: false };
+/** The sidebar's settings, as T3 Code's: how projects group and sort, limited threads, the Working
+ * shelf, when threads settle on their own, and which thread actions ask first. */
+const sideSettings = { grouping: true, projectOrder: "updated_at", snoozeLimited: false, working: false, onMerge: true, days: 3, keepPrs: false, confirmUnpin: false, confirmArchive: false, confirmDelete: true };
+const PROJECT_ORDERS = [["updated_at", "Last user message"], ["created_at", "Created at"], ["manual", "Manual"]];
 try {
   Object.assign(sideSettings, JSON.parse(load("gui-sidebar-settings")));
 } catch {}
@@ -106,11 +111,18 @@ function sidebarSettingsHtml() {
   const row = (key, title, about, control) => `<div class="side-setting" data-setting="${key}"><div><label for="side-${key}">${title}</label><p class="meta">${about}</p></div>${control}</div>`;
   const toggle = (key, on, title, about) => row(key, title, about, `<label class="switch"><input type="checkbox" id="side-${key}" aria-label="${title}"${on ? " checked" : ""}><span></span></label>`);
   return `<section id="side-settings"><h2 class="looks-title">Organization</h2>
+    ${toggle("grouping", sideSettings.grouping, "Project grouping", "Combine matching repositories across environments.")}
+    ${row("projectOrder", "Project order", "Order of projects in the sidebar project picker and command palette.", `<select id="side-projectOrder" aria-label="Project order">${PROJECT_ORDERS.map(([v, l]) => `<option value="${v}"${v === sideSettings.projectOrder ? " selected" : ""}>${l}</option>`).join("")}</select>`)}
+    ${toggle("snoozeLimited", sideSettings.snoozeLimited, "Snooze limited threads", "Snooze usage-limit stops until the reported reset time, when the session continues.")}
     ${toggle("working", sideSettings.working, "Working section (beta)", "Fold working and monitoring threads into a Working section. They return to the top of the inbox when they need you.")}
     ${toggle("onMerge", sideSettings.onMerge, "Auto-settle merged threads", "Settle a thread when its pull request merges. Closed pull requests still settle automatically.")}
     ${toggle("inactive", !!sideSettings.days, "Auto-settle inactive threads", "Sidebar threads with no activity for this long settle automatically.")}
     ${sideSettings.days ? row("days", "Days of inactivity before auto-settle", "Any new activity un-settles a thread automatically.", `<input type="number" id="side-days" min="1" max="90" value="${sideSettings.days}" aria-label="Days of inactivity before auto-settle">`) : ""}
-    ${sideSettings.days ? toggle("keepPrs", sideSettings.keepPrs, "Keep threads with a PR", "Inactivity does not settle threads with a pull request. Merge and close still do.") : ""}</section>`;
+    ${sideSettings.days ? toggle("keepPrs", sideSettings.keepPrs, "Keep threads with a PR", "Inactivity does not settle threads with a pull request. Merge and close still do.") : ""}
+    <h2 class="looks-title">Confirmations</h2>
+    ${toggle("confirmUnpin", sideSettings.confirmUnpin, "Unpin confirmation", "Ask before unpinning a thread from the pinned section.")}
+    ${toggle("confirmArchive", sideSettings.confirmArchive, "Archive confirmation", "Ask before archiving a thread.")}
+    ${toggle("confirmDelete", sideSettings.confirmDelete, "Delete confirmation", "Ask before deleting a thread.")}</section>`;
 }
 /** T3 Code's Archive settings page: archived threads by project, newest first, each brought back
  * with Unarchive, or from its context menu, which also deletes. */
@@ -159,8 +171,8 @@ function bindSidebarSettings() {
     bindSidebarSettings();
   };
   const on = (key) => root.querySelector(`#side-${key}`);
-  on("working").onchange = (e) => change(() => (sideSettings.working = e.target.checked));
-  on("onMerge").onchange = (e) => change(() => (sideSettings.onMerge = e.target.checked));
+  for (const key of ["grouping", "snoozeLimited", "working", "onMerge", "confirmUnpin", "confirmArchive", "confirmDelete"]) on(key).onchange = (e) => change(() => (sideSettings[key] = e.target.checked));
+  on("projectOrder").onchange = (e) => change(() => (sideSettings.projectOrder = e.target.value));
   on("inactive").onchange = (e) => {
     change(() => (sideSettings.days = e.target.checked ? 3 : null));
     rebuild();
@@ -216,8 +228,8 @@ function statusSlot(tab) {
   if (phase === "working") return { icon: "circle-dashed", text: "Working", tone: "info", since: unixOf(lastPrompt(tab)?.at) };
   if (phase === "delegating") return { icon: "bot", text: agentsWorking(runningAgents(tab).length), tone: "info", since: delegatedSince(tab) / 1000 || 0 };
   if (phase === "input") return { icon: "message-circle-question", text: "Input", tone: "input" };
-  if (phase === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "warning" } : { icon: "circle-alert", text: "Failed", tone: "error" };
-  if (wokeNow(tab) && tab !== active) return { icon: "alarm-clock", text: "Woke", tone: "warning", woke: true };
+  if (phase === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "limited" } : { icon: "circle-alert", text: "Failed", tone: "error" };
+  if (wokeNow(tab) && tab !== active) return { icon: "alarm-clock", text: "Woke", tone: "limited", woke: true };
   return null;
 }
 
@@ -247,7 +259,7 @@ async function askFavicon(tab, key) {
   favicons.set(key, { url, at: Date.now() });
   if (url === was || !guiOn()) return;
   renderSidebar();
-  if (active && !crumbEl.querySelector("input.rename")) crumbEl.innerHTML = crumbHtml(active);
+  if (active && !crumbEl.querySelector("input.rename")) crumbEl.innerHTML = crumbHtml(active, subagentShown());
 }
 /** T3 Code's project icon: the project's favicon, or else a monogram of its name. */
 function projectIcon(name, tab) {
@@ -259,22 +271,44 @@ function projectIcon(name, tab) {
   return `<svg class="monogram" viewBox="0 0 16 16" style="color:${MONOGRAM_COLORS[hash]}" aria-hidden="true"><text x="8" y="10.8" text-anchor="middle" fill="currentColor" font-size="8.25" font-weight="700" textLength="${[...text].length === 1 ? 6 : 12}" lengthAdjust="spacingAndGlyphs">${esc(text)}</text></svg>`;
 }
 
+/** Limits whose stop was snoozed already, as `threadKey:resume_at`, so a woken thread stays awake. */
+const limitsSnoozed = new Set();
+try {
+  for (const id of JSON.parse(load("gui-limits-snoozed")) ?? []) limitsSnoozed.add(id);
+} catch {}
+/** T3 Code's Snooze limited threads: a usage-limit stop snoozes until the limit lifts, once. */
+function snoozeLimitStops() {
+  if (!sideSettings.snoozeLimited) return;
+  for (const tab of tabs) {
+    const at = tab.view.resume_at;
+    const id = `${threadKey(tab)}:${at}`;
+    if (phaseOf(tab) !== "failed" || !at || at <= nowS() || limitsSnoozed.has(id) || settled(tab)) continue;
+    limitsSnoozed.add(id);
+    sideMarks.snoozed[threadKey(tab)] = { until: at, at: nowS(), limit: at };
+    saveMarks();
+    save("gui-limits-snoozed", JSON.stringify([...limitsSnoozed].slice(-200)));
+  }
+}
+
 function renderSidebar() {
   if (document.activeElement?.matches("#thread-list input.rename") || rowDrag?.started) return;
+  snoozeLimitStops();
   for (const tab of tabs) if (!firstSeen.has(tab.key)) firstSeen.set(tab.key, nowS());
   for (const key of selected) if (!tabByKey(key)) selected.delete(key);
   noteReturns();
-  if (ui.project && !projectNames().includes(ui.project)) ui.project = "";
-  const trigger = `${ui.project ? projectIcon(ui.project, tabOfProject(ui.project)) : icon("folder")}<span class="label">${esc(ui.project || "All projects")}</span>${icon("chevron-down")}`;
+  const scope = projectGroups().find((g) => g.key === ui.project);
+  if (!scope) ui.project = "";
+  const trigger = `${scope ? projectIcon(scope.name, scope.tab) : icon("folder")}<span class="label">${esc(scope?.name ?? "All projects")}</span>${icon("chevron-down")}`;
   if (projectFilter.innerHTML !== trigger) projectFilter.innerHTML = trigger;
-  projectFilter.setAttribute("aria-label", ui.project ? `Filter threads by project: ${ui.project}` : "Filter threads by project");
-  const inScope = tabs.filter((t) => !ui.project || projectName(t) === ui.project);
+  projectFilter.setAttribute("aria-label", scope ? `Filter threads by project: ${scope.name}` : "Filter threads by project");
+  const inScope = tabs.filter((t) => !ui.project || projectKeyOf(t) === ui.project);
   const needle = ui.search.trim().toLowerCase();
   document.getElementById("search-clear").hidden = !ui.search;
   const rows = needle ? searchRows(inScope, needle) : shelfRows(inScope);
   threadList.replaceChildren(...rows);
   if (!rows.length) threadList.innerHTML = `<p class="empty" role="status">${tabs.length ? "No threads found" : "No threads yet"}</p>`;
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
+  document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
   tickDurations();
   scheduleWake();
 }
@@ -370,12 +404,70 @@ function notePrStatus(url, status) {
 }
 /** The PR panel's fuller answer from gh says the same of the state. */
 const notePrView = (url, d) =>
-  notePrStatus(url, { state: d.state === "OPEN" && d.isDraft ? "draft" : d.state.toLowerCase(), title: d.title, merged_at: d.mergedAt, closed_at: d.closedAt });
+  notePrStatus(url, { state: d.state === "OPEN" && d.isDraft ? "draft" : d.state.toLowerCase(), title: d.title, merged_at: d.mergedAt, closed_at: d.closedAt, head: d.headRefName, base: d.baseRefName });
 /** A pull request's glyph and number in its state's color, as T3 Code's badge. */
 function prBadge(tab, tag = "span", pr = prOf(tab)) {
   if (!pr) return "";
   const state = prStatus(tab, pr)?.state;
   return `<${tag}${tag === "button" ? ' type="button"' : ""} class="pr" data-pr="${esc(pr.url)}"${state ? ` data-state="${state}"` : ""} aria-label="PR #${pr.number}${state ? ` ${state}` : ""}">${icon(PR_LOOKS[state]?.icon ?? "git-pull-request-arrow")}#${pr.number}</${tag}>`;
+}
+/** The shells open beside a thread, in panel Terminal tabs and drawer terminals: `{ id, surface }` or `{ id, script }`. */
+const threadShells = (tab) => [
+  ...[...shellTerms.values()].filter((e) => e.tab === tab && e.shell).map((e) => ({ id: e.shell, surface: e.surface })),
+  ...scriptShells.filter((s) => s.tab === tab && s.id).map((script) => ({ id: script.id, script })),
+];
+/** Shells running a command, which pulse a terminal glyph on their thread's row, as T3 Code's do.
+ * The machines are asked each second while any shell is open. */
+let busyShells = new Set();
+async function askBusyShells() {
+  if (!guiOn() || document.hidden) return;
+  const byMachine = new Map();
+  for (const tab of tabs) for (const { id } of threadShells(tab)) byMachine.set(tab.machine, [...(byMachine.get(tab.machine) ?? []), id]);
+  const busy = new Set();
+  await Promise.all([...byMachine].map(([machine, shells]) => callOn(machine, { cmd: "busy_shells", shells }).then((ids) => ids.forEach((id) => busy.add(`${machine}:${id}`)), () => {})));
+  if ([...busy].join() === [...busyShells].join()) return;
+  busyShells = busy;
+  renderSidebar();
+}
+setInterval(askBusyShells, 1000);
+const busyShellsOf = (tab) => threadShells(tab).filter(({ id }) => busyShells.has(`${tab.machine}:${id}`));
+function terminalPulse(tab) {
+  const n = busyShellsOf(tab).length;
+  if (!n) return "";
+  const label = n === 1 ? "1 terminal process running. Open terminal" : `${n} terminal processes running. Open terminal`;
+  // Every pulse keeps one phase, however recently its row was drawn.
+  return `<span class="term-run" role="button" data-act="terminal" aria-label="${label}" data-tip="${label}" data-tip-delay="150" style="--pulse-at: -${Date.now() % 2000}ms">${icon("terminal")}</span>`;
+}
+function revealTerminal(tab) {
+  const [shell] = busyShellsOf(tab);
+  if (!shell) return;
+  if (tab !== active) activate(tab);
+  if (shell.surface) return addSurface(tab, panelOf(tab).surfaces.find((s) => s.id === shell.surface));
+  toggleDrawer(true);
+  showDrawerView(tab, shell.script);
+}
+/** T3 Code's badge for a thread that linked several pull requests: a stack glyph and its layer count
+ * when they chain branch on branch, else "+N" with the latest's glyph, in their overall state's color.
+ * It opens the thread's Linked pull requests. */
+function rowPrBadge(tab) {
+  const links = linkedPrs(tab);
+  if (links.length < 2) return prBadge(tab, "span", links[0] ? prsOf(tab).find((p) => p.url === links[0].url) ?? links[0] : undefined);
+  const statuses = links.map((p) => prStatus(tab, p));
+  const states = statuses.map((st) => (st?.state === "draft" ? "open" : st?.state ?? "open"));
+  const state = statuses.every((st) => st?.state === "draft") ? "draft" : states.includes("open") ? "open" : states.every((st) => st === "merged") ? "merged" : "closed";
+  const heads = new Map(statuses.filter((st) => st?.head).map((st) => [st.head, st]));
+  const bases = statuses.filter((st) => !st?.base || !heads.has(st.base) || heads.get(st.base) === st).length;
+  const look = PR_LOOKS[state].label.toLowerCase();
+  const latest = prOf(tab) ?? links[0];
+  const lead = prStatus(tab, latest);
+  const label = bases === 1
+    ? `Stack of ${links.length} pull requests, ${look}`
+    : `${lead ? `PR #${latest.number} - ${PR_LOOKS[lead.state].label}: ${lead.title}` : `PR #${latest.number}, status pending`}, and ${links.length - 1} more linked; overall ${look}`;
+  return `<span class="pr" role="button" data-act="prs" data-pr-list data-state="${state}" aria-label="${esc(label)}">${icon(bases === 1 ? "layers-2" : PR_LOOKS[state].icon)}${bases === 1 ? links.length : `+${links.length}`}</span>`;
+}
+function openLinkedPrs(tab) {
+  if (tab !== active) activate(tab);
+  addSurface(tab, { id: "prs", kind: "prs" });
 }
 const pinMark = (tab) => (isPinned(tab) ? `<span class="pin" role="button" data-act="unpin" title="Unpin thread">${icon("pin")}${icon("pin-off")}</span>` : "");
 const titleHtml = (tab) =>
@@ -393,17 +485,20 @@ function cardRow(tab) {
   const draft = tab !== active && hasDraft(tab);
   row.classList.toggle("draft", draft);
   const ws = threadOf(tab).workspace;
+  // As T3 Code's: the branch, or a project-less thread's machine once threads span machines, or nothing.
+  const scratchMachine = !ws?.branch && ws && !ws.repo && new Set(tabs.map((t) => t.machine)).size > 1;
   const where = ws?.branch
-    ? `${ws.worktree ? icon("folder-git", "dim") : ""}<span class="branch" title="${esc(ws.branch)}">${middle(ws.branch)}</span>`
-    : `<span class="branch">${icon("monitor")}<span class="head">${esc(machineName(tab.machine))}</span></span>`;
-  const remote = tab.machine !== LOCAL ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
+    ? `${ws.worktree ? icon("folder-git", "dim") : ""}<span class="branch">${middle(ws.branch)}</span>`
+    : scratchMachine ? `<span class="branch">${icon("monitor")}<span class="head">${esc(machineName(tab.machine))}</span></span>` : `<span class="branch"></span>`;
+  const remote = tab.machine !== LOCAL && !scratchMachine ? `<span class="remote" title="${esc(machineName(tab.machine))}">${icon("monitor")}</span>` : "";
+  const account = tab.view.account !== DEFAULT_ACCOUNT ? `<span class="account" title="Runs under the ${esc(accountName(tab.machine, tab.view.account))} account">${esc(accountName(tab.machine, tab.view.account))}</span>` : "";
   const state = slot
     ? `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : ""}>${icon(slot.icon)}${slot.text}${slot.since ? ` <span class="since" data-since="${slot.since}"></span>` : ""}</span>`
     : `<span class="stamp when${unseenDone(tab) ? " unread" : ""}">${esc(ago(latestUserAt(tab)))}</span>`;
-  const acts = `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${MOD_LABEL}⇧S)">${icon("check")}Settle</span></span>`;
+  const acts = `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${bindingLabel("thread.settle") ?? ""})">${icon("check")}Settle</span></span>`;
   row.innerHTML = `<span class="l1">${draft ? `<span class="draft-pen" role="img" title="Unsent draft" aria-label="Unsent draft">${icon("square-pen")}</span>` : ""}${projectIcon(projectName(tab), tab)}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>
     <span class="l2">${titleHtml(tab)}</span>
-    <span class="l3">${where}${prBadge(tab)}<span class="right">${statsHtml(tab)}${remote}<span class="provider">${icon("claude")}</span></span></span>`;
+    <span class="l3">${where}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="right">${statsHtml(tab)}${remote}${account}<span class="provider">${icon("claude")}</span></span></span>`;
   return row;
 }
 
@@ -414,7 +509,7 @@ function slimRow(tab, action) {
   const act = action === "wake"
     ? `<span role="button" data-act="wake" title="Wake thread now">${icon("alarm-clock-off")}</span>`
     : `<span role="button" data-act="unsettle" title="Un-settle thread">${icon("undo-2")}</span>`;
-  row.innerHTML = `${projectIcon(projectName(tab), tab)}<span class="l2">${titleHtml(tab)}</span>${pinMark(tab)}${prBadge(tab)}<span class="slot">${time}<span class="acts">${act}</span></span>`;
+  row.innerHTML = `${projectIcon(projectName(tab), tab)}<span class="l2">${titleHtml(tab)}</span>${pinMark(tab)}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="slot">${time}<span class="acts">${act}</span></span>`;
   return row;
 }
 
@@ -450,11 +545,16 @@ document.body.append(hoverCard);
 let card = null;
 let cardTimer;
 let cardClosedAt = 0;
+/** Where the pointer clicked a card's link: no card opens until it moves from there, so the row
+ * the closed card uncovers doesn't pop its own card under a still pointer. */
+let cardHeldAt = null;
+addEventListener("pointermove", (e) => cardHeldAt && (e.clientX !== cardHeldAt.x || e.clientY !== cardHeldAt.y) && (cardHeldAt = null), true);
 function cardTarget(el) {
-  const pr = el.closest("#thread-list .pr[data-pr], #composer-footer .pr[data-pr]");
+  const pr = el.closest("#thread-list .pr[data-pr], #thread-list .pr[data-pr-list], #composer-footer .pr[data-pr]");
   const row = el.closest("#thread-list .thread-row:not(.result)");
   const tab = row ? tabByKey(row.dataset.tab) : pr && active;
   if (!tab || ui.renaming === tab.key) return null;
+  if (pr?.dataset.prList !== undefined) return { key: `prs:${tab.key}`, anchor: pr, tab, side: "top", delay: 150, html: () => `<ul>${linkedPrs(tab).map((p) => prItem(tab, p)).join("")}</ul>` };
   if (pr) return { key: `pr:${tab.key}:${pr.dataset.pr}`, anchor: pr, tab, side: "top", delay: row ? 150 : 600, html: () => `<ul>${prItem(tab, prsOf(tab).find((p) => p.url === pr.dataset.pr) ?? prOf(tab))}</ul>` };
   return { key: `row:${tab.key}`, anchor: row, tab, side: "right", delay: 150, html: () => rowCardHtml(tab) };
 }
@@ -478,7 +578,7 @@ function showCard(target) {
 }
 document.addEventListener("pointerover", (e) => {
   if (!guiOn() || settingsOpen()) return hideCard();
-  if (e.pointerType !== "mouse") return;
+  if (e.pointerType !== "mouse" || cardHeldAt) return;
   if (e.target.closest("#hover-card")) return clearTimeout(cardTimer);
   const target = sideMenu.hidden && !document.body.classList.contains("dragging-row") ? cardTarget(e.target) : null;
   if (target?.key === card?.key) {
@@ -505,11 +605,52 @@ hoverCard.addEventListener("click", (e) => {
   e.preventDefault();
   const tab = card?.tab;
   hideCard();
+  cardHeldAt = { x: e.clientX, y: e.clientY };
   if (e.metaKey || e.ctrlKey) return openOutside(link.dataset.cardPr);
   if (!tab) return;
   if (tab !== active) activate(tab);
   openPr(tab, link.dataset.cardPr);
 });
+
+/** T3 Code's tooltips: an element's `data-tip` shows above it once the pointer rests 600ms, or
+ * `data-tip-delay` ms, and the next opens at once while one is up or just closed. `data-tip-sub`
+ * adds a muted second line; `data-tip-side` "bottom" puts it under the element's start, "left" at its left. */
+const sideTip = Object.assign(document.createElement("div"), { id: "side-tip", role: "tooltip", hidden: true });
+document.body.append(sideTip);
+let tipFor = null;
+let tipTimer;
+let tipClosedAt = 0;
+function hideSideTip() {
+  clearTimeout(tipTimer);
+  if (!sideTip.hidden) tipClosedAt = Date.now();
+  sideTip.hidden = true;
+  tipFor = null;
+}
+function showSideTip(el) {
+  if (!el.isConnected || !el.dataset.tip) return hideSideTip();
+  sideTip.innerHTML = `<span>${esc(el.dataset.tip)}</span>${el.dataset.tipSub ? `<span class="sub">${esc(el.dataset.tipSub)}</span>` : ""}`;
+  sideTip.hidden = false;
+  const a = el.getBoundingClientRect();
+  const r = sideTip.getBoundingClientRect();
+  const side = el.dataset.tipSide ?? (a.top - r.height - 4 >= 5 ? "top" : "bottom");
+  const x = side === "left" ? a.left - r.width - 4 : side === "bottom" && el.dataset.tipSide ? a.left : a.left + a.width / 2 - r.width / 2;
+  const y = side === "left" ? a.top + a.height / 2 - r.height / 2 : side === "top" ? a.top - r.height - 4 : a.bottom + 4;
+  sideTip.style.left = `${Math.max(5, Math.min(x, innerWidth - r.width - 5))}px`;
+  sideTip.style.top = `${Math.max(5, Math.min(y, innerHeight - r.height - 5))}px`;
+}
+document.addEventListener("pointerover", (e) => {
+  if (e.pointerType !== "mouse") return;
+  // A title gui-tooltip.js moved into data-tip is its tooltip, not this one.
+  const found = e.target.closest?.("[data-tip]");
+  const el = found === tip.target ? null : found;
+  if (el === tipFor) return;
+  const shown = !sideTip.hidden;
+  hideSideTip();
+  if (!el || document.body.classList.contains("dragging-row")) return;
+  tipFor = el;
+  tipTimer = setTimeout(() => showSideTip(el), shown || Date.now() - tipClosedAt < 400 ? 0 : Number(el.dataset.tipDelay ?? 600));
+});
+for (const type of ["pointerdown", "blur", "scroll"]) addEventListener(type, hideSideTip, true);
 
 const wakeLabel = (until) => {
   const s = until - nowS();
@@ -639,8 +780,9 @@ function unsettle(tab) {
     sideMarks.order = sideMarks.order.filter((k) => k !== threadKey(tab));
   });
 }
-function pin(tab) {
+async function pin(tab, ask = true) {
   if (isPinned(tab)) {
+    if (ask && sideSettings.confirmUnpin && !(await confirmAction(`Unpin thread "${esc(threadTitle(tab))}"?`, "This will move the thread out of your pinned section.", "Unpin"))) return;
     noteUndo("Unpinned", changeMarks(threadKey(tab), () => (sideMarks.pins = sideMarks.pins.filter((k) => k !== threadKey(tab)))));
     return;
   }
@@ -711,6 +853,11 @@ function askDialog(html, submit, bind = () => {}) {
   });
 }
 
+/** The confirmations T3 Code's settings turn on: a title, a line under it, and the action's button. */
+const confirmAction = (title, about, verb, danger = false) =>
+  askDialog(`<h3>${title}</h3><p class="about">${about}</p>
+    <div class="actions"><button type="button" class="outline" data-cancel>Cancel</button><button class="${danger ? "destructive" : "primary"}">${verb}</button></div>`, () => true);
+
 async function customSnooze(list) {
   const soon = new Date(Date.now() + 3600e3);
   const pad = (n) => String(n).padStart(2, "0");
@@ -753,15 +900,15 @@ function rowMenuItems(tab) {
   const session = threadOf(tab).session;
   return [
     { label: ws?.branch ? `New thread on ${ws.branch}` : `New thread in ${project}`, icon: "message-square-plus", run: () => newThreadIn(tab) },
-    isPinned(tab) ? { label: "Unpin thread", icon: "pin-off", hint: `${MOD_LABEL}⇧P`, run: () => pin(tab) } : { label: "Pin thread", icon: "pin", hint: `${MOD_LABEL}⇧P`, run: () => pin(tab) },
-    settled(tab) ? { label: "Un-settle thread", icon: "circle-check", run: () => unsettle(tab) } : { label: "Settle thread", icon: "circle-check", hint: `${MOD_LABEL}⇧S`, run: () => settle(tab) },
+    isPinned(tab) ? { label: "Unpin thread", icon: "pin-off", hint: bindingLabel("thread.pin"), run: () => pin(tab) } : { label: "Pin thread", icon: "pin", hint: bindingLabel("thread.pin"), run: () => pin(tab) },
+    settled(tab) ? { label: "Un-settle thread", icon: "circle-check", run: () => unsettle(tab) } : { label: "Settle thread", icon: "circle-check", hint: bindingLabel("thread.settle"), run: () => settle(tab) },
     sideMarks.snoozed[threadKey(tab)] && snoozedNow(tab)
       ? { label: "Wake thread", icon: "clock", run: () => wake(tab) }
       : { label: "Snooze", icon: "clock", disabled: !canSnooze(tab), children: () => snoozeItems([tab], true) },
     { label: "Rename thread", icon: "pencil", sep: true, run: () => startRename(tab) },
     { label: titling.has(tab.key) ? "Regenerating…" : "Regenerate title", icon: "refresh-cw", disabled: titling.has(tab.key) || !lastPrompt(tab), run: () => regenerateTitles([tab]) },
-    { label: "Mark unread", icon: "mail-open", disabled: phaseOf(tab) !== "done", run: () => markUnread(tab) },
-    { label: ui.project === project ? "Show all projects" : `Filter by ${project}`, icon: "folder-tree", run: () => setProjectFilter(ui.project === project ? "" : project) },
+    { label: "Mark unread", icon: "mail-open", run: () => markUnread(tab) },
+    { label: ui.project === projectKeyOf(tab) ? "Show all projects" : `Filter by ${project}`, icon: "folder-tree", run: () => setProjectFilter(ui.project === projectKeyOf(tab) ? "" : projectKeyOf(tab)) },
     { label: "Auto-settle behavior", icon: "timer", children: () => [
       { label: "Enabled", checked: !sideMarks.noAutoSettle[threadKey(tab)], run: () => changeMarks(threadKey(tab), () => delete sideMarks.noAutoSettle[threadKey(tab)]) },
       { label: "Disabled", checked: !!sideMarks.noAutoSettle[threadKey(tab)], run: () => changeMarks(threadKey(tab), () => (sideMarks.noAutoSettle[threadKey(tab)] = true)) },
@@ -770,9 +917,9 @@ function rowMenuItems(tab) {
       { label: "Path", icon: "folder", run: () => copyAndTell(tab.view.cwd, "path") },
       ...(ws?.branch ? [{ label: "Branch", icon: "git-branch", run: () => copyAndTell(ws.branch, "branch") }] : []),
       { label: "Thread ID", icon: "hash", disabled: !session, run: () => copyAndTell(session, "thread ID") },
-      { label: "Resume command", icon: "terminal", disabled: !session, run: () => copyAndTell(resumeCommand(tab), "resume command") },
     ] },
     { label: "Project settings", icon: "gear", run: () => openProjectSettings(tab) },
+    ...(switchItems(tab).length ? [{ label: "Move to account", icon: "user-round", children: () => switchItems(tab).map(({ label, run }) => ({ label, run })) }] : []),
     { label: "Archive thread", icon: "archive", sep: true, disabled: turnLive(tab), run: () => archiveThread(tab) },
     { label: "Delete", icon: "trash", danger: true, run: () => deleteThreads([tab]) },
   ];
@@ -784,7 +931,7 @@ function bulkMenuItems(list) {
   const settling = list.filter((t) => !settled(t));
   const titled = list.filter((t) => !titling.has(t.key) && lastPrompt(t));
   return [
-    ...(pinned.length ? [{ label: `Unpin (${pinned.length})`, icon: "pin-off", run: () => pinned.forEach(pin) }] : []),
+    ...(pinned.length ? [{ label: `Unpin (${pinned.length})`, icon: "pin-off", run: () => pinned.forEach((t) => pin(t, false)) }] : []),
     { label: `Settle (${list.length})`, icon: "circle-check", disabled: !settling.length, run: () => settling.forEach(settle) },
     ...(list.every(canSnooze) ? [{ label: `Snooze (${list.length})`, icon: "clock", children: () => snoozeItems(list, true) }] : []),
     titled.length ? { label: `Regenerate titles (${titled.length})`, icon: "refresh-cw", run: () => regenerateTitles(titled) } : { label: `Regenerating… (${list.length})`, icon: "refresh-cw", disabled: true },
@@ -808,7 +955,8 @@ async function showMenu(items, at) {
     return out;
   };
   try {
-    await (await Menu.new({ items: await build(items) })).popup();
+    const point = at && !(at instanceof Element) && TAURI.dpi ? new TAURI.dpi.LogicalPosition(at.x, at.y) : undefined;
+    await (await Menu.new({ items: await build(items) })).popup(point);
   } catch (e) {
     console.warn("native menu", e);
     openSideMenu(items, at);
@@ -869,10 +1017,12 @@ window.addEventListener("keydown", (e) => {
 
 function startRename(tab, where = "row") {
   if (where === "header") {
-    const title = document.querySelector("#chat-head .crumb .title");
+    const title = document.querySelector("#chat-head .crumb button.title");
     if (!title) return;
-    title.innerHTML = `<input class="rename" value="${esc(threadTitle(tab))}" aria-label="Thread title" spellcheck="false">`;
-    return editTitle(tab, title.querySelector("input"));
+    const input = Object.assign(document.createElement("input"), { className: "rename", value: threadTitle(tab), spellcheck: false });
+    input.setAttribute("aria-label", "Thread title");
+    title.replaceWith(input);
+    return editTitle(tab, input);
   }
   ui.renaming = tab.key;
   renderSidebar();
@@ -938,7 +1088,7 @@ threadList.addEventListener("click", (e) => {
   if (row.classList.contains("result")) return openResult(tab);
   const act = e.target.closest("[data-act]")?.dataset.act;
   if (act === "snooze") return openSideMenu(snoozeItems([tab]), e.target.closest("[data-act]"));
-  if (act) return { settle, unsettle, wake, unpin: pin, dismiss: wake, discard: discardDraft }[act](tab);
+  if (act) return { settle, unsettle, wake, unpin: pin, dismiss: wake, discard: discardDraft, terminal: revealTerminal, prs: openLinkedPrs }[act](tab);
   const pr = e.target.closest("[data-pr]");
   if (pr && isModClick(e)) return openOutside(pr.dataset.pr);
   if (!pr && isModClick(e)) return toggleSelected(tab);
@@ -1020,7 +1170,7 @@ threadList.addEventListener("pointerdown", (e) => {
   if (e.pointerType !== "mouse" || e.button !== 0 || ui.search || isModClick(e) || e.shiftKey) return;
   const row = e.target.closest(".thread-row:not(.result)");
   const act = e.target.closest("[data-act]")?.dataset.act;
-  if (!row || e.target.closest("input, .pr, .pin, .woke") || (act && !["settle", "unsettle", "wake"].includes(act))) return;
+  if (!row || e.target.closest("input, .pr, .pin, .woke, .term-run") || (act && !["settle", "unsettle", "wake"].includes(act))) return;
   rowDrag = { row, key: row.dataset.tab, x: e.clientX, y: e.clientY, sweep: act ?? null, started: false };
 });
 addEventListener("pointermove", (e) => {
@@ -1184,8 +1334,50 @@ function setProjectFilter(project) {
   save("gui-project", ui.project);
   renderSidebar();
 }
-const projectNames = () => [...new Set(tabs.map(projectName))].sort();
-const tabOfProject = (name) => tabs.find((t) => projectName(t) === name);
+/** Each machine's projects' origins (`host/owner/name`), by `machine:path`, which group a project's
+ * checkouts across machines, as T3 Code's repository identity does. */
+const projectRepos = new Map();
+const reposAsked = new Map();
+function askProjectRepos(machine, place) {
+  if (reposAsked.has(machine)) return;
+  reposAsked.set(machine, place);
+  callOn(machine, { cmd: "list_projects" }).then((list) => {
+    const was = [...projectRepos.entries()].join();
+    for (const p of list) projectRepos.set(`${machine}:${p.path}`, p.repo ?? null);
+    if (!projectRepos.has(place)) projectRepos.set(place, null);
+    reposAsked.delete(machine);
+    if ([...projectRepos.entries()].join() !== was && guiOn()) renderSidebar();
+  }, () => setTimeout(() => reposAsked.delete(machine), 30e3));
+}
+const projectPathOf = (tab) => threadOf(tab).workspace?.project ?? tab.view.cwd;
+/** The project group a thread is in: its repository with Project grouping on, else its folder on its machine. */
+function projectKeyOf(tab) {
+  const place = `${tab.machine}:${projectPathOf(tab)}`;
+  if (!projectRepos.has(place)) askProjectRepos(tab.machine, place);
+  const repo = sideSettings.grouping && projectRepos.get(place);
+  return repo ? `repo:${repo}` : place;
+}
+const threadCreatedAt = (tab) => unixOf(threadOf(tab).items[0]?.at) || firstSeen.get(tab.key) || 0;
+/** T3 Code's project order: by the latest user message or the newest thread, newest first, or
+ * manually, which with no reordering here keeps the order projects first appeared in. */
+function sortedProjects(list, tabsOf) {
+  const order = sideSettings.projectOrder;
+  const latest = (p) => Math.max(-Infinity, ...tabsOf(p).map(order === "created_at" ? threadCreatedAt : latestUserAt));
+  const first = (p) => Math.min(Infinity, ...tabsOf(p).map(threadCreatedAt));
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  return [...list].sort(order === "manual" ? (a, b) => first(a) - first(b) || byName(a, b) : (a, b) => latest(b) - latest(a) || byName(a, b));
+}
+/** The sidebar's projects: `{ key, name, tab, machine }`, `tab` the group's first thread. */
+function projectGroups() {
+  const groups = new Map();
+  for (const tab of tabs) {
+    const key = projectKeyOf(tab);
+    if (!groups.has(key)) groups.set(key, { key, name: projectName(tab), tab, machine: tab.machine, tabs: [] });
+    groups.get(key).tabs.push(tab);
+  }
+  return sortedProjects([...groups.values()], (g) => g.tabs);
+}
+const tabOfProject = (key) => tabs.find((t) => projectKeyOf(t) === key);
 const projectFilter = document.getElementById("project-filter");
 const projectMenu = document.createElement("div");
 projectMenu.id = "project-menu";
@@ -1201,10 +1393,12 @@ function openProjectMenu() {
   let shown = [];
   const draw = () => {
     const q = input.value.trim().toLowerCase();
-    shown = ["", ...projectNames()].filter((name) => !q || (name || "All projects").toLowerCase().includes(q));
+    const groups = projectGroups();
+    const machinesShown = !sideSettings.grouping && new Set(groups.map((g) => g.machine)).size > 1;
+    shown = [{ key: "", name: "All projects" }, ...groups].filter((g) => !q || g.name.toLowerCase().includes(q));
     hit = Math.min(hit, Math.max(0, shown.length - 1));
     list.innerHTML = shown.length
-      ? shown.map((name, i) => `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(name)}" aria-selected="${name === ui.project}">${name ? projectIcon(name, tabOfProject(name)) : icon("folder")}<span class="label">${esc(name || "All projects")}</span>${name ? `<button type="button" class="gear" data-gear="${esc(name)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(name)}">${icon("gear")}</button>` : ""}</div>`).join("")
+      ? shown.map((g, i) => `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(g.key)}" aria-selected="${g.key === ui.project}">${g.key ? projectIcon(g.name, g.tab) : icon("folder")}<span class="label">${esc(g.name)}</span>${machinesShown && g.key ? `<span class="where">${esc(machineName(g.machine))}</span>` : ""}${g.key ? `<button type="button" class="gear" data-gear="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(g.name)}">${icon("gear")}</button>` : ""}</div>`).join("")
       : `<p class="empty">No matching projects.</p>`;
   };
   const pick = (name) => {
@@ -1218,7 +1412,7 @@ function openProjectMenu() {
   input.onkeydown = (e) => {
     if (e.isComposing) return;
     if (e.key === "Escape") return (e.stopPropagation(), closeProjectMenu());
-    if (e.key === "Enter" && shown.length) return (e.preventDefault(), pick(shown[hit]));
+    if (e.key === "Enter" && shown.length) return (e.preventDefault(), pick(shown[hit].key));
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     e.preventDefault();
     hit = (hit + (e.key === "ArrowDown" ? 1 : -1) + shown.length) % Math.max(1, shown.length);
@@ -1263,7 +1457,7 @@ function closeProjectMenu() {
 projectFilter.onclick = () => (projectMenu.hidden ? openProjectMenu() : closeProjectMenu());
 window.addEventListener("mousedown", (e) => !projectMenu.hidden && !e.target.closest("#project-menu, #project-filter") && closeProjectMenu(), true);
 
-const projectCount = () => new Set(tabs.map((t) => `${t.machine}:${threadOf(t).workspace?.project ?? t.view.cwd}`)).size;
+const projectCount = () => projectGroups().length;
 /** A new session in the thread's folder, on its machine, without the picker. */
 async function newThreadIn(tab) {
   if (!tab) return toggleProjects();
@@ -1277,22 +1471,22 @@ async function newThreadIn(tab) {
     tell(`Couldn't open a thread: ${esc(e)}`, 6000);
   }
 }
-/** T3 Code's chat.new: with more than one project the picker asks where, otherwise the thread opens here. */
+/** T3 Code's chat.new: with more than one project the palette asks where, otherwise the thread opens here. */
 function newThread(here = false) {
   if (narrow(768)) toggleSidebar(false);
   if (active && (here || projectCount() <= 1)) return newThreadIn(active);
-  toggleProjects();
+  openPalette({ mode: "new-thread-in" });
 }
 function newThreadWithoutProject() {
   const machine = active?.machine ?? onlineMachines()[0];
   if (!machine) return toggleProjects();
   if (pickerOpen()) closeProjects();
-  openTab(machine, null).catch((e) => tell(`Couldn't open a thread: ${esc(e)}`, 6000));
+  openScratchTab(machine).catch((e) => tell(`Couldn't open a thread: ${esc(e)}`, 6000));
 }
-async function addProject(machine = active?.machine) {
+/** T3 Code's Add project: the palette's sources, `machine` picked as their environment. */
+function addProject(machine = active?.machine) {
   if (narrow(768)) toggleSidebar(false);
-  await showProjects({ machine });
-  if (pickerOpen() && picker.querySelector(".choices")) browseFolders();
+  openPalette({ mode: "add-project", machine });
 }
 document.getElementById("new-thread").onclick = (e) => newThread(e.shiftKey);
 document.getElementById("add-project").onclick = () => addProject();
@@ -1344,15 +1538,16 @@ function forget(tab) {
   closeTab(tab);
 }
 /** T3 Code's Archive: the session closes and Settings keeps it, to bring back with Unarchive. */
-function archiveThread(tab) {
+async function archiveThread(tab) {
   if (turnLive(tab)) return;
+  if (sideSettings.confirmArchive && !(await confirmAction(`Archive thread "${esc(threadTitle(tab))}"?`, "Settings › Archive keeps it to bring back.", "Archive"))) return;
   archived.push({ ...closedEntry(tab), name: threadTitle(tab), project: projectName(tab), at: nowS(), created: unixOf(threadOf(tab).items[0]?.at) || undefined });
   saveArchived();
   forget(tab);
 }
 async function deleteThreads(list) {
   const one = list.length === 1;
-  const sure = await askDialog(`<h3>${one ? `Delete thread "${esc(threadTitle(list[0]))}"?` : `Delete ${list.length} threads?`}</h3>
+  const sure = !sideSettings.confirmDelete || await askDialog(`<h3>${one ? `Delete thread "${esc(threadTitle(list[0]))}"?` : `Delete ${list.length} threads?`}</h3>
     <p class="about">This closes ${one ? "its session" : "their sessions"} and removes ${one ? "it" : "them"} from pinned for good. Claude Code keeps ${one ? "its transcript" : "their transcripts"}.</p>
     <div class="actions"><button type="button" class="outline" data-cancel>Cancel</button><button class="destructive">Delete</button></div>`, () => true);
   if (sure) list.forEach(forget);
@@ -1425,7 +1620,6 @@ function jumpToRow(n) {
 
 function toggleSidebar(open = !ui.sidebarOpen) {
   ui.sidebarOpen = open;
-  if (!narrow(768)) save("gui-sidebar", String(open));
   document.body.dataset.sidebar = open ? "open" : "closed";
 }
 document.getElementById("sidebar-toggle").innerHTML = icon("panel-left-close");
@@ -1470,6 +1664,40 @@ window.addEventListener("keydown", (e) => !(e.repeat && e.key === MOD_KEY) && sh
 window.addEventListener("keyup", (e) => e.key === MOD_KEY && showJumpHints(false), true);
 window.addEventListener("blur", () => showJumpHints(false));
 
+/** T3 Code's update control at the footer's end, in the desktop app: it checks for a new version, or
+ * installs the one found, which restarts the app. */
+const sideUpdate = document.getElementById("side-update");
+let updateBusy = null;
+function drawUpdate() {
+  const version = document.body.dataset.update;
+  const state = updateBusy ?? (version ? "available" : "idle");
+  const [glyph, tip] = {
+    idle: ["refresh-cw", "Check for updates"],
+    checking: ["refresh-cw", "Checking for updates…"],
+    available: ["download", `Update ${version} ready to download`],
+    downloading: ["download", "Downloading update"],
+  }[state];
+  sideUpdate.dataset.state = state;
+  sideUpdate.dataset.tip = tip;
+  sideUpdate.setAttribute("aria-label", tip);
+  sideUpdate.setAttribute("aria-disabled", String(!!updateBusy));
+  sideUpdate.innerHTML = `<span class="glyph">${icon(glyph, state === "checking" ? "spin" : "")}</span>`;
+}
+sideUpdate.onclick = async () => {
+  if (updateBusy) return;
+  const install = !!document.body.dataset.update;
+  updateBusy = install ? "downloading" : "checking";
+  drawUpdate();
+  await (install ? installUpdate() : checkUpdate());
+  updateBusy = null;
+  drawUpdate();
+};
+if (TAURI) {
+  sideUpdate.hidden = false;
+  drawUpdate();
+  new MutationObserver(drawUpdate).observe(document.body, { attributeFilter: ["data-update"] });
+}
+
 const sidebarEl = document.getElementById("sidebar");
 function setSidebarWidth(px) {
   const width = Math.round(Math.max(208, Math.min(px, innerWidth - 640)));
@@ -1490,14 +1718,33 @@ sidebarRail.onmousedown = (down) => {
 };
 sidebarRail.ondblclick = () => save("gui-sidebar-width", String(setSidebarWidth(SIDEBAR_WIDTH)));
 
-/** The header's project crumb opens a new thread there; a double-click on the title renames it. */
-function crumbHtml(tab) {
+/** T3 Code's breadcrumb: the project, which opens a new thread there, a subagent's parent thread, and
+ * the title, whose chevron shows on hover and whose click opens the thread's menu; a double-click
+ * renames it. A subagent's own title opens nothing. */
+function crumbHtml(tab, sub = null) {
   const name = projectName(tab);
-  return `<button class="project" data-new-here title="New thread in ${esc(name)}">${projectIcon(name, tab)}<span>${esc(name)}</span></button><span class="sep">/</span><span class="title" title="${esc(threadTitle(tab))}">${esc(threadTitle(tab))}</span>${statsHtml(tab)}`;
+  const sep = `<span class="sep" aria-hidden="true">/</span>`;
+  const parent = threadTitle(tab);
+  const title = sub ? sub.title : parent;
+  return `<button type="button" class="project" data-new-here aria-label="New thread in ${esc(name)}" data-tip="New thread in ${esc(name)}">${projectIcon(name, tab)}<span>${esc(name)}</span></button>${sep}${sub
+    ? `<button type="button" class="parent" data-subagent-back aria-label="Open parent thread: ${esc(parent)}" data-tip="${esc(parent)}"><span class="text">${esc(parent)}</span></button>${sep}<h2 class="title sub" data-tip="${esc(title)}"><span class="text">${esc(title)}</span></h2>`
+    : `<button type="button" class="title" aria-haspopup="menu" aria-label="Thread actions for ${esc(title)}" data-tip="${esc(title)}"><h2 class="text">${esc(title)}</h2>${icon("chevron-down", "chev")}</button>`}${statsHtml(tab)}`;
+}
+/** A parent crumb that would push the title out folds to "...", as T3 Code's does. */
+function fitParentCrumb() {
+  const parent = crumbEl.querySelector(".parent");
+  if (!parent) return;
+  parent.classList.remove("folded");
+  const gap = parseFloat(getComputedStyle(crumbEl).columnGap) || 0;
+  const items = [...crumbEl.children];
+  const need = items.reduce((sum, el) => sum + (el.classList.contains("title") ? el.querySelector(".text").scrollWidth : el.getBoundingClientRect().width), gap * (items.length - 1));
+  parent.classList.toggle("folded", need > crumbEl.clientWidth);
 }
 const crumbEl = document.querySelector("#chat-head .crumb");
+new ResizeObserver(fitParentCrumb).observe(crumbEl);
+new MutationObserver(fitParentCrumb).observe(crumbEl, { childList: true });
 crumbEl.addEventListener("click", (e) => e.target.closest("[data-new-here]") && newThreadIn(active));
-crumbEl.addEventListener("dblclick", (e) => active && e.target.closest(".title") && !e.target.closest("input") && startRename(active, "header"));
+crumbEl.addEventListener("dblclick", (e) => active && e.target.closest("button.title") && !e.target.closest(".chev") && startRename(active, "header"));
 document.getElementById("chat-head").addEventListener("contextmenu", (e) => {
   if (!active || e.target.closest("input, button:not([data-new-here])")) return;
   e.preventDefault();

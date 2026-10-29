@@ -9,8 +9,10 @@ const SUMMARY_CHARS: usize = 300;
 /// The biggest image, as base64, that a thread page carries inline.
 const PICTURE_CHARS: usize = 2 << 20;
 const READ_LIMIT: u64 = 8 << 20;
+/// The line `fork` adds to a copy, naming the session it was copied from.
+pub const FORK_LINE: &str = "pinned-fork";
 
-#[derive(Serialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Item {
     /// What the user typed, or a slash command as `/name args`. `pictures` holds the `data:` URLs of
@@ -31,18 +33,39 @@ pub enum Item {
     Thinking { id: String, at: String, text: String },
     /// A request to the model that failed, such as `API Error: 529 Overloaded`.
     Error { id: String, at: String, text: String },
-    Tool { id: String, at: String, name: String, summary: String, detail: String },
-    /// The outcome of the `Tool` whose id is `tool`.
-    Result { tool: String, at: String, error: bool, text: String },
+    /// `args` holds the input of a tool T3 Code shows as a generic call, such as Grep or an MCP tool,
+    /// one `[key, value]` per field.
+    Tool {
+        id: String,
+        at: String,
+        name: String,
+        summary: String,
+        detail: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        args: Vec<(String, String)>,
+    },
+    /// The outcome of the `Tool` whose id is `tool`. `links` are a web search's results as `[title, url]`.
+    Result {
+        tool: String,
+        at: String,
+        error: bool,
+        text: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        links: Vec<(String, String)>,
+    },
+    /// Claude compacted the conversation, from `before` tokens to `after` when it says.
+    Compaction { id: String, at: String, before: Option<u64>, after: Option<u64> },
+    /// The conversation goes on from a copy of the session `source`, which pinned forked.
+    Fork { id: String, at: String, source: String },
     /// Output of a local command such as `/model`, which claude shows without a turn.
     Note { id: String, at: String, text: String },
-    /// A pull request the session opened or worked on.
-    Pr { number: u64, url: String, repo: String },
+    /// A pull request the session opened or worked on, linked at `at`.
+    Pr { number: u64, url: String, repo: String, at: String },
     /// The model the session runs from here on, by its marketing name, such as `Haiku 5.5`.
     Model { name: String },
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Page {
     pub items: Vec<Item>,
     /// Where the next read starts.
@@ -51,16 +74,30 @@ pub struct Page {
     pub reset: bool,
     /// How full the context window was after the last answer in these lines.
     pub context: Option<Context>,
+    /// The git branch claude last worked on in these lines.
+    pub branch: Option<String>,
+    /// The task list claude last wrote with `TodoWrite` in these lines.
+    pub todos: Option<Todos>,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+/// A `TodoWrite` call, whose list replaces the one before it.
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Todos {
+    pub at: String,
+    pub steps: Vec<Todo>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Todo {
+    pub step: String,
+    /// `pending`, `in_progress` or `completed`, as claude writes it.
+    pub status: String,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Context {
     pub tokens: u64,
     pub at: String,
-}
-
-pub fn projects_dir(home: &Path) -> PathBuf {
-    std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| home.join(".claude"), PathBuf::from).join("projects")
 }
 
 pub fn find(projects: &Path, session: &str) -> Option<PathBuf> {
@@ -109,8 +146,9 @@ pub struct Forked {
 }
 
 /// Copies `file`'s lines up to `cut` into a sibling transcript for `session`, as `claude --fork-session`
-/// would. Claude then resumes the copy as its own conversation, leaving the original whole.
-pub fn fork(file: &Path, cut: Cut, session: &str) -> Result<Forked, String> {
+/// would. Claude then resumes the copy as its own conversation, leaving the original whole. With a
+/// `source`, the copy ends in a line naming the session it came from, which claude passes over.
+pub fn fork(file: &Path, cut: Cut, session: &str, source: Option<&str>) -> Result<Forked, String> {
     let text = std::fs::read_to_string(file).map_err(|e| format!("could not read the transcript: {e}"))?;
     let (uuid, keep) = match cut {
         Cut::Before(uuid) => (uuid, false),
@@ -121,7 +159,7 @@ pub fn fork(file: &Path, cut: Cut, session: &str) -> Result<Forked, String> {
     let at = lines.iter().position(|l| parsed(l).is_some_and(|v| v["uuid"] == uuid)).ok_or("that message is not in this conversation")?;
     let end = at + usize::from(keep);
     let timestamp = lines[end..].iter().find_map(|l| parsed(l).and_then(|v| v["timestamp"].as_str().map(str::to_owned))).unwrap_or_default();
-    let copied: Vec<String> = lines[..end]
+    let mut copied: Vec<String> = lines[..end]
         .iter()
         .map(|line| match parsed(line) {
             Some(mut v) if v.get("sessionId").is_some() => {
@@ -131,6 +169,10 @@ pub fn fork(file: &Path, cut: Cut, session: &str) -> Result<Forked, String> {
             _ => line.to_string(),
         })
         .collect();
+    if let Some(source) = source {
+        let at = lines[..end].iter().rev().find_map(|l| parsed(l).and_then(|v| v["timestamp"].as_str().map(str::to_owned))).unwrap_or_default();
+        copied.push(serde_json::json!({ "type": FORK_LINE, "sourceSession": source, "timestamp": at }).to_string());
+    }
     let said = lines[..end].iter().filter_map(|l| parsed(l)).any(|v| matches!(v["type"].as_str(), Some("user" | "assistant")));
     let target = file.with_file_name(format!("{session}.jsonl"));
     std::fs::write(&target, copied.iter().map(|l| format!("{l}\n")).collect::<String>()).map_err(|e| format!("could not write the copy: {e}"))?;
@@ -150,6 +192,8 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
     let lines: Vec<Value> = bytes[..whole].split(|b| *b == b'\n').filter_map(|line| serde_json::from_slice::<Value>(line).ok()).filter(|v| v["isSidechain"].as_bool() != Some(true)).collect();
     let mut items: Vec<Item> = lines.iter().flat_map(items_of).collect();
     let context = lines.iter().rev().find_map(context_of);
+    let branch = lines.iter().rev().find_map(|l| l["gitBranch"].as_str().filter(|b| !b.is_empty()).map(str::to_owned));
+    let todos = lines.iter().rev().find_map(todos_of);
     let mut next = from + whole as u64;
     if whole == 0 && bytes.len() as u64 == READ_LIMIT {
         if let Some(rest) = rest_of_line(&mut f)? {
@@ -157,7 +201,81 @@ pub fn read(file: &Path, from: u64) -> std::io::Result<Page> {
             items.push(Item::Note { id: format!("skipped:{from}"), at: String::new(), text: "An entry too large to show was left out.".into() });
         }
     }
-    Ok(Page { items, next, reset: replaced, context })
+    Ok(Page { items, next, reset: replaced, context, branch, todos })
+}
+
+/// The list of the last `TodoWrite` call on an assistant line of the main conversation.
+fn todos_of(line: &Value) -> Option<Todos> {
+    if line["type"] != "assistant" {
+        return None;
+    }
+    let call = line["message"]["content"].as_array()?.iter().rev().find(|b| b["type"] == "tool_use" && b["name"] == TODO_TOOL)?;
+    let steps = call["input"]["todos"]
+        .as_array()?
+        .iter()
+        .filter_map(|todo| {
+            let step = todo["content"].as_str()?.trim();
+            let status = todo["status"].as_str().filter(|s| ["pending", "in_progress", "completed"].contains(s))?;
+            (!step.is_empty()).then(|| Todo { step: clip(step, SUMMARY_CHARS), status: status.to_owned() })
+        })
+        .collect();
+    Some(Todos { at: line["timestamp"].as_str().unwrap_or_default().to_owned(), steps })
+}
+
+/// Claude's task list tool, which the composer shows instead of the thread.
+const TODO_TOOL: &str = "TodoWrite";
+/// A message of a transcript that holds a query, as T3 Code's thread search reports one.
+#[derive(Serialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
+pub struct Found {
+    /// `user` or `assistant`.
+    pub source: &'static str,
+    pub snippet: String,
+}
+
+/// The prompt that holds `query`, else the answer, the latest of each, with ASCII letters in either
+/// case, as T3 Code's server searches messages.
+pub fn search(file: &Path, query: &str) -> std::io::Result<Option<Found>> {
+    let needle = query.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    if needle.is_empty() {
+        return Ok(None);
+    }
+    let len = std::fs::metadata(file)?.len();
+    let (mut user, mut assistant) = (None, None);
+    let mut from = 0;
+    loop {
+        let page = read(file, from)?;
+        for item in &page.items {
+            let (slot, text) = match item {
+                Item::User { text, .. } | Item::Steer { text, .. } => (&mut user, text),
+                Item::Text { text, .. } => (&mut assistant, text),
+                _ => continue,
+            };
+            if text.to_ascii_lowercase().contains(&needle) {
+                *slot = Some(text.clone());
+            }
+        }
+        if page.next <= from || page.next >= len {
+            break;
+        }
+        from = page.next;
+    }
+    Ok(user.map(|text| ("user", text)).or(assistant.map(|text| ("assistant", text))).map(|(source, text)| Found { source, snippet: snippet(&text, query) }))
+}
+
+/// T3 Code's buildSearchSnippet: the message on one line, cut to about 240 characters around the match.
+fn snippet(text: &str, query: &str) -> String {
+    let text: Vec<char> = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().collect();
+    if text.len() <= 240 {
+        return text.into_iter().collect();
+    }
+    let needle: Vec<char> = query.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase().chars().collect();
+    let lower: Vec<char> = text.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let at = (0..=lower.len().saturating_sub(needle.len())).find(|&i| lower[i..].starts_with(&needle)).unwrap_or(0);
+    let body = 236;
+    let start = at.saturating_sub(72).min(text.len() - body);
+    let end = (start + body).min(text.len());
+    let cut: String = text[start..end].iter().collect();
+    format!("{}{cut}{}", if start > 0 { "…" } else { "" }, if end < text.len() { "…" } else { "" })
 }
 
 /// What an answer's usage says the next request starts from: the prompt it read, cached or not, and what it wrote.
@@ -199,11 +317,16 @@ pub(crate) fn items_of(line: &Value) -> Vec<Item> {
     let at = str_of(&line["timestamp"]);
     match line["type"].as_str() {
         Some("pr-link") => match line["prNumber"].as_u64() {
-            Some(number) => vec![Item::Pr { number, url: str_of(&line["prUrl"]), repo: str_of(&line["prRepository"]) }],
+            Some(number) => vec![Item::Pr { number, url: str_of(&line["prUrl"]), repo: str_of(&line["prRepository"]), at }],
             None => vec![],
         },
-        Some("user") if line["isCompactSummary"].as_bool() == Some(true) => vec![Item::Note { id, at, text: "The conversation was compacted.".into() }],
-        Some("user") => user_items(&line["message"]["content"], id, at),
+        Some("user") if line["isCompactSummary"].as_bool() == Some(true) => vec![],
+        Some("system") if line["subtype"] == "compact_boundary" => {
+            let tokens = |k: &str| line["compactMetadata"][k].as_u64().filter(|n| *n > 0);
+            vec![Item::Compaction { id, at, before: tokens("preTokens"), after: tokens("postTokens") }]
+        }
+        Some(FORK_LINE) => vec![Item::Fork { id: format!("fork:{at}"), at, source: str_of(&line["sourceSession"]) }],
+        Some("user") => user_items(&line["message"]["content"], &line["toolUseResult"], id, at),
         Some("attachment") if line["attachment"]["type"] == "queued_command" && line["attachment"]["origin"]["kind"] == "human" => {
             match spoken(line["attachment"]["prompt"].as_str().unwrap_or_default()) {
                 Some(Spoken::Prompt(text)) => vec![Item::Steer { id, at, text }],
@@ -234,10 +357,11 @@ pub(crate) fn items_of(line: &Value) -> Vec<Item> {
                             let text = str_of(&block["thinking"]);
                             (!text.trim().is_empty()).then(|| Item::Thinking { id, at: at.clone(), text })
                         }
+                        "tool_use" if block["name"] == TODO_TOOL => None,
                         "tool_use" => {
                             let name = str_of(&block["name"]);
-                            let (summary, detail) = describe_tool(&name, &block["input"]);
-                            Some(Item::Tool { id: str_of(&block["id"]), at: at.clone(), name, summary, detail })
+                            let (summary, detail, args) = describe_tool(&name, &block["input"]);
+                            Some(Item::Tool { id: str_of(&block["id"]), at: at.clone(), name, summary, detail, args })
                         }
                         _ => None,
                     }
@@ -248,7 +372,7 @@ pub(crate) fn items_of(line: &Value) -> Vec<Item> {
     }
 }
 
-fn user_items(content: &Value, id: String, at: String) -> Vec<Item> {
+fn user_items(content: &Value, outcome: &Value, id: String, at: String) -> Vec<Item> {
     if let Some(text) = content.as_str() {
         return match spoken(text) {
             Some(Spoken::Prompt(text)) => vec![Item::User { id, at, text, images: 0, pictures: vec![] }],
@@ -265,6 +389,7 @@ fn user_items(content: &Value, id: String, at: String) -> Vec<Item> {
             at: at.clone(),
             error: b["is_error"].as_bool() == Some(true),
             text: clip(&result_text(&b["content"]), PREVIEW_CHARS),
+            links: links_of(outcome),
         })
         .collect();
     let text = blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n");
@@ -278,6 +403,12 @@ fn user_items(content: &Value, id: String, at: String) -> Vec<Item> {
         None => None,
     };
     results.into_iter().chain(said).collect()
+}
+
+/// The pages a web search found, from the structured result Claude Code keeps beside its text.
+fn links_of(outcome: &Value) -> Vec<(String, String)> {
+    let found = outcome["results"].as_array().into_iter().flatten().flat_map(|r| r["content"].as_array().into_iter().flatten());
+    found.filter_map(|c| Some((c["title"].as_str().unwrap_or_default().to_owned(), c["url"].as_str()?.to_owned()))).take(50).collect()
 }
 
 /// A `data:` URL for an image block's base64 source, when it is a picture a page can show and small enough.
@@ -349,29 +480,44 @@ fn result_text(content: &Value) -> String {
     }
 }
 
-fn describe_tool(name: &str, input: &Value) -> (String, String) {
+/// Tools T3 Code draws with their own rows. Any other shows its input as `key value` lines.
+const OWN_ROWS: &[&str] = &["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Skill", "Agent", "Task", "ExitPlanMode", "AskUserQuestion"];
+const ARGS_SHOWN: usize = 40;
+
+/// A tool call's one-line summary, the detail its row expands to, and its input as `[key, value]` pairs.
+fn describe_tool(name: &str, input: &Value) -> (String, String, Vec<(String, String)>) {
     let field = |k: &str| input[k].as_str().unwrap_or_default();
     let summary = match name {
-        "Bash" => field("description").to_owned(),
-        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => field("file_path").to_owned(),
+        "Bash" => field("command").to_owned(),
+        "Read" | "Write" | "Edit" | "MultiEdit" => field("file_path").to_owned(),
+        "NotebookEdit" => field("notebook_path").to_owned(),
         "Grep" | "Glob" => field("pattern").to_owned(),
         "WebFetch" => field("url").to_owned(),
         "WebSearch" => field("query").to_owned(),
         "Agent" | "Task" => field("description").to_owned(),
         "Skill" => field("skill").to_owned(),
+        "Artifact" => field("file_path").to_owned(),
         "AskUserQuestion" => input["questions"][0]["question"].as_str().unwrap_or_default().to_owned(),
         _ => String::new(),
     };
     let summary = if summary.is_empty() { first_string(input).unwrap_or_default() } else { summary };
     let detail = match name {
         "Bash" => field("command").to_owned(),
-        "Edit" => format!("{}\n---\n{}", field("old_string"), field("new_string")),
-        "Write" => field("content").to_owned(),
+        "Skill" => field("args").to_owned(),
         "Agent" | "Task" => field("prompt").to_owned(),
-        "ExitPlanMode" => return (clip(summary.lines().next().unwrap_or_default(), SUMMARY_CHARS), clip(field("plan"), PLAN_CHARS)),
+        "Artifact" => field("description").to_owned(),
+        "ExitPlanMode" => return (clip(summary.lines().next().unwrap_or_default(), SUMMARY_CHARS), clip(field("plan"), PLAN_CHARS), vec![]),
         _ => String::new(),
     };
-    (clip(summary.lines().next().unwrap_or_default(), SUMMARY_CHARS), clip(&detail, PREVIEW_CHARS))
+    let args = match input.as_object() {
+        Some(fields) if !OWN_ROWS.contains(&name) => fields
+            .iter()
+            .take(ARGS_SHOWN)
+            .map(|(k, v)| (k.clone(), clip(&v.as_str().filter(|s| !s.is_empty()).map_or_else(|| v.to_string(), str::to_owned), PREVIEW_CHARS)))
+            .collect(),
+        _ => vec![],
+    };
+    (clip(summary.lines().next().unwrap_or_default(), SUMMARY_CHARS), clip(&detail, PREVIEW_CHARS), args)
 }
 
 fn first_string(input: &Value) -> Option<String> {
@@ -399,6 +545,26 @@ mod tests {
     }
 
     #[test]
+    fn search_finds_the_latest_prompt_before_an_answer_with_an_excerpt_around_the_match() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let long = format!("{} the Flaky Test fails on CI {}", "words ".repeat(30), "more ".repeat(30));
+        for line in [
+            r#"{"type":"user","uuid":"u1","timestamp":"t1","message":{"role":"user","content":"look at the flaky test"}}"#.to_owned(),
+            r#"{"type":"assistant","uuid":"a1","timestamp":"t2","message":{"content":[{"type":"text","text":"The flaky test is fixed."}]}}"#.to_owned(),
+            format!(r#"{{"type":"user","uuid":"u2","timestamp":"t3","message":{{"role":"user","content":"{long}"}}}}"#),
+        ] {
+            writeln!(file, "{line}").unwrap();
+        }
+        let found = search(file.path(), "flaky  TEST").unwrap().unwrap();
+        assert_eq!(found.source, "user");
+        assert!(found.snippet.starts_with('…') && found.snippet.ends_with('…'), "{}", found.snippet);
+        assert!(found.snippet.contains("the Flaky Test fails on CI"), "{}", found.snippet);
+        assert_eq!(found.snippet.chars().count(), 238);
+        assert_eq!(search(file.path(), "is fixed").unwrap(), Some(Found { source: "assistant", snippet: "The flaky test is fixed.".into() }));
+        assert_eq!(search(file.path(), "nowhere").unwrap(), None);
+    }
+
+    #[test]
     fn the_context_is_the_last_answers_prompt_and_output() {
         let read = page(&[
             r#"{"type":"assistant","uuid":"a1","timestamp":"t1","message":{"content":[],"usage":{"input_tokens":5,"cache_read_input_tokens":100,"output_tokens":7}}}"#,
@@ -416,13 +582,29 @@ mod tests {
     }
 
     #[test]
+    fn the_last_todo_list_leaves_the_items_for_the_page() {
+        let read = page(&[
+            r#"{"type":"user","uuid":"u1","timestamp":"t1","gitBranch":"main","message":{"content":"plan it"}}"#,
+            r#"{"type":"assistant","uuid":"a1","timestamp":"t2","gitBranch":"main","message":{"content":[{"type":"tool_use","id":"w1","name":"TodoWrite","input":{"todos":[{"content":"Read the parser","status":"in_progress","activeForm":"Reading the parser"},{"content":"Fix it","status":"pending"}]}}]}}"#,
+            r#"{"type":"user","uuid":"u2","timestamp":"t3","gitBranch":"feature","message":{"content":[{"type":"tool_result","tool_use_id":"w1","content":"Todos have been modified successfully."}]}}"#,
+            r#"{"type":"assistant","uuid":"a2","timestamp":"t4","gitBranch":"feature","message":{"content":[{"type":"tool_use","id":"w2","name":"TodoWrite","input":{"todos":[{"content":"Read the parser","status":"completed"},{"content":"Fix it","status":"in_progress"},{"content":"  ","status":"pending"},{"content":"Odd","status":"later"}]}}]}}"#,
+            r#"{"type":"assistant","uuid":"s1","isSidechain":true,"timestamp":"t5","gitBranch":"sub","message":{"content":[{"type":"tool_use","id":"w3","name":"TodoWrite","input":{"todos":[{"content":"A subagent's","status":"pending"}]}}]}}"#,
+        ]);
+        let step = |step: &str, status: &str| Todo { step: step.into(), status: status.into() };
+        assert_eq!(read.todos, Some(Todos { at: "t4".into(), steps: vec![step("Read the parser", "completed"), step("Fix it", "in_progress")] }));
+        assert_eq!(read.branch.as_deref(), Some("feature"));
+        assert!(read.items.iter().all(|i| !matches!(i, Item::Tool { .. })), "a TodoWrite call showed in the thread: {:?}", read.items);
+        assert_eq!(page(&[r#"{"type":"user","uuid":"u","message":{"content":"hi"}}"#]).todos, None);
+    }
+
+    #[test]
     fn a_turn_reads_as_prompt_tool_result_and_answer() {
         let items = page(&[
             r#"{"type":"user","uuid":"u1","timestamp":"2026-10-23T10:00:00Z","message":{"role":"user","content":"fix the bug"}}"#,
             r#"{"type":"assistant","uuid":"a1","timestamp":"2026-10-23T10:00:05Z","message":{"content":[{"type":"thinking","thinking":""},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test","description":"Run the tests"}}]}}"#,
             r#"{"type":"user","uuid":"u2","timestamp":"2026-10-23T10:00:09Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok","is_error":false}]}}"#,
             r#"{"type":"assistant","uuid":"a2","timestamp":"2026-10-23T10:01:00Z","message":{"content":[{"type":"text","text":"Fixed."}]}}"#,
-            r#"{"type":"pr-link","prNumber":7,"prUrl":"https://github.com/o/r/pull/7","prRepository":"o/r"}"#,
+            r#"{"type":"pr-link","prNumber":7,"prUrl":"https://github.com/o/r/pull/7","prRepository":"o/r","timestamp":"2026-10-23T10:02:00Z"}"#,
             r#"{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"claude-haiku-5-5","marketingName":"Haiku 5.5"}}}"#,
             r#"{"type":"attachment","attachment":{"type":"hook_success","content":"x"}}"#,
         ])
@@ -431,10 +613,10 @@ mod tests {
             items,
             vec![
                 Item::User { id: "u1".into(), at: "2026-10-23T10:00:00Z".into(), text: "fix the bug".into(), images: 0, pictures: vec![] },
-                Item::Tool { id: "t1".into(), at: "2026-10-23T10:00:05Z".into(), name: "Bash".into(), summary: "Run the tests".into(), detail: "cargo test".into() },
-                Item::Result { tool: "t1".into(), at: "2026-10-23T10:00:09Z".into(), error: false, text: "ok".into() },
+                Item::Tool { id: "t1".into(), at: "2026-10-23T10:00:05Z".into(), name: "Bash".into(), summary: "cargo test".into(), detail: "cargo test".into(), args: vec![] },
+                Item::Result { tool: "t1".into(), at: "2026-10-23T10:00:09Z".into(), error: false, text: "ok".into(), links: vec![] },
                 Item::Text { id: "a2:0".into(), at: "2026-10-23T10:01:00Z".into(), text: "Fixed.".into() },
-                Item::Pr { number: 7, url: "https://github.com/o/r/pull/7".into(), repo: "o/r".into() },
+                Item::Pr { number: 7, url: "https://github.com/o/r/pull/7".into(), repo: "o/r".into(), at: "2026-10-23T10:02:00Z".into() },
                 Item::Model { name: "Haiku 5.5".into() },
             ]
         );
@@ -473,12 +655,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("old.jsonl");
         std::fs::write(&file, "{\"uuid\":\"a\",\"sessionId\":\"old\",\"timestamp\":\"t1\"}\nnot json\n{\"uuid\":\"b\",\"sessionId\":\"old\",\"timestamp\":\"t2\"}\n{\"uuid\":\"c\",\"sessionId\":\"old\"}\n").unwrap();
-        let forked = fork(&file, Cut::Before("b"), "new").unwrap();
+        let forked = fork(&file, Cut::Before("b"), "new", None).unwrap();
         assert_eq!((forked.until.as_str(), forked.said), ("t2", false));
-        assert_eq!(std::fs::read_to_string(dir.path().join("new.jsonl")).unwrap(), "{\"sessionId\":\"new\",\"timestamp\":\"t1\",\"uuid\":\"a\"}\nnot json\n");
-        assert_eq!(fork(&file, Cut::Through("b"), "new2").unwrap().until, "");
-        assert_eq!(std::fs::read_to_string(dir.path().join("new2.jsonl")).unwrap().lines().count(), 3);
-        assert!(fork(&file, Cut::Before("zzz"), "x").is_err());
+        assert_eq!(std::fs::read_to_string(dir.path().join("new.jsonl")).unwrap(), "{\"uuid\":\"a\",\"sessionId\":\"new\",\"timestamp\":\"t1\"}\nnot json\n");
+        assert_eq!(fork(&file, Cut::Through("b"), "new2", Some("old")).unwrap().until, "");
+        let copy = std::fs::read_to_string(dir.path().join("new2.jsonl")).unwrap();
+        assert_eq!(copy.lines().count(), 4);
+        assert_eq!(read(&dir.path().join("new2.jsonl"), 0).unwrap().items, vec![Item::Fork { id: "fork:t2".into(), at: "t2".into(), source: "old".into() }]);
+        assert!(fork(&file, Cut::Before("zzz"), "x", None).is_err());
         assert!(std::fs::read_to_string(&file).unwrap().contains("\"c\""));
     }
 
@@ -534,8 +718,7 @@ mod tests {
                 Item::User { id: "c".into(), at: "".into(), text: "log line\nwhy does this fail?".into(), images: 0, pictures: vec![] },
                 Item::User { id: "d".into(), at: "".into(), text: "! ls".into(), images: 0, pictures: vec![] },
                 Item::Note { id: "e".into(), at: "".into(), text: "Interrupted.".into() },
-                Item::Note { id: "f".into(), at: "".into(), text: "The conversation was compacted.".into() },
-                Item::Result { tool: "t1".into(), at: "".into(), error: false, text: "denied".into() },
+                Item::Result { tool: "t1".into(), at: "".into(), error: false, text: "denied".into(), links: vec![] },
                 Item::User { id: "g".into(), at: "".into(), text: "use the other folder".into(), images: 0, pictures: vec![] },
             ]
         );
@@ -557,15 +740,67 @@ mod tests {
             vec![
                 Item::User { id: "u".into(), at: "t0".into(), text: "what is this?".into(), images: 2, pictures: vec![format!("data:image/png;base64,{png}")] },
                 Item::Thinking { id: "a:0".into(), at: "t1".into(), text: "Found the page. I'll read it now.\n\n".into() },
-                Item::Tool { id: "q1".into(), at: "t1".into(), name: "AskUserQuestion".into(), summary: "Which one should open the PR?".into(), detail: "".into() },
+                Item::Tool { id: "q1".into(), at: "t1".into(), name: "AskUserQuestion".into(), summary: "Which one should open the PR?".into(), detail: "".into(), args: vec![] },
                 Item::Result {
                     tool: "q1".into(),
                     at: "t2".into(),
                     error: false,
-                    text: r#"Your questions have been answered: "Which one should open the PR?"="The other session". You can now continue with these answers in mind."#.into()
+                    text: r#"Your questions have been answered: "Which one should open the PR?"="The other session". You can now continue with these answers in mind."#.into(),
+                    links: vec![],
                 },
-                Item::Tool { id: "p1".into(), at: "t3".into(), name: "ExitPlanMode".into(), summary: "# Ship the fix".into(), detail: "# Ship the fix\n\n1. Patch\n2. Test".into() },
+                Item::Tool { id: "p1".into(), at: "t3".into(), name: "ExitPlanMode".into(), summary: "# Ship the fix".into(), detail: "# Ship the fix\n\n1. Patch\n2. Test".into(), args: vec![] },
                 Item::Error { id: "e".into(), at: "t4".into(), text: "API Error: Your computer went to sleep mid-response. The response above may be incomplete.".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_published_artifact_reads_as_its_file_and_description() {
+        let items = page(&[
+            r#"{"type":"assistant","uuid":"a","timestamp":"t1","message":{"content":[{"type":"tool_use","id":"x1","name":"Artifact","input":{"file_path":"/tmp/payouts.html","icon":"flow","description":"Follows an invoice to the bank."}}]}}"#,
+            r#"{"type":"assistant","uuid":"b","timestamp":"t2","message":{"content":[{"type":"tool_use","id":"x2","name":"Artifact","input":{"action":"quickstart","intent":"other"}}]}}"#,
+        ])
+        .items;
+        assert_eq!(
+            items,
+            vec![
+                Item::Tool { id: "x1".into(), at: "t1".into(), name: "Artifact".into(), summary: "/tmp/payouts.html".into(), detail: "Follows an invoice to the bank.".into(), args: vec![("file_path".into(), "/tmp/payouts.html".into()), ("icon".into(), "flow".into()), ("description".into(), "Follows an invoice to the bank.".into())] },
+                Item::Tool { id: "x2".into(), at: "t2".into(), name: "Artifact".into(), summary: "quickstart".into(), detail: "".into(), args: vec![("action".into(), "quickstart".into()), ("intent".into(), "other".into())] },
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_tools_keep_their_input_and_searches_their_links() {
+        let items = page(&[
+            r#"{"type":"assistant","uuid":"a","timestamp":"t","message":{"content":[{"type":"tool_use","id":"m1","name":"mcp__linear__create_issue","input":{"title":"Fix it","priority":2}},{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"/w/a.rs","old_string":"x","new_string":"y"}},{"type":"tool_use","id":"s1","name":"Skill","input":{"skill":"deploy","args":"prod"}}]}}"#,
+            r#"{"type":"user","uuid":"r","timestamp":"t2","toolUseResult":{"query":"rust","results":[{"tool_use_id":"x","content":[{"title":"Rust","url":"https://rust-lang.org"}]},"Some text"]},"message":{"content":[{"type":"tool_result","tool_use_id":"w1","content":"Web search results"}]}}"#,
+        ])
+        .items;
+        assert_eq!(
+            items,
+            vec![
+                Item::Tool { id: "m1".into(), at: "t".into(), name: "mcp__linear__create_issue".into(), summary: "Fix it".into(), detail: "".into(), args: vec![("title".into(), "Fix it".into()), ("priority".into(), "2".into())] },
+                Item::Tool { id: "e1".into(), at: "t".into(), name: "Edit".into(), summary: "/w/a.rs".into(), detail: "".into(), args: vec![] },
+                Item::Tool { id: "s1".into(), at: "t".into(), name: "Skill".into(), summary: "deploy".into(), detail: "prod".into(), args: vec![] },
+                Item::Result { tool: "w1".into(), at: "t2".into(), error: false, text: "Web search results".into(), links: vec![("Rust".into(), "https://rust-lang.org".into())] },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_compaction_reads_as_its_token_counts() {
+        let items = page(&[
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"c","timestamp":"t","content":"Conversation compacted","compactMetadata":{"trigger":"manual","preTokens":258550,"postTokens":25325}}"#,
+            r#"{"type":"user","uuid":"s","timestamp":"t","isCompactSummary":true,"message":{"content":"This session is being continued."}}"#,
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"d","timestamp":"t2","compactMetadata":{"trigger":"auto","preTokens":1000}}"#,
+        ])
+        .items;
+        assert_eq!(
+            items,
+            vec![
+                Item::Compaction { id: "c".into(), at: "t".into(), before: Some(258550), after: Some(25325) },
+                Item::Compaction { id: "d".into(), at: "t2".into(), before: Some(1000), after: None },
             ]
         );
     }
@@ -604,7 +839,7 @@ mod tests {
 
         let mut growing = tempfile::NamedTempFile::new().unwrap();
         write!(growing, "{}", &huge[..huge.len() - 2]).unwrap();
-        assert_eq!(read(growing.path(), 0).unwrap(), Page { items: vec![], next: 0, reset: false, context: None }, "a line still being written waits");
+        assert_eq!(read(growing.path(), 0).unwrap(), Page { items: vec![], next: 0, reset: false, context: None, branch: None, todos: None }, "a line still being written waits");
     }
 
     #[test]

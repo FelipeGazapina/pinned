@@ -583,7 +583,7 @@ function renderThemeSearch() {
   const tools = body.querySelector(".ti-tools");
   tools.innerHTML = !t.searching || t.results
     ? `<div class="ti-popular"><span class="muted">Popular</span>${VSX_SUGGESTED.map((s) => `<button type="button" class="ti-chip" data-ti-suggest="${s}"${t.installing ? " disabled" : ""}>${s}</button>`).join("")}</div>
-      ${t.results?.length ? `<label class="ti-sort"><span class="muted">Sort</span><select aria-label="Sort themes"${t.installing ? " disabled" : ""}>${VSX_SORTS.map(([v, l]) => `<option value="${v}"${v === t.sort ? " selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}`
+      ${t.results?.length ? `<div class="ti-sort"><span class="muted">Sort</span>${selectHtml({ id: "ti-sort", value: t.sort, options: VSX_SORTS, label: "Sort themes" }).replace("<button ", `<button ${t.installing ? "disabled " : ""}`)}</div>` : ""}`
     : "";
   body.querySelector('[role="status"]').textContent = t.searching ? "Searching themes..." : t.results ? `${t.results.length} supported ${t.results.length === 1 ? "theme" : "themes"} found.` : "";
   body.querySelector(".ti-search-error").innerHTML = t.searchError ? `<p class="ti-alert" role="status">${esc(t.searchError)}</p>` : "";
@@ -859,7 +859,7 @@ TAURI?.webview.getCurrentWebview().onDragDropEvent(async ({ payload }) => {
   zone.classList.toggle("over", over && payload.type !== "drop" && payload.type !== "leave");
   if (payload.type !== "drop" || !over) return;
   try {
-    readThemeFiles(await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split("/").pop()))));
+    readThemeFiles(await Promise.all(payload.paths.map(async (path) => new File([await invoke("read_dropped", { path })], path.split(/[\\/]/).pop()))));
   } catch (err) {
     themeImport.error = String(err);
     renderThemeFile();
@@ -880,7 +880,7 @@ function bindThemeImport(body) {
     }
   });
   body.addEventListener("change", (e) => {
-    if (e.target.matches(".ti-sort select")) {
+    if (e.target.matches("#ti-sort")) {
       themeImport.sort = e.target.value;
       runThemeSearch();
     }

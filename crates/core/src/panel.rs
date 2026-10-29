@@ -8,20 +8,53 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
-const READ_LIMIT: usize = 2_000_000;
+const READ_LIMIT: usize = 1024 * 1024;
 const IMAGE_LIMIT: usize = 8_000_000;
 const PAGE_LIMIT: u64 = 512 * 1024;
 const ICON_LIMIT: u64 = 200 * 1024;
 const HITS: usize = 2_000;
 
-#[derive(Serialize, Debug, PartialEq, Default)]
+#[derive(Serialize, Debug, PartialEq, Default, schemars::JsonSchema)]
 pub struct PageMeta {
     pub title: String,
     /// The page's icon as a `data:` URL, so a client that can't reach the machine's localhost shows it.
     pub icon: Option<String>,
+    /// Why the page can't be reached, as Chromium names it (`ERR_CONNECTION_REFUSED`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+    /// The file name, when the address answers a file a browser downloads instead of showing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+/// Why a fetch got no page: the address can't be reached, named as Chromium names it, or some other failure.
+enum FetchError {
+    Unreachable(&'static str),
+    Failed(String),
+}
+
+impl From<String> for FetchError {
+    fn from(e: String) -> Self {
+        FetchError::Failed(e)
+    }
+}
+
+impl From<&str> for FetchError {
+    fn from(e: &str) -> Self {
+        FetchError::Failed(e.to_owned())
+    }
+}
+
+/// Whether a browser shows a `kind` response itself rather than downloading it.
+fn shows_inline(kind: &str) -> bool {
+    kind.is_empty()
+        || ["text/", "image/", "video/", "audio/"].iter().any(|p| kind.starts_with(p))
+        || ["application/pdf", "application/json", "application/xml", "application/javascript", "application/xhtml+xml"].contains(&kind)
+        || kind.ends_with("+json")
+        || kind.ends_with("+xml")
 }
 
 /// The title and icon of the page at `url`, fetched from this machine.
@@ -30,9 +63,14 @@ pub fn page_meta(url: &str) -> Result<PageMeta, String> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(format!("not a web address: {url}"));
     }
-    let (base, kind, page) = fetch(url, PAGE_LIMIT)?;
+    let (base, kind, page) = match fetch(url, PAGE_LIMIT) {
+        Ok(got) => got,
+        Err(FetchError::Unreachable(code)) => return Ok(PageMeta { failure: Some(code.into()), ..PageMeta::default() }),
+        Err(FetchError::Failed(e)) => return Err(e),
+    };
     if !kind.contains("html") {
-        return Ok(PageMeta::default());
+        let name = base.path_segments().and_then(|mut s| s.next_back()).filter(|n| !n.is_empty()).unwrap_or("download");
+        return Ok(PageMeta { file: (!shows_inline(&kind)).then(|| name.to_owned()), ..PageMeta::default() });
     }
     let html = String::from_utf8_lossy(&page);
     let title = element_text(&html, "title").map(|t| unescape(t.trim())).unwrap_or_default();
@@ -48,15 +86,25 @@ pub fn page_meta(url: &str) -> Result<PageMeta, String> {
         let (_, kind, bytes) = fetch(at, ICON_LIMIT).ok()?;
         kind.starts_with("image/").then(|| format!("data:{kind};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
     });
-    Ok(PageMeta { title, icon })
+    Ok(PageMeta { title, icon, ..PageMeta::default() })
 }
 
 /// The final address, content type and first `limit` bytes of what `url` answers, after redirects.
 /// A dev server answers plain HTTP, which this reads over a socket; reqwest takes https.
-fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>), String> {
+fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>), FetchError> {
     if url.scheme() == "https" {
         let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(4)).build().map_err(|e| e.to_string())?;
-        let got = client.get(url).send().map_err(|e| e.to_string())?.error_for_status().map_err(|e| e.to_string())?;
+        let got = client.get(url).send().map_err(|e| {
+            let dns = format!("{e:?}").contains("dns error");
+            match () {
+                _ if e.is_timeout() => FetchError::Unreachable("ERR_TIMED_OUT"),
+                _ if e.is_redirect() => FetchError::Unreachable("ERR_TOO_MANY_REDIRECTS"),
+                _ if e.is_connect() && dns => FetchError::Unreachable("ERR_NAME_NOT_RESOLVED"),
+                _ if e.is_connect() => FetchError::Unreachable("ERR_CONNECTION_REFUSED"),
+                _ => FetchError::Failed(e.to_string()),
+            }
+        })?;
+        let got = got.error_for_status().map_err(|e| e.to_string())?;
         let (at, kind) = (got.url().clone(), got.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned());
         let mut body = vec![];
         got.take(limit).read_to_end(&mut body).map_err(|e| e.to_string())?;
@@ -66,9 +114,11 @@ fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>
     for _ in 0..5 {
         let host = at.host_str().ok_or("no host")?.to_owned();
         let port = at.port_or_known_default().unwrap_or(80);
-        // localhost may name ::1 first while the server listens on 127.0.0.1 only.
-        let addrs: Vec<_> = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port)).map_err(|e| e.to_string())?.collect();
-        let mut stream = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, Duration::from_secs(2)).ok()).ok_or_else(|| format!("nothing answers at {host}:{port}"))?;
+        // localhost may name ::1 first while the server listens on 127.0.0.1 only. Windows takes
+        // seconds to refuse a closed loopback port, while an open one answers at once.
+        let addrs: Vec<_> = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port)).map_err(|_| FetchError::Unreachable("ERR_NAME_NOT_RESOLVED"))?.collect();
+        let wait = |a: &std::net::SocketAddr| if a.ip().is_loopback() { Duration::from_millis(300) } else { Duration::from_secs(2) };
+        let mut stream = addrs.iter().find_map(|a| std::net::TcpStream::connect_timeout(a, wait(a)).ok()).ok_or(FetchError::Unreachable("ERR_CONNECTION_REFUSED"))?;
         stream.set_read_timeout(Some(Duration::from_secs(4))).map_err(|e| e.to_string())?;
         let target = at.query().map_or_else(|| at.path().to_owned(), |q| format!("{}?{q}", at.path()));
         write!(stream, "GET {target} HTTP/1.0\r\nHost: {host}:{port}\r\nAccept: text/html,image/*;q=0.9,*/*;q=0.5\r\nUser-Agent: pinned\r\n\r\n").map_err(|e| e.to_string())?;
@@ -85,12 +135,12 @@ fn fetch(url: reqwest::Url, limit: u64) -> Result<(reqwest::Url, String, Vec<u8>
             continue;
         }
         if !(200..300).contains(&status) {
-            return Err(format!("the page answered {status}"));
+            return Err(format!("the page answered {status}").into());
         }
         let kind = header("content-type").unwrap_or_default();
         return Ok((at, kind.split(';').next().unwrap_or("").trim().to_owned(), body));
     }
-    Err("too many redirects".into())
+    Err(FetchError::Unreachable("ERR_TOO_MANY_REDIRECTS"))
 }
 
 fn element_text<'a>(html: &'a str, name: &str) -> Option<&'a str> {
@@ -172,7 +222,7 @@ fn unescape(text: &str) -> String {
     out
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Refs {
     pub local: Vec<String>,
     /// As `origin/main`.
@@ -197,7 +247,7 @@ pub fn refs(cwd: &Path, path: Option<&str>) -> Result<Refs, String> {
 }
 
 /// A file as the panel shows it: text, an image, or neither when it is binary.
-#[derive(Serialize, Debug, PartialEq, Default)]
+#[derive(Serialize, Debug, PartialEq, Default, schemars::JsonSchema)]
 pub struct FileText {
     pub text: Option<String>,
     /// An image as a `data:` URL.
@@ -238,11 +288,12 @@ const IMAGES: &[(&str, &str)] = &[("png", "image/png"), ("jpg", "image/jpeg"), (
 /// The file at `rel`, or as it was at `rev` when one is given.
 pub fn read_file(cwd: &Path, rel: &str, root: bool, rev: Option<&str>) -> Result<FileText, String> {
     let (path, base) = inside(cwd, rel, root)?;
+    let mut size = None;
     let bytes = match rev {
         Some(rev) => {
             check_rev(rev)?;
             let spec = if root { format!("{rev}:{rel}") } else { format!("{rev}:./{rel}") };
-            let out = Command::new("git").args(["show", &spec]).current_dir(&base).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
+            let out = crate::process::command("git").args(["show", &spec]).current_dir(&base).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
             if !out.status.success() {
                 return Err(format!("git: {}", String::from_utf8_lossy(&out.stderr).trim()));
             }
@@ -257,11 +308,13 @@ pub fn read_file(cwd: &Path, rel: &str, root: bool, rev: Option<&str>) -> Result
                 return Err(format!("{rel} is a folder"));
             }
             let mut bytes = vec![];
-            std::fs::File::open(&real).and_then(|f| f.take(IMAGE_LIMIT as u64 + 1).read_to_end(&mut bytes)).map_err(|e| format!("could not read {rel}: {e}"))?;
+            let file = std::fs::File::open(&real).map_err(|e| format!("could not read {rel}: {e}"))?;
+            size = file.metadata().ok().map(|m| m.len());
+            file.take(IMAGE_LIMIT as u64 + 1).read_to_end(&mut bytes).map_err(|e| format!("could not read {rel}: {e}"))?;
             bytes
         }
     };
-    let size = bytes.len() as u64;
+    let size = size.unwrap_or(bytes.len() as u64);
     let ext = rel.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     if let Some((_, mime)) = IMAGES.iter().find(|(e, _)| *e == ext) {
         return Ok(FileText {
@@ -297,7 +350,7 @@ pub fn write_file(cwd: &Path, rel: &str, root: bool, text: &str, since: Option<&
     Ok(hash(text.as_bytes()))
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Hit {
     pub path: String,
     pub line: u32,
@@ -352,7 +405,7 @@ fn gh(cwd: &Path, path: Option<&str>, args: &[&str]) -> Result<String, String> {
 }
 
 fn gh_input(cwd: &Path, path: Option<&str>, args: &[&str], input: Option<&str>) -> Result<String, String> {
-    let mut command = Command::new("gh");
+    let mut command = crate::process::command("gh");
     command.args(args).current_dir(cwd).stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(path) = path {
         command.env("PATH", path);
@@ -411,7 +464,7 @@ pub fn pr_comment(cwd: &Path, pr: &str, body: &str, reply_to: Option<&str>, path
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ReviewEvent {
     Comment,
@@ -419,7 +472,7 @@ pub enum ReviewEvent {
     RequestChanges,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct ReviewComment {
     pub path: String,
     pub line: u32,
@@ -458,19 +511,32 @@ pub fn pr_rerun(cwd: &Path, check: &str, path: Option<&str>) -> Result<(), Strin
     }
 }
 
-/// What the pull request's detail adds to `gh pr view`: its review threads and the pull requests
-/// stacked under and over it. Each part is left out when gh can't answer it.
+/// A reaction group as every reactable node reports it, with who reacted bounded rather than paged.
+const REACTIONS: &str = "reactionGroups { content viewerHasReacted reactors(first: 10) { totalCount nodes { ... on User { login } ... on Bot { login } ... on Organization { login } ... on Mannequin { login } } } }";
+
+/// What the pull request's detail adds to `gh pr view`: its review threads, reactions, reviewers
+/// with their faces, what the viewer may do, and the pull requests stacked under and over it. Each
+/// part is left out when gh can't answer it.
 pub fn pr_extras(cwd: &Path, pr: &str, view: &Value, path: Option<&str>) -> Value {
     let mut extras = json!({});
     if let Some((owner, repo, number)) = pr_parts(view["url"].as_str().unwrap_or(pr)) {
-        let query = "query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved isOutdated path line originalLine startLine diffSide comments(first: 50) { nodes { id body createdAt url author { login } } } } } } } }";
-        let threads = gh(cwd, path, &["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("repo={repo}"), "-F", &format!("number={number}")])
-            .ok()
-            .and_then(|out| serde_json::from_str::<Value>(&out).ok())
-            .map(|v| v["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"].clone())
-            .filter(Value::is_array);
-        if let Some(threads) = threads {
-            extras["threads"] = threads;
+        let vars = ["-f".to_owned(), format!("owner={owner}"), "-f".to_owned(), format!("repo={repo}"), "-F".to_owned(), format!("number={number}")];
+        let ask = |query: &str| {
+            let mut args = vec!["api".to_owned(), "graphql".to_owned(), "-f".to_owned(), format!("query={query}")];
+            args.extend(vars.iter().cloned());
+            gh(cwd, path, &args.iter().map(String::as_str).collect::<Vec<_>>()).ok().and_then(|out| serde_json::from_str::<Value>(&out).ok()).filter(|v| v["data"]["repository"]["pullRequest"].is_object())
+        };
+        let rich = format!("query($owner: String!, $repo: String!, $number: Int!) {{ viewer {{ login }} repository(owner: $owner, name: $repo) {{ viewerPermission pullRequest(number: $number) {{ id viewerCanUpdate {REACTIONS} comments(first: 100) {{ nodes {{ id viewerCanUpdate {REACTIONS} }} }} reviews(first: 100) {{ nodes {{ id {REACTIONS} }} }} latestReviews(first: 50) {{ nodes {{ state submittedAt author {{ login avatarUrl }} }} }} reviewRequests(first: 50) {{ nodes {{ requestedReviewer {{ ... on User {{ login name avatarUrl }} ... on Bot {{ login avatarUrl }} ... on Team {{ combinedSlug teamName: name teamAvatarUrl: avatarUrl }} }} }} }} reviewThreads(first: 100) {{ nodes {{ id isResolved isOutdated path line originalLine startLine diffSide comments(first: 50) {{ totalCount nodes {{ id body createdAt url viewerCanUpdate author {{ login avatarUrl }} {REACTIONS} }} }} }} }} }} }} }}");
+        let plain = "query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved isOutdated path line originalLine startLine diffSide comments(first: 50) { nodes { id body createdAt url author { login } } } } } } } }";
+        if let Some(answer) = ask(&rich).or_else(|| ask(plain)) {
+            if let Value::Object(read) = read_conversation(&answer["data"]) {
+                extras.as_object_mut().unwrap().extend(read);
+            }
+        }
+        if view["url"].as_str().is_some_and(|u| u.starts_with("https://github.com/")) {
+            if let Ok(Some(stack)) = crate::pulls::stack(cwd, path, &format!("{owner}/{repo}"), number) {
+                extras["ghStack"] = json!(stack);
+            }
         }
     }
     let list = |flag: &str, branch: &str| {
@@ -486,6 +552,352 @@ pub fn pr_extras(cwd: &Path, pr: &str, view: &Value, path: Option<&str>) -> Valu
         extras["stack"] = json!({ "below": below, "above": above });
     }
     extras
+}
+
+/// The parts of the conversation query's `data` the panel reads: review threads, reactions by the
+/// id of what they are on, the reviewers asked and their latest verdicts, and the viewer's access.
+fn read_conversation(data: &Value) -> Value {
+    let pr = &data["repository"]["pullRequest"];
+    let mut out = json!({ "threads": pr["reviewThreads"]["nodes"].as_array().cloned().unwrap_or_default() });
+    if let Some(login) = data["viewer"]["login"].as_str() {
+        out["viewer"] = login.into();
+    }
+    if let Some(id) = pr["id"].as_str() {
+        out["prId"] = id.into();
+        let mut reactions = serde_json::Map::new();
+        let mut editable = Vec::new();
+        let mut keep = |node: &Value| {
+            if let (Some(id), Some(groups)) = (node["id"].as_str(), node["reactionGroups"].as_array()) {
+                reactions.insert(id.to_owned(), reactions_of(groups));
+            }
+        };
+        keep(pr);
+        for node in pr["comments"]["nodes"].as_array().into_iter().chain(pr["reviews"]["nodes"].as_array()).flatten() {
+            keep(node);
+            if node["viewerCanUpdate"] == true {
+                editable.extend(node["id"].as_str().map(str::to_owned));
+            }
+        }
+        for thread in out["threads"].as_array_mut().into_iter().flatten() {
+            for c in thread["comments"]["nodes"].as_array_mut().into_iter().flatten() {
+                if let Some(groups) = c["reactionGroups"].as_array() {
+                    c["reactions"] = reactions_of(groups);
+                }
+                if c["viewerCanUpdate"] == true {
+                    editable.extend(c["id"].as_str().map(str::to_owned));
+                }
+            }
+        }
+        out["reactions"] = reactions.into();
+        out["editable"] = editable.into();
+        out["canUpdate"] = pr["viewerCanUpdate"].as_bool().unwrap_or(false).into();
+        out["permission"] = data["repository"]["viewerPermission"].as_str().unwrap_or("READ").into();
+        out["reviewers"] = pr["reviewRequests"]["nodes"].as_array().into_iter().flatten().filter_map(|n| {
+            let r = &n["requestedReviewer"];
+            let (login, team) = match r["combinedSlug"].as_str() {
+                Some(slug) => (slug, true),
+                None => (r["login"].as_str()?, false),
+            };
+            Some(json!({ "login": login, "name": r["name"].as_str().or(r["teamName"].as_str()), "avatarUrl": r["avatarUrl"].as_str().or(r["teamAvatarUrl"].as_str()), "team": team }))
+        }).collect();
+        out["latestReviews"] = pr["latestReviews"]["nodes"].as_array().cloned().unwrap_or_default().into();
+    }
+    out
+}
+
+/// GitHub's reaction groups as T3 Code keeps them: only those with someone in them, with who.
+fn reactions_of(groups: &[Value]) -> Value {
+    groups
+        .iter()
+        .filter(|g| g["reactors"]["totalCount"].as_u64().unwrap_or(0) > 0)
+        .map(|g| json!({ "content": g["content"], "count": g["reactors"]["totalCount"], "viewerHasReacted": g["viewerHasReacted"].as_bool().unwrap_or(false), "actors": g["reactors"]["nodes"].as_array().into_iter().flatten().filter_map(|n| n["login"].as_str()).collect::<Vec<_>>() }))
+        .collect()
+}
+
+/// GitHub's reactions, by the name its GraphQL API gives them.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Reaction {
+    ThumbsUp,
+    ThumbsDown,
+    Laugh,
+    Hooray,
+    Confused,
+    Heart,
+    Rocket,
+    Eyes,
+}
+
+/// A change to who is on a pull request, what is on it, and its review threads.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PrChange {
+    /// Adds or takes back the viewer's `content` on `subject`, a comment, review or the pull request.
+    React { subject: String, content: Reaction, on: bool },
+    /// Asks `login`, a person or a team's `org/slug`, for a review, or takes the request back.
+    Reviewer {
+        login: String,
+        #[serde(default)]
+        team: bool,
+        on: bool,
+    },
+    Label { name: String, on: bool },
+    /// Resolves the review thread `thread`, or opens it again.
+    Resolve { thread: String, on: bool },
+    /// Rewrites the comment `id`, a remark on the pull request or, with `review`, on a line.
+    Comment {
+        id: String,
+        #[serde(default)]
+        review: bool,
+        body: String,
+    },
+}
+
+pub fn pr_change(cwd: &Path, pr: &str, change: &PrChange, path: Option<&str>) -> Result<(), String> {
+    let (owner, repo, number) = check_url(pr)?;
+    let mutate = |query: &str, vars: &[(&str, &str)]| {
+        let mut args = vec!["api".to_owned(), "graphql".to_owned(), "-f".to_owned(), format!("query={query}")];
+        for (k, v) in vars {
+            args.extend(["-f".to_owned(), format!("{k}={v}")]);
+        }
+        gh(cwd, path, &args.iter().map(String::as_str).collect::<Vec<_>>()).map(drop)
+    };
+    match change {
+        PrChange::React { subject, content, on } => {
+            let name = if *on { "addReaction" } else { "removeReaction" };
+            let content = serde_json::to_value(content).unwrap();
+            mutate(&format!("mutation($subject: ID!, $content: ReactionContent!) {{ {name}(input: {{subjectId: $subject, content: $content}}) {{ reaction {{ content }} }} }}"), &[("subject", subject), ("content", content.as_str().unwrap())])
+        }
+        PrChange::Resolve { thread, on } => {
+            let name = if *on { "resolveReviewThread" } else { "unresolveReviewThread" };
+            mutate(&format!("mutation($thread: ID!) {{ {name}(input: {{threadId: $thread}}) {{ thread {{ isResolved }} }} }}"), &[("thread", thread)])
+        }
+        PrChange::Comment { id, review: false, body } => mutate("mutation($id: ID!, $body: String!) { updateIssueComment(input: {id: $id, body: $body}) { issueComment { id } } }", &[("id", id), ("body", body)]),
+        PrChange::Comment { id, review: true, body } => mutate("mutation($id: ID!, $body: String!) { updatePullRequestReviewComment(input: {pullRequestReviewCommentId: $id, body: $body}) { pullRequestReviewComment { id } } }", &[("id", id), ("body", body)]),
+        PrChange::Reviewer { login, team, on } => {
+            let body = if *team { json!({ "team_reviewers": [login.rsplit('/').next().unwrap_or(login)] }) } else { json!({ "reviewers": [login] }) };
+            gh_input(cwd, path, &["api", "-X", if *on { "POST" } else { "DELETE" }, &format!("repos/{owner}/{repo}/pulls/{number}/requested_reviewers"), "--input", "-"], Some(&body.to_string())).map(drop)
+        }
+        PrChange::Label { name, on: true } => gh_input(cwd, path, &["api", "-X", "POST", &format!("repos/{owner}/{repo}/issues/{number}/labels"), "--input", "-"], Some(&json!({ "labels": [name] }).to_string())).map(drop),
+        PrChange::Label { name, on: false } => gh(cwd, path, &["api", "-X", "DELETE", &format!("repos/{owner}/{repo}/issues/{number}/labels/{}", path_segment(name))]).map(drop),
+    }
+}
+
+fn path_segment(text: &str) -> String {
+    text.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Candidates {
+    Reviewers,
+    Labels,
+}
+
+/// `{candidates, truncated}`: who a review may be asked of, or the repository's labels, with those
+/// already on the pull request marked.
+pub fn pr_candidates(cwd: &Path, pr: &str, of: Candidates, path: Option<&str>) -> Result<Value, String> {
+    let (owner, repo, number) = check_url(pr)?;
+    let query = match of {
+        Candidates::Reviewers => "query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { assignableUsers(first: 100) { pageInfo { hasNextPage } nodes { login name avatarUrl } } pullRequest(number: $number) { author { login } reviewRequests(first: 100) { nodes { requestedReviewer { ... on User { login name avatarUrl } ... on Team { slug combinedSlug teamName: name teamAvatarUrl: avatarUrl } ... on Bot { login avatarUrl } } } } } } }",
+        Candidates::Labels => "query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { labels(first: 100, orderBy: {field: NAME, direction: ASC}) { pageInfo { hasNextPage } nodes { name color description } } pullRequest(number: $number) { labels(first: 100) { nodes { name } } } } }",
+    };
+    let out = gh(cwd, path, &["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("repo={repo}"), "-F", &format!("number={number}")])?;
+    let v: Value = serde_json::from_str(&out).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+    let repository = &v["data"]["repository"];
+    if !repository.is_object() {
+        return Err("GitHub can't find this repository".into());
+    }
+    Ok(match of {
+        Candidates::Reviewers => reviewer_candidates(repository),
+        Candidates::Labels => label_candidates(repository),
+    })
+}
+
+/// Whoever has been asked leads, so a request can be taken back; then the people with access, but
+/// not the author, since GitHub refuses a review request to whoever opened the pull request.
+fn reviewer_candidates(repository: &Value) -> Value {
+    let pr = &repository["pullRequest"];
+    let author = pr["author"]["login"].as_str().unwrap_or("");
+    let mut seen = std::collections::HashSet::new();
+    let mut candidates = Vec::new();
+    for n in pr["reviewRequests"]["nodes"].as_array().into_iter().flatten() {
+        let r = &n["requestedReviewer"];
+        let (login, team) = match (r["combinedSlug"].as_str(), r["login"].as_str()) {
+            (Some(slug), _) => (slug, true),
+            (None, Some(login)) => (login, false),
+            _ => continue,
+        };
+        if seen.insert((team, login.to_owned())) {
+            candidates.push(json!({ "login": login, "team": team, "name": r["name"].as_str().or(r["teamName"].as_str()), "avatarUrl": r["avatarUrl"].as_str().or(r["teamAvatarUrl"].as_str()), "requested": true }));
+        }
+    }
+    for u in repository["assignableUsers"]["nodes"].as_array().into_iter().flatten() {
+        let Some(login) = u["login"].as_str() else { continue };
+        if login != author && seen.insert((false, login.to_owned())) {
+            candidates.push(json!({ "login": login, "team": false, "name": u["name"], "avatarUrl": u["avatarUrl"], "requested": false }));
+        }
+    }
+    json!({ "candidates": candidates, "truncated": repository["assignableUsers"]["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false) })
+}
+
+fn label_candidates(repository: &Value) -> Value {
+    let on: std::collections::HashSet<&str> = repository["pullRequest"]["labels"]["nodes"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str()).collect();
+    let candidates: Vec<Value> = repository["labels"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| {
+            let name = l["name"].as_str()?;
+            Some(json!({ "name": name, "color": l["color"], "description": l["description"], "applied": on.contains(name) }))
+        })
+        .collect();
+    json!({ "candidates": candidates, "truncated": repository["labels"]["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false) })
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StackAction {
+    /// Merges the pull request and the unmerged layers under it, as GitHub's merge-async does.
+    Merge,
+    /// Rebases every unmerged layer, bottom to top, onto the stack's base.
+    Rebase,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+/// A layer's head as the reader last saw it, so a stack that moved since is not acted on.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct StackHead {
+    pub number: u64,
+    pub sha: String,
+}
+
+/// Merges or rebases the GitHub stack the pull request `pr` is in, as T3 Code's stack menu does.
+pub fn pr_stack(cwd: &Path, pr: &str, action: StackAction, method: MergeMethod, heads: &[StackHead], path: Option<&str>) -> Result<(), String> {
+    let (owner, repo, number) = check_url(pr)?;
+    let changed = || "The stack changed. Refresh it before trying again.".to_owned();
+    let stack = crate::pulls::stack(cwd, path, &format!("{owner}/{repo}"), number)?.ok_or_else(changed)?;
+    let at = stack.layers.iter().position(|l| l.number == number).ok_or_else(changed)?;
+    let affected = match action {
+        StackAction::Merge => &stack.layers[..=at],
+        StackAction::Rebase => &stack.layers[..],
+    };
+    let open: Vec<_> = affected.iter().filter(|l| l.state != crate::pulls::State::Merged).collect();
+    let unchanged = open.len() == heads.len() && open.iter().all(|l| !l.head_sha.is_empty() && heads.iter().any(|h| h.number == l.number && h.sha == l.head_sha));
+    if !unchanged {
+        return Err(changed());
+    }
+    let unsupported = "This operation is not supported for this stack.".to_owned();
+    if open.is_empty() || open.iter().any(|l| l.state == crate::pulls::State::Closed) {
+        return Err(unsupported);
+    }
+    match action {
+        StackAction::Merge => {
+            let target = &stack.layers[at];
+            if target.state != crate::pulls::State::Open || open.iter().any(|l| l.state == crate::pulls::State::Draft) {
+                return Err(unsupported);
+            }
+            merge_async(cwd, path, &format!("repos/{owner}/{repo}/pulls/{number}/merge-async"), method, &target.head_sha)
+        }
+        StackAction::Rebase => {
+            let aliases: String = open.iter().enumerate().map(|(i, l)| format!("l{i}: repository(owner: $owner, name: $repo) {{ pullRequest(number: {}) {{ maintainerCanModify headRepository {{ viewerPermission }} }} }} ", l.number)).collect();
+            let access: Value = serde_json::from_str(&gh(cwd, path, &["api", "graphql", "-f", &format!("query=query($owner: String!, $repo: String!) {{ {aliases}}}"), "-f", &format!("owner={owner}"), "-f", &format!("repo={repo}")])?).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+            let writable = (0..open.len()).all(|i| {
+                let pr = &access["data"][format!("l{i}")]["pullRequest"];
+                pr["maintainerCanModify"].as_bool() == Some(true) || matches!(pr["headRepository"]["viewerPermission"].as_str(), Some("ADMIN" | "MAINTAIN" | "WRITE"))
+            });
+            if !writable {
+                return Err("You cannot update every branch in this stack. Check write access and fork maintainer permissions before retrying.".into());
+            }
+            let remote: Value = serde_json::from_str(&gh(cwd, path, &["api", &format!("repos/{owner}/{repo}")])?).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+            let remote = remote["clone_url"].as_str().ok_or("GitHub didn't say where the repository's branches live")?.to_owned();
+            let layers: Vec<(u64, &str, &str)> = open.iter().map(|l| (l.number, l.head.as_str(), l.head_sha.as_str())).collect();
+            cascade_rebase(cwd, path, &remote, &stack.base, &layers)
+        }
+    }
+}
+
+fn merge_async(cwd: &Path, path: Option<&str>, route: &str, method: MergeMethod, sha: &str) -> Result<(), String> {
+    let body = json!({ "merge_method": method, "merge_action": "default", "sha": sha });
+    let read = |out: String| serde_json::from_str::<Value>(&out).map_err(|_| "GitHub returned an unreadable stack operation response.".to_owned());
+    let mut answer = read(gh_input(cwd, path, &["api", "-X", "PUT", route, "--input", "-"], Some(&body.to_string()))?)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(300);
+    let mut wait = Duration::from_secs(1);
+    while answer["status"] == "pending" && std::time::Instant::now() < deadline {
+        let uuid = answer["details"]["uuid"].as_str().ok_or("GitHub returned an unreadable stack operation response.")?.to_owned();
+        std::thread::sleep(wait);
+        wait = (wait * 2).min(Duration::from_secs(10));
+        answer = read(gh(cwd, path, &["api", &format!("{route}/{}", path_segment(&uuid))])?)?;
+    }
+    match answer["status"].as_str() {
+        Some("merged" | "enqueued") => Ok(()),
+        Some("pending") => Err("The merge is still running on GitHub. Check its status there before submitting another request.".into()),
+        _ => Err(answer["details"]["message"].as_str().map_or_else(|| "GitHub refused the stack merge. Check the stack's branch rules and merge requirements.".to_owned(), |m| format!("GitHub refused the stack merge: {m}"))),
+    }
+}
+
+/// Moves each layer's own commits onto the rebased layer under it and force-pushes the branch,
+/// bottom to top, in a scratch clone: GitHub's own "Rebase stack" has no API, and its per-pull
+/// request "update branch" replays the old copy of every lower layer into the one above.
+fn cascade_rebase(cwd: &Path, path: Option<&str>, remote: &str, base: &str, layers: &[(u64, &str, &str)]) -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let host = remote.strip_prefix("https://").and_then(|r| r.split('/').next());
+    let token = host.and_then(|h| gh(cwd, path, &["auth", "token", "--hostname", h]).ok()).map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
+    let config = |key: &str| run(cwd, path, "git", &["config", key]).ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+    let mut env = vec![("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned())];
+    let mut settings = vec![("user.name".to_owned(), config("user.name").unwrap_or_else(|| "Pinned".into())), ("user.email".to_owned(), config("user.email").unwrap_or_else(|| "pinned@localhost".into()))];
+    if let Some(token) = token {
+        let basic = base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
+        settings.push((format!("http.{remote}.extraheader"), format!("AUTHORIZATION: basic {basic}")));
+    }
+    env.push(("GIT_CONFIG_COUNT".into(), settings.len().to_string()));
+    for (i, (k, v)) in settings.into_iter().enumerate() {
+        env.push((format!("GIT_CONFIG_KEY_{i}"), k));
+        env.push((format!("GIT_CONFIG_VALUE_{i}"), v));
+    }
+    let git = |args: &[&str]| {
+        let mut command = crate::process::command("git");
+        command.args(args).current_dir(dir.path()).stdin(Stdio::null()).envs(env.iter().map(|(k, v)| (k, v)));
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let out = command.output().map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+        }
+    };
+    let stopped = |number: u64, step: &'static str, done: usize| move |e: String| format!("Stack rebase stopped at PR #{number} while {step}. {done} layers were rebased. {e}").trim_end().to_owned();
+    let first = layers.first().map_or(0, |l| l.0);
+    git(&["init", "--quiet"]).map_err(stopped(first, "preparing", 0))?;
+    git(&["remote", "add", "origin", remote]).map_err(stopped(first, "preparing", 0))?;
+    let mut fetch = vec!["fetch".to_owned(), "--quiet".to_owned(), "--no-tags".to_owned(), "origin".to_owned(), format!("+refs/heads/{base}:refs/remotes/origin/{base}")];
+    fetch.extend(layers.iter().map(|(_, head, _)| format!("+refs/heads/{head}:refs/remotes/origin/{head}")));
+    git(&fetch.iter().map(String::as_str).collect::<Vec<_>>()).map_err(stopped(first, "fetching", 0))?;
+    let (mut parent_old, mut parent_new) = (format!("origin/{base}"), format!("origin/{base}"));
+    for (i, &(number, head, sha)) in layers.iter().enumerate() {
+        let upstream = if i == 0 { git(&["merge-base", &parent_old, sha]).map_err(stopped(number, "reading the fork point", i))? } else { parent_old.clone() };
+        git(&["checkout", "--quiet", "--detach", sha]).map_err(stopped(number, "checking out", i))?;
+        if git(&["rebase", "--quiet", "--onto", &parent_new, &upstream]).is_err() {
+            let _ = git(&["rebase", "--abort"]);
+            return Err(format!("PR #{number} conflicts with the layer below it. {i} layers were rebased; resolve #{number} with `gh stack rebase` and push."));
+        }
+        let rebased = git(&["rev-parse", "HEAD"]).map_err(stopped(number, "rebasing", i))?;
+        if rebased != sha {
+            git(&["push", "--quiet", &format!("--force-with-lease=refs/heads/{head}:{sha}"), "origin", &format!("{rebased}:refs/heads/{head}")]).map_err(stopped(number, "pushing", i))?;
+        }
+        parent_old = sha.to_owned();
+        parent_new = rebased;
+    }
+    Ok(())
 }
 
 /// A review guide for the pull request, as T3 Code writes one: numbered stops through the diff.
@@ -561,7 +973,7 @@ pub fn guide_stops(out: &str) -> Result<Value, String> {
 /// The review guide kept for `pr` and the run writing one, as `{guide, run}`. With `write`, a
 /// headless claude starts writing a new one in the tab's folder from the pull request's diff, and
 /// the answer comes back with `run` set until it is done.
-pub fn guide(cwd: &Path, pr: &str, write: bool, store: &Path, claude: &Path, path: Option<&str>) -> Result<Value, String> {
+pub fn guide(cwd: &Path, pr: &str, write: bool, store: &Path, claude: &Path, env: &[(String, String)], path: Option<&str>) -> Result<Value, String> {
     check_url(pr)?;
     let file = store.join(format!("{}.json", &hash(pr.as_bytes())[..16]));
     let mut kept: Value = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({ "guide": null, "run": null }));
@@ -580,10 +992,11 @@ pub fn guide(cwd: &Path, pr: &str, write: bool, store: &Path, claude: &Path, pat
     std::fs::create_dir_all(store).map_err(|e| e.to_string())?;
     std::fs::write(&file, kept.to_string()).map_err(|e| e.to_string())?;
     let prompt = guide_prompt(&view, &diff);
-    let mut command = Command::new(claude);
+    let mut command = crate::process::command(claude);
     command
         .args(["-p", "--output-format", "json", "--json-schema", GUIDE_SCHEMA, "--allowedTools", "Read,Grep,Glob"])
         .current_dir(cwd)
+        .envs(env.iter().cloned())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -626,10 +1039,15 @@ impl DeviceHub {
     /// The hub's address, starting it first when it isn't running. `embed` is the origin of a page
     /// that frames the dashboard, which the hub must allow. The first start downloads the hub.
     pub fn url(&self, embed: Option<&str>, path: Option<&str>) -> Result<String, String> {
+        Ok(format!("http://localhost:{}/", self.port(embed, path)?))
+    }
+
+    /// The hub's port, starting it first when it isn't running.
+    pub fn port(&self, embed: Option<&str>, path: Option<&str>) -> Result<u16, String> {
         let mut running = self.running.lock().unwrap();
         if let Some((child, port)) = running.as_mut() {
             if child.try_wait().ok().flatten().is_none() {
-                return Ok(format!("http://localhost:{port}/"));
+                return Ok(*port);
             }
         }
         let port = std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map_err(|e| e.to_string())?.port();
@@ -638,7 +1056,8 @@ impl DeviceHub {
         if let Some(origin) = embed.filter(|o| o.starts_with("http://") || o.starts_with("https://")) {
             args.extend(["--frame-ancestor", origin]);
         }
-        let mut command = Command::new("npx");
+        // npm installs npx on Windows as a batch file, which a program name without its extension never finds.
+        let mut command = crate::process::command(if cfg!(windows) { "npx.cmd" } else { "npx" });
         command.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         if let Some(path) = path {
             command.env("PATH", path);
@@ -647,7 +1066,7 @@ impl DeviceHub {
         for _ in 0..600 {
             if std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(200)).is_ok() {
                 *running = Some((child, port));
-                return Ok(format!("http://localhost:{port}/"));
+                return Ok(port);
             }
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(format!("the device hub stopped before it started ({status})"));
@@ -664,6 +1083,148 @@ impl DeviceHub {
             let _ = child.wait();
         }
     }
+}
+
+/// Serves a folder's files over loopback HTTP, so a File tab draws an HTML file with its styles and
+/// scripts, and the Browser opens it, as T3's workspace asset URLs do. Each folder gets a token of
+/// its own as the first part of its URLs, so no page reaches a folder it wasn't handed.
+#[derive(Default)]
+pub struct FileServer {
+    state: std::sync::Arc<std::sync::Mutex<Served>>,
+}
+
+#[derive(Default)]
+struct Served {
+    port: Option<u16>,
+    roots: std::collections::HashMap<String, PathBuf>,
+}
+
+const MIME: &[(&str, &str)] = &[
+    ("html", "text/html; charset=utf-8"),
+    ("htm", "text/html; charset=utf-8"),
+    ("css", "text/css; charset=utf-8"),
+    ("js", "text/javascript; charset=utf-8"),
+    ("mjs", "text/javascript; charset=utf-8"),
+    ("json", "application/json"),
+    ("svg", "image/svg+xml"),
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("webp", "image/webp"),
+    ("ico", "image/x-icon"),
+    ("pdf", "application/pdf"),
+    ("woff", "font/woff"),
+    ("woff2", "font/woff2"),
+    ("txt", "text/plain; charset=utf-8"),
+    ("md", "text/plain; charset=utf-8"),
+    ("wasm", "application/wasm"),
+    ("mp4", "video/mp4"),
+    ("webm", "video/webm"),
+    ("mp3", "audio/mpeg"),
+];
+
+impl FileServer {
+    /// The URL that serves `rel` from the tab's folder, or its repository when `root`.
+    pub fn url(&self, cwd: &Path, rel: &str, root: bool) -> Result<String, String> {
+        let (path, base) = inside(cwd, rel, root)?;
+        let base = base.canonicalize().map_err(|e| e.to_string())?;
+        if !path.canonicalize().map_err(|e| format!("could not read {rel}: {e}"))?.starts_with(&base) {
+            return Err(format!("{rel:?} leads outside the project"));
+        }
+        let mut served = self.state.lock().unwrap();
+        let token = match served.roots.iter().find(|(_, b)| **b == base) {
+            Some((token, _)) => token.clone(),
+            None => {
+                use std::hash::{BuildHasher, Hasher};
+                let part = || {
+                    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+                    h.write(base.as_os_str().as_encoded_bytes());
+                    h.finish()
+                };
+                let token = format!("{:016x}{:016x}", part(), part());
+                served.roots.insert(token.clone(), base);
+                token
+            }
+        };
+        let port = match served.port {
+            Some(port) => port,
+            None => {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+                let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+                let state = self.state.clone();
+                std::thread::spawn(move || {
+                    for stream in listener.incoming().flatten() {
+                        let state = state.clone();
+                        std::thread::spawn(move || serve_file(stream, &state));
+                    }
+                });
+                served.port = Some(port);
+                port
+            }
+        };
+        let path: Vec<String> = rel.split('/').map(percent_encode).collect();
+        Ok(format!("http://127.0.0.1:{port}/{token}/{}", path.join("/")))
+    }
+}
+
+fn percent_encode(part: &str) -> String {
+    part.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+fn percent_decode(part: &str) -> Option<String> {
+    let bytes = part.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            out.push(u8::from_str_radix(part.get(i + 1..i + 3)?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn serve_file(mut stream: std::net::TcpStream, state: &std::sync::Mutex<Served>) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && head.len() < 16 * 1024 {
+        match stream.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => return,
+        }
+    }
+    let head = String::from_utf8_lossy(&head);
+    let target = head.split_whitespace().nth(1).unwrap_or("/");
+    let target = target.split(['?', '#']).next().unwrap_or("/");
+    let mut parts = target.trim_start_matches('/').splitn(2, '/');
+    let token = parts.next().unwrap_or("");
+    let rel = parts.next().and_then(percent_decode).unwrap_or_default();
+    let base = state.lock().unwrap().roots.get(token).cloned();
+    let found = base.and_then(|base| {
+        let rel = if rel.is_empty() || rel.ends_with('/') { format!("{rel}index.html") } else { rel };
+        if !Path::new(&rel).components().all(|c| matches!(c, Component::Normal(_))) {
+            return None;
+        }
+        let real = base.join(&rel).canonicalize().ok()?;
+        let real = if real.is_dir() { real.join("index.html") } else { real };
+        (real.starts_with(&base) && real.is_file()).then_some(real)
+    });
+    let reply = match found.and_then(|f| std::fs::read(&f).ok().map(|b| (f, b))) {
+        Some((file, body)) => {
+            let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            let mime = MIME.iter().find(|(e, _)| *e == ext).map_or("application/octet-stream", |(_, m)| m);
+            let mut reply = format!("HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+            reply.extend(body);
+            reply
+        }
+        None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot found".to_vec(),
+    };
+    let _ = stream.write_all(&reply);
 }
 
 const SHELL_KEEP: usize = 256 * 1024;
@@ -766,14 +1327,58 @@ impl Shells {
     pub fn close(&self, id: &str) {
         self.open.lock().unwrap().remove(id);
     }
+
+    /// Those of `ids` whose shell has a command running under it.
+    pub fn busy(&self, ids: &[String], path: Option<&str>) -> Vec<String> {
+        let pids: Vec<(String, u32)> = {
+            let open = self.open.lock().unwrap();
+            ids.iter().filter_map(|id| Some((id.clone(), open.get(id)?.session.pid()?))).collect()
+        };
+        if pids.is_empty() {
+            return vec![];
+        }
+        let table = crate::workspace::run(Path::new("/"), path, "ps", &["-A", "-o", "pid=,ppid=,comm="]).unwrap_or_default();
+        pids.into_iter().filter(|(_, pid)| runs_command(&table, *pid)).map(|(id, _)| id).collect()
+    }
+}
+
+/// Whether `ps -o pid=,ppid=,comm=` lists a command under the shell `shell`. As T3 Code's terminal
+/// manager reads it, a child named as the shell with no children of its own is the shell's prompt
+/// helper, not a command.
+fn runs_command(table: &str, shell: u32) -> bool {
+    let rows: Vec<(u32, u32, &str)> = table
+        .lines()
+        .filter_map(|line| {
+            let (pid, rest) = line.trim().split_once(char::is_whitespace)?;
+            let rest = rest.trim_start();
+            let (ppid, comm) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            Some((pid.parse().ok()?, ppid.parse().ok()?, comm.trim()))
+        })
+        .collect();
+    let name = |pid: u32| {
+        let comm = rows.iter().find(|r| r.0 == pid).map_or("", |r| r.2.trim_start_matches('-'));
+        Path::new(comm).file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())
+    };
+    let shell_name = name(shell);
+    rows.iter().filter(|r| r.1 == shell).any(|r| shell_name.is_empty() || name(r.0) != shell_name || rows.iter().any(|c| c.1 == r.0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_shell_runs_a_command_when_a_child_is_not_its_own_prompt_helper() {
+        let table = "  100     1 /bin/zsh\n  200   100 zsh\n  300   100 -zsh\n  301   300 git\n  400     1 zsh\n  401   400 npm run dev\n  500     1 -zsh\n  501   500 zsh\n";
+        assert!(runs_command(table, 100), "a helper with a child of its own is a command");
+        assert!(runs_command(table, 400));
+        assert!(!runs_command(table, 500), "a lone copy of the shell is its prompt helper");
+        assert!(!runs_command(table, 999));
+        assert!(!runs_command("  600     1 bash\n", 600));
+    }
+
     fn git(dir: &Path, args: &[&str]) {
-        assert!(Command::new("git").args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "git {args:?}");
+        assert!(crate::process::command("git").args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "git {args:?}");
     }
 
     #[test]
@@ -790,7 +1395,8 @@ mod tests {
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = server.local_addr().unwrap().port();
         std::thread::spawn(move || {
-            for stream in server.incoming().flatten().take(2) {
+            // Every connection, as another test looking for web servers may knock on this one too.
+            for stream in server.incoming().flatten() {
                 let mut stream = stream;
                 let mut ask = vec![];
                 let mut chunk = [0; 1024];
@@ -807,8 +1413,37 @@ mod tests {
             }
         });
         let meta = page_meta(&format!("http://localhost:{port}/")).unwrap();
-        assert_eq!(meta, PageMeta { title: "Dev server".into(), icon: Some("data:image/png;base64,UE5HIQ==".into()) });
+        assert_eq!(meta, PageMeta { title: "Dev server".into(), icon: Some("data:image/png;base64,UE5HIQ==".into()), ..PageMeta::default() });
         assert!(page_meta("file:///etc/passwd").unwrap_err().contains("not a web address"));
+    }
+
+    #[test]
+    fn page_meta_names_an_unreachable_page_and_a_file_it_would_download() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        assert_eq!(page_meta(&format!("http://127.0.0.1:{port}/")).unwrap().failure.as_deref(), Some("ERR_CONNECTION_REFUSED"));
+        assert_eq!(page_meta("http://no-such-host.invalid/").unwrap().failure.as_deref(), Some("ERR_NAME_NOT_RESOLVED"));
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in server.incoming().flatten().take(2) {
+                let mut stream = stream;
+                let mut ask = vec![];
+                let mut chunk = [0; 1024];
+                while !ask.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => ask.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let kind = if String::from_utf8_lossy(&ask).starts_with("GET /report.zip") { "application/zip" } else { "application/manifest+json" };
+                let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nPK").as_bytes());
+            }
+        });
+        let zip = page_meta(&format!("http://127.0.0.1:{port}/report.zip")).unwrap();
+        assert_eq!((zip.file.as_deref(), zip.failure), (Some("report.zip"), None));
+        assert_eq!(page_meta(&format!("http://127.0.0.1:{port}/manifest.webmanifest")).unwrap(), PageMeta::default());
     }
 
     #[test]
@@ -844,6 +1479,44 @@ mod tests {
         assert_eq!(std::fs::read_to_string(src.join("a.rs")).unwrap(), "fn a() { 2 }\n");
         assert!(write_file(&src, "a.rs", false, "lost", Some(&now.hash)).unwrap_err().contains("changed on disk"));
         assert_eq!(write_file(&src, "a.rs", false, "fn a() { 3 }\n", Some(&saved)).map(drop), Ok(()));
+    }
+
+    #[test]
+    fn the_file_server_serves_a_folder_only_by_its_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let site = dir.path().join("site");
+        std::fs::create_dir_all(site.join("css")).unwrap();
+        std::fs::write(site.join("page one.html"), "<link href=css/a.css>").unwrap();
+        std::fs::write(site.join("css/a.css"), "b{}").unwrap();
+        std::fs::write(dir.path().join("secret"), "no").unwrap();
+        let get = |url: &str| {
+            let rest = url.strip_prefix("http://").unwrap();
+            let (host, path) = rest.split_at(rest.find('/').unwrap());
+            let mut stream = std::net::TcpStream::connect(host).unwrap();
+            write!(stream, "GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n").unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            reply
+        };
+        let server = FileServer::default();
+        let page = server.url(&site, "page one.html", false).unwrap();
+        assert!(page.ends_with("/page%20one.html"), "{page}");
+        let reply = get(&page);
+        assert!(reply.starts_with("HTTP/1.1 200") && reply.contains("text/html") && reply.ends_with("<link href=css/a.css>"), "{reply}");
+        assert!(get(&page.replace("page%20one.html", "css/a.css")).ends_with("b{}"));
+        assert!(get(&page.replace("page%20one.html", "../secret")).starts_with("HTTP/1.1 404"));
+        assert!(get(&page.replace("page%20one.html", "%2E%2E/secret")).starts_with("HTTP/1.1 404"));
+        let token = page.split('/').nth(3).unwrap();
+        assert!(get(&page.replace(token, "0000")).starts_with("HTTP/1.1 404"));
+        assert!(server.url(&site, "../secret", false).unwrap_err().contains("not a path inside"));
+    }
+
+    #[test]
+    fn a_file_past_a_megabyte_shows_its_first_megabyte_and_its_whole_size() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("big.log"), "x".repeat(3 * 1024 * 1024)).unwrap();
+        let big = read_file(dir.path(), "big.log", false, None).unwrap();
+        assert_eq!((big.truncated, big.size, big.text.map(|t| t.len())), (true, 3 * 1024 * 1024, Some(1024 * 1024)));
     }
 
     #[test]
@@ -893,6 +1566,82 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(pr_edit(dir.path(), "42", Some("x"), None, None).unwrap_err().contains("not a pull request URL"));
         assert!(pr_rerun(dir.path(), "https://example.com/status", None).unwrap_err().contains("no GitHub Actions run"));
+    }
+
+    #[test]
+    fn the_conversation_query_is_read_into_reactions_reviewers_and_access() {
+        let group = |content: &str, n: u64, me: bool, who: &[&str]| json!({ "content": content, "viewerHasReacted": me, "reactors": { "totalCount": n, "nodes": who.iter().map(|l| json!({ "login": l })).collect::<Vec<_>>() } });
+        let data = json!({
+            "viewer": { "login": "ana" },
+            "repository": { "viewerPermission": "TRIAGE", "pullRequest": {
+                "id": "PR_1", "viewerCanUpdate": true,
+                "reactionGroups": [group("HEART", 2, true, &["bo"]), group("EYES", 0, false, &[])],
+                "comments": { "nodes": [{ "id": "IC_1", "viewerCanUpdate": true, "reactionGroups": [group("THUMBS_UP", 1, false, &["bo"])] }, { "id": "IC_2", "viewerCanUpdate": false, "reactionGroups": [] }] },
+                "reviews": { "nodes": [] },
+                "latestReviews": { "nodes": [{ "state": "APPROVED", "submittedAt": "2026-01-01T00:00:00Z", "author": { "login": "bo", "avatarUrl": "https://avatars.githubusercontent.com/u/2" } }] },
+                "reviewRequests": { "nodes": [{ "requestedReviewer": { "login": "cy", "name": "Cy", "avatarUrl": null } }, { "requestedReviewer": { "combinedSlug": "acme/core", "teamName": "Core", "teamAvatarUrl": null } }, { "requestedReviewer": null }] },
+                "reviewThreads": { "nodes": [{ "id": "T1", "comments": { "totalCount": 12, "nodes": [{ "id": "RC_1", "viewerCanUpdate": true, "reactionGroups": [group("ROCKET", 1, true, &[])] }] } }] },
+            } },
+        });
+        let read = read_conversation(&data);
+        assert_eq!(read["viewer"], "ana");
+        assert_eq!(read["prId"], "PR_1");
+        assert_eq!(read["permission"], "TRIAGE");
+        assert_eq!(read["reactions"]["PR_1"], json!([{ "content": "HEART", "count": 2, "viewerHasReacted": true, "actors": ["bo"] }]));
+        assert_eq!(read["reactions"]["IC_1"], json!([{ "content": "THUMBS_UP", "count": 1, "viewerHasReacted": false, "actors": ["bo"] }]));
+        assert_eq!(read["threads"][0]["comments"]["nodes"][0]["reactions"], json!([{ "content": "ROCKET", "count": 1, "viewerHasReacted": true, "actors": [] }]));
+        assert_eq!(read["threads"][0]["comments"]["totalCount"], 12);
+        assert_eq!(read["reviewers"], json!([{ "login": "cy", "name": "Cy", "avatarUrl": null, "team": false }, { "login": "acme/core", "name": "Core", "avatarUrl": null, "team": true }]));
+        assert_eq!(read["latestReviews"][0]["state"], "APPROVED");
+        assert_eq!(read["editable"], json!(["IC_1", "RC_1"]));
+        let plain = read_conversation(&json!({ "repository": { "pullRequest": { "reviewThreads": { "nodes": [{ "id": "T1" }] } } } }));
+        assert_eq!(plain, json!({ "threads": [{ "id": "T1" }] }));
+    }
+
+    #[test]
+    fn candidates_put_whoever_was_asked_first_and_leave_the_author_out() {
+        let repository = json!({
+            "assignableUsers": { "pageInfo": { "hasNextPage": true }, "nodes": [{ "login": "ana", "name": "Ana", "avatarUrl": "a" }, { "login": "bo", "name": null, "avatarUrl": "b" }, { "login": "cy", "name": "Cy", "avatarUrl": "c" }] },
+            "pullRequest": { "author": { "login": "ana" }, "reviewRequests": { "nodes": [{ "requestedReviewer": { "login": "cy", "name": "Cy", "avatarUrl": "c" } }, { "requestedReviewer": { "slug": "core", "combinedSlug": "acme/core", "teamName": "Core", "teamAvatarUrl": "t" } }] } },
+        });
+        assert_eq!(reviewer_candidates(&repository), json!({ "truncated": true, "candidates": [
+            { "login": "cy", "team": false, "name": "Cy", "avatarUrl": "c", "requested": true },
+            { "login": "acme/core", "team": true, "name": "Core", "avatarUrl": "t", "requested": true },
+            { "login": "bo", "team": false, "name": null, "avatarUrl": "b", "requested": false },
+        ] }));
+        let labels = json!({ "labels": { "pageInfo": { "hasNextPage": false }, "nodes": [{ "name": "bug", "color": "d73a4a", "description": "Something is wrong" }, { "name": "docs", "color": "0075ca", "description": null }] }, "pullRequest": { "labels": { "nodes": [{ "name": "docs" }] } } });
+        assert_eq!(label_candidates(&labels), json!({ "truncated": false, "candidates": [{ "name": "bug", "color": "d73a4a", "description": "Something is wrong", "applied": false }, { "name": "docs", "color": "0075ca", "description": null, "applied": true }] }));
+        assert_eq!(path_segment("good first issue/é"), "good%20first%20issue%2F%C3%A9");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stack_rebase_moves_each_layers_own_commits_onto_the_rebased_layer_below() {
+        let dir = tempfile::tempdir().unwrap();
+        let (origin, work) = (dir.path().join("origin.git"), dir.path().join("work"));
+        git(dir.path(), &["init", "--quiet", "--bare", origin.to_str().unwrap()]);
+        git(dir.path(), &["clone", "--quiet", origin.to_str().unwrap(), work.to_str().unwrap()]);
+        let commit = |file: &str| {
+            std::fs::write(work.join(file), file).unwrap();
+            git(&work, &["add", file]);
+            git(&work, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", file]);
+        };
+        let head = || run(&work, None, "git", &["rev-parse", "HEAD"]).ok().unwrap().trim().to_owned();
+        git(&work, &["checkout", "--quiet", "-b", "main"]);
+        commit("base");
+        git(&work, &["checkout", "--quiet", "-b", "one"]);
+        commit("one");
+        let one = head();
+        git(&work, &["checkout", "--quiet", "-b", "two"]);
+        commit("two");
+        let two = head();
+        git(&work, &["checkout", "--quiet", "main"]);
+        commit("later");
+        git(&work, &["push", "--quiet", "origin", "main", "one", "two"]);
+        cascade_rebase(&work, None, &format!("file://{}", origin.display()), "main", &[(1, "one", &one), (2, "two", &two)]).unwrap();
+        let log = |branch: &str| run(&origin, None, "git", &["log", "--format=%s", branch]).ok().unwrap();
+        assert_eq!(log("two"), "two\none\nlater\nbase\n");
+        assert_eq!(log("one"), "one\nlater\nbase\n");
     }
 
     #[cfg(unix)]

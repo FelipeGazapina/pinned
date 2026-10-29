@@ -2,6 +2,7 @@ use pinned_core::account::{self, Credentials};
 use pinned_core::connectors::{self, Connectors, Keys};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::Machine;
+use pinned_core::process;
 use pinned_core::wire::HubCall;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -70,8 +71,11 @@ fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         let open = |work| {
             let taken = match work {
-                connectors::Work::Run(run) => machine.run(&run.spec()).is_ok(),
-                connectors::Work::Delivery(d) => machine.deliver(&d.env(), &d.text()),
+                connectors::Work::Run(run) if matches!(run.runs_on, connectors::RunsOn::FreshBox(_)) => {
+                    Err("this workflow runs in an Upstash Box, which needs pinned signed in".to_owned())
+                }
+                connectors::Work::Run(run) => machine.run(&run.spec()).map(drop),
+                connectors::Work::Delivery(d) => machine.deliver(&d.env(), &d.text()).then_some(()).ok_or_else(|| "no session answers that thread".to_owned()),
             };
             async move { taken }
         };
@@ -81,7 +85,7 @@ fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
 }
 
 fn computer_name() -> String {
-    std::process::Command::new("scutil")
+    process::command("scutil")
         .args(["--get", "ComputerName"])
         .output()
         .ok()

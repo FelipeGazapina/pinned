@@ -6,12 +6,14 @@ function parseDiff(patch) {
   let newNo = 0;
   for (const line of patch.split("\n")) {
     if (line.startsWith("diff --git ")) {
-      file = { path: line.match(/ b\/(.*)$/)?.[1] ?? line.slice(11), status: "changed", added: 0, removed: 0, hunks: [], binary: false };
+      file = { path: line.match(/ b\/(.*)$/)?.[1] ?? line.slice(11), from: null, status: "changed", added: 0, removed: 0, hunks: [], binary: false };
       files.push(file);
       hunk = null;
     } else if (!file) continue;
     else if (!hunk && line.startsWith("new file")) file.status = "added";
     else if (!hunk && line.startsWith("deleted file")) file.status = "deleted";
+    else if (!hunk && line.startsWith("rename from ")) Object.assign(file, { from: line.slice(12), status: "renamed" });
+    else if (!hunk && line.startsWith("rename to ")) file.path = line.slice(10);
     else if (!hunk && line.startsWith("Binary files")) file.binary = true;
     else if (line.startsWith("@@")) {
       const m = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
@@ -59,57 +61,68 @@ function withoutWhitespace(files) {
   });
 }
 
-const LANG_BY_EXT = { js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "jsx", ts: "typescript", tsx: "tsx", mts: "typescript", cts: "typescript", py: "python", rs: "rust", rb: "ruby", go: "go", java: "java", kt: "kotlin", swift: "swift", c: "c", h: "c", cc: "cpp", cpp: "cpp", hpp: "cpp", cs: "csharp", php: "php", sh: "bash", zsh: "bash", bash: "bash", json: "json", jsonc: "jsonc", yml: "yaml", yaml: "yaml", toml: "toml", ini: "ini", md: "markdown", mdx: "mdx", css: "css", scss: "scss", less: "less", html: "html", xml: "xml", svg: "xml", vue: "vue", svelte: "svelte", sql: "sql", lua: "lua", r: "r", graphql: "graphql", gql: "graphql", m: "objective-c", pl: "perl", dart: "dart", ex: "elixir", exs: "elixir", zig: "zig", scala: "scala", hs: "haskell", tf: "hcl", proto: "proto", diff: "diff" };
-const LANG_BY_NAME = { Makefile: "makefile", Dockerfile: "docker", "Cargo.lock": "toml", ".gitignore": "ini", ".env": "ini" };
-const HLJS_NAMES = { jsx: "javascript", tsx: "typescript", jsonc: "json", toml: "ini", html: "xml", vue: "xml", svelte: "xml", mdx: "markdown", "objective-c": "objectivec", docker: "dockerfile", hcl: "ini" };
+/** The Shiki language pierre colors `path` as, from its file name, or null for plain text. */
 const langOf = (path) => {
-  const name = path.split("/").pop();
-  return LANG_BY_NAME[name] ?? LANG_BY_EXT[name.split(".").pop().toLowerCase()] ?? null;
+  const lang = PIERRE_DIFFS.filetype(path);
+  return lang === "text" ? null : lang;
 };
 
-/** Shiki with T3's pierre-dark or pierre-light theme, loaded on first use; hljs colors lines until it is ready. */
+/** Shiki with T3's pierre-dark or pierre-light theme and each grammar, loaded on first use. A
+ * language is settled once it is loaded or failed to; a "highlighter" event says when one settles. */
 let shiki = null;
 let shikiLoading = null;
 const shikiLangs = new Set();
+const shikiFailed = new Set();
 const shikiWaiting = new Set();
+const shikiSettle = () => {
+  highlighted.clear();
+  document.dispatchEvent(new Event("highlighter"));
+};
 function loadShiki() {
   shikiLoading ??= import("./vendor/shiki/shiki.js").then(async (mod) => {
     shiki = await mod.highlighter();
-    for (const lang of shikiWaiting) await shiki.loadLanguage(lang).then(() => shikiLangs.add(lang), () => {});
+    for (const lang of shikiWaiting) await shiki.loadLanguage(lang).then(() => shikiLangs.add(lang), () => shikiFailed.add(lang));
     shikiWaiting.clear();
-    highlighted.clear();
-    document.dispatchEvent(new Event("highlighter"));
-  }, (e) => console.warn("shiki didn't load", e));
+    shikiSettle();
+  }, (e) => {
+    console.warn("shiki didn't load", e);
+    for (const lang of shikiWaiting) shikiFailed.add(lang);
+    shikiWaiting.clear();
+    shikiSettle();
+  });
   return shikiLoading;
 }
+const SHIKI_PATIENCE = 4000;
 function wantLang(lang) {
-  if (!lang || shikiLangs.has(lang)) return;
-  if (!shiki) {
-    shikiWaiting.add(lang);
-    loadShiki();
-    return;
-  }
-  if (shikiWaiting.has(lang)) return;
+  if (!lang || shikiLangs.has(lang) || shikiFailed.has(lang) || shikiWaiting.has(lang)) return;
   shikiWaiting.add(lang);
-  shiki.loadLanguage(lang).then(() => {
-    shikiLangs.add(lang);
+  setTimeout(() => {
+    if (!shikiWaiting.has(lang)) return;
+    shikiFailed.add(lang);
+    shikiSettle();
+  }, SHIKI_PATIENCE);
+  if (!shiki) return void loadShiki();
+  shiki.loadLanguage(lang).then(() => shikiLangs.add(lang), () => shikiFailed.add(lang)).then(() => {
     shikiWaiting.delete(lang);
-    highlighted.clear();
-    document.dispatchEvent(new Event("highlighter"));
-  }, () => shikiWaiting.delete(lang));
+    shikiSettle();
+  });
+}
+/** Whether `lang` is colored or never will be, asking for it otherwise. */
+function langSettled(lang) {
+  wantLang(lang);
+  return !lang || shikiLangs.has(lang) || shikiFailed.has(lang);
 }
 
 const highlighted = new Map();
 /** Each of `texts` as highlighted HTML, lexed together so a string or comment that spans lines keeps
- * its color. */
+ * its color; plain until the language settles. */
 function highlightLines(texts, lang) {
-  if (!lang) return texts.map((t) => esc(t));
-  wantLang(lang);
+  if (!lang || !langSettled(lang) || !shikiLangs.has(lang)) return texts.map((t) => esc(t));
   const source = texts.join("\n");
   const key = `${codeTheme()}\n${lang}\n${source}`;
   if (highlighted.has(key)) return highlighted.get(key);
   if (highlighted.size > 2000) highlighted.clear();
-  const lines = shikiLangs.has(lang) ? shikiLines(source, lang) : hljsLines(source, HLJS_NAMES[lang] ?? lang);
+  const lines = shikiLines(source, lang);
   if (!lines) return texts.map((t) => esc(t));
   highlighted.set(key, lines);
   return lines;
@@ -125,34 +138,6 @@ function shikiLines(source, lang) {
   } catch {
     return null;
   }
-}
-
-/** hljs escapes the text; a span left open at a line's end is closed and opened again. */
-function hljsLines(source, lang) {
-  if (!window.hljs?.getLanguage(lang)) return null;
-  let html;
-  try {
-    html = hljs.highlight(source, { language: lang, ignoreIllegals: true }).value;
-  } catch {
-    return null;
-  }
-  const lines = [];
-  const open = [];
-  let line = "";
-  for (const part of html.split(/(<span[^>]*>|<\/span>|\n)/)) {
-    if (part === "\n") {
-      lines.push(line + "</span>".repeat(open.length));
-      line = open.join("");
-    } else if (part.startsWith("<span")) {
-      open.push(part);
-      line += part;
-    } else if (part === "</span>") {
-      open.pop();
-      line += part;
-    } else line += part;
-  }
-  lines.push(line + "</span>".repeat(open.length));
-  return lines;
 }
 
 function lineHtml(lines, lang) {
@@ -190,7 +175,7 @@ const EXPAND_STEP = 100;
  * after the last hunk has no known length until the file is read. */
 function gapRows(f, gap, i, open, content, rowOpts) {
   if (gap.size === 0) return [];
-  if (gap.size == null) return f.status === "changed" ? [separatorHtml(gap, i, null)] : [];
+  if (gap.size == null) return f.hunks.length && f.status !== "added" && f.status !== "deleted" ? [separatorHtml(gap, i, null)] : [];
   const shown = open?.[i] ?? { top: 0, bottom: 0 };
   const top = Math.min(shown.top, gap.size);
   const bottom = Math.min(shown.bottom, gap.size - top);
@@ -202,16 +187,19 @@ function gapRows(f, gap, i, open, content, rowOpts) {
   return [...(top ? diffRows(context(0, top), rowOpts) : []), ...(left ? [separatorHtml(gap, i, left)] : []), ...(bottom ? diffRows(context(gap.size - bottom, bottom), rowOpts) : [])];
 }
 
-/** "N unmodified lines", with pierre's buttons: one to show the whole stretch when it is short, else
- * one for each side it touches, each showing `EXPAND_STEP` more lines, and "Expand all". */
+/** "N unmodified lines" with pierre's chevrons (createSeparator.js). A stretch longer than
+ * `EXPAND_STEP` gets one per side it touches, each opening `EXPAND_STEP` more lines on that side, and
+ * "Expand all"; a shorter one a single chevron for all of it, two-way between hunks. */
 function separatorHtml(gap, i, left) {
   const chunked = left == null || left > EXPAND_STEP;
-  const button = (dir, ic, title) => `<button type="button" class="expand" data-expand="${dir}" data-gap="${i}" title="${title}">${icon(ic)}</button>`;
+  const pierreIcon = (name) => `<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><use href="#${name}"/></svg>`;
+  const button = (dir, label, single = false) => `<button type="button" class="expand" data-expand="${dir}"${single ? " data-whole" : ""} data-gap="${i}" aria-label="${label}">${pierreIcon(dir === "all" ? "diffs-icon-expand-all" : "diffs-icon-expand")}</button>`;
   const buttons = !chunked
-    ? button("all", "chevrons-up-down", "Expand")
-    : `${gap.first ? "" : button("top", "arrow-down", `Show ${EXPAND_STEP} more lines`)}${gap.last ? "" : button("bottom", "arrow-up", `Show ${EXPAND_STEP} more lines`)}`;
+    ? gap.first ? button("bottom", "Expand", true) : gap.last ? button("top", "Expand", true) : button("all", "Expand")
+    : `${gap.first ? "" : button("top", `Show ${EXPAND_STEP} more lines`)}${gap.last ? "" : button("bottom", `Show ${EXPAND_STEP} more lines`)}`;
   const label = left == null ? "More unchanged context may be available" : `${left} unmodified line${left === 1 ? "" : "s"}`;
-  return `<div class="gap" data-gap="${i}"><span class="gutter">${buttons}</span><span class="label">${label}</span>${chunked && left != null ? `<button type="button" class="all" data-expand="all" data-gap="${i}">Expand all</button>` : ""}</div>`;
+  const multi = chunked && !gap.first && !gap.last;
+  return `<div class="gap${multi ? " multi" : ""}" data-gap="${i}"><span class="gutter">${buttons}</span><span class="label" data-expand="${gap.first ? "bottom" : gap.last ? "top" : "both"}" data-gap="${i}">${label}</span>${chunked && left != null ? `<button type="button" class="all" data-expand="all" data-gap="${i}">Expand all</button>` : ""}</div>`;
 }
 
 /** Each visual row of `lines` as HTML. `comments` holds a file's review comments by `side:end`;
@@ -249,9 +237,10 @@ function diffRows(lines, { lang, comments, draft, selection, path }) {
 }
 
 const rangeLabel = (c) => (c.start === c.end ? `L${c.end}` : `L${c.start} to L${c.end}`);
-const commentHtml = (c) => `<div class="dcomment">${icon("message-circle")}<p><span class="range">${esc(rangeLabel(c))}</span>${esc(c.text)}</p><button type="button" class="icon" data-comment-delete="${esc(c.id)}" title="Delete comment">${icon("trash-2")}</button></div>`;
-const draftHtml = (d) => `<div class="dcomment draft"><textarea rows="3" placeholder="Add a comment…" data-comment-text>${esc(d.text ?? "")}</textarea>
-  <div class="row"><span class="hint">${IS_MAC ? "⌘" : "Ctrl"} Enter to send</span><span class="spacer"></span><button type="button" class="outline" data-comment-cancel>Cancel</button><button type="button" class="primary" data-comment-save>Comment</button></div></div>`;
+/** DiffCommentAnnotation.tsx: a saved comment, and the draft being written. */
+const commentHtml = (c) => c.html ?? `<div class="dcomment">${icon("message-circle")}<p>${esc(c.text)}</p><button type="button" class="icon" data-comment-delete="${esc(c.id)}" aria-label="Delete comment">${icon("trash-2")}</button></div>`;
+const draftHtml = (d) => `<div class="dcomment draft"><textarea rows="3" placeholder="Add a comment…" aria-label="Comment on lines ${esc(rangeLabel(d))}" data-comment-text>${esc(d.text ?? "")}</textarea>
+  <div class="row"><span class="hint">⌘/Ctrl Enter to send</span><button type="button" class="ghost" data-comment-cancel>Cancel</button><button type="button" class="primary" data-comment-save${(d.text ?? "").trim() ? "" : " disabled"}>Comment</button></div></div>`;
 
 /** Rows past the first `EAGER_ROWS` of a diff wait in sized placeholders until they scroll near,
  * so a long diff opens without building or coloring every line. */
@@ -273,9 +262,17 @@ function watchChunks(root) {
 }
 const rowHeight = (row) => (row.startsWith('<div class="gap"') ? 24 : row.startsWith('<div class="dl') ? 20 + (row.includes('class="dcomment') ? 64 : 0) : 64);
 
+/** pierre's file header icon for each status (getIconForType.js), and the tree's git-status letter. */
+const CHANGE_ICON = { changed: "diffs-icon-symbol-modified", added: "diffs-icon-symbol-added", deleted: "diffs-icon-symbol-deleted", renamed: "diffs-icon-symbol-moved" };
+const pierreSymbol = (name, cls = "") => `<svg class="i ${cls}" viewBox="0 0 16 16" aria-hidden="true"><use href="#${name}"/></svg>`;
+
+/** A file still waiting for its grammar shows these, as T3's viewer shows a loading file. */
+const waitingRows = `<div class="file-waiting" aria-label="Loading">${["62%", "44%", "78%"].map((w) => `<span style="width:${w}"></span>`).join("")}</div>`;
+
 /** `opts.comments` (Map path → Map `side:end` → comments) and `opts.draft` show review comments;
  * `opts.viewed(file)` answers a Code tab's "Viewed" state; `opts.contents(path)` the new file's
- * lines once read, for the unchanged stretches; `opts.expanded(path)` which of them are open. */
+ * lines once read, for the unchanged stretches; `opts.expanded(path)` which of them are open;
+ * `opts.partial` is the file a cut patch ends in. */
 function filesHtml(files, key, opts = {}) {
   if (!files.length) return `<p class="panel-empty">No net changes in this selection.</p>`;
   pendingChunks.clear();
@@ -286,7 +283,8 @@ function filesHtml(files, key, opts = {}) {
     const lang = collapsed ? null : langOf(f.path);
     const rowOpts = { lang, path: f.path, comments: opts.comments?.get(f.path), draft: opts.draft?.path === f.path ? opts.draft : null, selection: ui.selection?.key === key ? ui.selection : null };
     let body = "";
-    if (!collapsed && !f.binary) {
+    if (!collapsed && !f.binary && !langSettled(lang)) body = waitingRows;
+    else if (!collapsed && !f.binary) {
       const content = opts.contents?.(f.path);
       const open = opts.expanded?.(f.path);
       const gaps = gapsOf(f, content?.length);
@@ -305,34 +303,62 @@ function filesHtml(files, key, opts = {}) {
     const viewed = opts.viewed?.(f);
     const fresh = ui.justOpened === id;
     if (fresh) ui.justOpened = null;
+    // createFileHeaderElement.js: the deletions show unless only lines were added, and the reverse.
+    const counts = `${f.removed > 0 || f.added === 0 ? `<span class="del">-${f.removed}</span>` : ""}${f.added > 0 || f.removed === 0 ? `<span class="add">+${f.added}</span>` : ""}`;
     return `<section class="file" data-id="${esc(id)}" data-path="${esc(f.path)}" data-status="${f.status}"${collapsed ? " data-collapsed" : ""}${fresh ? " data-fresh" : ""}>
-      <header>${icon(collapsed ? "chevron-right" : "chevron-down", "fold")}<span class="change"></span><span class="path" title="${esc(opts.openTitle ?? f.path)}"><bdi>${esc(f.path)}</bdi></span>
-        <button type="button" class="copy" data-copy="${esc(f.path)}" title="Copy path">${icon("copy")}</button><span class="spacer"></span>
-        ${viewed ? `<label class="viewed${viewed.changed ? " changed" : ""}"><input type="checkbox" data-viewed="${esc(f.path)}"${viewed.on ? " checked" : ""}>${viewed.changed ? "Changed" : "Viewed"}</label>` : ""}
-        <span class="del">-${f.removed}</span><span class="add">+${f.added}</span></header>
+      <header><span class="fold" title="${collapsed ? "Expand diff" : "Collapse diff"}">${icon(collapsed ? "chevron-right" : "chevron-down")}</span>${pierreSymbol(CHANGE_ICON[f.status], "change")}${f.from ? `<span class="from"><bdi>${esc(f.from)}</bdi></span>${pierreSymbol("diffs-icon-arrow-right-short", "moved")}` : ""}<span class="path"><bdi>${esc(f.path)}</bdi></span>
+        <button type="button" class="copy" data-copy="${esc(f.path)}" title="Copy path" aria-label="Copy file path">${icon("copy")}</button>${opts.partial === f ? `<span class="partial" title="This file is too large to show in full." aria-label="Partial diff preview">${icon("info")}</span>` : ""}<span class="spacer"></span>
+        ${counts}
+        ${viewed ? `<label class="viewed${viewed.changed ? " changed" : ""}"${viewed.changed ? ' title="This file has been pushed to since you marked it viewed."' : ""}><input type="checkbox" data-viewed="${esc(f.path)}" aria-label="${viewed.changed ? "Changed" : "Viewed"}"${viewed.on ? " checked" : ""}>${viewed.changed ? "Changed" : "Viewed"}</label>` : ""}</header>
       ${collapsed ? "" : `<div class="hunks">${f.binary ? `<p class="panel-empty">Binary file</p>` : body}</div>`}</section>`;
   }).join("");
 }
 
+/** @pierre/trees' icon for a file, in its light or dark color as the theme is. */
+function treeIconHtml(path) {
+  const icons = window.PIERRE_ICONS;
+  if (!icons) return icon("file", "ficon");
+  if (!document.getElementById("pierre-sprite")) document.body.insertAdjacentHTML("afterbegin", `<div id="pierre-sprite" aria-hidden="true">${icons.sprite}</div>`);
+  const { name, token } = icons.resolve(path);
+  const [light, dark] = icons.colors[token ?? "default"] ?? icons.colors.default;
+  return `<svg class="i ficon" viewBox="0 0 16 16" style="color: light-dark(${light}, ${dark})" aria-hidden="true"><use href="#${esc(name)}"/></svg>`;
+}
+
+const TREE_STATUS = { added: ["A", "added"], deleted: ["D", "deleted"], changed: ["M", "modified"], renamed: ["R", "renamed"] };
+
+/** @pierre/trees as T3's DiffFileTree draws it: compact rows in the diff's order, folders that hold
+ * one folder flattened into one row, each file's icon and git-status letter, the chosen file lit. */
 function fileTreeHtml(files) {
-  const root = { dirs: new Map(), files: [] };
+  const node = () => ({ dirs: new Map(), files: 0, children: [] });
+  const root = node();
   for (const f of files) {
-    const parts = f.path.split("/");
     let dir = root;
-    for (const part of parts.slice(0, -1)) {
-      if (!dir.dirs.has(part)) dir.dirs.set(part, { dirs: new Map(), files: [] });
+    for (const part of f.path.split("/").slice(0, -1)) {
+      if (!dir.dirs.has(part)) {
+        const sub = node();
+        dir.dirs.set(part, sub);
+        dir.children.push({ name: part, dir: sub });
+      }
       dir = dir.dirs.get(part);
     }
-    dir.files.push(f);
+    dir.files++;
+    dir.children.push({ file: f });
   }
   const rows = [];
   const dirs = [];
+  const guides = (depth) => (depth ? `<span class="guides">${"<span></span>".repeat(depth)}</span>` : "");
   const walk = (dir, depth, prefix) => {
-    for (const [name, sub] of [...dir.dirs].sort(([a], [b]) => a.localeCompare(b))) {
+    for (const child of dir.children) {
+      const f = child.file;
+      if (f) {
+        const [letter, status] = TREE_STATUS[f.status];
+        rows.push(`<button type="button" class="leaf${ui.treePicked === f.path ? " picked" : ""}" data-tree-file="${esc(f.path)}" data-git="${status}" style="--depth:${depth}" title="${esc(f.path)}" aria-selected="${ui.treePicked === f.path}">${guides(depth)}${treeIconHtml(f.path)}<span class="name">${esc(f.path.split("/").pop())}</span><span class="git" title="Git status: ${status}">${letter}</span></button>`);
+        continue;
+      }
       // A folder holding only one folder shows as one row, like `src/ui`.
-      let label = name;
-      let inner = sub;
-      while (!inner.files.length && inner.dirs.size === 1) {
+      let label = child.name;
+      let inner = child.dir;
+      while (!inner.files && inner.dirs.size === 1) {
         const [[n, d]] = inner.dirs;
         label += `/${n}`;
         inner = d;
@@ -340,16 +366,13 @@ function fileTreeHtml(files) {
       const path = `${prefix}${label}`;
       dirs.push(path);
       const closed = ui.treeClosed.has(path);
-      rows.push(`<button type="button" class="dir" data-tree-dir="${esc(path)}" style="--depth:${depth}">${icon(closed ? "chevron-right" : "chevron-down")}${icon(closed ? "folder" : "folder-open")}<span>${esc(label)}</span></button>`);
+      rows.push(`<button type="button" class="dir" data-tree-dir="${esc(path)}" aria-expanded="${!closed}" style="--depth:${depth}">${guides(depth)}<svg class="i chevron" viewBox="0 0 16 16" aria-hidden="true"><use href="#file-tree-icon-chevron"/></svg><span class="name">${esc(label)}</span><span class="git" title="Contains git status items"><svg viewBox="0 0 6 6" aria-hidden="true"><circle cx="3" cy="3" r="3"/></svg></span></button>`);
       if (!closed) walk(inner, depth + 1, `${path}/`);
-    }
-    for (const f of dir.files.sort((a, b) => a.path.localeCompare(b.path))) {
-      rows.push(`<button type="button" class="leaf" data-tree-file="${esc(f.path)}" data-status="${f.status}" style="--depth:${depth}" title="${esc(f.path)}">${fileIcon(f.path)}<span class="name">${esc(f.path.split("/").pop())}</span><span class="del">-${f.removed}</span><span class="add">+${f.added}</span></button>`);
     }
   };
   walk(root, 0, "");
   const allOpen = dirs.every((d) => !ui.treeClosed.has(d));
-  return `<aside class="file-tree"><header><span>Files</span><span class="muted">${files.length}</span><span class="spacer"></span>${dirs.length ? `<button type="button" class="icon" data-tree-all="${allOpen ? "close" : "open"}" data-dirs="${esc(JSON.stringify(dirs))}" title="${allOpen ? "Collapse all folders" : "Expand all folders"}">${icon(allOpen ? "chevrons-down-up" : "chevrons-up-down")}</button>` : ""}</header>${rows.join("")}</aside>`;
+  return `<aside class="file-tree"><header><span class="title">Files</span><span class="count">${files.length}</span>${dirs.length ? `<button type="button" class="icon" data-tree-all="${allOpen ? "close" : "open"}" data-dirs="${esc(JSON.stringify(dirs))}" title="${allOpen ? "Collapse all folders" : "Expand all folders"}" aria-label="${allOpen ? "Collapse all folders" : "Expand all folders"}">${icon(allOpen ? "chevrons-down-up" : "chevrons-up-down")}</button>` : ""}</header>${rows.join("")}</aside>`;
 }
 
 /** A file's icon by its kind, colored as the file trees T3 draws do. */
@@ -367,13 +390,18 @@ function fileIcon(path) {
   return `<span class="ficon" style="color:${hit?.[2] ?? "#a3a3a3"}">${icon(hit?.[1] ?? "file")}</span>`;
 }
 
-function diffToolbar(added, removed, scope, { refresh = false } = {}) {
+/** DiffPanel.tsx's header row. The totals, collapse-all and file-tree toggle show only with files;
+ * Refresh spins while `refreshing`. */
+function diffToolbar(files, key, scope, { refresh = false, refreshing = false } = {}) {
   const on = (b) => (b ? " on" : "");
-  return `<div class="diff-bar">${scope}<span class="spacer"></span><span class="add">+${added}</span><span class="del">-${removed}</span>
-    ${refresh ? `<button type="button" data-diff="refresh" class="icon" title="Refresh">${icon("rotate-cw")}</button>` : ""}
-    <button type="button" data-diff="collapse" class="icon" title="Collapse or expand all files">${icon("chevrons-up-down")}</button>
-    <span class="seg"><button type="button" data-diff="unified" class="icon${on(ui.diffView === "unified")}" title="Stacked">${icon("rows-3")}</button><button type="button" data-diff="split" class="icon${on(ui.diffView === "split")}" title="Split">${icon("columns-2")}</button></span>
-    <button type="button" data-diff="wrap" class="icon${on(ui.diffWrap)}" title="Wrap lines">${icon("text-wrap")}</button>
-    <button type="button" data-diff="whitespace" class="icon${on(ui.diffHideSpace)}" title="${ui.diffHideSpace ? "Show whitespace changes" : "Hide whitespace changes"}">${icon("pilcrow")}</button>
-    <button type="button" data-diff="tree" class="icon${on(ui.diffTree)}" title="File tree">${icon("folder-tree")}</button></div>`;
+  const any = files.length > 0;
+  const allCollapsed = any && files.every((f) => ui.collapsed.has(`${key}:${f.path}`));
+  const tip = (text) => `title="${text}" aria-label="${text}"`;
+  return `<div class="diff-bar">${scope}<span class="spacer"></span>${any ? `<span class="add">+${sum(files, "added")}</span><span class="del">-${sum(files, "removed")}</span>` : ""}
+    ${refresh ? `<button type="button" data-diff="refresh" class="icon${refreshing ? " refreshing" : ""}" title="${refreshing ? "Refreshing diff…" : "Refresh diff"}" aria-label="${refreshing ? "Refreshing diff" : "Refresh diff"}">${icon("refresh-cw")}</button>` : ""}
+    ${any ? `<button type="button" data-diff="collapse" class="icon" ${tip(allCollapsed ? "Expand all files" : "Collapse all files")}>${icon(allCollapsed ? "chevrons-up-down" : "chevrons-down-up")}</button>` : ""}
+    <span class="seg"><button type="button" data-diff="unified" class="icon${on(ui.diffView === "unified")}" title="Stacked" aria-label="Stacked diff view">${icon("rows-3")}</button><button type="button" data-diff="split" class="icon${on(ui.diffView === "split")}" title="Split" aria-label="Split diff view">${icon("columns-2")}</button></span>
+    <button type="button" data-diff="wrap" class="icon${on(ui.diffWrap)}" title="${ui.diffWrap ? "Disable line wrapping" : "Enable line wrapping"}" aria-label="${ui.diffWrap ? "Disable diff line wrapping" : "Enable diff line wrapping"}">${icon("text-wrap")}</button>
+    <button type="button" data-diff="whitespace" class="icon${on(ui.diffHideSpace)}" ${tip(ui.diffHideSpace ? "Show whitespace changes" : "Hide whitespace changes")}>${icon("pilcrow")}</button>
+    ${any ? `<button type="button" data-diff="tree" class="icon${on(ui.diffTree)}" ${tip(ui.diffTree ? "Hide file tree" : "Show file tree")}>${icon("folder-tree")}</button>` : ""}</div>`;
 }

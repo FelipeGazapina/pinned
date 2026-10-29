@@ -20,8 +20,16 @@
 <link rel="stylesheet" href="gui-agents.css">
 <link rel="stylesheet" href="gui-composer.css">
 <link rel="stylesheet" href="gui-panel.css">
+<link rel="stylesheet" href="gui-pr.css">
+<link rel="stylesheet" href="gui-diff.css">
+<link rel="stylesheet" href="gui-browser.css">
+<link rel="stylesheet" href="gui-surfaces.css">
+<link rel="stylesheet" href="gui-device.css">
 <link rel="stylesheet" href="gui-shell.css">
+<link rel="stylesheet" href="gui-usage.css">
 <link rel="stylesheet" href="gui-settings.css">
+<link rel="stylesheet" href="gui-keybindings.css">
+<link rel="stylesheet" href="gui-pulls.css">
 </head>
 <body data-view="expanded" data-tabs="top">
   <main id="expanded">
@@ -43,32 +51,31 @@
         <div class="brand" data-tauri-drag-region><button id="sidebar-toggle" class="icon" title="Toggle sidebar (⌘B)"><i data-icon="panel-left"></i></button><b data-tauri-drag-region>pinned</b></div>
         <div class="side-head">
           <div class="row"><label class="search"><i data-icon="search"></i><input id="thread-search" placeholder="Search" autocomplete="off" spellcheck="false"><button id="search-clear" class="clear" title="Clear search" hidden><i data-icon="x"></i></button></label>
-            <button id="new-thread" class="icon" title="New thread (⌘N), here with Shift (⌘⇧N)"><i data-icon="square-pen"></i></button></div>
+            <button id="new-thread" class="icon" aria-label="New thread" data-tip="New thread (⌘N)"><i data-icon="square-pen"></i></button></div>
           <div class="row"><button id="project-filter" class="projects" type="button" aria-haspopup="listbox" aria-expanded="false"></button>
-            <button id="add-project" class="icon" title="Add project"></button></div>
+            <button id="add-project" class="icon" aria-label="Add project" data-tip="Add project"></button></div>
         </div>
         <div id="thread-list"></div>
         <p id="side-notice" role="status" hidden></p>
         <span id="sidebar-resize" title="Drag to resize, double-click to reset"></span>
-        <footer><button id="gui-settings" class="icon" title="Settings (⌘,)"><i data-icon="settings"></i></button>
-          <button class="icon" data-open-page="pull-requests" title="Pull requests"><i data-icon="git-pull-request"></i></button>
-          <button class="icon" data-open-page="usage" title="Usage (⌘U)"><i data-icon="chart-column"></i></button>
-          <button id="mode-terminal" class="icon" title="Terminal view (⌘E)"><i data-icon="square-terminal"></i></button>
-          <button class="back" title="Back (Esc)"><i data-icon="arrow-left"></i>Back</button></footer>
+        <footer><button id="gui-settings" class="icon" aria-label="Settings" data-tip="Settings"><i data-icon="settings"></i></button>
+          <button class="icon" data-open-page="pull-requests" aria-label="Pull Requests" data-tip="Pull Requests"><i data-icon="git-pull-request"></i></button>
+          <button class="icon" data-open-page="usage" aria-label="Usage" data-tip="Usage"><i data-icon="chart-column"></i></button>
+          <button id="mode-terminal" class="icon" aria-label="Terminal view" data-tip="Terminal view (⌘E)"><i data-icon="square-terminal"></i></button>
+          <button class="back"><i data-icon="arrow-left"></i>Back</button>
+          <button id="side-update" class="icon" data-app-only hidden></button></footer>
       </aside>
       <section id="chat">
         <header id="chat-head" data-tauri-drag-region>
           <button id="chat-sidebar-toggle" class="icon" title="Toggle sidebar (⌘B)"><i data-icon="panel-left"></i></button>
           <span class="crumb" data-tauri-drag-region></span>
-          <button id="pr-chip" class="chip" title="Open the pull request" hidden><i data-icon="github"></i><span></span></button>
-          <button class="update" title="Install the new version and restart"></button>
           <span id="scripts-control" class="split" hidden></span>
-          <span id="open-in" class="split" hidden><button type="button" class="main outline" title="Open in editor"><i data-ic="square-arrow-out-up-right"></i><span class="label">Open</span></button><button type="button" class="pick outline" title="Choose the editor"><i data-ic="chevron-down"></i></button></span>
+          <span id="open-in" class="split" role="group" aria-label="Open in editor" hidden><button type="button" class="main outline" aria-label="Open"><i data-ic="square-arrow-out-up-right"></i><span class="label">Open</span></button><button type="button" class="pick outline" aria-label="Choose editor"><i data-ic="chevron-down"></i></button></span>
           <span id="git-action" hidden><button class="main"></button><button class="more" title="Git actions"><i data-icon="chevron-down"></i></button></span>
           <div id="header-menu" hidden></div>
           <button id="head-more" class="icon" title="Options" aria-label="Options"><i data-icon="ellipsis"></i></button>
-          <span class="controls"><button id="panel-expand" class="icon" title="Maximize panel"><i data-icon="maximize-2"></i></button><button id="toggle-details" class="icon" title="Thread details (⌘⇧B)" aria-label="Thread details"></button><button id="toggle-terminal" class="icon" title="Terminal (⌘J)"><i data-icon="panel-bottom"></i></button>
-          <button id="toggle-panel" class="icon" title="Side panel (⌘⌥B)"><i data-icon="panel-right"></i></button>
+          <span class="controls"><button id="panel-expand" class="icon" title="Maximize panel"><i data-icon="maximize-2"></i></button><button id="toggle-details" class="icon" title="Thread details (⇧⌘B)" aria-label="Thread details"></button><button id="toggle-terminal" class="icon" title="Terminal (⌘J)"><i data-icon="panel-bottom"></i></button>
+          <button id="toggle-panel" class="icon" title="Side panel (⌥⌘B)"><i data-icon="panel-right"></i></button>
           <button id="gui-minimize" class="icon" title="Shrink to pill"><i data-icon="minus"></i></button></span>
         </header>
         <div id="thread"></div>
@@ -78,15 +85,16 @@
         <div id="image-zoom" hidden><img alt="Attached image"></div>
         <form id="composer" onsubmit="return false">
           <div id="approval" hidden></div>
+          <div id="limit-note" hidden></div>
           <button type="button" id="stash" title="Stashed prompts (⌘S stashes the draft)" hidden><span>Stash</span><span class="count"></span></button>
           <p id="composer-note" hidden></p>
           <div class="box">
             <div id="attachments" hidden></div>
             <textarea id="prompt" rows="1" placeholder="Ask anything"></textarea>
             <div class="tools">
-              <span class="controls"><button type="button" id="model-button" class="pick" title="Model (⌘⇧M)"><i data-icon="claude"></i><span class="name">Default</span><i data-icon="chevron-down"></i></button>
-                <span class="block" id="traits-block" hidden><span class="sep"></span><button type="button" id="traits-button" class="pick" title="Reasoning (⌘⇧E)"></button></span>
-                <span class="block" id="mode-block" hidden><span class="sep"></span><button type="button" id="mode-button" class="pick" title="Access (⌘⇧A)"></button><span class="sep"></span><button type="button" id="plan-toggle" class="pick"></button></span>
+              <span class="controls"><button type="button" id="model-button" class="pick" title="Model (⇧⌘M)"><i data-icon="claude"></i><span class="name">Default</span><i data-icon="chevron-down"></i></button>
+                <span class="block" id="traits-block" hidden><span class="sep"></span><button type="button" id="traits-button" class="pick" title="Reasoning (⇧⌘E)"></button></span>
+                <span class="block" id="mode-block" hidden><span class="sep"></span><button type="button" id="mode-button" class="pick" title="Access (⇧⌘A)"></button><span class="sep"></span><button type="button" id="plan-toggle" class="pick"></button></span>
                 <button type="button" id="more-button" class="pick" aria-label="More composer controls" title="More composer controls" hidden><i data-icon="ellipsis"></i></button></span>
               <span class="spacer"></span>
               <button type="button" id="context-meter" class="icon" hidden></button>
@@ -123,19 +131,14 @@
       </div>
     </div>
     <div id="settings">
-      <nav id="settings-nav">
-        <div class="head" data-tauri-drag-region><button id="settings-back" class="icon" title="Back to the app (⌘,)"><i data-icon="arrow-left"></i></button><b data-tauri-drag-region>Settings</b></div>
-        <div class="links">
-          <button data-page="general"><i data-icon="settings"></i>General</button>
-          <button data-page="integrations"><i data-icon="plug"></i>Connectors</button>
-          <button data-page="projects"><i data-icon="folder"></i>Projects</button>
-          <button data-page="connectors"><i data-icon="workflow"></i>Workflows</button>
-          <button data-page="account"><i data-icon="circle-user"></i>Account</button>
-          <button data-page="machines"><i data-icon="server"></i>Machines</button>
-          <button data-page="archive"><i data-icon="archive"></i>Archive</button>
-        </div>
+      <nav id="settings-nav" aria-label="Settings">
+        <div class="head" data-tauri-drag-region><button id="settings-back" class="icon" title="Back to the app (⌘,)" aria-label="Back to the app"><i data-icon="arrow-left"></i></button><b data-tauri-drag-region>Settings</b></div>
+        <label class="settings-search"><i data-icon="search"></i><input type="search" placeholder="Search" aria-label="Search settings" role="combobox" aria-autocomplete="list" aria-expanded="false" autocomplete="off" spellcheck="false"><kbd>/</kbd><button type="button" class="clear" aria-label="Clear settings search" hidden><i data-icon="x"></i></button></label>
+        <p class="settings-none" role="status" hidden>No settings found</p>
+        <div class="settings-results" id="settings-search-results" role="listbox" aria-label="Settings search results" hidden></div>
+        <div class="links"></div>
       </nav>
-      <section id="settings-page"></section>
+      <section id="settings-page" data-settings-page-scroll></section>
     </div>
     <div id="grip" title="Resize"></div>
     <span id="version"></span>
@@ -163,7 +166,7 @@
 <script src="settings.js"></script>
 <script src="history.js"></script>
 <script src="vendor/marked.js"></script>
-<script src="vendor/highlight.min.js"></script>
+<script src="vendor/pierre-diffs.js"></script>
 <script src="vendor/pierre-icons.js"></script>
 <script src="vendor/file-icons.js"></script>
 <script src="vendor/editor-icons.js"></script>
@@ -171,13 +174,27 @@
 <script src="terminal-menu.js"></script>
 <script src="diff.js"></script>
 <script src="gui.js"></script>
+<script src="gui-settings.js"></script>
+<script src="gui-tooltip.js"></script>
+<script src="gui-appearance.js"></script>
 <script src="gui-sidebar.js"></script>
 <script src="gui-timeline.js"></script>
 <script src="gui-agents.js"></script>
 <script src="gui-composer.js"></script>
 <script src="gui-panel.js"></script>
+<script src="gui-pr.js"></script>
+<script src="gui-diff.js"></script>
+<script src="gui-browser.js"></script>
+<script src="gui-surfaces.js"></script>
+<script src="gui-device.js"></script>
+<script src="accounts.js"></script>
 <script src="gui-shell.js"></script>
+<script src="gui-add-project.js"></script>
+<script src="gui-keybindings.js"></script>
+<script src="gui-settings-search.js"></script>
+<script src="gui-pulls.js"></script>
 <script src="gui-links.js"></script>
+<script src="gui-usage.js"></script>
 <script src="vendor/theme-palettes.js"></script>
 <script src="theme-colors.js"></script>
 <script src="gui-theme.js"></script>

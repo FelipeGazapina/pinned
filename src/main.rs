@@ -1,7 +1,10 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod account;
 mod awake;
 mod browser;
 mod commands;
+mod fonts;
 
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::wire::{Call, MachineEvent, TabId};
@@ -152,7 +155,7 @@ fn get_opacity(panel: State<Panel>) -> u8 {
 }
 
 #[tauri::command]
-fn get_usage(machine: State<Arc<Machine>>) -> agent::Usage {
+fn get_usage(machine: State<Arc<Machine>>) -> std::collections::BTreeMap<String, agent::Usage> {
     machine.usage()
 }
 
@@ -192,15 +195,22 @@ fn watch_reminders(app: AppHandle) {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         for reminder in app.state::<reminders::Reminders>().take_due(now) {
-            notify(&reminder.message);
+            notify(&app, &reminder.message);
         }
     });
 }
 
-fn notify(message: &str) {
+#[cfg(not(windows))]
+fn notify(_app: &AppHandle, message: &str) {
     let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!("display notification \"{escaped}\" with title \"Reminder\" sound name \"Glass\"");
-    let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+    let _ = pinned_core::process::command("osascript").args(["-e", &script]).status();
+}
+
+#[cfg(windows)]
+fn notify(app: &AppHandle, message: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title("Reminder").body(message).show();
 }
 
 /// Debug builds run the script `PINNED_PROBE` names in the main window once it has loaded, so
@@ -266,6 +276,8 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_notification::init());
     builder
         .invoke_handler(tauri::generate_handler![
             machine_call,
@@ -279,6 +291,7 @@ fn main() {
             close_tab,
             awake::get_keep_awake,
             awake::set_keep_awake,
+            fonts::font_families,
             check_update,
             install_update,
             get_opacity,
@@ -291,14 +304,14 @@ fn main() {
             commands::connect_slack,
             commands::disconnect_slack,
             commands::slack_suggestions,
-            commands::connect_vercel,
-            commands::disconnect_vercel,
-            commands::vercel_models,
             commands::open_github_tokens,
             commands::open_url,
             commands::connect_github,
             commands::disconnect_github,
             commands::github_repos,
+            commands::connect_vercel,
+            commands::disconnect_vercel,
+            commands::vercel_models,
             commands::clone_repo,
             commands::save_connector,
             commands::delete_connector,
@@ -322,7 +335,7 @@ fn main() {
         ])
         .setup(move |app| {
             let config = app.path().app_config_dir().ok();
-            let from_arg = std::env::args().nth(1).and_then(|d| std::fs::canonicalize(d).ok()).filter(|p| p.is_dir());
+            let from_arg = std::env::args().nth(1).and_then(|d| dunce::canonicalize(d).ok()).filter(|p| p.is_dir());
             let handle = app.handle().clone();
             let machine = Machine::new(launch, config.clone(), from_arg, move |event: MachineEvent| drop(handle.emit("machine", event)));
             app.manage(machine.clone());
@@ -349,7 +362,7 @@ fn main() {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),
                 agent::Message::ListReminders => Ok(handle.state::<reminders::Reminders>().list()),
                 agent::Message::CancelReminder { id } => handle.state::<reminders::Reminders>().cancel(id),
-                agent::Message::Agent(_) | agent::Message::Usage(_) => Err("the machine answers this itself".into()),
+                agent::Message::Agent(_) | agent::Message::Usage { .. } => Err("the machine answers this itself".into()),
                 callback => match handle.state::<account::Account>().forward(callback) {
                     Ok(answer) => answer,
                     Err(agent::Message::Stage { connector, subject, stage }) => tauri::async_runtime::block_on(

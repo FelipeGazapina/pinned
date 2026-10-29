@@ -46,20 +46,20 @@ const DEFAULT_CATEGORIES = [
   },
   { name: "ignore", description: "Anything else", workflow: null, mention: null },
 ];
-const sessionSteps = (c, event) => [["agent", event], ["reply", ""], ["bug", ""], ...(c.fix === "off" ? [] : [["coding", "starts the fix"], ["review", "pull request opened"], ["proof", ""]])];
+const sessionSteps = (c, event) => [["ask", event], ["agent", ""], ["reply", ""], ["bug", ""], ...(c.fix === "off" ? [] : [["coding", "starts the fix"], ["review", "pull request opened"], ["proof", ""]])];
 const TRIGGERS = {
   "linear-label": {
     text: "A Linear issue gets a label",
     pitch: "Claude resolves the issue, opens a pull request and moves the issue through your columns.",
     needs: "linear",
     step: "linear-trigger",
-    steps: () => [["picked", "new issue"], ["agent", ""], ["coding", "starts changing code"], ["review", "pull request opened"], ["proof", ""]],
+    steps: () => [["ask", "new issue"], ["picked", ""], ["agent", ""], ["coding", "starts changing code"], ["review", "pull request opened"], ["proof", ""]],
     subject: "issue",
     name: "Resolve labeled Linear issues",
     defaults: { worktree: true, columns: { picked: "Analyzing", coding: "In Dev", review: "Ready to Review" } },
     trigger: () => ({ kind: "linear-label", label: "claude" }),
     instructions: () => DEFAULT_INSTRUCTIONS,
-    sentence: (c, where) => `When an issue gets the label “${c.trigger.label}”, Claude picks it up${where}.`,
+    sentence: (c, where) => `When an issue gets the label “${c.trigger.label}”, ${who(c)} picks it up${where}.`,
   },
   "slack-mention": {
     text: "The bot is @mentioned in Slack",
@@ -71,7 +71,7 @@ const TRIGGERS = {
     name: "Triage Slack mentions",
     trigger: (was) => ({ kind: "slack-mention", channel: was?.channel ?? "" }),
     instructions: (c) => (c.fix === "off" ? SLACK_INSTRUCTIONS : SLACK_FIX_INSTRUCTIONS),
-    sentence: (c, where, then) => `When the bot is mentioned in #${c.trigger.channel.replace(/^#/, "")}, Claude ${then}${where}.`,
+    sentence: (c, where, then) => `When the bot is mentioned in #${c.trigger.channel.replace(/^#/, "")}, ${who(c)} ${then}${where}.`,
   },
   "slack-message": {
     text: "A Slack message, sorted by a decision model",
@@ -105,7 +105,7 @@ const TRIGGERS = {
     name: "Answer routed Slack threads",
     trigger: () => ({ kind: "called" }),
     instructions: (c) => routedText(TRIGGERS["slack-mention"].instructions(c)),
-    sentence: (c, where, then) => `When ${orList(routesTo(c).map((r) => `“${r.router}”`)) || "another workflow"} routes a Slack thread here, Claude ${then}${where}.`,
+    sentence: (c, where, then) => `When ${orList(routesTo(c).map((r) => `“${r.router}”`)) || "another workflow"} routes a Slack thread here, ${who(c)} ${then}${where}.`,
   },
 };
 const orList = (names) => new Intl.ListFormat("en", { type: "disjunction" }).format(names);
@@ -113,13 +113,29 @@ const orList = (names) => new Intl.ListFormat("en", { type: "disjunction" }).for
 const settingsPage = document.getElementById("settings-page");
 const LINEAR_KEYS = "https://linear.app/settings/account/security";
 const GITHUB_TOKENS = "https://github.com/settings/tokens/new?scopes=repo&description=pinned";
+const UPSTASH_CONSOLE = "https://console.upstash.com/";
 const VERCEL_KEYS = "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys";
+/** The Run on choice that gives each issue or thread its own Upstash Box, as the backend's `RunsOn::FreshBox` stores it. */
+const BOX = "upstash-box";
+const BOX_SIZES = { small: "Small", medium: "Medium", large: "Large" };
 
 /** Mirrors the backend's `get_settings`. Unsaved connectors carry an empty id. */
-let settings = { linear: null, slack: null, vercel: null, connectors: [], checked: null };
-const PAGES = ["general", "integrations", "projects", "connectors", "account", "machines", "archive"];
-let page = PAGES.includes(load("settings-page")) ? load("settings-page") : "integrations";
-let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [], decisionModels: [] };
+let settings = { linear: null, slack: null, connectors: [], checked: null };
+/** The settings sections in the nav's order, T3 Code's where it has the section. A file adds its own
+ * with `settingsSection({ page, label, icon, show, search })`: `show` draws the page into settingsPage,
+ * and `search` lists the settings it holds as `{ title, terms, id }`. A result scrolls to the element
+ * `id`, or else to the heading or label on the page that reads `title`. */
+const SETTINGS_ORDER = ["general", "appearance", "projects", "keybindings", "integrations", "accounts", "connectors", "account", "machines", "archive"];
+const settingsSections = [];
+function settingsSection(section) {
+  const rank = (p) => (SETTINGS_ORDER.includes(p) ? SETTINGS_ORDER.indexOf(p) : SETTINGS_ORDER.length - 1.5);
+  const at = settingsSections.findIndex((s) => rank(s.page) > rank(section.page));
+  settingsSections.splice(at < 0 ? settingsSections.length : at, 0, section);
+}
+const settingsSectionOf = (name) => settingsSections.find((s) => s.page === name);
+let page = load("settings-page") || "general";
+/** Names from the connected Linear workspace and Slack channels, for the connector form's suggestions. */
+let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [], models: [] };
 
 const settingsOpen = () => document.body.dataset.page === "settings";
 
@@ -129,6 +145,7 @@ async function toggleSettings() {
   if (settingsOpen()) return active ? activate(active) : delete document.body.dataset.page;
   document.body.dataset.page = "settings";
   picker.hidden = true;
+  renderSettingsNav();
   try {
     settings = await connectorCall("get_settings");
   } catch (e) {
@@ -145,11 +162,18 @@ function onHubSettings(latest) {
   if (line) line.textContent = checkedText();
 }
 
+function renderSettingsNav() {
+  document.querySelector("#settings-nav .links").innerHTML = settingsSections
+    .map((s) => `<button type="button" data-page="${s.page}"${s.page === page ? ' class="active" aria-current="page"' : ""}>${icon(s.icon)}<span>${esc(s.label)}</span></button>`)
+    .join("");
+}
+
 function showPage(name) {
-  page = name;
+  const section = settingsSectionOf(name) ?? settingsSections[0];
+  name = page = section.page;
   save("settings-page", name);
   delete settingsPage.dataset.view;
-  for (const b of document.querySelectorAll("#settings-nav [data-page]")) b.classList.toggle("active", b.dataset.page === name);
+  renderSettingsNav();
   if (name === "connectors" && settings.linear && !suggestions.labels.length) {
     connectorCall("linear_suggestions").then((found) => {
       Object.assign(suggestions, found);
@@ -164,25 +188,21 @@ function showPage(name) {
       fillList("slack-channels", channels);
     }, console.warn);
   }
-  if (name === "connectors" && settings.vercel && !suggestions.decisionModels.length) {
-    connectorCall("vercel_models").then((models) => {
-      suggestions.decisionModels = models;
-      fillList("vercel-models", models);
-    }, console.warn);
-  }
   if (name === "connectors" && settings.github && !suggestions.repos.length) {
     connectorCall("github_repos").then((repos) => {
       suggestions.repos = repos.map((r) => r.full_name);
       fillList("github-repos", suggestions.repos);
     }, console.warn);
   }
-  if (name === "projects") return showProjectsPage();
-  if (name === "general") return showGeneral();
-  if (name === "account") return showAccount();
-  if (name === "machines") return showMachinesPage();
-  if (name === "archive") return showArchive();
-  if (name === "integrations") settingsPage.innerHTML = integrationsHtml();
-  else redraw();
+  if (name === "connectors" && !suggestions.models.length) {
+    connectorCall("vercel_models").then((models) => {
+      suggestions.models = models;
+      fillVercelModels();
+      if (view.name === "edit" && document.getElementById("save-connector")) refresh();
+    }, console.warn);
+  }
+  settingsPage.scrollTop = 0;
+  return section.show();
 }
 
 function fillList(id, names) {
@@ -190,9 +210,32 @@ function fillList(id, names) {
   if (list) list.innerHTML = options(names);
 }
 
+function vercelModelOptions(models) {
+  return models
+    .map((model) => {
+      const label = model.kind === "decision" ? `${model.id} · decision` : model.id;
+      return `<option value="${esc(model.id)}">${esc(label)}</option>`;
+    })
+    .join("");
+}
+
+function fillVercelModels() {
+  const list = document.getElementById("vercel-models");
+  if (list) list.innerHTML = vercelModelOptions(suggestions.models);
+}
+
 const esc = (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const options = (values, labelOf = (v) => v, selected) =>
   values.map((v) => `<option value="${esc(v)}"${v === selected ? " selected" : ""}>${esc(labelOf(v))}</option>`).join("");
+
+/** A row of chips that picks one of the machines, for pages that show one machine at a time. */
+function machineChipsHtml(current, action) {
+  const listed = [...machines.entries()].filter(([, m]) => !m.view.upstash_box);
+  if (listed.length < 2) return "";
+  const chips = listed.map(([id, m]) =>
+    `<button class="chip${id === current ? " active" : ""}" data-action="${action}" data-machine="${esc(id)}"${m.view.online ? "" : " disabled"}>${esc(machineName(id))}</button>`);
+  return `<div class="chips">${chips.join("")}</div>`;
+}
 
 function integrationsHtml() {
   const account = settings.linear;
@@ -215,8 +258,33 @@ function integrationsHtml() {
       ${body}
     </div>
     ${slackCardHtml()}
+    ${githubCardHtml()}
     ${vercelCardHtml()}
-    ${githubCardHtml()}`;
+    ${upstashCardHtml()}`;
+}
+
+function upstashCardHtml() {
+  const connected = settings.upstash;
+  const body = !account
+    ? `<p class="hint">Sign in to pinned to run sessions in Upstash Boxes.</p>`
+    : connected
+      ? `<p class="connected">Box key <b>${esc(connected.key_hint)}</b> · Claude token <b>${esc(connected.claude_hint)}</b></p>
+         <div class="actions"><span class="hint">Deletes the boxes running now</span><button class="secondary" data-action="disconnect-upstash">Disconnect</button></div>
+         <p class="error" id="upstash-error"></p>`
+      : `<ol class="steps">
+           <li>Create a Box API key in the Box tab of the Upstash console.
+             <button class="secondary" data-action="open-upstash-console">Open Upstash ↗</button>
+             <div class="row"><input id="upstash-key" type="password" placeholder="box_…" autocomplete="off"></div></li>
+           <li>Run <code>claude setup-token</code> in a terminal and paste the token it prints. Boxes then run Claude on your subscription.
+             <div class="row"><input id="claude-token" type="password" placeholder="sk-ant-oat01-…" autocomplete="off">
+             <button class="primary" data-action="connect-upstash">Connect</button></div></li>
+         </ol>
+         <p class="error" id="upstash-error"></p>`;
+  return `<div class="card">
+      <div class="card-head"><span class="logo upstash">▢</span><div><b>Upstash Box</b><div class="hint">A fresh cloud sandbox for each issue or thread a workflow picks up</div></div>
+        <span class="badge" data-on="${!!connected}">${connected ? "Connected" : "Not connected"}</span></div>
+      ${body}
+    </div>`;
 }
 
 function githubCardHtml() {
@@ -242,7 +310,7 @@ function githubCardHtml() {
 function vercelCardHtml() {
   const account = settings.vercel;
   const body = account
-    ? `<p class="connected">Connected. The team's AI Gateway balance is <b>$${esc(account.balance)}</b>.</p>
+    ? `<p class="connected">Key <b>${esc(account.key_hint)}</b></p>
        <div class="actions"><button class="secondary" data-action="disconnect-vercel">Disconnect</button></div>`
     : `<ol class="steps">
          <li>Create an AI Gateway API key in your Vercel team.
@@ -253,7 +321,7 @@ function vercelCardHtml() {
        </ol>
        <p class="error" id="vercel-error"></p>`;
   return `<div class="card">
-      <div class="card-head"><span class="logo" data-tone="vercel" data-logo="vercel">${LOGOS.vercel}</span><div><b>Vercel AI Gateway</b><div class="hint">Decision models that sort Slack messages into categories</div></div>
+      <div class="card-head"><span class="logo" data-tone="vercel" data-logo="vercel">${LOGOS.vercel}</span><div><b>Vercel AI Gateway</b><div class="hint">Models that read, classify and sort what a workflow picks up</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
@@ -287,7 +355,7 @@ let view = { name: "list" };
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const subject = (c) => TRIGGERS[c.trigger.kind].subject;
-const folderName = (path) => path.split("/").filter(Boolean).pop() ?? "";
+const folderName = (path) => path.split(/[\\/]/).filter(Boolean).pop() ?? "";
 
 const input = (path, value, attrs = "") => `<input data-bind="${path}" value="${esc(value)}" ${attrs}>`;
 const select = (path, values, labelOf, selected) => `<select data-bind="${path}">${options(values, labelOf, selected)}</select>`;
@@ -402,6 +470,7 @@ const STEPS = {
       return [
         !settings.vercel && "Connect the Vercel AI Gateway under Connectors.",
         !c.trigger.decide.model.trim() && "Name the decision model.",
+        suggestions.models.some((m) => m.id === c.trigger.decide.model.trim() && m.kind !== "decision") && `${c.trigger.decide.model.trim()} is a chat model: the Decide step needs a decision model.`,
         categories.length < 2 && "Add at least two categories.",
         names.some((name) => !name) && "Name every category.",
         twice && `Two categories are named “${twice.name.trim()}”.`,
@@ -421,20 +490,32 @@ const STEPS = {
     app: "Claude Code",
     title: "Run a session",
     summary: (c) =>
-      [folderName(c.folder) || folderName(c.repo.replace(/\.git$/, "")) || "no folder", account && runOnName(c), c.model.trim() || "default model", c.effort, PERMISSIONS[c.permissionMode]]
+      [
+        isBox(c) ? folderName(c.repo.replace(/\.git$/, "")) || "no repository" : folderName(c.folder) || folderName(c.repo.replace(/\.git$/, "")) || "no folder",
+        (account || isBox(c)) && runOnName(c),
+        connectorAccountName(c),
+        c.model.trim() || "default model",
+        c.effort,
+        PERMISSIONS[c.permissionMode],
+      ]
         .filter(Boolean)
         .join(" · "),
-    issues: (c) => (c.folder.trim() || c.repo.trim() ? [] : ["Choose the folder or the repository the session opens in."]),
-    fields: (c) => `${account ? `<label>Run on ${runOnHtml(c)}</label>` : ""}
-      <label>Folder${account ? ` on ${esc(machineName(folderMachine(c)))}` : ""}
+    issues: (c) => (isBox(c) ? boxIssues(c) : [...(c.folder.trim() || c.repo.trim() ? [] : ["Choose the folder or the repository the session opens in."]), ...codexProjectIssues(c)]),
+    fields: (c) => `${account || isBox(c) ? `<label>Run on ${runOnHtml(c)}</label>` : ""}
+      ${
+        isBox(c)
+          ? `<label>Size ${select("machine.size", Object.keys(BOX_SIZES), (size) => BOX_SIZES[size], c.machine.size)}</label>`
+          : `<label>Folder${account ? ` on ${esc(machineName(folderMachine(c)))}` : ""}
         <span class="row">${input("folder", c.folder, 'list="folders" placeholder="/path/to/repo" spellcheck="false"')}
-        ${folderMachine(c) === LOCAL ? `<button class="secondary" data-action="pick-folder">Choose…</button>` : ""}</span></label>
+        ${folderMachine(c) === LOCAL ? `<button class="secondary" data-action="pick-folder">Choose…</button>` : ""}</span></label>`
+      }
       <label>Repository ${input("repo", c.repo, `list="github-repos" placeholder="${settings.github ? "owner/name, from your GitHub" : "git URL"}" spellcheck="false"`)}</label>
       <p class="hint" id="repo">${repoHint(c)}</p>
       <div class="grid">
         <label>Model ${input("model", c.model, `list="models" placeholder="claude's default"`)}</label>
         <label>Effort ${select("effort", EFFORTS, undefined, c.effort)}</label>
         <label>Permissions ${select("permissionMode", Object.keys(PERMISSIONS), (p) => PERMISSIONS[p], c.permissionMode)}</label>
+        ${isBox(c) ? "" : `<label>Account ${accountSelectHtml(c)}</label>`}
       </div>
       ${check("worktree", c.worktree, `Separate git worktree per ${subject(c)}`)}
       <label>Instructions sent before the ${subject(c)}
@@ -470,6 +551,79 @@ const STEPS = {
   },
   coding: moveStep("coding", "Move the issue when Claude starts changing code"),
   review: moveStep("review", "Move the issue when the pull request is open"),
+  ask: {
+    tone: "vercel",
+    icon: "▲",
+    app: "Vercel",
+    title: "Ask a model",
+    ghost: "Ask a model before the session starts",
+    optional: true,
+    on: (c) => !!c.ask,
+    add: (c) =>
+      (c.ask = {
+        model: "typesafe-ai/jev",
+        instructions: "Classify the request below for an engineering team. Answer from the text only.",
+        questions: [
+          { name: "kind", ask: "What does it ask for?", choices: ["bug", "question", "critique", "enhancement"], stopOn: [] },
+          { name: "agent", ask: "Can a coding agent handle it on its own, without a person deciding first?", choices: ["yes", "no"], stopOn: ["no"] },
+        ],
+      }),
+    remove: (c) => (c.ask = null),
+    summary: (c) => {
+      const ask = c.ask;
+      if (!ask) return "";
+      const questions = ask.questions ?? [];
+      const n = questions.length;
+      const stops = questions
+        .filter((q) => (q.stopOn ?? []).some((s) => s.trim()))
+        .map((q) => `stops on ${q.name.trim() || "?"} = ${(q.stopOn ?? []).map((s) => s.trim()).filter(Boolean).join(", ")}`);
+      return [`${ask.model.trim() || "no model"} · ${n} question${n === 1 ? "" : "s"}`, ...stops].join(" · ");
+    },
+    issues: (c) => {
+      const ask = c.ask;
+      if (!ask) return [];
+      const questions = ask.questions ?? [];
+      const model = ask.model.trim();
+      const decision = suggestions.models.some((m) => m.id === model && m.kind === "decision");
+      const bare = decision && questions.some((q) => !(q.choices ?? []).some((choice) => choice.trim()));
+      const stray = questions.flatMap((q) =>
+        (q.stopOn ?? [])
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .filter((s) => !(q.choices ?? []).some((choice) => choice.trim().toLowerCase() === s.toLowerCase()))
+          .map((s) => `“${s}” is not a choice for ${q.name.trim() || "a question"}.`),
+      );
+      return [
+        !settings.vercel && "Connect Vercel AI Gateway under Connectors.",
+        !ask.model.trim() && "Name the model.",
+        questions.some((q) => !q.name.trim()) && "Name each question.",
+        questions.some((q) => !q.ask.trim()) && "Write what each question asks.",
+        bare && `${model} is a decision model: give every question choices.`,
+        ...stray,
+      ].filter(Boolean);
+    },
+    fields: (c) => {
+      const ask = c.ask;
+      const rows = (ask?.questions ?? [])
+        .map(
+          (q, i) => `<div class="grid">
+          <label>Name ${input(`ask.questions.${i}.name`, q.name, 'placeholder="kind" spellcheck="false"')}</label>
+          <label>Question ${input(`ask.questions.${i}.ask`, q.ask, 'placeholder="What does it ask for?"')}</label>
+        </div>
+        <div class="grid">
+          <label>Choices <input data-bind="ask.questions.${i}.choices" data-list="" value="${esc((q.choices ?? []).join(", "))}" placeholder="bug, question"></label>
+          <label>Stop on <input data-bind="ask.questions.${i}.stopOn" data-list="" value="${esc((q.stopOn ?? []).join(", "))}" placeholder="none"></label>
+        </div>
+        <div class="actions start"><button class="secondary" data-action="remove-question" data-index="${i}">Remove</button></div>`,
+        )
+        .join("");
+      return `<label>Model ${input("ask.model", ask?.model ?? "", 'list="vercel-models" placeholder="typesafe-ai/jev" spellcheck="false"')}</label>
+        <label>Instructions
+          <textarea data-bind="ask.instructions" rows="4">${esc(ask?.instructions ?? "")}</textarea></label>
+        ${rows}
+        <div class="actions start"><button class="secondary" data-action="add-question">Add question</button></div>`;
+    },
+  },
   proof: {
     tone: "proof",
     icon: "▶",
@@ -572,24 +726,61 @@ const shown = (c, id) => isOn(c, id) || (view.name === "edit" && view.open === i
 
 const hubIdOf = (machine) => (machine === LOCAL ? account?.machine_id ?? "" : machine);
 const localIdOf = (id) => (id && id === account?.machine_id ? LOCAL : id);
-const runOnName = (c) => (c.machine ? machineName(localIdOf(c.machine)) : "any machine");
+/** A connector's `machine` is a machine id, "" for any, or an object for a box per issue. */
+const isBox = (c) => c.machine?.kind === BOX;
+const runOnName = (c) => (isBox(c) ? `Upstash Box (${c.machine.size})` : c.machine ? machineName(localIdOf(c.machine)) : "any machine");
 
 function folderMachine(c) {
-  const preferred = localIdOf(c.machine);
+  const preferred = isBox(c) ? "" : localIdOf(c.machine);
   if (preferred && machines.has(preferred)) return preferred;
   return machines.has(LOCAL) ? LOCAL : onlineMachines()[0];
 }
 
 function runOnHtml(c) {
-  const known = [...machines.entries()].map(([id, m]) => [hubIdOf(id), `${machineName(id)}${m.view.online ? "" : " (offline)"}`]);
-  if (c.machine && !known.some(([id]) => id === c.machine)) known.push([c.machine, "A removed machine"]);
-  const labels = Object.fromEntries([["", "Any online machine"], ...known]);
+  const known = [...machines.entries()].filter(([, m]) => !m.view.upstash_box).map(([id, m]) => [hubIdOf(id), `${machineName(id)}${m.view.online ? "" : " (offline)"}`]);
+  if (c.machine && !isBox(c) && !known.some(([id]) => id === c.machine)) known.push([c.machine, "A removed machine"]);
+  const labels = Object.fromEntries([["", "Any online machine"], ...known, [BOX, `A fresh Upstash Box per ${subject(c)}`]]);
+  if (isBox(c)) {
+    return `${select("machine", Object.keys(labels), (id) => labels[id], BOX)}
+      <span class="hint">Each ${subject(c)} gets its own box. pinned deletes it 30 minutes after the session goes quiet, or when you close its tab, and after 4 hours at most.</span>`;
+  }
   return `${select("machine", Object.keys(labels), (id) => labels[id], c.machine)}
     <span class="hint">${c.machine ? "Falls back to another online machine while this one is offline." : "Each run goes to whichever machine is online."}</span>`;
 }
 
+/** What a box run needs: the hub, which runs boxes, Upstash, and the repository the box clones and pushes with GitHub. */
+function boxIssues(c) {
+  if (!account) return ["Sign in to pinned to run sessions in Upstash Boxes."];
+  return [
+    !settings.upstash && "Connect Upstash Box under Connectors.",
+    !c.repo.trim() && "Name the repository the box clones.",
+    !settings.github && "Connect GitHub under Connectors: the box clones, pushes and opens the pull request with it.",
+  ].filter(Boolean);
+}
+
+/** A run under the project's account fails when that account is Codex, which can't run a workflow. */
+function codexProjectIssues(c) {
+  if (c.account || isBox(c)) return [];
+  const project = suggestions.projects?.find((p) => p.path === c.folder.trim());
+  const account = project && accountOf(folderMachine(c), project.account);
+  return account?.provider === "codex" ? [`${folderName(c.folder)} runs under ${account.name}, a Codex account, which can't run a workflow. Pick a Claude Code account under Account.`] : [];
+}
+
+const connectorAccountName = (c) => !isBox(c) && c.account && accountName(folderMachine(c), c.account);
+
+/** The Claude Code accounts of the connector's machine; Codex can't run a connector, whose prompts rely on Claude Code's hooks. */
+function accountSelectHtml(c) {
+  const machine = folderMachine(c);
+  const ids = ["", ...(machines.get(machine)?.accounts ?? []).filter((a) => a.provider === "claude").map((a) => a.id)];
+  if (c.account && !ids.includes(c.account)) ids.push(c.account);
+  const label = (id) => (!id ? "Project's account" : accountOf(machine, id)?.name ?? `${id} (not on ${machineName(machine)})`);
+  return select("account", ids, label, c.account);
+}
+
 const repoHint = (c) =>
-  !c.repo.trim()
+  isBox(c)
+    ? `The box clones ${c.repo.trim() ? `<code>${esc(c.repo.trim())}</code>` : "the repository"} into <code>~/pinned</code> and pushes${settings.github ? " with your GitHub token" : ""}.`
+    : !c.repo.trim()
     ? "A machine without the folder can't run this session."
     : `A machine without ${c.folder.trim() ? "this folder" : "a clone"} clones <code>${esc(c.repo.trim())}</code> into <code>~/pinned</code>${settings.github ? " with your GitHub token" : ""}.`;
 
@@ -614,10 +805,16 @@ async function newRoute(select) {
 async function loadFolders(c) {
   const machine = folderMachine(c);
   suggestions.folders = [];
+  suggestions.projects = [];
   try {
-    suggestions.folders = (await callOn(machine, { cmd: "list_projects" })).map((p) => p.path);
+    suggestions.projects = await callOn(machine, { cmd: "list_projects" });
+    suggestions.folders = suggestions.projects.map((p) => p.path);
   } catch {}
   fillList("folders", suggestions.folders);
+  if (machine && !machines.get(machine)?.accounts) {
+    await accountsOf(machine).catch(console.warn);
+    if (page === "connectors" && view.name === "edit" && view.draft === c) redraw();
+  }
 }
 
 async function fillRepo() {
@@ -659,9 +856,13 @@ function cardHtml(c, i) {
   </div>`;
 }
 
+const who = (c) => (c.ask ? `${c.ask.model.trim() || "a model"} classifies it, then Claude` : "Claude");
+
 function sentence(c) {
-  const machine = account && c.machine ? ` on ${runOnName(c)}` : "";
-  const where = folderName(c.folder) ? ` in ${folderName(c.folder)}${machine}` : machine;
+  const machine = (account || isBox(c)) && c.machine ? ` on ${isBox(c) ? "a fresh Upstash Box" : runOnName(c)}` : "";
+  const as = connectorAccountName(c) ? ` with the ${connectorAccountName(c)} account` : "";
+  const folder = isBox(c) ? folderName(c.repo.replace(/\.git$/, "")) : folderName(c.folder);
+  const where = (folder ? ` in ${folder}${machine}` : machine) + as;
   const then = c.fix === "off" ? "answers in the thread" : "answers in the thread and fixes bugs";
   return TRIGGERS[c.trigger.kind].sentence(c, where, then);
 }
@@ -689,7 +890,7 @@ function editorHtml() {
     <datalist id="models">${options(MODELS)}</datalist>
     <datalist id="folders">${options(suggestions.folders)}</datalist>
     <datalist id="github-repos">${options(suggestions.repos)}</datalist>
-    <datalist id="vercel-models">${options(suggestions.decisionModels)}</datalist>
+    <datalist id="vercel-models">${vercelModelOptions(suggestions.models)}</datalist>
     <div class="editor-bar">
       <button class="secondary" data-action="close-editor" title="Back to workflows">←</button>
       ${input("name", c.name, 'class="title" placeholder="Workflow name"')}
@@ -914,6 +1115,7 @@ function blank(kind) {
   const { name, trigger, defaults } = TRIGGERS[kind];
   const c = {
     id: "",
+    account: "",
     enabled: true,
     name,
     trigger: trigger(),
@@ -935,7 +1137,7 @@ function blank(kind) {
 }
 
 function commandPreview(c) {
-  const parts = ["claude"];
+  const parts = [connectorAccountName(c) && c.account !== DEFAULT_ACCOUNT ? `CLAUDE_CONFIG_DIR=<${connectorAccountName(c)}'s home> claude` : "claude"];
   if (c.model) parts.push(`--model ${c.model}`);
   parts.push(`--effort ${c.effort}`, `--permission-mode ${c.permissionMode}`);
   if (c.worktree) parts.push(`--worktree=<${subject(c)}>`);
@@ -974,17 +1176,27 @@ function tidyTrigger({ kind, label, channel, decide }) {
 /** The draft with its typed names trimmed, as the backend matches them. */
 function tidy(c) {
   const t = trimmed;
-  return {
+  const list = (values) => (values ?? []).map(t).filter(Boolean);
+  const out = {
     ...c,
     name: t(c.name),
     folder: t(c.folder),
     repo: t(c.repo),
     model: t(c.model),
+    account: t(c.account),
     team: t(c.team),
     label: t(c.label),
     trigger: tidyTrigger(c.trigger),
     columns: Object.fromEntries(Object.entries(c.columns).map(([stage, column]) => [stage, t(column)])),
   };
+  if (c.ask) {
+    out.ask = {
+      model: t(c.ask.model),
+      instructions: t(c.ask.instructions),
+      questions: (c.ask.questions ?? []).map((q) => ({ name: t(q.name), ask: t(q.ask), choices: list(q.choices), stopOn: list(q.stopOn) })),
+    };
+  } else delete out.ask;
+  return out;
 }
 
 const defaultText = (c) => TRIGGERS[c.trigger.kind].instructions(c);
@@ -993,7 +1205,7 @@ const defaultText = (c) => TRIGGERS[c.trigger.kind].instructions(c);
 const RESHAPES = {
   "trigger.kind": (c, kind) => ({ ...c, trigger: TRIGGERS[kind].trigger(c.trigger) }),
   fix: (c, fix) => ({ ...c, fix }),
-  machine: (c, machine) => ({ ...c, machine }),
+  machine: (c, machine) => ({ ...c, machine: machine === BOX ? { kind: BOX, size: "medium" } : machine }),
 };
 
 /** Applies `change` to the draft, swapping in the new defaults where the old ones were untouched. */
@@ -1004,7 +1216,7 @@ function reshape(change) {
   if (before.instructions.trim() === defaultText(before).trim()) after.instructions = defaultText(after);
   if (before.trigger.kind !== after.trigger.kind) view.open = flowOf(after)[0][0];
   view.draft = after;
-  if (before.machine !== after.machine) {
+  if (JSON.stringify(before.machine) !== JSON.stringify(after.machine)) {
     loadFolders(after);
     fillRepo();
   }
@@ -1076,6 +1288,30 @@ const actions = {
       document.getElementById("slack-error").textContent = e;
     }
   },
+  "open-upstash-console": () => (TAURI ? invoke("open_url", { url: UPSTASH_CONSOLE }) : window.open(UPSTASH_CONSOLE, "_blank", "noopener")),
+  async "connect-upstash"() {
+    const key = document.getElementById("upstash-key").value;
+    const claude_token = document.getElementById("claude-token").value;
+    if (!key.trim() || !claude_token.trim()) return;
+    try {
+      settings.upstash = await connectorCall("connect_upstash", { key, claude_token });
+      showPage("integrations");
+    } catch (e) {
+      document.getElementById("upstash-error").textContent = e;
+    }
+  },
+  async "disconnect-upstash"(button) {
+    if (!armed(button, "Delete the boxes?")) return;
+    try {
+      await connectorCall("disconnect_upstash");
+    } catch (e) {
+      // The hub keeps the key until every box is deleted, so a later try can still delete them.
+      document.getElementById("upstash-error").textContent = e;
+      return;
+    }
+    settings.upstash = null;
+    showPage("integrations");
+  },
   "open-github-tokens": () => (TAURI ? invoke("open_github_tokens") : window.open(GITHUB_TOKENS, "_blank", "noopener")),
   async "connect-github"() {
     const token = document.getElementById("github-token").value;
@@ -1100,7 +1336,6 @@ const actions = {
     if (!key.trim()) return;
     try {
       settings.vercel = await connectorCall("connect_vercel", { key });
-      suggestions.decisionModels = [];
       showPage("integrations");
     } catch (e) {
       document.getElementById("vercel-error").textContent = e;
@@ -1109,8 +1344,15 @@ const actions = {
   async "disconnect-vercel"() {
     await connectorCall("disconnect_vercel");
     settings.vercel = null;
-    suggestions.decisionModels = [];
     showPage("integrations");
+  },
+  "add-question"() {
+    view.draft.ask.questions.push({ name: "", ask: "", choices: [], stopOn: [] });
+    redraw();
+  },
+  "remove-question"(button) {
+    view.draft.ask.questions.splice(Number(button.dataset.index), 1);
+    redraw();
   },
   async "disconnect-slack"() {
     await connectorCall("disconnect_slack");
@@ -1297,6 +1539,7 @@ settingsPage.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "linear-key") actions["connect-linear"]();
   if (e.key === "Enter" && e.target.id === "slack-token") actions["connect-slack"]();
   if (e.key === "Enter" && e.target.id === "vercel-key") actions["connect-vercel"]();
+  if (e.key === "Enter" && e.target.id === "claude-token") actions["connect-upstash"]();
   if (view.name !== "edit" || page !== "connectors") return;
   if (e.key === "s" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
@@ -1315,7 +1558,8 @@ settingsPage.addEventListener("input", (e) => {
   if (e.target.tagName === "SELECT" && e.target.value === NEW_ROUTE) return newRoute(e.target);
   const decide = view.draft.trigger.decide;
   const renamed = /^trigger\.decide\.categories\.\d+\.name$/.test(path) && decide.fallback && fallbackOf(decide);
-  bind(path, e.target.type === "checkbox" ? e.target.checked : e.target.value);
+  const listed = "list" in e.target.dataset;
+  bind(path, e.target.type === "checkbox" ? e.target.checked : listed ? e.target.value.split(",").map((s) => s.trim()) : e.target.value);
   if (renamed) decide.fallback = renamed.name.trim() || null;
   refresh();
 });
@@ -1339,7 +1583,27 @@ settingsPage.addEventListener("change", async (e) => {
 
 addEventListener("resize", applyZoom);
 
-for (const b of document.querySelectorAll("#settings-nav [data-page]")) b.onclick = () => showPage(b.dataset.page);
+document.querySelector("#settings-nav .links").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-page]");
+  if (b) showPage(b.dataset.page);
+});
+settingsSection({ page: "general", label: "General", icon: "settings", show: () => showGeneral(), search: [
+  { title: "Keep this Mac awake", terms: ["sleep display power"] },
+  { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
+  { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
+] });
+settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => (settingsPage.innerHTML = integrationsHtml()), search: [
+  { title: "Linear", terms: ["api key issues labels connector"] },
+  { title: "Slack", terms: ["bot token channels mentions connector"] },
+  { title: "GitHub", terms: ["token repositories clone connector"] },
+  { title: "Vercel AI Gateway", terms: ["api key models classify connector"] },
+  { title: "Upstash Box", terms: ["sandbox cloud box claude setup-token subscription connector"] },
+] });
+settingsSection({ page: "projects", label: "Projects", icon: "folder", show: () => showProjectsPage(), search: [{ title: "Projects", terms: ["history turns changed files"] }] });
+settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show: () => redraw(), search: [{ title: "Workflows", terms: ["linear label slack mention automation trigger"] }] });
+settingsSection({ page: "account", label: "Account", icon: "circle-user", show: () => showAccount(), search: [{ title: "Password", terms: ["account change sign in out email"] }] });
+settingsSection({ page: "machines", label: "Machines", icon: "server", show: () => showMachinesPage(), search: [{ title: "Machines", terms: ["pair rename remove server node computer"] }] });
+settingsSection({ page: "archive", label: "Archive", icon: "archive", show: () => showArchive(), search: [{ title: "Archive", terms: ["archived threads unarchive delete restore"] }] });
 document.getElementById("settings-toggle").onclick = toggleSettings;
 document.getElementById("settings-back").onclick = toggleSettings;
 

@@ -2,19 +2,15 @@
 async function showGeneral() {
   const awake = TAURI && (await invoke("get_keep_awake"));
   settingsPage.innerHTML = `<h2>General</h2>
-    ${TAURI ? `<p><label class="toggle"><input type="checkbox" id="keep-awake"${awake ? " checked" : ""}> Keep this Mac awake</label></p>
-    <p class="meta">While this is on, the Mac and its display don't go to sleep, so sessions keep working when you step away. It turns off when you switch it off or quit pinned.</p>
+    ${TAURI ? `<p><label class="toggle"><input type="checkbox" id="keep-awake"${awake ? " checked" : ""}> Keep this ${COMPUTER} awake</label></p>
+    <p class="meta">While this is on, the ${COMPUTER} and its display don't go to sleep, so sessions keep working when you step away. It turns off when you switch it off or quit pinned.</p>
     <p class="error" id="awake-error"></p>` : ""}
-    ${themeSettingsHtml()}
-    ${contrastSettingsHtml()}
-    ${appearanceHtml()}
-    ${sidebarSettingsHtml()}${panelSettingsHtml()}
-    ${sendShortcutHtml()}`;
-  bindThemeSettings();
-  bindAppearance();
+    ${sidebarSettingsHtml()}
+    ${sendShortcutHtml()}
+    ${browserSettingsHtml()}`;
   bindSidebarSettings();
-  bindPanelSettings();
   bindSendShortcut();
+  bindBrowserSettings();
   if (!TAURI) return;
   document.getElementById("keep-awake").onchange = async (e) => {
     try {
@@ -27,25 +23,62 @@ async function showGeneral() {
   };
 }
 
+/** T3 Code's Appearance page: colors and themes, the interface, motion and typography. */
+function showAppearance() {
+  settingsPage.innerHTML = `<h2>Appearance</h2><div class="settings-sections">
+    ${themeSettingsHtml()}
+    ${interfaceSettingsHtml()}
+    ${motionSettingsHtml()}
+    ${appearanceHtml()}</div>`;
+  bindThemeSettings();
+  bindInterfaceSettings();
+  bindMotionSettings();
+  bindAppearance();
+}
+
 let projectsMachine = LOCAL;
 
 async function showProjectsPage() {
   if (!machines.get(projectsMachine)?.view.online) projectsMachine = onlineMachines()[0];
-  const projects = projectsMachine ? await callOn(projectsMachine, { cmd: "list_projects" }).catch(() => []) : [];
-  const chips = [...machines.entries()].map(([id, m]) =>
-    `<button class="chip${id === projectsMachine ? " active" : ""}" data-action="projects-machine" data-machine="${esc(id)}"${m.view.online ? "" : " disabled"}>${esc(machineName(id))}</button>`);
+  const [projects, accounts] = projectsMachine
+    ? await Promise.all([callOn(projectsMachine, { cmd: "list_projects" }).catch(() => []), accountsOf(projectsMachine).catch(() => [])])
+    : [[], []];
+  // Asking every account's CLI takes a while, and the user may have moved to another page meanwhile.
+  if (page !== "projects") return;
   settingsPage.innerHTML = `<h2>Projects</h2>
-    ${machines.size > 1 ? `<div class="chips">${chips.join("")}</div>` : ""}
-    <p>Pick a project to see what its sessions changed, turn by turn.</p>
+    ${machineChipsHtml(projectsMachine, "projects-machine")}
+    <p>Pick a project to see what its sessions changed, turn by turn${accounts.length ? ", or the account its sessions run under" : ""}.</p>
+    <p class="error" id="projects-error"></p>
     <div class="projects">${
-      projects.map((p) => `<button class="project" data-action="open-project" data-path="${esc(p.path)}">
-        <b>${esc(p.name)}</b><span class="path">${esc(tilde(p.path))}</span></button>`).join("") || `<p class="empty">No projects yet.</p>`
+      projects.map((p) => `<div class="project-row"><button class="project" data-action="open-project" data-path="${esc(p.path)}">
+        <b>${esc(p.name)}</b><span class="path">${esc(tilde(p.path))}</span></button>${projectAccountHtml(p, accounts)}</div>`).join("") || `<p class="empty">No projects yet.</p>`
     }</div>`;
 }
 
+function projectAccountHtml(project, accounts) {
+  if (!accounts.length) return "";
+  const ids = accounts.map((a) => a.id);
+  if (!ids.includes(project.account)) ids.push(project.account);
+  const label = (id) => accountOf(projectsMachine, id)?.name ?? `${id} (removed)`;
+  return `<select data-project-account data-path="${esc(project.path)}" title="The account its sessions run under">${options(ids, label, project.account)}</select>`;
+}
+
+settingsPage.addEventListener("change", async (e) => {
+  if (!("projectAccount" in e.target.dataset)) return;
+  const account = e.target.value;
+  document.getElementById("projects-error").textContent = "";
+  try {
+    await callOn(projectsMachine, { cmd: "set_project_account", path: e.target.dataset.path, account: account === DEFAULT_ACCOUNT ? null : account });
+  } catch (err) {
+    await showProjectsPage();
+    document.getElementById("projects-error").textContent = String(err);
+  }
+});
+
 async function showProjectHistory(path) {
   const turns = await callOn(projectsMachine, { cmd: "project_history", path }).catch(() => []);
-  const name = path.split("/").filter(Boolean).pop() ?? "/";
+  if (page !== "projects") return;
+  const name = path.split(/[\\/]/).filter(Boolean).pop() ?? "/";
   settingsPage.innerHTML = `<button class="secondary" data-action="projects-back">← Projects</button>
     <h2>${esc(name)}</h2><p class="meta">${esc(tilde(path))}</p>
     <div class="history">${historyHtml(turns)}</div>`;

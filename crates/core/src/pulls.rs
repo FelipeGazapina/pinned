@@ -21,8 +21,8 @@ fn search_query(stacks: bool) -> String {
     pageInfo {{ hasNextPage endCursor }}
     nodes {{ ... on PullRequest {{
       number title url isDraft state mergeable reviewDecision additions deletions createdAt updatedAt headRefName baseRefName
-      author {{ login avatarUrl }}
-      repository {{ nameWithOwner }}
+      author {{ login avatarUrl ... on User {{ name }} }}
+      repository {{ nameWithOwner mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed }}
       labels(first: 20) {{ nodes {{ name color }} }}
       reviewRequests(first: 20) {{ nodes {{ requestedReviewer {{ ... on User {{ login }} ... on Team {{ slug }} }} }} }}
       commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }}{stack}
@@ -32,7 +32,7 @@ fn search_query(stacks: bool) -> String {
     )
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ListState {
     Open,
@@ -41,7 +41,7 @@ pub enum ListState {
     All,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Involvement {
     All,
@@ -52,13 +52,13 @@ pub enum Involvement {
 pub const GITHUB: &str = "github.com";
 
 /// A GitHub repository: `owner/name` on `host`, github.com or an Enterprise Server's.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Repo {
     pub host: String,
     pub name: String,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct PullRequests {
     /// The gh account's login.
     pub viewer: String,
@@ -69,7 +69,7 @@ pub struct PullRequests {
     pub more: bool,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Row {
     pub host: String,
     pub number: u64,
@@ -77,6 +77,8 @@ pub struct Row {
     pub url: String,
     pub repo: String,
     pub author: String,
+    /// The author's full name, when GitHub has one.
+    pub author_name: String,
     pub avatar: String,
     pub state: State,
     pub conflicting: bool,
@@ -90,12 +92,22 @@ pub struct Row {
     pub base: String,
     pub labels: Vec<Label>,
     pub group: Group,
+    /// How the repository lets pull requests merge, in GitHub's order.
+    pub merge_methods: Vec<MergeMethod>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack: Option<StackMembership>,
 }
 
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
 /// Where a pull request sits in one of GitHub's pull request stacks.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct StackMembership {
     pub number: u64,
     pub position: u64,
@@ -104,7 +116,7 @@ pub struct StackMembership {
 }
 
 /// A GitHub pull request stack, its layers from the bottom up.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Stack {
     pub number: u64,
     pub url: String,
@@ -112,21 +124,22 @@ pub struct Stack {
     pub layers: Vec<Layer>,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Layer {
     pub number: u64,
     pub title: String,
     pub head: String,
+    pub head_sha: String,
     pub state: State,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Label {
     pub name: String,
     pub color: String,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
     Open,
@@ -135,7 +148,7 @@ pub enum State {
     Closed,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Review {
     Approved,
@@ -143,7 +156,7 @@ pub enum Review {
     ReviewRequired,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Checks {
     Passing,
@@ -151,7 +164,7 @@ pub enum Checks {
     Pending,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Group {
     Authored,
@@ -159,8 +172,73 @@ pub enum Group {
     Others,
 }
 
-/// The search terms before the repositories, in T3 Code's order.
-fn terms(state: ListState, involvement: Involvement, text: &str) -> String {
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftFilter {
+    Only,
+    Hide,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewFilter {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+    None,
+}
+
+/// T3 Code's list filters, each one of GitHub's search qualifiers.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+#[serde(default)]
+pub struct Filters {
+    pub draft: Option<DraftFilter>,
+    pub review: Option<ReviewFilter>,
+    pub checks: Option<Checks>,
+    /// A row holds a label of every group; a group's names are GitHub's own OR.
+    pub labels: Vec<Vec<String>>,
+    pub excluded_labels: Vec<String>,
+    pub author: Option<String>,
+}
+
+/// A value the reader typed, quoted so GitHub reads it whole; no label or login holds a quote.
+fn qualifier_value(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "").trim())
+}
+
+impl Filters {
+    fn qualifiers(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.labels.iter().filter(|g| !g.is_empty()).map(|g| format!("label:{}", g.iter().map(|l| qualifier_value(l)).collect::<Vec<_>>().join(","))).collect();
+        out.extend(self.excluded_labels.iter().map(|l| format!("-label:{}", qualifier_value(l))));
+        if let Some(author) = self.author.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            let me = author.trim_start_matches('@').eq_ignore_ascii_case("me");
+            out.push(if me { "author:@me".to_owned() } else { format!("author:{}", qualifier_value(author)) });
+        }
+        if let Some(draft) = self.draft {
+            out.push(format!("draft:{}", draft == DraftFilter::Only));
+        }
+        if let Some(review) = self.review {
+            let value = match review {
+                ReviewFilter::Approved => "approved",
+                ReviewFilter::ChangesRequested => "changes_requested",
+                ReviewFilter::ReviewRequired => "required",
+                ReviewFilter::None => "none",
+            };
+            out.push(format!("review:{value}"));
+        }
+        match self.checks {
+            Some(Checks::Passing) => out.push("status:success".to_owned()),
+            Some(Checks::Failing) => out.push("status:failure".to_owned()),
+            Some(Checks::Pending) => out.push("status:pending".to_owned()),
+            None => {}
+        }
+        out
+    }
+}
+
+/// The search terms before the repositories, in T3 Code's order. The text is quoted, so what the
+/// reader typed can only narrow the listing, never add a qualifier of its own.
+fn terms(state: ListState, involvement: Involvement, text: &str, filters: &Filters) -> String {
     let state = match state {
         ListState::Open => "is:open",
         ListState::Closed => "is:closed is:unmerged",
@@ -172,7 +250,12 @@ fn terms(state: ListState, involvement: Involvement, text: &str) -> String {
         Involvement::Reviewing => "review-requested:@me",
         Involvement::All => "",
     };
-    ["is:pr", state, involvement, text.trim(), "sort:updated-desc"].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" ")
+    let text = text.trim();
+    let phrase = if text.is_empty() { String::new() } else { format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\"")) };
+    let mut out = vec!["is:pr".to_owned(), state.to_owned(), involvement.to_owned(), phrase];
+    out.extend(filters.qualifiers());
+    out.push("sort:updated-desc".to_owned());
+    out.into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
 /// `terms` with as many `repo:` qualifiers as fit under GitHub's query limit, per query.
@@ -269,6 +352,7 @@ fn row(host: &str, node: &Value, viewer: &str, reviewing: &HashSet<String>) -> O
         number: node["number"].as_u64()?,
         title: s(&node["title"]),
         repo: s(&node["repository"]["nameWithOwner"]),
+        author_name: s(&node["author"]["name"]),
         avatar: s(&node["author"]["avatarUrl"]),
         state,
         conflicting: node["mergeable"].as_str() == Some("CONFLICTING"),
@@ -281,6 +365,11 @@ fn row(host: &str, node: &Value, viewer: &str, reviewing: &HashSet<String>) -> O
         head: s(&node["headRefName"]),
         base: s(&node["baseRefName"]),
         labels: node["labels"]["nodes"].as_array().into_iter().flatten().map(|l| Label { name: s(&l["name"]), color: s(&l["color"]) }).collect(),
+        merge_methods: [("mergeCommitAllowed", MergeMethod::Merge), ("squashMergeAllowed", MergeMethod::Squash), ("rebaseMergeAllowed", MergeMethod::Rebase)]
+            .into_iter()
+            .filter(|(field, _)| node["repository"][field].as_bool() == Some(true))
+            .map(|(_, method)| method)
+            .collect(),
         author,
         url,
         group,
@@ -308,7 +397,7 @@ fn pages(cwd: &Path, path: Option<&str>, host: &str, q: &str, limit: usize) -> R
 /// The pull requests of `repos` that match, newest update first, `limit` per search at most, one
 /// host's searches at a time. With every involvement, a second search finds the ones awaiting the
 /// viewer's review, a team's request included.
-pub fn list(cwd: &Path, path: Option<&str>, repos: Vec<Repo>, state: ListState, involvement: Involvement, text: &str, limit: usize) -> Result<PullRequests, String> {
+pub fn list(cwd: &Path, path: Option<&str>, repos: Vec<Repo>, state: ListState, involvement: Involvement, text: &str, filters: &Filters, limit: usize) -> Result<PullRequests, String> {
     let limit = limit.clamp(1, MAX_ROWS);
     let mut hosts: Vec<&str> = repos.iter().map(|r| r.host.as_str()).collect();
     hosts.dedup();
@@ -318,14 +407,14 @@ pub fn list(cwd: &Path, path: Option<&str>, repos: Vec<Repo>, state: ListState, 
         let names: Vec<String> = repos.iter().filter(|r| r.host == host).map(|r| r.name.clone()).collect();
         let mut nodes = vec![];
         let mut login = String::new();
-        for q in queries(&terms(state, involvement, text), &names) {
+        for q in queries(&terms(state, involvement, text, filters), &names) {
             let (found, who, left) = pages(cwd, path, host, &q, limit)?;
             (login, more) = (who, more || left);
             nodes.extend(found);
         }
         let mut reviewing = HashSet::new();
         if involvement == Involvement::All {
-            for q in queries(&terms(state, Involvement::Reviewing, text), &names) {
+            for q in queries(&terms(state, Involvement::Reviewing, text, filters), &names) {
                 reviewing.extend(pages(cwd, path, host, &q, limit)?.0.iter().filter_map(|n| n["url"].as_str().map(str::to_owned)));
             }
         }
@@ -336,6 +425,120 @@ pub fn list(cwd: &Path, path: Option<&str>, repos: Vec<Repo>, state: ListState, 
     }
     rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(PullRequests { viewer, repos, rows, more })
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionKind {
+    Labels,
+    Authors,
+}
+
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Author {
+    pub login: String,
+    pub name: String,
+    pub avatar: String,
+}
+
+/// What a filter picker finds on the hosts for what the reader typed, as T3 Code's
+/// RepositoryLabels and RepositoryAuthors read it: each repository's labels, or the people who
+/// can be mentioned there, a pull request's author from a fork among them.
+#[derive(Serialize, Debug, Default, PartialEq, schemars::JsonSchema)]
+pub struct FilterOptions {
+    pub labels: Vec<Label>,
+    pub authors: Vec<Author>,
+}
+
+const LABELS_QUERY: &str = "query($owner: String!, $name: String!, $search: String) { repository(owner: $owner, name: $name) { labels(first: 100, query: $search, orderBy: { field: NAME, direction: ASC }) { nodes { name color } } } }";
+const AUTHORS_QUERY: &str = "query($owner: String!, $name: String!, $search: String) { repository(owner: $owner, name: $name) { mentionableUsers(first: 50, query: $search) { nodes { login name avatarUrl } } } }";
+
+fn read_options(kind: OptionKind, data: &Value, into: &mut FilterOptions) {
+    let s = |v: &Value| v.as_str().unwrap_or_default().to_owned();
+    let field = if kind == OptionKind::Labels { "labels" } else { "mentionableUsers" };
+    for node in data["repository"][field]["nodes"].as_array().into_iter().flatten() {
+        match kind {
+            OptionKind::Labels if !into.labels.iter().any(|l| l.name.eq_ignore_ascii_case(node["name"].as_str().unwrap_or_default())) => into.labels.push(Label { name: s(&node["name"]), color: s(&node["color"]) }),
+            OptionKind::Authors if !into.authors.iter().any(|a| a.login.eq_ignore_ascii_case(node["login"].as_str().unwrap_or_default())) => {
+                into.authors.push(Author { login: s(&node["login"]), name: s(&node["name"]), avatar: s(&node["avatarUrl"]) })
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `kind` options matching `query` across `repos`, deduplicated, the first repository's first.
+pub fn filter_options(cwd: &Path, path: Option<&str>, repos: &[Repo], kind: OptionKind, query: &str) -> Result<FilterOptions, String> {
+    let mut out = FilterOptions::default();
+    let query = query.trim();
+    for repo in repos.iter().take(10) {
+        let Some((owner, name)) = repo.name.split_once('/') else { continue };
+        let fields = [
+            format!("query={}", if kind == OptionKind::Labels { LABELS_QUERY } else { AUTHORS_QUERY }),
+            format!("owner={owner}"),
+            format!("name={name}"),
+        ];
+        let mut args = vec!["api", "graphql", "--hostname", &repo.host];
+        for f in &fields {
+            args.extend(["-f", f]);
+        }
+        let typed = format!("search={query}");
+        if !query.is_empty() {
+            args.extend(["-f", &typed]);
+        }
+        let out_json = run(cwd, path, "gh", &args).map_err(gh_failure)?;
+        let doc: Value = serde_json::from_str(&out_json).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+        read_options(kind, &doc["data"], &mut out);
+    }
+    Ok(out)
+}
+
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
+pub struct FileStat {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+/// T3 Code reads at most five pages of a pull request's files before it calls the split unknown.
+const FILE_PAGES: usize = 5;
+const FILES_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { files(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { path additions deletions } } } } }";
+
+fn read_files(data: &Value, into: &mut Vec<FileStat>) -> Option<String> {
+    let files = &data["repository"]["pullRequest"]["files"];
+    into.extend(files["nodes"].as_array().into_iter().flatten().filter_map(|f| {
+        Some(FileStat { path: f["path"].as_str()?.to_owned(), additions: f["additions"].as_u64().unwrap_or(0), deletions: f["deletions"].as_u64().unwrap_or(0) })
+    }));
+    (files["pageInfo"]["hasNextPage"].as_bool() == Some(true)).then(|| files["pageInfo"]["endCursor"].as_str().map(str::to_owned)).flatten()
+}
+
+/// The changed files of pull request `number` of `repo` on `host`, with their line counts, or
+/// `None` past five pages of them.
+pub fn files(cwd: &Path, path: Option<&str>, host: &str, repo: &str, number: u64) -> Result<Option<Vec<FileStat>>, String> {
+    let (owner, name) = repo.split_once('/').ok_or("not an owner/name repository")?;
+    let fields = [format!("query={FILES_QUERY}"), format!("owner={owner}"), format!("name={name}"), format!("number={number}")];
+    let (mut out, mut after) = (vec![], None::<String>);
+    for _ in 0..FILE_PAGES {
+        let mut args = vec!["api", "graphql", "--hostname", host];
+        for f in &fields[..3] {
+            args.extend(["-f", f]);
+        }
+        args.extend(["-F", &fields[3]]);
+        let cursor = after.as_ref().map(|a| format!("after={a}"));
+        if let Some(cursor) = &cursor {
+            args.extend(["-f", cursor]);
+        }
+        let raw = run(cwd, path, "gh", &args).map_err(gh_failure)?;
+        let doc: Value = serde_json::from_str(&raw).map_err(|e| format!("gh sent a bad answer: {e}"))?;
+        if let Some(message) = doc["errors"][0]["message"].as_str() {
+            return Err(format!("GitHub: {message}"));
+        }
+        after = read_files(&doc["data"], &mut out);
+        if after.is_none() {
+            return Ok(Some(out));
+        }
+    }
+    Ok(None)
 }
 
 fn layer_state(layer: &Value) -> State {
@@ -353,7 +556,7 @@ fn read_stack(raw: &Value) -> Option<Stack> {
         number: raw["number"].as_u64()?,
         url: raw["html_url"].as_str().map_or_else(|| s(&raw["url"]), str::to_owned),
         base: raw["base"].as_str().map_or_else(|| s(&raw["base"]["ref"]), str::to_owned),
-        layers: raw["pull_requests"].as_array().into_iter().flatten().filter_map(|l| Some(Layer { number: l["number"].as_u64()?, title: s(&l["title"]), head: s(&l["head"]["ref"]), state: layer_state(l) })).collect(),
+        layers: raw["pull_requests"].as_array().into_iter().flatten().filter_map(|l| Some(Layer { number: l["number"].as_u64()?, title: s(&l["title"]), head: s(&l["head"]["ref"]), head_sha: s(&l["head"]["sha"]), state: layer_state(l) })).collect(),
     })
 }
 
@@ -377,9 +580,31 @@ mod tests {
 
     #[test]
     fn builds_t3s_search_terms() {
-        assert_eq!(terms(ListState::Open, Involvement::All, ""), "is:pr is:open sort:updated-desc");
-        assert_eq!(terms(ListState::Closed, Involvement::Authored, " fix "), "is:pr is:closed is:unmerged author:@me fix sort:updated-desc");
-        assert_eq!(terms(ListState::All, Involvement::Reviewing, ""), "is:pr review-requested:@me sort:updated-desc");
+        let none = Filters::default();
+        assert_eq!(terms(ListState::Open, Involvement::All, "", &none), "is:pr is:open sort:updated-desc");
+        assert_eq!(terms(ListState::Closed, Involvement::Authored, " fix it ", &none), r#"is:pr is:closed is:unmerged author:@me "fix it" sort:updated-desc"#);
+        assert_eq!(terms(ListState::All, Involvement::Reviewing, "", &none), "is:pr review-requested:@me sort:updated-desc");
+        assert_eq!(terms(ListState::All, Involvement::All, r#"say "hi" \ is:merged"#, &none), r#"is:pr "say \"hi\" \\ is:merged" sort:updated-desc"#);
+    }
+
+    #[test]
+    fn writes_t3s_filter_qualifiers() {
+        let filters = Filters {
+            draft: Some(DraftFilter::Hide),
+            review: Some(ReviewFilter::ChangesRequested),
+            checks: Some(Checks::Failing),
+            labels: vec![vec!["bug".into()], vec!["size:S".into(), "size:\"XS".into()]],
+            excluded_labels: vec!["wontfix".into()],
+            author: Some("octo cat".into()),
+        };
+        assert_eq!(
+            terms(ListState::Open, Involvement::All, "flaky", &filters),
+            r#"is:pr is:open "flaky" label:"bug" label:"size:S","size:XS" -label:"wontfix" author:"octo cat" draft:false review:changes_requested status:failure sort:updated-desc"#
+        );
+        let me = Filters { author: Some("@Me".into()), draft: Some(DraftFilter::Only), review: Some(ReviewFilter::None), ..Filters::default() };
+        assert_eq!(me.qualifiers(), vec!["author:@me", "draft:true", "review:none"]);
+        let parsed: Filters = serde_json::from_value(json!({ "draft": "only", "review": "review_required", "checks": "passing", "labels": [["a"]] })).unwrap();
+        assert_eq!(parsed.qualifiers(), vec![r#"label:"a""#, "draft:true", "review:required", "status:success"]);
     }
 
     #[test]
@@ -426,7 +651,8 @@ mod tests {
         let node = json!({
             "number": 7, "title": "Fix it", "url": "https://github.com/o/r/pull/7", "isDraft": false, "state": "OPEN", "mergeable": "CONFLICTING",
             "reviewDecision": "CHANGES_REQUESTED", "additions": 3, "deletions": 1, "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-02T00:00:00Z",
-            "headRefName": "fix", "baseRefName": "main", "author": { "login": "someone", "avatarUrl": "https://avatars/x" }, "repository": { "nameWithOwner": "o/r" },
+            "headRefName": "fix", "baseRefName": "main", "author": { "login": "someone", "name": "Some One", "avatarUrl": "https://avatars/x" },
+            "repository": { "nameWithOwner": "o/r", "mergeCommitAllowed": false, "squashMergeAllowed": true, "rebaseMergeAllowed": true },
             "labels": { "nodes": [{ "name": "bug", "color": "d73a4a" }] },
             "reviewRequests": { "nodes": [{ "requestedReviewer": { "login": "me" } }] },
             "commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "FAILURE" } } }] },
@@ -434,11 +660,33 @@ mod tests {
         let r = row("github.com", &node, "me", &HashSet::new()).unwrap();
         assert_eq!((r.state, r.conflicting, r.review, r.checks, r.group), (State::Open, true, Some(Review::ChangesRequested), Some(Checks::Failing), Group::Reviewing));
         assert_eq!(r.labels, vec![Label { name: "bug".into(), color: "d73a4a".into() }]);
+        assert_eq!((r.author.as_str(), r.author_name.as_str()), ("someone", "Some One"));
+        assert_eq!(r.merge_methods, vec![MergeMethod::Squash, MergeMethod::Rebase]);
         let mine = row("github.com", &node, "someone", &HashSet::new()).unwrap();
         assert_eq!(mine.group, Group::Authored);
         let team = row("github.com", &json!({ "url": "https://github.com/o/r/pull/8", "number": 8, "state": "MERGED" }), "me", &["https://github.com/o/r/pull/8".to_owned()].into()).unwrap();
         assert_eq!((team.state, team.group, team.stack), (State::Merged, Group::Reviewing, None));
         let stacked = row("github.com", &json!({ "url": "u", "number": 9, "state": "OPEN", "stack": { "number": 3, "size": 2, "baseRefName": "main" }, "stackEntry": { "position": 2 } }), "me", &HashSet::new()).unwrap();
         assert_eq!(stacked.stack, Some(StackMembership { number: 3, position: 2, size: 2, base: "main".into() }));
+    }
+
+    #[test]
+    fn reads_filter_options_once_each() {
+        let mut found = FilterOptions::default();
+        read_options(OptionKind::Labels, &json!({ "repository": { "labels": { "nodes": [{ "name": "bug", "color": "d73a4a" }, { "name": "docs", "color": "0075ca" }] } } }), &mut found);
+        read_options(OptionKind::Labels, &json!({ "repository": { "labels": { "nodes": [{ "name": "Bug", "color": "ffffff" }] } } }), &mut found);
+        assert_eq!(found.labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec!["bug", "docs"]);
+        read_options(OptionKind::Authors, &json!({ "repository": { "mentionableUsers": { "nodes": [{ "login": "octocat", "name": "The Octocat", "avatarUrl": "https://avatars/o" }, { "login": "hubot", "name": null }] } } }), &mut found);
+        assert_eq!(found.authors, vec![Author { login: "octocat".into(), name: "The Octocat".into(), avatar: "https://avatars/o".into() }, Author { login: "hubot".into(), name: "".into(), avatar: "".into() }]);
+    }
+
+    #[test]
+    fn reads_a_page_of_changed_files() {
+        let mut files = vec![];
+        let page = json!({ "repository": { "pullRequest": { "files": { "pageInfo": { "hasNextPage": true, "endCursor": "c2" }, "nodes": [{ "path": "src/a.rs", "additions": 3, "deletions": 1 }, { "path": "Cargo.lock" }] } } } });
+        assert_eq!(read_files(&page, &mut files).as_deref(), Some("c2"));
+        let last = json!({ "repository": { "pullRequest": { "files": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] } } } });
+        assert_eq!(read_files(&last, &mut files), None);
+        assert_eq!(files, vec![FileStat { path: "src/a.rs".into(), additions: 3, deletions: 1 }, FileStat { path: "Cargo.lock".into(), additions: 0, deletions: 0 }]);
     }
 }

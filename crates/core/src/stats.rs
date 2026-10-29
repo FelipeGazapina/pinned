@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
 /// What a thread's work came to, read from its transcript.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default, schemars::JsonSchema)]
 pub struct ThreadStats {
     /// How long the agent worked on the thread's turns, unknown when the entrypoint logs no turn durations.
     #[serde(default, skip_serializing_if = "Option::is_none")]

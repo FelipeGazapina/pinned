@@ -1,10 +1,8 @@
 //! Files a client attaches to a session, such as a photo taken on a phone, saved on the session's
 //! machine so claude can read them by path.
 
-use crate::sync;
-use std::fs::{DirBuilder, OpenOptions};
+use crate::{private, sync};
 use std::io::{ErrorKind, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -22,13 +20,13 @@ pub fn save(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf, String> {
     if data.len() > LIMIT {
         return Err(too_big(name));
     }
-    private_dir(dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
+    private::dir(dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
     sweep(dir);
     let (stem, ext) = file_name(name);
     let mut n = 1;
     loop {
         let path = dir.join(if n == 1 { format!("{stem}{ext}") } else { format!("{stem}-{n}{ext}") });
-        match OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+        match private::file().create_new(true).open(&path) {
             Ok(mut file) => {
                 return file.write_all(data).map(|()| path.clone()).map_err(|e| {
                     let _ = std::fs::remove_file(&path);
@@ -57,11 +55,6 @@ pub fn sweep(dir: &Path) {
     }
 }
 
-fn private_dir(dir: &Path) -> std::io::Result<()> {
-    DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-}
-
 /// The stem and extension an upload named `name` is saved under: its last path component, with
 /// anything but ASCII letters, digits, `.`, `-` and `_` made `_`, and no leading dot.
 fn file_name(name: &str) -> (String, String) {
@@ -86,7 +79,9 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
@@ -109,6 +104,7 @@ mod tests {
         let second = save(&dir, "photo.png", b"second").unwrap();
         assert_eq!((first.clone(), second.clone()), (dir.join("photo.png"), dir.join("photo-2.png")));
         assert_eq!((std::fs::read(&first).unwrap(), std::fs::read(&second).unwrap()), (b"first".to_vec(), b"second".to_vec()));
+        #[cfg(unix)]
         assert_eq!((mode(&dir), mode(&first)), (0o700, 0o600));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -128,7 +124,7 @@ mod tests {
         let dir = temp("sweep");
         let old = save(&dir, "old.png", b"x").unwrap();
         let new = save(&dir, "new.png", b"y").unwrap();
-        let file = OpenOptions::new().write(true).open(&old).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&old).unwrap();
         file.set_modified(SystemTime::now() - KEEP - Duration::from_secs(60)).unwrap();
         sweep(&dir);
         assert_eq!((old.exists(), new.exists()), (false, true));

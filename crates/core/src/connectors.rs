@@ -2,8 +2,8 @@
 //! with a claude session already working on what it found.
 
 use crate::agent::{self, Stage, Subject};
-use crate::wire::RunSpec;
-use crate::{github, linear, slack, vercel};
+use crate::wire::{MachineId, RunSpec};
+use crate::{github, linear, slack, upstash, vercel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
@@ -19,6 +19,8 @@ const LINEAR_KEY: &str = "linear-key";
 const SLACK_KEY: &str = "slack-key";
 const GITHUB_KEY: &str = "github-key";
 const VERCEL_KEY: &str = "vercel-key";
+const UPSTASH_KEY: &str = "upstash-box-key";
+const CLAUDE_TOKEN: &str = "claude-oauth-token";
 /// A Slack watermark trails the check that moved it, so a message Slack shows a little late
 /// is still after it. Threads already handled keep the overlap from starting a session twice.
 const SLACK_OVERLAP: chrono::Duration = chrono::Duration::seconds(60);
@@ -28,7 +30,7 @@ const MIN_CONFIDENCE_TO_PAGE: f64 = 0.85;
 const UNSURE_BELOW: f64 = 0.6;
 const PAGE_COOLDOWN: chrono::Duration = chrono::Duration::minutes(30);
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
     Low,
@@ -39,7 +41,7 @@ pub enum Effort {
 }
 
 /// Serialized names match `claude --permission-mode`.
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
     Manual,
@@ -51,7 +53,7 @@ pub enum PermissionMode {
 }
 
 /// How far a Slack connector's session goes with a bug it finds.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Fix {
     /// Analyze and reply; never file an issue or change code.
@@ -78,7 +80,7 @@ fn fix_or_auto_fix<'de, D: Deserializer<'de>>(d: D) -> Result<Fix, D::Error> {
     })
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Trigger {
     /// A Linear issue created with this label.
@@ -110,7 +112,7 @@ impl Trigger {
 }
 
 /// How a message workflow sorts each message, and where each category sends it.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Decide {
     /// A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.
     pub model: String,
@@ -121,7 +123,7 @@ pub struct Decide {
     pub fallback: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Category {
     pub name: String,
     /// What the decision model reads to tell this category from the others.
@@ -216,7 +218,31 @@ impl Category {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+/// A model on Vercel's AI Gateway that reads what the trigger found before the session starts.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Ask {
+    /// A gateway model id, as `typesafe-ai/jev`. The id picks chat or decision when the step runs.
+    pub model: String,
+    pub instructions: String,
+    pub questions: Vec<Question>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Question {
+    /// The key the answer goes under, as `kind`.
+    pub name: String,
+    pub ask: String,
+    /// The answers the model must pick from; empty takes free text.
+    #[serde(default)]
+    pub choices: Vec<String>,
+    /// Choices that end the workflow without a session.
+    #[serde(default)]
+    pub stop_on: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Connector {
     #[serde(default)]
@@ -261,24 +287,98 @@ pub struct Connector {
     /// Whether a session that opens a pull request must prove it works, with a Playwright video.
     #[serde(default = "on")]
     pub proof: bool,
-    #[serde(default)]
-    pub machine: String,
+    /// Asks a gateway model about the trigger's find before the session starts. None skips it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<Ask>,
+    #[serde(default, rename = "machine")]
+    pub runs_on: RunsOn,
     #[serde(default)]
     pub repo: String,
+    /// The account its sessions run under; empty runs them under their project's.
+    #[serde(default)]
+    pub account: String,
 }
 
 fn on() -> bool {
     true
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Paged {
     pub at: String,
     pub ping: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+/// Where a workflow's sessions run. Kept under the connector's original `machine` key: a machine
+/// id string ("" = any), or `{"kind":"upstash-box",…}`. Old stores load as before, and an old UI
+/// that never touches the select saves the object back untouched.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(from = "StoredRunsOn", into = "StoredRunsOn")]
+pub enum RunsOn {
+    /// Whichever of the account's machines is online.
+    #[default]
+    Any,
+    /// This machine first, else whichever is online.
+    Machine(MachineId),
+    /// A new Upstash Box for each issue or thread, which the hub deletes once its session ends.
+    FreshBox(BoxStep),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BoxStep {
+    #[serde(default)]
+    pub size: BoxSize,
+}
+
+/// Serialized names match Upstash's `size`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum BoxSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+enum StoredRunsOn {
+    Machine(String),
+    Box {
+        kind: UpstashBoxKind,
+        #[serde(default)]
+        size: BoxSize,
+    },
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+enum UpstashBoxKind {
+    #[serde(rename = "upstash-box")]
+    UpstashBox,
+}
+
+impl From<StoredRunsOn> for RunsOn {
+    fn from(stored: StoredRunsOn) -> Self {
+        match stored {
+            StoredRunsOn::Machine(id) if id.is_empty() => RunsOn::Any,
+            StoredRunsOn::Machine(id) => RunsOn::Machine(id),
+            StoredRunsOn::Box { size, .. } => RunsOn::FreshBox(BoxStep { size }),
+        }
+    }
+}
+
+impl From<RunsOn> for StoredRunsOn {
+    fn from(runs_on: RunsOn) -> Self {
+        match runs_on {
+            RunsOn::Any => StoredRunsOn::Machine(String::new()),
+            RunsOn::Machine(id) => StoredRunsOn::Machine(id),
+            RunsOn::FreshBox(step) => StoredRunsOn::Box { kind: UpstashBoxKind::UpstashBox, size: step.size },
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Followed {
     /// The newest message the session has seen, as a Slack ts.
     pub cursor: String,
@@ -291,7 +391,7 @@ pub struct Followed {
 }
 
 /// A Linear issue a Slack thread's session filed.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Filed {
     pub id: String,
     pub identifier: String,
@@ -392,6 +492,11 @@ impl Connector {
             .map(|(thread, _)| thread.to_owned())
     }
 
+    /// A box has only the account its Claude token signs in.
+    fn account(&self) -> Option<String> {
+        Some(self.account.trim().to_owned()).filter(|a| !a.is_empty() && !matches!(self.runs_on, RunsOn::FreshBox(_)))
+    }
+
     fn unclaim(&mut self, subject: &Subject) {
         let key = match subject {
             Subject::LinearIssue { issue } => issue.clone(),
@@ -399,6 +504,13 @@ impl Connector {
         };
         self.handled.retain(|k| *k != key);
         self.followed.remove(&key);
+    }
+
+    fn box_note(&self) -> &'static str {
+        match self.runs_on {
+            RunsOn::FreshBox(_) => BOX_NOTE,
+            RunsOn::Any | RunsOn::Machine(_) => "",
+        }
     }
 
     /// The Linear issue `pinned stage` moves for a session on `subject`.
@@ -415,7 +527,7 @@ impl Connector {
 }
 
 /// The Linear column each stage moves the issue to. Empty leaves the issue where it is.
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, schemars::JsonSchema)]
 pub struct Columns {
     pub picked: String,
     pub coding: String,
@@ -433,7 +545,7 @@ impl Columns {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, schemars::JsonSchema)]
 struct Store {
     linear: Option<linear::Account>,
     #[serde(default)]
@@ -442,6 +554,8 @@ struct Store {
     github: Option<github::Account>,
     #[serde(default)]
     vercel: Option<vercel::Account>,
+    #[serde(default)]
+    upstash: Option<upstash::Account>,
     connectors: Vec<Connector>,
 }
 
@@ -609,13 +723,13 @@ struct Settled {
     errors: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 pub struct Check {
     pub at: String,
     pub error: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 pub struct Settings {
     pub linear: Option<linear::Account>,
     pub slack: Option<slack::Account>,
@@ -623,6 +737,8 @@ pub struct Settings {
     pub github: Option<github::Account>,
     #[serde(default)]
     pub vercel: Option<vercel::Account>,
+    #[serde(default)]
+    pub upstash: Option<upstash::Account>,
     pub connectors: Vec<Connector>,
     pub checked: Option<Check>,
 }
@@ -646,7 +762,13 @@ pub struct Run {
     pub subject: Subject,
     /// The Slack messages the bot reacts to once a tab takes the run, by ts.
     pub mentioned: Vec<String>,
+    /// The account the connector names, or none for its project's.
+    pub account: Option<String>,
+    pub runs_on: RunsOn,
+    /// The subject text an Ask step reads: the issue, or the Slack thread so far.
+    pub input: String,
 }
+
 
 impl Run {
     pub fn spec(&self) -> RunSpec {
@@ -656,6 +778,7 @@ impl Run {
             args: self.args.clone(),
             env: agent::session_env(&self.connector, &self.subject),
             token: None,
+            account: self.account.clone(),
         }
     }
 }
@@ -788,7 +911,7 @@ fn channel_name(name: &str) -> &str {
     name.trim().trim_start_matches('#')
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Suggestions {
     labels: Vec<String>,
     columns: Vec<String>,
@@ -832,13 +955,10 @@ impl Storage for FileStorage {
 
     fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
-        std::fs::OpenOptions::new()
-            .write(true)
+        crate::private::file()
             .create(true)
             .truncate(true)
-            .mode(0o600)
             .open(self.dir.join(name))
             .and_then(|mut f| f.write_all(key.as_bytes()))
             .map_err(|e| e.to_string())
@@ -951,13 +1071,24 @@ impl Connectors {
     async fn hand_over<F, Fut>(&self, work: Work, open: &F) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
-        Fut: Future<Output = bool>,
+        Fut: Future<Output = Result<(), String>>,
     {
         match work {
-            Work::Run(run) => {
+            Work::Run(mut run) => {
                 let (connector, subject, folder, mentioned) = (run.connector.clone(), run.subject.clone(), run.cwd.clone(), run.mentioned.clone());
-                if !open(Work::Run(run)).await {
-                    return Err(self.unclaim(&connector, &subject, &folder));
+                match self.consult(&connector, &run.input).await {
+                    Ok(None) => {}
+                    Ok(Some((ask, answers))) => {
+                        if stops(&ask, &answers).is_some() {
+                            self.keep_stopped(&connector, &subject)?;
+                            return Ok(());
+                        }
+                        append_answers(&mut run, &ask, &answers);
+                    }
+                    Err(why) => return Err(self.unclaim(&connector, &subject, &folder, &why)),
+                }
+                if let Err(why) = open(Work::Run(run)).await {
+                    return Err(self.unclaim(&connector, &subject, &folder, &why));
                 }
                 // The session starts even when Linear won't move the issue or Slack won't take the
                 // reaction; the check reports why. A Slack thread has no issue to pick until its
@@ -968,13 +1099,13 @@ impl Connectors {
                 }
             }
             Work::Delivery(d) => {
-                let cursor = if open(Work::Delivery(d.clone())).await {
+                let cursor = if open(Work::Delivery(d.clone())).await.is_ok() {
                     d.cursor.clone()
                 } else {
                     let (run, newest) = self.fallback(&d).await?;
                     let folder = run.cwd.clone();
-                    if !open(Work::Run(run)).await {
-                        return Err(format!("could not open a session in {} for a Slack thread; the next check tries again", folder.display()));
+                    if let Err(why) = open(Work::Run(run)).await {
+                        return Err(format!("could not open a session in {} for a Slack thread: {why}; the next check tries again", folder.display()));
                     }
                     newest
                 };
@@ -999,8 +1130,28 @@ impl Connectors {
         result
     }
 
-    fn unclaim(&self, connector: &str, subject: &Subject, folder: &Path) -> String {
-        let error = format!("could not open a session in {}; the next check tries again", folder.display());
+    /// The connector's Ask step and its answers, or None when it has no such step.
+    async fn consult(&self, connector: &str, input: &str) -> Result<Option<(Ask, Vec<(String, String)>)>, String> {
+        let ask = self.store.lock().unwrap().connectors.iter().find(|c| c.id == connector).and_then(|c| c.ask.clone());
+        let Some(ask) = ask else { return Ok(None) };
+        let key = self.key(VERCEL_KEY).ok_or_else(|| "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".to_owned())?;
+        let answers = vercel::ask(&key, &ask, input).await?;
+        Ok(Some((ask, answers)))
+    }
+
+    /// Leaves the subject handled, and drops a Slack thread's cursor so later replies are not delivered.
+    fn keep_stopped(&self, connector: &str, subject: &Subject) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        if let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) {
+            if let Subject::SlackThread { channel, thread } = subject {
+                c.followed.remove(&thread_key(channel, thread));
+            }
+        }
+        self.save(&store)
+    }
+
+    fn unclaim(&self, connector: &str, subject: &Subject, folder: &Path, why: &str) -> String {
+        let error = format!("could not open a session in {}: {why}; the next check tries again", folder.display());
         let mut store = self.store.lock().unwrap();
         let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) else { return error };
         c.unclaim(subject);
@@ -1028,8 +1179,13 @@ impl Connectors {
         let posts = slack::thread(&token, &d.channel, &d.thread).await?;
         let newest = posts.last().map_or_else(|| d.cursor.clone(), |p| p.ts.clone());
         let note = c.created.get(&thread_key(&d.channel, &d.thread)).map(filed_note);
-        let run = slack_run(&c, &d.channel, &name, &d.thread, &posts, note.as_deref(), &self.exe);
-        Ok((Run { mentioned: d.mentioned.clone(), ..run }, newest))
+        let mut run = slack_run(&c, &d.channel, &name, &d.thread, &posts, note.as_deref(), &self.exe);
+        run.mentioned = d.mentioned.clone();
+        // The thread already passed the step, so a stop answer does not end this new session.
+        if let Some((ask, answers)) = self.consult(&run.connector, &run.input).await? {
+            append_answers(&mut run, &ask, &answers);
+        }
+        Ok((run, newest))
     }
 
     /// Records that the thread's session has every message up to `cursor`, someone else's among them.
@@ -1266,15 +1422,43 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
     if c.proof {
         prompt += &proof_of_work(exe);
     }
-    prompt += &format!(
-        "\n\nLinear issue {}: {}\n{}\n\n{}",
+    prompt += c.box_note();
+    let input = format!(
+        "{}: {}\n{}\n\n{}",
         issue.identifier,
         issue.title,
         issue.url,
         issue.description.as_deref().unwrap_or("(no description)"),
     );
+    prompt += &format!("\n\nLinear issue {input}");
     args.push(prompt);
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() }, mentioned: vec![] }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject: Subject::LinearIssue { issue: issue.id.clone() }, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone(), input }
+}
+
+/// The first question whose answer is one of its `stop_on` values, ignoring case.
+fn stops(ask: &Ask, answers: &[(String, String)]) -> Option<(String, String)> {
+    ask.questions.iter().find_map(|question| {
+        let (_, answer) = answers.iter().find(|(name, _)| name == &question.name)?;
+        question.stop_on.iter().any(|stop| stop.eq_ignore_ascii_case(answer)).then(|| (question.name.clone(), answer.clone()))
+    })
+}
+
+fn read_as(subject: &Subject) -> &'static str {
+    match subject {
+        Subject::LinearIssue { .. } => "issue",
+        Subject::SlackThread { .. } => "thread",
+    }
+}
+
+fn answered(model: &str, kind: &str, answers: &[(String, String)]) -> String {
+    let lines = answers.iter().map(|(name, answer)| format!("- {name}: {answer}")).collect::<Vec<_>>().join("\n");
+    format!("\n\nBefore this session, {model} on Vercel's AI Gateway read the {kind} and answered:\n{lines}")
+}
+
+fn append_answers(run: &mut Run, ask: &Ask, answers: &[(String, String)]) {
+    if let Some(prompt) = run.args.last_mut() {
+        prompt.push_str(&answered(&ask.model, read_as(&run.subject), answers));
+    }
 }
 
 /// What every connector session that may open a pull request must do to prove the change works.
@@ -1294,6 +1478,13 @@ fn proof_of_work(exe: &str) -> String {
         exe
     )
 }
+
+/// Ends the instructions of a session that runs in a box, which nothing outlives but what it pushed.
+const BOX_NOTE: &str = "\n\nYou run in a disposable Upstash Box (Linux arm64) that pinned deletes 10 minutes after you go quiet, \
+    or 2 minutes after you stop once you reported the review stage. \
+    Push your branch before you finish, because anything not pushed is lost. \
+    For proof videos, launch Playwright with `executablePath: '/usr/bin/chromium'` instead of installing a browser, and never attach over CDP to port 9222. \
+    If `command -v ffmpeg` finds nothing, check the recording with Playwright screenshots taken at the same steps instead of extracting frames.";
 
 const SLACK_PROOF: &str = "\nPut the link to the Proof comment in your last reply in the thread too.";
 
@@ -1379,13 +1570,17 @@ fn slack_run(
         prompt += &proof_of_work(exe);
         prompt += SLACK_PROOF;
     }
-    prompt += &format!("\n\nSlack thread in #{channel_name}, oldest first:\n");
-    let transcript: Vec<String> = posts.iter().map(|p| format!("{}: {}", p.author, p.text)).collect();
-    prompt += &transcript.join("\n");
+    prompt += c.box_note();
+    let input = transcript(posts);
+    prompt += &format!("\n\nSlack thread in #{channel_name}, oldest first:\n{input}");
     prompt += note.unwrap_or_default();
     args.push(prompt);
     let subject = Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() };
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![] }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone(), input }
+}
+
+fn transcript(posts: &[slack::Post]) -> String {
+    posts.iter().map(|p| format!("{}: {}", p.author, p.text)).collect::<Vec<_>>().join("\n")
 }
 
 fn reply_header(author: &str) -> String {
@@ -1410,12 +1605,12 @@ fn filed_note(filed: &Filed) -> String {
 }
 
 impl Connectors {
-    /// Polls forever. `open` receives what each check found and answers whether a tab took it,
-    /// and `on_check` hears how each check went. A settings change wakes it early.
+    /// Polls forever. `open` receives what each check found and answers whether a tab took it, or
+    /// why none did, and `on_check` hears how each check went. A settings change wakes it early.
     pub async fn watch<F, Fut>(&self, open: F, on_check: impl Fn(&Check))
     where
         F: Fn(Work) -> Fut,
-        Fut: Future<Output = bool>,
+        Fut: Future<Output = Result<(), String>>,
     {
         loop {
             let (work, mut error) = self.poll().await;
@@ -1438,6 +1633,7 @@ impl Connectors {
             slack: store.slack.clone(),
             github: store.github.clone(),
             vercel: store.vercel.clone(),
+            upstash: store.upstash.clone(),
             connectors: store.connectors.clone(),
             checked: self.checked.lock().unwrap().clone(),
         }
@@ -1510,16 +1706,7 @@ impl Connectors {
         self.save(&store)
     }
 
-    pub async fn github_repos(&self) -> Result<Vec<github::Repo>, String> {
-        github::repos(&self.github_token().ok_or("GitHub is not connected")?).await
-    }
-
-    /// What a machine clones the account's private GitHub repositories with.
-    pub fn github_token(&self) -> Option<String> {
-        self.key(GITHUB_KEY)
-    }
-
-    /// Checks the key against the Vercel AI Gateway before keeping it.
+    /// Checks the key against the gateway before keeping it.
     pub async fn connect_vercel(&self, key: &str) -> Result<vercel::Account, String> {
         let key = key.trim();
         let account = vercel::account(key).await?;
@@ -1538,9 +1725,42 @@ impl Connectors {
         self.save(&store)
     }
 
-    /// The decision models a Slack message workflow can sort messages with.
-    pub async fn vercel_models(&self) -> Result<Vec<String>, String> {
-        vercel::decision_models().await
+    /// Chat models tagged `structured-output`, and every decision model. The list needs no key.
+    pub async fn vercel_models(&self) -> Result<Vec<vercel::Model>, String> {
+        vercel::models().await
+    }
+
+    pub async fn github_repos(&self) -> Result<Vec<github::Repo>, String> {
+        github::repos(&self.github_token().ok_or("GitHub is not connected")?).await
+    }
+
+    /// What a machine clones the account's private GitHub repositories with.
+    pub fn github_token(&self) -> Option<String> {
+        self.key(GITHUB_KEY)
+    }
+
+    /// Keeps the Box key and the Claude token, which the hub checked with Upstash first.
+    pub fn connect_upstash(&self, keys: &upstash::Keys) -> Result<upstash::Account, String> {
+        self.storage.write_key(UPSTASH_KEY, &keys.api_key)?;
+        self.storage.write_key(CLAUDE_TOKEN, &keys.claude_token)?;
+        let account = keys.account();
+        let mut store = self.store.lock().unwrap();
+        store.upstash = Some(account.clone());
+        self.save(&store)?;
+        Ok(account)
+    }
+
+    pub fn disconnect_upstash(&self) -> Result<(), String> {
+        self.storage.remove_key(UPSTASH_KEY);
+        self.storage.remove_key(CLAUDE_TOKEN);
+        let mut store = self.store.lock().unwrap();
+        store.upstash = None;
+        self.save(&store)
+    }
+
+    /// What the hub creates and boots boxes with. Never serialized, never sent to a client.
+    pub fn box_keys(&self) -> Option<upstash::Keys> {
+        Some(upstash::Keys { api_key: self.key(UPSTASH_KEY)?, claude_token: self.key(CLAUDE_TOKEN)? })
     }
 
     /// Channels the bot was invited to, which a Slack connector can watch.
@@ -1621,8 +1841,7 @@ impl Connectors {
     /// The store and the integrations' keys, as `import` takes them.
     pub fn export(&self) -> (serde_json::Value, Keys) {
         let store = serde_json::to_value(&*self.store.lock().unwrap()).unwrap();
-        let keys = Keys { linear: self.key(LINEAR_KEY), slack: self.key(SLACK_KEY), github: self.key(GITHUB_KEY), vercel: self.key(VERCEL_KEY) };
-        (store, keys)
+        (store, Keys { linear: self.key(LINEAR_KEY), slack: self.key(SLACK_KEY), github: self.key(GITHUB_KEY), vercel: self.key(VERCEL_KEY) })
     }
 }
 
@@ -1658,6 +1877,24 @@ mod tests {
     }
 
     #[test]
+    fn a_connector_from_v0_7_0_runs_under_its_projects_account_and_a_named_one_under_that() {
+        let saved = serde_json::json!({
+            "id": "c1", "name": "Bugs", "enabled": true, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": "/repo", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+            "instructions": "", "machine": "m1", "repo": "",
+        });
+        let old: Connector = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(run(&old, &issue(), "/bin/pinned").spec().account, None);
+        let mut named = saved;
+        named["account"] = " work ".into();
+        let named: Connector = serde_json::from_value(named).unwrap();
+        assert_eq!(run(&named, &issue(), "/bin/pinned").spec().account.as_deref(), Some("work"));
+        assert_eq!(serde_json::to_value(&named).unwrap()["account"], " work ");
+        assert_eq!(old.ask, None, "a connector stored before the ask step has none");
+        assert!(serde_json::to_value(&old).unwrap().get("ask").is_none());
+    }
+
+    #[test]
     fn a_run_no_tab_took_is_found_again_by_the_next_check() {
         let mut linear = linear_connector();
         linear.handled = vec!["uuid".into(), "older".into()];
@@ -1665,24 +1902,142 @@ mod tests {
         slack.handled = vec!["C0123ABCD:1792400050.000200".into()];
         slack.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
         let (connectors, dir) = stored("unclaim", vec![linear, slack]);
-        let refuse = |_: Work| async { false };
+        let refuse = |_: Work| async { Err("Upstash Box: the bootstrap failed: curl: (22) 404".to_owned()) };
 
         let issue_run = run(&linear_connector(), &issue(), "/bin/pinned");
         assert_eq!(
             block_on(connectors.hand_over(Work::Run(issue_run), &refuse)),
-            Err("could not open a session in /repo; the next check tries again".into())
+            Err("could not open a session in /repo: Upstash Box: the bootstrap failed: curl: (22) 404; the next check tries again".into()),
+            "the check line says why no machine took the run"
         );
         let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
         let thread_run = Run { mentioned: vec!["1792400050.000200".into()], ..thread_run };
         assert_eq!(
             block_on(connectors.hand_over(Work::Run(thread_run), &refuse)),
-            Err("could not open a session in /repo; the next check tries again".into()),
+            Err("could not open a session in /repo: Upstash Box: the bootstrap failed: curl: (22) 404; the next check tries again".into()),
             "nothing reacts to a mention no session took"
         );
 
         let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
         assert_eq!(reloaded[0].handled, ["older"]);
         assert_eq!((reloaded[1].handled.len(), reloaded[1].followed.len()), (0, 0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_stop_answer_keeps_the_subject_handled_and_forgets_the_thread() {
+        let ask = Ask {
+            model: "google/gemini-3.5-flash".into(),
+            instructions: "Classify.".into(),
+            questions: vec![
+                Question { name: "kind".into(), ask: "What does it ask for?".into(), choices: vec!["bug".into(), "question".into()], stop_on: vec![] },
+                Question { name: "agent".into(), ask: "Can a coding agent handle it?".into(), choices: vec!["yes".into(), "no".into()], stop_on: vec!["No".into()] },
+            ],
+        };
+        let stopping = [("kind".into(), "bug".into()), ("agent".into(), "no".into())];
+        assert_eq!(stops(&ask, &stopping), Some(("agent".into(), "no".into())));
+        assert_eq!(stops(&ask, &[("kind".into(), "bug".into()), ("agent".into(), "yes".into())]), None);
+        assert_eq!(
+            answered("google/gemini-3.5-flash", "thread", &stopping),
+            "\n\nBefore this session, google/gemini-3.5-flash on Vercel's AI Gateway read the thread and answered:\n- kind: bug\n- agent: no"
+        );
+        assert_eq!(
+            answered("google/gemini-3.5-flash", "issue", &[("kind".into(), "question".into())]),
+            "\n\nBefore this session, google/gemini-3.5-flash on Vercel's AI Gateway read the issue and answered:\n- kind: question"
+        );
+
+        let mut slack = Connector { id: "c2".into(), ask: Some(ask), ..slack_connector() };
+        slack.handled = vec!["C0123ABCD:1792400050.000200".into()];
+        slack.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
+        let (connectors, dir) = stored("ask-stop", vec![slack]);
+        std::fs::write(dir.join("vercel-key"), "vck_testa1b2").unwrap();
+        let _reply = TestReply::set(r#"{"kind":"bug","agent":"No"}"#.into());
+        let opened = std::sync::atomic::AtomicBool::new(false);
+        let open = |_: Work| {
+            opened.store(true, std::sync::atomic::Ordering::Relaxed);
+            async { Ok(()) }
+        };
+        let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &open)), Ok(()));
+        assert!(!opened.load(std::sync::atomic::Ordering::Relaxed), "a stop answer starts no session");
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
+        assert_eq!(reloaded[0].handled, ["C0123ABCD:1792400050.000200"]);
+        assert!(reloaded[0].followed.is_empty(), "later replies are not delivered, and fallback never opens a session");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    static ASK_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct TestReply {
+        _gate: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TestReply {
+        fn set(content: String) -> Self {
+            let gate = ASK_TEST.lock().unwrap();
+            crate::vercel::set_test_content(Some(content));
+            Self { _gate: gate }
+        }
+    }
+
+    impl Drop for TestReply {
+        fn drop(&mut self) {
+            crate::vercel::set_test_content(None);
+        }
+    }
+
+    fn classifying() -> Ask {
+        Ask {
+            model: "google/gemini-3.5-flash".into(),
+            instructions: "Classify.".into(),
+            questions: vec![
+                Question { name: "kind".into(), ask: "What does it ask for?".into(), choices: vec!["bug".into(), "question".into()], stop_on: vec![] },
+                Question { name: "agent".into(), ask: "Can a coding agent handle it?".into(), choices: vec!["yes".into(), "no".into()], stop_on: vec!["no".into()] },
+            ],
+        }
+    }
+
+    fn claimed_thread(name: &str, ask: Option<Ask>) -> (Connectors, PathBuf) {
+        let mut slack = Connector { id: "c2".into(), ask, ..slack_connector() };
+        slack.handled = vec!["C0123ABCD:1792400050.000200".into()];
+        slack.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
+        stored(name, vec![slack])
+    }
+
+    #[test]
+    fn an_answer_that_continues_is_appended_to_the_prompt() {
+        let (connectors, dir) = claimed_thread("ask-go", Some(classifying()));
+        std::fs::write(dir.join("vercel-key"), "vck_testa1b2").unwrap();
+        let _reply = TestReply::set(r#"{"kind":"bug","agent":"yes"}"#.into());
+        let prompt = std::sync::Mutex::new(String::new());
+        let open = |work: Work| {
+            if let Work::Run(run) = work {
+                *prompt.lock().unwrap() = run.args.last().cloned().unwrap_or_default();
+            }
+            async { Ok(()) }
+        };
+        let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &open)), Ok(()));
+        assert_eq!(
+            prompt.lock().unwrap().as_str().rsplit_once("\n\n").unwrap().1,
+            "Before this session, google/gemini-3.5-flash on Vercel's AI Gateway read the thread and answered:\n- kind: bug\n- agent: yes"
+        );
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
+        assert_eq!(reloaded[0].handled, ["C0123ABCD:1792400050.000200"]);
+        assert_eq!(reloaded[0].followed.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_missing_gateway_key_gives_the_subject_back() {
+        let (connectors, dir) = claimed_thread("ask-nokey", Some(classifying()));
+        let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { Ok(()) })),
+            Err("could not open a session in /repo: Vercel AI Gateway is not connected: connect it in pinned's Connectors settings; the next check tries again".into())
+        );
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
+        assert_eq!((reloaded[0].handled.len(), reloaded[0].followed.len()), (0, 0));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1705,7 +2060,7 @@ mod tests {
         let slack = Connector { id: "c2".into(), handled: vec!["C0123ABCD:1792400050.000200".into()], ..slack_connector() };
         let (connectors, dir) = stored("claimed", vec![slack]);
         let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
-        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { true })), Ok(()));
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { Ok(()) })), Ok(()));
         assert_eq!(connectors.get_settings().connectors[0].handled, ["C0123ABCD:1792400050.000200"]);
         assert_eq!(block_on(connectors.acknowledge("C0123ABCD", &[])), Ok(()), "nothing to react to needs no Slack");
         let _ = std::fs::remove_dir_all(dir);
@@ -1718,7 +2073,7 @@ mod tests {
         let not_connected = Err("Slack is not connected: connect it in pinned's Connectors settings".to_owned());
         let thread_run = slack_run(&Connector { id: "c2".into(), ..slack_connector() }, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
         let thread_run = Run { mentioned: vec!["1792400050.000200".into()], ..thread_run };
-        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { true })), not_connected);
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run), &|_| async { Ok(()) })), not_connected);
         assert_eq!(connectors.get_settings().connectors[0].handled, ["C0123ABCD:1792400050.000200"], "the run stays claimed");
 
         let delivery = Delivery {
@@ -1729,7 +2084,7 @@ mod tests {
             cursor: "1792400090.000000".into(),
             mentioned: vec!["1792400090.000000".into()],
         };
-        assert_eq!(block_on(connectors.hand_over(Work::Delivery(delivery), &|_| async { true })), not_connected);
+        assert_eq!(block_on(connectors.hand_over(Work::Delivery(delivery), &|_| async { Ok(()) })), not_connected);
         let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
         assert_eq!(reloaded[0].followed["C0123ABCD:1792400050.000200"].cursor, "1792400090.000000", "the cursor moved all the same");
         let _ = std::fs::remove_dir_all(dir);
@@ -1741,19 +2096,20 @@ mod tests {
         let exported = serde_json::json!({
             "linear": { "name": "Ana", "email": "ana@acme.dev", "organization": "Acme" },
             "slack": { "team": "Acme", "userId": "UBOT", "name": "pinned" },
-            "vercel": { "balance": "12.34" },
+            "vercel": { "key_hint": "…ck_1" },
             "connectors": [serde_json::to_value(Connector { id: "c9".into(), ..slack_connector() }).unwrap()],
         });
-        let keys = Keys { linear: Some(" lin_api_1 ".into()), github: Some("ghp_1".into()), vercel: Some("vck_1".into()), ..Keys::default() };
+        let keys = Keys { linear: Some(" lin_api_1 ".into()), github: Some("ghp_1".into()), vercel: Some(" vck_1 ".into()), ..Keys::default() };
         assert_eq!(connectors.import(exported.clone(), keys), Ok(true));
         let (store, keys) = connectors.export();
         assert_eq!(keys, Keys { linear: Some("lin_api_1".into()), slack: None, github: Some("ghp_1".into()), vercel: Some("vck_1".into()) });
         assert_eq!(store["linear"]["email"], "ana@acme.dev");
-        assert_eq!(store["vercel"], serde_json::json!({ "balance": "12.34" }));
+        assert_eq!(store["vercel"], serde_json::json!({ "key_hint": "…ck_1" }));
         assert_eq!(std::fs::read_to_string(dir.join("vercel-key")).unwrap(), "vck_1");
         assert_eq!(store["slack"], serde_json::Value::Null);
         assert_eq!(store["connectors"][0]["id"], "c9");
         assert_eq!(std::fs::read_to_string(dir.join("linear-key")).unwrap(), "lin_api_1");
+        assert_eq!(std::fs::read_to_string(dir.join("vercel-key")).unwrap(), "vck_1");
         let other = Keys { slack: Some("xoxb-2".into()), ..Keys::default() };
         assert_eq!(connectors.import(serde_json::json!({ "connectors": [] }), other), Ok(false), "a store with connectors keeps them");
         assert_eq!(connectors.export().1.linear.as_deref(), Some("lin_api_1"));
@@ -1783,8 +2139,10 @@ mod tests {
             followed: BTreeMap::new(),
             paged: BTreeMap::new(),
             proof: false,
-            machine: String::new(),
+            ask: None,
+            runs_on: RunsOn::Any,
             repo: String::new(),
+            account: String::new(),
         }
     }
 
@@ -1818,6 +2176,7 @@ mod tests {
                 "Fix it.\n\nReport your progress to pinned, the app that started this session. Each command moves the Linear issue to its next column. Run each one once:\n- Run `'/Applications/pinned.app/Contents/MacOS/pinned' stage coding` right before you start changing code.\n\nLinear issue ENG-7: Broken button\nhttps://linear.app/x/issue/ENG-7\n\n(no description)",
             ]
         );
+        assert_eq!(run.input, "ENG-7: Broken button\nhttps://linear.app/x/issue/ENG-7\n\n(no description)");
     }
 
     fn slack_connector() -> Connector {
@@ -1842,8 +2201,10 @@ mod tests {
             followed: BTreeMap::new(),
             paged: BTreeMap::new(),
             proof: false,
-            machine: String::new(),
+            ask: None,
+            runs_on: RunsOn::Any,
             repo: String::new(),
+            account: String::new(),
         }
     }
 
@@ -1884,6 +2245,7 @@ mod tests {
                 "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Keep every answer short. Before each `slack reply`, invoke the `pinned:bro` skill on your draft and post the message it gives you, not the draft. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\nThis workflow only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here",
             ]
         );
+        assert_eq!(run.input, "ana: @pinned export 500s since today\nsee the log\nbruno: same here");
     }
 
     fn fixing_connector() -> Connector {
@@ -2332,7 +2694,7 @@ mod tests {
         let settled = settle(&mut connectors.store.lock().unwrap(), vec![("c5", routed("escalation", "c2", Some(paging())))]);
         assert_eq!(settled.pages.len(), 1);
         let work = settled.work.into_iter().next().unwrap();
-        assert!(block_on(connectors.hand_over(work, &|_| async { false })).is_err());
+        assert!(block_on(connectors.hand_over(work, &|_| async { Err("no tab took it".to_owned()) })).is_err());
         let mut store = connectors.store.lock().unwrap();
         let later = checked_at() + chrono::Duration::hours(2);
         let settled = settle_at(&mut store, vec![("c5", routed("escalation", "c2", Some(paging())))], later);
@@ -2411,7 +2773,7 @@ mod tests {
         let settled = settle_at(&mut connectors.store.lock().unwrap(), vec![("c5", routed("escalation", "c2", Some(paging())))], at(5));
         assert_eq!(replies(&settled), [("1792400050.000200".to_owned(), already("1792399000.000000"))]);
         let work = settled.work.into_iter().next().unwrap();
-        assert!(block_on(connectors.hand_over(work, &|_| async { false })).is_err());
+        assert!(block_on(connectors.hand_over(work, &|_| async { Err("no tab took it".to_owned()) })).is_err());
 
         let mut store = connectors.store.lock().unwrap();
         let settled = settle_at(&mut store, vec![("c5", routed("escalation", "c2", Some(paging())))], at(8));
@@ -2472,8 +2834,8 @@ mod tests {
         let settled = settle(&mut connectors.store.lock().unwrap(), vec![("c5", routed("error", "c2", None))]);
         let work = settled.work.into_iter().next().unwrap();
         assert_eq!(
-            block_on(connectors.hand_over(work, &|_| async { false })),
-            Err("could not open a session in /repo; the next check tries again".into())
+            block_on(connectors.hand_over(work, &|_| async { Err("no tab took it".to_owned()) })),
+            Err("could not open a session in /repo: no tab took it; the next check tries again".into())
         );
         let mut store = connectors.store.lock().unwrap();
         assert!(!store.handled(THREAD), "the router's next check asks the decision model again");
@@ -2644,5 +3006,87 @@ mod tests {
         }
         assert!(!prompt(Fix::Off, true).contains("Proof"));
         assert_eq!(prompt(Fix::Off, true), prompt(Fix::Off, false));
+    }
+
+    #[test]
+    fn run_on_loads_any_machine_or_box_from_the_machine_key_and_saves_it_back_as_it_was() {
+        let base = serde_json::to_value(linear_connector()).unwrap();
+        for (stored, runs_on) in [
+            (serde_json::json!(""), RunsOn::Any),
+            (serde_json::json!("m1"), RunsOn::Machine("m1".into())),
+            (serde_json::json!({ "kind": "upstash-box", "size": "medium" }), RunsOn::FreshBox(BoxStep { size: BoxSize::Medium })),
+            (serde_json::json!({ "kind": "upstash-box", "size": "large" }), RunsOn::FreshBox(BoxStep { size: BoxSize::Large })),
+        ] {
+            let mut saved = base.clone();
+            saved["machine"] = stored.clone();
+            let text = serde_json::to_string(&saved).unwrap();
+            let loaded: Connector = serde_json::from_str(&text).unwrap();
+            assert_eq!(loaded.runs_on, runs_on);
+            assert_eq!(serde_json::to_string(&loaded).unwrap(), text, "{stored} saves back byte for byte");
+        }
+        let mut sizeless = base.clone();
+        sizeless["machine"] = serde_json::json!({ "kind": "upstash-box" });
+        assert_eq!(serde_json::from_value::<Connector>(sizeless).unwrap().runs_on, RunsOn::FreshBox(BoxStep { size: BoxSize::Medium }));
+        let mut unknown = base;
+        unknown["machine"] = serde_json::json!({ "kind": "lambda" });
+        assert!(serde_json::from_value::<Connector>(unknown).is_err());
+    }
+
+    #[test]
+    fn a_store_saved_by_v0_12_still_loads() {
+        let saved = r#"{
+          "linear": { "name": "Felipe", "email": "f@x.com", "organization": "X" },
+          "github": { "login": "felipe", "name": "Felipe" },
+          "connectors": [{
+            "id": "c1", "name": "Resolve", "enabled": true,
+            "trigger": { "kind": "linear-label", "label": "claude" },
+            "folder": "/repo", "model": "opus", "effort": "high", "permissionMode": "auto", "worktree": true,
+            "instructions": "Fix it.", "columns": { "picked": "Analyzing", "coding": "", "review": "" },
+            "since": "2026-10-01T00:00:00+00:00", "handled": ["uuid"], "proof": true,
+            "machine": "7c0d2a9e-1111-4222-8333-944455556666", "repo": "acme/app", "account": "work"
+          }]
+        }"#;
+        let store: Store = serde_json::from_str(saved).unwrap();
+        assert!(store.upstash.is_none());
+        assert_eq!(store.connectors[0].runs_on, RunsOn::Machine("7c0d2a9e-1111-4222-8333-944455556666".into()));
+        assert_eq!(serde_json::to_value(&store.connectors[0]).unwrap()["machine"], "7c0d2a9e-1111-4222-8333-944455556666");
+    }
+
+    #[test]
+    fn a_box_workflows_run_goes_to_a_box_with_the_box_note_and_no_account() {
+        let boxed = Connector { runs_on: RunsOn::FreshBox(BoxStep::default()), account: "work".into(), proof: true, ..linear_connector() };
+        let box_run = run(&boxed, &issue(), "/bin/pinned");
+        assert_eq!(box_run.runs_on, RunsOn::FreshBox(BoxStep { size: BoxSize::Medium }));
+        assert_eq!(box_run.account, None, "a box signs in only with the Claude token");
+        let prompt = box_run.args.last().unwrap();
+        assert!(prompt.contains(&format!("{PROOF}{BOX_NOTE}\n\nLinear issue ENG-7")), "{prompt}");
+
+        let on_machine = Connector { runs_on: RunsOn::Machine("m1".into()), proof: true, ..linear_connector() };
+        let machine_run = run(&on_machine, &issue(), "/bin/pinned");
+        assert_eq!((machine_run.runs_on, machine_run.account), (RunsOn::Machine("m1".into()), None));
+        assert_eq!(machine_run.args.last().unwrap().replace(BOX_NOTE, ""), *machine_run.args.last().unwrap(), "a machine's prompt has no box note");
+        assert_eq!(*machine_run.args.last().unwrap(), prompt.replace(BOX_NOTE, ""));
+
+        let thread = |runs_on| connector_thread_run(&Connector { runs_on, ..fixing_connector() }, "2026-10-19T10:00:00Z", "2026-10-19T10:01:00Z").args.pop().unwrap();
+        let in_box = thread(RunsOn::FreshBox(BoxStep::default()));
+        assert!(in_box.contains(&format!("{BOX_NOTE}\n\nSlack thread in #support")), "{in_box}");
+        assert_eq!(in_box.replace(BOX_NOTE, ""), thread(RunsOn::Any));
+    }
+
+    #[test]
+    fn upstash_keys_stay_in_storage_and_only_their_hints_reach_settings() {
+        let (connectors, dir) = stored("upstash", vec![]);
+        assert!(connectors.box_keys().is_none());
+        let keys = upstash::Keys::parse("box_abcdA1b2", "sk-ant-oat01-zz9f3c").unwrap();
+        assert_eq!(connectors.connect_upstash(&keys).unwrap(), upstash::Account { key_hint: "…A1b2".into(), claude_hint: "…9f3c".into() });
+        let kept = connectors.box_keys().unwrap();
+        assert_eq!((kept.api_key.as_str(), kept.claude_token.as_str()), ("box_abcdA1b2", "sk-ant-oat01-zz9f3c"));
+        let settings = serde_json::to_string(&connectors.get_settings()).unwrap();
+        assert!(settings.contains("\"upstash\":{\"key_hint\":\"…A1b2\",\"claude_hint\":\"…9f3c\"}"), "{settings}");
+        assert!(!settings.contains("box_abcd") && !settings.contains("sk-ant-oat01"), "{settings}");
+        connectors.disconnect_upstash().unwrap();
+        assert!(connectors.box_keys().is_none());
+        assert!(connectors.get_settings().upstash.is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
