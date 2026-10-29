@@ -161,7 +161,7 @@ pub struct Connector {
     /// Whether a session that opens a pull request must prove it works, with a Playwright video.
     #[serde(default = "on")]
     pub proof: bool,
-    /// Asks a gateway model about the trigger's find before the session starts. Empty skips it.
+    /// Asks a gateway model about the trigger's find before the session starts. None skips it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask: Option<Ask>,
     #[serde(default, rename = "machine")]
@@ -487,11 +487,6 @@ pub struct Run {
     pub input: String,
 }
 
-/// What an Ask step found for one subject. `Skip` is a workflow with no such step.
-enum Consulted {
-    Skip,
-    Answers(Ask, Vec<(String, String)>),
-}
 
 impl Run {
     pub fn spec(&self) -> RunSpec {
@@ -764,8 +759,8 @@ impl Connectors {
             Work::Run(mut run) => {
                 let (connector, subject, folder, mentioned) = (run.connector.clone(), run.subject.clone(), run.cwd.clone(), run.mentioned.clone());
                 match self.consult(&connector, &run.input).await {
-                    Ok(Consulted::Skip) => {}
-                    Ok(Consulted::Answers(ask, answers)) => {
+                    Ok(None) => {}
+                    Ok(Some((ask, answers))) => {
                         if stops(&ask, &answers).is_some() {
                             self.keep_stopped(&connector, &subject)?;
                             return Ok(());
@@ -817,13 +812,13 @@ impl Connectors {
         result
     }
 
-    /// The connector's Ask step, once, for a subject the check already claimed.
-    async fn consult(&self, connector: &str, input: &str) -> Result<Consulted, String> {
+    /// The connector's Ask step and its answers, or None when it has no such step.
+    async fn consult(&self, connector: &str, input: &str) -> Result<Option<(Ask, Vec<(String, String)>)>, String> {
         let ask = self.store.lock().unwrap().connectors.iter().find(|c| c.id == connector).and_then(|c| c.ask.clone());
-        let Some(ask) = ask else { return Ok(Consulted::Skip) };
+        let Some(ask) = ask else { return Ok(None) };
         let key = self.key(VERCEL_KEY).ok_or_else(|| "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".to_owned())?;
         let answers = vercel::ask(&key, &ask, input).await?;
-        Ok(Consulted::Answers(ask, answers))
+        Ok(Some((ask, answers)))
     }
 
     /// Leaves the subject handled, and drops a Slack thread's cursor so later replies are not delivered.
@@ -860,9 +855,8 @@ impl Connectors {
         let mut run = slack_run(&c, &d.channel, channel_name(name), &d.thread, &posts, note.as_deref(), &self.exe);
         run.mentioned = d.mentioned.clone();
         // The thread already passed the step, so a stop answer does not end this new session.
-        match self.consult(&run.connector, &run.input).await? {
-            Consulted::Skip => {}
-            Consulted::Answers(ask, answers) => append_answers(&mut run, &ask, &answers),
+        if let Some((ask, answers)) = self.consult(&run.connector, &run.input).await? {
+            append_answers(&mut run, &ask, &answers);
         }
         Ok((run, newest))
     }

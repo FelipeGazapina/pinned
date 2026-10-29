@@ -155,7 +155,6 @@ fn schema(ask: &Ask) -> Value {
     })
 }
 
-/// The chat-completions body for `ask` and `input`.
 fn completion_body(ask: &Ask, input: &str) -> Value {
     json!({
         "model": ask.model,
