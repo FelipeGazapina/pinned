@@ -125,7 +125,8 @@ function showPage(name) {
   if (name === "connectors" && !suggestions.models.length) {
     connectorCall("vercel_models").then((models) => {
       suggestions.models = models;
-      fillList("vercel-models", models);
+      fillVercelModels();
+      if (view.name === "edit" && document.getElementById("save-connector")) refresh();
     }, console.warn);
   }
   settingsPage.scrollTop = 0;
@@ -135,6 +136,20 @@ function showPage(name) {
 function fillList(id, names) {
   const list = document.getElementById(id);
   if (list) list.innerHTML = options(names);
+}
+
+function vercelModelOptions(models) {
+  return models
+    .map((model) => {
+      const label = model.kind === "decision" ? `${model.id} · decision` : model.id;
+      return `<option value="${esc(model.id)}">${esc(label)}</option>`;
+    })
+    .join("");
+}
+
+function fillVercelModels() {
+  const list = document.getElementById("vercel-models");
+  if (list) list.innerHTML = vercelModelOptions(suggestions.models);
 }
 
 const esc = (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -397,7 +412,7 @@ const STEPS = {
     on: (c) => !!c.ask,
     add: (c) =>
       (c.ask = {
-        model: "google/gemini-3.5-flash",
+        model: "typesafe-ai/jev",
         instructions: "Classify the request below for an engineering team. Answer from the text only.",
         questions: [
           { name: "kind", ask: "What does it ask for?", choices: ["bug", "question", "critique", "enhancement"], stopOn: [] },
@@ -419,6 +434,9 @@ const STEPS = {
       const ask = c.ask;
       if (!ask) return [];
       const questions = ask.questions ?? [];
+      const model = ask.model.trim();
+      const decision = suggestions.models.some((m) => m.id === model && m.kind === "decision");
+      const bare = decision && questions.some((q) => !(q.choices ?? []).some((choice) => choice.trim()));
       const stray = questions.flatMap((q) =>
         (q.stopOn ?? [])
           .map((s) => s.trim())
@@ -431,6 +449,7 @@ const STEPS = {
         !ask.model.trim() && "Name the model.",
         questions.some((q) => !q.name.trim()) && "Name each question.",
         questions.some((q) => !q.ask.trim()) && "Write what each question asks.",
+        bare && `${model} is a decision model: give every question choices.`,
         ...stray,
       ].filter(Boolean);
     },
@@ -449,7 +468,7 @@ const STEPS = {
         <div class="actions start"><button class="secondary" data-action="remove-question" data-index="${i}">Remove</button></div>`,
         )
         .join("");
-      return `<label>Model ${input("ask.model", ask?.model ?? "", 'list="vercel-models" placeholder="google/gemini-3.5-flash" spellcheck="false"')}</label>
+      return `<label>Model ${input("ask.model", ask?.model ?? "", 'list="vercel-models" placeholder="typesafe-ai/jev" spellcheck="false"')}</label>
         <label>Instructions
           <textarea data-bind="ask.instructions" rows="4">${esc(ask?.instructions ?? "")}</textarea></label>
         ${rows}
@@ -636,7 +655,7 @@ function editorHtml() {
     <datalist id="models">${options(MODELS)}</datalist>
     <datalist id="folders">${options(suggestions.folders)}</datalist>
     <datalist id="github-repos">${options(suggestions.repos)}</datalist>
-    <datalist id="vercel-models">${options(suggestions.models)}</datalist>
+    <datalist id="vercel-models">${vercelModelOptions(suggestions.models)}</datalist>
     <div class="editor-bar">
       <button class="secondary" data-action="close-editor" title="Back to workflows">←</button>
       ${input("name", c.name, 'class="title" placeholder="Workflow name"')}
