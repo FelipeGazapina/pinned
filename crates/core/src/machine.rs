@@ -2053,66 +2053,38 @@ fn tab_number(id: &str) -> u32 {
     id.trim_start_matches("tab-").parse().unwrap_or(0)
 }
 
-#[derive(Debug, PartialEq)]
-#[cfg(test)]
-enum Input {
-    /// Enter: whatever was drafted is now a prompt in flight.
-    Submit,
-    /// Printable text the user has not submitted.
-    Text,
-    /// Ctrl-C or Ctrl-U, which empty claude's prompt.
-    Clear,
-    /// Escape sequences and other control bytes: focus reports, DA replies, menu keys.
-    Keys,
-}
-
-/// Counts the terminal's input line. Printable bytes add, including inside a bracketed paste.
-/// Backspace subtracts, floored at 0. Ctrl-C, Ctrl-U, and Enter clear the line.
-/// Enter on a non-empty line is a submit. Escape sequences are ignored.
+/// Counts the terminal's input line in characters. Printable text adds, including newlines inside
+/// a bracketed paste. Backspace subtracts, floored at 0. Ctrl-C, Ctrl-U, and Enter clear the line.
+/// Enter on a non-empty line is a submit. Escape sequences such as focus reports are ignored.
 fn note_draft(draft_len: &mut usize, data: &[u8]) -> bool {
     let mut submitted = false;
+    let mut pasting = false;
     let mut i = 0;
     while i < data.len() {
         match data[i] {
             0x1b => {
                 let Some(len) = escape_len(&data[i + 1..]) else { break };
+                match &data[i + 1..i + 1 + len] {
+                    b"[200~" => pasting = true,
+                    b"[201~" => pasting = false,
+                    _ => {}
+                }
                 i += len;
             }
+            b'\r' | b'\n' if pasting => *draft_len += 1,
             b'\r' => {
-                if *draft_len > 0 {
-                    submitted = true;
-                }
+                submitted |= *draft_len > 0;
                 *draft_len = 0;
             }
             0x03 | 0x15 => *draft_len = 0,
             0x08 | 0x7f => *draft_len = draft_len.saturating_sub(1),
+            0x80..=0xbf => {}
             byte if byte >= 0x20 => *draft_len += 1,
             _ => {}
         }
         i += 1;
     }
     submitted
-}
-
-/// What a write to the terminal means for a notice. Only text holds one back.
-#[cfg(test)]
-fn classify_input(data: &[u8]) -> Input {
-    let mut seen = Input::Keys;
-    let mut i = 0;
-    while i < data.len() {
-        match data[i] {
-            0x1b => {
-                let Some(len) = escape_len(&data[i + 1..]) else { break };
-                i += len;
-            }
-            b'\r' => return Input::Submit,
-            0x03 | 0x15 => seen = Input::Clear,
-            byte if byte >= 0x20 && byte != 0x7f => seen = Input::Text,
-            _ => {}
-        }
-        i += 1;
-    }
-    seen
 }
 
 fn escape_len(rest: &[u8]) -> Option<usize> {
@@ -3698,15 +3670,19 @@ echo '{"type":"result","result":"ok"}'
 
     #[test]
     fn escape_sequences_are_not_a_draft_and_enter_submits() {
-        for keys in [&b"\x1b[I"[..], b"\x1b[O", b"\x1b", b"\x1b[A", b"\x1b[?1;2c", b"\x1b[1;1R", b"\x1b]11;rgb:0/0/0\x07"] {
-            assert_eq!(classify_input(keys), Input::Keys, "{keys:?}");
-        }
-        assert_eq!(classify_input(b"xyz"), Input::Text);
-        assert_eq!(classify_input(b"\r"), Input::Submit);
-        assert_eq!(classify_input(b"hi\r"), Input::Submit);
-        assert_eq!(classify_input(b"xyz\x03"), Input::Clear);
-        assert_eq!(classify_input(b"\x15ab"), Input::Text);
         let mut draft = 0usize;
+        for keys in [&b"\x1b[I"[..], b"\x1b[O", b"\x1b", b"\x1b[A", b"\x1b[?1;2c", b"\x1b[1;1R", b"\x1b]11;rgb:0/0/0\x07"] {
+            assert!(!note_draft(&mut draft, keys), "{keys:?}");
+            assert_eq!(draft, 0, "{keys:?} is not text");
+        }
+        note_draft(&mut draft, "é".as_bytes());
+        assert_eq!(draft, 1, "one character, however many bytes");
+        note_draft(&mut draft, b"\x7f");
+        assert_eq!(draft, 0);
+        assert!(!note_draft(&mut draft, b"\x1b[200~line one\rline two\x1b[201~"), "a newline inside a paste is not Enter");
+        assert_eq!(draft, 17);
+        note_draft(&mut draft, b"\x03");
+        assert_eq!(draft, 0);
         assert!(!note_draft(&mut draft, b"\x1b[200~ab\x1b[201~"));
         assert_eq!(draft, 2, "a bracketed paste counts the text inside it");
         assert!(note_draft(&mut draft, b"\r"));
