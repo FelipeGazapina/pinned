@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
 pub const OUTPUT_KEEP: usize = 256 * 1024;
@@ -197,14 +197,19 @@ impl Screen {
 
 /// A prompt is in flight until the Done of a turn that started after it.
 /// Claude's Working marks that start. Codex never sends Working, so a Done
-/// with no open turn closes one submit.
+/// with no open turn closes one submit. A submit that never gets a turn of its own,
+/// such as a menu answer or a prompt Claude folded into the running turn, is settled
+/// once the tab has sat at Done for `SETTLE` with no new turn.
 #[derive(Default)]
 struct Turn {
-    submit: u32,
-    done: u32,
-    opened: Option<u32>,
+    submit: u64,
+    done: u64,
+    opened: Option<u64>,
+    settle: Option<(Instant, u64)>,
     draft: bool,
 }
+
+const SETTLE: Duration = Duration::from_secs(5);
 
 impl Turn {
     fn busy(&self) -> bool {
@@ -212,26 +217,37 @@ impl Turn {
     }
 
     fn note_submit(&mut self) {
-        self.submit = self.submit.wrapping_add(1);
+        self.submit += 1;
         self.draft = false;
     }
 
     fn note_working(&mut self) {
         if self.submit == self.done {
-            self.submit = self.done.wrapping_add(1);
+            self.submit = self.done + 1;
         }
         if self.opened.is_none() {
-            self.opened = Some(self.done.wrapping_add(1));
+            self.opened = Some(self.done + 1);
         }
+        self.settle = None;
     }
 
     fn note_terminal(&mut self) {
         if let Some(gen) = self.opened.take() {
             self.done = gen;
         } else if self.done != self.submit {
-            self.done = self.done.wrapping_add(1);
+            self.done += 1;
         }
+        self.settle = Some((Instant::now(), self.submit));
         self.draft = false;
+    }
+
+    /// Closes the submits made before the last Done once no turn followed them.
+    fn settle(&mut self) {
+        let Some((_, upto)) = self.settle.filter(|(at, _)| at.elapsed() >= SETTLE) else { return };
+        if self.opened.is_none() {
+            self.done = self.done.max(upto);
+        }
+        self.settle = None;
     }
 
     fn reset(&mut self) {
@@ -332,7 +348,7 @@ impl Tab {
     }
 
     fn flush_queued(&mut self) {
-        if self.gate.busy() || self.gate.draft || !matches!(self.status, Some(AgentStatus::Done | AgentStatus::Failed)) {
+        if self.gate.busy() || self.gate.draft || !matches!(self.status, None | Some(AgentStatus::Done | AgentStatus::Failed)) {
             return;
         }
         let Some(text) = self.queued.first().cloned() else { return };
@@ -1136,11 +1152,11 @@ impl Machine {
             return self.shells.write(tab, data);
         }
         self.tab(tab, |t| {
-            let (text, submit) = classify_input(data);
-            if submit {
-                t.gate.note_submit();
-            } else if text {
-                t.gate.draft = true;
+            match classify_input(data) {
+                Input::Submit => t.gate.note_submit(),
+                Input::Text => t.gate.draft = true,
+                Input::Clear => t.gate.draft = false,
+                Input::Keys => {}
             }
             match t.session.as_mut() {
                 Some(s) => s.write(data).map_err(|e| e.to_string()),
@@ -1274,7 +1290,7 @@ impl Machine {
     /// Types `text` as one prompt into the newest live tab whose environment holds every pair of
     /// `env`, such as the session answering a Slack thread. Answers whether one took it.
     pub fn deliver(&self, env: &[(String, String)], text: &str) -> bool {
-        self.live_tab(env).is_some_and(|tab| self.type_prompt(&tab, text).is_ok())
+        self.live_tab(env).is_some_and(|tab| self.offer_prompt(&tab, text).is_ok())
     }
 
     fn live_tab(&self, env: &[(String, String)]) -> Option<TabId> {
@@ -1335,7 +1351,7 @@ impl Machine {
             }
             if self.parent_idle(&tab) {
                 if let Some(text) = self.pr_watches.take_wake(&tab) {
-                    let _ = self.type_prompt(&tab, &text);
+                    let _ = self.offer_prompt(&tab, &text);
                 }
             }
         }
@@ -1352,11 +1368,6 @@ impl Machine {
                     s.write(&paste(&held)).map_err(|e| e.to_string())?;
                     t.gate.note_submit();
                 }
-                let accept = !t.gate.busy() && !t.gate.draft && t.status != Some(AgentStatus::Working);
-                if !accept {
-                    t.queued.push(text.to_owned());
-                    return Ok(());
-                }
                 s.write(&paste(text)).map_err(|e| e.to_string())?;
                 t.gate.note_submit();
                 Ok(())
@@ -1367,6 +1378,24 @@ impl Machine {
             }
             None => Err(format!("tab {tab} has no running session")),
         })?
+    }
+
+    /// A prompt pinned sends on someone else's behalf, such as a Slack reply or a pull request
+    /// wake. It waits while a turn is in flight or the user is drafting, and goes in at the
+    /// next turn end, one per turn. The user's own prompts take `type_prompt` and never wait.
+    fn offer_prompt(&self, tab: &str, text: &str) -> Result<(), String> {
+        let waiting = self.tab(tab, |t| {
+            if t.session.is_none() {
+                return Err(format!("tab {tab} has no running session"));
+            }
+            t.queued.push(text.to_owned());
+            t.flush_queued();
+            Ok(!t.queued.is_empty())
+        })??;
+        if waiting {
+            self.arm_notices();
+        }
+        Ok(())
     }
 
     /// Reopens the sessions still going at the last quit, resumed, and returns their tab ids.
@@ -1606,6 +1635,7 @@ impl Machine {
         })?
     }
 
+    /// Starts the once-a-second pass that settles turns and types waiting notices and offers.
     fn arm_notices(&self) {
         if self.notice_loop.swap(true, Ordering::Relaxed) {
             return;
@@ -1619,6 +1649,10 @@ impl Machine {
             }
             let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
             for tab in tabs {
+                let _ = machine.tab(&tab, |t| {
+                    t.gate.settle();
+                    t.flush_queued();
+                });
                 machine.maybe_deliver(&tab);
             }
         });
@@ -2028,34 +2062,36 @@ fn tab_number(id: &str) -> u32 {
     id.trim_start_matches("tab-").parse().unwrap_or(0)
 }
 
-/// Printable text starts a draft. Enter submits. Escape sequences and other control
-/// bytes do neither: focus reports, DA replies, and menu keys must not hold a notice.
-fn classify_input(data: &[u8]) -> (bool, bool) {
+#[derive(Debug, PartialEq)]
+enum Input {
+    /// Enter: whatever was drafted is now a prompt in flight.
+    Submit,
+    /// Printable text the user has not submitted.
+    Text,
+    /// Ctrl-C or Ctrl-U, which empty claude's prompt.
+    Clear,
+    /// Escape sequences and other control bytes: focus reports, DA replies, menu keys.
+    Keys,
+}
+
+/// What a write to the terminal means for a notice. Only text holds one back.
+fn classify_input(data: &[u8]) -> Input {
+    let mut seen = Input::Keys;
     let mut i = 0;
-    let mut text = false;
-    let mut submit = false;
     while i < data.len() {
-        if data[i] == 0x1b {
-            let Some(len) = escape_len(&data[i + 1..]) else { break };
-            i += 1 + len;
-            continue;
+        match data[i] {
+            0x1b => {
+                let Some(len) = escape_len(&data[i + 1..]) else { break };
+                i += len;
+            }
+            b'\r' => return Input::Submit,
+            0x03 | 0x15 => seen = Input::Clear,
+            byte if byte >= 0x20 && byte != 0x7f => seen = Input::Text,
+            _ => {}
         }
-        if data[i] == b'\r' {
-            submit = true;
-            i += 1;
-            continue;
-        }
-        if data[i] < 0x20 || data[i] == 0x7f {
-            i += 1;
-            continue;
-        }
-        text = true;
         i += 1;
     }
-    if submit {
-        text = false;
-    }
-    (text, submit)
+    seen
 }
 
 fn escape_len(rest: &[u8]) -> Option<usize> {
@@ -3563,15 +3599,14 @@ echo '{"type":"result","result":"ok"}'
 
     #[test]
     fn escape_sequences_are_not_a_draft_and_enter_submits() {
-        assert_eq!(classify_input(b"\x1b[I"), (false, false));
-        assert_eq!(classify_input(b"\x1b[O"), (false, false));
-        assert_eq!(classify_input(b"\x1b"), (false, false));
-        assert_eq!(classify_input(b"\x1b[A"), (false, false));
-        assert_eq!(classify_input(b"\x1b[?1;2c"), (false, false));
-        assert_eq!(classify_input(b"\x1b[1;1R"), (false, false));
-        assert_eq!(classify_input(b"xyz"), (true, false));
-        assert_eq!(classify_input(b"\r"), (false, true));
-        assert_eq!(classify_input(b"hi\r"), (false, true));
+        for keys in [&b"\x1b[I"[..], b"\x1b[O", b"\x1b", b"\x1b[A", b"\x1b[?1;2c", b"\x1b[1;1R", b"\x1b]11;rgb:0/0/0\x07"] {
+            assert_eq!(classify_input(keys), Input::Keys, "{keys:?}");
+        }
+        assert_eq!(classify_input(b"xyz"), Input::Text);
+        assert_eq!(classify_input(b"\r"), Input::Submit);
+        assert_eq!(classify_input(b"hi\r"), Input::Submit);
+        assert_eq!(classify_input(b"xyz\x03"), Input::Clear);
+        assert_eq!(classify_input(b"\x15ab"), Input::Text);
     }
 
     #[test]
@@ -3636,6 +3671,36 @@ echo '{"type":"result","result":"ok"}'
         wait_for("the delivery after Done", || read_pty(&file_b).contains("from linear"));
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_file(&file_b);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_users_own_prompt_goes_in_mid_turn_and_after_an_interrupt() {
+        let (m, tab, file) = pty_file("prompt-mid-turn");
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
+        m.type_prompt(&tab, "steer this").unwrap();
+        wait_for("the prompt typed mid-turn", || read_pty(&file).contains("steer this"));
+        m.write_input(&tab, b"\x1b").unwrap();
+        m.type_prompt(&tab, "after esc").unwrap();
+        wait_for("the prompt after an interrupt with no Done", || read_pty(&file).contains("after esc"));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn a_submit_with_no_turn_of_its_own_settles_once_the_tab_sits_at_done() {
+        let mut turn = Turn::default();
+        turn.note_submit();
+        turn.note_working();
+        turn.note_submit();
+        turn.note_terminal();
+        assert!(turn.busy(), "a prompt queued during the turn still waits for its own turn");
+        turn.settle();
+        assert!(turn.busy(), "settling waits for SETTLE");
+        turn.settle = turn.settle.map(|(_, upto)| (Instant::now() - SETTLE, upto));
+        turn.settle();
+        assert!(!turn.busy(), "a menu answer or a folded prompt must not hold the tab forever");
+        turn.note_submit();
+        assert!(turn.busy(), "a submit after the settle is in flight");
     }
 
     #[test]
