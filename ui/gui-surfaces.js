@@ -527,6 +527,46 @@ function prsClick(e) {
 panelBody.addEventListener("click", (e) => {
   if (e.target.closest(".prs, .prs-empty")) prsClick(e);
 });
+
+/** Each project's memories as its machine last sent them, by `machine:path`: `{ list, at }`. */
+const memories = new Map();
+const memoryKey = (tab) => `${tab.machine}:${projectPathOf(tab)}`;
+async function memoryCall(tab, call) {
+  const key = memoryKey(tab);
+  try {
+    memories.set(key, { list: await callOn(tab.machine, { ...call, path: projectPathOf(tab) }), at: Date.now() });
+  } catch (e) {
+    memories.set(key, { list: memories.get(key)?.list ?? [], at: Date.now() });
+    flash(`Couldn't ${call.cmd === "project_memories" ? "read" : "change"} the memory: ${String(e)}`);
+  }
+  if (tab === active && shownSurface(tab)?.kind === "memory") renderPanel();
+}
+/** What the project's orchestrator and its workers start every session with. The agents add to it
+ * as they work, so a panel shown again after a few seconds asks the machine again. */
+function renderMemoryPanel() {
+  const tab = active;
+  const known = memories.get(memoryKey(tab));
+  if (!known || Date.now() - known.at > 5000) memoryCall(tab, { cmd: "project_memories" });
+  const list = known?.list;
+  const rows = !list
+    ? `<p class="memory-empty">Loading…</p>`
+    : list.length
+      ? `<ul class="memory-list">${list.map((m) => `<li><span class="id">#${m.id}</span><span class="text">${esc(m.text)}</span><button type="button" class="ghost" data-forget="${m.id}" title="Forget #${m.id}" aria-label="Forget #${m.id}">${icon("x")}</button></li>`).join("")}</ul>`
+      : `<p class="memory-empty">No memories yet.</p>`;
+  showPanel(`<div class="memory"><p class="memory-about">Every session of the ${esc(projectName(tab))} orchestrator and its workers starts with these.</p>
+    <form class="memory-add"><input name="text" type="text" placeholder="Remember something about this project" aria-label="New memory" autocomplete="off"><button type="submit" class="outline">Add</button></form>${rows}</div>`);
+}
+panelBody.addEventListener("click", (e) => {
+  const forget = e.target.closest(".memory [data-forget]");
+  if (forget && active) memoryCall(active, { cmd: "forget", id: Number(forget.dataset.forget) });
+});
+panelBody.addEventListener("submit", (e) => {
+  const form = e.target.closest(".memory-add");
+  if (!form || !active) return;
+  e.preventDefault();
+  const text = form.elements.text.value.trim();
+  if (text) memoryCall(active, { cmd: "remember", text });
+});
 panelBody.addEventListener("contextmenu", (e) => {
   const row = e.target.closest(".prs [data-prs-open]");
   if (!row || !active) return;

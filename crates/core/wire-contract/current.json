@@ -731,6 +731,84 @@
                 ]
               },
               {
+                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_orchestrator"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "`Vec<projects::Memory>`: what the project's orchestrator and workers keep.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "project_memories"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "`Vec<projects::Memory>` after adding `text` to the project's memory.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remember"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "text"
+                ]
+              },
+              {
+                "description": "`Vec<projects::Memory>` after removing the memory `id`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "forget"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id"
+                ]
+              },
+              {
                 "description": "The new tab's id, running the CLI's login for the account in the account's home.",
                 "type": "object",
                 "properties": {
@@ -5208,6 +5286,84 @@
                 ]
               },
               {
+                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_orchestrator"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "`Vec<projects::Memory>`: what the project's orchestrator and workers keep.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "project_memories"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "`Vec<projects::Memory>` after adding `text` to the project's memory.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remember"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "text"
+                ]
+              },
+              {
+                "description": "`Vec<projects::Memory>` after removing the memory `id`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "forget"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id"
+                ]
+              },
+              {
                 "description": "The new tab's id, running the CLI's login for the account in the account's home.",
                 "type": "object",
                 "properties": {
@@ -9267,6 +9423,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "role": {
+                "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Role"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -9373,6 +9540,21 @@
                 "format": "double"
               }
             }
+          },
+          "Role": {
+            "description": "The part a session plays in its project's orchestration.",
+            "oneOf": [
+              {
+                "description": "Hands every request to workers and keeps the project's memory.",
+                "type": "string",
+                "const": "orchestrator"
+              },
+              {
+                "description": "Does one task the orchestrator delegated.",
+                "type": "string",
+                "const": "worker"
+              }
+            ]
           },
           "AgentEvent": {
             "type": "object",
@@ -11076,6 +11258,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "role": {
+                "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Role"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -11175,6 +11368,21 @@
                 "format": "double"
               }
             }
+          },
+          "Role": {
+            "description": "The part a session plays in its project's orchestration.",
+            "oneOf": [
+              {
+                "description": "Hands every request to workers and keeps the project's memory.",
+                "type": "string",
+                "const": "orchestrator"
+              },
+              {
+                "description": "Does one task the orchestrator delegated.",
+                "type": "string",
+                "const": "worker"
+              }
+            ]
           },
           "AgentEvent": {
             "type": "object",
@@ -16147,6 +16355,17 @@
                 "type": "null"
               }
             ]
+          },
+          "role": {
+            "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Role"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -16253,6 +16472,21 @@
                 "format": "double"
               }
             }
+          },
+          "Role": {
+            "description": "The part a session plays in its project's orchestration.",
+            "oneOf": [
+              {
+                "description": "Hands every request to workers and keeps the project's memory.",
+                "type": "string",
+                "const": "orchestrator"
+              },
+              {
+                "description": "Does one task the orchestrator delegated.",
+                "type": "string",
+                "const": "worker"
+              }
+            ]
           }
         }
       },
@@ -16367,6 +16601,17 @@
                 "type": "null"
               }
             ]
+          },
+          "role": {
+            "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Role"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -16466,6 +16711,21 @@
                 "format": "double"
               }
             }
+          },
+          "Role": {
+            "description": "The part a session plays in its project's orchestration.",
+            "oneOf": [
+              {
+                "description": "Hands every request to workers and keeps the project's memory.",
+                "type": "string",
+                "const": "orchestrator"
+              },
+              {
+                "description": "Does one task the orchestrator delegated.",
+                "type": "string",
+                "const": "worker"
+              }
+            ]
           }
         }
       }
@@ -16742,6 +17002,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "role": {
+                "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Role"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -16848,6 +17119,21 @@
                 "format": "double"
               }
             }
+          },
+          "Role": {
+            "description": "The part a session plays in its project's orchestration.",
+            "oneOf": [
+              {
+                "description": "Hands every request to workers and keeps the project's memory.",
+                "type": "string",
+                "const": "orchestrator"
+              },
+              {
+                "description": "Does one task the orchestrator delegated.",
+                "type": "string",
+                "const": "worker"
+              }
+            ]
           },
           "Reply": {
             "description": "The answer to the call that carried `id`: `{\"id\":4,\"ok\":…}` or `{\"id\":4,\"err\":\"…\"}`.",
@@ -18078,6 +18364,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "role": {
+                "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Role"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -18177,6 +18474,21 @@
                 "format": "double"
               }
             }
+          },
+          "Role": {
+            "description": "The part a session plays in its project's orchestration.",
+            "oneOf": [
+              {
+                "description": "Hands every request to workers and keeps the project's memory.",
+                "type": "string",
+                "const": "orchestrator"
+              },
+              {
+                "description": "Does one task the orchestrator delegated.",
+                "type": "string",
+                "const": "worker"
+              }
+            ]
           },
           "Reply": {
             "description": "The answer to the call that carried `id`: `{\"id\":4,\"ok\":…}` or `{\"id\":4,\"err\":\"…\"}`.",
@@ -19849,6 +20161,84 @@
                   "cmd",
                   "path",
                   "account"
+                ]
+              },
+              {
+                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_orchestrator"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "`Vec<projects::Memory>`: what the project's orchestrator and workers keep.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "project_memories"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "`Vec<projects::Memory>` after adding `text` to the project's memory.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remember"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "text"
+                ]
+              },
+              {
+                "description": "`Vec<projects::Memory>` after removing the memory `id`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "forget"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id"
                 ]
               },
               {
@@ -23165,6 +23555,84 @@
                 "required": [
                   "cmd",
                   "path"
+                ]
+              },
+              {
+                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_orchestrator"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "`Vec<projects::Memory>`: what the project's orchestrator and workers keep.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "project_memories"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "`Vec<projects::Memory>` after adding `text` to the project's memory.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "remember"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "text"
+                ]
+              },
+              {
+                "description": "`Vec<projects::Memory>` after removing the memory `id`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "forget"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id"
                 ]
               },
               {

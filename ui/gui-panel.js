@@ -61,6 +61,7 @@ const SURFACES = {
   terminal: { icon: "square-terminal", label: "Terminal", key: "T" },
   prs: { icon: "link-2", label: "Linked pull requests", key: "L" },
   device: { icon: "smartphone", label: "Device", key: "M" },
+  memory: { icon: "book-open", label: "Memory", key: "Y" },
 };
 
 /** Each thread's right panel: its open surfaces, the one shown, open or closed, maximized, width. */
@@ -176,6 +177,7 @@ const surfaceTitle = (tab, s) => {
   if (s.kind === "terminal") return terminalLabel(terminalsOf(s).active);
   if (s.kind === "prs") return "Pull requests";
   if (s.kind === "device") return s.label ?? s.target?.name ?? "Device";
+  if (s.kind === "memory") return "Memory";
   if (s.kind === "pr") return `#${s.url.match(/\/pull\/(\d+)/)?.[1] ?? "?"}`;
   return s.title || hostOf(s.url) || "Browser";
 };
@@ -223,6 +225,7 @@ function addMenu() {
     { label: "Pull request", icon: "git-pull-request", kbd: "P", disabled: !pr, hint: pr ? `#${pr.number}` : "No pull request in this thread", run: () => openSurface("pr") },
     { label: "Linked pull requests", icon: "link-2", kbd: "L", disabled: !tab, run: () => addSurface(tab, { id: "prs", kind: "prs" }) },
     { label: "Device", icon: "smartphone", kbd: "M", disabled: !tab, run: () => addSurface(tab, panelOf(tab).surfaces.find((x) => x.kind === "device") ?? { id: `device:${Date.now().toString(36)}`, kind: "device" }) },
+    { label: "Memory", icon: "book-open", kbd: "Y", disabled: !tab, run: () => addSurface(tab, { id: "memory", kind: "memory" }) },
   ];
 }
 
@@ -415,6 +418,7 @@ function renderPanel() {
   else if (s.kind === "terminal") renderTerminalPanel(s);
   else if (s.kind === "prs") renderPrsPanel(s);
   else if (s.kind === "device") renderDevicePanel(s);
+  else if (s.kind === "memory") renderMemoryPanel();
   else renderPrPanel(s);
   placePages();
 }

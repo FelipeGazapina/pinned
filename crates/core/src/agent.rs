@@ -1,8 +1,84 @@
 use crate::accounts::AccountId;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 pub const SOCK_ENV: &str = "PINNED_SOCK";
 pub const TAB_ENV: &str = "PINNED_TAB";
+/// Set on a project's orchestrator and its workers, with the project in `PROJECT_ENV`, since a
+/// worker runs in a worktree whose folder is not the project's.
+pub const ROLE_ENV: &str = "PINNED_ROLE";
+pub const PROJECT_ENV: &str = "PINNED_PROJECT";
+
+const ORCHESTRATOR_PROMPT: &str = "You are this project's orchestrator in pinned. You cannot edit files. Hand every piece of work to a worker with the delegate tool, and write each brief so it stands alone: the goal, the files involved, the constraints, and how to verify the result. Workers are threads the user can open and steer; agents lists them. You get a message when a worker finishes or needs input: review what it reports, and tell the user what was done. Save durable facts with remember (the user's preferences, decisions, conventions, architecture facts), remove wrong ones with forget, and follow the memories listed below.";
+const WORKER_PROMPT: &str = "You are a worker of this project's orchestrator in pinned. Do the task you were given fully and verify it. End with a concise report of what changed and how you verified it, which the orchestrator reads. Save durable facts about the project you learn with remember.";
+
+/// The part a session plays in its project's orchestration.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Role {
+    /// Hands every request to workers and keeps the project's memory.
+    Orchestrator,
+    /// Does one task the orchestrator delegated.
+    Worker,
+}
+
+impl Role {
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::Orchestrator => "orchestrator",
+            Role::Worker => "worker",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Role> {
+        [Role::Orchestrator, Role::Worker].into_iter().find(|r| r.name() == name)
+    }
+
+    /// What the role's sessions are told on top of Claude Code's own system prompt.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            Role::Orchestrator => ORCHESTRATOR_PROMPT,
+            Role::Worker => WORKER_PROMPT,
+        }
+    }
+
+    pub fn disallowed_tools(self) -> &'static [&'static str] {
+        match self {
+            Role::Orchestrator => &["Edit", "Write", "NotebookEdit"],
+            Role::Worker => &[],
+        }
+    }
+
+    pub fn may(self, tool: &ProjectTool) -> bool {
+        self == Role::Orchestrator || !matches!(tool, ProjectTool::Delegate { .. } | ProjectTool::Agents)
+    }
+}
+
+/// The role and project a session's environment names, for an orchestrator's or a worker's session.
+pub fn role_of(env: &[(String, String)]) -> Option<(Role, PathBuf)> {
+    let var = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+    Some((Role::parse(var(ROLE_ENV)?)?, PathBuf::from(var(PROJECT_ENV)?)))
+}
+
+pub fn role_env(role: Role, project: &Path) -> Vec<(String, String)> {
+    vec![(ROLE_ENV.to_owned(), role.name().to_owned()), (PROJECT_ENV.to_owned(), project.display().to_string())]
+}
+
+/// What an orchestrator or a worker asks of its project through pinned's MCP tools.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(tag = "tool", rename_all = "kebab-case")]
+pub enum ProjectTool {
+    /// Starts a worker on `task`, in a worktree of its own when the project is a git repository.
+    Delegate {
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    Agents,
+    Remember { text: String },
+    Forget { id: u64 },
+    Memories,
+}
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";
 pub const ISSUE_ENV: &str = "PINNED_ISSUE";
@@ -161,6 +237,11 @@ pub enum Message {
     Remind { message: String, when: When },
     ListReminders,
     CancelReminder { id: u64 },
+    Project {
+        tab: String,
+        #[serde(flatten)]
+        tool: ProjectTool,
+    },
     Usage {
         #[serde(flatten)]
         usage: Usage,
@@ -186,6 +267,27 @@ mod tests {
         );
         assert_eq!(report.over(known, 1792400000).five_hour, None);
         assert_eq!(Usage::default().over(known, 1792400000), Usage { five_hour: None, seven_day: known.seven_day });
+    }
+
+    #[test]
+    fn a_project_tool_message_names_the_tab_and_the_tool() {
+        let line = r#"{"kind":"project","tab":"tab-3","tool":"delegate","task":"Add a --json flag","title":"JSON output"}"#;
+        let message: Message = serde_json::from_str(line).unwrap();
+        let delegate = ProjectTool::Delegate { task: "Add a --json flag".into(), title: Some("JSON output".into()) };
+        assert!(matches!(&message, Message::Project { tab, tool } if tab == "tab-3" && *tool == delegate));
+        assert_eq!(serde_json::to_string(&message).unwrap(), line);
+        let forget: Message = serde_json::from_str(r#"{"kind":"project","tab":"tab-3","tool":"forget","id":2}"#).unwrap();
+        assert!(matches!(forget, Message::Project { tool: ProjectTool::Forget { id: 2 }, .. }));
+        assert!(Role::Worker.may(&ProjectTool::Memories) && !Role::Worker.may(&delegate) && Role::Orchestrator.may(&delegate));
+    }
+
+    #[test]
+    fn a_sessions_environment_names_its_role_and_project() {
+        let env = [vec![(CONNECTOR_ENV.to_owned(), "c1".to_owned())], role_env(Role::Worker, Path::new("/repo"))].concat();
+        assert_eq!(env[1..], [("PINNED_ROLE".to_owned(), "worker".to_owned()), ("PINNED_PROJECT".to_owned(), "/repo".to_owned())]);
+        assert_eq!(role_of(&env), Some((Role::Worker, PathBuf::from("/repo"))));
+        assert_eq!(role_of(&[("PINNED_ROLE".into(), "boss".into()), ("PINNED_PROJECT".into(), "/repo".into())]), None);
+        assert_eq!(role_of(&[("PINNED_ROLE".into(), "orchestrator".into())]), None, "a role without its project");
     }
 
     #[test]

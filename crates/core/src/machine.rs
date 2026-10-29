@@ -1,5 +1,5 @@
 use crate::accounts::{self, Account, Accounts, Provider};
-use crate::agent::{session_of, AgentEvent, AgentStatus, Message, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
+use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, FileServer, Shells};
@@ -59,7 +59,7 @@ impl Launch {
         let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
         let mcp_config = files.join("claude-mcp.json");
-        reminders::write_mcp_config(&mcp_config, exe)?;
+        reminders::write_mcp_config(&mcp_config, exe, true)?;
         let plugin_dir = files.join("plugin");
         let tutorial_helper = plugin::install(&plugin_dir)?;
         let path_env = login_shell_path().or_else(|| std::env::var("PATH").ok());
@@ -259,6 +259,7 @@ impl Tab {
             updated: self.updated,
             session: self.claude_session.clone(),
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
+            role: role_of(&self.env).map(|(role, _)| role),
         }
     }
 }
@@ -433,6 +434,18 @@ impl Machine {
                 json(self.accounts.remove(&account)?)
             }
             Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
+            Call::OpenOrchestrator { path } => json(self.open_orchestrator(&path)?),
+            Call::ProjectMemories { path } => json(self.memories(&canonical(&path))),
+            Call::Remember { path, text } => {
+                let path = canonical(&path);
+                self.change_memory(&path, None, "added", |p| p.remember(&text, unix_now()))?;
+                json(self.memories(&path))
+            }
+            Call::Forget { path, id } => {
+                let path = canonical(&path);
+                self.change_memory(&path, None, "removed", |p| p.forget(id))?;
+                json(self.memories(&path))
+            }
             Call::SignIn { account } => json(self.sign_in(&account)?),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from } => json(self.thread(&tab, from)?),
@@ -800,8 +813,20 @@ impl Machine {
             (t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass)
         })?;
         let mut args = args;
+        let mut prompt = vec![];
         if self.device_agents.as_ref().is_some_and(|f| f.exists()) {
-            args.extend(["--append-system-prompt".to_owned(), crate::device::AGENT_PROMPT.to_owned()]);
+            prompt.push(crate::device::AGENT_PROMPT.to_owned());
+        }
+        if let Some((role, project)) = role_of(&env) {
+            if !role.disallowed_tools().is_empty() {
+                // --disallowedTools takes any number of values, so the prompt's flag after it keeps it from swallowing the rest.
+                args.push("--disallowedTools".to_owned());
+                args.extend(role.disallowed_tools().iter().map(|t| t.to_string()));
+            }
+            prompt.extend([role.prompt().to_owned(), projects::render(&self.memories(&project))].into_iter().filter(|p| !p.is_empty()));
+        }
+        if !prompt.is_empty() {
+            args.extend(["--append-system-prompt".to_owned(), prompt.join("\n\n")]);
         }
         self.save_sessions();
         let env = [self.accounts.env(&account), env].concat();
@@ -1100,16 +1125,137 @@ impl Machine {
         if let Some(id) = account.as_deref().filter(|id| self.accounts.get(id).is_none()) {
             return Err(format!("no account {id} on this machine"));
         }
-        let path = dunce::canonicalize(path).unwrap_or_else(|_| path.into());
-        {
-            let mut projects = self.projects.lock().unwrap();
-            let project = projects.iter_mut().find(|p| p.path == path).ok_or_else(|| format!("{} is not a project on this machine", path.display()))?;
-            project.account = account;
-            if let Some(file) = &self.projects_file {
-                projects::save(file, &projects);
-            }
-        }
+        let path = canonical(path);
+        self.change_project(&path, |p| {
+            p.account = account;
+            Ok(())
+        })?;
         Ok(self.project_view(&path))
+    }
+
+    fn change_project<R>(&self, path: &Path, change: impl FnOnce(&mut projects::Project) -> Result<R, String>) -> Result<R, String> {
+        let mut projects = self.projects.lock().unwrap();
+        let project = projects.iter_mut().find(|p| p.path == path).ok_or_else(|| format!("{} is not a project on this machine", path.display()))?;
+        let changed = change(project)?;
+        if let Some(file) = &self.projects_file {
+            projects::save(file, &projects);
+        }
+        Ok(changed)
+    }
+
+    /// Applies `change` to the project's memory. A running orchestrator that did not make the
+    /// change is told: its prompt keeps the memory it started with, and a resume replays that.
+    fn change_memory(&self, project: &Path, by: Option<Role>, verb: &str, change: impl FnOnce(&mut projects::Project) -> Result<projects::Memory, String>) -> Result<projects::Memory, String> {
+        let memory = self.change_project(project, change)?;
+        if let Some(orchestrator) = self.live_tab(&role_env(Role::Orchestrator, project)).filter(|_| by != Some(Role::Orchestrator)) {
+            let _ = self.type_prompt(&orchestrator, &format!("[pinned] Project memory changed: {verb} #{} \"{}\"", memory.id, memory.text));
+        }
+        Ok(memory)
+    }
+
+    fn memories(&self, project: &Path) -> Vec<projects::Memory> {
+        self.projects.lock().unwrap().iter().find(|p| p.path == project).map(|p| p.memories.clone()).unwrap_or_default()
+    }
+
+    /// The project's orchestrator tab: the one already open, else a new one, not yet started.
+    pub fn open_orchestrator(&self, path: &str) -> Result<TabId, String> {
+        if !Path::new(path).is_dir() {
+            return Err(format!("{path} is not a folder on this machine"));
+        }
+        let project = self.open_project(path.into());
+        let open = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env) == Some((Role::Orchestrator, project.clone()))).map(|(id, _)| id.clone()).min_by_key(|id| tab_number(id));
+        if let Some(id) = open {
+            return Ok(id);
+        }
+        let account = self.account_for(None, &project)?;
+        // Its tools and its workers' reports reach it through pinned's MCP server and hooks, which only Claude Code loads.
+        if !account.provider.spec().harness {
+            return Err(format!("account {} runs {}, which can't be a project's orchestrator", account.id, account.provider.spec().name));
+        }
+        let id = self.add_tab(project.clone(), account, vec![], role_env(Role::Orchestrator, &project), false, None);
+        self.emit_tabs();
+        Ok(id)
+    }
+
+    fn project_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
+        let (role, project) = self.tab(tab, |t| role_of(&t.env))?.ok_or("only a project's orchestrator and its workers have this tool")?;
+        if !role.may(&tool) {
+            return Err("only the project's orchestrator has this tool".into());
+        }
+        match tool {
+            ProjectTool::Delegate { task, title } => self.delegate(tab, &project, task, title),
+            ProjectTool::Agents => Ok(self.workers(&project)),
+            ProjectTool::Remember { text } => Ok(format!("Remembered #{}.", self.change_memory(&project, Some(role), "added", |p| p.remember(&text, unix_now()))?.id)),
+            ProjectTool::Forget { id } => self.change_memory(&project, Some(role), "removed", |p| p.forget(id)).map(|_| format!("Forgot #{id}.")),
+            ProjectTool::Memories => Ok(Some(projects::render(&self.memories(&project))).filter(|m| !m.is_empty()).unwrap_or_else(|| "No memories yet.".into())),
+        }
+    }
+
+    /// Opens a worker tab on the project of the orchestrator `from`, in a new worktree when the
+    /// project is a git repository, starts it on `task`, and says which tab it is.
+    fn delegate(&self, from: &str, project: &Path, task: String, title: Option<String>) -> Result<String, String> {
+        let bypass = self.tab(from, |t| t.bypass)?;
+        let account = self.account_for(None, project)?;
+        let made = project.join(".git").exists().then(|| branches::new_worktree(project, self.launch.path_env.as_deref())).transpose()?;
+        let cwd = made.clone().unwrap_or_else(|| project.to_owned());
+        // A thread is titled after its prompt's first line, so the title leads the prompt.
+        let prompt = title.as_ref().map_or_else(|| task.clone(), |t| format!("{t}\n\n{task}"));
+        // A prompt starting with a dash would read as an option.
+        let prompt = if prompt.starts_with('-') { format!("\n{prompt}") } else { prompt };
+        let launch = title.iter().flat_map(|t| ["--name".to_owned(), t.clone()]).chain([prompt]).collect();
+        let id = self.add_tab(cwd.clone(), account, launch, role_env(Role::Worker, project), bypass, None);
+        self.tab(&id, |t| t.made = made.clone())?;
+        if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
+            self.close_tab(&id);
+            if let Some(made) = made {
+                branches::drop_worktree(&made, self.launch.path_env.as_deref());
+            }
+            return Err(e);
+        }
+        if title.is_some() {
+            self.tab(&id, |t| t.title = title)?;
+            self.emit_tabs();
+        }
+        Ok(format!("Started worker {id} in {}. You get a message when it finishes or needs input.", cwd.display()))
+    }
+
+    fn workers(&self, project: &Path) -> String {
+        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id)).collect();
+        workers.sort_by_key(|w| w.opened);
+        if workers.is_empty() {
+            return "No workers yet.".into();
+        }
+        let state = |w: &TabView| match (w.running, w.status) {
+            (false, _) => "stopped",
+            (true, None) => "starting",
+            (true, Some(status)) => AgentStatus::ALL.iter().find(|(s, ..)| *s == status).map_or("", |(_, name, _)| name),
+        };
+        workers.iter().map(|w| format!("{}: {} ({}) in {}", w.id, w.title.as_deref().unwrap_or("untitled"), state(w), w.cwd)).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Types a worker's news into its project's running orchestrator: that it finished, with its
+    /// last message, that it needs input, or that its turn failed. Dropped when no orchestrator runs.
+    fn report_to_orchestrator(&self, worker: &str, project: &Path, event: &AgentEvent, before: Option<AgentStatus>) {
+        let title = self.tab(worker, |t| t.title.clone()).ok().flatten().unwrap_or_else(|| "untitled".into());
+        let what = match event.status {
+            AgentStatus::Done => {
+                let said = self.transcript(worker).ok().and_then(|file| thread::read(&file, 0).ok()).and_then(|page| {
+                    page.items.into_iter().rev().find_map(|item| match item {
+                        thread::Item::Text { text, .. } => Some(text),
+                        _ => None,
+                    })
+                });
+                format!("finished. Its last message:\n\n{}", truncate(&said.unwrap_or_else(|| "(none)".into()), REPORT_CHARS))
+            }
+            // Claude says it waits for input a while after every finished turn too.
+            AgentStatus::NeedsInput if before == Some(AgentStatus::Done) => return,
+            AgentStatus::NeedsInput => format!("needs input: {}", event.message.as_deref().unwrap_or("it is waiting")),
+            AgentStatus::Failed => format!("stopped on an error: {}", event.message.as_deref().unwrap_or("unknown")),
+            AgentStatus::Working => return,
+        };
+        if let Some(orchestrator) = self.live_tab(&role_env(Role::Orchestrator, project)) {
+            let _ = self.type_prompt(&orchestrator, &format!("[pinned] Worker {worker} \"{title}\" {what}"));
+        }
     }
 
     /// The projects this machine syncs: the most recently opened checkout of each git origin.
@@ -1268,8 +1414,8 @@ impl Machine {
         self.usage.lock().unwrap().clone()
     }
 
-    /// Answers the hook socket. Hook events and usage update the tabs; every other message, a
-    /// connector session's callbacks and the reminders tools, goes to `other`.
+    /// Answers the hook socket. Hook events and usage update the tabs and project tools act on
+    /// them; every other message, a connector session's callbacks and the reminders tools, goes to `other`.
     pub fn listen(&self, other: impl Fn(Message) -> Result<String, String> + Send + Sync + 'static) -> std::io::Result<()> {
         let me = self.me.clone();
         hooks::listen(self.launch.sock.clone(), move |message| {
@@ -1290,6 +1436,7 @@ impl Machine {
                     machine.emit(Event::Usage { usage, account });
                     Ok(String::new())
                 }
+                Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 message => other(message),
             }
         })
@@ -1305,7 +1452,11 @@ impl Machine {
     fn record_event(&self, event: AgentEvent) {
         if let Some(tab) = &event.tab {
             let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
+            let (before, role) = self.tab(tab, |t| (t.status, role_of(&t.env))).unwrap_or_default();
             self.record_status(tab, &event);
+            if let Some((Role::Worker, project)) = role {
+                self.report_to_orchestrator(tab, &project, &event, before);
+            }
             self.record_turn(tab, &event);
             let turn_ended = matches!(event.status, AgentStatus::Done | AgentStatus::Failed);
             if new_session || turn_ended {
@@ -1396,7 +1547,9 @@ impl Machine {
                 t.tally = Tally::default();
             }
             let mut changed = new;
-            if let Some(worktree) = reported_cwd.and_then(|c| sessions::worktree(&t.cwd, Path::new(c))) {
+            // An orchestrator steps into its workers' worktrees to review them, and stays in the project.
+            let orchestrator = role_of(&t.env).is_some_and(|(role, _)| role == Role::Orchestrator);
+            if let Some(worktree) = reported_cwd.filter(|_| !orchestrator).and_then(|c| sessions::worktree(&t.cwd, Path::new(c))) {
                 t.cwd = worktree;
                 changed = true;
             }
@@ -1633,6 +1786,20 @@ impl Machine {
 
 fn json<T: Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
+}
+
+fn canonical(path: &str) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.into())
+}
+
+/// Most of a worker's last message an orchestrator is sent; the rest stays in the worker's thread.
+const REPORT_CHARS: usize = 4000;
+
+fn truncate(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}\n[cut short: the whole message is in the worker's thread]", &text[..cut]),
+        None => text.to_owned(),
+    }
 }
 
 fn tab_number(id: &str) -> u32 {
@@ -2787,5 +2954,223 @@ mod tests {
         assert_eq!(repo_name("https://github.com/acme/app/"), Some("app"));
         assert_eq!(repo_name("git@host:app.git"), Some("app"));
         assert_eq!(repo_name("https://github.com/acme/.."), None);
+    }
+
+    /// A fake `claude` that records, for each start, its folder, role, project and arguments in
+    /// `<claude>.<tab>`, NUL-separated since a prompt holds newlines.
+    #[cfg(unix)]
+    fn recording_claude(dir: &Path) -> PathBuf {
+        let claude = dir.join("claude");
+        let script = "#!/bin/sh\nprintf '%s\\0' \"$(pwd -P)\" \"$PINNED_ROLE\" \"$PINNED_PROJECT\" \"$@\" > \"$0.tmp.$PINNED_TAB\" && mv \"$0.tmp.$PINNED_TAB\" \"$0.$PINNED_TAB\"\nexec sleep 30\n";
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    #[cfg(unix)]
+    fn started(claude: &Path, tab: &str) -> Vec<String> {
+        let file = PathBuf::from(format!("{}.{tab}", claude.display()));
+        wait_for("claude to start", || file.exists());
+        let text = std::fs::read_to_string(&file).unwrap();
+        let _ = std::fs::remove_file(file);
+        text.trim_end_matches('\0').split('\0').map(String::from).collect()
+    }
+
+    #[cfg(unix)]
+    fn ask(sock: &Path, line: &str) -> Result<String, String> {
+        use std::io::{BufRead, Write};
+        let mut stream = crate::ipc::UnixStream::connect(sock).unwrap();
+        writeln!(stream, "{line}").unwrap();
+        let mut reply = String::new();
+        std::io::BufReader::new(stream).read_line(&mut reply).unwrap();
+        serde_json::from_str(&reply).unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_orchestrator_cannot_edit_and_starts_with_one_prompt_holding_the_projects_memory() {
+        let dir = temp("orchestrator-args");
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        let claude = recording_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.call(Call::DeviceAgents { allow: Some(true) }).unwrap();
+        let path = project.display().to_string();
+        let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
+        let remembered = m.call(Call::Remember { path: path.clone(), text: " Use pnpm, not npm. ".into() }).unwrap();
+        assert_eq!((&remembered[0]["id"], &remembered[0]["text"]), (&json!(1), &json!("Use pnpm, not npm.")));
+        m.start_claude(&tab, 80, 24).unwrap();
+        let args = started(&claude, &tab);
+        let prompt = format!("{}\n\n{}\n\nProject memory, by id:\n- [1] Use pnpm, not npm.", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt());
+        assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt", &prompt]);
+        assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
+        let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
+        m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None });
+        assert_eq!(m.view(&tab).unwrap().cwd, path, "reviewing a worker's worktree moved the orchestrator into it");
+        assert_eq!(m.call(Call::Forget { path: path.clone(), id: 1 }), Ok(json!([])));
+        assert_eq!(m.call(Call::Forget { path, id: 1 }), Err(format!("no memory #1 in {}", project.display())));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_projects_orchestrator_opens_once_and_only_under_claude_code() {
+        let root = temp("orchestrator-once");
+        let m = accounts_machine(&root);
+        let (app, api, side) = (root.join("app"), root.join("api"), root.join("side"));
+        for p in [&app, &api, &side] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let open = |p: &Path| m.call(Call::OpenOrchestrator { path: p.display().to_string() });
+        assert_eq!(open(&app), Ok(json!("tab-1")));
+        assert_eq!(open(&app), Ok(json!("tab-1")), "a second orchestrator opened for the project");
+        assert_eq!(open(&api), Ok(json!("tab-2")));
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        m.open_project(side.clone());
+        m.call(Call::SetProjectAccount { path: side.display().to_string(), account: Some("side".into()) }).unwrap();
+        assert_eq!(open(&side), Err("account side runs Codex, which can't be a project's orchestrator".into()));
+        assert_eq!(open(&root.join("gone")), Err(format!("{} is not a folder on this machine", root.join("gone").display())));
+        assert_eq!(m.tabs().len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_resumed_orchestrator_starts_with_its_role_and_memory_again() {
+        let dir = temp("orchestrator-resume");
+        let (project, config) = (dir.join("app"), dir.join("config"));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        let path = project.display().to_string();
+        std::fs::write(config.join("projects.json"), json!([{ "path": path, "memories": [{ "id": 4, "text": "Deploys go through Railway.", "created": 1 }] }]).to_string()).unwrap();
+        let env = json!([["PINNED_ROLE", "orchestrator"], ["PINNED_PROJECT", path]]);
+        std::fs::write(config.join("sessions.json"), json!([{ "cwd": path, "session": "s1", "env": env }]).to_string()).unwrap();
+        let claude = recording_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let tabs = m.restore_tabs();
+        m.start_claude(&tabs[0], 80, 24).unwrap();
+        let prompt = format!("{}\n\nProject memory, by id:\n- [4] Deploys go through Railway.", Role::Orchestrator.prompt());
+        assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt", &prompt]);
+        assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_orchestrator_delegates_to_workers_each_in_its_own_worktree() {
+        let dir = temp("delegate");
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        git(&project, &["init", "-q", "-b", "main"]);
+        git(&project, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let claude = recording_claude(&dir);
+        let sock = dir.join("pinned.sock");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = project.display().to_string();
+        let orchestrator = m.open_orchestrator(&path).unwrap();
+        let plain = m.open_tab(Some(path.clone()), false).unwrap();
+        let tool = |tab: &str, tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}",{tool}}}"#));
+        let delegate = r#""tool":"delegate","task":"Add a --json flag to the CLI.","title":"JSON output""#;
+        let worker_of = |reply: &str| reply.strip_prefix("Started worker ").and_then(|r| r.split(' ').next()).unwrap().to_owned();
+
+        assert_eq!(tool(&plain, delegate), Err("only a project's orchestrator and its workers have this tool".into()));
+        let reply = tool(&orchestrator, delegate).unwrap();
+        let worker = worker_of(&reply);
+        let args = started(&claude, &worker);
+        let tree = PathBuf::from(&args[0]);
+        assert_eq!(tree.parent(), Some(project.join(".claude/worktrees").as_path()), "{}", tree.display());
+        assert!(tree.file_name().unwrap().to_str().unwrap().starts_with("pinned-"));
+        assert_eq!(reply, format!("Started worker {worker} in {}. You get a message when it finishes or needs input.", tree.display()));
+        assert_eq!(args[1..], ["worker", &path, "--settings", "s", "--plugin-dir", "p", "--name", "JSON output", "JSON output\n\nAdd a --json flag to the CLI.", "--append-system-prompt", Role::Worker.prompt()]);
+        let view = m.view(&worker).unwrap();
+        assert_eq!((view.role, view.title.as_deref(), view.running), (Some(Role::Worker), Some("JSON output"), true));
+
+        let second = worker_of(&tool(&orchestrator, r#""tool":"delegate","task":"- Fix the README typo.""#).unwrap());
+        let args = started(&claude, &second);
+        assert_ne!(args[0], tree.display().to_string(), "two workers share a checkout");
+        assert_eq!(args[7..9], ["\n- Fix the README typo.", "--append-system-prompt"]);
+
+        assert_eq!(tool(&worker, delegate), Err("only the project's orchestrator has this tool".into()));
+        assert_eq!(tool(&worker, r#""tool":"remember","text":"The CLI parses flags with clap.""#), Ok("Remembered #1.".into()));
+        assert_eq!(tool(&orchestrator, r#""tool":"memories""#), Ok("Project memory, by id:\n- [1] The CLI parses flags with clap.".into()));
+        assert_eq!(tool(&orchestrator, r#""tool":"forget","id":7"#), Err(format!("no memory #7 in {path}")));
+        assert_eq!(
+            tool(&orchestrator, r#""tool":"agents""#),
+            Ok(format!("{worker}: JSON output (starting) in {}\n{second}: untitled (starting) in {}", tree.display(), args[0]))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_news_is_typed_into_its_projects_running_orchestrator() {
+        let root = temp("report");
+        let config = root.join("config");
+        std::fs::create_dir_all(config.join("accounts/work/projects/-app")).unwrap();
+        std::fs::write(config.join("accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
+        let transcript = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-10-29T10:00:00Z","message":{"content":"Add a --json flag."}}"#,
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2026-10-29T10:01:00Z","message":{"content":[{"type":"text","text":"Reading src/cli.rs first."}]}}"#,
+            r#"{"type":"assistant","uuid":"a2","timestamp":"2026-10-29T10:05:00Z","message":{"content":[{"type":"text","text":"Added --json in src/cli.rs; all 12 tests pass."}]}}"#,
+        ];
+        std::fs::write(config.join("accounts/work/projects/-app/s1.jsonl"), transcript.map(|l| l.to_owned() + "\n").concat()).unwrap();
+        let file = root.join("typed.bin");
+        let m = Machine::new(launch(), Some(config), None, |_| {});
+        let app = Path::new("/work/app");
+        let orchestrator = running(&m, role_env(Role::Orchestrator, app), &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&orchestrator, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        let work = m.accounts.get("work").unwrap();
+        let worker = m.add_tab("/work/app/.claude/worktrees/pinned-1".into(), work.clone(), vec![], role_env(Role::Worker, app), false, Some("s1".into()));
+        let elsewhere = m.add_tab("/work/api".into(), work, vec![], role_env(Role::Worker, Path::new("/work/api")), false, Some("s1".into()));
+        m.tab(&worker, |t| t.title = Some("JSON output".into())).unwrap();
+        let event = |tab: &str, status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: None, snapshot: None };
+
+        m.record_event(event(&worker, AgentStatus::Working, None));
+        m.record_event(event(&worker, AgentStatus::NeedsInput, Some("Claude needs your permission to use Bash")));
+        m.record_event(event(&worker, AgentStatus::Done, None));
+        m.record_event(event(&worker, AgentStatus::NeedsInput, Some("Claude is waiting for your input")));
+        m.record_event(event(&elsewhere, AgentStatus::Done, None));
+        let expected = format!(
+            "\x1b[200~[pinned] Worker {worker} \"JSON output\" needs input: Claude needs your permission to use Bash\x1b[201~\r\
+             \x1b[200~[pinned] Worker {worker} \"JSON output\" finished. Its last message:\n\nAdded --json in src/cli.rs; all 12 tests pass.\x1b[201~\r"
+        );
+        wait_for("the reports", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
+        assert_eq!(truncate("añb", 2), "añ\n[cut short: the whole message is in the worker's thread]");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_memory_change_the_orchestrator_did_not_make_is_typed_into_it() {
+        let root = temp("memory-note");
+        let (sock, file) = (root.join("pinned.sock"), root.join("typed.bin"));
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(root.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let app = m.open_project("/work/app".into());
+        let path = app.display().to_string();
+        let orchestrator = running(&m, role_env(Role::Orchestrator, &app), &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&orchestrator, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        let worker = m.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &app), false, None);
+        let remember = |tab: &str, text: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":"remember","text":"{text}"}}"#));
+
+        m.call(Call::Remember { path: path.clone(), text: "Use pnpm, not npm.".into() }).unwrap();
+        assert_eq!(remember(&worker, "The CLI parses flags with clap."), Ok("Remembered #2.".into()));
+        assert_eq!(remember(&orchestrator, "Deploys go through Railway."), Ok("Remembered #3.".into()));
+        m.call(Call::Forget { path, id: 1 }).unwrap();
+        let expected = "\x1b[200~[pinned] Project memory changed: added #1 \"Use pnpm, not npm.\"\x1b[201~\r\
+                        \x1b[200~[pinned] Project memory changed: added #2 \"The CLI parses flags with clap.\"\x1b[201~\r\
+                        \x1b[200~[pinned] Project memory changed: removed #1 \"Use pnpm, not npm.\"\x1b[201~\r";
+        wait_for("the notes", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
