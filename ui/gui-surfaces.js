@@ -549,6 +549,7 @@ async function refreshMemory(tab) {
   try {
     const [hits, status] = await Promise.all([callOn(tab.machine, { cmd: "memory_search", path, query, limit: 50 }), callOn(tab.machine, { cmd: "memory_status", path })]);
     if (m.query === query) Object.assign(m, { hits, status });
+    else m.again = true;
   } catch (e) {
     m.hits ??= [];
     flash(`Couldn't read the memory: ${String(e)}`);

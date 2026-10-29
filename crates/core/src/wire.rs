@@ -557,6 +557,10 @@ impl Call {
                 | Call::PublishProject { .. }
                 | Call::BusyShells { .. }
                 | Call::SearchThreads { .. }
+                | Call::MemorySearch { .. }
+                | Call::MemorySave { .. }
+                | Call::MemoryForget { .. }
+                | Call::MemoryStatus { .. }
         )
     }
 }

@@ -1453,9 +1453,10 @@ impl Machine {
             let Some(machine) = me.upgrade() else { return Err("pinned is shutting down".into()) };
             match message {
                 Message::Agent(event) => {
-                    let context = machine.recall(&event);
-                    machine.record_event(event);
-                    Ok(context)
+                    // Recorded first: recall can wait on a memory store, and a turn's later events
+                    // must not land before this one.
+                    machine.record_event(event.clone());
+                    Ok(machine.recall(&event))
                 }
                 Message::Usage { usage: report, account } => {
                     let account = account.unwrap_or_else(accounts::default_account);
