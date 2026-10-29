@@ -893,6 +893,45 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[test]
+    fn an_isolated_task_drops_its_worktree_after_the_task_lock() {
+        let root = std::env::temp_dir().join(format!("pinned-wt-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let status = std::process::Command::new("git").args(args).current_dir(dir).status().unwrap();
+            assert!(status.success(), "git {args:?} in {} failed", dir.display());
+        };
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let dir = crate::branches::new_worktree(&root, None).unwrap();
+        let delegates = Arc::new(Delegates::default());
+        let task = delegates.begin(NewTask {
+            parent: Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Look".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: dir.clone(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: true,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        let status_of = delegates.clone();
+        let id = task.id.clone();
+        let waiting = std::thread::spawn(move || {
+            status_of.status(&Caller { tab: Some("tab-1".into()), task: None }, &id).map(|value| value["workState"].as_str().unwrap_or("").to_owned())
+        });
+        delegates.apply(&task.id, ChildEvent::Exited { code: Some(1), stderr: String::new() }, None);
+        assert!(waiting.join().unwrap().is_ok(), "status waited behind the worktree remove");
+        assert!(!dir.exists(), "the isolated worktree was kept");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_new_registry_does_not_reuse_task_ids() {
         let first = new_cursor(&Delegates::default(), Mode::Async).id;
         let second = new_cursor(&Delegates::default(), Mode::Async).id;

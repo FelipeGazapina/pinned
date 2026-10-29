@@ -107,44 +107,58 @@ impl Delegates {
     }
 
     pub fn fail(&self, id: &str, error: String, path: Option<&str>) {
-        let mut tasks = self.tasks.lock().unwrap();
-        if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
-            if !task.state.terminal() {
-                task.state = WorkState::Failed;
-                task.error = Some(error);
-                task.ended = Some(unix_millis());
-                drop_isolated(task, path);
+        let dir = {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(task) = tasks.iter_mut().find(|task| task.id == id) else { return };
+            if task.state.terminal() {
+                return;
             }
+            task.state = WorkState::Failed;
+            task.error = Some(error);
+            task.ended = Some(unix_millis());
+            isolated_cwd(task)
+        };
+        if let Some(dir) = dir {
+            crate::branches::drop_worktree(&dir, path);
         }
     }
 
     /// Applies one child event. Returns the parent tab when a task just became deliverable.
     pub fn apply(&self, id: &str, event: ChildEvent, path: Option<&str>) -> Option<String> {
-        let mut tasks = self.tasks.lock().unwrap();
-        let index = tasks.iter().position(|task| task.id == id)?;
-        let held = match event {
-            ChildEvent::Line(line) => {
-                let provider = tasks[index].provider;
-                let events = (driver(provider).parse)(&line);
-                let mut held = None;
-                for event in events {
-                    if let Some(next) = tasks[index].note(event) {
-                        held = Some(next);
+        let (ready, dirs) = {
+            let mut tasks = self.tasks.lock().unwrap();
+            let index = tasks.iter().position(|task| task.id == id)?;
+            let held = match event {
+                ChildEvent::Line(line) => {
+                    let provider = tasks[index].provider;
+                    let events = (driver(provider).parse)(&line);
+                    let mut held = None;
+                    for event in events {
+                        if let Some(next) = tasks[index].note(event) {
+                            held = Some(next);
+                        }
                     }
+                    held
                 }
-                held
+                ChildEvent::Exited { code, stderr } => tasks[index].exited(code, stderr),
+            };
+            if let Some(held) = held {
+                settle(&mut tasks, index, held);
             }
-            ChildEvent::Exited { code, stderr } => tasks[index].exited(code, stderr),
+            let mut dirs = release(&mut tasks);
+            if let Some(dir) = isolated_cwd(&tasks[index]) {
+                if !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+            let id = tasks[index].id.clone();
+            let ready = chain_ready(&tasks, &id).then(|| root_tab(&tasks, tasks[index].parent.clone())).flatten();
+            (ready, dirs)
         };
-        if let Some(held) = held {
-            settle(&mut tasks, index, held);
+        for dir in dirs {
+            crate::branches::drop_worktree(&dir, path);
         }
-        if tasks[index].state.terminal() {
-            drop_isolated(&tasks[index], path);
-        }
-        release(&mut tasks, path);
-        let id = tasks[index].id.clone();
-        chain_ready(&tasks, &id).then(|| root_tab(&tasks, tasks[index].parent.clone())).flatten()
+        ready
     }
 
     pub fn started_json(&self, id: &str) -> Result<Value, String> {
@@ -222,7 +236,7 @@ impl Delegates {
     }
 
     fn stop_one(&self, id: &str, reason: &str, path: Option<&str>) {
-        let pid = {
+        let (pid, dir) = {
             let mut tasks = self.tasks.lock().unwrap();
             let Some(task) = tasks.iter_mut().find(|task| task.id == id) else { return };
             if task.state.terminal() {
@@ -231,9 +245,13 @@ impl Delegates {
             task.state = WorkState::Cancelled;
             task.error = Some(reason.to_owned());
             task.ended = Some(unix_millis());
-            drop_isolated(task, path);
-            self.pids.lock().unwrap().remove(id)
+            let dir = isolated_cwd(task);
+            let pid = self.pids.lock().unwrap().remove(id);
+            (pid, dir)
         };
+        if let Some(dir) = dir {
+            crate::branches::drop_worktree(&dir, path);
+        }
         if let Some(pid) = pid {
             kill(pid);
         }
@@ -687,7 +705,8 @@ fn settle(tasks: &mut [Task], index: usize, held: HeldExit) {
     tasks[index].ended = Some(unix_millis());
 }
 
-fn release(tasks: &mut [Task], path: Option<&str>) {
+fn release(tasks: &mut [Task]) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
     loop {
         let waiting: Vec<String> = tasks.iter().filter(|task| task.state == WorkState::WaitingForChildren).map(|task| task.id.clone()).collect();
         let mut changed = false;
@@ -701,13 +720,16 @@ fn release(tasks: &mut [Task], path: Option<&str>) {
             tasks[index].error = held.error;
             tasks[index].state = if held.failed { WorkState::Failed } else { WorkState::ResultAvailable };
             tasks[index].ended = Some(unix_millis());
-            drop_isolated(&tasks[index], path);
+            if let Some(dir) = isolated_cwd(&tasks[index]) {
+                dirs.push(dir);
+            }
             changed = true;
         }
         if !changed {
             break;
         }
     }
+    dirs
 }
 
 fn has_working_descendant(tasks: &[Task], id: &str) -> bool {
@@ -777,10 +799,8 @@ fn postorder(tasks: &[Task], id: &str, out: &mut Vec<String>) {
     }
 }
 
-fn drop_isolated(task: &Task, path: Option<&str>) {
-    if task.isolated && task.conversation.is_none() && task.state.terminal() {
-        crate::branches::drop_worktree(&task.cwd, path);
-    }
+fn isolated_cwd(task: &Task) -> Option<PathBuf> {
+    (task.isolated && task.conversation.is_none() && task.state.terminal()).then(|| task.cwd.clone())
 }
 
 fn unix_millis() -> u64 {
