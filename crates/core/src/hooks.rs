@@ -62,9 +62,31 @@ pub fn forward(arg: Option<&str>) {
         eprintln!("usage: pinned {SUBCOMMAND} <working|done|needs-input|failed>");
         return;
     }
-    let Ok(sock) = std::env::var(SOCK_ENV) else { return };
-    let Some(event) = event_from(arg, &hook_payload()) else { return };
-    tell(&sock, &Message::Agent(event));
+    let payload = hook_payload();
+    if let (Ok(sock), Some(event)) = (std::env::var(SOCK_ENV), event_from(arg, &payload)) {
+        tell(&sock, &Message::Agent(event));
+    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    launch_notify(&user_notify_from_args(&args), &payload);
+}
+
+/// The command after `--` in pinned's notify argv, without the JSON payload Codex appends.
+fn user_notify_from_args(args: &[String]) -> Vec<String> {
+    let Some(after) = args.split(|arg| arg == "--").nth(1) else { return vec![] };
+    let mut cmd = after.to_vec();
+    if cmd.last().is_some_and(|arg| arg.trim_start().starts_with('{')) {
+        cmd.pop();
+    }
+    cmd
+}
+
+fn launch_notify(cmd: &[String], payload: &str) {
+    let Some((bin, rest)) = cmd.split_first() else { return };
+    let mut argv: Vec<&str> = rest.iter().map(String::as_str).collect();
+    if !payload.is_empty() {
+        argv.push(payload);
+    }
+    let _ = process::command(bin).args(&argv).stdin(std::process::Stdio::null()).status();
 }
 
 /// Claude writes the payload on stdin. Codex appends it as the last argument.
@@ -420,6 +442,25 @@ mod tests {
         assert_eq!(linear(&args(&["create", "--assignee", "Ana", "Export 500s"])), usage);
         assert_eq!(linear(&args(&["file", "a", "b"])), usage);
         let _ = std::fs::remove_file(sock);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_user_notify_runs_with_the_same_payload() {
+        let dir = std::env::temp_dir().join(format!("pinned-user-notify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("out");
+        let script = dir.join("notify.sh");
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s' \"$2\" > \"$1\"\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let payload = r#"{"type":"agent-turn-complete","thread-id":"thr-1"}"#;
+        let args = vec!["hook".into(), "done".into(), "--".into(), script.display().to_string(), out.display().to_string(), payload.into()];
+        assert_eq!(user_notify_from_args(&args), vec![script.display().to_string(), out.display().to_string()]);
+        launch_notify(&user_notify_from_args(&args), payload);
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), payload);
+        assert!(user_notify_from_args(&["hook".into(), "done".into(), payload.into()]).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

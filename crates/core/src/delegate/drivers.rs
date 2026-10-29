@@ -170,16 +170,107 @@ fn toml_str(value: &str) -> String {
 
 /// Codex runs this when a turn finishes. The JSON payload arrives as the last argument.
 /// `hook done` is the same turn-end pinned already maps for Claude's Stop hook.
-pub fn codex_notify_flag(exe: &Path) -> Vec<String> {
-    vec![
-        "-c".into(),
-        format!(
-            "notify=[{}, {}, {}]",
-            toml_str(&exe.display().to_string()),
-            toml_str(crate::hooks::SUBCOMMAND),
-            toml_str("done"),
-        ),
-    ]
+pub fn codex_notify_flag(exe: &Path, user: &[String]) -> Vec<String> {
+    let mut parts = vec![
+        toml_str(&exe.display().to_string()),
+        toml_str(crate::hooks::SUBCOMMAND),
+        toml_str("done"),
+    ];
+    if !user.is_empty() {
+        parts.push(toml_str("--"));
+        parts.extend(user.iter().map(|arg| toml_str(arg)));
+    }
+    vec!["-c".into(), format!("notify=[{}]", parts.join(", "))]
+}
+
+/// The `notify` array in a Codex `config.toml`, when it is a top-level list of strings.
+pub fn codex_user_notify(config: &str) -> Vec<String> {
+    let mut in_table = false;
+    let mut collecting: Option<String> = None;
+    for line in config.lines() {
+        if let Some(buf) = collecting.as_mut() {
+            buf.push('\n');
+            buf.push_str(line);
+            if brackets_balanced(buf) {
+                return quoted_strings(buf);
+            }
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && !trimmed.contains('=') {
+            in_table = true;
+            continue;
+        }
+        if in_table {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("notify") else { continue };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else { continue };
+        let rest = rest.trim();
+        if !rest.starts_with('[') {
+            continue;
+        }
+        if brackets_balanced(rest) {
+            return quoted_strings(rest);
+        }
+        collecting = Some(rest.to_owned());
+    }
+    vec![]
+}
+
+fn brackets_balanced(text: &str) -> bool {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            if c == '\\' && q == '"' {
+                chars.next();
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth == 0 && quote.is_none()
+}
+
+fn quoted_strings(text: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '"' && c != '\'' {
+            continue;
+        }
+        let quote = c;
+        let mut value = String::new();
+        while let Some(n) = chars.next() {
+            if n == '\\' && quote == '"' {
+                match chars.next() {
+                    Some('n') => value.push('\n'),
+                    Some('t') => value.push('\t'),
+                    Some(other) => value.push(other),
+                    None => break,
+                }
+                continue;
+            }
+            if n == quote {
+                break;
+            }
+            value.push(n);
+        }
+        out.push(value);
+    }
+    out
 }
 
 fn parse_claude(line: &str) -> Vec<StreamEvent> {
@@ -588,6 +679,19 @@ pub fn spawn(
         on_event(ChildEvent::Exited { code, stderr });
     });
     Ok(pid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::codex_user_notify;
+
+    #[test]
+    fn a_top_level_notify_array_is_read_and_a_table_one_is_not() {
+        let text = "notify = [\n  \"/bin/echo\",\n  \"hi\",\n]\n[tui]\nnotify = [\"nope\"]\n";
+        assert_eq!(codex_user_notify(text), vec!["/bin/echo".to_owned(), "hi".to_owned()]);
+        assert_eq!(codex_user_notify("model = \"gpt-5.4\"\n"), Vec::<String>::new());
+        assert_eq!(codex_user_notify("notify = \"/bin/echo\"\n"), Vec::<String>::new());
+    }
 }
 
 pub fn kill(pid: u32) {

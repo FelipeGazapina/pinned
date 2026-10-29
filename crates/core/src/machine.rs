@@ -104,7 +104,14 @@ impl Launch {
                     if self.mcp_config.is_some() {
                         cmd.args(crate::delegate::codex_mcp_flags(&self.exe, &self.sock, Some(tab), None, self.reminders));
                     }
-                    cmd.args(crate::delegate::codex_notify_flag(&self.exe));
+                    let home = env
+                        .iter()
+                        .find(|(key, _)| key == "CODEX_HOME")
+                        .map(|(_, value)| PathBuf::from(value))
+                        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
+                        .unwrap_or_else(|| home().join(".codex"));
+                    let user = crate::delegate::codex_user_notify(&std::fs::read_to_string(home.join("config.toml")).unwrap_or_default());
+                    cmd.args(crate::delegate::codex_notify_flag(&self.exe, &user));
                 }
                 if bypass {
                     cmd.arg(spec.bypass_flag);
@@ -3195,6 +3202,32 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn a_codex_tab_keeps_the_notify_command_from_its_codex_home() {
+        let root = temp("codex-user-notify");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let m = accounts_machine(&root);
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        let script = root.join("user-notify");
+        let home = root.join("config/accounts/side");
+        std::fs::write(
+            home.join("config.toml"),
+            format!("notify = [\n  \"{}\",\n  \"--ping\",\n]\n[tui]\nnotify = [\"nope\"]\n", script.display()),
+        )
+        .unwrap();
+        m.open_project(app.clone());
+        m.call(Call::SetProjectAccount { path: app.display().to_string(), account: Some("side".into()) }).unwrap();
+        let tab = m.open_tab(Some(app.display().to_string()), false).unwrap();
+        let line = first_line(&m, &tab);
+        assert!(line.contains(&script.display().to_string()), "the account's notify was dropped: {line}");
+        assert!(line.contains("--ping"), "the notify argument was dropped: {line}");
+        assert!(line.contains("\"hook\", \"done\", \"--\""), "pinned's hook does not run first: {line}");
+        assert!(!line.contains("nope"), "a notify inside a table was used: {line}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_limited_session_moves_to_another_signed_in_account_and_continues_there() {
         let root = temp("switch-account");
         let app = root.join("app");
@@ -3694,7 +3727,14 @@ while True:
             |_| {},
         );
         m.listen(|_| Err("not a connector".into())).unwrap();
-        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Codex), vec![], vec![("NOTICE_FILE".into(), file.display().to_string())], false, None);
+        let tab = m.add_tab(
+            root.clone(),
+            Account::builtin(Provider::Codex),
+            vec![],
+            vec![("NOTICE_FILE".into(), file.display().to_string()), ("CODEX_HOME".into(), root.display().to_string())],
+            false,
+            None,
+        );
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
         m.start_claude(&tab, 80, 24).unwrap();
