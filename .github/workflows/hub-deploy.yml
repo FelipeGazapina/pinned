@@ -1,0 +1,60 @@
+name: hub deploy
+
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]*']
+
+concurrency:
+  group: hub-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+      tag: ${{ steps.pick.outputs.tag }}
+      live: ${{ steps.pick.outputs.live }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: pick
+        run: |
+          live=$(git rev-parse origin/railway-hub)
+          tag=$(git tag --merged origin/main --list 'v[0-9]*' --sort=-v:refname | head -1)
+          sha=$(git rev-list -n1 "$tag")
+          # Already contained, including a second run after the first moved the branch.
+          if git merge-base --is-ancestor "$sha" "$live"; then
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            echo "$tag is already live" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "sha=$sha"
+              echo "tag=$tag"
+              echo "live=$live"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+  compat:
+    needs: resolve
+    if: needs.resolve.outputs.sha != ''
+    uses: ./.github/workflows/hub-compat.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+      base: ${{ needs.resolve.outputs.live }}
+
+  deploy:
+    needs: [resolve, compat]
+    if: always() && needs.resolve.outputs.sha != '' && needs.compat.result == 'success' && (needs.compat.outputs.breaking == 'false' || needs.compat.outputs.approved == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          gh api -X PATCH "repos/${{ github.repository }}/git/refs/heads/railway-hub" -f sha="${{ needs.resolve.outputs.sha }}" -F force=false
+          echo "Deployed ${{ needs.resolve.outputs.tag }} (${{ needs.resolve.outputs.sha }}) to the hub" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

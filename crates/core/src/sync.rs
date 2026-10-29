@@ -31,7 +31,7 @@ pub const MESSAGE_LIMIT: usize = ((BATCH + FILE_LIMIT) as usize).div_ceil(3) * 4
 pub const HISTORY: &str = "history.jsonl";
 
 /// A file as the hub holds it. An empty `sha` marks a deleted one.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Entry {
     pub path: String,
     pub sha: String,
@@ -42,7 +42,7 @@ pub struct Entry {
     pub size: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct File {
     #[serde(flatten)]
     pub entry: Entry,
@@ -52,7 +52,7 @@ pub struct File {
 }
 
 /// A project of the account, offered on machines that don't have it yet.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Project {
     /// The origin as `host/owner/name`, lowercased.
     pub key: String,
@@ -75,7 +75,7 @@ pub struct Checkout {
 
 /// What a machine remembers between syncs: the files' hashes, to skip hashing unchanged files,
 /// and what each checkout and the hub agreed on last.
-#[derive(Serialize, Deserialize, Default, Debug)]
+#[derive(Serialize, Deserialize, Default, Debug, schemars::JsonSchema)]
 pub struct State {
     #[serde(default)]
     hashes: BTreeMap<PathBuf, Hashed>,
@@ -89,7 +89,7 @@ pub struct State {
     claude_homes: BTreeMap<String, PathBuf>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
 struct Hashed {
     size: u64,
     modified: u64,

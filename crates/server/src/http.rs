@@ -48,22 +48,43 @@ pub struct Server {
     open_signup: bool,
 }
 
+/// Routes a released hub keeps serving. Dropping one breaks apps that still call it.
+pub const ROUTES: &[&str] = &[
+    "POST /api/signup",
+    "POST /api/login",
+    "POST /api/logout",
+    "POST /api/password",
+    "POST /api/machines",
+    "POST /api/pair",
+    "GET /api/version",
+    "GET /ws/client",
+    "GET /ws/machine",
+    "GET /install.sh",
+    "GET /download/{file}",
+    "GET /new",
+];
+
+fn route(spec: &str) -> &str {
+    assert!(ROUTES.contains(&spec), "{spec} is missing from ROUTES");
+    spec.split_once(' ').expect("METHOD /path").1
+}
+
 pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, open_signup: bool) -> Router {
     let server = Arc::new(Server { hub, downloads, attempts: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), open_signup });
     Router::new()
-        .route("/api/signup", post(signup))
-        .route("/api/login", post(login))
-        .route("/api/logout", post(logout))
-        .route("/api/password", post(change_password))
-        .route("/api/machines", post(register))
-        .route("/api/pair", post(pair))
-        .route("/api/version", get(|| async { env!("CARGO_PKG_VERSION") }))
-        .route("/ws/client", get(client_socket))
-        .route("/ws/machine", get(machine_socket))
-        .route("/install.sh", get(install))
-        .route("/download/{file}", get(download))
+        .route(route("POST /api/signup"), post(signup))
+        .route(route("POST /api/login"), post(login))
+        .route(route("POST /api/logout"), post(logout))
+        .route(route("POST /api/password"), post(change_password))
+        .route(route("POST /api/machines"), post(register))
+        .route(route("POST /api/pair"), post(pair))
+        .route(route("GET /api/version"), get(|| async { env!("CARGO_PKG_VERSION") }))
+        .route(route("GET /ws/client"), get(client_socket))
+        .route(route("GET /ws/machine"), get(machine_socket))
+        .route(route("GET /install.sh"), get(install))
+        .route(route("GET /download/{file}"), get(download))
         // A prompt link, /new?prompt=…, is the app itself, which reads the link from its address.
-        .route_service("/new", SetResponseHeader::overriding(ServeFile::new(ui.join("index.html")), header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
+        .route_service(route("GET /new"), SetResponseHeader::overriding(ServeFile::new(ui.join("index.html")), header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
         // Without it a browser guesses the files stay fresh for hours, and runs an old UI after a deploy.
         .fallback_service(SetResponseHeader::overriding(ServeDir::new(ui), header::CACHE_CONTROL, HeaderValue::from_static("no-cache")))
         .with_state(server)
@@ -501,5 +522,24 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 account.to_machine(machine, socket, &ToMachine::Reply(unknown_call(id, e)));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ROUTES;
+
+    #[test]
+    fn the_router_serves_each_published_route() {
+        let src = include_str!("http.rs");
+        let mut used = vec![];
+        let mut rest = src;
+        while let Some(at) = rest.find("route(\"") {
+            rest = &rest[at + "route(\"".len()..];
+            let end = rest.find('"').expect("route spec");
+            used.push(&rest[..end]);
+            rest = &rest[end..];
+        }
+        assert_eq!(used.as_slice(), ROUTES);
     }
 }

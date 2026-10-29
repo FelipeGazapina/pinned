@@ -9,7 +9,7 @@ use std::time::Duration;
 
 const FILE: &str = "account.json";
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Credentials {
     pub hub: String,
     pub email: String,
@@ -42,47 +42,47 @@ impl Credentials {
 }
 
 /// `POST /api/signup` and `/api/login` take this.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SignIn {
     pub email: String,
     pub password: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Session {
     pub token: String,
     pub account: AccountView,
 }
 
 /// `POST /api/password`, with the user token as bearer, takes this.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewPassword {
     pub current: String,
     pub password: String,
 }
 
 /// `POST /api/machines`, with the user token as bearer, takes this.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewMachine {
     pub name: String,
     pub os: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Registered {
     pub machine: MachineView,
     pub token: String,
 }
 
 /// `POST /api/pair` takes this.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Pairing {
     pub code: String,
     pub name: String,
     pub os: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Paired {
     pub machine: MachineView,
     pub token: String,
@@ -91,7 +91,7 @@ pub struct Paired {
     pub email: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Failure {
     pub error: String,
 }

@@ -32,7 +32,7 @@ fn search_query(stacks: bool) -> String {
     )
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ListState {
     Open,
@@ -41,7 +41,7 @@ pub enum ListState {
     All,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Involvement {
     All,
@@ -52,13 +52,13 @@ pub enum Involvement {
 pub const GITHUB: &str = "github.com";
 
 /// A GitHub repository: `owner/name` on `host`, github.com or an Enterprise Server's.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Repo {
     pub host: String,
     pub name: String,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct PullRequests {
     /// The gh account's login.
     pub viewer: String,
@@ -69,7 +69,7 @@ pub struct PullRequests {
     pub more: bool,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Row {
     pub host: String,
     pub number: u64,
@@ -98,7 +98,7 @@ pub struct Row {
     pub stack: Option<StackMembership>,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MergeMethod {
     Merge,
@@ -107,7 +107,7 @@ pub enum MergeMethod {
 }
 
 /// Where a pull request sits in one of GitHub's pull request stacks.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct StackMembership {
     pub number: u64,
     pub position: u64,
@@ -116,7 +116,7 @@ pub struct StackMembership {
 }
 
 /// A GitHub pull request stack, its layers from the bottom up.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Stack {
     pub number: u64,
     pub url: String,
@@ -124,7 +124,7 @@ pub struct Stack {
     pub layers: Vec<Layer>,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Layer {
     pub number: u64,
     pub title: String,
@@ -133,13 +133,13 @@ pub struct Layer {
     pub state: State,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Label {
     pub name: String,
     pub color: String,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
     Open,
@@ -148,7 +148,7 @@ pub enum State {
     Closed,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Review {
     Approved,
@@ -156,7 +156,7 @@ pub enum Review {
     ReviewRequired,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Checks {
     Passing,
@@ -164,7 +164,7 @@ pub enum Checks {
     Pending,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Group {
     Authored,
@@ -172,14 +172,14 @@ pub enum Group {
     Others,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DraftFilter {
     Only,
     Hide,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewFilter {
     Approved,
@@ -189,7 +189,7 @@ pub enum ReviewFilter {
 }
 
 /// T3 Code's list filters, each one of GitHub's search qualifiers.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Filters {
     pub draft: Option<DraftFilter>,
@@ -427,14 +427,14 @@ pub fn list(cwd: &Path, path: Option<&str>, repos: Vec<Repo>, state: ListState, 
     Ok(PullRequests { viewer, repos, rows, more })
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OptionKind {
     Labels,
     Authors,
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Author {
     pub login: String,
     pub name: String,
@@ -444,7 +444,7 @@ pub struct Author {
 /// What a filter picker finds on the hosts for what the reader typed, as T3 Code's
 /// RepositoryLabels and RepositoryAuthors read it: each repository's labels, or the people who
 /// can be mentioned there, a pull request's author from a fork among them.
-#[derive(Serialize, Debug, Default, PartialEq)]
+#[derive(Serialize, Debug, Default, PartialEq, schemars::JsonSchema)]
 pub struct FilterOptions {
     pub labels: Vec<Label>,
     pub authors: Vec<Author>,
@@ -493,7 +493,7 @@ pub fn filter_options(cwd: &Path, path: Option<&str>, repos: &[Repo], kind: Opti
     Ok(out)
 }
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct FileStat {
     pub path: String,
     pub additions: u64,

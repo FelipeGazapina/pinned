@@ -19,7 +19,7 @@ const CREATE_POLL: Duration = Duration::from_secs(2);
 const CREATE_WAIT: Duration = Duration::from_secs(5 * 60);
 
 /// What the Connectors card shows of the keys pinned keeps.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Account {
     /// The Box key's last characters, as `…a1b2`.
     pub key_hint: String,
@@ -57,7 +57,7 @@ pub(crate) fn hint(secret: &str) -> String {
     format!("…{tail}")
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BoxId(pub String);
 
 impl std::fmt::Display for BoxId {

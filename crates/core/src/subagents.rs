@@ -12,7 +12,7 @@ const STEPS: usize = 6;
 /// A card shows a glance at each step, and the page carries every agent on each poll.
 const STEP_CHARS: usize = 1200;
 
-#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[derive(Serialize, Debug, PartialEq, Clone, Copy, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum State {
     Running,
@@ -21,7 +21,7 @@ pub enum State {
 }
 
 /// An agent claude spawned with its `Agent` tool, as of the end of its own transcript.
-#[derive(Serialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 pub struct Subagent {
     pub id: String,
     /// The id of the `Agent` tool use that spawned it, in the session's transcript or, for a nested

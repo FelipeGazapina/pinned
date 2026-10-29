@@ -20,7 +20,7 @@ const MTIME_SLACK: u64 = 36 * 3600;
 /// Bare family names span generations, and `<synthetic>` lines were never billed.
 const UNPRICEABLE: [&str; 6] = ["<synthetic>", "synthetic", "opus", "sonnet", "haiku", "fable"];
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Speed {
     Standard,
@@ -28,7 +28,7 @@ pub enum Speed {
 }
 
 /// A quarter hour's use of one model in one session.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Row {
     /// Unix time the quarter hour starts.
     pub at: u64,
@@ -48,7 +48,7 @@ pub struct Row {
     pub savings: f64,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Default, schemars::JsonSchema)]
 pub struct Cost {
     pub input: f64,
     pub cache_read: f64,
@@ -73,7 +73,7 @@ pub struct ModelRate {
 pub type RateTable = HashMap<String, ModelRate>;
 
 /// A price the user set for a model, in USD per million tokens; cache prices left out are input's.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Price {
     pub input: f64,
     pub output: f64,
@@ -173,7 +173,7 @@ pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBoo
 }
 
 /// The user's prices and model mappings on a machine, as T3 Code keeps them in its server settings.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
 pub struct PriceBook {
     #[serde(default)]
     pub prices: HashMap<String, Price>,
@@ -361,7 +361,7 @@ fn download() -> Option<Vec<u8>> {
 }
 
 /// A plan's rate-limit window, as T3 Code's `ServerProviderUsageWindow`.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct PlanWindow {
     pub id: String,
     /// `session`, `weekly` or `monthly`.
@@ -375,7 +375,7 @@ pub struct PlanWindow {
 }
 
 /// The account claude is signed in with and its plan's windows, from claude's own `/usage` check.
-#[derive(Serialize, Debug, Default, PartialEq)]
+#[derive(Serialize, Debug, Default, PartialEq, schemars::JsonSchema)]
 pub struct Limits {
     pub email: Option<String>,
     pub plan: Option<String>,

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Every field but `path` has a default, so a file written by another version still loads.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 pub struct Project {
     /// Canonicalized, since it identifies the project.
     pub path: PathBuf,
@@ -58,13 +58,13 @@ pub fn recent(projects: &[Project]) -> Vec<&Project> {
 const BROWSE_LIMIT: usize = 500;
 
 /// The folder a typed path lists, and its subfolders that match.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 pub struct Folders {
     pub parent: PathBuf,
     pub entries: Vec<Folder>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 pub struct Folder {
     pub name: String,
     pub path: PathBuf,

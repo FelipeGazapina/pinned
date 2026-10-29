@@ -26,7 +26,7 @@ const SLACK_OVERLAP: chrono::Duration = chrono::Duration::seconds(60);
 /// A mention older than this when pinned picks it up arrived while pinned was closed.
 const OFFLINE_AFTER: chrono::Duration = chrono::Duration::minutes(5);
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
     Low,
@@ -37,7 +37,7 @@ pub enum Effort {
 }
 
 /// Serialized names match `claude --permission-mode`.
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
     Manual,
@@ -49,7 +49,7 @@ pub enum PermissionMode {
 }
 
 /// How far a Slack connector's session goes with a bug it finds.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Fix {
     /// Analyze and reply; never file an issue or change code.
@@ -76,7 +76,7 @@ fn fix_or_auto_fix<'de, D: Deserializer<'de>>(d: D) -> Result<Fix, D::Error> {
     })
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Trigger {
     /// A Linear issue created with this label.
@@ -95,7 +95,7 @@ impl Trigger {
 }
 
 /// A model on Vercel's AI Gateway that reads what the trigger found before the session starts.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Ask {
     /// A gateway model id, as `typesafe-ai/jev`. The id picks chat or decision when the step runs.
@@ -104,7 +104,7 @@ pub struct Ask {
     pub questions: Vec<Question>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Question {
     /// The key the answer goes under, as `kind`.
@@ -118,7 +118,7 @@ pub struct Question {
     pub stop_on: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Connector {
     #[serde(default)]
@@ -180,7 +180,7 @@ fn on() -> bool {
 /// Where a workflow's sessions run. Kept under the connector's original `machine` key: a machine
 /// id string ("" = any), or `{"kind":"upstash-box",…}`. Old stores load as before, and an old UI
 /// that never touches the select saves the object back untouched.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(from = "StoredRunsOn", into = "StoredRunsOn")]
 pub enum RunsOn {
     /// Whichever of the account's machines is online.
@@ -192,14 +192,14 @@ pub enum RunsOn {
     FreshBox(BoxStep),
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BoxStep {
     #[serde(default)]
     pub size: BoxSize,
 }
 
 /// Serialized names match Upstash's `size`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum BoxSize {
     Small,
@@ -208,7 +208,7 @@ pub enum BoxSize {
     Large,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 enum StoredRunsOn {
     Machine(String),
@@ -219,7 +219,7 @@ enum StoredRunsOn {
     },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 enum UpstashBoxKind {
     #[serde(rename = "upstash-box")]
     UpstashBox,
@@ -245,7 +245,7 @@ impl From<RunsOn> for StoredRunsOn {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Followed {
     /// The newest message the session has seen, as a Slack ts.
     pub cursor: String,
@@ -258,7 +258,7 @@ pub struct Followed {
 }
 
 /// A Linear issue a Slack thread's session filed.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Filed {
     pub id: String,
     pub identifier: String,
@@ -368,7 +368,7 @@ impl Connector {
 }
 
 /// The Linear column each stage moves the issue to. Empty leaves the issue where it is.
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, schemars::JsonSchema)]
 pub struct Columns {
     pub picked: String,
     pub coding: String,
@@ -386,7 +386,7 @@ impl Columns {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, schemars::JsonSchema)]
 struct Store {
     linear: Option<linear::Account>,
     #[serde(default)]
@@ -441,13 +441,13 @@ impl Store {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
 pub struct Check {
     pub at: String,
     pub error: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 pub struct Settings {
     pub linear: Option<linear::Account>,
     pub slack: Option<slack::Account>,
@@ -562,7 +562,7 @@ fn channel_name(name: &str) -> &str {
     name.trim().trim_start_matches('#')
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Suggestions {
     labels: Vec<String>,
     columns: Vec<String>,

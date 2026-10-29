@@ -14,7 +14,7 @@ const LIST_TOOL: &str = "list_reminders";
 const CANCEL_TOOL: &str = "cancel_reminder";
 pub const SERVER: &str = "pinned";
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Reminder {
     pub id: u64,
     pub message: String,

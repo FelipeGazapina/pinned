@@ -45,12 +45,3 @@ jobs:
           releaseBody: On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. Or click the update button in a running pinned.
           releaseDraft: false
           args: ${{ matrix.args }}
-
-  # Railway deploys the hub from the railway-hub branch, so point it at the released commit.
-  hub:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - run: gh api -X PATCH "repos/${{ github.repository }}/git/refs/heads/railway-hub" -f sha="${{ github.sha }}" -F force=true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
