@@ -539,6 +539,10 @@ function memoryOf(tab) {
 }
 async function refreshMemory(tab) {
   const m = memoryOf(tab);
+  // One read per project at a time, so a slow machine isn't asked again on every render. A search
+  // or change made meanwhile reads once more after it.
+  if (m.reading) return void (m.again = true);
+  m.reading = true;
   const path = projectPathOf(tab);
   const query = m.query;
   m.at = Date.now();
@@ -549,10 +553,15 @@ async function refreshMemory(tab) {
     m.hits ??= [];
     flash(`Couldn't read the memory: ${String(e)}`);
   }
+  m.reading = false;
+  if (m.again) {
+    m.again = false;
+    return refreshMemory(tab);
+  }
   const shown = tab === active && shownSurface(tab)?.kind === "memory";
   if (shown) renderPanel();
   // The model downloads in the background, and nothing else would tell the panel it finished.
-  if (shown && m.status?.vectors === "loading") setTimeout(() => m.at < Date.now() - 1500 && refreshMemory(tab), 2000);
+  if (shown && m.status?.vectors === "loading") setTimeout(() => !m.reading && m.at < Date.now() - 1500 && refreshMemory(tab), 2000);
 }
 async function changeMemory(tab, call) {
   try {
@@ -572,7 +581,7 @@ function renderMemoryPanel() {
   const tab = active;
   if (!hasProject(tab)) return showPanel(`<div class="memory"><p class="memory-empty">This thread is not in a project, so it has no memory.</p></div>`);
   const m = memoryOf(tab);
-  if (!m.hits || Date.now() - m.at > 5000) refreshMemory(tab);
+  if (!m.reading && (!m.hits || Date.now() - m.at > 5000)) refreshMemory(tab);
   const count = m.status ? `${m.status.count} ${m.status.count === 1 ? "memory" : "memories"} · ${VECTORS[m.status.vectors] ?? m.status.vectors}` : "";
   const hits = !m.hits
     ? `<p class="memory-empty">Loading…</p>`

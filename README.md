@@ -70,7 +70,8 @@ workers instead of doing the work itself. Open it from a thread's menu (**Open t
 or from the robot button next to the project in the project filter. Its row comes first and
 says **Orchestrator**.
 
-The orchestrator can't edit files. For each request it starts a worker, an ordinary thread
+The orchestrator has no file-editing tools, but it can still change files with a shell command
+you approve. For each request it starts a worker, an ordinary thread
 marked with a robot that you can open and steer. A worker in a git project gets its own
 worktree. When a worker finishes or needs input, pinned tells the orchestrator, which reviews
 the result and answers you.
