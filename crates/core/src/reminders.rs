@@ -265,7 +265,7 @@ fn tool_definitions(reminders: bool) -> Value {
         }),
         json!({
             "name": STATUS_TOOL,
-            "description": "The child task's state. Do not call this on a running task. Wait for the notice, or use mode \"wait\". Reading a finished task marks its result delivered. Every body has next, which says what to do now.",
+            "description": "The child task's state. Every body has next, which says what to do now. A session does not poll a running task: it ends its turn, and pinned types a notice when the task finishes. A headless task gets no notice, so it calls this again when next says to. Reading a finished task marks its result delivered.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "taskId": { "type": "string" } },
