@@ -72,12 +72,14 @@ impl Access {
 }
 
 /// `asked` cannot be wider than `ceiling`. A plan request is already read-only before this.
+/// An explicit `auto`, and an omitted mode, narrow to read-only under that ceiling. `full-access` does not.
 pub fn resolve_access(ceiling: Access, request: &Request) -> Result<Access, String> {
     if request.interaction == Interaction::Plan {
         return Ok(Access::ReadOnly);
     }
     let asked = match request.runtime {
         None => ceiling,
+        Some(RuntimeMode::Auto) if ceiling == Access::ReadOnly => Access::ReadOnly,
         Some(RuntimeMode::Auto) => Access::Auto,
         Some(RuntimeMode::FullAccess) => Access::Full,
     };
@@ -1362,6 +1364,14 @@ grok-4.7-high - Grok 4.7  High
         );
         request.runtime = Some(RuntimeMode::Auto);
         assert_eq!(resolve_access(Access::Full, &request).unwrap(), Access::Auto);
+        assert_eq!(resolve_access(Access::ReadOnly, &request).unwrap(), Access::ReadOnly);
+        request.runtime = None;
+        assert_eq!(resolve_access(Access::ReadOnly, &request).unwrap(), Access::ReadOnly);
+        request.runtime = Some(RuntimeMode::FullAccess);
+        assert_eq!(
+            resolve_access(Access::ReadOnly, &request).unwrap_err(),
+            "runtimeMode \"full-access\" is wider than this session's \"read-only\""
+        );
         request.runtime = None;
         request.interaction = Interaction::Plan;
         assert_eq!(resolve_access(Access::Full, &request).unwrap(), Access::ReadOnly);
