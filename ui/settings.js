@@ -964,6 +964,7 @@ function graphNodeUi(node) {
   const type = graphNodeKind(node);
   if (type === "trigger") return STEPS[WATCH_STEP[node.watch?.kind ?? "called"]] ?? STEPS["called-trigger"];
   if (type === "classify") return { tone: "vercel", icon: "▲", app: "Vercel AI Gateway", title: "Classify" };
+  if (type === "switch") return { tone: "switch", icon: "⇉", app: "Workflow", title: "Switch" };
   if (type === "talk") return { tone: "claude", icon: "✳", app: "Claude Code", title: "Talk to the session" };
   if (type === "page") return { tone: "slack", icon: "@", app: "Slack", title: "Page a group" };
   if (type === "stage-picked") return { ...STEPS.picked, title: "Stage picked" };
@@ -979,6 +980,13 @@ function graphNodeSummary(node, c) {
     return STEPS[step]?.summary?.({ ...c, trigger: legacyTriggerFromWatch(node.watch) }) ?? node.name;
   }
   if (type === "classify") return node.model?.trim() || "Name a model";
+  if (type === "switch") {
+    const question = node.question?.trim();
+    const equals = (node.cases ?? []).map((item) => item.equals?.trim()).filter(Boolean);
+    if (!question) return "Pick a question";
+    if (!equals.length) return `${question} continues`;
+    return `${question} is ${equals.join(", ")}`;
+  }
   if (type === "talk") return node.prompt?.trim() || "Session opens on the first talk";
   if (type === "page") return node.group?.trim() ? `@${node.group.trim().replace(/^@/, "")}` : "Name a group";
   if (type === "call") {
@@ -1003,6 +1011,10 @@ function graphNodeIssues(node, c) {
     const pseudo = { ...c, ask: { model: node.model, instructions: node.instructions, questions: (node.questions ?? []).map((q) => ({ ...q, choices: (q.choices ?? []).map((ch) => ch.label ?? ch.id ?? ch) })) } };
     return STEPS.ask.issues(pseudo);
   }
+  if (type === "switch") {
+    const problem = graphApi()?.switchProblem(c.graph, node);
+    return problem ? [problem] : [];
+  }
   if (type === "talk") return [];
   if (type === "page") return [!node.group?.trim() && "Name the Slack user group to page."].filter(Boolean);
   if (type === "call") {
@@ -1014,6 +1026,30 @@ function graphNodeIssues(node, c) {
 
 function graphNodeIndex(id) {
   return view.draft.graph.nodes.findIndex((n) => n.id === id);
+}
+
+function boundGraphNode(path) {
+  const match = /^graph\.nodes\.(\d+)\b/.exec(path);
+  if (!match) return null;
+  return view.draft.graph?.nodes?.[Number(match[1])] ?? null;
+}
+
+function keepSwitchQuestion(node) {
+  const target = view.draft.graph.nodes.find((n) => n.id === node.classify && graphNodeKind(n) === "classify");
+  const names = (target?.questions ?? []).map((q) => q.name).filter(Boolean);
+  if (!names.includes(node.question)) node.question = names[0] ?? "";
+}
+
+function retargetCasePort(node, index, button) {
+  const item = node.cases?.[index];
+  const api = graphApi();
+  if (!item || !api) return;
+  const wired = view.draft.graph.edges.some((e) => e.from === node.id && e.port === item.id);
+  if (!wired) {
+    item.id = api.nextCaseId(node.cases.filter((_, i) => i !== index), item.equals);
+    if (button) button.dataset.port = item.id;
+  }
+  if (button) button.textContent = `${item.equals.trim() || "This case"} ends here`;
 }
 
 function graphLayout(c) {
@@ -1191,6 +1227,52 @@ function classifyFields(node, c) {
     ${choiceEnders(node)}`;
 }
 
+function choiceLabels(question) {
+  return (question?.choices ?? []).map((ch) => (typeof ch === "string" ? ch : ch.label ?? ch.id)).filter((label) => label != null && String(label) !== "");
+}
+
+function switchFields(node, c) {
+  const i = graphNodeIndex(node.id);
+  const base = `graph.nodes.${i}`;
+  const classifies = (c.graph?.nodes ?? []).filter((n) => graphNodeKind(n) === "classify");
+  const target = classifies.find((n) => n.id === node.classify);
+  const questions = target?.questions ?? [];
+  const names = questions.map((q) => q.name).filter(Boolean);
+  const question = questions.find((q) => q.name === node.question);
+  const labels = choiceLabels(question);
+  const classifyIds = classifies.map((n) => n.id);
+  const classifyValues = classifyIds.includes(node.classify) ? classifyIds : ["", ...classifyIds];
+  const questionValues = names.includes(node.question) ? names : ["", ...names];
+  const classifySelect = classifies.length
+    ? `<label>Classify ${select(`${base}.classify`, classifyValues, (id) => classifies.find((n) => n.id === id)?.name || "Choose a classify", node.classify ?? "")}</label>`
+    : `<p class="hint">Add a classify node first. A switch reads an answer that node already gave.</p>`;
+  const questionSelect = !target
+    ? ""
+    : names.length
+      ? `<label>Question ${select(`${base}.question`, questionValues, (name) => name || "Choose a question", node.question ?? "")}</label>`
+      : `<p class="hint">That classify has no questions yet.</p>`;
+  const cases = (node.cases ?? [])
+    .map((item, ci) => {
+      const listId = `switch-choices-${i}-${ci}`;
+      const datalist = labels.length ? `<datalist id="${listId}">${labels.map((label) => `<option value="${esc(label)}"></option>`).join("")}</datalist>` : "";
+      const shown = item.equals?.trim() || "This case";
+      const listAttr = labels.length ? `list="${listId}" ` : "";
+      return `<div class="category">
+        <label>Equals ${input(`${base}.cases.${ci}.equals`, item.equals ?? "", `${listAttr}placeholder="no" spellcheck="false"`)}${datalist}</label>
+        <div class="actions start">
+          <button class="secondary" data-action="graph-end-choice" data-port="${esc(item.id)}">${esc(shown)} ends here</button>
+          <button class="secondary" data-action="graph-remove-case" data-index="${ci}">Remove case</button>
+        </div>
+      </div>`;
+    })
+    .join("");
+  return `${classifySelect}
+    ${questionSelect}
+    ${cases}
+    <div class="actions start"><button class="secondary" data-action="graph-add-case">Add case</button></div>
+    <p class="hint">The first case that matches the answer, ignoring case, takes that port. Anything else leaves through otherwise.</p>`;
+}
+
 function choiceEnders(node) {
   const api = graphApi();
   const skip = new Set([api?.FALLBACK ?? "fallback", api?.NOWHERE ?? "nowhere"]);
@@ -1220,6 +1302,7 @@ function graphNodePanel(c) {
   let body = "";
   if (type === "trigger") body = STEPS[WATCH_STEP[c.trigger?.kind] ?? WATCH_STEP[node.watch?.kind ?? "called"]].fields(c);
   else if (type === "classify") body = classifyFields(node, c);
+  else if (type === "switch") body = switchFields(node, c);
   else if (type === "talk") {
     const i = graphNodeIndex(node.id);
     body = `<label>Prompt<textarea data-bind="graph.nodes.${i}.prompt" rows="6">${esc(node.prompt ?? "")}</textarea></label>
@@ -1248,7 +1331,8 @@ function panelHtml(c) {
 function applyGraphPick(type) {
   const api = graphApi();
   if (!api || !view.graphPick) return;
-  const fresh = api.newNode(type, view.draft.graph);
+  const upstreamId = view.graphPick.mode === "splice" ? view.draft.graph.edges[view.graphPick.edgeIndex]?.from : view.graphPick.from;
+  const fresh = api.newNode(type, view.draft.graph, upstreamId);
   if (view.graphPick.mode === "splice") {
     const edge = view.draft.graph.edges[view.graphPick.edgeIndex];
     view.draft.graph = api.splice(view.draft.graph, edge, fresh);
@@ -1654,6 +1738,25 @@ const actions = {
     view.open = null;
     redraw();
   },
+  "graph-add-case"() {
+    const api = graphApi();
+    const node = view.draft.graph.nodes.find((n) => n.id === view.open);
+    if (!api || !node || graphNodeKind(node) !== "switch") return;
+    if (!node.cases) node.cases = [];
+    node.cases.push({ id: api.nextCaseId(node.cases), equals: "" });
+    const index = node.cases.length - 1;
+    redraw();
+    settingsPage.querySelector(`.node-panel [data-bind$=".cases.${index}.equals"]`)?.focus();
+  },
+  "graph-remove-case"(button) {
+    const node = view.draft.graph.nodes.find((n) => n.id === view.open);
+    if (!node?.cases) return;
+    const index = Number(button.dataset.index);
+    const id = node.cases[index]?.id;
+    node.cases.splice(index, 1);
+    if (id) view.draft.graph.edges = view.draft.graph.edges.filter((e) => !(e.from === node.id && e.port === id));
+    redraw();
+  },
   "graph-add-question"() {
     const node = view.draft.graph.nodes.find((n) => n.id === view.open);
     if (!node?.questions) node.questions = [];
@@ -1922,6 +2025,18 @@ settingsPage.addEventListener("input", (e) => {
     value = value.map((label) => ({ id: label, label, description: "" }));
   }
   bind(path, value);
+  if (path.startsWith("graph.nodes.") && (path.endsWith(".classify") || path.endsWith(".question") || /\.cases\.\d+\.equals$/.test(path))) {
+    const node = boundGraphNode(path);
+    if (node && graphNodeKind(node) === "switch") {
+      if (path.endsWith(".classify")) keepSwitchQuestion(node);
+      const caseMatch = /\.cases\.(\d+)\.equals$/.exec(path);
+      if (caseMatch) retargetCasePort(node, Number(caseMatch[1]), e.target.closest(".category")?.querySelector('[data-action="graph-end-choice"]'));
+      if (path.endsWith(".classify") || path.endsWith(".question")) {
+        redraw();
+        return;
+      }
+    }
+  }
   if (path === "trigger.label" || path === "trigger.channel") syncWatchFromTrigger(view.draft);
   if (path.startsWith("graph.nodes") && path.includes(".watch.")) syncLegacyFromGraph(view.draft);
   if (renamed) decide.fallback = renamed.name.trim() || null;
