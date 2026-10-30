@@ -54,8 +54,8 @@ const taskActions = (agent) => {
   return cancel + send + open;
 };
 const agentError = (agent) => agent.state === "failed" && agent.error ? `<div class="agent-error">${esc(agent.error)}</div>` : "";
-const sendErrorHtml = (tab, id) => {
-  const text = threadOf(tab).sendErrors?.[id];
+const sendErrorHtml = (tab, agent) => {
+  const text = agent.undelivered && threadOf(tab).sendErrors?.[agent.id];
   return text ? `<div class="agent-error">${esc(text)}</div>` : "";
 };
 
@@ -79,7 +79,7 @@ function agentCardHtml(tab, agent, depth) {
     : `<div class="agent-step">${icon(line.icon, "kind")}<span class="label${running ? " shimmer" : ""}">${esc(line.label)}</span></div>`;
   return `<div class="agent-card" data-agent="${esc(agent.id)}" data-state="${esc(agent.state)}" style="--depth:${depth}">
     <button type="button" class="agent-head" data-toggle="${esc(key)}" aria-expanded="${open}" title="${esc(agent.name)}">${icon("bot", "kind")}<span class="name">${esc(agent.name || "Agent")}</span>
-      ${chip ? `<span class="chip">${esc(chip)}</span>` : ""}<span class="state-label">${esc(stateLabel(agent.state))}</span><span class="time">${time}</span>${mark}</button>${taskActions(agent)}${sendErrorHtml(tab, agent.id)}${agentError(agent)}${body}</div>`;
+      ${chip ? `<span class="chip">${esc(chip)}</span>` : ""}<span class="state-label">${esc(stateLabel(agent.state))}</span><span class="time">${time}</span>${mark}</button>${taskActions(agent)}${sendErrorHtml(tab, agent)}${agentError(agent)}${body}</div>`;
 }
 
 /** A card per agent the turn spawned, below its work fold so they show while the fold is shut, with
@@ -99,7 +99,7 @@ function delegatedStrip(tab) {
   if (!agents.length) return "";
   return `<div class="delegated-strip">${agents.map((a) => {
     const chip = [a.kind, a.model].filter(Boolean).join(" · ");
-    return `<div class="delegated" data-state="${esc(a.state)}"><span class="name">${esc(a.name || "Agent")}</span>${chip ? `<span class="chip">${esc(chip)}</span>` : ""}<span class="state-label">${esc(stateLabel(a.state))}</span>${taskActions(a)}${sendErrorHtml(tab, a.id)}${agentError(a)}</div>`;
+    return `<div class="delegated" data-state="${esc(a.state)}"><span class="name">${esc(a.name || "Agent")}</span>${chip ? `<span class="chip">${esc(chip)}</span>` : ""}<span class="state-label">${esc(stateLabel(a.state))}</span>${taskActions(a)}${sendErrorHtml(tab, a)}${agentError(a)}</div>`;
   }).join("")}</div>`;
 }
 

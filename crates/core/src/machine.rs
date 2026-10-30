@@ -232,8 +232,8 @@ struct Tab {
     held: Vec<String>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
     turn_pending: Option<Instant>,
-    /// Printable bytes in the terminal's input line. Done does not clear it.
-    draft_len: usize,
+    /// The terminal's input line. Done does not clear it.
+    draft: Draft,
     /// Claude's permission mode from the latest hook that reported one. `plan` is read-only.
     permission_mode: Option<String>,
     /// Shift+Tab changed the mode and no hook has reported the new one. A child stays read-only.
@@ -298,7 +298,7 @@ impl Tab {
 
     /// A notice may be typed. Cursor never reports Done, so it is never idle.
     fn notice_idle(&self) -> bool {
-        self.session.is_some() && self.status == Some(AgentStatus::Done) && self.turn_pending.is_none() && self.draft_len == 0
+        self.session.is_some() && self.status == Some(AgentStatus::Done) && self.turn_pending.is_none() && self.draft.empty()
     }
 
     fn note_submit(&mut self) {
@@ -1037,7 +1037,7 @@ impl Machine {
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
             t.turn_pending = None;
-            t.draft_len = 0;
+            t.draft = Draft::default();
         })?;
         self.type_held_once_raw(tab, session);
         Ok(())
@@ -1103,7 +1103,7 @@ impl Machine {
             return self.shells.write(tab, data);
         }
         let (submitted, mode_unknown) = self.tab(tab, |t| {
-            let submitted = note_draft(&mut t.draft_len, data);
+            let submitted = note_draft(&mut t.draft, data);
             if submitted {
                 t.note_submit();
             }
@@ -1620,7 +1620,7 @@ impl Machine {
 
     /// Types one finished task's notice now. The tab must own the task. The idle gate does not apply.
     fn deliver_task(&self, tab: &str, task: &str) -> Result<(), String> {
-        if self.tab(tab, |t| t.draft_len)? > 0 {
+        if !self.tab(tab, |t| t.draft.empty())? {
             return Err("The prompt has unsent text. Send or clear it (Ctrl-U), then try again.".into());
         }
         let caller = crate::delegate::Caller { tab: Some(tab.to_owned()), task: None };
@@ -1792,7 +1792,7 @@ impl Machine {
             message: None,
             held: vec![],
             turn_pending: None,
-            draft_len: 0,
+            draft: Draft::default(),
             permission_mode: None,
             permission_unknown: false,
             screen: Arc::default(),
@@ -2096,11 +2096,26 @@ fn tab_number(id: &str) -> u32 {
     id.trim_start_matches("tab-").parse().unwrap_or(0)
 }
 
-/// Counts the terminal's input line in characters. Printable text adds, including newlines inside
-/// a bracketed paste. Backspace subtracts, floored at 0. Ctrl-C, Ctrl-U, and Enter clear the line.
-/// Enter on a non-empty line is a submit. Up and down recall a prompt, so the line counts as
-/// occupied until Enter, Ctrl-U, or Ctrl-C. Other escape sequences, such as focus reports, are ignored.
-fn note_draft(draft_len: &mut usize, data: &[u8]) -> bool {
+/// The terminal's input line as far as the keys show it.
+#[derive(Clone, Copy, Debug, Default)]
+struct Draft {
+    /// Characters typed into the line.
+    chars: usize,
+    /// Up or down put an earlier prompt in the line. Its length is unknown, so backspace cannot empty it.
+    recalled: bool,
+}
+
+impl Draft {
+    fn empty(&self) -> bool {
+        self.chars == 0 && !self.recalled
+    }
+}
+
+/// Follows the terminal's input line. Printable text adds a character, including newlines inside
+/// a bracketed paste. Backspace removes one, floored at 0. Ctrl-C, Ctrl-U, and Enter clear the line.
+/// Enter on a non-empty line is a submit. Up and down recall a prompt, so the line stays occupied
+/// until Enter, Ctrl-U, or Ctrl-C. Other escape sequences, such as focus reports, are ignored.
+fn note_draft(draft: &mut Draft, data: &[u8]) -> bool {
     let mut submitted = false;
     let mut pasting = false;
     let mut i = 0;
@@ -2111,20 +2126,20 @@ fn note_draft(draft_len: &mut usize, data: &[u8]) -> bool {
                 match &data[i + 1..i + 1 + len] {
                     b"[200~" => pasting = true,
                     b"[201~" => pasting = false,
-                    b"[A" | b"[B" | b"OA" | b"OB" => *draft_len = (*draft_len).max(1),
+                    b"[A" | b"[B" | b"OA" | b"OB" => draft.recalled = true,
                     _ => {}
                 }
                 i += len;
             }
-            b'\r' | b'\n' if pasting => *draft_len += 1,
+            b'\r' | b'\n' if pasting => draft.chars += 1,
             b'\r' => {
-                submitted |= *draft_len > 0;
-                *draft_len = 0;
+                submitted |= !draft.empty();
+                *draft = Draft::default();
             }
-            0x03 | 0x15 => *draft_len = 0,
-            0x08 | 0x7f => *draft_len = draft_len.saturating_sub(1),
+            0x03 | 0x15 => *draft = Draft::default(),
+            0x08 | 0x7f => draft.chars = draft.chars.saturating_sub(1),
             0x80..=0xbf => {}
-            byte if byte >= 0x20 => *draft_len += 1,
+            byte if byte >= 0x20 => draft.chars += 1,
             _ => {}
         }
         i += 1;
@@ -3976,6 +3991,22 @@ exec sleep 30
 
     #[test]
     #[cfg(unix)]
+    fn a_recalled_prompt_holds_the_notice_through_backspace_until_ctrl_u() {
+        let (m, tab, file) = pty_file("notice-recall");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.write_input(&tab, b"\x1b[A").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Recall");
+        m.write_input(&tab, b"\x7f").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed onto a recalled prompt: {}", read_pty(&file));
+        m.write_input(&tab, b"\x15").unwrap();
+        let needle = format!("[pinned] Delegated task {id} \"Recall\"");
+        wait_for("the notice after ctrl-u", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn two_deliverers_paste_a_notice_once() {
         let (m, tab, file) = pty_file("notice-once");
         m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
@@ -4009,39 +4040,40 @@ exec sleep 30
 
     #[test]
     fn escape_sequences_are_not_a_draft_and_enter_submits() {
-        let mut draft = 0usize;
+        let mut draft = Draft::default();
         for keys in [&b"\x1b[I"[..], b"\x1b[O", b"\x1b", b"\x1b[C", b"\x1b[D", b"\x1b[?1;2c", b"\x1b[1;1R", b"\x1b]11;rgb:0/0/0\x07"] {
             assert!(!note_draft(&mut draft, keys), "{keys:?}");
-            assert_eq!(draft, 0, "{keys:?} is not text");
+            assert!(draft.empty(), "{keys:?} is not text");
         }
         for keys in [b"\x1b[A".as_slice(), b"\x1b[B", b"\x1bOA", b"\x1bOB"] {
-            draft = 0;
-            assert!(!note_draft(&mut draft, keys), "{keys:?}");
-            assert_eq!(draft, 1, "{keys:?} recalls a prompt into the line");
-            draft = 0;
-            note_draft(&mut draft, b"xy");
-            assert!(!note_draft(&mut draft, keys), "{keys:?}");
-            assert_eq!(draft, 2, "{keys:?} must not shrink a longer draft");
+            for clear in [b"\r".as_slice(), b"\x15", b"\x03"] {
+                draft = Draft::default();
+                assert!(!note_draft(&mut draft, keys), "{keys:?}");
+                assert!(!note_draft(&mut draft, b"\x7f\x7f\x7f"));
+                assert!(!draft.empty(), "backspace after {keys:?} edits the recalled prompt, which is still in the line");
+                assert_eq!(note_draft(&mut draft, clear), clear == b"\r", "{clear:?} after {keys:?}");
+                assert!(draft.empty(), "{clear:?} clears the recalled prompt");
+            }
         }
-        draft = 0;
+        draft = Draft::default();
         note_draft(&mut draft, "é".as_bytes());
-        assert_eq!(draft, 1, "one character, however many bytes");
+        assert_eq!(draft.chars, 1, "one character, however many bytes");
         note_draft(&mut draft, b"\x7f");
-        assert_eq!(draft, 0);
+        assert_eq!(draft.chars, 0);
         assert!(!note_draft(&mut draft, b"\x1b[200~line one\rline two\x1b[201~"), "a newline inside a paste is not Enter");
-        assert_eq!(draft, 17);
+        assert_eq!(draft.chars, 17);
         note_draft(&mut draft, b"\x03");
-        assert_eq!(draft, 0);
+        assert_eq!(draft.chars, 0);
         assert!(!note_draft(&mut draft, b"\x1b[200~ab\x1b[201~"));
-        assert_eq!(draft, 2, "a bracketed paste counts the text inside it");
+        assert_eq!(draft.chars, 2, "a bracketed paste counts the text inside it");
         assert!(note_draft(&mut draft, b"\r"));
-        assert_eq!(draft, 0);
+        assert_eq!(draft.chars, 0);
         assert!(!note_draft(&mut draft, b"\r"), "enter on an empty line is not a submit");
         note_draft(&mut draft, b"ab");
         assert!(!note_draft(&mut draft, b"\x08"));
-        assert_eq!(draft, 1);
+        assert_eq!(draft.chars, 1);
         assert!(!note_draft(&mut draft, b"\x7f\x7f"));
-        assert_eq!(draft, 0, "backspace stops at an empty line");
+        assert_eq!(draft.chars, 0, "backspace stops at an empty line");
     }
 
     #[test]

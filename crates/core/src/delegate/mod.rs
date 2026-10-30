@@ -1189,6 +1189,11 @@ exec '{real}' "$@"
             client_request_id: None,
             role: None,
         });
+        let headless = Caller { tab: None, task: Some(parent.id.clone()) };
+        let working = delegates.status(&headless, &child.id).unwrap();
+        assert_eq!(working["next"], format!("call task_status with taskId \"{}\" when you need it", child.id));
+        let from_tab = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &parent.id).unwrap();
+        assert!(from_tab["next"].as_str().unwrap().starts_with("end your turn"), "{}", from_tab["next"]);
         delegates.apply(&child.id, ChildEvent::Line(json!({"type":"result","result":"NESTED"}).to_string()), None);
         let root = Caller { tab: Some("tab-1".into()), task: None };
         assert_eq!(

@@ -565,11 +565,15 @@ impl Task {
     }
 }
 
+/// A session hears back through a typed notice. A headless task has no terminal to type into, so it asks again.
 fn working_next(task: &Task) -> String {
-    format!(
-        "end your turn and do not poll; pinned types a notice when this session is idle, or the user sends it from the task's card; then call task_status with this taskId \"{}\"",
-        task.id
-    )
+    match task.parent {
+        Parent::Tab(_) => format!(
+            "end your turn and do not poll; pinned types a notice when this session is idle, or the user sends it from the task's card; then call task_status with this taskId \"{}\"",
+            task.id
+        ),
+        Parent::Task(_) => format!("call task_status with taskId \"{}\" when you need it", task.id),
+    }
 }
 
 fn next_line(task: &Task) -> String {
