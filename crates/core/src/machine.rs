@@ -869,7 +869,7 @@ impl Machine {
         let start = std::time::Instant::now();
         let mut drew_at = None;
         loop {
-            if self.screen_text(id).contains("No conversation found") {
+            if Self::resume_refused(&self.screen_text(id)) {
                 return Err("No conversation found".into());
             }
             if !self.still_running(id) {
@@ -878,8 +878,9 @@ impl Machine {
             let screen = self.screen_text(id);
             if !screen.is_empty() {
                 let drew = drew_at.get_or_insert_with(std::time::Instant::now);
-                // The refusal is that line, or it follows the first paint and the process exits.
-                if drew.elapsed() >= std::time::Duration::from_millis(400) {
+                // The TUI paints, then a missing id exits. Claude Code 2.1 took about 1.3s to do
+                // that, so 400ms of paint is still the startup screen, not a live resume.
+                if drew.elapsed() >= std::time::Duration::from_secs(2) {
                     return Ok(());
                 }
             }
@@ -894,12 +895,50 @@ impl Machine {
     /// treating a dead process as a resume that worked.
     fn refusal_after_exit(&self, id: &TabId) -> Result<(), String> {
         for _ in 0..10 {
-            if self.screen_text(id).contains("No conversation found") {
+            if Self::resume_refused(&self.screen_text(id)) {
                 return Err("No conversation found".into());
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         Ok(())
+    }
+
+    /// Claude's TUI places each word with a cursor command, so the refusal is not one contiguous
+    /// sentence in the pty bytes.
+    fn resume_refused(screen: &str) -> bool {
+        let mut flat = String::new();
+        let mut chars = screen.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                match chars.peek() {
+                    Some('[') => {
+                        chars.next();
+                        for next in chars.by_ref() {
+                            if next.is_ascii_alphabetic() {
+                                break;
+                            }
+                        }
+                    }
+                    Some(']') => {
+                        chars.next();
+                        for next in chars.by_ref() {
+                            if next == '\u{7}' || next == '\u{1b}' {
+                                break;
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        chars.next();
+                    }
+                    None => {}
+                }
+                continue;
+            }
+            if c.is_ascii_alphanumeric() {
+                flat.push(c.to_ascii_lowercase());
+            }
+        }
+        flat.contains("noconversationfound")
     }
 
     fn screen_text(&self, id: &str) -> String {
@@ -3357,6 +3396,39 @@ mod tests {
         let id = staying_machine.run(&run).unwrap();
         assert!(staying_machine.view(&id).unwrap().running);
         staying_machine.close_tab(&id);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_missing_resume_is_recognized_when_the_tui_places_each_word() {
+        let screen = "No\u{1b}[12Gconversation\u{1b}[25Gfound with session ID";
+        assert!(Machine::resume_refused(screen));
+        assert!(!Machine::resume_refused("Resumed the conversation and found the bug"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_resume_that_paints_then_exits_is_still_refused() {
+        let dir = temp("resume-late");
+        let missing = dir.join("missing");
+        std::fs::write(
+            &missing,
+            "#!/bin/sh\necho started\nsleep 0.6\nprintf 'No\\033[12Gconversation\\033[25Gfound with session ID\\n'\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&missing, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let run = RunSpec {
+            folder: dir.display().to_string(),
+            repo: None,
+            args: vec!["--resume".into(), "missing".into()],
+            env: vec![],
+            token: None,
+            account: None,
+        };
+        let refused = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, missing)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let err = refused.run(&run).unwrap_err();
+        assert!(err.contains("No conversation found"), "{err}");
+        assert!(refused.tabs().is_empty(), "the refused resume left a tab");
         let _ = std::fs::remove_dir_all(dir);
     }
 
