@@ -706,7 +706,7 @@ grok-4.7-high - Grok 4.7  High
         );
         assert_eq!(
             value["providers"][2]["constraints"][1],
-            "Cursor sessions can't delegate further."
+            "A worker or a delegated child cannot start another pinned worker. A Cursor session cannot delegate."
         );
         let found = capabilities(&parent, &accounts, Some("grok"));
         assert_eq!(found["providers"].as_array().unwrap().len(), 1);

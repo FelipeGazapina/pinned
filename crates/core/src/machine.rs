@@ -3970,10 +3970,19 @@ echo '{"type":"result","result":"ok"}'
     }
 
     #[test]
-    fn a_task_caller_the_registry_does_not_know_is_refused() {
+    fn a_delegated_child_cannot_start_another_pinned_worker() {
         let m = Machine::new(launch(), None, None, |_| {});
         let request = crate::delegate::parse_request(&json!({ "task": "look" })).unwrap();
-        assert_eq!(m.start_delegate(None, Some("task-gone".into()), None, request), Err("no task task-gone".into()));
+        assert_eq!(m.start_delegate(None, Some("task-gone".into()), None, request), Err("a delegated child cannot start another pinned worker".into()));
+        assert!(m.delegates.running().is_empty());
+    }
+
+    #[test]
+    fn a_worker_cannot_start_another_pinned_worker() {
+        let m = machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, Path::new("/repo")), false, None);
+        let request = crate::delegate::parse_request(&json!({ "task": "look" })).unwrap();
+        assert_eq!(m.start_delegate(Some(tab), None, None, request).unwrap_err(), "a worker cannot start another pinned worker");
         assert!(m.delegates.running().is_empty());
     }
 
@@ -4877,6 +4886,7 @@ while True:
         assert!(tree.file_name().unwrap().to_str().unwrap().starts_with("pinned-"));
         assert_eq!(reply, format!("Started worker {worker} in {}. You get a message when it finishes or needs input.", tree.display()));
         assert_eq!(args[1..], ["worker", &path, "--settings", "s", "--plugin-dir", "p", "--name", "JSON output", "JSON output\n\nAdd a --json flag to the CLI.", "--append-system-prompt", Role::Worker.prompt()]);
+        assert!(!args.iter().any(|arg| arg == "--disallowedTools"), "a worker launch removed the sub-agent tool: {args:?}");
         let view = m.view(&worker).unwrap();
         assert_eq!((view.role, view.title.as_deref(), view.running), (Some(Role::Worker), Some("JSON output"), true));
 

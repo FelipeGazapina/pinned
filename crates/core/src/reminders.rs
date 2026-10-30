@@ -903,8 +903,10 @@ fn restore_var(name: &str, value: Option<String>) {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel"];
         let memory = ["memory_search", "memory_save", "memory_forget"];
-        assert_eq!(names(None), [&reminders[..], &delegation, &memory].concat());
-        assert_eq!(names(Some(Role::Worker)), names(None));
+        let plain = names(None);
+        assert_eq!(plain, [&reminders[..], &delegation, &memory].concat());
+        let worker = names(Some(Role::Worker));
+        assert_eq!(worker, plain.iter().filter(|name| name.as_str() != "delegate_task").cloned().collect::<Vec<_>>());
         assert_eq!(names(Some(Role::Orchestrator)), [&reminders[..], &delegation, &["delegate", "agents"], &memory].concat());
         let on_a_node = tool_definitions(false, None).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(on_a_node, [&delegation[..], &memory].concat());
@@ -916,6 +918,52 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
         assert_eq!(ask("delegate", serde_json::json!({}), Some("tab-2")), Err("delegate: missing field `task`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
+    }
+
+    #[cfg(unix)]
+    fn offered(role: Option<&str>, task: Option<&str>) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+        let previous = (std::env::var(ROLE_ENV).ok(), std::env::var(TASK_ENV).ok());
+        match role {
+            Some(value) => std::env::set_var(ROLE_ENV, value),
+            None => std::env::remove_var(ROLE_ENV),
+        }
+        match task {
+            Some(value) => std::env::set_var(TASK_ENV, value),
+            None => std::env::remove_var(TASK_ENV),
+        }
+        let input = format!("{}\n", json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}));
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        serve_io(true, std::io::Cursor::new(input.into_bytes()), Shared(buf.clone())).unwrap();
+        restore_var(ROLE_ENV, previous.0);
+        restore_var(TASK_ENV, previous.1);
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let value: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        value["result"]["tools"].as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap().to_owned()).collect()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_is_not_offered_delegate_task() {
+        let names = offered(Some("worker"), None);
+        assert!(!names.contains(&"delegate_task".to_owned()), "{names:?}");
+        assert!(!names.contains(&"delegate".to_owned()), "{names:?}");
+        assert!(names.contains(&"memory_search".to_owned()), "{names:?}");
+        assert!(names.contains(&"task_status".to_owned()), "{names:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_delegated_child_is_not_offered_delegate_task() {
+        let names = offered(None, Some("task-1"));
+        assert!(!names.contains(&"delegate_task".to_owned()), "{names:?}");
+        assert!(names.contains(&"memory_search".to_owned()), "{names:?}");
+        let plain = offered(None, None);
+        assert!(plain.contains(&"delegate_task".to_owned()), "{plain:?}");
+        let orchestrator = offered(Some("orchestrator"), None);
+        assert!(orchestrator.contains(&"delegate_task".to_owned()) && orchestrator.contains(&"delegate".to_owned()), "{orchestrator:?}");
+        let both = offered(Some("orchestrator"), Some("task-1"));
+        assert!(!both.contains(&"delegate_task".to_owned()) && !both.contains(&"delegate".to_owned()), "{both:?}");
     }
 
     #[test]
