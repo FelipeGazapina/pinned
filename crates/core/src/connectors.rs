@@ -431,7 +431,7 @@ pub enum BoxPermission {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         row: Option<String>,
     },
-    /// Ask in the work's thread, and open nothing until the user says yes.
+    /// Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.
     Ask,
 }
 
@@ -477,7 +477,6 @@ fn box_access_is_legacy(access: &BoxAccess) -> bool {
     access == &BoxAccess::default()
 }
 
-/// A question waiting in the work's thread. The id is a hash of the connector and subject, so a retry records it once.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BoxAsk {
     pub id: String,
@@ -3093,6 +3092,7 @@ impl Connectors {
         };
         store.boxes = kept.clone();
         self.save(&store)?;
+        self.wake.notify_one();
         Ok(kept)
     }
 
@@ -3144,7 +3144,9 @@ impl Connectors {
         let ask = store.box_asks.remove(index);
         store.box_grants.retain(|grant| !(grant.connector == ask.connector && grant.subject == ask.subject));
         store.box_grants.push(BoxGrant { connector: ask.connector, subject: ask.subject, allow });
-        self.save(&store)
+        self.save(&store)?;
+        self.wake.notify_one();
+        Ok(())
     }
 
     /// Claims `proposed` as the workflow kind's one box, or returns the row already claimed.
@@ -4598,6 +4600,44 @@ mod tests {
         assert!(disk.get("boxes").is_none());
         assert!(disk.get("box_asks").is_none());
         assert!(disk.get("box_grants").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn answering_a_box_wakes_the_next_check() {
+        let (connectors, dir) = stored("box-wake", vec![]);
+        let connectors = std::sync::Arc::new(connectors);
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let watched = connectors.clone();
+        let counted = hits.clone();
+        // `rt-multi-thread` is off, so a current-thread runtime has to be driven on its own thread.
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
+                watched
+                    .watch(
+                        |_work| async { Ok(()) },
+                        move |_| {
+                            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        },
+                    )
+                    .await;
+            });
+        });
+        let start = std::time::Instant::now();
+        while hits.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            assert!(start.elapsed() < std::time::Duration::from_secs(2), "the check never started");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let subject = Subject::LinearIssue { issue: "uuid-1".into() };
+        block_on(connectors.ensure_box_ask("c1", &subject)).unwrap();
+        let id = connectors.get_settings().box_asks[0].id.clone();
+        let before = hits.load(std::sync::atomic::Ordering::SeqCst);
+        connectors.answer_box(&id, true).unwrap();
+        let start = std::time::Instant::now();
+        while hits.load(std::sync::atomic::Ordering::SeqCst) == before {
+            assert!(start.elapsed() < std::time::Duration::from_secs(2), "yes did not wake the check");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
