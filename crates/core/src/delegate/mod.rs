@@ -973,6 +973,7 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_isolated_task_drops_its_worktree_after_the_task_lock() {
         let root = std::env::temp_dir().join(format!("pinned-wt-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -984,6 +985,34 @@ grok-4.7-high - Grok 4.7  High
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
         let dir = crate::branches::new_worktree(&root, None).unwrap();
+        let real = String::from_utf8(std::process::Command::new("/bin/sh").arg("-c").arg("command -v git").output().unwrap().stdout).unwrap();
+        let real = real.trim();
+        assert!(!real.is_empty(), "git is not on PATH");
+        let marker = root.join("removing");
+        let go = root.join("go");
+        let body = format!(
+            r#"if [ "$1" = worktree ] && [ "$2" = remove ]; then
+  /usr/bin/touch '{marker}'
+  while [ ! -f '{go}' ]; do
+    /bin/sleep 0.05
+  done
+fi
+export PATH="/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin"
+exec '{real}' "$@"
+"#,
+            marker = marker.display(),
+            go = go.display(),
+        );
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        script(&bin, "git", &body);
+        struct Release(PathBuf);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.0, "");
+            }
+        }
+        let _release = Release(go.clone());
         let delegates = Arc::new(Delegates::default());
         let task = delegates.begin(NewTask {
             parent: Parent::Tab("tab-1".into()),
@@ -1000,13 +1029,28 @@ grok-4.7-high - Grok 4.7  High
             client_request_id: None,
             role: None,
         });
-        let status_of = delegates.clone();
+        let applying = delegates.clone();
         let id = task.id.clone();
-        let waiting = std::thread::spawn(move || {
-            status_of.status(&Caller { tab: Some("tab-1".into()), task: None }, &id).map(|value| value["workState"].as_str().unwrap_or("").to_owned())
+        let path = bin.display().to_string();
+        let handle = std::thread::spawn(move || {
+            applying.apply(&id, ChildEvent::Exited { code: Some(1), stderr: String::new() }, Some(&path));
         });
-        delegates.apply(&task.id, ChildEvent::Exited { code: Some(1), stderr: String::new() }, None);
-        assert!(waiting.join().unwrap().is_ok(), "status waited behind the worktree remove");
+        let started = Instant::now();
+        while !marker.exists() {
+            assert!(started.elapsed() < Duration::from_secs(5), "worktree remove never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let status_of = delegates.clone();
+        let status_id = task.id.clone();
+        std::thread::spawn(move || {
+            let value = status_of.status(&Caller { tab: Some("tab-1".into()), task: None }, &status_id).unwrap();
+            let _ = tx.send(value["workState"].as_str().unwrap_or("").to_owned());
+        });
+        let state = rx.recv_timeout(Duration::from_secs(1)).expect("status blocked behind the worktree remove");
+        assert_eq!(state, "failed");
+        std::fs::write(&go, "").unwrap();
+        handle.join().unwrap();
         assert!(!dir.exists(), "the isolated worktree was kept");
         let _ = std::fs::remove_dir_all(&root);
     }
