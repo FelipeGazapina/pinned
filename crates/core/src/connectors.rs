@@ -4556,7 +4556,7 @@ mod tests {
         let (connectors, dir) = stored("box-access", vec![workflow]);
         let before = serde_json::to_value(&connectors.get_settings().connectors[0]).unwrap()["machine"].clone();
         assert_eq!(before, json!({ "kind": "upstash-box", "size": "small" }));
-        assert_eq!(connectors.box_access(), BoxAccess::default(), "a store from before this field still opens a fresh box per run");
+        assert_eq!(connectors.box_access(), BoxAccess::default());
         let access = BoxAccess { workflow: BoxPermission::Ask, session: BoxPermission::Fresh, worker: BoxPermission::Off, orchestrator: BoxPermission::Fixed { row: None } };
         assert_eq!(connectors.set_box_access(access.clone()).unwrap(), access);
         assert_eq!(connectors.box_access(), access);
@@ -4571,6 +4571,33 @@ mod tests {
         connectors.claim_fixed_row("row-1").unwrap();
         let again = connectors.set_box_access(BoxAccess { workflow: BoxPermission::Fixed { row: None }, ..BoxAccess::default() }).unwrap();
         assert_eq!(again.workflow, BoxPermission::Fixed { row: Some("row-1".into()) }, "saving fixed without a row keeps the box the hub created");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_account_stored_before_box_permissions_still_runs_a_box_workflow() {
+        let dir = temp_dir("legacy-box");
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = r#"{
+          "connectors": [{
+            "id": "c1", "name": "Bugs", "enabled": true,
+            "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": "/repo", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+            "instructions": "",
+            "machine": { "kind": "upstash-box", "size": "small" }
+          }]
+        }"#;
+        std::fs::write(dir.join("connectors.json"), saved).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(connectors.box_access(), BoxAccess { workflow: BoxPermission::Fresh, ..BoxAccess::default() });
+        let settings = serde_json::to_value(connectors.get_settings()).unwrap();
+        assert!(settings.get("boxes").is_none());
+        assert!(settings.get("box_asks").is_none());
+        assert_eq!(settings["connectors"][0]["machine"], json!({ "kind": "upstash-box", "size": "small" }));
+        let disk = on_disk(&dir);
+        assert!(disk.get("boxes").is_none());
+        assert!(disk.get("box_asks").is_none());
+        assert!(disk.get("box_grants").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
