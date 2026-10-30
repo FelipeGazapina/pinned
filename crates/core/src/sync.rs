@@ -378,6 +378,7 @@ pub fn plugin_dirs(claude_home: &Path, dir: &Path) -> Vec<PathBuf> {
 /// Brings this Claude home's enabled plugins and its `skills` folder into line with the hub.
 /// Pulled plugins land under `share.dir`. Pulled user skills land in the home's `skills` folder.
 /// Claude Code has no flag for a second skills directory.
+/// A user skill this home already has, and has not synced before, stays when the hub holds a different copy.
 pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now: SystemTime) -> Result<Synced, String> {
     publish(share)?;
     let mut local = BTreeMap::new();
@@ -388,13 +389,32 @@ pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now:
     }
     let agreed_key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
     let mut agreed = state.agreed.remove(&agreed_key).unwrap_or_default();
-    let synced = exchange(hub, state, PLUGINS_KEY, &mut agreed, &local, &|path| plugin_local(share, path), now, false)?;
+    let keep = conflicting_user_skills(&local, &agreed, &hub.list(PLUGINS_KEY)?);
+    let synced = exchange(hub, state, PLUGINS_KEY, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false)?;
     state.agreed.insert(agreed_key, agreed);
     Ok(synced)
 }
 
-const DENY_FILE: &[&str] = &["settings.json", ".claude.json", "installed_plugins.json", ".env", "credentials.json"];
-const SKIP_DIR: &[&str] = &["node_modules", ".git", "secrets", ".secrets"];
+fn conflicting_user_skills(local: &BTreeMap<String, (String, u64)>, agreed: &BTreeMap<String, String>, remote: &[Entry]) -> BTreeSet<String> {
+    let on_hub: BTreeMap<&str, &str> = remote.iter().map(|entry| (entry.path.as_str(), entry.sha.as_str())).collect();
+    local
+        .iter()
+        .filter(|(path, (sha, _))| path.starts_with("user-skills/") && !agreed.contains_key(path.as_str()) && on_hub.get(path.as_str()).is_some_and(|hub_sha| *hub_sha != sha.as_str()))
+        .map(|(path, _)| (*path).clone())
+        .collect()
+}
+
+const DENY_FILE: &[&str] = &["settings.json", "settings.local.json", ".claude.json", "installed_plugins.json", ".env", "credentials.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
+const SKIP_DIR: &[&str] = &["node_modules", ".git", "secrets", ".secrets", "target", "dist", "build", "vendor"];
+
+fn blocked(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    DENY_FILE.iter().any(|item| *item == name) || SKIP_DIR.iter().any(|item| *item == name) || name.starts_with(".env") || name.ends_with(".pem") || name.ends_with(".key")
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
 
 /// Whether the hub should store `path` for `project`. Plugin paths are stored only under `PLUGINS_KEY`.
 pub fn accepts(project: &str, path: &str) -> bool {
@@ -407,12 +427,12 @@ fn plugin_path(path: &str) -> bool {
         return false;
     }
     let parts: Vec<&str> = path.split('/').collect();
-    if parts.iter().any(|part| part.is_empty() || SKIP_DIR.contains(part) || DENY_FILE.contains(part) || part.ends_with(".pem") || part.ends_with(".key")) {
+    if parts.iter().any(|part| part.is_empty() || blocked(part)) {
         return false;
     }
     match parts.as_slice() {
         ["plugins", id, _, ..] if plugin_id(id) => true,
-        ["user-skills", first, ..] if *first != "synced" && plugin_id(first) => true,
+        ["user-skills", first, ..] if !first.eq_ignore_ascii_case("synced") && plugin_id(first) => true,
         _ => false,
     }
 }
@@ -426,7 +446,7 @@ fn publish(share: &PluginShare) -> Result<(), String> {
     let before = read_ids(&record);
     let mut keep = BTreeSet::new();
     for plugin in crate::commands::enabled_plugins(&share.claude_home) {
-        if !plugin_id(&plugin.id) || plugin.path.components().any(|c| c.as_os_str() == "marketplaces") {
+        if !plugin_id(&plugin.id) || plugin.path.components().any(|c| c.as_os_str() == "marketplaces") || is_symlink(&plugin.path) {
             continue;
         }
         mirror(&plugin, &share.dir.join("plugins").join(&plugin.id))?;
@@ -448,6 +468,9 @@ fn read_ids(file: &Path) -> BTreeSet<String> {
 }
 
 fn mirror(plugin: &crate::commands::EnabledPlugin, dest: &Path) -> Result<(), String> {
+    if is_symlink(dest) {
+        return Ok(());
+    }
     copy_tree(&plugin.path, dest, &plugin.id, Path::new(""))?;
     let marker = dest.join(".pinned-plugin.json");
     let body = serde_json::to_vec(&serde_json::json!({ "version": plugin.version, "gitCommitSha": plugin.git_commit_sha })).unwrap();
@@ -461,10 +484,13 @@ fn mirror(plugin: &crate::commands::EnabledPlugin, dest: &Path) -> Result<(), St
 }
 
 fn copy_tree(src: &Path, dest: &Path, id: &str, rel: &Path) -> Result<(), String> {
+    if is_symlink(src) || is_symlink(dest) {
+        return Ok(());
+    }
     let Ok(entries) = std::fs::read_dir(src) else { return Ok(()) };
     for entry in entries.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
-        if SKIP_DIR.contains(&name.as_str()) {
+        if blocked(&name) {
             continue;
         }
         let rel = rel.join(&name);
@@ -486,11 +512,13 @@ fn copy_tree(src: &Path, dest: &Path, id: &str, rel: &Path) -> Result<(), String
 }
 
 fn copy_newer(src: &Path, dest: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
+    if is_symlink(dest) {
+        return Ok(());
+    }
     let copy = match std::fs::metadata(dest) {
         Err(_) => true,
         Ok(have) => match (meta.modified().ok(), have.modified().ok()) {
             (Some(src_mod), Some(dest_mod)) if src_mod > dest_mod => true,
-            (Some(src_mod), Some(dest_mod)) if src_mod == dest_mod => meta.len() != have.len(),
             (Some(_), Some(_)) => false,
             _ => meta.len() != have.len(),
         },
@@ -516,14 +544,17 @@ fn plugin_files(share: &PluginShare) -> Vec<(String, PathBuf)> {
 }
 
 fn walk_shared(dir: &Path, prefix: &str, skills: bool, files: &mut Vec<(String, PathBuf)>) {
+    if is_symlink(dir) {
+        return;
+    }
     fn rec(dir: &Path, prefix: &str, rel: &Path, skills: bool, files: &mut Vec<(String, PathBuf)>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
-            if SKIP_DIR.contains(&name.as_str()) {
+            if blocked(&name) {
                 continue;
             }
-            if skills && rel.as_os_str().is_empty() && name == "synced" {
+            if skills && rel.as_os_str().is_empty() && name.eq_ignore_ascii_case("synced") {
                 continue;
             }
             let rel = rel.join(&name);
@@ -559,10 +590,24 @@ fn plugin_local(share: &PluginShare, path: &str) -> Option<PathBuf> {
         return None;
     }
     if let Some(rest) = path.strip_prefix("plugins/") {
-        return Some(share.dir.join("plugins").join(rel_path(rest)?));
+        return placed(&share.dir.join("plugins"), rest);
     }
-    let rest = path.strip_prefix("user-skills/")?;
-    Some(share.claude_home.join("skills").join(rel_path(rest)?))
+    placed(&share.claude_home.join("skills"), path.strip_prefix("user-skills/")?)
+}
+
+fn placed(root: &Path, rest: &str) -> Option<PathBuf> {
+    let rel = rel_path(rest)?;
+    if is_symlink(root) {
+        return None;
+    }
+    let mut cur = root.to_path_buf();
+    for component in rel.components() {
+        cur.push(component);
+        if is_symlink(&cur) {
+            return None;
+        }
+    }
+    Some(cur)
 }
 
 fn rel_path(rest: &str) -> Option<PathBuf> {
@@ -1128,6 +1173,8 @@ mod tests {
         sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
         sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
         assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/notes/SKILL.md")).unwrap(), "from mini");
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        assert!(!mac_home.join(".claude/skills/notes/SKILL.md").exists(), "a skill mac deleted came back from mini");
         std::fs::remove_file(mac_home.join(".claude/skills/ship/SKILL.md")).unwrap();
         sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
         sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
@@ -1198,6 +1245,32 @@ mod tests {
         sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
         let again = sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
         assert_eq!(again.pushed, Vec::<String>::new(), "the machines kept publishing the same file");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_file_past_the_limit_is_not_pushed() {
+        let root = root("limit");
+        let hub = MemHub::default();
+        let home = root.join("mac");
+        let install = home.join("plugins/toy");
+        put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#);
+        put(&install.join("skills/greet/SKILL.md"), "small");
+        let mut blob = vec![0u8; FILE_LIMIT as usize + (1 << 20)];
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        for byte in &mut blob {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            *byte = seed as u8;
+        }
+        std::fs::write(install.join("skills/greet/blob.bin"), &blob).unwrap();
+        enable(&home, "toy@demo", &install, "1.2.3", "abc123");
+        let share = PluginShare { claude_home: home.join(".claude"), dir: root.join("synced") };
+        let synced = sync_plugins(&hub, &mut State::default(), &share, SystemTime::now()).unwrap();
+        assert!(synced.pushed.iter().any(|path| path.ends_with("SKILL.md")));
+        assert!(synced.pushed.iter().all(|path| !path.contains("blob.bin")), "a file over the limit left the machine");
+        assert!(hub.0.borrow().keys().all(|path| !path.contains("blob.bin")));
         let _ = std::fs::remove_dir_all(root);
     }
 

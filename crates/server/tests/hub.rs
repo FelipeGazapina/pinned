@@ -623,12 +623,33 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     assert_eq!(pulled, stored);
     assert_eq!(std::fs::read_to_string(mini_home.join("synced-plugins/plugins/toy@demo/skills/greet/SKILL.md")).unwrap(), skill);
     let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1 }, data: Some("eA==".into()) };
-    for path in ["plugins/toy@demo/settings.json", "plugins/toy@demo/.claude.json", "plugins/toy@demo/.env"] {
+    for path in [
+        "plugins/toy@demo/settings.json",
+        "plugins/toy@demo/.claude.json",
+        "plugins/toy@demo/.env",
+        "plugins/toy@demo/Settings.json",
+        "plugins/toy@demo/.ENV",
+        "plugins/toy@demo/.env.local",
+        "plugins/toy@demo/settings.local.json",
+        "plugins/toy@demo/cert.PEM",
+        "plugins/toy@demo/Secrets/token.txt",
+        "plugins/toy@demo/../../.ssh/id_rsa",
+        "/etc/passwd",
+    ] {
         assert_eq!(
             mac_link.call_hub(HubCall::SyncPush { project: sync::PLUGINS_KEY.into(), files: vec![secret(path)] }),
             Err(format!("{path} is not a file a project shares"))
         );
     }
+    let raw = vec![7u8; sync::FILE_LIMIT as usize + 1];
+    let oversized = sync::File {
+        entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64 },
+        data: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
+    };
+    assert_eq!(
+        mac_link.call_hub(HubCall::SyncPush { project: sync::PLUGINS_KEY.into(), files: vec![oversized] }),
+        Err("plugins/toy@demo/skills/greet/blob.bin is bigger than a synced file may be".into())
+    );
     assert_eq!(stored_plugin_paths(&hub.database), stored);
     let (mut mac, mut mini) = (mac, mini);
     mac.kill();
