@@ -948,14 +948,17 @@ function syncTriggerFromWatch(c, watch) {
   else if (watch.kind === "called") c.trigger = { kind: "called" };
 }
 
-function ensureDraftGraph(c) {
-  const api = graphApi();
-  if (!api) return c.graph ?? { nodes: [], edges: [] };
-  if (!c.graph?.nodes?.length) c.graph = api.ensureGraph(c);
-  const trigger = c.graph.nodes.find((n) => graphNodeKind(n) === "trigger");
-  if (trigger?.watch) syncTriggerFromWatch(c, trigger.watch);
-  return c.graph;
+function syncWatchFromTrigger(c) {
+  const node = c.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger");
+  if (!node || !c.trigger) return;
+  const t = c.trigger;
+  if (t.kind === "linear-label") node.watch = { kind: "linear-label", label: t.label ?? "" };
+  else if (t.kind === "slack-mention") node.watch = { kind: "slack-mention", channel: t.channel ?? "" };
+  else if (t.kind === "slack-message") node.watch = { kind: "slack-message", channel: t.channel ?? "" };
+  else node.watch = { kind: "called" };
 }
+
+const OLDER_HUB = "This workflow comes from an older hub; update the hub.";
 
 function graphNodeUi(node) {
   const type = graphNodeKind(node);
@@ -1014,15 +1017,23 @@ function graphNodeIndex(id) {
 }
 
 function graphLayout(c) {
-  ensureDraftGraph(c);
   const api = graphApi();
   const graph = c.graph;
+  if (!graph?.nodes?.length) return null;
   const nodes = graph.nodes.map((node) => {
     const portList = api ? api.ports(node) : [{ id: "out", label: "" }];
     const portCount = portList.length || 1;
-    const h = portCount > 2 ? Math.max(TILE, portCount * 28 + 16) : TILE;
-    return { node, id: node.id, cx: PAD + node.position[0], cy: PAD + node.position[1], h, ports: portCount, portList };
+    const h = api?.nodeHeight(node) ?? (portCount > 2 ? Math.max(TILE, portCount * 28 + 16) : TILE);
+    return { node, id: node.id, cx: TEXT_W / 2 + node.position[0], cy: node.position[1], h, ports: portCount, portList };
   });
+  const top = Math.min(...nodes.map((n) => n.cy - n.h / 2));
+  const left = Math.min(...nodes.map((n) => n.cx - TEXT_W / 2));
+  const dx = PAD - left;
+  const dy = PAD - top;
+  for (const n of nodes) {
+    n.cx += dx;
+    n.cy += dy;
+  }
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
   const edges = graph.edges
     .map((e, index) => ({
@@ -1034,9 +1045,9 @@ function graphLayout(c) {
       selected: view.selectedEdge === index,
     }))
     .filter((e) => e.from && e.to);
-  const width = Math.max(PAD * 2, ...nodes.map((n) => n.cx + TEXT_W / 2), PAD + COL) + PAD;
-  const height = Math.max(PAD * 2, ...nodes.map((n) => n.cy + n.h / 2 + TEXT_H), PAD * 2) + PAD;
-  return { nodes, edges, width, height, graph };
+  const right = Math.max(...nodes.map((n) => n.cx + TEXT_W / 2));
+  const bottom = Math.max(...nodes.map((n) => n.cy + n.h / 2 + TEXT_H));
+  return { nodes, edges, width: right + PAD, height: bottom + PAD, graph };
 }
 
 function graphPickerHtml(c, anchor) {
@@ -1053,25 +1064,32 @@ function graphPickerHtml(c, anchor) {
 }
 
 function flowHtml(c) {
-  const { nodes, edges, width, height, graph } = graphLayout(c);
+  const laid = graphLayout(c);
+  if (!laid) {
+    return `<div class="flow graph-flow" data-width="720" data-height="240" style="width:720px;height:240px">
+      <p class="hint" style="position:absolute;left:${PAD}px;top:${PAD}px;max-width:420px">${OLDER_HUB}</p>
+    </div>`;
+  }
+  const { nodes, edges, width, height, graph } = laid;
   const api = graphApi();
   const dangling = api
     ? graph.nodes.flatMap((node) =>
         api.ports(node).flatMap((port) => {
           if (graph.edges.some((e) => e.from === node.id && e.port === port.id)) return [];
-          const laid = nodes.find((n) => n.id === node.id);
-          const y = portY(laid, port.id);
-          return [{ node, port: port.id, label: port.label, x: laid.cx + TILE / 2 + STUB, y, laid }];
+          const box = nodes.find((n) => n.id === node.id);
+          const y = portY(box, port.id);
+          return [{ node, port: port.id, label: port.label, x: box.cx + TILE / 2 + STUB, y, laid: box }];
         }),
       )
     : [];
+  const flowWidth = Math.max(width, ...dangling.map((d) => d.x + END), 0) + (dangling.length ? PAD : 0);
   const picker = view.graphPick ? graphPickerHtml(c, view.graphPick) : "";
-  return `<div class="flow graph-flow" data-width="${width}" data-height="${height}" style="width:${width}px;height:${height}px">
+  return `<div class="flow graph-flow" data-width="${flowWidth}" data-height="${height}" style="width:${flowWidth}px;height:${height}px">
     ${nodes.map((n) => graphNodeHtml(c, n)).join("")}
-    <svg class="edges" width="${width}" height="${height}" aria-hidden="true">
+    <svg class="edges" width="${flowWidth}" height="${height}" aria-hidden="true">
       <defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow" d="M0 1 9 5 0 9z"/></marker></defs>
       ${edges.map((edge) => graphEdgeSvg(edge)).join("")}
-      ${dangling.map(({ laid }) => `<path d="M${laid.cx + TILE / 2} ${laid.cy}h${STUB}"/><circle cx="${laid.cx + TILE / 2 + STUB}" cy="${laid.cy}" r="4.5"/>`).join("")}
+      ${dangling.map((d) => `<path d="M${d.laid.cx + TILE / 2} ${d.y}h${STUB}"/>`).join("")}
     </svg>
     ${edges.map((edge) => graphEdgeLabels(edge)).join("")}
     ${edges.map((edge) => graphEdgeAddButton(edge)).join("")}
@@ -1100,8 +1118,9 @@ function graphNodeHtml(c, n) {
   const trigger = graphNodeKind(n.node) === "trigger";
   const portHandles = n.portList
     .map((port, portIndex) => {
-      const y = n.cy - n.h / 2 + (n.h * (portIndex + 0.5)) / n.ports;
-      return `<button type="button" class="port-handle" data-node="${esc(n.id)}" data-port="${esc(port.id)}" style="left:${n.cx + TILE / 2 - 6}px;top:${y - 6}px" title="${esc(port.label || port.id)}"></button>`;
+      const y = (n.h * (portIndex + 0.5)) / n.ports;
+      const x = (TEXT_W + TILE) / 2;
+      return `<button type="button" class="port-handle" data-node="${esc(n.id)}" data-port="${esc(port.id)}" style="left:${x}px;top:${y}px;transform:translate(-50%,-50%)" title="${esc(port.label || port.id)}"></button>`;
     })
     .join("");
   return `<div class="step graph-node${open ? " open" : ""}" data-node="${esc(n.id)}" style="${nodeAt(n)}">
@@ -1131,7 +1150,6 @@ function graphEdgeSvg(edge) {
   return `<g class="edge-group${cls ? ` ${cls}` : ""}" data-edge="${edge.index}">
     <path class="edge-hit" data-action="graph-select-edge" data-edge="${edge.index}" d="M${x1} ${y1}C${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2 - 6} ${y2}"/>
     <path d="M${x1} ${y1}C${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2 - 6} ${y2}" marker-end="url(#flow-arrow)"/>
-    <circle cx="${x1}" cy="${y1}" r="4.5"/><circle cx="${x2}" cy="${y2}" r="4.5"/>
   </g>`;
 }
 
@@ -1139,21 +1157,6 @@ function graphEdgeLabels(edge) {
   const [x1, y1, x2, y2] = graphEdgeEnds(edge);
   if (edge.portLabel) return `<span class="port-label" style="left:${x1 + 8}px;top:${y1}px">${esc(edge.portLabel)}</span>`;
   return "";
-}
-
-function triggerWatchFields(node, c) {
-  const watch = node.watch ?? { kind: "called" };
-  const pseudo = { ...c, trigger: legacyTriggerFromWatch(watch) };
-  const step = WATCH_STEP[watch.kind ?? "called"];
-  if (step === "linear-trigger") {
-    return `<label>Label ${input(`graph.nodes.${graphNodeIndex(node.id)}.watch.label`, watch.label ?? "", 'list="linear-labels" placeholder="claude"')}</label>
-      <p class="hint">pinned checks Linear every minute for issues with this label.</p>`;
-  }
-  if (step === "slack-trigger" || step === "message-trigger") {
-    return `<label>Channel ${input(`graph.nodes.${graphNodeIndex(node.id)}.watch.channel`, watch.channel ?? "", 'list="slack-channels" placeholder="support"')}</label>
-      <p class="hint">${step === "message-trigger" ? "Every new message in the channel is sorted once." : "Each @mention in a new thread starts one session."}</p>`;
-  }
-  return `<p class="hint">Runs when another workflow calls this one with <code>call</code>.</p>`;
 }
 
 function classifyFields(node, c) {
@@ -1184,7 +1187,18 @@ function classifyFields(node, c) {
       </div>`
         : ""
     }
-    <label>Fallback ${select(`${base}.fallback.kind`, ["none", "extra", "existing"], (k) => k, node.fallback?.kind ?? "none")}</label>`;
+    <label>Fallback ${select(`${base}.fallback.kind`, ["none", "extra", "existing"], (k) => k, node.fallback?.kind ?? "none")}</label>
+    ${choiceEnders(node)}`;
+}
+
+function choiceEnders(node) {
+  const api = graphApi();
+  const skip = new Set([api?.FALLBACK ?? "fallback", api?.NOWHERE ?? "nowhere"]);
+  const buttons = (api?.ports(node) ?? [])
+    .filter((port) => port.label && !skip.has(port.id))
+    .map((port) => `<button class="secondary" data-action="graph-end-choice" data-port="${esc(port.id)}">${esc(port.label)} ends here</button>`)
+    .join("");
+  return buttons ? `<div class="actions start">${buttons}</div>` : "";
 }
 
 function sessionFields(c) {
@@ -1204,7 +1218,7 @@ function graphNodePanel(c) {
   const ui = graphNodeUi(node);
   const type = graphNodeKind(node);
   let body = "";
-  if (type === "trigger") body = triggerWatchFields(node, c);
+  if (type === "trigger") body = STEPS[WATCH_STEP[c.trigger?.kind] ?? WATCH_STEP[node.watch?.kind ?? "called"]].fields(c);
   else if (type === "classify") body = classifyFields(node, c);
   else if (type === "talk") {
     const i = graphNodeIndex(node.id);
@@ -1314,7 +1328,8 @@ function redraw() {
 }
 
 function edit(index, draft = clone(settings.connectors[index]), open = null) {
-  ensureDraftGraph(draft);
+  const trigger = draft.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger");
+  if (trigger?.watch) syncTriggerFromWatch(draft, trigger.watch);
   const first = draft.graph?.nodes?.[0]?.id ?? null;
   view = { name: "edit", index, draft, original: JSON.stringify(draft), open: open ?? first, zoom: null, pan: null, menu: false, graphPick: null, selectedEdge: null, connectFrom: null, drag: null };
   loadFolders(draft);
@@ -1430,8 +1445,8 @@ function reshape(change) {
   if (before.name === TRIGGERS[before.trigger.kind].name) after.name = TRIGGERS[after.trigger.kind].name;
   if (before.instructions.trim() === defaultText(before).trim()) after.instructions = defaultText(after);
   if (before.trigger.kind !== after.trigger.kind) {
-    ensureDraftGraph(after);
-    view.open = after.graph.nodes.find((n) => graphNodeKind(n) === "trigger")?.id ?? view.open;
+    syncWatchFromTrigger(after);
+    view.open = after.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger")?.id ?? view.open;
   }
   view.draft = after;
   if (JSON.stringify(before.machine) !== JSON.stringify(after.machine)) {
@@ -1584,7 +1599,7 @@ const actions = {
   },
   "pick-trigger"(button) {
     const draft = blank(button.dataset.kind);
-    if (graphApi()) draft.graph = graphApi().defaultGraph(draft);
+    if (graphApi()) draft.graph = graphApi().startingGraph(draft);
     edit(-1, draft);
     showStep(draft.graph.nodes[0]?.id, true);
   },
@@ -1650,6 +1665,20 @@ const actions = {
     node.questions.splice(Number(button.dataset.index), 1);
     redraw();
   },
+  "graph-end-choice"(button) {
+    const api = graphApi();
+    const from = view.open;
+    const port = button.dataset.port;
+    if (!api || !from || !view.draft.graph) return;
+    let graph = view.draft.graph;
+    const existing = graph.edges.filter((e) => e.from === from && e.port === port);
+    const onlyStop = existing.length === 1 && graphNodeKind(graph.nodes.find((n) => n.id === existing[0].to) ?? {}) === "stop";
+    if (onlyStop) return;
+    for (const edge of existing) graph = api.disconnect(graph, edge);
+    const stop = api.newNode("stop", graph);
+    view.draft.graph = api.append(graph, from, port, stop);
+    redraw();
+  },
   "add-step"(button) {
     const id = stepOf(button);
     STEPS[id].add?.(view.draft);
@@ -1702,15 +1731,20 @@ const actions = {
     fillRepo();
   },
   async "save-connector"() {
+    const error = document.getElementById("editor-error");
+    if (!view.draft.graph?.nodes?.length) {
+      error.textContent = OLDER_HUB;
+      return;
+    }
+    syncWatchFromTrigger(view.draft);
     const decide = view.draft.trigger.decide;
     if (decide && fallbackOf(decide)?.mention?.trim()) decide.fallback = null;
     const c = tidy(view.draft);
-    const error = document.getElementById("editor-error");
+    syncWatchFromTrigger(c);
     if (!c.name) {
       error.textContent = "Name the workflow.";
       return settingsPage.querySelector(".editor-bar .title").focus();
     }
-    ensureDraftGraph(c);
     const api = graphApi();
     const graphErr = api?.validate(c.graph, (id) => settings.connectors.some((k) => k.id === id && k.trigger?.kind === "called"));
     if (graphErr) {
@@ -1888,6 +1922,7 @@ settingsPage.addEventListener("input", (e) => {
     value = value.map((label) => ({ id: label, label, description: "" }));
   }
   bind(path, value);
+  if (path === "trigger.label" || path === "trigger.channel") syncWatchFromTrigger(view.draft);
   if (path.startsWith("graph.nodes") && path.includes(".watch.")) syncLegacyFromGraph(view.draft);
   if (renamed) decide.fallback = renamed.name.trim() || null;
   refresh();

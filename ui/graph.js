@@ -1,6 +1,12 @@
 /** Pure graph edits for the workflow editor. No DOM. */
 
 export const COL = 230;
+export const TILE = 84;
+export const TEXT_W = 150;
+/** Label block under the tile, including the gap the canvas leaves above the text. */
+export const TEXT_H = 56;
+/** Old canvas row. One pitch is the tile plus its label, with a gap so the boxes do not touch. */
+export const ROW = 150;
 export const OUT = "out";
 export const FALLBACK = "fallback";
 export const NOWHERE = "nowhere";
@@ -115,15 +121,60 @@ export function newNode(type, graph) {
   }
 }
 
-function shiftRight(graph, fromX, delta = COL) {
-  return graph.nodes.map((n) => (n.position[0] >= fromX ? { ...n, position: [n.position[0] + delta, n.position[1]] } : n));
-}
-
 function nodeById(graph, id) {
   return graph.nodes.find((n) => n.id === id);
 }
 
-/** Insert `newNode` on `edge`, splitting it into two edges and shifting downstream columns. */
+export function nodeHeight(node) {
+  const n = ports(node).length;
+  return n > 2 ? Math.max(TILE, n * 28 + 16) : TILE;
+}
+
+function nodeBox(node) {
+  const h = nodeHeight(node);
+  const [x, y] = node.position;
+  return { id: node.id, left: x - TEXT_W / 2, right: x + TEXT_W / 2, top: y - h / 2, bottom: y + h / 2 + TEXT_H };
+}
+
+function intersects(a, b) {
+  return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+}
+
+/** Boxes in graph coordinates. `bottom` includes the label under the tile. */
+export function layout(graph) {
+  return graph.nodes.map(nodeBox);
+}
+
+/** Pairs of node ids whose boxes intersect, labels included. */
+export function collisions(boxes) {
+  const hits = [];
+  for (let i = 0; i < boxes.length; i += 1) {
+    for (let j = i + 1; j < boxes.length; j += 1) {
+      if (intersects(boxes[i], boxes[j])) hits.push([boxes[i].id, boxes[j].id]);
+    }
+  }
+  return hits;
+}
+
+function fanY(node, portId) {
+  const list = ports(node);
+  const n = Math.max(1, list.length);
+  const idx = Math.max(0, list.findIndex((p) => p.id === portId));
+  return node.position[1] + (idx - (n - 1) / 2) * ROW;
+}
+
+function clearY(graph, node) {
+  const [x, prefer] = node.position;
+  const blocked = graph.nodes.filter((n) => Math.abs(n.position[0] - x) < TEXT_W).map(nodeBox);
+  for (let i = 0; i < 48; i += 1) {
+    const y = prefer + (i === 0 ? 0 : (i % 2 ? 1 : -1) * Math.ceil(i / 2) * ROW);
+    const box = nodeBox({ ...node, position: [x, y] });
+    if (!blocked.some((b) => intersects(box, b))) return y;
+  }
+  return prefer + 48 * ROW;
+}
+
+/** Insert `newNode` on `edge`. The new node takes the target's column. Every node at or right of that column moves one column right. */
 export function splice(graph, edge, newNode) {
   const idx = findEdgeIndex(graph, edge);
   if (idx < 0) throw new Error("edge not found");
@@ -131,23 +182,24 @@ export function splice(graph, edge, newNode) {
   const to = nodeById(graph, edge.to);
   if (!from || !to) throw new Error("edge endpoints missing");
 
-  const midX = Math.round((from.position[0] + to.position[0]) / 2);
-  const placed = { ...newNode, position: [midX, from.position[1]] };
-  let nodes = shiftRight({ ...graph, nodes: [...graph.nodes, placed] }, to.position[0]);
-
+  const insertX = to.position[0];
+  const shifted = graph.nodes.map((n) => (n.position[0] >= insertX ? { ...n, position: [n.position[0] + COL, n.position[1]] } : n));
+  const placed = { ...newNode, position: [insertX, from.position[1]] };
+  placed.position = [insertX, clearY({ nodes: shifted }, placed)];
+  const nodes = [...shifted, placed].sort((a, b) => a.position[0] - b.position[0] || String(a.id).localeCompare(String(b.id)));
   const outPort = ports(placed)[0]?.id ?? OUT;
   const edges = graph.edges.slice();
   edges.splice(idx, 1, { from: edge.from, port: edge.port, to: placed.id }, { from: placed.id, port: outPort, to: edge.to });
-  nodes.sort((a, b) => a.position[0] - b.position[0] || String(a.id).localeCompare(String(b.id)));
   return { nodes, edges };
 }
 
-/** Connect a dangling port to a new node placed one column to the right. */
+/** Connect a dangling port to a new node one column to the right, on a row that does not cover a neighbor. */
 export function append(graph, fromNode, port, newNode) {
   const from = nodeById(graph, fromNode);
   if (!from) throw new Error("from node missing");
   const x = from.position[0] + COL;
-  const placed = { ...newNode, position: [x, from.position[1]] };
+  const placed = { ...newNode, position: [x, fanY(from, port)] };
+  placed.position = [x, clearY(graph, placed)];
   return {
     nodes: [...graph.nodes, placed],
     edges: [...graph.edges, { from: fromNode, port, to: placed.id }],
@@ -261,62 +313,25 @@ export function validate(graph, called) {
   return walk(trigger.id) ?? null;
 }
 
-/** Minimal graph when the hub has not filled `connector.graph` yet. */
-export function ensureGraph(connector) {
-  if (connector.graph?.nodes?.length) return connector.graph;
-  return defaultGraph(connector);
-}
-
-function watchFromTrigger(trigger) {
-  const { kind, label, channel, decide } = trigger;
-  if (kind === "linear-label") return { kind: "linear-label", label: label ?? "" };
-  if (kind === "slack-mention") return { kind: "slack-mention", channel: channel ?? "" };
-  if (kind === "slack-message") return { kind: "slack-message", channel: channel ?? "" };
-  if (kind === "called") return { kind: "called" };
+function watchOf(trigger) {
+  const kind = trigger?.kind ?? "called";
+  if (kind === "linear-label") return { kind, label: trigger.label ?? "" };
+  if (kind === "slack-mention" || kind === "slack-message") return { kind, channel: trigger.channel ?? "" };
   return { kind: "called" };
 }
 
-export function defaultGraph(connector) {
+/** One trigger of the chosen kind and one talk. A connector without `graph` is not guessed into this. */
+export function startingGraph(connector) {
   resetIds(0);
   const tid = newId("trigger");
-  const watch = watchFromTrigger(connector.trigger ?? { kind: "called" });
-  const nodes = [{ id: tid, name: "Trigger", position: [0, 0], type: "trigger", watch }];
-  const edges = [];
-
-  if (connector.trigger?.kind === "slack-message" && connector.trigger.decide) {
-    const cid = newId("classify");
-    const decide = connector.trigger.decide;
-    const questions = [
-      {
-        name: "category",
-        ask: decide.instructions || "Categorize this message.",
-        choices: (decide.categories ?? []).map((cat) => ({
-          id: cat.name?.trim() || "unnamed",
-          label: cat.name?.trim() || "unnamed",
-          description: cat.description ?? "",
-        })),
-      },
-    ];
-    nodes.push({
-      id: cid,
-      name: "Decide",
-      position: [COL, 0],
-      type: "classify",
-      model: decide.model ?? DEFAULT_ASK.model,
-      instructions: decide.instructions ?? "",
-      questions,
-      branchOn: "category",
-      gate: { kind: "decide", unsureBelow: 0.6, pageAt: 0.85 },
-      fallback: decide.fallback ? { kind: "existing", port: decide.fallback } : { kind: "none" },
-    });
-    edges.push({ from: tid, port: OUT, to: cid });
-  } else {
-    const talkId = newId("talk");
-    nodes.push({ id: talkId, name: "Run session", position: [COL, 0], type: "talk", prompt: "" });
-    edges.push({ from: tid, port: OUT, to: talkId });
-  }
-
-  return { nodes, edges };
+  const talkId = newId("talk");
+  return {
+    nodes: [
+      { id: tid, name: "Trigger", position: [0, 0], type: "trigger", watch: watchOf(connector?.trigger) },
+      { id: talkId, name: "Run session", position: [COL, 0], type: "talk", prompt: "" },
+    ],
+    edges: [{ from: tid, port: OUT, to: talkId }],
+  };
 }
 
 export const PICKER_TYPES = ["classify", "talk", "page", "stage-picked", "call", "stop"];
