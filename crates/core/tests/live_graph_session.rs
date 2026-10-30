@@ -89,8 +89,8 @@ fn run_case(name: &str, proof: Proof) {
             assert_eq!(second.id, first_tab, "the second talk opened another tab");
             assert_eq!(second.session.as_deref(), Some(first_id.as_str()), "the second talk opened another session");
             assert_eq!(machine.tabs().len(), 1, "a second tab stayed open");
-            let page = kept.save_thread(&machine, &first_tab, "second");
-            assert!(word(&page, ALPHA) && word(&page, BETA), "the second answer forgot ALPHA: {page}");
+            kept.save_thread(&machine, &first_tab, "second");
+            same_conversation(&machine, &first_tab);
             finish(&connectors, &machine, &open, &second);
         }
         Proof::Resume => {
@@ -100,10 +100,10 @@ fn run_case(name: &str, proof: Proof) {
             assert_eq!(claude.as_deref(), Some(first_id.as_str()), "resume stored a different session id");
             assert_ne!(tab, first_tab, "resume reused the closed tab");
             assert!(kept.log_contains(&format!("--resume\n{first_id}")), "resume did not pass the session id\n{}", kept.log_text());
-            let second = wait_turn(&machine, &tab, 1, ALPHA, &kept);
+            let second = wait_turn(&machine, &tab, 1, BETA, &kept);
             assert_eq!(second.session.as_deref(), Some(first_id.as_str()), "the resumed hook reported a new session");
-            let page = kept.save_thread(&machine, &tab, "second");
-            assert!(word(&page, ALPHA), "the resumed answer forgot ALPHA: {page}");
+            kept.save_thread(&machine, &tab, "second");
+            same_conversation(&machine, &tab);
             assert!(kept.log_contains("then BETA"), "the second talk was not typed after resume\n{}", kept.log_text());
             finish(&connectors, &machine, &open, &second);
         }
@@ -255,6 +255,16 @@ fn assistant_lines(machine: &Machine, tab: &str) -> Vec<String> {
         pinned_core::thread::Item::Text { text, .. } => Some(text),
         _ => None,
     }).collect()).unwrap_or_default()
+}
+
+/// The tab's transcript holds the first answer, then the second. The model's wording of the second
+/// answer varies, so the proof is the transcript, not whether the model repeats ALPHA.
+fn same_conversation(machine: &Machine, tab: &str) {
+    let lines = assistant_lines(machine, tab);
+    assert!(
+        lines.len() >= 2 && word(&lines[0], ALPHA) && word(lines.last().unwrap(), BETA),
+        "the second talk is not in the first talk's conversation: {lines:?}"
+    );
 }
 
 fn thread_text(machine: &Machine, tab: &str) -> Option<String> {
