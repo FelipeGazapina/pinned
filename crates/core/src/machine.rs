@@ -195,9 +195,6 @@ impl Screen {
     }
 }
 
-/// A Claude slash command reports no Working and no Done. After this long at Done, the submit is over.
-const SLASH_WAIT: Duration = Duration::from_secs(5);
-
 struct Tab {
     cwd: PathBuf,
     account: Account,
@@ -234,7 +231,6 @@ struct Tab {
     /// Prompts typed before the session took the terminal, typed in once it does.
     held: Vec<String>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
-    /// A provider that reports Working also drops it after `SLASH_WAIT` at Done with no Working.
     turn_pending: Option<Instant>,
     /// Printable bytes in the terminal's input line. Done does not clear it.
     draft_len: usize,
@@ -294,15 +290,6 @@ impl Tab {
 
     fn note_submit(&mut self) {
         self.turn_pending = Some(Instant::now());
-    }
-
-    /// Claude reports Working when a turn opens. A submit that stays at Done never did.
-    fn release_slash(&mut self) {
-        let Some(at) = self.turn_pending else { return };
-        if !self.account.provider.spec().harness || self.status != Some(AgentStatus::Done) || at.elapsed() < SLASH_WAIT {
-            return;
-        }
-        self.turn_pending = None;
     }
 }
 
@@ -1651,21 +1638,7 @@ impl Machine {
         })?
     }
 
-    /// Drops a Claude submit that stayed at Done, then types a notice if the tab is idle.
-    fn release_unopened(&self, tab: &str) {
-        let released = self
-            .tab(tab, |t| {
-                let pending = t.turn_pending.is_some();
-                t.release_slash();
-                pending && t.turn_pending.is_none()
-            })
-            .unwrap_or(false);
-        if released {
-            self.maybe_deliver(tab);
-        }
-    }
-
-    /// Starts the once-a-second pass that releases slash-command submits and types waiting notices.
+    /// Starts the once-a-second pass that types a waiting notice once its session is idle.
     fn arm_notices(&self) {
         if self.notice_loop.swap(true, Ordering::Relaxed) {
             return;
@@ -1679,7 +1652,6 @@ impl Machine {
             }
             let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
             for tab in tabs {
-                machine.release_unopened(&tab);
                 machine.maybe_deliver(&tab);
             }
         });
@@ -3956,38 +3928,26 @@ echo '{"type":"result","result":"ok"}'
 
     #[test]
     #[cfg(unix)]
-    fn a_claude_slash_command_releases_after_five_seconds_and_a_codex_one_does_not() {
-        let (m, tab, file) = pty_file("slash-claude");
-        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
-        m.write_input(&tab, b"/model\r").unwrap();
-        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Slash");
-        m.maybe_deliver(&tab);
-        m.release_unopened(&tab);
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed before the slash command aged out: {}", read_pty(&file));
-        m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - SLASH_WAIT)).unwrap();
-        m.release_unopened(&tab);
-        let needle = format!("[pinned] Delegated task {id} \"Slash\"");
-        wait_for("the notice after a Claude slash command sits at Done", || read_pty(&file).contains(&needle));
-        let _ = std::fs::remove_file(&file);
-
-        let (m, tab, file) = pty_file("slash-codex");
-        m.tab(&tab, |t| {
-            t.account = Account::builtin(Provider::Codex);
-            t.status = Some(AgentStatus::Done);
-        })
-        .unwrap();
-        m.write_input(&tab, b"/model\r").unwrap();
-        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Slash");
-        m.maybe_deliver(&tab);
-        m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - SLASH_WAIT)).unwrap();
-        m.release_unopened(&tab);
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!read_pty(&file).contains("[pinned]"), "a Codex slash command released without Done: {}", read_pty(&file));
-        m.record_event(done_event(&tab));
-        let needle = format!("[pinned] Delegated task {id} \"Slash\"");
-        wait_for("the notice after Codex Done", || read_pty(&file).contains(&needle));
-        let _ = std::fs::remove_file(file);
+    fn a_slash_command_holds_its_notice_until_done() {
+        for (name, account) in [("slash-claude", Account::builtin(Provider::Claude)), ("slash-codex", Account::builtin(Provider::Codex))] {
+            let (m, tab, file) = pty_file(name);
+            m.tab(&tab, |t| {
+                t.account = account;
+                t.status = Some(AgentStatus::Done);
+            })
+            .unwrap();
+            m.write_input(&tab, b"/model\r").unwrap();
+            let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Slash");
+            m.maybe_deliver(&tab);
+            m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - Duration::from_secs(5))).unwrap();
+            m.maybe_deliver(&tab);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!read_pty(&file).contains("[pinned]"), "{name} typed the notice before Done: {}", read_pty(&file));
+            m.record_event(done_event(&tab));
+            let needle = format!("[pinned] Delegated task {id} \"Slash\"");
+            wait_for("the notice after Done", || read_pty(&file).contains(&needle));
+            let _ = std::fs::remove_file(file);
+        }
     }
 
     #[test]
