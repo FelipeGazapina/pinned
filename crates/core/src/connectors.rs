@@ -2,6 +2,9 @@
 //! with a claude session already working on what it found.
 
 use crate::agent::{self, Stage, Subject};
+use crate::graph::migrate::migrate;
+use crate::graph::project::project;
+use crate::graph::{Graph, NodeKind, Watch};
 use crate::wire::{MachineId, RunSpec};
 use crate::{github, linear, slack, upstash, vercel};
 use chrono::{DateTime, Utc};
@@ -26,8 +29,8 @@ const CLAUDE_TOKEN: &str = "claude-oauth-token";
 const SLACK_OVERLAP: chrono::Duration = chrono::Duration::seconds(60);
 /// A mention older than this when pinned picks it up arrived while pinned was closed.
 const OFFLINE_AFTER: chrono::Duration = chrono::Duration::minutes(5);
-const MIN_CONFIDENCE_TO_PAGE: f64 = 0.85;
-const UNSURE_BELOW: f64 = 0.6;
+pub(crate) const MIN_CONFIDENCE_TO_PAGE: f64 = 0.85;
+pub(crate) const UNSURE_BELOW: f64 = 0.6;
 const PAGE_COOLDOWN: chrono::Duration = chrono::Duration::minutes(30);
 
 #[derive(Serialize, Deserialize, Clone, Copy, schemars::JsonSchema)]
@@ -305,6 +308,74 @@ pub struct Connector {
 
 fn on() -> bool {
     true
+}
+
+/// What an app reads. A connector that has no stored graph still sends the graph `migrate` builds,
+/// so a new app always sees one. The store keeps `None` until someone edits the graph.
+fn presented(mut connector: Connector) -> Connector {
+    if connector.graph.is_none() {
+        connector.graph = Some(migrate(&connector));
+    }
+    connector
+}
+
+fn refresh_legacy(connector: &mut Connector, graph: &Graph) {
+    let projected = project(graph);
+    connector.trigger = projected.trigger;
+    connector.ask = projected.ask;
+}
+
+/// A migrated router calls the slack-mention workflow that then owns the thread, not only a
+/// `Watch::Called` one. Both answer a thread, which is what `Call` walks.
+fn call_target(store: &Store, saving: &str, graph: &Graph, id: &str) -> bool {
+    if !saving.is_empty() && id == saving {
+        return answers_threads_graph(graph);
+    }
+    store.connectors.iter().find(|connector| connector.id == id).is_some_and(answers_threads)
+}
+
+fn answers_threads(connector: &Connector) -> bool {
+    match &connector.graph {
+        Some(graph) => answers_threads_graph(graph),
+        None => matches!(connector.trigger, Trigger::SlackMention { .. } | Trigger::Called),
+    }
+}
+
+fn answers_threads_graph(graph: &Graph) -> bool {
+    graph.nodes.iter().any(|node| matches!(node.kind, NodeKind::Trigger { watch: Watch::Called | Watch::SlackMention { .. } }))
+}
+
+fn reject_call_cycle(origin: &str, origin_graph: &Graph, store: &Store) -> Result<(), String> {
+    let mut stack = Vec::new();
+    if !origin.is_empty() {
+        stack.push(origin.to_owned());
+    }
+    walk_calls(origin_graph, &mut stack, origin, origin_graph, store)
+}
+
+fn graph_of(store: &Store, workflow: &str) -> Option<Graph> {
+    let connector = store.connectors.iter().find(|connector| connector.id == workflow)?;
+    Some(connector.graph.clone().unwrap_or_else(|| migrate(connector)))
+}
+
+fn walk_calls(graph: &Graph, stack: &mut Vec<String>, origin: &str, origin_graph: &Graph, store: &Store) -> Result<(), String> {
+    for node in &graph.nodes {
+        let NodeKind::Call { workflow } = &node.kind else { continue };
+        if stack.iter().any(|seen| seen == workflow) {
+            return Err(format!("\"{}\" calls \"{workflow}\", which calls back", node.name));
+        }
+        stack.push(workflow.clone());
+        let result = if workflow == origin {
+            walk_calls(origin_graph, stack, origin, origin_graph, store)
+        } else if let Some(owned) = graph_of(store, workflow) {
+            walk_calls(&owned, stack, origin, origin_graph, store)
+        } else {
+            Ok(())
+        };
+        stack.pop();
+        result?;
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -1638,7 +1709,7 @@ impl Connectors {
             github: store.github.clone(),
             vercel: store.vercel.clone(),
             upstash: store.upstash.clone(),
-            connectors: store.connectors.clone(),
+            connectors: store.connectors.iter().cloned().map(presented).collect(),
             checked: self.checked.lock().unwrap().clone(),
         }
     }
@@ -1774,8 +1845,32 @@ impl Connectors {
     }
 
     /// Adds or replaces a connector. Its watermark, handled issues, filed issues, thread cursors and pages stay with the stored copy.
+    ///
+    /// An older app omits `graph`. When the stored graph is exactly `migrate` of the stored
+    /// connector, that graph was never edited, so the save replaces it. An edited graph stays,
+    /// and `project` rewrites the legacy trigger and ask so the next old-app read matches it.
+    /// A graph equal to `migrate` of the connector being stored is stored as `None`, so the
+    /// untouched case stays derivable. What this returns still carries a graph, as `get_settings` does.
     pub fn save_connector(&self, mut connector: Connector) -> Result<Connector, String> {
         let mut store = self.store.lock().unwrap();
+        if let Some(graph) = connector.graph.take() {
+            {
+                let called = |id: &str| call_target(&store, connector.id.as_str(), &graph, id);
+                graph.validate(&called)?;
+            }
+            reject_call_cycle(connector.id.as_str(), &graph, &store)?;
+            refresh_legacy(&mut connector, &graph);
+            connector.graph = (graph != migrate(&connector)).then_some(graph);
+        } else if let Some(existing) = store.connectors.iter().find(|existing| existing.id == connector.id && !connector.id.is_empty()) {
+            if let Some(stored) = existing.graph.clone() {
+                if stored == migrate(existing) {
+                    connector.graph = None;
+                } else {
+                    refresh_legacy(&mut connector, &stored);
+                    connector.graph = Some(stored);
+                }
+            }
+        }
         match store.connectors.iter_mut().find(|c| c.id == connector.id && !c.id.is_empty()) {
             Some(existing) => {
                 connector.since = existing.since.clone();
@@ -1797,7 +1892,7 @@ impl Connectors {
         }
         self.save(&store)?;
         self.wake.notify_one();
-        Ok(connector)
+        Ok(presented(connector))
     }
 
     pub fn delete_connector(&self, id: &str) -> Result<(), String> {
@@ -1852,6 +1947,7 @@ impl Connectors {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::{Edge, Node, NodeId, PortId};
 
     fn block_on<F: Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(future)
@@ -3093,6 +3189,140 @@ mod tests {
         connectors.disconnect_upstash().unwrap();
         assert!(connectors.box_keys().is_none());
         assert!(connectors.get_settings().upstash.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn on_disk(dir: &std::path::Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.join("connectors.json")).unwrap()).unwrap()
+    }
+
+    fn calling(workflow: &str) -> crate::graph::Graph {
+        crate::graph::Graph {
+            nodes: vec![
+                Node { id: NodeId("trigger".into()), name: "Trigger".into(), position: [0, 0], kind: NodeKind::Trigger { watch: Watch::Called } },
+                Node { id: NodeId("route".into()), name: "Route".into(), position: [240, 0], kind: NodeKind::Call { workflow: workflow.into() } },
+            ],
+            edges: vec![Edge { from: NodeId("trigger".into()), port: PortId("out".into()), to: NodeId("route".into()) }],
+        }
+    }
+
+    #[test]
+    fn a_read_sends_a_graph_and_leaves_the_store_without_one() {
+        let (connectors, dir) = stored("send-graph", vec![slack_connector()]);
+        let sent = connectors.get_settings().connectors;
+        assert_eq!(sent[0].graph, Some(migrate(&slack_connector())));
+        assert!(on_disk(&dir)["connectors"][0].get("graph").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_save_of_the_migrated_graph_stores_none_and_still_returns_one() {
+        let (connectors, dir) = stored("collapse-graph", vec![router(), slack_connector(), called()]);
+        let mut incoming = router();
+        incoming.graph = Some(migrate(&router()));
+        let saved = connectors.save_connector(incoming).unwrap();
+        assert_eq!(saved.graph, Some(migrate(&router())));
+        let stored = on_disk(&dir)["connectors"].as_array().unwrap().iter().find(|connector| connector["id"] == "c5").unwrap().clone();
+        assert!(stored.get("graph").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_edited_graph_is_stored_and_its_legacy_fields_come_from_the_graph() {
+        let (connectors, dir) = stored("refresh-graph", vec![]);
+        let mut incoming = linear_connector();
+        incoming.id.clear();
+        let mut graph = migrate(&incoming);
+        match &mut graph.nodes[0].kind {
+            NodeKind::Trigger { watch: Watch::LinearLabel { label } } => *label = "bug".into(),
+            _ => panic!("trigger"),
+        }
+        graph.nodes.iter_mut().for_each(|node| {
+            if let NodeKind::Talk { prompt } = &mut node.kind {
+                *prompt = "note".into();
+            }
+        });
+        incoming.graph = Some(graph);
+        connectors.save_connector(incoming).unwrap();
+        let stored = &on_disk(&dir)["connectors"][0];
+        assert_eq!(stored["trigger"]["label"], "bug");
+        assert_eq!(stored["graph"]["nodes"][2]["prompt"], "note");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_untouched_graph_is_dropped_when_an_older_app_saves() {
+        let mut stored_connector = slack_connector();
+        stored_connector.graph = Some(migrate(&slack_connector()));
+        let (connectors, dir) = stored("untouched-graph", vec![stored_connector]);
+        let incoming = serde_json::json!({
+            "id": "c2", "name": "Triage", "enabled": true,
+            "trigger": { "kind": "slack-mention", "channel": "#bugs" },
+            "folder": "/repo", "model": "", "effort": "high", "permissionMode": "plan", "worktree": false,
+            "instructions": "Changed.",
+        });
+        let incoming: Connector = serde_json::from_value(incoming).unwrap();
+        assert!(incoming.graph.is_none());
+        connectors.save_connector(incoming).unwrap();
+        let stored = &on_disk(&dir)["connectors"][0];
+        assert!(stored.get("graph").is_none());
+        assert_eq!(stored["instructions"], "Changed.");
+        assert_eq!(stored["trigger"]["channel"], "#bugs");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_0_14_save_of_an_edited_graph_keeps_the_graph() {
+        let mut incoming = slack_connector();
+        let mut graph = migrate(&incoming);
+        graph.nodes.push(Node { id: NodeId("extra".into()), name: "Extra".into(), position: [10, 10], kind: NodeKind::Stop });
+        incoming.graph = Some(graph);
+        let (connectors, dir) = stored("keep-edited", vec![]);
+        let saved = connectors.save_connector(incoming).unwrap();
+        let old = serde_json::json!({
+            "id": saved.id, "name": "Renamed", "enabled": true,
+            "trigger": { "kind": "slack-mention", "channel": "#other" },
+            "folder": "/elsewhere", "model": "", "effort": "high", "permissionMode": "plan", "worktree": false,
+            "instructions": "New instructions.",
+        });
+        let old: Connector = serde_json::from_value(old).unwrap();
+        assert!(old.graph.is_none(), "0.14 json has no graph key");
+        connectors.save_connector(old).unwrap();
+        let stored = &on_disk(&dir)["connectors"][0];
+        assert_eq!(stored["name"], "Renamed");
+        assert_eq!(stored["instructions"], "New instructions.");
+        assert_eq!(stored["folder"], "/elsewhere");
+        assert_eq!(stored["trigger"]["channel"], "#support");
+        assert!(stored["graph"]["nodes"].as_array().unwrap().iter().any(|node| node["id"] == "extra"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_save_rejects_an_invalid_graph_and_a_call_cycle() {
+        let (connectors, dir) = stored("reject-graph", vec![slack_connector()]);
+        let mut bad = slack_connector();
+        bad.graph = Some(crate::graph::Graph { nodes: vec![], edges: vec![] });
+        assert_eq!(connectors.save_connector(bad).err().as_deref(), Some("a workflow needs a trigger"));
+        assert_eq!(on_disk(&dir)["connectors"][0]["name"], "Triage");
+        assert!(on_disk(&dir)["connectors"][0].get("graph").is_none());
+
+        let mut mention = slack_connector();
+        mention.graph = Some(calling("c1"));
+        assert_eq!(connectors.save_connector(mention).err().as_deref(), Some("\"Route\" calls \"c1\", which is not a called workflow"));
+        let _ = std::fs::remove_dir_all(dir);
+
+        let mut other = called();
+        other.id = "c7".into();
+        other.name = "Other".into();
+        let (connectors, dir) = stored("cycle-graph", vec![called(), other]);
+        let mut first = called();
+        first.graph = Some(calling("c7"));
+        connectors.save_connector(first).unwrap();
+        let mut back = called();
+        back.id = "c7".into();
+        back.name = "Other".into();
+        back.graph = Some(calling("c6"));
+        assert_eq!(connectors.save_connector(back).err().as_deref(), Some("\"Route\" calls \"c7\", which calls back"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
