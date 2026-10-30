@@ -1722,12 +1722,20 @@ impl Machine {
     }
 
     fn open_delegated(&self, tab: &str, task: &str) -> Result<TabId, String> {
+        use crate::delegate::Access;
         let info = self.delegates.open(&crate::delegate::Caller { tab: Some(tab.to_owned()), task: None }, task)?;
         let account = self.accounts.get(&info.account).ok_or_else(|| format!("no account {} on this machine", info.account))?;
-        let bypass = self.tab(tab, |t| t.bypass).unwrap_or(false);
-        let launch = crate::delegate::resume_args(info.provider, &info.conversation);
+        let bypass = info.access == Access::Full;
+        let mut launch = crate::delegate::resume_args(info.provider, &info.conversation);
+        let plan = info.access == Access::ReadOnly && info.provider == Provider::Claude;
+        if plan {
+            launch.extend(["--permission-mode".to_owned(), "plan".to_owned()]);
+        }
         let session = (info.provider == Provider::Claude).then(|| info.conversation.clone());
         let id = self.add_tab(info.cwd.clone(), account, launch, vec![], bypass, session);
+        if plan {
+            let _ = self.tab(&id, |t| t.permission_mode = Some("plan".into()));
+        }
         if info.isolated {
             let _ = self.tab(&id, |t| t.made = Some(info.cwd));
         }
@@ -3769,6 +3777,95 @@ echo '{"type":"result","result":"ok"}'
         let tab = m.restore_tabs().pop().expect("the plan session restored");
         let plan = ["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"].map(str::to_owned).to_vec();
         assert_eq!(argv_of(&m, &tab, &argv), plan);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_opened_thread_takes_its_access_from_the_task() {
+        let root = temp("open-access");
+        let argv = root.join("argv");
+        let body = r#"#!/bin/sh
+printf '%s\n' "$@" > "ARGV"
+exec sleep 30
+"#
+        .replace("ARGV", &argv.display().to_string());
+        let claude = root.join("claude");
+        let codex = root.join("codex");
+        for bin in [&claude, &codex] {
+            std::fs::write(bin, &body).unwrap();
+            std::fs::set_permissions(bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        let m = Machine::new(
+            Launch { bins: BTreeMap::from([(Provider::Claude, claude), (Provider::Codex, codex)]), ..launch() },
+            None,
+            Some(root.clone()),
+            |_| {},
+        );
+        let open = |provider: Provider, parent_bypass: bool, access: crate::delegate::Access, session: &str| {
+            let account = Account::builtin(provider);
+            let parent = m.add_tab(root.clone(), account.clone(), vec![], vec![], parent_bypass, None);
+            let task = m.delegates.begin(crate::delegate::NewTask {
+                parent: crate::delegate::Parent::Tab(parent.clone()),
+                tool: None,
+                title: "Opened".into(),
+                account: account.id,
+                provider,
+                model: None,
+                cwd: root.clone(),
+                mode: crate::delegate::Mode::Async,
+                access,
+                isolated: false,
+                caller_key: format!("tab:{parent}"),
+                client_request_id: None,
+                role: None,
+            });
+            let started = match provider {
+                Provider::Claude | Provider::Cursor => json!({"type":"system","subtype":"init","session_id":session}).to_string(),
+                Provider::Codex => json!({"type":"thread.started","thread_id":session}).to_string(),
+            };
+            m.delegates.apply(&task.id, crate::delegate::ChildEvent::Line(started), None);
+            if provider == Provider::Claude {
+                m.delegates.apply(&task.id, crate::delegate::ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+            } else {
+                m.delegates.apply(&task.id, crate::delegate::ChildEvent::Exited { code: Some(0), stderr: String::new() }, None);
+            }
+            let opened = m.open_delegated(&parent, &task.id).unwrap();
+            let _ = std::fs::remove_file(&argv);
+            m.start_claude(&opened, 80, 24).unwrap();
+            wait_for("opened argv", || std::fs::read(&argv).is_ok_and(|bytes| !bytes.is_empty()));
+            let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
+            let mode = m.tab(&opened, |t| (t.bypass, t.permission_mode.clone())).unwrap();
+            (lines, mode)
+        };
+        let pair = |args: &[String], flag: &str, value: &str| args.windows(2).any(|window| window[0] == flag && window[1] == value);
+
+        let (lines, (bypass, mode)) = open(Provider::Claude, true, crate::delegate::Access::ReadOnly, "plan-session");
+        assert!(!bypass, "a read-only thread copied the parent's bypass");
+        assert_eq!(mode.as_deref(), Some("plan"));
+        assert!(pair(&lines, "--resume", "plan-session"), "{lines:?}");
+        assert!(pair(&lines, "--permission-mode", "plan"), "{lines:?}");
+        assert!(!lines.iter().any(|arg| arg == "--dangerously-skip-permissions"), "{lines:?}");
+
+        let (lines, (bypass, mode)) = open(Provider::Claude, false, crate::delegate::Access::Full, "full-session");
+        assert!(bypass);
+        assert_eq!(mode, None);
+        assert!(lines.iter().any(|arg| arg == "--dangerously-skip-permissions"), "{lines:?}");
+        assert!(!lines.iter().any(|arg| arg == "--permission-mode"), "{lines:?}");
+
+        let (lines, (bypass, mode)) = open(Provider::Claude, true, crate::delegate::Access::Auto, "auto-session");
+        assert!(!bypass, "an auto thread copied the parent's bypass");
+        assert_eq!(mode, None);
+        assert!(pair(&lines, "--resume", "auto-session"), "{lines:?}");
+        assert!(!lines.iter().any(|arg| arg == "--dangerously-skip-permissions"), "{lines:?}");
+        assert!(!lines.iter().any(|arg| arg == "--permission-mode"), "{lines:?}");
+
+        let (lines, (bypass, mode)) = open(Provider::Codex, true, crate::delegate::Access::ReadOnly, "codex-session");
+        assert!(!bypass, "a Codex thread copied the parent's bypass");
+        assert_eq!(mode, None);
+        assert!(pair(&lines, "resume", "codex-session"), "{lines:?}");
+        assert!(!lines.iter().any(|arg| arg == "--permission-mode" || arg == "--dangerously-bypass-approvals-and-sandbox"), "{lines:?}");
+        m.quit();
         let _ = std::fs::remove_dir_all(root);
     }
 

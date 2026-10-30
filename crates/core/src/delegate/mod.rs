@@ -270,6 +270,8 @@ pub struct OpenInfo {
     pub conversation: String,
     /// The folder is a worktree this task made. The opened tab owns it.
     pub isolated: bool,
+    /// What the opened tab may do. The parent's bypass is not copied.
+    pub access: Access,
 }
 
 pub enum ChildEvent {

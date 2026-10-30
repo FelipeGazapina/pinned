@@ -408,6 +408,7 @@ impl Delegates {
             provider: task.provider,
             conversation,
             isolated: task.isolated,
+            access: task.access,
         })
     }
 
