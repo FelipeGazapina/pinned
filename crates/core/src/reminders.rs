@@ -421,7 +421,11 @@ fn delegate_call(params: &Value, output: &Mutex<impl Write>) -> Value {
         }
         if Instant::now() >= deadline {
             let mut pending = value.clone();
-            pending["next"] = json!("still working; the wait timed out; pinned will type a notice into this session when it finishes");
+            pending["next"] = if tab.is_none() {
+                json!(format!("call task_status with taskId \"{id}\" when you need it"))
+            } else {
+                json!("still working; the wait timed out; pinned will type a notice into this session when it finishes")
+            };
             return tool_result(Ok(pending.to_string()));
         }
         let pause = progress_every().min(StdDuration::from_millis(200));
@@ -737,6 +741,37 @@ mod tests {
         assert_eq!(body["taskId"], "task-slow");
         assert_eq!(body["next"], "still working; the wait timed out; pinned will type a notice into this session when it finishes");
         assert_eq!(*cancels.lock().unwrap(), 0);
+
+        std::env::remove_var(TAB_ENV);
+        std::env::set_var(TASK_ENV, "task-parent");
+        let sock = dir.join("headless-timeout.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(stream) => stream,
+                    Err(_) => continue,
+                };
+                let mut line = String::new();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let body = json!({"taskId":"task-slow","title":"say ship","providerInstanceId":"claude","model":null,"workState":"working","summary":null,"error":null,"cwd":"/tmp"});
+                let _ = writeln!(stream, "{}", serde_json::to_string(&Ok::<_, String>(body.to_string())).unwrap());
+            }
+        });
+        std::env::set_var(SOCK_ENV, &sock);
+        let input = format!(
+            "{}\n",
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delegate_task","arguments":{"task":"say ship","mode":"wait","timeoutMs":400}}})
+        );
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        serve_io(true, std::io::Cursor::new(input.into_bytes()), Shared(buf.clone())).unwrap();
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let value: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        let body: Value = serde_json::from_str(value["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["next"], "call task_status with taskId \"task-slow\" when you need it");
 
         restore_var(SOCK_ENV, previous.0);
         restore_var(TAB_ENV, previous.1);
