@@ -6256,7 +6256,7 @@ async function sweep(profileName) {
     await waitFor("the project menu", () => page.locator("#project-menu").isVisible());
     check((await attr("#project-menu input", "placeholder")) === "Search projects...", "the menu has no project search");
     const items = await page.locator("#project-menu .item .label").allTextContents();
-    check(items.join("|") === "All projects|alpha|beta", `items: ${items.join("|")}`);
+    check(items.join("|") === "All projects|alpha|beta|gamma", `items: ${items.join("|")}`);
     const [menu, search] = [await rect("#project-menu"), await rect("#sidebar .search")];
     check(Math.round(menu.left) === Math.round(search.left) && menu.width <= 288, `the menu sits at ${menu.left} (${menu.width}px), the search at ${search.left}`);
     await page.fill("#project-menu input", "nothing like it");
@@ -6691,11 +6691,11 @@ async function sweep(profileName) {
     await sendPrompt("past the limit");
     await answered("echo: past the limit");
 
-    check((await filterLabels()).join() === "All projects,beta,alpha", `by last message: ${(await filterLabels()).join()}`);
+    check((await filterLabels()).join() === "All projects,beta,alpha,gamma", `by last message: ${(await filterLabels()).join()}`);
     await sideSetting("grouping");
     await page.selectOption("#side-projectOrder", "manual");
     await closeSettings();
-    check((await filterLabels()).join() === "All projects,alpha,beta", `manual: ${(await filterLabels()).join()}`);
+    check((await filterLabels()).join() === "All projects,alpha,beta,gamma", `manual: ${(await filterLabels()).join()}`);
     await sideSetting("grouping");
     await page.selectOption("#side-projectOrder", "updated_at");
     await closeSettings();
@@ -6706,11 +6706,11 @@ async function sweep(profileName) {
       require("child_process").execFileSync("git", ["-C", two, "remote", "add", "origin", "https://github.com/example/alpha.git"]);
     }
     const copy = await openThreadIn("work/alpha-two");
-    await waitFor("alpha's two checkouts as one project", async () => [...(await filterLabels())].sort().join() === "All projects,alpha,beta", 10000);
+    await waitFor("alpha's two checkouts as one project", async () => [...(await filterLabels())].sort().join() === "All projects,alpha,beta,gamma", 10000);
     await sideSetting("grouping", false);
     await closeSettings();
     const apart = await filterLabels();
-    check([...apart].sort().join() === "All projects,alpha,alpha-two,beta", `kept apart: ${apart.join()}`);
+    check([...apart].sort().join() === "All projects,alpha,alpha-two,beta,gamma", `kept apart: ${apart.join()}`);
     await sideSetting("grouping", true);
     await closeSettings();
     await press(page.locator("#project-filter"));

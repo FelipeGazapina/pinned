@@ -366,6 +366,38 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
 }
 
 #[test]
+fn a_remote_project_with_no_thread_is_still_in_list_projects() {
+    let hub = TestHub::start("remote_projects");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let dir = temp("remote-projects");
+    let (machine, machine_token) = account::register_machine(&url, &token, "vps", "linux").unwrap();
+    let id = machine.id.clone();
+    let creds = Credentials { hub: url.clone(), email: account.email, user_token: token.clone(), machine_id: machine.id, machine_token };
+    creds.save(&dir).unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let node = Node::start(&dir, creds);
+    client.wait_machines(&[("vps", true)]);
+
+    let notes = dir.join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    let path = node.machine.open_project(notes).display().to_string();
+    assert!(node.machine.tabs().iter().all(|tab| tab.cwd != path), "the folder has a thread, so the tab list would already carry it");
+    let listed = client.call(&id, json!({ "cmd": "list_projects" })).unwrap();
+    assert!(
+        listed.as_array().unwrap().iter().any(|project| project["path"] == path),
+        "list_projects omitted a folder that exists and has no thread: {listed}"
+    );
+    assert!(
+        client.frames.iter().filter(|frame| frame["type"] == "event" && frame["machine"] == id && frame["event"]["kind"] == "tabs").all(|frame| {
+            frame["event"]["tabs"].as_array().is_none_or(|tabs| tabs.iter().all(|tab| tab["cwd"] != path))
+        }),
+        "the tab snapshot the client was given includes {path}"
+    );
+}
+
+#[test]
 fn the_hub_serves_the_install_script_binaries_and_the_web_app() {
     let hub = TestHub::start("files");
     let get = |path: &str| {
