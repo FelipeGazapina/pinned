@@ -1043,15 +1043,18 @@ mod tests {
         ] {
             put(&install.join(rel), body);
         }
-        std::os::unix::fs::symlink(&outside, install.join("skills/escape")).unwrap();
         std::fs::create_dir_all(install.join("agents")).unwrap();
-        std::os::unix::fs::symlink(outside.join("id_rsa"), install.join("agents/helper.md")).unwrap();
         let linked_real = root.join("linked-real");
         put(&linked_real.join(".claude-plugin/plugin.json"), r#"{"name":"linked"}"#);
         put(&linked_real.join("readme.txt"), "LINKED-SECRET");
-        std::os::unix::fs::symlink(&linked_real, mac_home.join("plugins/linked")).unwrap();
         put(&mac_home.join(".claude/skills/ship/SKILL.md"), "---\nname: ship\ndescription: Ship the branch\n---\n");
-        std::os::unix::fs::symlink(&outside, mac_home.join(".claude/skills/stolen")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, install.join("skills/escape")).unwrap();
+            std::os::unix::fs::symlink(outside.join("id_rsa"), install.join("agents/helper.md")).unwrap();
+            std::os::unix::fs::symlink(&linked_real, mac_home.join("plugins/linked")).unwrap();
+            std::os::unix::fs::symlink(&outside, mac_home.join(".claude/skills/stolen")).unwrap();
+        }
         let installed = serde_json::json!({ "plugins": {
             "toy@demo": [{ "installPath": install, "version": "1.2.3", "gitCommitSha": "abc123" }],
             "linked@demo": [{ "installPath": mac_home.join("plugins/linked"), "version": "1", "gitCommitSha": "def" }],
@@ -1063,6 +1066,7 @@ mod tests {
         put(&ssh.join("config"), "ROOT-CONFIG");
         let rooted = root.join("rooted");
         std::fs::create_dir_all(rooted.join(".claude")).unwrap();
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&ssh, rooted.join(".claude/skills")).unwrap();
         let mac = PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") };
         let rooted_share = PluginShare { claude_home: rooted.join(".claude"), dir: root.join("rooted-synced") };
@@ -1206,6 +1210,7 @@ mod tests {
         let outside = root.join("precious");
         put(&outside.join("precious.txt"), "precious");
         std::fs::remove_dir_all(mac.dir.join("plugins/toy@demo")).unwrap();
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, mac.dir.join("plugins/toy@demo")).unwrap();
         put(&mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"toy@demo":false}}"#);
         sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
