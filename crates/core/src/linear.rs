@@ -156,10 +156,31 @@ fn assignee(data: &Value, who: &str) -> Result<String, String> {
     id.map(str::to_owned).ok_or_else(|| if who.is_empty() { "Linear did not say who owns the API key".into() } else { format!("Linear has no user named {who:?}") })
 }
 
-fn create_input(team: &str, assignee: &str, title: &str, description: &str, label: Option<&str>) -> Value {
+fn column_state<'a>(team: &'a Value, column: &str) -> Result<Option<&'a str>, String> {
+    if column.trim().is_empty() {
+        return Ok(None);
+    }
+    let states: Vec<(&str, &str)> = team["states"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|state| Some((state["id"].as_str()?, state["name"].as_str()?)))
+        .collect();
+    if let Some((id, _)) = states.iter().find(|(_, name)| name.eq_ignore_ascii_case(column.trim())) {
+        return Ok(Some(*id));
+    }
+    let name = team["name"].as_str().unwrap_or("?");
+    let names = states.iter().map(|(_, state)| *state).collect::<Vec<_>>().join(", ");
+    Err(format!("team {name} has no column named {column:?}; its columns are {names}"))
+}
+
+fn create_input(team: &str, assignee: &str, title: &str, description: &str, label: Option<&str>, state: Option<&str>) -> Value {
     let mut input = json!({ "teamId": team, "assigneeId": assignee, "title": title, "description": description });
     if let Some(label) = label {
         input["labelIds"] = json!([label]);
+    }
+    if let Some(state) = state {
+        input["stateId"] = json!(state);
     }
     input
 }
@@ -174,20 +195,23 @@ fn created(data: &Value) -> Result<Issue, String> {
 
 /// Creates an issue in `team`, a team name or key, with the label called `label` unless it is empty,
 /// assigned to the user `assignee` names, or to the owner of the API key when it is empty.
-pub async fn create_issue(key: &str, team: &str, title: &str, description: &str, label: &str, assignee: &str) -> Result<Issue, String> {
+/// Empty `column` keeps the team's default status. Any other column must name one of that team's states, ignoring case.
+pub async fn create_issue(key: &str, team: &str, title: &str, description: &str, label: &str, assignee: &str, column: &str) -> Result<Issue, String> {
     let data = query(
         key,
         "{ viewer { id } users(first: 250) { nodes { id name displayName email } } \
-           teams(first: 250) { nodes { id key name } } issueLabels(first: 250) { nodes { id name team { id } } } }",
+           teams(first: 250) { nodes { id key name states { nodes { id name } } } } issueLabels(first: 250) { nodes { id name team { id } } } }",
         json!({}),
     )
     .await?;
-    let (team, label) = resolve(&data, team, label)?;
+    let (team_id, label) = resolve(&data, team, label)?;
+    let found = nodes(&data["teams"]).find(|node| node["id"].as_str() == Some(team_id.as_str())).cloned().unwrap_or(Value::Null);
+    let state = column_state(&found, column)?.map(str::to_owned);
     let assignee = self::assignee(&data, assignee)?;
     let data = query(
         key,
         "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id identifier title description url } } }",
-        json!({ "input": create_input(&team, &assignee, title, description, label.as_deref()) }),
+        json!({ "input": create_input(&team_id, &assignee, title, description, label.as_deref(), state.as_deref()) }),
     )
     .await?;
     created(&data)
@@ -267,11 +291,11 @@ mod tests {
     #[test]
     fn create_sends_the_label_only_when_there_is_one() {
         assert_eq!(
-            create_input("t-eng", "u-me", "Export 500s", "From Slack", Some("l-bug")),
+            create_input("t-eng", "u-me", "Export 500s", "From Slack", Some("l-bug"), None),
             json!({ "teamId": "t-eng", "assigneeId": "u-me", "title": "Export 500s", "description": "From Slack", "labelIds": ["l-bug"] })
         );
         assert_eq!(
-            create_input("t-eng", "u-me", "Export 500s", "", None),
+            create_input("t-eng", "u-me", "Export 500s", "", None, None),
             json!({ "teamId": "t-eng", "assigneeId": "u-me", "title": "Export 500s", "description": "" })
         );
     }
@@ -344,6 +368,60 @@ mod tests {
             found[1],
             Issue { id: "OLD-1".into(), identifier: "OLD-1".into(), title: "t".into(), description: None, url: "u".into() }
         );
+    }
+
+    fn engineering_team() -> Value {
+        json!({
+            "name": "Engineering",
+            "states": { "nodes": [
+                { "id": "s-backlog", "name": "Backlog" },
+                { "id": "s-todo", "name": "Todo" },
+            ] },
+        })
+    }
+
+    #[test]
+    fn column_state_matches_ignoring_case_omits_an_empty_column_and_names_the_states_on_a_miss() {
+        let team = engineering_team();
+        assert_eq!(column_state(&team, "backlog"), Ok(Some("s-backlog")));
+        assert_eq!(column_state(&team, ""), Ok(None));
+        assert_eq!(
+            column_state(&team, "Missing"),
+            Err("team Engineering has no column named \"Missing\"; its columns are Backlog, Todo".into())
+        );
+    }
+
+    #[test]
+    fn create_input_sets_state_id_only_when_a_column_was_resolved() {
+        assert_eq!(
+            create_input("t-eng", "u-me", "Export 500s", "The worker returns 500.", Some("l-bug"), Some("s-backlog")),
+            json!({
+                "teamId": "t-eng",
+                "assigneeId": "u-me",
+                "title": "Export 500s",
+                "description": "The worker returns 500.",
+                "labelIds": ["l-bug"],
+                "stateId": "s-backlog",
+            })
+        );
+        assert_eq!(
+            create_input("t-eng", "u-me", "Export 500s", "The worker returns 500.", None, None),
+            json!({ "teamId": "t-eng", "assigneeId": "u-me", "title": "Export 500s", "description": "The worker returns 500." })
+        );
+    }
+
+    #[test]
+    fn labeled_returns_an_issue_created_after_since_with_label_x() {
+        let data = json!({ "issues": { "nodes": [
+            issue_node("NEW-1", "2026-10-22T10:00:00.000Z", json!([
+                { "createdAt": "2026-10-22T10:00:00.000Z", "addedLabels": [{ "name": "X" }] },
+            ])),
+            issue_node("OLD-1", "2026-10-08T10:00:00.000Z", json!([
+                { "createdAt": "2026-10-08T10:00:00.000Z", "addedLabels": [{ "name": "X" }] },
+            ])),
+        ] } });
+        let found = labeled(&data, "X", "2026-10-21T00:00:00Z").unwrap();
+        assert_eq!(found.iter().map(|issue| issue.identifier.as_str()).collect::<Vec<_>>(), ["NEW-1"]);
     }
 
     #[test]

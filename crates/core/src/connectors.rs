@@ -1712,7 +1712,7 @@ impl Connectors {
         let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
         let link = slack::permalink(&token, channel, thread).await?;
         let description = format!("{}\n\nSlack thread: {link}", description.trim());
-        let issue = linear::create_issue(&key, &team, title.trim(), &description, &label, assignee).await?;
+        let issue = linear::create_issue(&key, &team, title.trim(), &description, &label, assignee, "").await?;
         let filed = Filed { id: issue.id, identifier: issue.identifier, url: issue.url };
         let mut store = self.store.lock().unwrap();
         // The connector may have been deleted while Linear answered; the issue exists all the same.
