@@ -1107,7 +1107,7 @@ impl Machine {
             if submitted {
                 t.note_submit();
             }
-            let mode_unknown = !t.permission_unknown && data.windows(3).any(|window| window == b"\x1b[Z");
+            let mode_unknown = t.account.provider.spec().harness && !t.permission_unknown && data.windows(3).any(|window| window == b"\x1b[Z");
             if mode_unknown {
                 t.permission_unknown = true;
             }
