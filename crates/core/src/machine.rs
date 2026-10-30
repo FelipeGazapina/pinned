@@ -2092,7 +2092,8 @@ fn tab_number(id: &str) -> u32 {
 
 /// Counts the terminal's input line in characters. Printable text adds, including newlines inside
 /// a bracketed paste. Backspace subtracts, floored at 0. Ctrl-C, Ctrl-U, and Enter clear the line.
-/// Enter on a non-empty line is a submit. Escape sequences such as focus reports are ignored.
+/// Enter on a non-empty line is a submit. Up and down recall a prompt, so the line counts as
+/// occupied until Enter, Ctrl-U, or Ctrl-C. Other escape sequences, such as focus reports, are ignored.
 fn note_draft(draft_len: &mut usize, data: &[u8]) -> bool {
     let mut submitted = false;
     let mut pasting = false;
@@ -2104,6 +2105,7 @@ fn note_draft(draft_len: &mut usize, data: &[u8]) -> bool {
                 match &data[i + 1..i + 1 + len] {
                     b"[200~" => pasting = true,
                     b"[201~" => pasting = false,
+                    b"[A" | b"[B" | b"OA" | b"OB" => *draft_len = (*draft_len).max(1),
                     _ => {}
                 }
                 i += len;
@@ -3840,10 +3842,20 @@ echo '{"type":"result","result":"ok"}'
     #[test]
     fn escape_sequences_are_not_a_draft_and_enter_submits() {
         let mut draft = 0usize;
-        for keys in [&b"\x1b[I"[..], b"\x1b[O", b"\x1b", b"\x1b[A", b"\x1b[?1;2c", b"\x1b[1;1R", b"\x1b]11;rgb:0/0/0\x07"] {
+        for keys in [&b"\x1b[I"[..], b"\x1b[O", b"\x1b", b"\x1b[C", b"\x1b[D", b"\x1b[?1;2c", b"\x1b[1;1R", b"\x1b]11;rgb:0/0/0\x07"] {
             assert!(!note_draft(&mut draft, keys), "{keys:?}");
             assert_eq!(draft, 0, "{keys:?} is not text");
         }
+        for keys in [b"\x1b[A".as_slice(), b"\x1b[B", b"\x1bOA", b"\x1bOB"] {
+            draft = 0;
+            assert!(!note_draft(&mut draft, keys), "{keys:?}");
+            assert_eq!(draft, 1, "{keys:?} recalls a prompt into the line");
+            draft = 0;
+            note_draft(&mut draft, b"xy");
+            assert!(!note_draft(&mut draft, keys), "{keys:?}");
+            assert_eq!(draft, 2, "{keys:?} must not shrink a longer draft");
+        }
+        draft = 0;
         note_draft(&mut draft, "é".as_bytes());
         assert_eq!(draft, 1, "one character, however many bytes");
         note_draft(&mut draft, b"\x7f");
@@ -3983,7 +3995,7 @@ echo '{"type":"result","result":"ok"}'
     fn focus_reports_do_not_hold_a_notice() {
         let (m, tab, file) = pty_file("notice-focus");
         m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
-        for bytes in [b"\x1b[I".as_slice(), b"\x1b[O".as_slice(), b"\x1b".as_slice(), b"\x1b[Z".as_slice(), b"\x1b[A".as_slice(), b"\r".as_slice()] {
+        for bytes in [b"\x1b[I".as_slice(), b"\x1b[O".as_slice(), b"\x1b".as_slice(), b"\x1b[Z".as_slice(), b"\x1b[C".as_slice(), b"\x1b[D".as_slice(), b"\r".as_slice()] {
             m.write_input(&tab, bytes).unwrap();
         }
         let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Focus");
