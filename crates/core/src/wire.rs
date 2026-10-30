@@ -200,6 +200,8 @@ pub enum Call {
     AddAccount { provider: Provider, name: String },
     /// `null`. Projects that ran under it fall back to the default account.
     RemoveAccount { account: AccountId },
+    /// The account's `View`, after this machine stored a Claude setup-token for it.
+    ShareLogin { account: AccountId, token: String },
     /// The project's `ProjectView`. `account: null` runs it under the default account again.
     SetProjectAccount { path: String, account: Option<AccountId> },
     /// The id of the project's orchestrator tab: the one already open, else a new one, not yet started.
@@ -728,6 +730,10 @@ pub enum HubCall {
         assignee: String,
     },
     LinearTake { connector: String, channel: String, thread: String, issue: String },
+    /// The other machines of this account that can take a share. A machine asks. A client cannot.
+    Peers,
+    /// Forwards `body` to `to`. The hub keeps nothing from it.
+    Relay { to: MachineId, body: crate::share::ShareBody },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -857,6 +863,8 @@ pub enum ToMachine {
     /// seeing it twice.
     Subscribe { tab: TabId, viewer: String },
     Unsubscribe { tab: TabId, viewer: String },
+    /// A share from another machine of this account. The hub keeps nothing from `body`.
+    Share { id: u64, body: crate::share::ShareBody },
 }
 
 #[cfg(test)]
@@ -950,6 +958,7 @@ mod tests {
             json!({ "cmd": "switch_account", "tab": "tab-1", "account": "spare", "cols": 120, "rows": 32 }),
         );
         round_trip(Call::RemoveAccount { account: "side".into() }, json!({ "cmd": "remove_account", "account": "side" }));
+        round_trip(Call::ShareLogin { account: "bloom".into(), token: "sk-ant-oat01-1".into() }, json!({ "cmd": "share_login", "account": "bloom", "token": "sk-ant-oat01-1" }));
         round_trip(
             Call::SetProjectAccount { path: "/repo".into(), account: None },
             json!({ "cmd": "set_project_account", "path": "/repo", "account": null }),
@@ -1066,6 +1075,14 @@ mod tests {
             json!({ "cmd": "connect_upstash", "key": "box_1", "claude_token": "sk-ant-oat01-1" }),
         );
         round_trip(HubCall::DisconnectUpstash, json!({ "cmd": "disconnect_upstash" }));
+        round_trip(HubCall::Peers, json!({ "cmd": "peers" }));
+        round_trip(
+            HubCall::Relay {
+                to: "m2".into(),
+                body: crate::share::ShareBody::Accounts { grants: vec![crate::share::Grant::Gone { id: "bloom".into(), revision: 2 }], projects: vec![] },
+            },
+            json!({ "cmd": "relay", "to": "m2", "body": { "kind": "accounts", "grants": [{ "state": "gone", "id": "bloom", "revision": 2 }], "projects": [] } }),
+        );
         round_trip(
             HubCall::Stage { connector: "c1".into(), subject: Subject::LinearIssue { issue: "uuid".into() }, stage: Stage::Coding },
             json!({ "cmd": "stage", "connector": "c1", "issue": "uuid", "stage": "coding" }),
@@ -1154,6 +1171,13 @@ mod tests {
         round_trip(
             ToMachine::Subscribe { tab: "tab-2".into(), viewer: "client-4".into() },
             json!({ "type": "subscribe", "tab": "tab-2", "viewer": "client-4" }),
+        );
+        round_trip(
+            ToMachine::Share {
+                id: 9,
+                body: crate::share::ShareBody::Accounts { grants: vec![crate::share::Grant::Gone { id: "bloom".into(), revision: 2 }], projects: vec![] },
+            },
+            json!({ "type": "share", "id": 9, "body": { "kind": "accounts", "grants": [{ "state": "gone", "id": "bloom", "revision": 2 }], "projects": [] } }),
         );
         round_trip(
             MachineFrame::Output { viewer: "client-4".into(), tab: "tab-2".into(), data: Bytes(b"hi".to_vec()) },
