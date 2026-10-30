@@ -2438,6 +2438,69 @@
                   "path",
                   "text"
                 ]
+              },
+              {
+                "description": "The new tab's id, not yet started: it resumes the delegated task's conversation in the child's folder.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "The task_status body. Stops the delegated task when this tab owns it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "`null`. Types that finished task's notice into the tab now. The tab must own the task.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "deliver_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
               }
             ]
           },
@@ -2511,7 +2574,8 @@
             "type": "string",
             "enum": [
               "claude",
-              "codex"
+              "codex",
+              "cursor"
             ]
           },
           "PrAction": {
@@ -7020,6 +7084,69 @@
                   "path",
                   "text"
                 ]
+              },
+              {
+                "description": "The new tab's id, not yet started: it resumes the delegated task's conversation in the child's folder.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "The task_status body. Stops the delegated task when this tab owns it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "`null`. Types that finished task's notice into the tab now. The tab must own the task.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "deliver_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
               }
             ]
           },
@@ -7091,7 +7218,8 @@
             "type": "string",
             "enum": [
               "claude",
-              "codex"
+              "codex",
+              "cursor"
             ]
           },
           "PrAction": {
@@ -9707,6 +9835,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "permission_mode": {
+                "description": "Claude Code's permission mode, such as `plan` or `default`. Absent when the hook does not report one.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -9718,7 +9854,8 @@
               "title",
               "resume_at",
               "prompt",
-              "snapshot"
+              "snapshot",
+              "permission_mode"
             ]
           },
           "Bytes": {
@@ -11535,6 +11672,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "permission_mode": {
+                "description": "Claude Code's permission mode, such as `plan` or `default`. Absent when the hook does not report one.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -17591,6 +17736,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "permission_mode": {
+                "description": "Claude Code's permission mode, such as `plan` or `default`. Absent when the hook does not report one.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -17602,7 +17755,8 @@
               "title",
               "resume_at",
               "prompt",
-              "snapshot"
+              "snapshot",
+              "permission_mode"
             ]
           },
           "Bytes": {
@@ -18945,6 +19099,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "permission_mode": {
+                "description": "Claude Code's permission mode, such as `plan` or `default`. Absent when the hook does not report one.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -22129,6 +22291,69 @@
                   "path",
                   "text"
                 ]
+              },
+              {
+                "description": "The new tab's id, not yet started: it resumes the delegated task's conversation in the child's folder.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "The task_status body. Stops the delegated task when this tab owns it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "`null`. Types that finished task's notice into the tab now. The tab must own the task.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "deliver_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
               }
             ]
           },
@@ -22202,7 +22427,8 @@
             "type": "string",
             "enum": [
               "claude",
-              "codex"
+              "codex",
+              "cursor"
             ]
           },
           "PrAction": {
@@ -25550,6 +25776,69 @@
                   "path",
                   "text"
                 ]
+              },
+              {
+                "description": "The new tab's id, not yet started: it resumes the delegated task's conversation in the child's folder.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "The task_status body. Stops the delegated task when this tab owns it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "cancel_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
+              },
+              {
+                "description": "`null`. Types that finished task's notice into the tab now. The tab must own the task.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "deliver_task"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "task"
+                ]
               }
             ]
           },
@@ -25621,7 +25910,8 @@
             "type": "string",
             "enum": [
               "claude",
-              "codex"
+              "codex",
+              "cursor"
             ]
           },
           "PrAction": {

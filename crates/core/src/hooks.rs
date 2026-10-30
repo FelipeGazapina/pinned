@@ -62,23 +62,65 @@ fn statusline_command(exe: &Path) -> String {
 /// forward it to the tab that owns this session, and print what Claude Code should add to a
 /// prompt. Never fails loudly, so it can't disturb the agent.
 pub fn forward(arg: Option<&str>) {
-    let Some(status) = AgentStatus::ALL.iter().find(|(_, a, _)| Some(*a) == arg).map(|(s, _, _)| *s)
-    else {
+    if AgentStatus::ALL.iter().all(|(_, name, _)| Some(*name) != arg) {
         eprintln!("usage: pinned {SUBCOMMAND} <working|done|needs-input|failed>");
         return;
-    };
-    let Ok(sock) = std::env::var(SOCK_ENV) else { return };
+    }
+    let payload = hook_payload();
+    if let (Ok(sock), Some(event)) = (std::env::var(SOCK_ENV), event_from(arg, &payload)) {
+        if let Some(output) = deliver(&sock, event) {
+            println!("{output}");
+        }
+    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    launch_notify(&user_notify_from_args(&args), &payload);
+}
 
+/// The command after `--` in pinned's notify argv, without the JSON payload Codex appends.
+fn user_notify_from_args(args: &[String]) -> Vec<String> {
+    let Some(after) = args.split(|arg| arg == "--").nth(1) else { return vec![] };
+    let mut cmd = after.to_vec();
+    if cmd.last().is_some_and(|arg| arg.trim_start().starts_with('{')) {
+        cmd.pop();
+    }
+    cmd
+}
+
+fn launch_notify(cmd: &[String], payload: &str) {
+    let Some((bin, rest)) = cmd.split_first() else { return };
+    let mut argv: Vec<&str> = rest.iter().map(String::as_str).collect();
+    if !payload.is_empty() {
+        argv.push(payload);
+    }
+    let _ = process::command(bin).args(&argv).stdin(std::process::Stdio::null()).status();
+}
+
+/// Claude writes the payload on stdin. Codex appends it as the last argument.
+fn hook_payload() -> String {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
-    let hook: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
+    if !input.trim().is_empty() {
+        return input;
+    }
+    std::env::args().next_back().filter(|arg| arg.trim_start().starts_with('{')).unwrap_or_default()
+}
+
+/// `done` is Claude's Stop hook and Codex's `agent-turn-complete` notify.
+pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
+    let status = AgentStatus::ALL.iter().find(|(_, a, _)| Some(*a) == arg).map(|(s, _, _)| *s)?;
+    let hook: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
+    if let Some(kind) = hook["type"].as_str() {
+        if kind != "agent-turn-complete" {
+            return None;
+        }
+    }
     let field = |k: &str| hook[k].as_str().map(str::to_owned);
-    let event = AgentEvent {
+    Some(AgentEvent {
         status,
         cwd: field("cwd"),
         message: field("message"),
         tab: std::env::var(TAB_ENV).ok(),
-        session: field("session_id"),
+        session: field("session_id").or_else(|| field("thread-id")).or_else(|| field("thread_id")),
         title: field("transcript_path")
             .and_then(|path| std::fs::File::open(path).ok())
             .and_then(|file| title_from_transcript(BufReader::new(file)))
@@ -93,11 +135,8 @@ pub fn forward(arg: Option<&str>) {
         snapshot: matches!(status, AgentStatus::Working | AgentStatus::Done | AgentStatus::Failed)
             .then(|| field("cwd").and_then(|cwd| history::snapshot(Path::new(&cwd))))
             .flatten(),
-    };
-
-    if let Some(output) = deliver(&sock, event) {
-        println!("{output}");
-    }
+        permission_mode: field("permission_mode"),
+    })
 }
 
 /// Sends the hook's event. A prompt waits up to `RECALL_WAIT` for the memories the harness
@@ -217,6 +256,9 @@ fn title_from_transcript(transcript: impl BufRead) -> Option<String> {
 /// Stands in for the title until Claude Code names the session: the prompt's first line.
 fn title_from_prompt(prompt: &str) -> Option<String> {
     let line = prompt.lines().map(str::trim).find(|l| !l.is_empty())?;
+    if line.starts_with("[pinned]") {
+        return None;
+    }
     Some(match line.char_indices().nth(PROMPT_TITLE_CHARS) {
         Some((cut, _)) => format!("{}…", line[..cut].trim_end()),
         None => line.to_owned(),
@@ -366,6 +408,8 @@ mod tests {
             Some("make the pill show every open tab as a carousel that keeps s…".to_owned()),
         );
         assert_eq!(title_from_prompt("  \n"), None);
+        assert_eq!(title_from_prompt("[pinned] Delegated task task-1 \"Ping\" finished: result available."), None);
+        assert_eq!(title_from_prompt("\n  [pinned] Delegated task task-1\nkeep the old title"), None);
     }
 
     /// One test, because the commands read the session's environment, which is process-wide.
@@ -431,6 +475,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_user_notify_runs_with_the_same_payload() {
+        let dir = std::env::temp_dir().join(format!("pinned-user-notify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("out");
+        let script = dir.join("notify.sh");
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s' \"$2\" > \"$1\"\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let payload = r#"{"type":"agent-turn-complete","thread-id":"thr-1"}"#;
+        let args = vec!["hook".into(), "done".into(), "--".into(), script.display().to_string(), out.display().to_string(), payload.into()];
+        assert_eq!(user_notify_from_args(&args), vec![script.display().to_string(), out.display().to_string()]);
+        launch_notify(&user_notify_from_args(&args), payload);
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), payload);
+        assert!(user_notify_from_args(&["hook".into(), "done".into(), payload.into()]).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_prompt_gets_the_memory_the_harness_recalls_unless_it_takes_too_long() {
         let sock = std::env::temp_dir().join(format!("pinned-recall-{}.sock", std::process::id()));
         listen(sock.clone(), |message| match message {
@@ -444,7 +507,7 @@ mod tests {
         })
         .unwrap();
         let sock = sock.display().to_string();
-        let event = |status, prompt: Option<&str>| AgentEvent { status, cwd: None, message: None, tab: Some("tab-1".into()), session: None, title: None, resume_at: None, prompt: prompt.map(Into::into), snapshot: None };
+        let event = |status, prompt: Option<&str>| AgentEvent { status, cwd: None, message: None, tab: Some("tab-1".into()), session: None, title: None, resume_at: None, prompt: prompt.map(Into::into), snapshot: None, permission_mode: None };
         assert_eq!(
             deliver(&sock, event(AgentStatus::Working, Some("how do we deploy?"))),
             Some(r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[1] Deploys: the hub deploys from tags (how do we deploy?)"}}"#.into())
@@ -542,5 +605,20 @@ mod tests {
         let message: Message = serde_json::from_str(slack).unwrap();
         assert!(matches!(&message, Message::Stage { subject: Subject::SlackThread { channel, .. }, .. } if channel == "C0123ABCD"));
         assert_eq!(serde_json::to_string(&message).unwrap(), slack);
+    }
+
+    #[test]
+    fn a_codex_turn_complete_payload_is_the_tabs_done() {
+        let payload = r#"{"type":"agent-turn-complete","thread-id":"thr-9","turn-id":"turn-9","cwd":"/repo","input-messages":["ping"],"last-assistant-message":"ok"}"#;
+        let event = event_from(Some("done"), payload).unwrap();
+        assert_eq!(event.status, AgentStatus::Done);
+        assert_eq!(event.session.as_deref(), Some("thr-9"));
+        assert_eq!(event.cwd.as_deref(), Some("/repo"));
+        assert!(event_from(Some("done"), r#"{"type":"task-complete"}"#).is_none());
+        let claude = event_from(Some("done"), r#"{"session_id":"s1","cwd":"/work"}"#).unwrap();
+        assert_eq!((claude.status, claude.session.as_deref(), claude.cwd.as_deref()), (AgentStatus::Done, Some("s1"), Some("/work")));
+        assert_eq!(claude.permission_mode, None);
+        let plan = event_from(Some("working"), r#"{"permission_mode":"plan","prompt":"look"}"#).unwrap();
+        assert_eq!(plan.permission_mode.as_deref(), Some("plan"));
     }
 }

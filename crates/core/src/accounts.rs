@@ -28,6 +28,7 @@ pub fn default_account() -> AccountId {
 pub enum Provider {
     Claude,
     Codex,
+    Cursor,
 }
 
 pub struct Spec {
@@ -74,13 +75,28 @@ const CODEX: Spec = Spec {
     bypass_flag: "--dangerously-bypass-approvals-and-sandbox",
 };
 
+/// Cursor's CLI has one login, in its own home. An empty `home_env` is what refuses a second account.
+const CURSOR: Spec = Spec {
+    name: "Cursor",
+    bin: "cursor-agent",
+    builtin: "cursor",
+    home_env: "",
+    default_home: "",
+    login: &["login"],
+    status: &["status"],
+    parse_status: cursor_status,
+    harness: false,
+    bypass_flag: "--force",
+};
+
 impl Provider {
-    pub const ALL: [Provider; 2] = [Provider::Claude, Provider::Codex];
+    pub const ALL: [Provider; 3] = [Provider::Claude, Provider::Codex, Provider::Cursor];
 
     pub fn spec(self) -> &'static Spec {
         match self {
             Provider::Claude => &CLAUDE,
             Provider::Codex => &CODEX,
+            Provider::Cursor => &CURSOR,
         }
     }
 }
@@ -161,6 +177,9 @@ impl Accounts {
     /// Adds an account with its own empty home, where signing in keeps its login.
     pub fn add(&self, provider: Provider, name: &str) -> Result<Account, String> {
         let Some(dir) = &self.dir else { return Err("this machine keeps no accounts".into()) };
+        if provider.spec().home_env.is_empty() {
+            return Err(format!("{} signs in only through its built-in account", provider.spec().name));
+        }
         let name = name.trim();
         let id = slug(name);
         if id.is_empty() {
@@ -202,6 +221,7 @@ impl Accounts {
         let spec = account.provider.spec();
         match &self.dir {
             Some(dir) if !account.is_builtin() => dir.join("accounts").join(&account.id),
+            _ if spec.home_env.is_empty() => self.home.clone(),
             _ => std::env::var_os(spec.home_env).map_or_else(|| self.home.join(spec.default_home), PathBuf::from),
         }
     }
@@ -277,6 +297,14 @@ fn codex_status(out: &Output) -> Status {
     Status { signed_in: out.status.success(), ..Status::default() }
 }
 
+/// `cursor-agent status` prints `✓ Logged in as <email>` when the built-in account is signed in.
+fn cursor_status(out: &Output) -> Status {
+    let text = String::from_utf8_lossy(&out.stdout);
+    let signed_in = out.status.success() && text.to_ascii_lowercase().contains("logged in");
+    let email = text.split(" as ").nth(1).and_then(|rest| rest.split_whitespace().next()).filter(|s| s.contains('@')).map(str::to_owned);
+    Status { signed_in, email, ..Status::default() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,14 +336,15 @@ mod tests {
         assert_eq!(accounts.add(Provider::Claude, "claude teams"), Err("an account claude-teams already exists".into()));
         assert_eq!(accounts.add(Provider::Codex, "Claude"), Err("an account claude already exists".into()), "a built-in id is taken");
         assert_eq!(accounts.add(Provider::Codex, " ?! "), Err("an account needs a name with a letter or digit".into()));
-        assert_eq!(ids(&Accounts::load(Some(&dir), "/Users/ana".into())), ["claude", "codex", "claude-teams"]);
+        assert_eq!(ids(&Accounts::load(Some(&dir), "/Users/ana".into())), ["claude", "codex", "cursor", "claude-teams"]);
+        assert_eq!(accounts.add(Provider::Cursor, "Other"), Err("Cursor signs in only through its built-in account".into()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn a_machine_without_a_folder_has_only_the_built_in_accounts() {
         let accounts = Accounts::load(None, "/Users/ana".into());
-        assert_eq!(ids(&accounts), ["claude", "codex"]);
+        assert_eq!(ids(&accounts), ["claude", "codex", "cursor"]);
         assert_eq!(accounts.add(Provider::Claude, "work"), Err("this machine keeps no accounts".into()));
     }
 
@@ -328,7 +357,7 @@ mod tests {
         assert_eq!(accounts.remove("claude"), Err("claude is built in and can't be removed".into()));
         assert_eq!(accounts.remove("home"), Err("no account home on this machine".into()));
         assert_eq!(accounts.remove("work"), Ok(()));
-        assert_eq!(ids(&Accounts::load(Some(&dir), "/Users/ana".into())), ["claude", "codex"]);
+        assert_eq!(ids(&Accounts::load(Some(&dir), "/Users/ana".into())), ["claude", "codex", "cursor"]);
         assert_eq!(accounts.add(Provider::Claude, "Work").map(|a| accounts.home(&a)), Ok(accounts.home(&work)));
         assert!(dir.join("accounts/work/.credentials.json").is_file());
         let _ = std::fs::remove_dir_all(dir);
@@ -372,6 +401,8 @@ printf '{\n  "loggedIn": true,\n  "authMethod": "claude.ai",\n  "email": "ana@ac
         let codex = script(&dir, "codex", r#"[ "$1 $2" = "login status" ] || exit 2
 [ -n "$CODEX_HOME" ] && { echo "Not logged in"; exit 1; }
 echo "Logged in using ChatGPT""#);
+        let cursor = script(&dir, "cursor-agent", r#"[ "$1" = "status" ] || exit 2
+echo "✓ Logged in as ana@acme.dev""#);
         let accounts = Accounts::load(Some(&dir), "/Users/ana".into());
         accounts.add(Provider::Claude, "work").unwrap();
         accounts.add(Provider::Codex, "side").unwrap();
@@ -383,6 +414,7 @@ echo "Logged in using ChatGPT""#);
         assert_eq!(status("work", &claude), Status::default());
         assert_eq!(status("codex", &codex), Status { signed_in: true, ..Status::default() });
         assert_eq!(status("side", &codex), Status::default());
+        assert_eq!(status("cursor", &cursor), Status { signed_in: true, email: Some("ana@acme.dev".into()), ..Status::default() });
         assert_eq!(status("claude", &dir.join("missing")), Status::default(), "a CLI that isn't installed signs no one in");
         let _ = std::fs::remove_dir_all(dir);
     }

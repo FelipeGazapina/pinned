@@ -1,6 +1,7 @@
 use pinned_core::account::{self, Credentials};
 use pinned_core::link;
 use pinned_core::machine::{Launch, Machine};
+use pinned_core::reminders;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -140,10 +141,11 @@ fn node(args: &[String]) -> Result<(), String> {
     let dir = args.config_dir();
     let creds = Credentials::load(&dir).ok_or_else(|| format!("{} has no account.json: run `pinned-server pair <hub url> <code>` first", dir.display()))?;
     let exe = std::env::current_exe().map_err(|e| format!("could not find pinned-server's own binary: {e}"))?;
-    let launch = Launch::prepare(&exe).map_err(|e| format!("could not prepare claude's settings: {e}"))?;
-    // Reminders notify on a desktop, which a node doesn't have, so its sessions get only the project tools.
+    let mut launch = Launch::prepare(&exe).map_err(|e| format!("could not prepare claude's settings: {e}"))?;
+    // Reminders notify on a desktop, which a node doesn't have, so its sessions get delegation and the project tools.
+    launch.reminders = false;
     if let Some(config) = &launch.mcp_config {
-        pinned_core::reminders::write_mcp_config(config, &exe, false).map_err(|e| format!("could not write claude's MCP config: {e}"))?;
+        reminders::write_mcp_config(config, &exe, false).map_err(|e| format!("could not write claude's MCP config: {e}"))?;
     }
     let machine = Machine::new(launch, Some(dir), None, |_| {});
     let link = Arc::new(link::spawn(creds, machine.clone(), VERSION));

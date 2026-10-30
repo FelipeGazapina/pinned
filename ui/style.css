@@ -189,6 +189,7 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .badge.box { margin-left: 6px; }
 .logo.claude { background: #d97757; }
 .logo.codex { background: #10a37f; }
+.logo.cursor { background: #111; }
 .actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 10px; }
 .actions.start { justify-content: flex-start; }
 #settings button.primary, #settings button.secondary { padding: 4px 12px; border-radius: 6px; white-space: nowrap; }

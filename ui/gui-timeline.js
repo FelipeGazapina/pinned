@@ -829,7 +829,7 @@ function userHtml(user, t, tab, first) {
     <div class="meta">${whenHtml(user.at)}${t.editable ? `<button type="button" class="xs" data-rewind="${esc(user.id)}" title="Edit from here"${t.editable === "busy" ? " disabled" : ""}>${icon("undo-2")}</button>` : ""}${user.text ? `<button type="button" class="xs" data-copy-item="${esc(user.id)}" title="Copy">${icon("copy")}</button>` : ""}${promptLinkFor(user.text) ? `<button type="button" class="xs" data-copy-link="${esc(user.id)}" title="Copy prompt link" aria-label="Copy prompt link">${icon("link")}</button>` : ""}</div></div>`;
 }
 
-function turnHtml(tab, turn, change, live, first, t) {
+function turnHtml(tab, turn, change, live, first, t, latest) {
   const cwd = tab.view.cwd;
   const work = live ? turn.work : turn.work.filter((s) => !turn.failed.has(s));
   const shown = live ? turn.shown : turn.steps.filter((s) => turn.shown.includes(s) || turn.failed.has(s));
@@ -855,7 +855,7 @@ function turnHtml(tab, turn, change, live, first, t) {
         <div class="steps">${steps}</div></details>`;
   }
   const notes = turn.notes.filter((n) => !(fold && !live && turn.interrupted && n.text === "Interrupted."));
-  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${fold}${agentCardsHtml(tab, turn)}
+  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${fold}${agentCardsHtml(tab, turn, latest)}
     ${shown.map((s) => shownHtml(s, cwd, t, live ? null : turn.answer, t.editable === true)).join("")}
     ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}
     ${change ? changesHtml(change, t.open) : ""}${turn.dividers.map(dividerHtml).join("")}</section>`;
@@ -932,7 +932,7 @@ function renderThread() {
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit, t.agentsKey, phaseOf(tab)]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab)]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
@@ -947,12 +947,15 @@ function renderThread() {
   const opening = turns.find((x) => x.user);
   const blank = sub ? (t.error ? `This subagent couldn't be read: ${esc(t.error)}` : "Loading…") : t.loaded ? "Send a message to start the conversation." : t.error ? `This thread couldn't be read: ${esc(t.error)}` : "Loading…";
   const parent = sub ? systemDividerHtml({ glyph: "bot", label: "Subagent of", detail: threadTitle(tab), action: "Open parent thread", data: "data-subagent-parent" }) : "";
+  const agentsBare = !sub && !turns.length && (t.agents ?? []).length;
   const body = turns.length
     ? `${parent}${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : ""}<div class="spacer" style="height:${win.above}px"></div>${shown
         .slice(win.lo, win.hi)
-        .map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + win.lo + i === turns.length - 1, turn === opening, t))
+        .map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + win.lo + i === turns.length - 1, turn === opening, t, first + win.lo + i === turns.length - 1))
         .join("")}<div class="spacer" style="height:${win.below}px"></div>${sub ? "" : agentsFooterHtml(tab)}`
-    : `<div class="blank"><p>${blank}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
+    : agentsBare
+      ? `${agentCardsHtml(tab, null, true)}${agentsFooterHtml(tab)}`
+      : `<div class="blank"><p>${blank}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
   const liveRows = threadView.querySelector(".work.live .group[open] > .rows");
   const follow = !liveRows || liveRows.scrollHeight - liveRows.scrollTop - liveRows.clientHeight < 24;
   // The window redraws on scroll, so claude's dialog card moves into the new lane, keeping its focus.
@@ -1359,6 +1362,51 @@ async function editFromHere(id) {
   await attachFiles(tabByKey(tab.key) ?? tab, files);
 }
 
+/** Types a finished task's notice into this session now. A draft stays in the prompt, and the error sits on the card. */
+async function sendDelegated(task) {
+  const tab = active;
+  const t = threadOf(tab);
+  try {
+    await callOn(tab.machine, { cmd: "deliver_task", tab: tab.view.id, task });
+    if (t.sendErrors) delete t.sendErrors[task];
+  } catch (e) {
+    t.sendErrors = { ...(t.sendErrors ?? {}), [task]: String(e) };
+    showComposerNote(String(e), true);
+  }
+  if (terminalOnly(tab)) renderTerminalOnly();
+  else renderThread();
+}
+
+/** Stops a delegated task this tab owns. The card redraws from the next agents poll. */
+async function cancelDelegated(task) {
+  const tab = active;
+  try {
+    await callOn(tab.machine, { cmd: "cancel_task", tab: tab.view.id, task });
+  } catch (e) {
+    showComposerNote(String(e), true);
+  }
+}
+
+/** Opens the delegated child's conversation as a tab on its folder and account. */
+const opening = new Set();
+async function openDelegated(task) {
+  if (opening.has(task)) return;
+  opening.add(task);
+  const tab = active;
+  try {
+    const created = await callOn(tab.machine, { cmd: "open_task", tab: tab.view.id, task });
+    await refreshTabs(tab.machine);
+    const next = tabByKey(keyOf(tab.machine, created));
+    if (!next) return;
+    activate(next);
+    await startTab(next);
+  } catch (e) {
+    showComposerNote(String(e), true);
+  } finally {
+    opening.delete(task);
+  }
+}
+
 /** T3 Code's "Fork from this response": a new thread beside this one whose claude carries on from here. */
 async function forkFrom(id) {
   const tab = active;
@@ -1533,6 +1581,12 @@ threadView.addEventListener("click", (e) => {
   }
   if (e.target.closest(".dialog-card [data-show-terminal]")) return toggleDrawer(true);
   const t = shownThread();
+  const openTask = e.target.closest("[data-open-task]");
+  if (openTask) return openDelegated(openTask.dataset.openTask);
+  const cancelTask = e.target.closest("[data-cancel-task]");
+  if (cancelTask) return cancelDelegated(cancelTask.dataset.cancelTask);
+  const sendTask = e.target.closest("[data-send-task]");
+  if (sendTask) return sendDelegated(sendTask.dataset.sendTask);
   const toggle = e.target.closest("[data-toggle]");
   if (toggle) {
     const key = toggle.dataset.toggle;
@@ -1687,10 +1741,12 @@ function renderUnsupported() {
 }
 
 function renderTerminalOnly() {
+  document.getElementById("chat").dataset.hero = "false";
   document.querySelector("#chat-head .crumb").innerHTML = crumbHtml(active);
   threadView.dataset.key = "";
-  const what = active.view.program === "sign-in" ? "This sign-in runs" : `${esc(accountName(active.machine, active.view.account))} runs Codex, which`;
-  threadView.innerHTML = `<div class="blank"><p>${what} in the terminal only.</p><button class="primary" data-mode-terminal>Terminal view</button></div>`;
+  const what = active.view.program === "sign-in" ? "This sign-in runs" : `${esc(accountName(active.machine, active.view.account))} runs`;
+  const strip = active.view.program === "sign-in" ? "" : delegatedStrip(active);
+  threadView.innerHTML = `<div class="blank"><p>${what} in the terminal only.</p><button class="primary" data-mode-terminal>Terminal view</button></div>${strip}`;
 }
 
 /** T3 Code's media dialog: the image over a dark scrim with a close button, and for a message's

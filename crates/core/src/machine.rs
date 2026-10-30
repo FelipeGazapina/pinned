@@ -1,5 +1,5 @@
 use crate::accounts::{self, Account, Accounts, Provider};
-use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV};
+use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, FileServer, Shells};
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
 pub const OUTPUT_KEEP: usize = 256 * 1024;
@@ -37,6 +37,8 @@ pub struct Launch {
     pub path_env: Option<String>,
     pub settings: PathBuf,
     pub mcp_config: Option<PathBuf>,
+    /// Desktop sessions offer reminders. A node keeps the MCP server for delegation and leaves this false.
+    pub reminders: bool,
     /// The plugin directory holding the skills that ship inside pinned, and its tutorial helper.
     pub plugin_dir: PathBuf,
     pub tutorial_helper: PathBuf,
@@ -71,6 +73,7 @@ impl Launch {
             path_env,
             settings,
             mcp_config: Some(mcp_config),
+            reminders: true,
             plugin_dir,
             tutorial_helper,
             sock: files.join("pinned.sock"),
@@ -100,6 +103,18 @@ impl Launch {
                     cmd.arg(&self.settings);
                     cmd.arg("--plugin-dir");
                     cmd.arg(&self.plugin_dir);
+                } else if provider == Provider::Codex {
+                    if self.mcp_config.is_some() {
+                        cmd.args(crate::delegate::codex_mcp_flags(&self.exe, &self.sock, Some(tab), None, self.reminders));
+                    }
+                    let home = env
+                        .iter()
+                        .find(|(key, _)| key == "CODEX_HOME")
+                        .map(|(_, value)| PathBuf::from(value))
+                        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
+                        .unwrap_or_else(|| home().join(".codex"));
+                    let user = crate::delegate::codex_user_notify(&std::fs::read_to_string(home.join("config.toml")).unwrap_or_default());
+                    cmd.args(crate::delegate::codex_notify_flag(&self.exe, &user));
                 }
                 if bypass {
                     cmd.arg(spec.bypass_flag);
@@ -218,6 +233,14 @@ struct Tab {
     message: Option<String>,
     /// Prompts typed before the session took the terminal, typed in once it does.
     held: Vec<String>,
+    /// When the latest submit went in. Cleared by Done, Failed, and a new session.
+    turn_pending: Option<Instant>,
+    /// The terminal's input line. Done does not clear it.
+    draft: Draft,
+    /// Claude's permission mode from the latest hook that reported one. `plan` is read-only.
+    permission_mode: Option<String>,
+    /// Shift+Tab changed the mode and no hook has reported the new one. A child stays read-only.
+    permission_unknown: bool,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
     screen: Arc<Mutex<Screen>>,
@@ -240,7 +263,18 @@ impl Tab {
             held: self.held_at_limit,
             account: self.account.id.clone(),
             model: self.model.clone(),
+            permission_mode: self.permission_mode.clone().filter(|_| !self.permission_unknown),
         })
+    }
+
+    /// What a child of this tab may do. Shift+Tab leaves the mode unknown until a hook reports it,
+    /// and an unknown mode is read-only.
+    fn child_access(&self) -> crate::delegate::Access {
+        if self.permission_unknown || self.permission_mode.as_deref() == Some("plan") {
+            crate::delegate::Access::ReadOnly
+        } else {
+            crate::delegate::Access::derive(self.bypass, false)
+        }
     }
 
     fn view(&self, id: &str) -> TabView {
@@ -264,6 +298,15 @@ impl Tab {
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
             role: role_of(&self.env).map(|(role, _)| role),
         }
+    }
+
+    /// A notice may be typed. Cursor never reports Done, so it is never idle.
+    fn notice_idle(&self) -> bool {
+        self.session.is_some() && self.status == Some(AgentStatus::Done) && self.turn_pending.is_none() && self.draft.empty()
+    }
+
+    fn note_submit(&mut self) {
+        self.turn_pending = Some(Instant::now());
     }
 }
 
@@ -295,8 +338,11 @@ pub struct Machine {
     pr_watches: crate::prwatch::Watches,
     clones: PathBuf,
     quitting: AtomicBool,
+    /// Wakes parents whose pty has gone quiet, once, for the life of the machine.
+    notice_loop: AtomicBool,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     agents: Mutex<subagents::Cache>,
+    delegates: crate::delegate::Delegates,
     memories: Arc<memory::Memories>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
@@ -354,8 +400,10 @@ impl Machine {
             pr_watches: Default::default(),
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
+            notice_loop: AtomicBool::new(false),
             usage: Mutex::default(),
             agents: Mutex::default(),
+            delegates: crate::delegate::Delegates::default(),
             memories,
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
@@ -562,8 +610,22 @@ impl Machine {
                 json(crate::device::Host { port: self.device_hub.port(None, path)?, path }.run(op)?)
             }
             Call::Subagent { tab, tool } => {
+                if let Some(steps) = self.delegates.steps_for(&tab, &tool) {
+                    return json(steps);
+                }
                 let file = thread::subagent(&self.transcript(&tab)?, &tool).ok_or("Claude Code kept no transcript of this subagent")?;
                 json(thread::read_subagent(&file).map_err(|e| format!("could not read the subagent's transcript: {e}"))?)
+            }
+            Call::OpenTask { tab, task } => json(self.open_delegated(&tab, &task)?),
+            Call::DeliverTask { tab, task } => json(self.deliver_task(&tab, &task)?),
+            Call::CancelTask { tab, task } => {
+                let path = self.launch.path_env.clone();
+                json(self.delegates.cancel(
+                    &crate::delegate::Caller { tab: Some(tab), task: None },
+                    &task,
+                    "cancelled from the card",
+                    path.as_deref(),
+                )?)
             }
             Call::Rewind { tab, before, files, cols, rows } => json(self.rewind(&tab, &before, files, cols, rows)?),
             Call::Fork { tab, through } => json(self.fork(&tab, &through)?),
@@ -662,10 +724,11 @@ impl Machine {
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
         let (session, account, process) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.session.as_ref().and(t.started)))?;
         let Some(file) = session.as_deref().and_then(|s| self.find_transcript(&account, s)) else {
-            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: vec![] });
+            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab) });
         };
         let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
-        let agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
+        let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
+        agents.extend(self.delegates.cards(tab));
         Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
     }
 
@@ -878,7 +941,7 @@ impl Machine {
             t.account = to;
             t.resume_at = None;
             if let Some(saved) = t.saved() {
-                (t.launch, t.resume_at) = saved.reopen(unix_now());
+                (t.launch, t.resume_at) = saved.reopen(unix_now(), t.account.provider);
             }
         })?;
         self.start_claude(tab, cols, rows)
@@ -963,7 +1026,7 @@ impl Machine {
         self.tab(tab, |t| {
             t.model = Some(model.to_owned());
             if let Some(saved) = t.saved() {
-                (t.launch, t.resume_at) = saved.reopen(unix_now());
+                (t.launch, t.resume_at) = saved.reopen(unix_now(), t.account.provider);
             }
         })?;
         self.start_claude(tab, cols, rows)
@@ -974,7 +1037,7 @@ impl Machine {
     pub fn restart_claude(&self, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
         self.tab(tab, |t| {
             if let Some(saved) = t.saved() {
-                (t.launch, t.resume_at) = saved.reopen(unix_now());
+                (t.launch, t.resume_at) = saved.reopen(unix_now(), t.account.provider);
             }
         })?;
         self.start_claude(tab, cols, rows)
@@ -1005,6 +1068,8 @@ impl Machine {
             t.session = Some(pty);
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
+            t.turn_pending = None;
+            t.draft = Draft::default();
         })?;
         self.type_held_once_raw(tab, session);
         Ok(())
@@ -1022,15 +1087,23 @@ impl Machine {
             }
             let done = machine.tab(&tab, |t| match t.session.as_mut() {
                 Some(s) if s.raw() => {
+                    let mut wrote = false;
                     for text in std::mem::take(&mut t.held) {
-                        let _ = s.write(&paste(&text));
+                        if s.write(&paste(&text)).is_ok() {
+                            t.turn_pending = Some(Instant::now());
+                            wrote = true;
+                        }
                     }
-                    true
+                    (true, wrote)
                 }
-                Some(_) => false,
-                None => true,
+                Some(_) => (false, false),
+                None => (true, false),
             });
-            if done.unwrap_or(true) {
+            let (done, wrote) = done.unwrap_or((true, false));
+            if wrote {
+                machine.arm_notices();
+            }
+            if done {
                 return;
             }
             drop(machine);
@@ -1061,10 +1134,28 @@ impl Machine {
         if Shells::owns(tab) {
             return self.shells.write(tab, data);
         }
-        self.tab(tab, |t| match t.session.as_mut() {
-            Some(s) => s.write(data).map_err(|e| e.to_string()),
-            None => Ok(()),
-        })?
+        let (submitted, mode_unknown) = self.tab(tab, |t| {
+            let submitted = note_draft(&mut t.draft, data);
+            if submitted {
+                t.note_submit();
+            }
+            let mode_unknown = t.account.provider.spec().harness && !t.permission_unknown && data.windows(3).any(|window| window == b"\x1b[Z");
+            if mode_unknown {
+                t.permission_unknown = true;
+            }
+            if let Some(s) = t.session.as_mut() {
+                s.write(data).map_err(|e| e.to_string())?;
+            }
+            Ok::<_, String>((submitted, mode_unknown))
+        })??;
+        if mode_unknown {
+            self.save_sessions();
+        }
+        if submitted {
+            self.arm_notices();
+        }
+        self.maybe_deliver(tab);
+        Ok(())
     }
 
     pub fn resize_pty(&self, tab: &str, cols: u16, rows: u16) -> Result<(), String> {
@@ -1079,11 +1170,23 @@ impl Machine {
 
     /// Ends the tab's session and forgets it. Answers whether no tab is left.
     pub fn close_tab(&self, tab: &str) -> bool {
-        let last = {
+        let path = self.launch.path_env.clone();
+        for id in self.delegates.running_under(tab) {
+            let _ = self.delegates.cancel_tree(&id, "the parent tab closed", path.as_deref());
+        }
+        let (made, owned, last) = {
             let mut tabs = self.tabs.lock().unwrap();
+            let made = tabs.get(tab).and_then(|t| t.made.clone());
             tabs.remove(tab);
-            tabs.is_empty()
+            let owned: Vec<PathBuf> = tabs.values().filter_map(|t| t.made.clone()).collect();
+            (made, owned, tabs.is_empty())
         };
+        self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
+        if let Some(made) = made {
+            if !owned.iter().any(|dir| dir == &made) {
+                branches::drop_worktree(&made, path.as_deref());
+            }
+        }
         self.save_sessions();
         self.emit_tabs();
         last
@@ -1398,19 +1501,26 @@ impl Machine {
     /// pty's cooked mode would echo it and turn the submitting \r into \n, and claude would never
     /// see a prompt.
     fn type_prompt(&self, tab: &str, text: &str) -> Result<(), String> {
-        self.tab(tab, |t| match t.session.as_mut() {
+        let wrote = self.tab(tab, |t| match t.session.as_mut() {
             Some(s) if s.raw() => {
                 for held in std::mem::take(&mut t.held) {
                     s.write(&paste(&held)).map_err(|e| e.to_string())?;
+                    t.turn_pending = Some(Instant::now());
                 }
-                s.write(&paste(text)).map_err(|e| e.to_string())
+                s.write(&paste(text)).map_err(|e| e.to_string())?;
+                t.turn_pending = Some(Instant::now());
+                Ok(true)
             }
             Some(_) => {
                 t.held.push(text.to_owned());
-                Ok(())
+                Ok(false)
             }
             None => Err(format!("tab {tab} has no running session")),
-        })?
+        })??;
+        if wrote {
+            self.arm_notices();
+        }
+        Ok(())
     }
 
     /// Reopens the sessions still going at the last quit, resumed, and returns their tab ids.
@@ -1426,9 +1536,9 @@ impl Machine {
             .filter_map(|s| {
                 // The transcript is in its account's home: with that account gone, nothing can resume it.
                 let account = self.account_for(Some(&s.account), &s.cwd).ok()?;
-                let (launch, resume_at) = s.reopen(now);
+                let (launch, resume_at) = s.reopen(now, account.provider);
                 let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session));
-                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model) = (s.interrupted, resume_at, s.held, s.model));
+                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode) = (s.interrupted, resume_at, s.held, s.model, s.permission_mode));
                 Some(id)
             })
             .collect();
@@ -1469,6 +1579,10 @@ impl Machine {
                     machine.emit(Event::Usage { usage, account });
                     Ok(String::new())
                 }
+                Message::Delegate { tab, task, tool, request } => machine.start_delegate(tab, task, tool, *request),
+                Message::TaskStatus { tab, task, id } => machine.task_status(tab, task, &id),
+                Message::TaskCancel { tab, task, id, reason } => machine.task_cancel(tab, task, &id, &reason),
+                Message::Capabilities { tab, task, search } => machine.capabilities(tab.as_deref(), task.as_deref(), &search),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 message => other(message),
             }
@@ -1478,8 +1592,338 @@ impl Machine {
     /// Ends every session as the machine shuts down, keeping them saved for the next launch.
     pub fn quit(&self) {
         self.quitting.store(true, Ordering::SeqCst);
+        let path = self.launch.path_env.clone();
+        for id in self.delegates.running() {
+            let _ = self.delegates.cancel_tree(&id, "pinned is shutting down", path.as_deref());
+        }
+        self.delegates.kill_remembered();
+        let (tabs, owned) = {
+            let tabs = self.tabs.lock().unwrap();
+            let owned: Vec<PathBuf> = tabs.values().filter_map(|tab| tab.made.clone()).collect();
+            let ids: Vec<String> = tabs.keys().cloned().collect();
+            (ids, owned)
+        };
+        for tab in &tabs {
+            self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
+        }
         self.tabs.lock().unwrap().clear();
         self.device_hub.stop();
+    }
+
+    fn caller(tab: Option<String>, task: Option<String>) -> crate::delegate::Caller {
+        crate::delegate::Caller { tab: tab.filter(|id| !id.is_empty()), task: task.filter(|id| !id.is_empty()) }
+    }
+
+    /// `delegate_task`, `task_status`, and `task_cancel` need the session that owns the work.
+    /// Without `PINNED_TAB` or `PINNED_TASK` every such process would share one caller key.
+    fn require_caller(tab: Option<String>, task: Option<String>) -> Result<crate::delegate::Caller, String> {
+        let caller = Self::caller(tab, task);
+        if caller.tab.is_none() && caller.task.is_none() {
+            Err("PINNED_TAB or PINNED_TASK must be set to delegate, check, or cancel a task".into())
+        } else {
+            Ok(caller)
+        }
+    }
+
+    fn task_status(&self, tab: Option<String>, task: Option<String>, id: &str) -> Result<String, String> {
+        let caller = Self::require_caller(tab, task)?;
+        self.delegates.status(&caller, id).map(|value| value.to_string())
+    }
+
+    fn task_cancel(&self, tab: Option<String>, task: Option<String>, id: &str, reason: &str) -> Result<String, String> {
+        let caller = Self::require_caller(tab, task)?;
+        self.delegates.cancel(&caller, id, reason, self.launch.path_env.as_deref()).map(|value| value.to_string())
+    }
+
+    /// A cancel or a quit landed while startup still had no child process. `unplaced` is a worktree
+    /// directory that is not on the task yet, so cancelling the task would not remove it.
+    fn startup_stopped(&self, id: &str, unplaced: Option<&Path>) -> bool {
+        let stop = self.quitting.load(Ordering::SeqCst) || self.delegates.is_terminal(id);
+        if !stop {
+            return false;
+        }
+        if let Some(dir) = unplaced {
+            branches::drop_worktree(dir, self.launch.path_env.as_deref());
+        }
+        if !self.delegates.is_terminal(id) {
+            let _ = self.delegates.cancel_tree(id, "pinned is shutting down", self.launch.path_env.as_deref());
+        }
+        true
+    }
+
+    /// The parent tab must still be open. A task claimed for a tab that closed is cancelled, so
+    /// the catalog wait cannot leave a child whose parent is already gone.
+    fn ensure_parent(&self, tab: Option<&str>, task: Option<&str>) -> Result<(), String> {
+        let Some(tab) = tab.filter(|id| !id.is_empty()) else { return Ok(()) };
+        if self.tabs.lock().unwrap().contains_key(tab) {
+            return Ok(());
+        }
+        if let Some(id) = task {
+            if !self.delegates.is_terminal(id) {
+                let _ = self.delegates.cancel_tree(id, "the parent tab closed", self.launch.path_env.as_deref());
+            }
+        }
+        Err(format!("no tab {tab}"))
+    }
+
+    fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
+        use crate::delegate::{driver_args, resolve_access, spawn, Access, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
+        let caller = Self::require_caller(tab, parent_task)?;
+        let parent = if let Some(tab) = caller.tab.clone() {
+            Parent::Tab(tab)
+        } else {
+            Parent::Task(caller.task.clone().unwrap_or_default())
+        };
+        let (account_id, inherited_model, parent_provider, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
+            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.cwd.clone(), t.child_access()))?
+        } else {
+            let id = caller.task.as_deref().unwrap_or_default();
+            let task = self.delegates.lineage(id).ok_or_else(|| format!("no task {id}"))?;
+            (Some(task.account), task.model, task.provider, task.cwd, task.access)
+        };
+        let account = if let Some(id) = request.target.account.clone().filter(|id| !id.is_empty()) {
+            self.accounts.get(&id).ok_or_else(|| format!("no account {id} on this machine"))?
+        } else if let Some(id) = account_id {
+            self.accounts.get(&id).unwrap_or_else(|| Account::builtin(Provider::Claude))
+        } else {
+            Account::builtin(Provider::Claude)
+        };
+        if let Some(kind) = request.target.driver_kind.as_deref() {
+            crate::delegate::require_driver(&account.id, account.provider, kind)?;
+        }
+        let bin = self.launch.bin(account.provider);
+        if !bin.is_file() {
+            return Err(format!("{} is not installed on this machine", account.provider.spec().name));
+        }
+        if !self.status(&account).signed_in {
+            return Err(format!("account {} is not signed in on this machine", account.id));
+        }
+        let access = resolve_access(ceiling, &request)?;
+        let mut model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
+        let mut effort = request.target.effort.clone().filter(|effort| !effort.is_empty());
+        self.ensure_parent(caller.tab.as_deref(), None)?;
+        let isolated = request.isolation == Isolation::Worktree;
+        let task = match self.delegates.claim(NewTask {
+            parent,
+            tool,
+            title: request.title.clone(),
+            account: account.id.clone(),
+            provider: account.provider,
+            model: model.clone(),
+            cwd: cwd.clone(),
+            mode: request.mode,
+            access,
+            isolated: false,
+            caller_key: caller.key(),
+            client_request_id: request.client_request_id.clone(),
+            role: request.role.clone(),
+        }) {
+            Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
+            Claim::Fresh(task) => *task,
+        };
+        self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
+        if account.provider == Provider::Cursor {
+            if let Some(name) = model.clone() {
+                let ids = self.delegates.cursor_ids(&bin, self.launch.path_env.as_deref());
+                model = Some(crate::delegate::map_cursor_model(&ids, &name, effort.as_deref()));
+                self.delegates.set_model(&task.id, model.clone());
+            }
+            effort = None;
+        }
+        self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
+        if isolated {
+            match branches::new_worktree(&cwd, self.launch.path_env.as_deref()) {
+                Ok(dir) => {
+                    if self.startup_stopped(&task.id, Some(&dir)) {
+                        return self.delegates.started_json(&task.id).map(|value| value.to_string());
+                    }
+                    cwd = dir;
+                    self.delegates.place(&task.id, cwd.clone(), true);
+                }
+                Err(error) => {
+                    self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
+                    return Err(error);
+                }
+            }
+        }
+        if self.startup_stopped(&task.id, None) {
+            return self.delegates.started_json(&task.id).map(|value| value.to_string());
+        }
+        let argv = driver_args(
+            account.provider,
+            &SpawnSpec {
+                task: &request.task,
+                model: model.as_deref(),
+                effort: effort.as_deref(),
+                access,
+                mcp_config: self.launch.mcp_config.as_deref(),
+                exe: &self.launch.exe,
+                sock: &self.launch.sock,
+                task_id: &task.id,
+                reminders: self.launch.reminders,
+            },
+        );
+        let mut env = self.accounts.env(&account);
+        env.push((SOCK_ENV.to_owned(), self.launch.sock.display().to_string()));
+        env.push((TASK_ENV.to_owned(), task.id.clone()));
+        let id = task.id.clone();
+        let me = self.me.clone();
+        let path_env = self.launch.path_env.clone();
+        let pid = match spawn(
+            ChildSpec { bin: &bin, argv: &argv, cwd: &cwd, env: &env, path: self.launch.path_env.as_deref(), strip: &INHERITED_SESSION_ENV },
+            move |event| {
+                let Some(machine) = me.upgrade() else { return };
+                if let Some(tab) = machine.delegates.apply(&id, event, path_env.as_deref()) {
+                    machine.maybe_deliver(&tab);
+                }
+            },
+        ) {
+            Ok(pid) => pid,
+            Err(error) => {
+                self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
+                return Err(error);
+            }
+        };
+        self.delegates.remember_pid(&task.id, pid);
+        if self.quitting.load(Ordering::SeqCst) {
+            self.delegates.kill_remembered();
+        }
+        self.arm_notices();
+        self.delegates.started_json(&task.id).map(|value| value.to_string())
+    }
+
+    /// Idle means the session is up, the last report was Done, no submit is outstanding, and the
+    /// input line is empty. A tab that never reports Done, such as Cursor, is never idle.
+    fn parent_idle(&self, tab: &str) -> bool {
+        self.tab(tab, |t| t.notice_idle()).unwrap_or(false)
+    }
+
+    /// Types one finished task's notice now. The tab must own the task. The idle gate does not apply.
+    fn deliver_task(&self, tab: &str, task: &str) -> Result<(), String> {
+        if !self.tab(tab, |t| t.draft.empty())? {
+            return Err("The prompt has unsent text. Send or clear it (Ctrl-U), then try again.".into());
+        }
+        let caller = crate::delegate::Caller { tab: Some(tab.to_owned()), task: None };
+        let text = self.delegates.claim_task_notice(&caller, task)?;
+        if let Err(error) = self.type_prompt(tab, &text) {
+            self.delegates.release_notice(&[task.to_owned()]);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn maybe_deliver(&self, tab: &str) {
+        if !self.parent_idle(tab) {
+            return;
+        }
+        let Some((text, ids)) = self.delegates.claim_notice(tab) else { return };
+        if self.write_notice(tab, &text) != Ok(true) {
+            self.delegates.release_notice(&ids);
+        }
+    }
+
+    /// Writes `text` into a raw session. `Ok(false)` when the session has not taken the terminal,
+    /// which leaves the notice unclaimed so a later idle can type it. Queuing it is not delivery.
+    fn write_notice(&self, tab: &str, text: &str) -> Result<bool, String> {
+        self.tab(tab, |t| {
+            if !t.notice_idle() {
+                return Ok(false);
+            }
+            match t.session.as_mut() {
+                Some(s) if s.raw() => {
+                    s.write(&paste(text)).map_err(|e| e.to_string())?;
+                    t.turn_pending = Some(Instant::now());
+                    Ok(true)
+                }
+                Some(_) => Ok(false),
+                None => Err(format!("tab {tab} has no running session")),
+            }
+        })?
+    }
+
+    /// Starts the once-a-second pass that types a waiting notice once its session is idle.
+    fn arm_notices(&self) {
+        if self.notice_loop.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let me = self.me.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let Some(machine) = me.upgrade() else { return };
+            if machine.quitting.load(Ordering::Relaxed) {
+                return;
+            }
+            let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
+            for tab in tabs {
+                machine.maybe_deliver(&tab);
+            }
+        });
+    }
+
+    fn capabilities(&self, tab: Option<&str>, task: Option<&str>, search: &str) -> Result<String, String> {
+        use crate::delegate::{capabilities, codex_constraints, cursor_models, provider_models, Access, Inherited, ListedAccount};
+        let (account, model, access) = if let Some(tab) = tab.filter(|tab| !tab.is_empty()) {
+            self.tab(tab, |t| (t.account.clone(), t.model.clone(), t.child_access())).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
+        } else if let Some(lineage) = task.filter(|task| !task.is_empty()).and_then(|id| self.delegates.lineage(id)) {
+            let account = self.accounts.get(&lineage.account).unwrap_or_else(|| Account::builtin(lineage.provider));
+            (account, lineage.model, lineage.access)
+        } else {
+            (Account::builtin(Provider::Claude), None, Access::Auto)
+        };
+        let parent = Inherited { account: account.id, model, access };
+        let listed = self
+            .accounts
+            .list()
+            .into_iter()
+            .map(|account| {
+                let status = self.status(&account);
+                let bin = self.launch.bin(account.provider);
+                let found = bin.is_file();
+                let (models, mut constraints) = match account.provider {
+                    Provider::Claude => (provider_models(Provider::Claude), vec![]),
+                    Provider::Codex => (vec![], codex_constraints()),
+                    Provider::Cursor => {
+                        let list = self.delegates.cursor_catalog(&bin, self.launch.path_env.as_deref());
+                        let mut constraints = crate::delegate::cursor_constraints();
+                        if found && list.trim().is_empty() {
+                            constraints.push("the model list is not ready yet".into());
+                        }
+                        (cursor_models(&list), constraints)
+                    }
+                };
+                if !status.signed_in {
+                    constraints.push("not signed in on this machine".into());
+                }
+                if !found {
+                    constraints.push(format!("{} is not installed on this machine", account.provider.spec().name));
+                }
+                ListedAccount { id: account.id, provider: account.provider, name: account.name, signed_in: status.signed_in, bin_found: found, models, constraints }
+            })
+            .collect::<Vec<_>>();
+        let search = (!search.is_empty()).then_some(search);
+        Ok(capabilities(&parent, &listed, search).to_string())
+    }
+
+    fn open_delegated(&self, tab: &str, task: &str) -> Result<TabId, String> {
+        use crate::delegate::Access;
+        let info = self.delegates.open(&crate::delegate::Caller { tab: Some(tab.to_owned()), task: None }, task)?;
+        let account = self.accounts.get(&info.account).ok_or_else(|| format!("no account {} on this machine", info.account))?;
+        let bypass = info.access == Access::Full;
+        let mut launch = crate::delegate::resume_args(info.provider, &info.conversation);
+        let plan = info.access == Access::ReadOnly && info.provider == Provider::Claude;
+        if plan {
+            launch.extend(["--permission-mode".to_owned(), "plan".to_owned()]);
+        }
+        let session = (info.provider == Provider::Claude).then(|| info.conversation.clone());
+        let id = self.add_tab(info.cwd.clone(), account, launch, vec![], bypass, session);
+        if plan {
+            let _ = self.tab(&id, |t| t.permission_mode = Some("plan".into()));
+        }
+        if info.isolated {
+            let _ = self.tab(&id, |t| t.made = Some(info.cwd));
+        }
+        self.emit_tabs();
+        Ok(id)
     }
 
     fn record_event(&self, event: AgentEvent) {
@@ -1495,6 +1939,7 @@ impl Machine {
             if new_session || turn_ended {
                 self.refresh_stats(tab, turn_ended);
             }
+            self.maybe_deliver(tab);
             self.continue_when_limit_lifts(tab);
             self.emit_tabs();
         }
@@ -1530,6 +1975,10 @@ impl Machine {
             title: None,
             message: None,
             held: vec![],
+            turn_pending: None,
+            draft: Draft::default(),
+            permission_mode: None,
+            permission_unknown: false,
             screen: Arc::default(),
         };
         self.tabs.lock().unwrap().insert(id.clone(), tab);
@@ -1650,12 +2099,20 @@ impl Machine {
             if !idle_notice {
                 t.updated = Some(unix_now());
             }
+            if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
+                t.turn_pending = None;
+            }
             t.status = Some(event.status);
             if event.title.is_some() {
                 t.title = event.title.clone();
             }
             t.message = event.message.clone().filter(|_| event.status == AgentStatus::NeedsInput);
-            before != (t.interrupted, t.resume_at, t.held_at_limit)
+            let mode_before = (t.permission_unknown, t.permission_mode.clone());
+            if event.permission_mode.is_some() {
+                t.permission_mode = event.permission_mode.clone();
+                t.permission_unknown = false;
+            }
+            before != (t.interrupted, t.resume_at, t.held_at_limit) || mode_before != (t.permission_unknown, t.permission_mode.clone())
         });
         if changed == Ok(true) {
             self.save_sessions();
@@ -1840,6 +2297,81 @@ fn truncate(text: &str, max: usize) -> String {
 
 fn tab_number(id: &str) -> u32 {
     id.trim_start_matches("tab-").parse().unwrap_or(0)
+}
+
+/// The terminal's input line as far as the keys show it.
+#[derive(Clone, Copy, Debug, Default)]
+struct Draft {
+    /// Characters typed into the line.
+    chars: usize,
+    /// Up or down put an earlier prompt in the line. Its length is unknown, so backspace cannot empty it.
+    recalled: bool,
+}
+
+impl Draft {
+    fn empty(&self) -> bool {
+        self.chars == 0 && !self.recalled
+    }
+}
+
+/// Follows the terminal's input line. Printable text adds a character, including newlines inside
+/// a bracketed paste. Backspace removes one, floored at 0. Ctrl-C, Ctrl-U, and Enter clear the line.
+/// Enter on a non-empty line is a submit. Up and down recall a prompt, so the line stays occupied
+/// until Enter, Ctrl-U, or Ctrl-C. Other escape sequences, such as focus reports, are ignored.
+fn note_draft(draft: &mut Draft, data: &[u8]) -> bool {
+    let mut submitted = false;
+    let mut pasting = false;
+    let mut i = 0;
+    while i < data.len() {
+        match data[i] {
+            0x1b => {
+                let Some(len) = escape_len(&data[i + 1..]) else { break };
+                match &data[i + 1..i + 1 + len] {
+                    b"[200~" => pasting = true,
+                    b"[201~" => pasting = false,
+                    b"[A" | b"[B" | b"OA" | b"OB" => draft.recalled = true,
+                    _ => {}
+                }
+                i += len;
+            }
+            b'\r' | b'\n' if pasting => draft.chars += 1,
+            b'\r' => {
+                submitted |= !draft.empty();
+                *draft = Draft::default();
+            }
+            0x03 | 0x15 => *draft = Draft::default(),
+            0x08 | 0x7f => draft.chars = draft.chars.saturating_sub(1),
+            0x80..=0xbf => {}
+            byte if byte >= 0x20 => draft.chars += 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    submitted
+}
+
+fn escape_len(rest: &[u8]) -> Option<usize> {
+    if rest.is_empty() {
+        return Some(0);
+    }
+    match rest[0] {
+        b'[' => rest[1..].iter().position(|b| (0x40..=0x7e).contains(b)).map(|at| at + 2),
+        b']' => {
+            let mut i = 1;
+            while i < rest.len() {
+                if rest[i] == 0x07 {
+                    return Some(i + 1);
+                }
+                if rest[i] == 0x1b && rest.get(i + 1) == Some(&b'\\') {
+                    return Some(i + 2);
+                }
+                i += 1;
+            }
+            None
+        }
+        b'O' | b'N' => rest.get(1).map(|_| 2),
+        _ => Some(1),
+    }
 }
 
 /// `text` as a bracketed paste and Enter, so its lines reach claude as one prompt that it submits.
@@ -2027,6 +2559,7 @@ mod tests {
             path_env: None,
             settings: "s".into(),
             mcp_config: None,
+            reminders: true,
             plugin_dir: "p".into(),
             tutorial_helper: "t".into(),
             sock: "k".into(),
@@ -2072,7 +2605,7 @@ mod tests {
     fn wait_for(what: &str, done: impl Fn() -> bool) {
         let start = Instant::now();
         while !done() {
-            assert!(start.elapsed() < Duration::from_secs(5), "timed out waiting for {what}");
+            assert!(start.elapsed() < Duration::from_secs(15), "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -2332,6 +2865,7 @@ mod tests {
             resume_at: None,
             prompt: None,
             snapshot: None,
+            permission_mode: None,
         };
         m.record_event(event(AgentStatus::NeedsInput, Some("Fix the build"), Some("Claude needs your permission to use Bash")));
         let view = m.view(&tab).unwrap();
@@ -2352,7 +2886,7 @@ mod tests {
         git(&dir, &["branch", "other"]);
         let m = machine();
         let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
-        let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None };
+        let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None };
         m.record_event(working.clone());
         let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false, from: None };
         assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"));
@@ -2485,7 +3019,7 @@ mod tests {
     fn a_session_held_at_its_usage_limit_stays_held_until_the_next_turn() {
         let m = machine();
         let tab = m.open_tab(None, false).unwrap();
-        let failed = |resume_at| AgentEvent { status: AgentStatus::Failed, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at, prompt: None, snapshot: None };
+        let failed = |resume_at| AgentEvent { status: AgentStatus::Failed, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at, prompt: None, snapshot: None, permission_mode: None };
         m.record_status(&tab, &failed(Some(1792400000)));
         m.call(Call::AutoResume { tab: tab.clone(), on: false }).unwrap();
         assert!(m.view(&tab).unwrap().held);
@@ -2497,6 +3031,159 @@ mod tests {
         m.record_status(&tab, &AgentEvent { status: AgentStatus::Working, ..failed(None) });
         let view = m.view(&tab).unwrap();
         assert_eq!((view.held, view.resume_at), (false, None));
+    }
+
+    #[test]
+    fn cancel_task_from_the_owning_tab_cancels_and_another_tab_is_refused() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let tab = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
+        let other = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(tab.clone()),
+            tool: None,
+            title: "Look".into(),
+            account: account.id.clone(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: "/repo".into(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{tab}"),
+            client_request_id: None,
+            role: None,
+        });
+        let body = m.call(Call::CancelTask { tab: tab.clone(), task: task.id.clone() }).unwrap();
+        assert_eq!(body["workState"], "cancelled");
+        assert_eq!(body["error"], json!("cancelled from the card"));
+        let refused = m.call(Call::CancelTask { tab: other, task: task.id.clone() });
+        assert_eq!(refused, Err(format!("task {} belongs to another session", task.id)));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_parent_close_drops_a_kept_worktree_unless_an_opened_tab_owns_it() {
+        let dir = temp("owned-worktree");
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let loose = branches::new_worktree(&repo, None).unwrap();
+        let owned = branches::new_worktree(&repo, None).unwrap();
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let parent = m.add_tab(std::fs::canonicalize(&repo).unwrap(), account.clone(), vec![], vec![], false, None);
+        let spec = |title: &str, cwd: PathBuf| crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(parent.clone()),
+            tool: None,
+            title: title.into(),
+            account: account.id.clone(),
+            provider: Provider::Claude,
+            model: None,
+            cwd,
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: true,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        };
+        let loose_task = m.delegates.begin(spec("Loose", loose.clone()));
+        let owned_task = m.delegates.begin(spec("Owned", owned.clone()));
+        let init = |id: &str, session: &str| {
+            m.delegates.apply(id, crate::delegate::ChildEvent::Line(json!({"type":"system","subtype":"init","session_id":session}).to_string()), None);
+            m.delegates.apply(id, crate::delegate::ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        };
+        init(&loose_task.id, "loose-1");
+        init(&owned_task.id, "owned-1");
+        let opened = m.open_delegated(&parent, &owned_task.id).unwrap();
+        assert_eq!(m.tab(&opened, |t| t.made.clone()).unwrap(), Some(owned.clone()));
+        m.close_tab(&parent);
+        assert!(!loose.exists(), "closing the parent left a worktree no tab owns");
+        assert!(owned.is_dir(), "closing the parent removed a worktree an opened tab owns");
+        m.close_tab(&opened);
+        assert!(!owned.exists(), "closing the opened tab left its worktree");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn quit_drops_a_kept_worktree() {
+        let dir = temp("quit-worktree");
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let kept = branches::new_worktree(&repo, None).unwrap();
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let parent = m.add_tab(std::fs::canonicalize(&repo).unwrap(), account.clone(), vec![], vec![], false, None);
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(parent.clone()),
+            tool: None,
+            title: "Kept".into(),
+            account: account.id.clone(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: kept.clone(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: true,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.apply(&task.id, crate::delegate::ChildEvent::Line(json!({"type":"system","subtype":"init","session_id":"keep-me"}).to_string()), None);
+        m.delegates.apply(&task.id, crate::delegate::ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        assert!(kept.is_dir(), "the worktree was not created");
+        m.quit();
+        assert!(!kept.exists(), "quit left a worktree that still had a conversation");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn quit_keeps_a_worktree_an_opened_tab_owns() {
+        let dir = temp("quit-owned-worktree");
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let loose = branches::new_worktree(&repo, None).unwrap();
+        let owned = branches::new_worktree(&repo, None).unwrap();
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let parent = m.add_tab(std::fs::canonicalize(&repo).unwrap(), account.clone(), vec![], vec![], false, None);
+        let spec = |title: &str, cwd: PathBuf| crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(parent.clone()),
+            tool: None,
+            title: title.into(),
+            account: account.id.clone(),
+            provider: Provider::Claude,
+            model: None,
+            cwd,
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: true,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        };
+        let loose_task = m.delegates.begin(spec("Loose", loose.clone()));
+        let owned_task = m.delegates.begin(spec("Owned", owned.clone()));
+        let init = |id: &str, session: &str| {
+            m.delegates.apply(id, crate::delegate::ChildEvent::Line(json!({"type":"system","subtype":"init","session_id":session}).to_string()), None);
+            m.delegates.apply(id, crate::delegate::ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        };
+        init(&loose_task.id, "loose-1");
+        init(&owned_task.id, "owned-1");
+        let opened = m.open_delegated(&parent, &owned_task.id).unwrap();
+        assert_eq!(m.tab(&opened, |t| t.made.clone()).unwrap(), Some(owned.clone()));
+        m.quit();
+        assert!(!loose.exists(), "quit left a worktree no tab owns");
+        assert!(owned.is_dir(), "quit removed a worktree an opened tab owns");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2625,6 +3312,7 @@ mod tests {
         BTreeMap::from([
             (Provider::Claude, script("claude", "auth status", "CLAUDE_CONFIG_DIR", r#"{"loggedIn":true,"email":"ana@acme.dev","orgName":"Acme","subscriptionType":"max"}"#, r#"{"loggedIn":false}"#)),
             (Provider::Codex, script("codex", "login status", "CODEX_HOME", "Logged in using ChatGPT", "Not logged in")),
+            (Provider::Cursor, script("cursor-agent", "status ", "CURSOR_UNUSED", "Logged in as ana@acme.dev", "Not logged in")),
         ])
     }
 
@@ -2659,7 +3347,10 @@ mod tests {
         let open = |app: &Path, bypass| m.open_tab(Some(app.display().to_string()), bypass).unwrap();
         let config = root.join("config").display().to_string();
         assert_eq!(first_line(&m, &open(&work_app, false)), format!("claude|--settings s --plugin-dir p|{config}/accounts/work||work\r\n"));
-        assert_eq!(first_line(&m, &open(&side_app, true)), format!("codex|--dangerously-bypass-approvals-and-sandbox||{config}/accounts/side|side\r\n"));
+        assert_eq!(
+            first_line(&m, &open(&side_app, true)),
+            format!("codex|-c notify=[\"/opt/pinned/bin/pinned\", \"hook\", \"done\"] --dangerously-bypass-approvals-and-sandbox||{config}/accounts/side|side\r\n")
+        );
         assert_eq!(first_line(&m, &open(&own_app, true)), "claude|--settings s --plugin-dir p --dangerously-skip-permissions|||claude\r\n");
         assert_eq!(m.tabs().into_iter().map(|t| t.account).collect::<Vec<_>>(), ["work", "side", "claude"]);
 
@@ -2712,6 +3403,10 @@ mod tests {
                 {
                     "id": "codex", "provider": "codex", "name": "Codex", "provider_name": "Codex", "builtin": true,
                     "signed_in": true, "email": null, "org": null, "plan": null,
+                },
+                {
+                    "id": "cursor", "provider": "cursor", "name": "Cursor", "provider_name": "Cursor", "builtin": true,
+                    "signed_in": true, "email": "ana@acme.dev", "org": null, "plan": null,
                 },
                 work,
             ]))
@@ -2870,6 +3565,53 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn a_codex_session_reopens_with_resume_not_claudes_flag() {
+        let root = temp("codex-resume");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let m = accounts_machine(&root);
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        std::fs::write(
+            root.join("config/sessions.json"),
+            format!(r#"[{{"cwd": "{}", "session": "thr-9", "env": [], "bypass": false, "interrupted": false, "resume_at": null, "account": "side"}}]"#, app.display()),
+        )
+        .unwrap();
+        let tabs = m.restore_tabs();
+        assert_eq!(tabs.len(), 1);
+        let line = first_line(&m, &tabs[0]);
+        assert!(line.contains(" resume thr-9"), "codex was not resumed with `resume`: {line}");
+        assert!(!line.contains("--resume"), "codex was passed claude's --resume: {line}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_codex_tab_keeps_the_notify_command_from_its_codex_home() {
+        let root = temp("codex-user-notify");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let m = accounts_machine(&root);
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
+        let script = root.join("user-notify");
+        let home = root.join("config/accounts/side");
+        std::fs::write(
+            home.join("config.toml"),
+            format!("notify = [\n  \"{}\",\n  \"--ping\",\n]\n[tui]\nnotify = [\"nope\"]\n", script.display()),
+        )
+        .unwrap();
+        m.open_project(app.clone());
+        m.call(Call::SetProjectAccount { path: app.display().to_string(), account: Some("side".into()) }).unwrap();
+        let tab = m.open_tab(Some(app.display().to_string()), false).unwrap();
+        let line = first_line(&m, &tab);
+        assert!(line.contains(&script.display().to_string()), "the account's notify was dropped: {line}");
+        assert!(line.contains("--ping"), "the notify argument was dropped: {line}");
+        assert!(line.contains("\"hook\", \"done\", \"--\""), "pinned's hook does not run first: {line}");
+        assert!(!line.contains("nope"), "a notify inside a table was used: {line}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_limited_session_moves_to_another_signed_in_account_and_continues_there() {
         let root = temp("switch-account");
         let app = root.join("app");
@@ -2993,6 +3735,828 @@ mod tests {
         assert_eq!(repo_name("https://github.com/acme/.."), None);
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn a_cursor_child_of_a_claude_tab_does_not_inherit_the_claude_model() {
+        let root = temp("cross-model");
+        let argv = root.join("argv");
+        let cursor = root.join("cursor-agent");
+        let body = r#"#!/bin/sh
+if [ "$1" = status ]; then echo 'Logged in as ana@acme.dev'; exit 0; fi
+if [ "$1" = "--list-models" ]; then sleep 0.3; printf '%s\n' 'composer-2.5-high - Composer High'; exit 0; fi
+printf '%s\n' "$@" > "ARGV"
+echo '{"type":"result","result":"ok"}'
+"#
+        .replace("ARGV", &argv.display().to_string());
+        std::fs::write(&cursor, body).unwrap();
+        std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        m.tab(&tab, |t| t.model = Some("claude-opus-5-5".into())).unwrap();
+        let plain = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "mode": "async" })).unwrap();
+        m.start_delegate(Some(tab.clone()), None, None, plain).unwrap();
+        wait_for("plain argv", || std::fs::read(&argv).is_ok_and(|b| !b.is_empty()));
+        let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
+        assert_eq!(lines, vec!["-p", "--output-format", "stream-json", "--trust", "look"]);
+        let _ = std::fs::remove_file(&argv);
+        let mapped = crate::delegate::parse_request(&json!({
+            "task": "look",
+            "target": { "providerInstanceId": "cursor", "model": "composer-2.5", "options": { "effort": "high" } },
+            "mode": "async",
+        }))
+        .unwrap();
+        m.start_delegate(Some(tab), None, None, mapped).unwrap();
+        wait_for("mapped argv", || std::fs::read(&argv).is_ok_and(|b| String::from_utf8_lossy(&b).contains("composer-2.5-high")));
+        let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
+        assert_eq!(lines, vec!["-p", "--output-format", "stream-json", "--trust", "--model", "composer-2.5-high", "look"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_task_caller_the_registry_does_not_know_is_refused() {
+        let m = Machine::new(launch(), None, None, |_| {});
+        let request = crate::delegate::parse_request(&json!({ "task": "look" })).unwrap();
+        assert_eq!(m.start_delegate(None, Some("task-gone".into()), None, request), Err("no task task-gone".into()));
+        assert!(m.delegates.running().is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_parent_tab_that_closes_during_startup_does_not_start_the_child() {
+        let root = temp("parent-gone");
+        let argv = root.join("argv");
+        let listing = root.join("listing");
+        let cursor = root.join("cursor-agent");
+        let body = r#"#!/bin/sh
+if [ "$1" = status ]; then echo 'Logged in as ana@acme.dev'; exit 0; fi
+if [ "$1" = "--list-models" ]; then touch "LISTING"; sleep 0.4; printf '%s\n' 'composer-2.5 - Composer'; exit 0; fi
+printf '%s\n' "$@" > "ARGV"
+echo '{"type":"result","result":"ok"}'
+"#
+        .replace("LISTING", &listing.display().to_string())
+        .replace("ARGV", &argv.display().to_string());
+        std::fs::write(&cursor, body).unwrap();
+        std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        m.close_tab(&tab);
+        let gone = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "mode": "async" })).unwrap();
+        let err = m.start_delegate(Some(tab), None, None, gone).unwrap_err();
+        assert!(err.contains("no tab"), "{err}");
+
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let mapped = crate::delegate::parse_request(&json!({
+            "task": "look",
+            "target": { "providerInstanceId": "cursor", "model": "composer-2.5" },
+            "mode": "async",
+        }))
+        .unwrap();
+        let started = m.clone();
+        let parent = tab.clone();
+        let handle = std::thread::spawn(move || started.start_delegate(Some(parent), None, None, mapped));
+        wait_for("the model list", || listing.is_file());
+        assert!(m.close_tab(&tab));
+        let err = handle.join().unwrap().unwrap_err();
+        assert!(err.contains("no tab"), "{err}");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!argv.exists(), "the child started after its parent tab closed");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    fn blocking_git(dir: &Path, started: &Path, go: &Path) -> String {
+        let real = String::from_utf8(crate::process::command("/bin/sh").args(["-c", "command -v git"]).output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let bin = dir.join("git-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let body = format!(
+            "#!/bin/sh\nexport PATH=\"/usr/bin:/bin:/opt/homebrew/bin\"\nif [ \"$1\" = worktree ] && [ \"$2\" = add ]; then\n  /usr/bin/touch \"{}\"\n  while [ ! -f \"{}\" ]; do /bin/sleep 0.02; done\nfi\nexec \"{}\" \"$@\"\n",
+            started.display(),
+            go.display(),
+            real
+        );
+        std::fs::write(bin.join("git"), body).unwrap();
+        std::fs::set_permissions(bin.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        bin.display().to_string()
+    }
+
+    #[cfg(unix)]
+    fn worktree_left_during_setup(quit: bool) {
+        let root = temp(if quit { "wt-quit" } else { "wt-cancel" });
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let started = root.join("adding");
+        let go = root.join("go");
+        let argv = root.join("argv");
+        let claude = root.join("claude");
+        let body = r#"#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ]; then echo '{"loggedIn":true,"email":"ana@acme.dev"}'; exit 0; fi
+printf '%s\n' "$@" > "ARGV"
+echo '{"type":"result","result":"ok"}'
+"#
+        .replace("ARGV", &argv.display().to_string());
+        std::fs::write(&claude, body).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path = blocking_git(&root, &started, &go);
+        let m = Machine::new(
+            Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), path_env: Some(path), ..launch() },
+            None,
+            Some(repo.clone()),
+            |_| {},
+        );
+        let tab = m.add_tab(repo.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let request = crate::delegate::parse_request(&json!({ "task": "look", "isolation": "worktree", "mode": "async" })).unwrap();
+        let worker = m.clone();
+        let parent = tab.clone();
+        let handle = std::thread::spawn(move || worker.start_delegate(Some(parent), None, None, request));
+        let began = Instant::now();
+        while !started.is_file() {
+            if handle.is_finished() {
+                panic!("startup ended before worktree add: {:?}", handle.join().unwrap());
+            }
+            assert!(began.elapsed() < Duration::from_secs(15), "timed out waiting for worktree add");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if quit {
+            m.quit();
+        } else {
+            let id = m.delegates.running().into_iter().next().expect("the task was claimed");
+            m.delegates
+                .cancel(&crate::delegate::Caller { tab: Some(tab), task: None }, &id, "stop", m.launch().path_env.as_deref())
+                .unwrap();
+        }
+        std::fs::write(&go, "").unwrap();
+        let body = handle.join().unwrap().expect("startup returned an error");
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["workState"], "cancelled");
+        let trees = repo.join(".claude/worktrees");
+        let left = std::fs::read_dir(&trees).map(|entries| entries.count()).unwrap_or(0);
+        assert_eq!(left, 0, "a worktree was left behind");
+        assert!(!argv.is_file(), "the child started after startup was abandoned");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_cancel_during_worktree_setup_drops_the_directory_and_cancels_the_task() {
+        worktree_left_during_setup(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_quit_during_worktree_setup_drops_the_directory_and_cancels_the_task() {
+        worktree_left_during_setup(true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_plan_parent_hands_its_child_read_only_even_when_bypass_is_on() {
+        let root = temp("plan-child");
+        let argv = root.join("argv");
+        let claude = root.join("claude");
+        let body = r#"#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ]; then echo '{"loggedIn":true,"email":"ana@acme.dev"}'; exit 0; fi
+printf '%s\n' "$@" > "ARGV"
+echo '{"type":"result","result":"ok"}'
+"#
+        .replace("ARGV", &argv.display().to_string());
+        std::fs::write(&claude, body).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
+        m.record_event(AgentEvent { permission_mode: Some("plan".into()), ..done_event(&tab) });
+        let request = crate::delegate::parse_request(&json!({ "task": "look", "mode": "async" })).unwrap();
+        m.start_delegate(Some(tab), None, None, request).unwrap();
+        wait_for("plan argv", || std::fs::read(&argv).is_ok_and(|b| !b.is_empty()));
+        let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
+        assert_eq!(lines, vec!["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    fn argv_of(m: &Machine, tab: &str, argv: &Path) -> Vec<String> {
+        let _ = std::fs::remove_file(argv);
+        let request = crate::delegate::parse_request(&json!({ "task": "look", "mode": "async" })).unwrap();
+        m.start_delegate(Some(tab.to_owned()), None, None, request).unwrap();
+        wait_for("child argv", || std::fs::read(argv).is_ok_and(|bytes| !bytes.is_empty()));
+        String::from_utf8(std::fs::read(argv).unwrap()).unwrap().lines().map(str::to_owned).collect()
+    }
+
+    #[cfg(unix)]
+    fn claude_recording_argv(root: &Path) -> PathBuf {
+        let argv = root.join("argv");
+        let claude = root.join("claude");
+        let body = r#"#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ]; then echo '{"loggedIn":true,"email":"ana@acme.dev"}'; exit 0; fi
+printf '%s\n' "$@" > "ARGV"
+echo '{"type":"result","result":"ok"}'
+"#
+        .replace("ARGV", &argv.display().to_string());
+        std::fs::write(&claude, body).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shift_tab_makes_the_child_read_only_until_a_hook_reports_the_mode() {
+        let root = temp("shift-tab-mode");
+        let claude = claude_recording_argv(&root);
+        let argv = root.join("argv");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
+        let full = ["-p", "look", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"].map(str::to_owned).to_vec();
+        let plan = ["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"].map(str::to_owned).to_vec();
+        m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
+        assert_eq!(argv_of(&m, &tab, &argv), full);
+        m.write_input(&tab, b"\x1b[Z").unwrap();
+        assert_eq!(argv_of(&m, &tab, &argv), plan);
+        m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
+        assert_eq!(argv_of(&m, &tab, &argv), full);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_restored_plan_session_starts_its_child_read_only() {
+        let root = temp("restored-plan");
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let claude = claude_recording_argv(&root);
+        let argv = root.join("argv");
+        sessions::save(
+            &root.join("sessions.json"),
+            &[sessions::Saved {
+                cwd: repo.clone(),
+                session: "s1".into(),
+                env: vec![],
+                bypass: true,
+                interrupted: false,
+                resume_at: None,
+                held: false,
+                account: "claude".into(),
+                model: None,
+                permission_mode: Some("plan".into()),
+            }],
+        );
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.clone()), Some(repo), |_| {});
+        let tab = m.restore_tabs().pop().expect("the plan session restored");
+        let plan = ["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"].map(str::to_owned).to_vec();
+        assert_eq!(argv_of(&m, &tab, &argv), plan);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_opened_thread_takes_its_access_from_the_task() {
+        let root = temp("open-access");
+        let argv = root.join("argv");
+        let body = r#"#!/bin/sh
+printf '%s\n' "$@" > "ARGV"
+exec sleep 30
+"#
+        .replace("ARGV", &argv.display().to_string());
+        let claude = root.join("claude");
+        let codex = root.join("codex");
+        for bin in [&claude, &codex] {
+            std::fs::write(bin, &body).unwrap();
+            std::fs::set_permissions(bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        let m = Machine::new(
+            Launch { bins: BTreeMap::from([(Provider::Claude, claude), (Provider::Codex, codex)]), ..launch() },
+            None,
+            Some(root.clone()),
+            |_| {},
+        );
+        let open = |provider: Provider, parent_bypass: bool, access: crate::delegate::Access, session: &str| {
+            let account = Account::builtin(provider);
+            let parent = m.add_tab(root.clone(), account.clone(), vec![], vec![], parent_bypass, None);
+            let task = m.delegates.begin(crate::delegate::NewTask {
+                parent: crate::delegate::Parent::Tab(parent.clone()),
+                tool: None,
+                title: "Opened".into(),
+                account: account.id,
+                provider,
+                model: None,
+                cwd: root.clone(),
+                mode: crate::delegate::Mode::Async,
+                access,
+                isolated: false,
+                caller_key: format!("tab:{parent}"),
+                client_request_id: None,
+                role: None,
+            });
+            let started = match provider {
+                Provider::Claude | Provider::Cursor => json!({"type":"system","subtype":"init","session_id":session}).to_string(),
+                Provider::Codex => json!({"type":"thread.started","thread_id":session}).to_string(),
+            };
+            m.delegates.apply(&task.id, crate::delegate::ChildEvent::Line(started), None);
+            if provider == Provider::Claude {
+                m.delegates.apply(&task.id, crate::delegate::ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+            } else {
+                m.delegates.apply(&task.id, crate::delegate::ChildEvent::Exited { code: Some(0), stderr: String::new() }, None);
+            }
+            let opened = m.open_delegated(&parent, &task.id).unwrap();
+            let _ = std::fs::remove_file(&argv);
+            m.start_claude(&opened, 80, 24).unwrap();
+            wait_for("opened argv", || std::fs::read(&argv).is_ok_and(|bytes| !bytes.is_empty()));
+            let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
+            let mode = m.tab(&opened, |t| (t.bypass, t.permission_mode.clone())).unwrap();
+            (lines, mode)
+        };
+        let pair = |args: &[String], flag: &str, value: &str| args.windows(2).any(|window| window[0] == flag && window[1] == value);
+
+        let (lines, (bypass, mode)) = open(Provider::Claude, true, crate::delegate::Access::ReadOnly, "plan-session");
+        assert!(!bypass, "a read-only thread copied the parent's bypass");
+        assert_eq!(mode.as_deref(), Some("plan"));
+        assert!(pair(&lines, "--resume", "plan-session"), "{lines:?}");
+        assert!(pair(&lines, "--permission-mode", "plan"), "{lines:?}");
+        assert!(!lines.iter().any(|arg| arg == "--dangerously-skip-permissions"), "{lines:?}");
+
+        let (lines, (bypass, mode)) = open(Provider::Claude, false, crate::delegate::Access::Full, "full-session");
+        assert!(bypass);
+        assert_eq!(mode, None);
+        assert!(lines.iter().any(|arg| arg == "--dangerously-skip-permissions"), "{lines:?}");
+        assert!(!lines.iter().any(|arg| arg == "--permission-mode"), "{lines:?}");
+
+        let (lines, (bypass, mode)) = open(Provider::Claude, true, crate::delegate::Access::Auto, "auto-session");
+        assert!(!bypass, "an auto thread copied the parent's bypass");
+        assert_eq!(mode, None);
+        assert!(pair(&lines, "--resume", "auto-session"), "{lines:?}");
+        assert!(!lines.iter().any(|arg| arg == "--dangerously-skip-permissions"), "{lines:?}");
+        assert!(!lines.iter().any(|arg| arg == "--permission-mode"), "{lines:?}");
+
+        let (lines, (bypass, mode)) = open(Provider::Codex, true, crate::delegate::Access::ReadOnly, "codex-session");
+        assert!(!bypass, "a Codex thread copied the parent's bypass");
+        assert_eq!(mode, None);
+        assert!(pair(&lines, "resume", "codex-session"), "{lines:?}");
+        assert!(!lines.iter().any(|arg| arg == "--permission-mode" || arg == "--dangerously-bypass-approvals-and-sandbox"), "{lines:?}");
+        m.quit();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn delegate_calls_without_a_tab_or_task_are_refused() {
+        let m = machine();
+        let request = crate::delegate::parse_request(&json!({ "task": "look" })).unwrap();
+        for err in [
+            m.start_delegate(None, None, None, request).unwrap_err(),
+            m.task_status(None, None, "task-1").unwrap_err(),
+            m.task_cancel(Some(String::new()), Some(String::new()), "task-1", "stop").unwrap_err(),
+        ] {
+            assert!(err.contains("PINNED_TAB") && err.contains("PINNED_TASK"), "{err}");
+        }
+        assert!(m.capabilities(None, None, "").is_ok());
+    }
+
+    #[test]
+    fn capabilities_for_a_task_use_that_task_not_builtin_claude() {
+        use crate::delegate::{Access, Mode, NewTask, Parent};
+        let m = machine();
+        let task = m.delegates.begin(NewTask {
+            parent: Parent::Tab("tab-9".into()),
+            tool: None,
+            title: "Look".into(),
+            account: "codex".into(),
+            provider: Provider::Codex,
+            model: Some("gpt-5.4".into()),
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Full,
+            isolated: false,
+            caller_key: "tab:tab-9".into(),
+            client_request_id: None,
+            role: None,
+        });
+        let value: serde_json::Value = serde_json::from_str(&m.capabilities(None, Some(&task.id), "").unwrap()).unwrap();
+        assert_eq!(value["inheritedProviderInstanceId"], "codex");
+        assert_eq!(value["inheritedModel"], "gpt-5.4");
+        assert_eq!(value["runtimeMode"], "full-access");
+        let missing: serde_json::Value = serde_json::from_str(&m.capabilities(None, None, "").unwrap()).unwrap();
+        assert_eq!(missing["inheritedProviderInstanceId"], "claude");
+        assert_eq!(missing["runtimeMode"], "auto");
+    }
+
+    #[cfg(unix)]
+    fn finish_task(m: &Machine, parent: crate::delegate::Parent, title: &str) -> String {
+        use crate::delegate::{ChildEvent, Mode, NewTask};
+        let task = m.delegates.begin(NewTask {
+            parent,
+            tool: None,
+            title: title.into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: Some("composer-2.5".into()),
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: "tab:notice".into(),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.apply(&task.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        task.id
+    }
+
+    #[cfg(unix)]
+    fn pty_file(name: &str) -> (Arc<Machine>, String, PathBuf) {
+        let file = std::env::temp_dir().join(format!("pinned-{name}-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let m = machine();
+        let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        (m, tab, file)
+    }
+
+    #[cfg(unix)]
+    fn read_pty(file: &Path) -> String {
+        String::from_utf8_lossy(&std::fs::read(file).unwrap_or_default()).into_owned()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn typed_text_holds_a_notice_across_done_until_backspaces_clear_it() {
+        let (m, tab, file) = pty_file("notice-typed");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.write_input(&tab, b"xyz").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Ping");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let early = read_pty(&file);
+        assert!(early.contains("xyz"), "the pty did not receive the keystrokes: {early:?}");
+        assert!(!early.contains("[pinned]"), "the notice was typed over a draft: {early:?}");
+        m.record_event(done_event(&tab));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "Done cleared a draft: {}", read_pty(&file));
+        m.write_input(&tab, b"\x7f\x7f\x7f").unwrap();
+        let needle = format!("[pinned] Delegated task {id} \"Ping\"");
+        wait_for("the notice after the draft is cleared", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_recalled_prompt_holds_the_notice_through_backspace_until_ctrl_u() {
+        let (m, tab, file) = pty_file("notice-recall");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.write_input(&tab, b"\x1b[A").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Recall");
+        m.write_input(&tab, b"\x7f").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed onto a recalled prompt: {}", read_pty(&file));
+        m.write_input(&tab, b"\x15").unwrap();
+        let needle = format!("[pinned] Delegated task {id} \"Recall\"");
+        wait_for("the notice after ctrl-u", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn two_deliverers_paste_a_notice_once() {
+        let (m, tab, file) = pty_file("notice-once");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Once");
+        let (left, right) = (m.clone(), m.clone());
+        let (tab_left, tab_right) = (tab.clone(), tab.clone());
+        std::thread::scope(|scope| {
+            scope.spawn(|| left.maybe_deliver(&tab_left));
+            scope.spawn(|| right.maybe_deliver(&tab_right));
+        });
+        let needle = format!("[pinned] Delegated task {id} \"Once\"");
+        wait_for("the one notice", || read_pty(&file).contains(&needle));
+        assert_eq!(read_pty(&file).matches(&needle).count(), 1, "the notice was pasted twice: {}", read_pty(&file));
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[cfg(unix)]
+    fn done_event(tab: &str) -> AgentEvent {
+        AgentEvent {
+            status: AgentStatus::Done,
+            cwd: None,
+            message: None,
+            tab: Some(tab.into()),
+            session: None,
+            title: None,
+            resume_at: None,
+            prompt: None,
+            snapshot: None,
+            permission_mode: None,
+        }
+    }
+
+    #[test]
+    fn escape_sequences_are_not_a_draft_and_enter_submits() {
+        let mut draft = Draft::default();
+        for keys in [&b"\x1b[I"[..], b"\x1b[O", b"\x1b", b"\x1b[C", b"\x1b[D", b"\x1b[?1;2c", b"\x1b[1;1R", b"\x1b]11;rgb:0/0/0\x07"] {
+            assert!(!note_draft(&mut draft, keys), "{keys:?}");
+            assert!(draft.empty(), "{keys:?} is not text");
+        }
+        for keys in [b"\x1b[A".as_slice(), b"\x1b[B", b"\x1bOA", b"\x1bOB"] {
+            for clear in [b"\r".as_slice(), b"\x15", b"\x03"] {
+                draft = Draft::default();
+                assert!(!note_draft(&mut draft, keys), "{keys:?}");
+                assert!(!note_draft(&mut draft, b"\x7f\x7f\x7f"));
+                assert!(!draft.empty(), "backspace after {keys:?} edits the recalled prompt, which is still in the line");
+                assert_eq!(note_draft(&mut draft, clear), clear == b"\r", "{clear:?} after {keys:?}");
+                assert!(draft.empty(), "{clear:?} clears the recalled prompt");
+            }
+        }
+        draft = Draft::default();
+        note_draft(&mut draft, "é".as_bytes());
+        assert_eq!(draft.chars, 1, "one character, however many bytes");
+        note_draft(&mut draft, b"\x7f");
+        assert_eq!(draft.chars, 0);
+        assert!(!note_draft(&mut draft, b"\x1b[200~line one\rline two\x1b[201~"), "a newline inside a paste is not Enter");
+        assert_eq!(draft.chars, 17);
+        note_draft(&mut draft, b"\x03");
+        assert_eq!(draft.chars, 0);
+        assert!(!note_draft(&mut draft, b"\x1b[200~ab\x1b[201~"));
+        assert_eq!(draft.chars, 2, "a bracketed paste counts the text inside it");
+        assert!(note_draft(&mut draft, b"\r"));
+        assert_eq!(draft.chars, 0);
+        assert!(!note_draft(&mut draft, b"\r"), "enter on an empty line is not a submit");
+        note_draft(&mut draft, b"ab");
+        assert!(!note_draft(&mut draft, b"\x08"));
+        assert_eq!(draft.chars, 1);
+        assert!(!note_draft(&mut draft, b"\x7f\x7f"));
+        assert_eq!(draft.chars, 0, "backspace stops at an empty line");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_codex_tab_gets_a_second_notice_only_after_the_done_that_follows_the_first() {
+        let (m, tab, file) = pty_file("notice-second");
+        m.tab(&tab, |t| {
+            t.account = Account::builtin(Provider::Codex);
+            t.status = Some(AgentStatus::Done);
+        })
+        .unwrap();
+        let first = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "First");
+        m.maybe_deliver(&tab);
+        let first_needle = format!("[pinned] Delegated task {first} \"First\"");
+        wait_for("the first notice", || read_pty(&file).contains(&first_needle));
+        let second = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Second");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mid = read_pty(&file);
+        assert!(!mid.contains("Second"), "a second notice was pasted before the first turn ended: {mid}");
+        m.record_event(done_event(&tab));
+        let second_needle = format!("[pinned] Delegated task {second} \"Second\"");
+        wait_for("the second notice after Done", || read_pty(&file).contains(&second_needle));
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_delivery_and_a_notice_do_not_share_an_idle_gap() {
+        let env = vec![("PINNED_ISSUE".into(), "abc".into())];
+        let file = std::env::temp_dir().join(format!("pinned-notice-deliver-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let m = machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env.clone(), false, None);
+        m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display())), pty::size(80, 24)).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        assert!(m.deliver(&env, "from slack"));
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "After");
+        m.maybe_deliver(&tab);
+        wait_for("the slack prompt", || read_pty(&file).contains("from slack"));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice shared the slack prompt's turn: {}", read_pty(&file));
+        m.record_event(done_event(&tab));
+        let needle = format!("[pinned] Delegated task {id} \"After\"");
+        wait_for("the notice after the delivery's Done", || read_pty(&file).contains(&needle));
+
+        let file_b = std::env::temp_dir().join(format!("pinned-notice-deliver-b-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file_b);
+        let tab_b = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env.clone(), false, None);
+        m.spawn(&tab_b, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file_b.display())), pty::size(80, 24)).unwrap();
+        let (seen_b, sink_b) = viewer();
+        m.attach(&tab_b, "test-b".into(), sink_b).unwrap();
+        wait_for("stty b", || text(&seen_b).contains("ready"));
+        m.tab(&tab_b, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        let id_b = finish_task(&m, crate::delegate::Parent::Tab(tab_b.clone()), "Before");
+        m.maybe_deliver(&tab_b);
+        let needle_b = format!("[pinned] Delegated task {id_b} \"Before\"");
+        wait_for("the notice first", || read_pty(&file_b).contains(&needle_b));
+        assert!(m.deliver(&env, "from linear"));
+        wait_for("a delivery types at once", || read_pty(&file_b).contains("from linear"));
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_file(&file_b);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_users_own_prompt_goes_in_mid_turn_and_after_an_interrupt() {
+        let (m, tab, file) = pty_file("prompt-mid-turn");
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "steer this".into() }), Ok(json!(null)));
+        wait_for("the prompt typed mid-turn", || read_pty(&file).contains("steer this"));
+        m.write_input(&tab, b"\x1b").unwrap();
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "after esc".into() }), Ok(json!(null)));
+        wait_for("the prompt after an interrupt with no Done", || read_pty(&file).contains("after esc"));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_slash_command_holds_its_notice_until_done() {
+        for (name, account) in [("slash-claude", Account::builtin(Provider::Claude)), ("slash-codex", Account::builtin(Provider::Codex))] {
+            let (m, tab, file) = pty_file(name);
+            m.tab(&tab, |t| {
+                t.account = account;
+                t.status = Some(AgentStatus::Done);
+            })
+            .unwrap();
+            m.write_input(&tab, b"/model\r").unwrap();
+            let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Slash");
+            m.maybe_deliver(&tab);
+            m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - Duration::from_secs(5))).unwrap();
+            m.maybe_deliver(&tab);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!read_pty(&file).contains("[pinned]"), "{name} typed the notice before Done: {}", read_pty(&file));
+            m.record_event(done_event(&tab));
+            let needle = format!("[pinned] Delegated task {id} \"Slash\"");
+            wait_for("the notice after Done", || read_pty(&file).contains(&needle));
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn focus_reports_do_not_hold_a_notice() {
+        let (m, tab, file) = pty_file("notice-focus");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        for bytes in [b"\x1b[I".as_slice(), b"\x1b[O".as_slice(), b"\x1b".as_slice(), b"\x1b[Z".as_slice(), b"\x1b[C".as_slice(), b"\x1b[D".as_slice(), b"\r".as_slice()] {
+            m.write_input(&tab, bytes).unwrap();
+        }
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Focus");
+        m.maybe_deliver(&tab);
+        let needle = format!("[pinned] Delegated task {id} \"Focus\"");
+        wait_for("the notice after focus reports", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn deliver_task_types_a_held_notice_and_another_tab_cannot() {
+        let (m, tab, file) = pty_file("deliver-task");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.write_input(&tab, b"xyz").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Held");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed over a draft: {}", read_pty(&file));
+        let other = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let refused = m.call(Call::DeliverTask { tab: other, task: id.clone() });
+        assert_eq!(refused, Err(format!("task {id} belongs to another session")));
+        assert!(!read_pty(&file).contains("[pinned]"), "another tab typed the notice: {}", read_pty(&file));
+        let blocked = m.call(Call::DeliverTask { tab: tab.clone(), task: id.clone() });
+        assert_eq!(blocked, Err("The prompt has unsent text. Send or clear it (Ctrl-U), then try again.".into()));
+        assert!(!read_pty(&file).contains("[pinned]"), "Send to session submitted the draft: {}", read_pty(&file));
+        m.write_input(&tab, b"\x15").unwrap();
+        let needle = format!("[pinned] Delegated task {id} \"Held\"");
+        wait_for("the notice after the draft is cleared", || read_pty(&file).contains(&needle));
+        let second = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Clear");
+        assert_eq!(m.call(Call::DeliverTask { tab: tab.clone(), task: second.clone() }), Ok(json!(null)));
+        let second_needle = format!("[pinned] Delegated task {second} \"Clear\"");
+        wait_for("Send to session typed the notice", || read_pty(&file).contains(&second_needle));
+        let again = m.call(Call::DeliverTask { tab, task: id });
+        assert!(again.is_err(), "a second send typed it again: {again:?}");
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_grandchild_is_not_typed_into_the_root_tab() {
+        let (m, tab, file) = pty_file("notice-grand");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        let parent = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(tab.clone()),
+            tool: None,
+            title: "Parent".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{tab}"),
+            client_request_id: None,
+            role: None,
+        });
+        let child = finish_task(&m, crate::delegate::Parent::Task(parent.id.clone()), "Grandchild");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("Grandchild"), "a grandchild notice was typed: {}", read_pty(&file));
+        assert!(!read_pty(&file).contains(&child), "a grandchild id was typed: {}", read_pty(&file));
+        m.delegates.apply(&parent.id, crate::delegate::ChildEvent::Line(json!({"type":"result","result":"PARENT"}).to_string()), None);
+        m.maybe_deliver(&tab);
+        let needle = format!("[pinned] Delegated task {} \"Parent\"", parent.id);
+        wait_for("the parent notice", || read_pty(&file).contains(&needle));
+        assert!(!read_pty(&file).contains("Grandchild"), "the parent notice included the grandchild: {}", read_pty(&file));
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_cursor_tab_with_no_turn_hook_never_receives_a_notice() {
+        let file = std::env::temp_dir().join(format!("pinned-notice-cursor-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let m = machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Cursor), vec![], vec![], false, None);
+        m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display())), pty::size(80, 24)).unwrap();
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Cursor");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        m.maybe_deliver(&tab);
+        let got = read_pty(&file);
+        assert!(!got.contains(&id), "a Cursor tab with no turn end was typed into: {got}");
+        assert!(!got.contains("[pinned]"), "a Cursor tab received a notice: {got}");
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_codex_notify_marks_the_tab_done_and_the_notice_is_typed() {
+        let root = temp("codex-notify");
+        let sock = std::env::temp_dir().join(format!("pinned-codex-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let file = root.join("notice.bin");
+        let exe = root.join("pinned-hook");
+        let codex = root.join("codex");
+        std::fs::write(&exe, r#"#!/usr/bin/env python3
+import json, os, socket, sys
+payload = json.loads(sys.argv[-1])
+if payload.get("type") != "agent-turn-complete":
+    sys.exit(0)
+msg = {"kind":"agent","status":"done","cwd":payload.get("cwd"),"message":None,"tab":os.environ.get("PINNED_TAB"),"session":payload.get("thread-id"),"title":None,"resume_at":None,"prompt":None,"snapshot":None}
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(os.environ["PINNED_SOCK"])
+s.sendall((json.dumps(msg) + "\n").encode())
+"#).unwrap();
+        std::fs::write(&codex, r#"#!/usr/bin/env python3
+import json, os, subprocess, sys
+payload = {"type":"agent-turn-complete","thread-id":"thr-9","turn-id":"turn-9","cwd":"/repo","input-messages":["ping"],"last-assistant-message":"ok"}
+for arg in sys.argv[1:]:
+    if arg.startswith("notify="):
+        subprocess.run(json.loads(arg[len("notify="):]) + [json.dumps(payload)], check=False)
+        break
+os.system("stty raw -echo")
+print("ready", flush=True)
+out = open(os.environ["NOTICE_FILE"], "wb")
+while True:
+    data = sys.stdin.buffer.read(1)
+    if not data:
+        break
+    out.write(data)
+    out.flush()
+"#).unwrap();
+        for path in [&exe, &codex] {
+            std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        let m = Machine::new(
+            Launch { exe, bins: BTreeMap::from([(Provider::Codex, codex)]), sock: sock.clone(), ..launch() },
+            None,
+            Some(root.clone()),
+            |_| {},
+        );
+        m.listen(|_| Err("not a connector".into())).unwrap();
+        let tab = m.add_tab(
+            root.clone(),
+            Account::builtin(Provider::Codex),
+            vec![],
+            vec![("NOTICE_FILE".into(), file.display().to_string()), ("CODEX_HOME".into(), root.display().to_string())],
+            false,
+            None,
+        );
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        m.start_claude(&tab, 80, 24).unwrap();
+        wait_for("codex ready", || text(&seen).contains("ready"));
+        wait_for("codex done", || m.view(&tab).unwrap().status == Some(AgentStatus::Done));
+        assert_eq!(m.view(&tab).unwrap().session.as_deref(), Some("thr-9"));
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "From Codex");
+        m.maybe_deliver(&tab);
+        let needle = format!("[pinned] Delegated task {id} \"From Codex\"");
+        wait_for("the codex notice", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A fake `claude` that records, for each start, its folder, role, project and arguments in
     /// `<claude>.<tab>`, NUL-separated since a prompt holds newlines.
     #[cfg(unix)]
@@ -3041,7 +4605,7 @@ mod tests {
         assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
-        m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None });
+        m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None });
         assert_eq!(m.view(&tab).unwrap().cwd, path, "reviewing a worker's worktree moved the orchestrator into it");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -3199,7 +4763,7 @@ mod tests {
             m.call(Call::MemorySave { path: path.clone(), title: title.into(), text: text.into(), kind: None, id: None }).unwrap();
         }
         let prompt = |tab: &str, status, prompt: &str| {
-            let event = AgentEvent { status, cwd: None, message: None, tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: Some(prompt.into()), snapshot: None };
+            let event = AgentEvent { status, cwd: None, message: None, tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: Some(prompt.into()), snapshot: None, permission_mode: None };
             ask(&sock, &serde_json::to_string(&Message::Agent(event)).unwrap())
         };
         assert_eq!(
@@ -3237,7 +4801,7 @@ mod tests {
         let worker = m.add_tab("/work/app/.claude/worktrees/pinned-1".into(), work.clone(), vec![], role_env(Role::Worker, app), false, Some("s1".into()));
         let elsewhere = m.add_tab("/work/api".into(), work, vec![], role_env(Role::Worker, Path::new("/work/api")), false, Some("s1".into()));
         m.tab(&worker, |t| t.title = Some("JSON output".into())).unwrap();
-        let event = |tab: &str, status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: None, snapshot: None };
+        let event = |tab: &str, status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None };
 
         m.record_event(event(&worker, AgentStatus::Working, None));
         m.record_event(event(&worker, AgentStatus::NeedsInput, Some("Claude needs your permission to use Bash")));

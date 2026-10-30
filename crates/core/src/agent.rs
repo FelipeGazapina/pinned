@@ -4,12 +4,15 @@ use std::path::{Path, PathBuf};
 
 pub const SOCK_ENV: &str = "PINNED_SOCK";
 pub const TAB_ENV: &str = "PINNED_TAB";
+/// Set on a delegated child, so its own `pinned mcp` can delegate further and name its parent task.
+pub const TASK_ENV: &str = "PINNED_TASK";
+
 /// Set on a project's orchestrator and its workers, with the project in `PROJECT_ENV`, since a
 /// worker runs in a worktree whose folder is not the project's.
 pub const ROLE_ENV: &str = "PINNED_ROLE";
 pub const PROJECT_ENV: &str = "PINNED_PROJECT";
 
-const ORCHESTRATOR_PROMPT: &str = "You are this project's orchestrator in pinned. You cannot edit files. Hand every piece of work to a worker with the delegate tool, and write each brief so it stands alone: the goal, the files involved, the constraints, and how to verify the result. Workers are threads the user can open and steer; agents lists them. You get a message when a worker finishes or needs input: review what it reports, and tell the user what was done. Keep the project's memory: save durable facts with memory_save (the user's preferences, decisions, conventions, architecture facts), look them up with memory_search, and remove wrong ones with memory_forget.";
+const ORCHESTRATOR_PROMPT: &str = "You are this project's orchestrator in pinned. You cannot edit files. Hand every piece of work to a worker with the delegate tool, and write each brief so it stands alone: the goal, the files involved, the constraints, and how to verify the result. Workers are threads the user can open and steer; agents lists them. To run a task on another provider or model, such as Cursor or Codex, call orchestrator_capabilities and then delegate_task. You get a message when a worker finishes or needs input: review what it reports, and tell the user what was done. Keep the project's memory: save durable facts with memory_save (the user's preferences, decisions, conventions, architecture facts), look them up with memory_search, and remove wrong ones with memory_forget.";
 const WORKER_PROMPT: &str = "You are a worker of this project's orchestrator in pinned. Do the task you were given fully and verify it. End with a concise report of what changed and how you verified it, which the orchestrator reads. Save durable facts about the project you learn with memory_save.";
 
 /// The part a session plays in its project's orchestration.
@@ -129,6 +132,9 @@ pub struct AgentEvent {
     pub prompt: Option<String>,
     /// Git tree of the working tree, on the events that start and end a turn.
     pub snapshot: Option<String>,
+    /// Claude Code's permission mode, such as `plan` or `default`. Absent when the hook does not report one.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 /// Where a connector's session is in its work on an issue. Each stage maps to a Linear column.
@@ -160,7 +166,10 @@ impl Subject {
         match self {
             Subject::LinearIssue { issue } => vec![(ISSUE_ENV.to_owned(), issue.clone())],
             Subject::SlackThread { channel, thread } => {
-                vec![(SLACK_CHANNEL_ENV.to_owned(), channel.clone()), (SLACK_THREAD_ENV.to_owned(), thread.clone())]
+                vec![
+                    (SLACK_CHANNEL_ENV.to_owned(), channel.clone()),
+                    (SLACK_THREAD_ENV.to_owned(), thread.clone()),
+                ]
             }
         }
     }
@@ -169,7 +178,11 @@ impl Subject {
 /// The connector and subject a session's environment names, for a connector's session.
 pub fn session_of(env: &[(String, String)]) -> Option<(String, Subject)> {
     let var = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
-    let subject = match (var(ISSUE_ENV), var(SLACK_CHANNEL_ENV), var(SLACK_THREAD_ENV)) {
+    let subject = match (
+        var(ISSUE_ENV),
+        var(SLACK_CHANNEL_ENV),
+        var(SLACK_THREAD_ENV),
+    ) {
         (_, Some(channel), Some(thread)) => Subject::SlackThread { channel, thread },
         (Some(issue), _, _) => Subject::LinearIssue { issue },
         _ => return None,
@@ -214,7 +227,10 @@ impl Usage {
     /// until that window resets.
     pub fn over(self, known: Usage, now: u64) -> Usage {
         let live = |w: Option<LimitWindow>| w.filter(|w| w.resets_at > now);
-        Usage { five_hour: self.five_hour.or(live(known.five_hour)), seven_day: self.seven_day.or(live(known.seven_day)) }
+        Usage {
+            five_hour: self.five_hour.or(live(known.five_hour)),
+            seven_day: self.seven_day.or(live(known.seven_day)),
+        }
     }
 }
 
@@ -229,7 +245,12 @@ pub enum Message {
         subject: Subject,
         stage: Stage,
     },
-    SlackReply { connector: String, channel: String, thread: String, text: String },
+    SlackReply {
+        connector: String,
+        channel: String,
+        thread: String,
+        text: String,
+    },
     LinearCreate {
         connector: String,
         channel: String,
@@ -240,8 +261,16 @@ pub enum Message {
         #[serde(default)]
         assignee: String,
     },
-    LinearTake { connector: String, channel: String, thread: String, issue: String },
-    Remind { message: String, when: When },
+    LinearTake {
+        connector: String,
+        channel: String,
+        thread: String,
+        issue: String,
+    },
+    Remind {
+        message: String,
+        when: When,
+    },
     ListReminders,
     CancelReminder { id: u64 },
     /// Not flattened, since a tool's own `kind` argument would collide with the message's tag.
@@ -253,24 +282,86 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account: Option<AccountId>,
     },
+    /// Starts a child agent. `tab` is the session that asked, when it has one. `task` is the
+    /// parent task when the asker is itself a child (`PINNED_TASK`).
+    Delegate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
+        request: Box<crate::delegate::Request>,
+    },
+    TaskStatus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        id: String,
+    },
+    TaskCancel {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        id: String,
+        #[serde(default)]
+        reason: String,
+    },
+    Capabilities {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default)]
+        search: String,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const WINDOW: LimitWindow = LimitWindow { used_percentage: 23.5, resets_at: 1792400000 };
+    const WINDOW: LimitWindow = LimitWindow {
+        used_percentage: 23.5,
+        resets_at: 1792400000,
+    };
 
     #[test]
     fn a_window_left_out_keeps_its_figure_only_until_it_resets() {
-        let known = Usage { five_hour: Some(WINDOW), seven_day: Some(LimitWindow { used_percentage: 41.2, resets_at: 1792900000 }) };
-        let report = Usage { five_hour: None, seven_day: Some(LimitWindow { used_percentage: 42.0, resets_at: 1792900000 }) };
+        let known = Usage {
+            five_hour: Some(WINDOW),
+            seven_day: Some(LimitWindow {
+                used_percentage: 41.2,
+                resets_at: 1792900000,
+            }),
+        };
+        let report = Usage {
+            five_hour: None,
+            seven_day: Some(LimitWindow {
+                used_percentage: 42.0,
+                resets_at: 1792900000,
+            }),
+        };
         assert_eq!(
             report.over(known, 1792399999),
-            Usage { five_hour: Some(WINDOW), seven_day: Some(LimitWindow { used_percentage: 42.0, resets_at: 1792900000 }) },
+            Usage {
+                five_hour: Some(WINDOW),
+                seven_day: Some(LimitWindow {
+                    used_percentage: 42.0,
+                    resets_at: 1792900000
+                })
+            },
         );
         assert_eq!(report.over(known, 1792400000).five_hour, None);
-        assert_eq!(Usage::default().over(known, 1792400000), Usage { five_hour: None, seven_day: known.seven_day });
+        assert_eq!(
+            Usage::default().over(known, 1792400000),
+            Usage {
+                five_hour: None,
+                seven_day: known.seven_day
+            }
+        );
     }
 
     #[test]
@@ -296,9 +387,12 @@ mod tests {
 
     #[test]
     fn a_usage_message_keeps_its_wire_shape() {
-        let line = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":1792400000}}"#;
+        let line =
+            r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":1792400000}}"#;
         let message: Message = serde_json::from_str(line).unwrap();
-        assert!(matches!(&message, Message::Usage { usage, account: None } if *usage == Usage { five_hour: Some(WINDOW), seven_day: None }));
+        assert!(
+            matches!(&message, Message::Usage { usage, account: None } if *usage == Usage { five_hour: Some(WINDOW), seven_day: None })
+        );
         assert_eq!(serde_json::to_string(&message).unwrap(), line);
         let line = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":1792400000},"account":"work"}"#;
         let message: Message = serde_json::from_str(line).unwrap();
