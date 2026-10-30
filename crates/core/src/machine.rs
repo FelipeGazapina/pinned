@@ -489,6 +489,11 @@ impl Machine {
                 }
                 json(self.accounts.remove(&account)?)
             }
+            Call::ShareLogin { account, token } => {
+                self.keep_token(&account, &token)?;
+                let account = self.accounts.get(&account).ok_or_else(|| format!("no account {account} on this machine"))?;
+                json(self.view_account(account))
+            }
             Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
             Call::OpenOrchestrator { path } => json(self.open_orchestrator(&path)?),
             Call::MemorySearch { path, query, limit } => json(self.memories.search(&self.known_project(&path)?, &query, limit.unwrap_or(SEARCH_LIMIT))?),
@@ -764,6 +769,10 @@ impl Machine {
             return self.accounts.get(id).ok_or_else(|| format!("no account {id} on this machine"));
         }
         let project = history::project_of(cwd);
+        let shared = git_remote(&project).and_then(|url| repo_key(&url)).and_then(|repo| self.accounts.shared_account(&repo));
+        if let Some(chosen) = shared {
+            return Ok(chosen.and_then(|id| self.accounts.get(&id)).unwrap_or_else(|| Account::builtin(Provider::Claude)));
+        }
         let chosen = self.projects.lock().unwrap().iter().find(|p| p.path == project).and_then(|p| p.account.clone());
         Ok(chosen.and_then(|id| self.accounts.get(&id)).unwrap_or_else(|| Account::builtin(Provider::Claude)))
     }
@@ -789,7 +798,49 @@ impl Machine {
     }
 
     fn status(&self, account: &Account) -> accounts::Status {
-        self.accounts.status(account, &self.launch.bin(account.provider), self.launch.path_env.as_deref())
+        let mut status = self.accounts.status(account, &self.launch.bin(account.provider), self.launch.path_env.as_deref());
+        if self.accounts.shared_token(&account.id).is_some() {
+            status.signed_in = true;
+        }
+        status
+    }
+
+    /// Stores the provider's shareable login for an account this machine already has.
+    pub fn keep_token(&self, id: &str, token: &str) -> Result<(), String> {
+        let account = self.accounts.get(id).ok_or_else(|| format!("no account {id} on this machine"))?;
+        self.accounts.keep_token(&account, token)
+    }
+
+    pub fn share_body(&self) -> Option<crate::share::ShareBody> {
+        self.accounts.share_body()
+    }
+
+    pub fn apply_share(&self, body: crate::share::ShareBody) -> Result<(), String> {
+        self.accounts.apply_share(&body)?;
+        self.bind_shared_projects();
+        Ok(())
+    }
+
+    fn bind_shared_projects(&self) {
+        let choices = self.accounts.project_choices();
+        if choices.is_empty() {
+            return;
+        }
+        let mut projects = self.projects.lock().unwrap();
+        let mut changed = false;
+        for project in projects.iter_mut() {
+            let Some(repo) = git_remote(&project.path).and_then(|url| repo_key(&url)) else { continue };
+            let Some(choice) = choices.iter().find(|choice| choice.repo == repo) else { continue };
+            if project.account != choice.account {
+                project.account = choice.account.clone();
+                changed = true;
+            }
+        }
+        if changed {
+            if let Some(file) = &self.projects_file {
+                projects::save(file, &projects);
+            }
+        }
     }
 
     /// Adds a tab in the folder kept for threads without a project, which no project lists, and
@@ -1335,12 +1386,18 @@ impl Machine {
             return Err(format!("no account {id} on this machine"));
         }
         let path = canonical(path);
+        let chosen = account.clone();
         {
             let mut projects = self.projects.lock().unwrap();
             let project = projects.iter_mut().find(|p| p.path == path).ok_or_else(|| format!("{} is not a project on this machine", path.display()))?;
             project.account = account;
             if let Some(file) = &self.projects_file {
                 projects::save(file, &projects);
+            }
+        }
+        if let Some(repo) = git_remote(&path).and_then(|url| repo_key(&url)) {
+            if let Err(e) = self.accounts.note_project(&repo, chosen) {
+                eprintln!("pinned: could not record a shared project account: {e}");
             }
         }
         Ok(self.project_view(&path))
@@ -5014,5 +5071,103 @@ while True:
         assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
         assert_eq!(truncate("añb", 2), "añ\n[cut short: the whole message is in the worker's thread]");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_login_shared_from_one_machine_runs_on_another_until_it_is_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let token = "sk-ant-oat01-TESTTOKEN";
+        let cursor_key = "crsr_test_key";
+        let codex_key = "sk-codex-test";
+        let root = temp("share-login");
+        let main = share_machine(&root.join("main"), true);
+        let remote = share_machine(&root.join("remote"), true);
+        let bare = share_machine(&root.join("bare"), false);
+        main.call(Call::AddAccount { provider: Provider::Claude, name: "Bloom".into() }).unwrap();
+        main.keep_token("bloom", token).unwrap();
+        main.keep_token("cursor", cursor_key).unwrap();
+        main.keep_token("codex", codex_key).unwrap();
+        let (main_repo, remote_repo) = (root.join("main-repo"), root.join("remote-repo"));
+        git_origin(&main_repo);
+        git_origin(&remote_repo);
+        let main_path = main.open_project(main_repo).display().to_string();
+        main.set_project_account(&main_path, Some("bloom".into())).unwrap();
+        let first = main.share_body().unwrap();
+        remote.apply_share(first.clone()).unwrap();
+        bare.apply_share(first.clone()).unwrap();
+
+        let caps = |m: &Machine| serde_json::from_str::<Value>(&m.capabilities(None, None, "").unwrap()).unwrap();
+        let row = |caps: &Value, id: &str| caps["providers"].as_array().unwrap().iter().find(|row| row["providerInstanceId"] == id).cloned();
+        let bloom = |caps: &Value| row(caps, "bloom");
+        let ready = bloom(&caps(&remote)).expect("the shared account is listed");
+        assert_eq!(ready["canRunChildTask"], json!(true));
+        assert!(ready["constraints"].as_array().unwrap().iter().all(|line| !line.as_str().unwrap_or("").contains("not signed in")));
+        for id in ["cursor", "codex"] {
+            let shared = row(&caps(&remote), id).expect(id);
+            assert_eq!(shared["canRunChildTask"], json!(true), "{id}");
+            assert!(shared["constraints"].as_array().unwrap().iter().all(|line| !line.as_str().unwrap_or("").contains("not signed in")));
+        }
+        let held = bloom(&caps(&bare)).expect("the shared account is listed where the cli is missing");
+        assert_eq!(held["canRunChildTask"], json!(false));
+        assert!(held["constraints"].as_array().unwrap().iter().any(|line| line.as_str().unwrap_or("").contains("not installed")));
+        let cursor_held = row(&caps(&bare), "cursor").expect("cursor");
+        assert_eq!(cursor_held["canRunChildTask"], json!(false));
+        assert!(cursor_held["constraints"].as_array().unwrap().iter().any(|line| line.as_str().unwrap_or("").contains("not installed")));
+        assert_eq!(remote.account_for(None, &remote_repo).unwrap().id, "bloom");
+
+        let tab = remote.open_tab(Some(remote.open_project(remote_repo).display().to_string()), false).unwrap();
+        assert_eq!(first_line(&remote, &tab), format!("{token}\r\n"));
+        let catalog = std::fs::read_to_string(root.join("remote/config/share.json")).unwrap();
+        assert!(!catalog.contains(token) && !catalog.contains(cursor_key) && !catalog.contains(codex_key), "{catalog}");
+        let cursor_env = remote.accounts.env(&remote.accounts.get("cursor").unwrap());
+        assert!(cursor_env.iter().any(|(key, value)| key == "CURSOR_API_KEY" && value == cursor_key));
+        let codex_env = remote.accounts.env(&remote.accounts.get("codex").unwrap());
+        assert!(codex_env.iter().any(|(key, value)| key == "CODEX_API_KEY" && value == codex_key));
+        let mode = std::fs::metadata(root.join("remote/config/share-tokens/bloom")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        main.call(Call::RemoveAccount { account: "bloom".into() }).unwrap();
+        remote.apply_share(main.share_body().unwrap()).unwrap();
+        assert!(bloom(&caps(&remote)).is_none());
+        assert!(remote.list_accounts().iter().all(|view| view.account.id != "bloom"));
+        assert!(!root.join("remote/config/share-tokens/bloom").exists());
+        remote.apply_share(first).unwrap();
+        assert!(bloom(&caps(&remote)).is_none());
+        assert_eq!(row(&caps(&remote), "cursor").unwrap()["canRunChildTask"], json!(true));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    fn share_machine(root: &Path, installed: bool) -> Arc<Machine> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(root).unwrap();
+        let write = |name: &str, body: &str| {
+            let path = root.join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, PermissionsExt::from_mode(0o755)).unwrap();
+            path
+        };
+        let bins = if installed {
+            BTreeMap::from([
+                (Provider::Claude, write("claude", "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then\n  printf '%s\\n' '{\"loggedIn\":false}'\n  exit 0\nfi\nprintf '%s\\n' \"$CLAUDE_CODE_OAUTH_TOKEN\"\nsleep 30\n")),
+                (Provider::Codex, write("codex", "#!/bin/sh\necho 'Not logged in'\nexit 1\n")),
+                (Provider::Cursor, write("cursor-agent", "#!/bin/sh\necho 'Not logged in'\nexit 1\n")),
+            ])
+        } else {
+            BTreeMap::from([(Provider::Claude, root.join("missing-claude")), (Provider::Codex, root.join("missing-codex")), (Provider::Cursor, root.join("missing-cursor"))])
+        };
+        Machine::new(Launch { bins, ..launch() }, Some(root.join("config")), None, |_| {})
+    }
+
+    #[cfg(unix)]
+    fn git_origin(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let run = |args: &[&str]| {
+            let status = process::command("git").args(args).current_dir(dir).status().unwrap();
+            assert!(status.success(), "{args:?}");
+        };
+        run(&["init"]);
+        run(&["remote", "add", "origin", "git@github.com:acme/shared-app.git"]);
     }
 }

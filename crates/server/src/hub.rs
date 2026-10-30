@@ -5,6 +5,7 @@ use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
 use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
 use pinned_core::upstash;
 use base64::Engine;
+use pinned_core::share;
 use pinned_core::{github, sync};
 use pinned_core::wire::{
     Call, HubCall, MachineEvent, MachineId, MachineView, PairCode, Reply, TabId, TabView, Target, ToClient, ToMachine, EXE_PLACEHOLDER,
@@ -19,6 +20,7 @@ use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
+const SHARE_WAIT: Duration = Duration::from_secs(20);
 /// A run may clone a large repository before its session starts.
 pub(crate) const RUN_WAIT: Duration = Duration::from_secs(30 * 60);
 
@@ -278,6 +280,21 @@ impl Hub {
         Err("no session answers that thread".into())
     }
 
+    /// Forwards a share to another machine of the account. Nothing from `body` is written down.
+    pub async fn relay(&self, account: &Account, from: &str, to: &str, body: share::ShareBody) -> Result<Value, String> {
+        if from == to {
+            return Err("a machine does not share with itself".into());
+        }
+        if account.is_dedicated(to) {
+            return Err("a box does not receive shared logins".into());
+        }
+        let size = serde_json::to_vec(&body).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
+        if size > share::RELAY_LIMIT {
+            return Err("a share is too large".into());
+        }
+        Ok(self.answer(account, to, account.send_share(to, body), SHARE_WAIT).await?)
+    }
+
     pub async fn call_machine(&self, account: &Account, machine: &str, call: Call, wait: Duration) -> Result<Value, Unanswered> {
         let sent = account.send_call(machine, call);
         self.answer(account, machine, sent, wait).await
@@ -307,6 +324,7 @@ impl Hub {
     pub async fn hub_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall) -> Result<Value, String> {
         let c = || self.connectors(account);
         let (answer, changed) = match call {
+            HubCall::Peers | HubCall::Relay { .. } => return Err("a share goes from one machine to another and is not kept".into()),
             HubCall::Machines => return json(self.machines(account).await?),
             HubCall::RenameMachine { id, name } => {
                 let name = name.trim();
@@ -535,6 +553,26 @@ impl Account {
         self.live.lock().unwrap().machines.contains_key(machine)
     }
 
+    fn is_dedicated(&self, machine: &str) -> bool {
+        self.live.lock().unwrap().machines.get(machine).is_some_and(|m| m.dedicated)
+    }
+
+    /// Online machines of this account, other than `except`, that are not boxes.
+    /// `generation` changes when that machine reconnects, so a sender repeats a share it already sent.
+    pub fn peers(&self, except: &str) -> Vec<Value> {
+        let mut peers: Vec<Value> = self
+            .live
+            .lock()
+            .unwrap()
+            .machines
+            .iter()
+            .filter(|(id, machine)| id.as_str() != except && !machine.dedicated)
+            .map(|(id, machine)| serde_json::json!({ "id": id, "generation": machine.socket }))
+            .collect();
+        peers.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+        peers
+    }
+
     /// What a box's machine shows of the session of `connector` on `subject`.
     pub fn seen(&self, machine: &str, connector: &str, subject: &Subject) -> Seen {
         let live = self.live.lock().unwrap();
@@ -549,6 +587,14 @@ impl Account {
     /// Sends the call at once, so calls reach the machine in the order they came, and answers
     /// the machine's name and where its answer arrives, or None while it is offline.
     pub fn send_call(&self, machine: &str, call: Call) -> Option<Sent> {
+        self.enqueue(machine, |id| ToMachine::Call { id, call })
+    }
+
+    pub fn send_share(&self, machine: &str, body: share::ShareBody) -> Option<Sent> {
+        self.enqueue(machine, |id| ToMachine::Share { id, body })
+    }
+
+    fn enqueue(&self, machine: &str, frame_of: impl FnOnce(u64) -> ToMachine) -> Option<Sent> {
         let mut live = self.live.lock().unwrap();
         let m = live.machines.get_mut(machine)?;
         let id = m.next_call;
@@ -557,7 +603,7 @@ impl Account {
         m.pending.retain(|_, waiting| !waiting.is_closed());
         let (answer, answered) = oneshot::channel();
         m.pending.insert(id, answer);
-        let _ = m.out.send(frame(&ToMachine::Call { id, call }));
+        let _ = m.out.send(frame(&frame_of(id)));
         Some((m.name.clone(), answered))
     }
 
