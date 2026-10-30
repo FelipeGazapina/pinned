@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Graph editor harness</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  body { margin: 0; background: var(--ground, #0f1115); min-height: 100vh; }
+  #settings-page { height: 100vh; display: flex; flex-direction: column; }
+  .editor { flex: 1; min-height: 0; }
+</style>
+</head>
+<body data-page="settings">
+<section id="settings-page"></section>
+<nav id="settings-nav" hidden><div class="links"></div></nav>
+<button id="settings-toggle" hidden></button>
+<button id="settings-back" hidden></button>
+<script>
+  const TAURI = false;
+  const LOCAL = "local";
+  const DEFAULT_ACCOUNT = "claude";
+  const machines = new Map([[LOCAL, { view: { online: true, upstash_box: false, cwd: "/tmp" }, accounts: [] }]]);
+  let account = null;
+  let hub = null;
+  let active = { machine: LOCAL, view: { cwd: "/tmp" } };
+  const invoke = async () => null;
+  const listen = () => {};
+  const save = () => {};
+  const load = () => null;
+  const callOn = async () => [];
+  const machineName = (id) => (id === LOCAL ? "This Mac" : id);
+  const onlineMachines = () => [LOCAL];
+  const accountOf = () => null;
+  const accountName = () => "";
+  const showGeneral = () => {};
+  const showProjectsPage = () => {};
+  const showAccount = () => {};
+  const showMachinesPage = () => {};
+  const showArchive = () => {};
+</script>
+<script src="icons.js"></script>
+<script type="module" src="graph-load.js"></script>
+<script defer src="settings.js"></script>
+<script type="module">
+  const COL = 230;
+  const ROW = 150;
+  const branchY = (i) => (i - 1.5) * ROW;
+  const fixture = {
+    id: "harness",
+    name: "Harness workflow",
+    enabled: true,
+    account: "",
+    trigger: { kind: "slack-mention", channel: "ops" },
+    folder: "/tmp/project",
+    machine: "",
+    repo: "",
+    model: "opus",
+    effort: "high",
+    permissionMode: "auto",
+    proof: false,
+    team: "",
+    label: "",
+    fix: "off",
+    worktree: false,
+    columns: { picked: "", coding: "", review: "" },
+    instructions: "Harness instructions",
+    graph: {
+      nodes: [
+        { id: "trigger-1", name: "Trigger", position: [0, 0], type: "trigger", watch: { kind: "slack-mention", channel: "ops" } },
+        {
+          id: "classify-1",
+          name: "Sort",
+          position: [COL, 0],
+          type: "classify",
+          model: "typesafe-ai/jev",
+          instructions: "Pick a branch",
+          branchOn: "kind",
+          questions: [
+            {
+              name: "kind",
+              ask: "Which branch?",
+              choices: [
+                { id: "a", label: "A", description: "" },
+                { id: "b", label: "B", description: "" },
+                { id: "c", label: "C", description: "" },
+                { id: "d", label: "D", description: "" },
+              ],
+            },
+          ],
+          gate: { kind: "direct" },
+          fallback: { kind: "none" },
+        },
+        { id: "talk-a", name: "A", position: [COL * 2, branchY(0)], type: "talk", prompt: "A" },
+        { id: "talk-b", name: "B", position: [COL * 2, branchY(1)], type: "talk", prompt: "B" },
+        { id: "talk-c", name: "C", position: [COL * 2, branchY(2)], type: "talk", prompt: "C" },
+        { id: "talk-d", name: "D", position: [COL * 2, branchY(3)], type: "talk", prompt: "D" },
+      ],
+      edges: [
+        { from: "trigger-1", port: "out", to: "classify-1" },
+        { from: "classify-1", port: "a", to: "talk-a" },
+        { from: "classify-1", port: "b", to: "talk-b" },
+        { from: "classify-1", port: "c", to: "talk-c" },
+        { from: "classify-1", port: "d", to: "talk-d" },
+      ],
+    },
+  };
+
+  await new Promise((resolve) => {
+    if (globalThis.PinnedGraph && globalThis.settings !== undefined) resolve();
+    else addEventListener("load", resolve);
+  });
+
+  settings = { linear: null, slack: true, vercel: { key_hint: "test" }, github: null, upstash: null, connectors: [], checked: null };
+  suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [], repos: [], models: [{ id: "typesafe-ai/jev", kind: "decision" }] };
+  page = "connectors";
+  edit(0, structuredClone(fixture));
+  view.open = null;
+  redraw();
+
+  globalThis.harnessGetGraph = () => structuredClone(view.draft.graph);
+  globalThis.harnessReady = true;
+</script>
+</body>
+</html>

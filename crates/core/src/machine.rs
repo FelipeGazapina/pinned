@@ -850,7 +850,106 @@ impl Machine {
             self.close_tab(&id);
             return Err(e);
         }
+        // `claude --resume` exits 1 and prints this when the conversation is gone. The hub then
+        // opens a new session seeded with the run's history. A live resume stays up, so the wait ends.
+        if run.args.windows(2).any(|w| w[0] == "--resume") {
+            if let Err(e) = self.resume_missing(&id) {
+                self.close_tab(&id);
+                return Err(e);
+            }
+        }
         Ok(id)
+    }
+
+    /// Reads the tab's screen until Claude has rejected the resume or kept a live one up.
+    /// The session exists as soon as the process is spawned, before it has written anything, so an
+    /// empty screen is not a live resume: a missing conversation exits with this line, and a busy
+    /// machine can take a while to schedule that process.
+    fn resume_missing(&self, id: &TabId) -> Result<(), String> {
+        let start = std::time::Instant::now();
+        let mut drew_at = None;
+        loop {
+            if Self::resume_refused(&self.screen_text(id)) {
+                return Err("No conversation found".into());
+            }
+            if !self.still_running(id) {
+                return self.refusal_after_exit(id);
+            }
+            let screen = self.screen_text(id);
+            if !screen.is_empty() {
+                let drew = drew_at.get_or_insert_with(std::time::Instant::now);
+                // The TUI paints, then a missing id exits. Claude Code 2.1 took about 1.3s to do
+                // that, so 400ms of paint is still the startup screen, not a live resume.
+                if drew.elapsed() >= std::time::Duration::from_secs(2) {
+                    return Ok(());
+                }
+            }
+            if start.elapsed() >= std::time::Duration::from_secs(15) {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// The last line can land after the exit is noticed. Read the screen again before
+    /// treating a dead process as a resume that worked.
+    fn refusal_after_exit(&self, id: &TabId) -> Result<(), String> {
+        for _ in 0..10 {
+            if Self::resume_refused(&self.screen_text(id)) {
+                return Err("No conversation found".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Ok(())
+    }
+
+    /// Claude's TUI places each word with a cursor command, so the refusal is not one contiguous
+    /// sentence in the pty bytes.
+    fn resume_refused(screen: &str) -> bool {
+        let mut flat = String::new();
+        let mut chars = screen.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                match chars.peek() {
+                    Some('[') => {
+                        chars.next();
+                        for next in chars.by_ref() {
+                            if next.is_ascii_alphabetic() {
+                                break;
+                            }
+                        }
+                    }
+                    Some(']') => {
+                        chars.next();
+                        for next in chars.by_ref() {
+                            if next == '\u{7}' || next == '\u{1b}' {
+                                break;
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        chars.next();
+                    }
+                    None => {}
+                }
+                continue;
+            }
+            if c.is_ascii_alphanumeric() {
+                flat.push(c.to_ascii_lowercase());
+            }
+        }
+        flat.contains("noconversationfound")
+    }
+
+    fn screen_text(&self, id: &str) -> String {
+        let screen = self.tabs.lock().unwrap().get(id).map(|tab| tab.screen.clone());
+        let Some(screen) = screen else { return String::new() };
+        let mut screen = screen.lock().unwrap();
+        String::from_utf8_lossy(screen.kept.make_contiguous()).into_owned()
+    }
+
+    fn still_running(&self, id: &str) -> bool {
+        self.tabs.lock().unwrap().get(id).is_some_and(|tab| tab.session.is_some())
     }
 
     /// Opens a tab running the CLI's login for the account, in the account's home, and returns its id.
@@ -3261,6 +3360,7 @@ mod tests {
         let m = machine();
         let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec!["--resume".into(), "s1".into()], env: vec![], token: None, account: None };
         let id = m.open_run(&run).unwrap();
+        assert_eq!(m.tab(&id, |t| t.launch.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone())).unwrap(), Some("s1".into()));
         assert_eq!(m.tab(&id, |t| t.claude_session.clone()).unwrap().as_deref(), Some("s1"));
         assert_eq!(m.thread(&id, 0).unwrap().session.as_deref(), Some("s1"));
         assert_eq!(m.view(&id).unwrap().session.as_deref(), Some("s1"), "the tab's view lacks the session clients key it by");
@@ -3268,6 +3368,103 @@ mod tests {
         assert_eq!(m.tab(&fresh, |t| t.claude_session.clone()).unwrap(), None);
         assert_eq!(m.view(&fresh).unwrap().session, None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_resume_that_finds_no_conversation_is_refused_and_a_live_one_stays() {
+        let dir = temp("resume-missing");
+        let missing = dir.join("missing");
+        std::fs::write(&missing, "#!/bin/sh\necho 'No conversation found with session ID' >&2\necho 'No conversation found with session ID'\nexit 1\n").unwrap();
+        let staying = dir.join("staying");
+        std::fs::write(&staying, "#!/bin/sh\necho started\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&missing, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&staying, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let run = RunSpec {
+            folder: dir.display().to_string(),
+            repo: None,
+            args: vec!["--resume".into(), "missing".into()],
+            env: vec![],
+            token: None,
+            account: None,
+        };
+        let refused = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, missing)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let err = refused.run(&run).unwrap_err();
+        assert!(err.contains("No conversation found"), "{err}");
+        assert!(refused.tabs().is_empty(), "the refused resume left a tab");
+        let staying_machine = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, staying)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let id = staying_machine.run(&run).unwrap();
+        assert!(staying_machine.view(&id).unwrap().running);
+        staying_machine.close_tab(&id);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_missing_resume_is_recognized_when_the_tui_places_each_word() {
+        let screen = "No\u{1b}[12Gconversation\u{1b}[25Gfound with session ID";
+        assert!(Machine::resume_refused(screen));
+        assert!(!Machine::resume_refused("Resumed the conversation and found the bug"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_resume_that_paints_then_exits_is_still_refused() {
+        let dir = temp("resume-late");
+        let missing = dir.join("missing");
+        std::fs::write(
+            &missing,
+            "#!/bin/sh\necho started\nsleep 0.6\nprintf 'No\\033[12Gconversation\\033[25Gfound with session ID\\n'\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&missing, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let run = RunSpec {
+            folder: dir.display().to_string(),
+            repo: None,
+            args: vec!["--resume".into(), "missing".into()],
+            env: vec![],
+            token: None,
+            account: None,
+        };
+        let refused = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, missing)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let err = refused.run(&run).unwrap_err();
+        assert!(err.contains("No conversation found"), "{err}");
+        assert!(refused.tabs().is_empty(), "the refused resume left a tab");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stop_hook_leaves_tab_done_with_claude_session_on_tabs_event() {
+        let env = vec![(CONNECTOR_ENV.to_owned(), "c1".into())];
+        let tabs_seen = Arc::new(Mutex::new(vec![]));
+        let seen = tabs_seen.clone();
+        let m = Machine::new(launch(), None, Some("/repo".into()), move |event| {
+            if let MachineEvent::Tabs { tabs } = event {
+                seen.lock().unwrap().extend(tabs);
+            }
+        });
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env, false, None);
+        let working = AgentEvent {
+            status: AgentStatus::Working,
+            cwd: Some("/repo".into()),
+            message: None,
+            tab: Some(tab.clone()),
+            session: Some("claude-s1".into()),
+            title: None,
+            resume_at: None,
+            prompt: Some("fix the bug".into()),
+            snapshot: None,
+            permission_mode: None,
+        };
+        m.record_event(working.clone());
+        m.record_event(AgentEvent { status: AgentStatus::Done, prompt: None, snapshot: None, ..working });
+        let view = m.view(&tab).unwrap();
+        assert_eq!(view.status, Some(AgentStatus::Done));
+        assert_eq!(view.session.as_deref(), Some("claude-s1"));
+        assert_eq!(view.connector.as_deref(), Some("c1"));
+        let last = tabs_seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(last.id, tab);
+        assert_eq!(last.status, Some(AgentStatus::Done));
+        assert_eq!(last.session.as_deref(), Some("claude-s1"));
     }
 
     #[test]

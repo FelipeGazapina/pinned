@@ -11,7 +11,7 @@ use pinned_core::agent::Subject;
 use pinned_core::account::{Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn};
 use pinned_core::link::UNAUTHORIZED;
 use pinned_core::sync;
-use pinned_core::wire::{AccountView, ClientFrame, HubCall, MachineFrame, MachineView, Reply, ToClient, ToMachine};
+use pinned_core::wire::{AccountView, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -479,7 +479,28 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
 fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: u64, text: &str) {
     match serde_json::from_str::<MachineFrame>(text) {
         Ok(MachineFrame::Reply(reply)) => account.answered(machine, socket, reply),
-        Ok(MachineFrame::Event { event }) => account.machine_event(machine, socket, event),
+        Ok(MachineFrame::Event { event }) => {
+            let after = match &event {
+                MachineEvent::Tabs { tabs } => Some(tabs.clone()),
+                _ => None,
+            };
+            account.machine_event(machine, socket, event);
+            if let Some(after) = after {
+                let observed = pinned_core::connectors::unix_millis();
+                let (hub, account, machine) = (hub.clone(), account.clone(), machine.to_owned());
+                tokio::spawn(async move {
+                    let Ok(connectors) = hub.connectors(&account).await else { return };
+                    let id = account.id;
+                    let open = move |work| {
+                        let hub = hub.clone();
+                        async move { hub.open_placed(id, work).await }
+                    };
+                    if let Err(e) = connectors.on_tabs(&machine, observed, &after, open).await {
+                        eprintln!("pinned-server: could not wake a workflow run: {e}");
+                    }
+                });
+            }
+        }
         Ok(MachineFrame::Output { viewer, tab, data }) => account.output(machine, &viewer, tab, data),
         Ok(MachineFrame::Call { id, call }) => {
             let (hub, account, machine) = (hub.clone(), account.clone(), machine.to_owned());

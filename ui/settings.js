@@ -925,130 +925,428 @@ const TILE = 84;
 const TEXT_W = 150;
 const TEXT_H = 56;
 const COL = 230;
-const ROW = 150;
 const PAD = 48;
 const STUB = 40;
 const END = 24;
 const MENU_W = 280;
 
-const offSteps = (c) => flowOf(c).map(([id]) => id).filter((id) => !shown(c, id));
+const graphApi = () => globalThis.PinnedGraph;
+const WATCH_STEP = {
+  "linear-label": "linear-trigger",
+  "slack-mention": "slack-trigger",
+  "slack-message": "message-trigger",
+  called: "called-trigger",
+};
 
-function layoutOf(c) {
-  const nodes = [];
-  const edges = [];
-  const ends = [];
-  const place = (node, col, row, h = node.ports > 2 ? Math.max(TILE, node.ports * 28 + 16) : TILE) => {
-    nodes.push({ ...node, cx: PAD + TEXT_W / 2 + col * COL, cy: row * ROW, h });
-    return nodes.at(-1);
-  };
-  let prev = null;
-  flowOf(c).forEach(([id, label], col) => {
-    const step = STEPS[id];
-    const branches = shown(c, id) ? step.branches?.(c) ?? [] : [];
-    const node = place({ step: id, ghost: !shown(c, id), ports: branches.length || 1 }, col, 0);
-    if (prev) edges.push({ from: prev, to: node, label, dashed: prev.ghost || node.ghost });
-    prev = node;
-    const middle = (branches.length - 1) / 2;
-    branches.forEach((branch, port) => {
-      let from = node;
-      branch.nodes.forEach((target, i) => {
-        const placed = place(target, col + 1 + i, port - middle);
-        edges.push(i ? { from, to: placed } : { from, to: placed, port, portLabel: branch.label });
-        from = placed;
-      });
-      if (branch.end !== undefined) ends.push({ from, category: branch.end });
-    });
-    if (branches.length && step.stub) place({ stub: step.stub }, col + 1, middle + 0.9, 32);
+const graphNodeKind = (node) => node.type ?? node.kind;
+
+function syncTriggerFromWatch(c, watch) {
+  if (!watch) return;
+  if (watch.kind === "linear-label") c.trigger = { kind: "linear-label", label: watch.label ?? "" };
+  else if (watch.kind === "slack-mention") c.trigger = { kind: "slack-mention", channel: watch.channel ?? "" };
+  else if (watch.kind === "slack-message") c.trigger = { kind: "slack-message", channel: watch.channel ?? "", decide: c.trigger?.decide ?? { model: "", instructions: "", categories: [], fallback: null } };
+  else if (watch.kind === "called") c.trigger = { kind: "called" };
+}
+
+function syncWatchFromTrigger(c) {
+  const node = c.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger");
+  if (!node || !c.trigger) return;
+  const t = c.trigger;
+  if (t.kind === "linear-label") node.watch = { kind: "linear-label", label: t.label ?? "" };
+  else if (t.kind === "slack-mention") node.watch = { kind: "slack-mention", channel: t.channel ?? "" };
+  else if (t.kind === "slack-message") node.watch = { kind: "slack-message", channel: t.channel ?? "" };
+  else node.watch = { kind: "called" };
+}
+
+const OLDER_HUB = "This workflow comes from an older hub; update the hub.";
+
+function graphNodeUi(node) {
+  const type = graphNodeKind(node);
+  if (type === "trigger") return STEPS[WATCH_STEP[node.watch?.kind ?? "called"]] ?? STEPS["called-trigger"];
+  if (type === "classify") return { tone: "vercel", icon: "▲", app: "Vercel AI Gateway", title: "Classify" };
+  if (type === "switch") return { tone: "switch", icon: "⇉", app: "Workflow", title: "Switch" };
+  if (type === "talk") return { tone: "claude", icon: "✳", app: "Claude Code", title: "Talk to the session" };
+  if (type === "page") return { tone: "slack", icon: "@", app: "Slack", title: "Page a group" };
+  if (type === "stage-picked") return { ...STEPS.picked, title: "Stage picked" };
+  if (type === "call") return { tone: "called", icon: "↳", app: "Workflow", title: "Call workflow" };
+  if (type === "stop") return { tone: "", icon: "■", app: "", title: "Stop" };
+  return { tone: "", icon: "?", app: "", title: node.name ?? "Node" };
+}
+
+function graphNodeSummary(node, c) {
+  const type = graphNodeKind(node);
+  if (type === "trigger") {
+    const step = WATCH_STEP[node.watch?.kind ?? "called"];
+    return STEPS[step]?.summary?.({ ...c, trigger: legacyTriggerFromWatch(node.watch) }) ?? node.name;
+  }
+  if (type === "classify") return node.model?.trim() || "Name a model";
+  if (type === "switch") {
+    const question = node.question?.trim();
+    const equals = (node.cases ?? []).map((item) => item.equals?.trim()).filter(Boolean);
+    if (!question) return "Pick a question";
+    if (!equals.length) return `${question} continues`;
+    return `${question} is ${equals.join(", ")}`;
+  }
+  if (type === "talk") return node.prompt?.trim() || "Session opens on the first talk";
+  if (type === "page") return node.group?.trim() ? `@${node.group.trim().replace(/^@/, "")}` : "Name a group";
+  if (type === "call") {
+    const target = settings.connectors.find((k) => k.id === node.workflow);
+    return target?.name ?? (node.workflow ? "Missing workflow" : "Pick a workflow");
+  }
+  if (type === "stop") return "Ends this branch";
+  return node.name ?? "";
+}
+
+function legacyTriggerFromWatch(watch) {
+  if (watch?.kind === "linear-label") return { kind: "linear-label", label: watch.label ?? "" };
+  if (watch?.kind === "slack-message") return { kind: "slack-message", channel: watch.channel ?? "", decide: { model: "", instructions: "", categories: [], fallback: null } };
+  if (watch?.kind === "slack-mention") return { kind: "slack-mention", channel: watch.channel ?? "" };
+  return { kind: "called" };
+}
+
+function graphNodeIssues(node, c) {
+  const type = graphNodeKind(node);
+  if (type === "trigger") return STEPS[WATCH_STEP[node.watch?.kind ?? "called"]]?.issues?.({ ...c, trigger: legacyTriggerFromWatch(node.watch) }) ?? [];
+  if (type === "classify") {
+    const pseudo = { ...c, ask: { model: node.model, instructions: node.instructions, questions: (node.questions ?? []).map((q) => ({ ...q, choices: (q.choices ?? []).map((ch) => ch.label ?? ch.id ?? ch) })) } };
+    return STEPS.ask.issues(pseudo);
+  }
+  if (type === "switch") {
+    const problem = graphApi()?.switchProblem(c.graph, node);
+    return problem ? [problem] : [];
+  }
+  if (type === "talk") return [];
+  if (type === "page") return [!node.group?.trim() && "Name the Slack user group to page."].filter(Boolean);
+  if (type === "call") {
+    const target = settings.connectors.find((k) => k.id === node.workflow);
+    return [!node.workflow && "Choose a workflow.", node.workflow && !target && "That workflow was deleted."].filter(Boolean);
+  }
+  return [];
+}
+
+function graphNodeIndex(id) {
+  return view.draft.graph.nodes.findIndex((n) => n.id === id);
+}
+
+function boundGraphNode(path) {
+  const match = /^graph\.nodes\.(\d+)\b/.exec(path);
+  if (!match) return null;
+  return view.draft.graph?.nodes?.[Number(match[1])] ?? null;
+}
+
+function keepSwitchQuestion(node) {
+  const target = view.draft.graph.nodes.find((n) => n.id === node.classify && graphNodeKind(n) === "classify");
+  const names = (target?.questions ?? []).map((q) => q.name).filter(Boolean);
+  if (!names.includes(node.question)) node.question = names[0] ?? "";
+}
+
+function retargetCasePort(node, index, button) {
+  const item = node.cases?.[index];
+  const api = graphApi();
+  if (!item || !api) return;
+  const wired = view.draft.graph.edges.some((e) => e.from === node.id && e.port === item.id);
+  if (!wired) {
+    item.id = api.nextCaseId(node.cases.filter((_, i) => i !== index), item.equals);
+    if (button) button.dataset.port = item.id;
+  }
+  if (button) button.textContent = `${item.equals.trim() || "This case"} ends here`;
+}
+
+function graphLayout(c) {
+  const api = graphApi();
+  const graph = c.graph;
+  if (!graph?.nodes?.length) return null;
+  const nodes = graph.nodes.map((node) => {
+    const portList = api ? api.ports(node) : [{ id: "out", label: "" }];
+    const portCount = portList.length || 1;
+    const h = api?.nodeHeight(node) ?? (portCount > 2 ? Math.max(TILE, portCount * 28 + 16) : TILE);
+    return { node, id: node.id, cx: TEXT_W / 2 + node.position[0], cy: node.position[1], h, ports: portCount, portList };
   });
-  if (offSteps(c).length) ends.push({ from: prev, menu: true });
   const top = Math.min(...nodes.map((n) => n.cy - n.h / 2));
+  const left = Math.min(...nodes.map((n) => n.cx - TEXT_W / 2));
+  const dx = PAD - left;
+  const dy = PAD - top;
+  for (const n of nodes) {
+    n.cx += dx;
+    n.cy += dy;
+  }
+  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
+  const edges = graph.edges
+    .map((e, index) => ({
+      ...e,
+      index,
+      from: byId[e.from],
+      to: byId[e.to],
+      portLabel: byId[e.from]?.portList?.find((p) => p.id === e.port)?.label,
+      selected: view.selectedEdge === index,
+    }))
+    .filter((e) => e.from && e.to);
+  const right = Math.max(...nodes.map((n) => n.cx + TEXT_W / 2));
   const bottom = Math.max(...nodes.map((n) => n.cy + n.h / 2 + TEXT_H));
-  for (const n of nodes) n.cy += PAD - top;
-  const right = Math.max(...nodes.map((n) => n.cx + TEXT_W / 2), ...ends.map((e) => e.from.cx + TILE / 2 + STUB + END));
-  return { nodes, edges, ends, width: right + PAD, height: bottom - top + 2 * PAD };
+  return { nodes, edges, width: right + PAD, height: bottom + PAD, graph };
+}
+
+function graphPickerHtml(c, anchor) {
+  if (!view.graphPick) return "";
+  const api = graphApi();
+  const types = api?.PICKER_TYPES ?? ["talk", "stop"];
+  const items = types
+    .map((type) => {
+      const ui = graphNodeUi({ type, watch: { kind: "called" } });
+      return `<button data-action="graph-pick-type" data-type="${type}">${iconHtml(ui)}<span>${esc(type)}</span></button>`;
+    })
+    .join("");
+  return `<div class="add-menu graph-picker" style="width:${MENU_W}px;left:${anchor.x}px;top:${anchor.y}px">${items}</div>`;
 }
 
 function flowHtml(c) {
-  const { nodes, edges, ends, width, height } = layoutOf(c);
-  return `<div class="flow" data-width="${width}" data-height="${height}" style="width:${width}px;height:${height}px">
-    ${nodes.map((n) => nodeHtml(c, n)).join("")}
-    <svg class="edges" width="${width}" height="${height}" aria-hidden="true">
+  const laid = graphLayout(c);
+  if (!laid) {
+    return `<div class="flow graph-flow" data-width="720" data-height="240" style="width:720px;height:240px">
+      <p class="hint" style="position:absolute;left:${PAD}px;top:${PAD}px;max-width:420px">${OLDER_HUB}</p>
+    </div>`;
+  }
+  const { nodes, edges, width, height, graph } = laid;
+  const api = graphApi();
+  const dangling = api
+    ? graph.nodes.flatMap((node) =>
+        api.ports(node).flatMap((port) => {
+          if (graph.edges.some((e) => e.from === node.id && e.port === port.id)) return [];
+          const box = nodes.find((n) => n.id === node.id);
+          const y = portY(box, port.id);
+          return [{ node, port: port.id, label: port.label, x: box.cx + TILE / 2 + STUB, y, laid: box }];
+        }),
+      )
+    : [];
+  const flowWidth = Math.max(width, ...dangling.map((d) => d.x + END), 0) + (dangling.length ? PAD : 0);
+  const picker = view.graphPick ? graphPickerHtml(c, view.graphPick) : "";
+  return `<div class="flow graph-flow" data-width="${flowWidth}" data-height="${height}" style="width:${flowWidth}px;height:${height}px">
+    ${nodes.map((n) => graphNodeHtml(c, n)).join("")}
+    <svg class="edges" width="${flowWidth}" height="${height}" aria-hidden="true">
       <defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow" d="M0 1 9 5 0 9z"/></marker></defs>
-      ${edges.map(edgeHtml).join("")}
-      ${ends.map(({ from }) => `<path d="M${from.cx + TILE / 2} ${from.cy}h${STUB}"/><circle cx="${from.cx + TILE / 2}" cy="${from.cy}" r="4.5"/>`).join("")}
+      ${edges.map((edge) => graphEdgeSvg(edge)).join("")}
+      ${dangling.map((d) => `<path d="M${d.laid.cx + TILE / 2} ${d.y}h${STUB}"/>`).join("")}
     </svg>
-    ${edges.map(edgeLabelHtml).join("")}
-    ${ends.map((end) => endHtml(c, end)).join("")}
+    ${edges.map((edge) => graphEdgeLabels(edge)).join("")}
+    ${edges.map((edge) => graphEdgeAddButton(edge)).join("")}
+    ${dangling.map((d) => graphDangleButton(d)).join("")}
+    ${picker}
   </div>`;
 }
 
-function endHtml(c, { from, menu, category }) {
-  const x = from.cx + TILE / 2 + STUB;
-  const at = `left:${x}px;top:${from.cy - END / 2}px`;
-  if (!menu) {
-    const name = c.trigger.decide.categories[category].name.trim();
-    return `<button class="end" data-action="choose-route" data-category="${category}" title="${esc(`Choose what happens after “${name}”`)}" style="${at}">${icon("plus")}</button>`;
-  }
-  const items = offSteps(c).map((id) => `<button data-action="add-step" data-step="${id}">${iconHtml(STEPS[id])}<span>${esc(STEPS[id].ghost)}</span></button>`);
-  return `<button class="end" data-action="open-add-menu" aria-expanded="${!!view.menu}" title="Add a step" style="${at}">${icon("plus")}</button>
-    ${view.menu ? `<div class="add-menu" style="width:${MENU_W}px;left:${x + END - MENU_W}px;top:${from.cy + END / 2 + 6}px">${items.join("")}</div>` : ""}`;
+function graphDangleButton({ node, port, x, y }) {
+  return `<button class="end graph-port-add" data-action="graph-append" data-from="${esc(node.id)}" data-port="${esc(port)}" title="Add a step" style="left:${x}px;top:${y - END / 2}px">${icon("plus")}</button>`;
+}
+
+function graphEdgeAddButton(edge) {
+  const [x1, y1, x2, y2] = graphEdgeEnds(edge);
+  const x = (x1 + x2) / 2;
+  const y = (y1 + y2) / 2;
+  return `<button class="edge-add" data-action="graph-splice" data-edge="${edge.index}" title="Insert a step" style="left:${x - 12}px;top:${y - 12}px">${icon("plus")}</button>`;
 }
 
 const nodeAt = (n) => `left:${n.cx - TEXT_W / 2}px;top:${n.cy - n.h / 2}px`;
 
-function nodeHtml(c, n) {
-  if (n.stub) return `<div class="stub" style="${nodeAt(n)}"><button data-action="add-category">${esc(n.stub)}</button></div>`;
-  if (!n.step) {
-    const open = n.kind === "route" && view.open === `route:${n.category}`;
-    return `<div class="branch${open ? " open" : ""}" data-branch="${n.kind}" data-category="${n.category}" style="${nodeAt(n)}">
-      <button class="node" data-action="open-branch" title="${esc(n.title)}">${iconHtml(n)}</button>
-      <span class="text"><b>${esc(n.title)}</b><span class="summary">${esc(n.summary)}</span></span>
-    </div>`;
-  }
-  const step = STEPS[n.step];
-  if (n.ghost) {
-    return `<div class="step" data-step="${n.step}" style="${nodeAt(n)}">
-      <button class="node ghost" data-action="add-step" title="${esc(step.ghost)}"><span class="icon">＋</span></button>
-      <span class="text"><span class="summary">${esc(step.ghost)}</span></span></div>`;
-  }
-  const issues = step.issues?.(c) ?? [];
-  const open = view.open === n.step;
-  return `<div class="step${open ? " open" : ""}" data-step="${n.step}" style="${nodeAt(n)}">
-    <button class="node${step.trigger ? " trigger" : ""}" data-action="toggle-step" aria-expanded="${open}" title="${esc(`${step.app}: ${step.title}`)}" style="height:${n.h}px">
-      ${iconHtml(step)}${issues.length ? `<span class="warn" title="${esc(issues.join(" "))}">!</span>` : ""}
+function graphNodeHtml(c, n) {
+  const ui = graphNodeUi(n.node);
+  const issues = graphNodeIssues(n.node, c);
+  const open = view.open === n.id;
+  const trigger = graphNodeKind(n.node) === "trigger";
+  const portHandles = n.portList
+    .map((port, portIndex) => {
+      const y = (n.h * (portIndex + 0.5)) / n.ports;
+      const x = (TEXT_W + TILE) / 2;
+      return `<button type="button" class="port-handle" data-node="${esc(n.id)}" data-port="${esc(port.id)}" style="left:${x}px;top:${y}px;transform:translate(-50%,-50%)" title="${esc(port.label || port.id)}"></button>`;
+    })
+    .join("");
+  return `<div class="step graph-node${open ? " open" : ""}" data-node="${esc(n.id)}" style="${nodeAt(n)}">
+    ${portHandles}
+    <button class="node${trigger ? " trigger" : ""}" data-action="graph-open-node" data-node="${esc(n.id)}" aria-expanded="${open}" title="${esc(`${ui.app}: ${ui.title}`)}" style="height:${n.h}px">
+      ${iconHtml(ui)}${issues.length ? `<span class="warn" title="${esc(issues.join(" "))}">!</span>` : ""}
     </button>
-    <span class="text"><b>${step.title}</b><span class="summary">${esc(step.summary(c))}</span></span>
+    <span class="text"><b>${esc(n.node.name || ui.title)}</b><span class="summary">${esc(graphNodeSummary(n.node, c))}</span></span>
   </div>`;
 }
 
-function ends({ from, to, port }) {
-  const y1 = port === undefined ? from.cy : from.cy - from.h / 2 + (from.h * (port + 0.5)) / from.ports;
-  return [from.cx + TILE / 2, y1, to.cx - TILE / 2, to.cy];
+function portY(laid, portId) {
+  const portIndex = laid.portList.findIndex((p) => p.id === portId);
+  const idx = portIndex < 0 ? 0 : portIndex;
+  return laid.cy - laid.h / 2 + (laid.h * (idx + 0.5)) / laid.ports;
 }
 
-function edgeHtml(edge) {
-  const [x1, y1, x2, y2] = ends(edge);
+function graphEdgeEnds(edge) {
+  const y1 = portY(edge.from, edge.port);
+  return [edge.from.cx + TILE / 2, y1, edge.to.cx - TILE / 2, edge.to.cy];
+}
+
+function graphEdgeSvg(edge) {
+  const [x1, y1, x2, y2] = graphEdgeEnds(edge);
   const bend = (x2 - x1) / 2;
-  return `<path${edge.dashed ? ' class="dashed"' : ""} d="M${x1} ${y1}C${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2 - 6} ${y2}" marker-end="url(#flow-arrow)"/>
-    <circle cx="${x1}" cy="${y1}" r="4.5"/><circle cx="${x2}" cy="${y2}" r="4.5"/>`;
+  const cls = edge.selected ? "edge-selected" : "";
+  return `<g class="edge-group${cls ? ` ${cls}` : ""}" data-edge="${edge.index}">
+    <path class="edge-hit" data-action="graph-select-edge" data-edge="${edge.index}" d="M${x1} ${y1}C${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2 - 6} ${y2}"/>
+    <path d="M${x1} ${y1}C${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2 - 6} ${y2}" marker-end="url(#flow-arrow)"/>
+  </g>`;
 }
 
-function edgeLabelHtml(edge) {
-  const [x1, y1, x2, y2] = ends(edge);
-  if (edge.portLabel !== undefined) return `<span class="port-label" style="left:${x1 + 8}px;top:${y1}px">${esc(edge.portLabel)}</span>`;
-  return edge.label ? `<span class="edge-label" style="left:${(x1 + x2) / 2}px;top:${(y1 + y2) / 2}px">${esc(edge.label)}</span>` : "";
+function graphEdgeLabels(edge) {
+  const [x1, y1, x2, y2] = graphEdgeEnds(edge);
+  if (edge.portLabel) return `<span class="port-label" style="left:${x1 + 8}px;top:${y1}px">${esc(edge.portLabel)}</span>`;
+  return "";
+}
+
+function classifyFields(node, c) {
+  const i = graphNodeIndex(node.id);
+  const base = `graph.nodes.${i}`;
+  const rows = (node.questions ?? [])
+    .map((q, qi) => {
+      const choices = (q.choices ?? []).map((ch) => (typeof ch === "string" ? ch : ch.label ?? ch.id)).join(", ");
+      return `<div class="grid">
+          <label>Name ${input(`${base}.questions.${qi}.name`, q.name, 'placeholder="kind" spellcheck="false"')}</label>
+          <label>Question ${input(`${base}.questions.${qi}.ask`, q.ask, "")}</label>
+        </div>
+        <label>Choices <input data-bind="${base}.questions.${qi}.choices" data-list="" value="${esc(choices)}" placeholder="bug, question"></label>
+        <div class="actions start"><button class="secondary" data-action="graph-remove-question" data-index="${qi}">Remove question</button></div>`;
+    })
+    .join("");
+  return `<label>Model ${input(`${base}.model`, node.model ?? "", 'list="vercel-models" spellcheck="false"')}</label>
+    <label>Instructions<textarea data-bind="${base}.instructions" rows="3">${esc(node.instructions ?? "")}</textarea></label>
+    ${rows}
+    <div class="actions start"><button class="secondary" data-action="graph-add-question">Add question</button></div>
+    <label>Branch on ${input(`${base}.branchOn`, node.branchOn ?? "", 'placeholder="kind" spellcheck="false"')}</label>
+    <label>Gate ${select(`${base}.gate.kind`, ["direct", "decide"], (k) => (k === "decide" ? "Decide (thresholds)" : "Direct"), node.gate?.kind ?? "direct")}</label>
+    ${
+      node.gate?.kind === "decide"
+        ? `<div class="grid">
+        <label>Unsure below ${input(`${base}.gate.unsureBelow`, node.gate.unsureBelow ?? 0.6, 'type="number" step="0.01" min="0" max="1"')}</label>
+        <label>Page at ${input(`${base}.gate.pageAt`, node.gate.pageAt ?? 0.85, 'type="number" step="0.01" min="0" max="1"')}</label>
+      </div>`
+        : ""
+    }
+    <label>Fallback ${select(`${base}.fallback.kind`, ["none", "extra", "existing"], (k) => k, node.fallback?.kind ?? "none")}</label>
+    ${choiceEnders(node)}`;
+}
+
+function choiceLabels(question) {
+  return (question?.choices ?? []).map((ch) => (typeof ch === "string" ? ch : ch.label ?? ch.id)).filter((label) => label != null && String(label) !== "");
+}
+
+function switchFields(node, c) {
+  const i = graphNodeIndex(node.id);
+  const base = `graph.nodes.${i}`;
+  const classifies = (c.graph?.nodes ?? []).filter((n) => graphNodeKind(n) === "classify");
+  const target = classifies.find((n) => n.id === node.classify);
+  const questions = target?.questions ?? [];
+  const names = questions.map((q) => q.name).filter(Boolean);
+  const question = questions.find((q) => q.name === node.question);
+  const labels = choiceLabels(question);
+  const classifyIds = classifies.map((n) => n.id);
+  const classifyValues = classifyIds.includes(node.classify) ? classifyIds : ["", ...classifyIds];
+  const questionValues = names.includes(node.question) ? names : ["", ...names];
+  const classifySelect = classifies.length
+    ? `<label>Classify ${select(`${base}.classify`, classifyValues, (id) => classifies.find((n) => n.id === id)?.name || "Choose a classify", node.classify ?? "")}</label>`
+    : `<p class="hint">Add a classify node first. A switch reads an answer that node already gave.</p>`;
+  const questionSelect = !target
+    ? ""
+    : names.length
+      ? `<label>Question ${select(`${base}.question`, questionValues, (name) => name || "Choose a question", node.question ?? "")}</label>`
+      : `<p class="hint">That classify has no questions yet.</p>`;
+  const cases = (node.cases ?? [])
+    .map((item, ci) => {
+      const listId = `switch-choices-${i}-${ci}`;
+      const datalist = labels.length ? `<datalist id="${listId}">${labels.map((label) => `<option value="${esc(label)}"></option>`).join("")}</datalist>` : "";
+      const shown = item.equals?.trim() || "This case";
+      const listAttr = labels.length ? `list="${listId}" ` : "";
+      return `<div class="category">
+        <label>Equals ${input(`${base}.cases.${ci}.equals`, item.equals ?? "", `${listAttr}placeholder="no" spellcheck="false"`)}${datalist}</label>
+        <div class="actions start">
+          <button class="secondary" data-action="graph-end-choice" data-port="${esc(item.id)}">${esc(shown)} ends here</button>
+          <button class="secondary" data-action="graph-remove-case" data-index="${ci}">Remove case</button>
+        </div>
+      </div>`;
+    })
+    .join("");
+  return `${classifySelect}
+    ${questionSelect}
+    ${cases}
+    <div class="actions start"><button class="secondary" data-action="graph-add-case">Add case</button></div>
+    <p class="hint">The first case that matches the answer, ignoring case, takes that port. Anything else leaves through otherwise.</p>`;
+}
+
+function choiceEnders(node) {
+  const api = graphApi();
+  const skip = new Set([api?.FALLBACK ?? "fallback", api?.NOWHERE ?? "nowhere"]);
+  const buttons = (api?.ports(node) ?? [])
+    .filter((port) => port.label && !skip.has(port.id))
+    .map((port) => `<button class="secondary" data-action="graph-end-choice" data-port="${esc(port.id)}">${esc(port.label)} ends here</button>`)
+    .join("");
+  return buttons ? `<div class="actions start">${buttons}</div>` : "";
+}
+
+function sessionFields(c) {
+  return STEPS.agent.fields(c);
+}
+
+function graphNodePanel(c) {
+  if (view.open === "session") {
+    return `<aside class="node-panel" aria-label="Session">
+      <div class="node-panel-head">${iconHtml(STEPS.agent)}<span class="text"><span class="app">Claude Code</span><b>Session</b></span>
+        <button class="secondary close" data-action="close-step" title="Close (Esc)">✕</button></div>
+      <div class="details">${sessionFields(c)}</div>
+    </aside>`;
+  }
+  const node = view.draft.graph?.nodes?.find((n) => n.id === view.open);
+  if (!node) return "";
+  const ui = graphNodeUi(node);
+  const type = graphNodeKind(node);
+  let body = "";
+  if (type === "trigger") body = STEPS[WATCH_STEP[c.trigger?.kind] ?? WATCH_STEP[node.watch?.kind ?? "called"]].fields(c);
+  else if (type === "classify") body = classifyFields(node, c);
+  else if (type === "switch") body = switchFields(node, c);
+  else if (type === "talk") {
+    const i = graphNodeIndex(node.id);
+    body = `<label>Prompt<textarea data-bind="graph.nodes.${i}.prompt" rows="6">${esc(node.prompt ?? "")}</textarea></label>
+      <div class="actions start"><button class="secondary" data-action="graph-open-session">Session settings (folder, model, fix…)</button></div>`;
+  } else if (type === "page") {
+    const i = graphNodeIndex(node.id);
+    body = `<label>Group ${input(`graph.nodes.${i}.group`, node.group ?? "", 'placeholder="@oncall" spellcheck="false"')}</label>`;
+  } else if (type === "call") {
+    const i = graphNodeIndex(node.id);
+    const targets = settings.connectors.filter((k) => k.id !== c.id);
+    body = `<label>Workflow ${select(`graph.nodes.${i}.workflow`, ["", ...targets.map((k) => k.id)], (id) => targets.find((k) => k.id === id)?.name ?? id, node.workflow ?? "")}</label>`;
+  } else if (type === "stage-picked") body = `<p class="hint">Moves the Linear issue to the connector's picked column when the session opens.</p>`;
+  const removable = type !== "trigger";
+  return `<aside class="node-panel" aria-label="${esc(ui.title)}">
+    <div class="node-panel-head">${iconHtml(ui)}<span class="text"><span class="app">${ui.app}</span><b>${esc(node.name || ui.title)}</b></span>
+      <button class="secondary close" data-action="close-step" title="Close (Esc)">✕</button></div>
+    <div class="details">${body}${removable ? `<div class="actions start"><button class="secondary danger" data-action="graph-delete-node">Delete node</button></div>` : ""}</div>
+  </aside>`;
 }
 
 function panelHtml(c) {
-  const route = /^route:(\d+)$/.exec(view.open ?? "");
-  if (route) return routePanelHtml(c, Number(route[1]));
-  const step = STEPS[view.open];
-  if (!step || !shown(c, view.open)) return "";
-  return `<aside class="node-panel" aria-label="${esc(step.title)}">
-    <div class="node-panel-head">${iconHtml(step)}<span class="text"><span class="app">${step.app}</span><b>${step.title}</b></span>
-      <button class="secondary close" data-action="close-step" title="Close (Esc)">✕</button></div>
-    <div class="details">${step.fields(c)}${step.optional ? `<div class="actions start"><button class="secondary" data-action="remove-step">Remove step</button></div>` : ""}</div>
-  </aside>`;
+  if (view.name !== "edit") return "";
+  return graphNodePanel(c);
+}
+
+function applyGraphPick(type) {
+  const api = graphApi();
+  if (!api || !view.graphPick) return;
+  const upstreamId = view.graphPick.mode === "splice" ? view.draft.graph.edges[view.graphPick.edgeIndex]?.from : view.graphPick.from;
+  const fresh = api.newNode(type, view.draft.graph, upstreamId);
+  if (view.graphPick.mode === "splice") {
+    const edge = view.draft.graph.edges[view.graphPick.edgeIndex];
+    view.draft.graph = api.splice(view.draft.graph, edge, fresh);
+  } else {
+    view.draft.graph = api.append(view.draft.graph, view.graphPick.from, view.graphPick.port, fresh);
+  }
+  view.graphPick = null;
+  view.open = fresh.id;
+  redraw();
+}
+
+function syncLegacyFromGraph(c) {
+  const trigger = c.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger");
+  if (trigger?.watch) syncTriggerFromWatch(c, trigger.watch);
 }
 
 const READABLE_ZOOM = 0.75;
@@ -1114,7 +1412,10 @@ function redraw() {
 }
 
 function edit(index, draft = clone(settings.connectors[index]), open = null) {
-  view = { name: "edit", index, draft, original: JSON.stringify(draft), open, zoom: null, pan: null, menu: false };
+  const trigger = draft.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger");
+  if (trigger?.watch) syncTriggerFromWatch(draft, trigger.watch);
+  const first = draft.graph?.nodes?.[0]?.id ?? null;
+  view = { name: "edit", index, draft, original: JSON.stringify(draft), open: open ?? first, zoom: null, pan: null, menu: false, graphPick: null, selectedEdge: null, connectFrom: null, drag: null };
   loadFolders(draft);
 }
 
@@ -1205,6 +1506,10 @@ function tidy(c) {
       questions: (c.ask.questions ?? []).map((q) => ({ name: t(q.name), ask: t(q.ask), choices: list(q.choices), stopOn: list(q.stopOn) })),
     };
   } else delete out.ask;
+  if (c.graph) {
+    syncLegacyFromGraph(c);
+    out.graph = c.graph;
+  }
   return out;
 }
 
@@ -1223,7 +1528,10 @@ function reshape(change) {
   const after = change(clone(before));
   if (before.name === TRIGGERS[before.trigger.kind].name) after.name = TRIGGERS[after.trigger.kind].name;
   if (before.instructions.trim() === defaultText(before).trim()) after.instructions = defaultText(after);
-  if (before.trigger.kind !== after.trigger.kind) view.open = flowOf(after)[0][0];
+  if (before.trigger.kind !== after.trigger.kind) {
+    syncWatchFromTrigger(after);
+    view.open = after.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger")?.id ?? view.open;
+  }
   view.draft = after;
   if (JSON.stringify(before.machine) !== JSON.stringify(after.machine)) {
     loadFolders(after);
@@ -1253,7 +1561,7 @@ function armed(button, text) {
 
 function showStep(id, focus) {
   view.open = id;
-  view.menu = false;
+  view.graphPick = null;
   redraw();
   settingsPage.querySelector(".flow .open")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   if (focus) settingsPage.querySelector(".node-panel .details [data-bind]")?.focus();
@@ -1375,8 +1683,9 @@ const actions = {
   },
   "pick-trigger"(button) {
     const draft = blank(button.dataset.kind);
+    if (graphApi()) draft.graph = graphApi().startingGraph(draft);
     edit(-1, draft);
-    showStep(flowOf(draft)[0][0], true);
+    showStep(draft.graph.nodes[0]?.id, true);
   },
   "edit-connector"(button) {
     edit(Number(button.closest(".flow-card").dataset.index));
@@ -1390,6 +1699,88 @@ const actions = {
   "toggle-step"(button) {
     const id = stepOf(button);
     showStep(view.open === id ? null : id);
+  },
+  "graph-open-node"(button) {
+    const id = button.dataset.node;
+    showStep(view.open === id ? null : id);
+  },
+  "graph-open-session"() {
+    view.open = "session";
+    redraw();
+  },
+  "graph-splice"(button) {
+    const flow = settingsPage.querySelector(".flow");
+    const box = button.getBoundingClientRect();
+    const origin = flow.getBoundingClientRect();
+    const zoom = zoomNow() || 1;
+    view.graphPick = { mode: "splice", edgeIndex: Number(button.dataset.edge), x: (box.left - origin.left) / zoom, y: (box.bottom - origin.top) / zoom + 6 };
+    refresh();
+  },
+  "graph-append"(button) {
+    const flow = settingsPage.querySelector(".flow");
+    const box = button.getBoundingClientRect();
+    const origin = flow.getBoundingClientRect();
+    const zoom = zoomNow() || 1;
+    view.graphPick = { mode: "append", from: button.dataset.from, port: button.dataset.port, x: (box.left - origin.left) / zoom, y: (box.bottom - origin.top) / zoom + 6 };
+    refresh();
+  },
+  "graph-pick-type"(button) {
+    applyGraphPick(button.dataset.type);
+  },
+  "graph-select-edge"(button) {
+    view.selectedEdge = Number(button.dataset.edge);
+    refresh();
+  },
+  "graph-delete-node"() {
+    const api = graphApi();
+    if (!api || !view.open || view.open === "session") return;
+    view.draft.graph = api.remove(view.draft.graph, view.open);
+    view.open = null;
+    redraw();
+  },
+  "graph-add-case"() {
+    const api = graphApi();
+    const node = view.draft.graph.nodes.find((n) => n.id === view.open);
+    if (!api || !node || graphNodeKind(node) !== "switch") return;
+    if (!node.cases) node.cases = [];
+    node.cases.push({ id: api.nextCaseId(node.cases), equals: "" });
+    const index = node.cases.length - 1;
+    redraw();
+    settingsPage.querySelector(`.node-panel [data-bind$=".cases.${index}.equals"]`)?.focus();
+  },
+  "graph-remove-case"(button) {
+    const node = view.draft.graph.nodes.find((n) => n.id === view.open);
+    if (!node?.cases) return;
+    const index = Number(button.dataset.index);
+    const id = node.cases[index]?.id;
+    node.cases.splice(index, 1);
+    if (id) view.draft.graph.edges = view.draft.graph.edges.filter((e) => !(e.from === node.id && e.port === id));
+    redraw();
+  },
+  "graph-add-question"() {
+    const node = view.draft.graph.nodes.find((n) => n.id === view.open);
+    if (!node?.questions) node.questions = [];
+    node.questions.push({ name: "", ask: "", choices: [] });
+    redraw();
+  },
+  "graph-remove-question"(button) {
+    const node = view.draft.graph.nodes.find((n) => n.id === view.open);
+    node.questions.splice(Number(button.dataset.index), 1);
+    redraw();
+  },
+  "graph-end-choice"(button) {
+    const api = graphApi();
+    const from = view.open;
+    const port = button.dataset.port;
+    if (!api || !from || !view.draft.graph) return;
+    let graph = view.draft.graph;
+    const existing = graph.edges.filter((e) => e.from === from && e.port === port);
+    const onlyStop = existing.length === 1 && graphNodeKind(graph.nodes.find((n) => n.id === existing[0].to) ?? {}) === "stop";
+    if (onlyStop) return;
+    for (const edge of existing) graph = api.disconnect(graph, edge);
+    const stop = api.newNode("stop", graph);
+    view.draft.graph = api.append(graph, from, port, stop);
+    redraw();
   },
   "add-step"(button) {
     const id = stepOf(button);
@@ -1443,19 +1834,30 @@ const actions = {
     fillRepo();
   },
   async "save-connector"() {
+    const error = document.getElementById("editor-error");
+    if (!view.draft.graph?.nodes?.length) {
+      error.textContent = OLDER_HUB;
+      return;
+    }
+    syncWatchFromTrigger(view.draft);
     const decide = view.draft.trigger.decide;
     if (decide && fallbackOf(decide)?.mention?.trim()) decide.fallback = null;
     const c = tidy(view.draft);
-    const error = document.getElementById("editor-error");
+    syncWatchFromTrigger(c);
     if (!c.name) {
       error.textContent = "Name the workflow.";
       return settingsPage.querySelector(".editor-bar .title").focus();
     }
-    const incomplete = flowOf(c).find(([id]) => shown(c, id) && STEPS[id].issues?.(c).length);
-    if (incomplete) {
-      const [id] = incomplete;
-      showStep(id, true);
-      document.getElementById("editor-error").textContent = STEPS[id].issues(c)[0];
+    const api = graphApi();
+    const graphErr = api?.validate(c.graph, (id) => settings.connectors.some((k) => k.id === id && k.trigger?.kind === "called"));
+    if (graphErr) {
+      document.getElementById("editor-error").textContent = graphErr;
+      return;
+    }
+    const bad = c.graph.nodes.find((n) => graphNodeIssues(n, c).length);
+    if (bad) {
+      showStep(bad.id, true);
+      document.getElementById("editor-error").textContent = graphNodeIssues(bad, c)[0];
       return;
     }
     try {
@@ -1488,9 +1890,9 @@ settingsPage.addEventListener("click", (e) => {
     e.preventDefault();
     return actions[button.dataset.action](button);
   }
-  if (canvasPanned || !e.target.closest(".canvas") || e.target.closest(".step, .branch, .add-menu")) return;
-  if (view.menu) {
-    view.menu = false;
+  if (canvasPanned || !e.target.closest(".canvas") || e.target.closest(".step, .branch, .add-menu, .graph-picker, .edge-add, .graph-port-add, .port-handle")) return;
+  if (view.graphPick) {
+    view.graphPick = null;
     return refresh();
   }
   if (view.open) showStep(null);
@@ -1498,12 +1900,37 @@ settingsPage.addEventListener("click", (e) => {
 
 settingsPage.addEventListener("pointerdown", (e) => {
   canvasPanned = false;
+  const handle = e.target.closest(".port-handle");
+  if (handle && view.name === "edit") {
+    view.connectFrom = { node: handle.dataset.node, port: handle.dataset.port };
+    handle.setPointerCapture(e.pointerId);
+    return;
+  }
+  const nodeBtn = e.target.closest(".graph-node .node");
+  if (nodeBtn && view.name === "edit" && !e.target.closest(".warn")) {
+    const id = nodeBtn.closest(".graph-node").dataset.node;
+    const node = view.draft.graph.nodes.find((n) => n.id === id);
+    if (node) {
+      view.graphDrag = { id, pointer: e.pointerId, x: e.clientX, y: e.clientY, pos: [...node.position] };
+      nodeBtn.setPointerCapture(e.pointerId);
+      return;
+    }
+  }
   const canvas = e.target.closest(".canvas");
-  if (!canvas || e.button !== 0 || e.pointerType === "touch" || e.target.closest(".step, .branch, button, .add-menu")) return;
+  if (!canvas || e.button !== 0 || e.pointerType === "touch" || e.target.closest(".step, .branch, button, .add-menu, .graph-picker, .edge-add, .port-handle")) return;
   canvasPan = { canvas, id: e.pointerId, x: e.clientX, y: e.clientY, left: canvas.scrollLeft, top: canvas.scrollTop };
 });
 
 settingsPage.addEventListener("pointermove", (e) => {
+  if (view.graphDrag?.pointer === e.pointerId) {
+    const api = graphApi();
+    const zoom = zoomNow() || 1;
+    const dx = (e.clientX - view.graphDrag.x) / zoom;
+    const dy = (e.clientY - view.graphDrag.y) / zoom;
+    view.draft.graph = api.move(view.draft.graph, view.graphDrag.id, [Math.round(view.graphDrag.pos[0] + dx), Math.round(view.graphDrag.pos[1] + dy)]);
+    refresh();
+    return;
+  }
   if (canvasPan?.id !== e.pointerId) return;
   const dx = e.clientX - canvasPan.x;
   const dy = e.clientY - canvasPan.y;
@@ -1519,6 +1946,21 @@ settingsPage.addEventListener("pointermove", (e) => {
 
 for (const type of ["pointerup", "pointercancel"]) {
   settingsPage.addEventListener(type, (e) => {
+    if (view.graphDrag?.pointer === e.pointerId) {
+      view.graphDrag = null;
+      return;
+    }
+    if (view.connectFrom) {
+      const target = [...document.elementsFromPoint(e.clientX, e.clientY)].map((el) => el.closest?.(".graph-node")).find(Boolean);
+      const api = graphApi();
+      if (target && api) {
+        try {
+          view.draft.graph = api.connect(view.draft.graph, view.connectFrom.node, view.connectFrom.port, target.dataset.node);
+        } catch {}
+      }
+      view.connectFrom = null;
+      refresh();
+    }
     if (canvasPan?.id !== e.pointerId) return;
     canvasPan.canvas.classList.remove("panning");
     canvasPan = null;
@@ -1559,6 +2001,16 @@ settingsPage.addEventListener("keydown", (e) => {
     return refresh();
   }
   if (e.key === "Escape" && view.open) showStep(null);
+  if ((e.key === "Delete" || e.key === "Backspace") && view.selectedEdge != null && !e.target.closest("input, textarea, select")) {
+    const api = graphApi();
+    const edge = view.draft.graph.edges[view.selectedEdge];
+    if (api && edge) {
+      e.preventDefault();
+      view.draft.graph = api.disconnect(view.draft.graph, edge);
+      view.selectedEdge = null;
+      refresh();
+    }
+  }
 });
 
 settingsPage.addEventListener("input", (e) => {
@@ -1568,7 +2020,25 @@ settingsPage.addEventListener("input", (e) => {
   const decide = view.draft.trigger.decide;
   const renamed = /^trigger\.decide\.categories\.\d+\.name$/.test(path) && decide.fallback && fallbackOf(decide);
   const listed = "list" in e.target.dataset;
-  bind(path, e.target.type === "checkbox" ? e.target.checked : listed ? e.target.value.split(",").map((s) => s.trim()) : e.target.value);
+  let value = e.target.type === "checkbox" ? e.target.checked : listed ? e.target.value.split(",").map((s) => s.trim()) : e.target.value;
+  if (path.includes(".choices") && path.startsWith("graph.nodes")) {
+    value = value.map((label) => ({ id: label, label, description: "" }));
+  }
+  bind(path, value);
+  if (path.startsWith("graph.nodes.") && (path.endsWith(".classify") || path.endsWith(".question") || /\.cases\.\d+\.equals$/.test(path))) {
+    const node = boundGraphNode(path);
+    if (node && graphNodeKind(node) === "switch") {
+      if (path.endsWith(".classify")) keepSwitchQuestion(node);
+      const caseMatch = /\.cases\.(\d+)\.equals$/.exec(path);
+      if (caseMatch) retargetCasePort(node, Number(caseMatch[1]), e.target.closest(".category")?.querySelector('[data-action="graph-end-choice"]'));
+      if (path.endsWith(".classify") || path.endsWith(".question")) {
+        redraw();
+        return;
+      }
+    }
+  }
+  if (path === "trigger.label" || path === "trigger.channel") syncWatchFromTrigger(view.draft);
+  if (path.startsWith("graph.nodes") && path.includes(".watch.")) syncLegacyFromGraph(view.draft);
   if (renamed) decide.fallback = renamed.name.trim() || null;
   refresh();
 });

@@ -66,8 +66,32 @@ pub struct Post {
     pub text: String,
 }
 
+fn api_root() -> String {
+    #[cfg(test)]
+    if let Some(root) = API_ROOT.lock().unwrap().clone() {
+        return root;
+    }
+    API.to_owned()
+}
+
+/// Points Slack calls at `root` for a test. `None` restores the real API.
+#[cfg(test)]
+pub fn set_api_root(root: Option<String>) {
+    *API_ROOT.lock().unwrap() = root;
+}
+
+/// One test at a time may point Slack at a stand-in.
+#[cfg(test)]
+pub fn lock_api() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(test)]
+static API_ROOT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 async fn call(token: &str, method: &str, params: &[(&str, &str)]) -> Result<Value, String> {
-    let url = reqwest::Url::parse_with_params(&format!("{API}{method}"), params).map_err(|e| e.to_string())?;
+    let url = reqwest::Url::parse_with_params(&format!("{}{method}", api_root()), params).map_err(|e| e.to_string())?;
     let response = reqwest::Client::new()
         .get(url)
         .bearer_auth(token)
@@ -80,7 +104,7 @@ async fn call(token: &str, method: &str, params: &[(&str, &str)]) -> Result<Valu
 /// Slack only reads a JSON body on its write methods.
 async fn write(token: &str, method: &str, body: Value) -> Result<Value, String> {
     let response = reqwest::Client::new()
-        .post(format!("{API}{method}"))
+        .post(format!("{}{method}", api_root()))
         .bearer_auth(token)
         .json(&body)
         .send()
