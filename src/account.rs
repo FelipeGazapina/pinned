@@ -73,11 +73,11 @@ fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
         let _stop = StopListening { machine: machine.clone(), id };
         let initial = machine.tabs();
         let connectors = app.state::<Connectors>();
-        if let Err(error) = connectors.on_tabs("local", connectors::unix_millis(), &initial, local_open(machine.clone())).await {
+        if let Err(error) = connectors.on_tabs("local", connectors::unix_millis(), &initial, local_open(machine.clone()), local_thread(machine.clone())).await {
             eprintln!("pinned: could not wake a workflow run: {error}");
         }
         let checked = |check: &connectors::Check| drop(app.emit("connectors-checked", check));
-        connectors.watch(local_open(machine), checked).await
+        connectors.watch(local_open(machine.clone()), local_thread(machine), checked).await
     })
 }
 
@@ -101,11 +101,18 @@ fn local_tabs(app: AppHandle, machine: Arc<Machine>) -> Listener {
         let machine = machine.clone();
         // The listener can run on the thread that holds a run, so the wake waits on its own task.
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = app.state::<Connectors>().on_tabs("local", observed, &tabs, local_open(machine)).await {
+            if let Err(error) = app.state::<Connectors>().on_tabs("local", observed, &tabs, local_open(machine.clone()), local_thread(machine)).await {
                 eprintln!("pinned: could not wake a workflow run: {error}");
             }
         });
     })
+}
+
+fn local_thread(machine: Arc<Machine>) -> impl Fn(&str, &str) -> std::future::Ready<Result<Vec<pinned_core::thread::Item>, String>> + Send + Sync {
+    move |_name: &str, tab: &str| {
+        let tab = tab.to_owned();
+        std::future::ready(machine.thread(&tab, 0).map(|page| page.items))
+    }
 }
 
 fn local_open(

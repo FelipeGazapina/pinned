@@ -100,6 +100,31 @@ pub struct Context {
     pub at: String,
 }
 
+/// Items the draft parser reads from a serialized `ThreadPage`. Other kinds are not a ticket fence.
+pub fn draft_items(page: &Value) -> Result<Vec<Item>, String> {
+    let Some(items) = page.get("items").and_then(|value| value.as_array()) else {
+        return Err("the machine sent no thread page".into());
+    };
+    Ok(items.iter().filter_map(draft_item).collect())
+}
+
+fn draft_item(item: &Value) -> Option<Item> {
+    let kind = item.get("kind")?.as_str()?;
+    let text = |key: &str| item.get(key).and_then(|value| value.as_str()).unwrap_or("").to_owned();
+    match kind {
+        "user" => Some(Item::User {
+            id: text("id"),
+            at: text("at"),
+            text: text("text"),
+            images: item.get("images").and_then(|value| value.as_u64()).unwrap_or(0) as u32,
+            pictures: vec![],
+        }),
+        "text" => Some(Item::Text { id: text("id"), at: text("at"), text: text("text") }),
+        "error" => Some(Item::Error { id: text("id"), at: text("at"), text: text("text") }),
+        _ => None,
+    }
+}
+
 pub fn find(projects: &Path, session: &str) -> Option<PathBuf> {
     if session.is_empty() || !session.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
         return None;

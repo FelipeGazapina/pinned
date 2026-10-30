@@ -156,7 +156,7 @@ fn assignee(data: &Value, who: &str) -> Result<String, String> {
     id.map(str::to_owned).ok_or_else(|| if who.is_empty() { "Linear did not say who owns the API key".into() } else { format!("Linear has no user named {who:?}") })
 }
 
-fn column_state<'a>(team: &'a Value, column: &str) -> Result<Option<&'a str>, String> {
+pub(crate) fn column_state<'a>(team: &'a Value, column: &str) -> Result<Option<&'a str>, String> {
     if column.trim().is_empty() {
         return Ok(None);
     }
@@ -174,7 +174,7 @@ fn column_state<'a>(team: &'a Value, column: &str) -> Result<Option<&'a str>, St
     Err(format!("team {name} has no column named {column:?}; its columns are {names}"))
 }
 
-fn create_input(team: &str, assignee: &str, title: &str, description: &str, label: Option<&str>, state: Option<&str>) -> Value {
+pub(crate) fn create_input(team: &str, assignee: &str, title: &str, description: &str, label: Option<&str>, state: Option<&str>) -> Value {
     let mut input = json!({ "teamId": team, "assigneeId": assignee, "title": title, "description": description });
     if let Some(label) = label {
         input["labelIds"] = json!([label]);
@@ -183,6 +183,29 @@ fn create_input(team: &str, assignee: &str, title: &str, description: &str, labe
         input["stateId"] = json!(state);
     }
     input
+}
+
+/// An issue in `data` whose description contains `marker`.
+pub(crate) fn issued<'a>(data: &'a Value, marker: &str) -> Option<&'a Value> {
+    nodes(&data["issues"]).find(|issue| issue["description"].as_str().is_some_and(|text| text.contains(marker)))
+}
+
+pub(crate) async fn find_marked(key: &str, team: &str, marker: &str) -> Result<Option<Issue>, String> {
+    let data = query(
+        key,
+        "query($marker: String!, $team: String!) {
+           issues(first: 10, filter: {
+             description: { contains: $marker },
+             team: { or: [{ name: { eqIgnoreCase: $team } }, { key: { eqIgnoreCase: $team } }] }
+           }) { nodes { id identifier title description url } }
+         }",
+        json!({ "marker": marker, "team": team }),
+    )
+    .await?;
+    match issued(&data, marker) {
+        Some(issue) => serde_json::from_value(issue.clone()).map(Some).map_err(|e| format!("Linear sent a bad issue: {e}")),
+        None => Ok(None),
+    }
 }
 
 fn created(data: &Value) -> Result<Issue, String> {

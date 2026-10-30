@@ -283,6 +283,9 @@ pub struct Connector {
     /// The issue each Slack thread's session filed, by `<channel id>:<thread ts>`.
     #[serde(default)]
     pub created: BTreeMap<String, Filed>,
+    /// Issues a create-ticket node filed, by run id then node id. Not `created`: `working_on` matches that map.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub receipts: BTreeMap<String, BTreeMap<String, Receipt>>,
     /// How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.
     #[serde(default)]
     pub followed: BTreeMap<String, Followed>,
@@ -480,6 +483,14 @@ impl Filed {
     fn answer(&self) -> String {
         format!("{} {}", self.identifier, self.url)
     }
+}
+
+/// An issue a create-ticket node filed. Separate from `Filed` so `working_on` cannot treat it as a Slack thread's issue.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Receipt {
+    pub id: String,
+    pub identifier: String,
+    pub url: String,
 }
 
 /// What `pinned linear create` does for a thread.
@@ -1723,6 +1734,47 @@ impl Connectors {
         Ok(filed.answer())
     }
 
+    async fn file_ticket(&self, run: &runner::Run, connector: &str, node: &crate::graph::NodeId) -> Result<Receipt, String> {
+        let _filing = self.filing.lock().await;
+        if let Some(receipt) = self.store.lock().unwrap().connectors.iter().find(|c| c.id == connector).and_then(|c| c.receipts.get(&run.id.0)?.get(&node.0)).cloned() {
+            return Ok(receipt);
+        }
+        let (team, label, column, title, description, marker) = {
+            let library = self.library();
+            let graph = library.get(connector).ok_or_else(|| format!("workflow {connector:?} has no graph"))?;
+            let found = graph.node(node).ok_or_else(|| format!("node {} is not in workflow {connector:?}", node.0))?;
+            let crate::graph::NodeKind::CreateTicket { team, label, column, .. } = &found.kind else {
+                return Err(format!("node {} is not a create-ticket", node.0));
+            };
+            if team.trim().is_empty() {
+                return Err(format!("{} has no Linear team", found.name));
+            }
+            let draft = run.draft(node).cloned().ok_or_else(|| format!("runner bug: {} has no draft", found.name))?;
+            let marker = crate::graph::draft::receipt_marker(&run.id, node);
+            let description = format!("{}\n\n{marker}", draft.description.trim());
+            (team.clone(), label.clone(), column.clone(), draft.title, description, marker)
+        };
+        let key = self.key(LINEAR_KEY).ok_or("Linear is not connected: connect it in pinned's Connectors settings")?;
+        if let Some(issue) = linear::find_marked(&key, &team, &marker).await? {
+            let receipt = Receipt { id: issue.id, identifier: issue.identifier, url: issue.url };
+            self.remember_receipt(connector, &run.id.0, &node.0, &receipt)?;
+            return Ok(receipt);
+        }
+        let issue = linear::create_issue(&key, &team, title.trim(), &description, &label, "", &column).await?;
+        let receipt = Receipt { id: issue.id, identifier: issue.identifier, url: issue.url };
+        self.remember_receipt(connector, &run.id.0, &node.0, &receipt)?;
+        Ok(receipt)
+    }
+
+    fn remember_receipt(&self, connector: &str, run: &str, node: &str, receipt: &Receipt) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        let Some(found) = store.connectors.iter_mut().find(|c| c.id == connector) else {
+            return Err("the workflow was deleted".into());
+        };
+        found.receipts.entry(run.to_owned()).or_default().insert(node.to_owned(), receipt.clone());
+        self.save(&store)
+    }
+
     /// Lets the Slack thread's session work on the existing issue `issue`, an identifier such as
     /// ENG-123, unless another session already works on it. Answers the issue's identifier, link,
     /// title and description.
@@ -2185,6 +2237,13 @@ fn tab_of<'a>(after: &'a [TabView], tab: &str) -> Option<&'a TabView> {
     after.iter().find(|view| view.id == tab)
 }
 
+fn turn_ready(run: &runner::Run, view: &TabView) -> bool {
+    let Session::Live { since, saw_working, await_working, .. } = &run.session else { return false };
+    let ended = matches!(view.status, Some(AgentStatus::Done | AgentStatus::Failed));
+    let newer = view.updated.is_some_and(|updated| *since > 0 && updated > since / 1000);
+    ended && (*saw_working || newer || !*await_working)
+}
+
 /// Level-triggered wakes against one machine's current tab list.
 /// A list captured before the wait started cannot say the tab left.
 /// A terminal status ends the wait when it belongs to this turn: Working was seen after the wait
@@ -2194,15 +2253,15 @@ fn reconcile_runs(machine: &str, after: &[TabView], observed: u64, runs: &mut [r
     let notes: Vec<_> = runs
         .iter()
         .filter_map(|run| {
-            let Session::Live { machine: live, tab, since, saw_working, await_working, .. } = &run.session else { return None };
+            let Session::Live { machine: live, tab, since, .. } = &run.session else { return None };
             if live != machine {
                 return None;
             }
-            Some((run.id.0.clone(), tab.clone(), *since, *saw_working, *await_working, run.status.clone(), tab_of(after, tab).cloned()))
+            Some((run.id.0.clone(), tab.clone(), *since, run.status.clone(), tab_of(after, tab).cloned()))
         })
         .collect();
     let mut changed = false;
-    for (id, _tab, since, saw_working, await_working, status, view) in notes {
+    for (id, _tab, since, status, view) in notes {
         let Some(run) = runs.iter_mut().find(|run| run.id.0 == id) else { continue };
         let Some(view) = view else {
             if observed < since {
@@ -2237,13 +2296,10 @@ fn reconcile_runs(machine: &str, after: &[TabView], observed: u64, runs: &mut [r
         if !matches!(status, Status::Waiting) {
             continue;
         }
-        let saw = match &run.session {
-            Session::Live { saw_working, .. } => *saw_working,
-            _ => saw_working,
-        };
-        let ended = matches!(view.status, Some(AgentStatus::Done | AgentStatus::Failed));
-        let newer = view.updated.is_some_and(|updated| since > 0 && updated > since / 1000);
-        if ended && (saw || newer || !await_working) {
+        if turn_ready(run, &view) {
+            if run.waiting_draft() {
+                continue;
+            }
             runner::push(run, Wake::TurnEnded { claude: view.session.clone() }, at);
             changed = true;
         }
@@ -2258,11 +2314,13 @@ fn inbox_text(items: &[GraphInbox]) -> String {
 impl Connectors {
     /// Polls forever. `open` receives what each check found and answers whether a tab took it, or
     /// why none did, and `on_check` hears how each check went. A settings change wakes it early.
-    pub async fn watch<F, Fut, R>(&self, open: F, on_check: impl Fn(&Check))
+    pub async fn watch<F, Fut, R, T, TFut>(&self, open: F, thread: T, on_check: impl Fn(&Check))
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
         R: Taken,
+        T: Fn(&str, &str) -> TFut,
+        TFut: Future<Output = Result<Vec<crate::thread::Item>, String>>,
     {
         loop {
             let _guard = self.driving.lock().await;
@@ -2272,7 +2330,7 @@ impl Connectors {
                     error.get_or_insert(e);
                 }
             }
-            if let Err(e) = self.drive_locked(&open).await {
+            if let Err(e) = self.drive_locked(&open, &thread).await {
                 error.get_or_insert(e);
             }
             drop(_guard);
@@ -2296,11 +2354,13 @@ impl Connectors {
 
     /// Tab statuses changed on `machine`. Waiting runs wake, then every running graph continues.
     /// `observed` is the unix millis the list arrived. Lists can queue behind a drive, so an older one never replaces a newer one.
-    pub async fn on_tabs<F, Fut, R>(&self, machine: &str, observed: u64, after: &[TabView], open: F) -> Result<(), String>
+    pub async fn on_tabs<F, Fut, R, T, TFut>(&self, machine: &str, observed: u64, after: &[TabView], open: F, thread: T) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
         R: Taken,
+        T: Fn(&str, &str) -> TFut,
+        TFut: Future<Output = Result<Vec<crate::thread::Item>, String>>,
     {
         let _guard = self.driving.lock().await;
         {
@@ -2309,7 +2369,7 @@ impl Connectors {
                 known.insert(machine.to_owned(), (observed, after.to_vec()));
             }
         }
-        self.drive_locked(&open).await
+        self.drive_locked(&open, &thread).await
     }
 
     fn reconcile_known(&self) -> Result<(), String> {
@@ -2319,6 +2379,51 @@ impl Connectors {
             let mut runs = self.runs.lock().unwrap();
             known.into_iter().fold(false, |changed, (machine, observed, tabs)| reconcile_runs(&machine, &tabs, observed, &mut runs, &at) || changed)
         };
+        if changed {
+            self.save_runs()?;
+        }
+        Ok(())
+    }
+
+    async fn fill_drafts<T, Fut>(&self, thread: &T) -> Result<(), String>
+    where
+        T: Fn(&str, &str) -> Fut,
+        Fut: Future<Output = Result<Vec<crate::thread::Item>, String>>,
+    {
+        let pending: Vec<(String, String, String, Option<String>)> = {
+            let runs = self.runs.lock().unwrap();
+            let known = self.known_tabs.lock().unwrap();
+            runs.iter()
+                .filter_map(|run| {
+                    let (machine, tab) = run.open_draft()?;
+                    let (_, tabs) = known.get(&machine)?;
+                    let view = tabs.iter().find(|view| view.id == tab)?;
+                    if !turn_ready(run, view) {
+                        return None;
+                    }
+                    Some((run.id.0.clone(), machine, tab, view.session.clone()))
+                })
+                .collect()
+        };
+        let mut changed = false;
+        let at = Utc::now().to_rfc3339();
+        for (id, machine, tab, claude) in pending {
+            let items = match thread(&machine, &tab).await {
+                Ok(items) => items,
+                Err(_) => continue,
+            };
+            let mut runs = self.runs.lock().unwrap();
+            let Some(run) = runs.iter_mut().find(|run| run.id.0 == id) else { continue };
+            if run.open_draft().is_none() {
+                continue;
+            }
+            let was = run.status.clone();
+            match crate::graph::draft::draft_from_turn(&items) {
+                Ok(draft) => runner::push(run, Wake::Drafted { claude, draft }, &at),
+                Err(why) => runner::fail_run(run, why),
+            }
+            changed |= run.status != was;
+        }
         if changed {
             self.save_runs()?;
         }
@@ -2419,14 +2524,16 @@ impl Connectors {
     /// Drives every running graph once. `watch` and `on_tabs` call the same loop. The ignored live
     /// test calls it between tab snapshots, the way `machine_frame` does.
     #[doc(hidden)]
-    pub async fn drive<F, Fut, R>(&self, open: &F) -> Result<(), String>
+    pub async fn drive<F, Fut, R, T, TFut>(&self, open: &F, thread: &T) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
         R: Taken,
+        T: Fn(&str, &str) -> TFut,
+        TFut: Future<Output = Result<Vec<crate::thread::Item>, String>>,
     {
         let _guard = self.driving.lock().await;
-        self.drive_locked(open).await
+        self.drive_locked(open, thread).await
     }
 
     /// The runs on disk, for the ignored live test.
@@ -2452,12 +2559,15 @@ impl Connectors {
         self.save_runs()
     }
 
-    async fn drive_locked<F, Fut, R>(&self, open: &F) -> Result<(), String>
+    async fn drive_locked<F, Fut, R, T, TFut>(&self, open: &F, thread: &T) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
         R: Taken,
+        T: Fn(&str, &str) -> TFut,
+        TFut: Future<Output = Result<Vec<crate::thread::Item>, String>>,
     {
+        self.fill_drafts(thread).await?;
         self.reconcile_known()?;
         let library = self.library();
         let mut failed = vec![];
@@ -2694,6 +2804,10 @@ impl Connectors {
             Effect::Open { owner, prompt, seeded } => self.perform_open(run, &owner, &prompt, seeded, library, open).await,
             Effect::Resume { owner, claude, text } => self.perform_resume(run, &owner, &claude, &text, open).await,
             Effect::Type { text } => self.perform_type(run, &text, open).await,
+            Effect::File { connector, node } => {
+                let receipt = self.file_ticket(run, &connector, &node).await?;
+                Ok(Supplied::Ticket { id: receipt.id, identifier: receipt.identifier, url: receipt.url })
+            }
         }
     }
 
@@ -3009,6 +3123,7 @@ impl Connectors {
                 connector.since = existing.since.clone();
                 connector.handled = std::mem::take(&mut existing.handled);
                 connector.created = std::mem::take(&mut existing.created);
+                connector.receipts = std::mem::take(&mut existing.receipts);
                 connector.followed = std::mem::take(&mut existing.followed);
                 connector.paged = std::mem::take(&mut existing.paged);
                 *existing = connector.clone();
@@ -3026,6 +3141,7 @@ impl Connectors {
                 connector.since = chrono::Utc::now().to_rfc3339();
                 connector.handled.clear();
                 connector.created.clear();
+                connector.receipts.clear();
                 connector.followed.clear();
                 connector.paged.clear();
                 store.connectors.push(connector.clone());
@@ -3094,6 +3210,10 @@ mod tests {
 
     fn block_on<F: Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(future)
+    }
+
+    fn no_thread(_machine: &str, _tab: &str) -> std::future::Ready<Result<Vec<crate::thread::Item>, String>> {
+        std::future::ready(Ok(Vec::new()))
     }
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -3387,6 +3507,7 @@ mod tests {
             repo: String::new(),
             account: String::new(),
             graph: None,
+            receipts: BTreeMap::new(),
         }
     }
 
@@ -3450,6 +3571,7 @@ mod tests {
             repo: String::new(),
             account: String::new(),
             graph: None,
+            receipts: BTreeMap::new(),
         }
     }
 
@@ -4661,14 +4783,14 @@ mod tests {
                 }
             }
         };
-        block_on(connectors.drive(&open)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
-        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open, &no_thread)).unwrap();
         {
             let run = connectors.runs.lock().unwrap()[0].clone();
             assert!(matches!(run.session, Session::Live { ref machine, ref tab, ref claude, .. } if machine == "m1" && tab == "tab-1" && claude.as_deref() == Some("claude-1")));
         }
-        block_on(connectors.on_tabs("m1", unix_millis(), &[], &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), &[], &open, &no_thread)).unwrap();
         let lines = seen.lock().unwrap().clone();
         assert_eq!(lines.len(), 4, "{lines:#?}");
         assert!(lines[0].contains("PINNED_CONNECTOR=c1\nPINNED_ISSUE=uuid"), "{}", lines[0]);
@@ -4730,9 +4852,9 @@ mod tests {
             }
             placed(work)
         };
-        block_on(connectors.drive(&open)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         assert_eq!(*opened.lock().unwrap(), 1);
-        block_on(connectors.on_tabs("m1", unix_millis(), &[], &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), &[], &open, &no_thread)).unwrap();
         assert_eq!(*opened.lock().unwrap(), 2, "the tab is already gone, so the run opens its next session");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4744,9 +4866,9 @@ mod tests {
         let (connectors, dir) = stored("tab-id-only", vec![connector]);
         connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
         let open = |work: Work| placed(work);
-        block_on(connectors.drive(&open)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
-        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&working), &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&working), &open, &no_thread)).unwrap();
         {
             let run = connectors.runs.lock().unwrap()[0].clone();
             assert!(matches!(run.status, Status::Waiting), "working is not the end of the turn");
@@ -4754,7 +4876,7 @@ mod tests {
         }
         let mut other = session_tab(Some(AgentStatus::Done), Some("claude-other"));
         other.id = "tab-9".into();
-        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&other), &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&other), &open, &no_thread)).unwrap();
         let run = connectors.runs.lock().unwrap()[0].clone();
         assert!(
             matches!(run.session, Session::Live { ref tab, ref claude, .. } if tab == "tab-1" && claude.as_deref() == Some("claude-1"))
@@ -4794,9 +4916,9 @@ mod tests {
             }
             placed(work)
         };
-        block_on(connectors.drive(&open)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
-        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open, &no_thread)).unwrap();
         let replay = Connectors::new(FileStorage::new(snap), "/bin/pinned".into());
         let again = std::sync::Mutex::new(0u32);
         let open = |work: Work| {
@@ -4805,7 +4927,7 @@ mod tests {
             }
             placed(work)
         };
-        block_on(replay.drive(&open)).unwrap();
+        block_on(replay.drive(&open, &no_thread)).unwrap();
         assert_eq!(*again.lock().unwrap(), 0, "the prompt was already handed to the tab");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4823,12 +4945,12 @@ mod tests {
             }
             placed(work)
         };
-        block_on(connectors.drive(&open)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
         let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
         for _ in 0..3 {
-            block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&working), &open)).unwrap();
-            block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open)).unwrap();
+            block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&working), &open, &no_thread)).unwrap();
+            block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open, &no_thread)).unwrap();
         }
         assert_eq!(*typed.lock().unwrap(), 2, "the second and third talks each type");
         assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Done));
@@ -4848,11 +4970,11 @@ mod tests {
             }
             placed(work)
         };
-        block_on(connectors.drive(&open)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         let fresh = unix_millis() + 10;
         let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
-        block_on(connectors.on_tabs("m1", fresh, std::slice::from_ref(&working), &open)).unwrap();
-        block_on(connectors.on_tabs("m1", fresh - 1, &[], &open)).unwrap();
+        block_on(connectors.on_tabs("m1", fresh, std::slice::from_ref(&working), &open, &no_thread)).unwrap();
+        block_on(connectors.on_tabs("m1", fresh - 1, &[], &open, &no_thread)).unwrap();
         assert_eq!(*opened.lock().unwrap(), 1, "the list without the tab arrived first, so the tab is still there");
         assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting));
         let _ = std::fs::remove_dir_all(dir);
@@ -4884,7 +5006,7 @@ mod tests {
             placed(work)
         };
         connectors.begin("c2".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
-        block_on(connectors.drive(&open)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         assert_eq!(*opened.lock().unwrap(), 0);
         let run = connectors.runs.lock().unwrap()[0].clone();
         assert!(matches!(run.status, Status::Done));
@@ -4909,9 +5031,9 @@ mod tests {
             placed(work)
         };
         let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
-        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open, &no_thread)).unwrap();
         assert_eq!(*prompts.lock().unwrap(), 0, "opening the session is not the end of a turn the list already showed");
-        block_on(connectors.drive(&open)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         assert_eq!(*prompts.lock().unwrap(), 1, "the next check types the next talk");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4929,9 +5051,9 @@ mod tests {
             }
             placed(work)
         };
-        block_on(connectors.drive(&open)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         connectors.known_tabs.lock().unwrap().insert("m1".into(), (1, Vec::new()));
-        block_on(connectors.drive(&open)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         assert_eq!(*opened.lock().unwrap(), 1, "a list from before the wait cannot drop the tab");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4955,8 +5077,8 @@ mod tests {
             }
             placed(work)
         };
-        let show = |tab: &TabView| block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(tab), &open)).unwrap();
-        block_on(connectors.drive(&open)).unwrap();
+        let show = |tab: &TabView| block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(tab), &open, &no_thread)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         let working = tab_at(Some(AgentStatus::Working), Some(u64::MAX));
         show(&working);
         assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting));
@@ -5057,7 +5179,7 @@ mod tests {
             .begin("c2".into(), Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() }, slack_trigger(None), "2026-10-29T12:00:00Z")
             .unwrap();
         let open = |work: Work| placed(work);
-        block_on(connectors.drive(&open)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         let (work, error) = block_on(connectors.poll());
         assert!(error.is_none(), "{error:?}");
         assert!(work.is_empty(), "the reply belongs to the run");
@@ -5068,7 +5190,7 @@ mod tests {
             }
             placed(work)
         };
-        block_on(connectors.drive(&open)).unwrap();
+        block_on(connectors.drive(&open, &no_thread)).unwrap();
         let prompts = prompts.lock().unwrap().clone();
         assert!(prompts.iter().any(|text| text.contains("here is the log")), "{prompts:?}");
         let _ = std::fs::remove_dir_all(dir);
@@ -5084,7 +5206,7 @@ mod tests {
         let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
         let before = connectors.get_settings().checked.unwrap().at;
         block_on(async {
-            let watch = connectors.watch(|_| async { Ok::<(), String>(()) }, |_| {});
+            let watch = connectors.watch(|_| async { Ok::<(), String>(()) }, no_thread, |_| {});
             let _ = tokio::time::timeout(std::time::Duration::from_secs(1), watch).await;
         });
         let check = connectors.get_settings().checked.expect("a check ran");
@@ -5119,7 +5241,7 @@ mod tests {
             .begin("c2".into(), Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() }, slack_trigger(None), "2026-10-29T12:00:00Z")
             .unwrap();
         let open = |work: Work| placed(work);
-        let failed = block_on(connectors.drive(&open));
+        let failed = block_on(connectors.drive(&open, &no_thread));
         slack::set_api_root(None);
         assert!(failed.is_err(), "the post did not reach Slack");
         assert!(connectors.store.lock().unwrap().connectors[0].paged.is_empty(), "the thread stays unpaged so the next attempt posts");
