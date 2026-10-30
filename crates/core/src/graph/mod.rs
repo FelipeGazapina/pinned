@@ -8,6 +8,7 @@
 use crate::vercel::Chosen;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 pub mod migrate;
 pub mod project;
@@ -162,23 +163,88 @@ pub struct Port {
     pub label: String,
 }
 
+fn out_port() -> Port {
+    Port { id: PortId(PortId::OUT.into()), label: "out".into() }
+}
+
+fn classify_ports(classify: &Classify) -> Vec<Port> {
+    let Some(name) = &classify.branch_on else {
+        return vec![out_port()];
+    };
+    let mut ports = Vec::new();
+    if let Some(question) = classify.questions.iter().find(|question| &question.name == name) {
+        for choice in &question.choices {
+            ports.push(Port { id: choice.id.clone(), label: choice.label.clone() });
+        }
+    }
+    if matches!(classify.fallback, Fallback::Extra) {
+        ports.push(Port { id: PortId(PortId::FALLBACK.into()), label: "fallback".into() });
+    }
+    if matches!(classify.gate, Gate::Decide { .. }) {
+        ports.push(Port { id: PortId(PortId::NOWHERE.into()), label: "nowhere".into() });
+    }
+    ports
+}
+
 impl NodeKind {
     /// The node's output ports, in drawing order. Derived, never stored.
     pub fn ports(&self) -> Vec<Port> {
-        todo!("trigger/talk/page/stage-picked/call: out; stop: none; classify: one per choice of branch_on, then fallback if Extra, then nowhere if Gate::Decide; no branch_on: out")
+        match self {
+            NodeKind::Trigger { .. } | NodeKind::Talk { .. } | NodeKind::Page { .. } | NodeKind::StagePicked | NodeKind::Call { .. } => {
+                vec![out_port()]
+            }
+            NodeKind::Stop => Vec::new(),
+            NodeKind::Classify(classify) => classify_ports(classify),
+        }
     }
 }
 
 impl Graph {
     /// Checks the invariants on `Graph`. `called` says whether a connector id holds a graph whose
     /// trigger is `Watch::Called`, for `call` targets. Errors name the node, for the editor.
+    ///
+    /// A cycle that runs through another connector's graph is rejected at save, which can see every
+    /// connector. This callback only answers whether one id is a legal call target.
     pub fn validate(&self, called: &dyn Fn(&str) -> bool) -> Result<(), String> {
-        let _ = called;
-        todo!()
+        let mut ids = BTreeSet::new();
+        let mut trigger = None;
+        for node in &self.nodes {
+            if !ids.insert(node.id.0.clone()) {
+                return Err(format!("\"{}\" reuses the id \"{}\"", node.name, node.id.0));
+            }
+            if matches!(node.kind, NodeKind::Trigger { .. }) && trigger.replace(node).is_some() {
+                return Err(format!("\"{}\" is a second trigger", node.name));
+            }
+        }
+        let Some(trigger) = trigger else {
+            return Err("a workflow needs a trigger".into());
+        };
+        for edge in &self.edges {
+            if edge.to == trigger.id {
+                return Err(format!("an edge enters the trigger \"{}\"", trigger.name));
+            }
+            let Some(from) = self.node(&edge.from) else {
+                return Err(format!("an edge leaves \"{}\", which is not a node", edge.from.0));
+            };
+            if self.node(&edge.to).is_none() {
+                return Err(format!("\"{}\" connects to \"{}\", which is not a node", from.name, edge.to.0));
+            }
+            if !from.kind.ports().iter().any(|port| port.id == edge.port) {
+                return Err(format!("\"{}\" has no port \"{}\"", from.name, edge.port.0));
+            }
+        }
+        for node in &self.nodes {
+            if let NodeKind::Call { workflow } = &node.kind {
+                if !called(workflow) {
+                    return Err(format!("\"{name}\" calls \"{workflow}\", which is not a called workflow", name = node.name));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn trigger(&self) -> &Node {
-        todo!("the one trigger node")
+        self.nodes.iter().find(|node| matches!(node.kind, NodeKind::Trigger { .. })).expect("a graph has one trigger")
     }
 
     pub fn node(&self, id: &NodeId) -> Option<&Node> {
@@ -210,5 +276,98 @@ pub struct ChosenOn {
 impl From<&Chosen> for ChosenOn {
     fn from(chosen: &Chosen) -> Self {
         ChosenOn { index: chosen.index, probabilities: chosen.probabilities.clone() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(id: &str, name: &str, kind: NodeKind) -> Node {
+        Node { id: NodeId(id.into()), name: name.into(), position: [0, 0], kind }
+    }
+
+    fn edge(from: &str, port: &str, to: &str) -> Edge {
+        Edge { from: NodeId(from.into()), port: PortId(port.into()), to: NodeId(to.into()) }
+    }
+
+    fn classify(branch_on: Option<&str>, choices: &[(&str, &str)], gate: Gate, fallback: Fallback) -> NodeKind {
+        NodeKind::Classify(Classify {
+            model: "m".into(),
+            instructions: String::new(),
+            questions: vec![Question {
+                name: "kind".into(),
+                ask: String::new(),
+                choices: choices.iter().map(|(id, label)| Choice { id: PortId((*id).into()), label: (*label).into(), description: String::new() }).collect(),
+            }],
+            branch_on: branch_on.map(str::to_owned),
+            gate,
+            fallback,
+        })
+    }
+
+    #[test]
+    fn ports_follow_the_node() {
+        assert_eq!(NodeKind::Talk { prompt: String::new() }.ports(), vec![Port { id: PortId("out".into()), label: "out".into() }]);
+        assert_eq!(NodeKind::StagePicked.ports(), vec![Port { id: PortId("out".into()), label: "out".into() }]);
+        assert_eq!(NodeKind::Stop.ports(), vec![]);
+        assert_eq!(
+            classify(None, &[("bug", "Bug")], Gate::Decide { unsure_below: 0.6, page_at: 0.85 }, Fallback::Extra).ports(),
+            vec![Port { id: PortId("out".into()), label: "out".into() }],
+            "a classify with no branch question has one out port"
+        );
+        assert_eq!(
+            classify(Some("kind"), &[("bug", "Bug"), ("ask", "Ask")], Gate::Direct, Fallback::None).ports(),
+            vec![Port { id: PortId("bug".into()), label: "Bug".into() }, Port { id: PortId("ask".into()), label: "Ask".into() }]
+        );
+        assert_eq!(
+            classify(Some("kind"), &[("bug", "Bug")], Gate::Decide { unsure_below: 0.6, page_at: 0.85 }, Fallback::Extra).ports(),
+            vec![
+                Port { id: PortId("bug".into()), label: "Bug".into() },
+                Port { id: PortId("fallback".into()), label: "fallback".into() },
+                Port { id: PortId("nowhere".into()), label: "nowhere".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_names_the_node() {
+        let talk = node("talk", "Talk", NodeKind::Talk { prompt: String::new() });
+        let trigger = node("trigger", "Start", NodeKind::Trigger { watch: Watch::Called });
+        let ok = Graph { nodes: vec![trigger.clone(), talk.clone()], edges: vec![edge("trigger", "out", "talk")] };
+        assert_eq!(ok.validate(&|_| false), Ok(()));
+
+        assert_eq!(Graph { nodes: vec![], edges: vec![] }.validate(&|_| true), Err("a workflow needs a trigger".into()));
+        let second = node("again", "Extra", NodeKind::Trigger { watch: Watch::Called });
+        assert_eq!(
+            Graph { nodes: vec![trigger.clone(), second], edges: vec![] }.validate(&|_| true),
+            Err("\"Extra\" is a second trigger".into())
+        );
+        assert_eq!(
+            Graph { nodes: vec![trigger.clone(), talk.clone()], edges: vec![edge("talk", "out", "trigger")] }.validate(&|_| true),
+            Err("an edge enters the trigger \"Start\"".into())
+        );
+        assert_eq!(
+            Graph { nodes: vec![trigger.clone(), talk.clone()], edges: vec![edge("missing", "out", "talk")] }.validate(&|_| true),
+            Err("an edge leaves \"missing\", which is not a node".into())
+        );
+        assert_eq!(
+            Graph { nodes: vec![trigger.clone()], edges: vec![edge("trigger", "out", "missing")] }.validate(&|_| true),
+            Err("\"Start\" connects to \"missing\", which is not a node".into())
+        );
+        assert_eq!(
+            Graph { nodes: vec![trigger.clone(), talk.clone()], edges: vec![edge("talk", "nope", "talk")] }.validate(&|_| true),
+            Err("\"Talk\" has no port \"nope\"".into())
+        );
+        let reused = node("trigger", "Talk", NodeKind::Talk { prompt: String::new() });
+        assert_eq!(
+            Graph { nodes: vec![trigger.clone(), reused], edges: vec![] }.validate(&|_| true),
+            Err("\"Talk\" reuses the id \"trigger\"".into())
+        );
+        let call = node("route", "Route", NodeKind::Call { workflow: "gone".into() });
+        assert_eq!(
+            Graph { nodes: vec![trigger, call], edges: vec![edge("trigger", "out", "route")] }.validate(&|id| id == "kept"),
+            Err("\"Route\" calls \"gone\", which is not a called workflow".into())
+        );
     }
 }
