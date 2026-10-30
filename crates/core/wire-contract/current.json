@@ -4674,6 +4674,20 @@
                 ]
               },
               {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
                 "type": "object",
                 "properties": {
@@ -4999,6 +5013,45 @@
               "branchOn",
               "gate",
               "fallback"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
             ]
           },
           "Edge": {
@@ -9647,6 +9700,20 @@
                 ]
               },
               {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
                 "type": "object",
                 "properties": {
@@ -9967,6 +10034,45 @@
               "model",
               "instructions",
               "questions"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
             ]
           },
           "Edge": {
@@ -11934,6 +12040,20 @@
                 ]
               },
               {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
                 "type": "object",
                 "properties": {
@@ -12259,6 +12379,45 @@
               "branchOn",
               "gate",
               "fallback"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
             ]
           },
           "Edge": {
@@ -14166,6 +14325,20 @@
                 ]
               },
               {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
                 "type": "object",
                 "properties": {
@@ -14486,6 +14659,45 @@
               "model",
               "instructions",
               "questions"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
             ]
           },
           "Edge": {
@@ -15334,6 +15546,20 @@
                 ]
               },
               {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
                 "type": "object",
                 "properties": {
@@ -15659,6 +15885,45 @@
               "branchOn",
               "gate",
               "fallback"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
             ]
           },
           "Edge": {
@@ -16266,6 +16531,20 @@
                 ]
               },
               {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
                 "type": "object",
                 "properties": {
@@ -16586,6 +16865,45 @@
               "model",
               "instructions",
               "questions"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
             ]
           },
           "Edge": {
@@ -18215,6 +18533,20 @@
                 ]
               },
               {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
                 "type": "object",
                 "properties": {
@@ -18540,6 +18872,45 @@
               "branchOn",
               "gate",
               "fallback"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
             ]
           },
           "Edge": {
@@ -19326,6 +19697,20 @@
                 ]
               },
               {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
                 "type": "object",
                 "properties": {
@@ -19646,6 +20031,45 @@
               "model",
               "instructions",
               "questions"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
             ]
           },
           "Edge": {
@@ -21916,6 +22340,20 @@
                 ]
               },
               {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
                 "type": "object",
                 "properties": {
@@ -22241,6 +22679,45 @@
               "branchOn",
               "gate",
               "fallback"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
             ]
           },
           "Edge": {
@@ -23674,6 +24151,20 @@
                 ]
               },
               {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
                 "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
                 "type": "object",
                 "properties": {
@@ -23994,6 +24485,45 @@
               "model",
               "instructions",
               "questions"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
             ]
           },
           "Edge": {

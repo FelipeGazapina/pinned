@@ -6,7 +6,7 @@
 //! is gone the run resumes the same Claude conversation, and when that conversation is gone too it
 //! opens a new one seeded with the run's history, so the new session knows everything so far.
 
-use super::{Answers, Classify, Fallback, Gate, Graph, NodeId, NodeKind, PortId};
+use super::{Answers, Classify, Fallback, Gate, Graph, NodeId, NodeKind, PortId, Switch};
 use crate::agent::Subject;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -36,6 +36,9 @@ pub struct Run {
     /// The data flowing through the run, as n8n's item: `trigger` holds the input, and each
     /// classify node writes its answers under its name.
     pub context: Value,
+    /// The same answers keyed by classify node id, so a switch can branch without another model call.
+    #[serde(default)]
+    classified: BTreeMap<NodeId, Answers>,
     /// Outermost frame first. The last frame is the graph `drive` is inside.
     stack: Vec<Frame>,
     /// Returned by `drive` until `supply` answers it.
@@ -199,6 +202,7 @@ pub fn start(library: &Library, connector: &str, subject: Subject, input: Value,
         session: Session::None,
         log: Vec::new(),
         context: json!({ "trigger": input }),
+        classified: BTreeMap::new(),
         stack: Vec::new(),
         pending: None,
         ready: None,
@@ -360,6 +364,19 @@ fn step(run: &mut Run, library: &Library) -> Next {
             Err(why) => Next::Fail(why),
         },
         NodeKind::Call { workflow } => enter_call(run, library, &connector, &node_id, &workflow),
+        NodeKind::Switch(switch) => {
+            let (port, why) = switch_port(run, &switch);
+            let at = stamped(run);
+            let mut what = json!({ "switch": switch.question, "port": port.0 });
+            if let Some(why) = why {
+                what["why"] = json!(why);
+            }
+            record(run, &connector, &node_id, what, &at);
+            if let Some(frame) = run.stack.last_mut() {
+                frame.phase = Phase::Follow(port);
+            }
+            Next::Cont
+        }
         NodeKind::Classify(classify) => {
             let paging = port_ids
                 .into_iter()
@@ -503,9 +520,10 @@ fn classify_supplied(
     let Some(ready) = ready else {
         return Err("classify came back with nothing to decide".into());
     };
+    let node = front_node(run)?;
+    run.classified.insert(node.clone(), answers.clone());
     write_answers(run, &ready.name, answers);
     let paging = ready.paging.clone();
-    let node = front_node(run)?;
     let connector = run.stack.last().expect("frame").connector.clone();
     match pick_port(&ready.classify, answers, &|port| {
         paging.iter().any(|id| id == port)
@@ -606,6 +624,32 @@ fn wait_turn(run: &mut Run) {
 fn follow_out(run: &mut Run) {
     if let Some(frame) = run.stack.last_mut() {
         frame.phase = Phase::Follow(out_port());
+    }
+}
+
+fn switch_port(run: &Run, switch: &Switch) -> (PortId, Option<String>) {
+    let unanswered = || {
+        (
+            out_port(),
+            Some(format!(
+                "classify \"{}\" has not answered \"{}\"",
+                switch.classify.0, switch.question
+            )),
+        )
+    };
+    let Some(answers) = run.classified.get(&switch.classify) else {
+        return unanswered();
+    };
+    let Some((_, answer)) = answers.answers.iter().find(|(name, _)| name == &switch.question) else {
+        return unanswered();
+    };
+    match switch
+        .cases
+        .iter()
+        .find(|case| case.equals.eq_ignore_ascii_case(answer))
+    {
+        Some(case) => (case.id.clone(), None),
+        None => (out_port(), None),
     }
 }
 
@@ -778,7 +822,7 @@ fn path_pages(
         match &node.kind {
             NodeKind::Page { .. } => return true,
             NodeKind::Talk { .. } | NodeKind::Call { .. } | NodeKind::Stop => return false,
-            NodeKind::Trigger { .. } | NodeKind::StagePicked | NodeKind::Classify(_) => node
+            NodeKind::Trigger { .. } | NodeKind::StagePicked | NodeKind::Classify(_) | NodeKind::Switch(_) => node
                 .kind
                 .ports()
                 .iter()
@@ -1016,8 +1060,8 @@ fn fail(run: &mut Run, why: String) -> Drive {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        Answers, Choice, ChosenOn, Classify, Edge, Fallback, Gate, Graph, Node, NodeId, NodeKind,
-        PortId, Question, Watch,
+        Answers, Case, Choice, ChosenOn, Classify, Edge, Fallback, Gate, Graph, Node, NodeId,
+        NodeKind, PortId, Question, Switch, Watch,
     };
     use super::{
         drive, history, port_for, push, start, supply, Drive, Effect, Entry, Library, Session,
@@ -1482,6 +1526,187 @@ mod tests {
                     seeded: false,
                 },
             ],
+        );
+    }
+
+    fn agent_switch(cases: Vec<Case>) -> NodeKind {
+        NodeKind::Switch(Switch {
+            classify: nid("ask"),
+            question: "agent".into(),
+            cases,
+        })
+    }
+
+    fn case(id: &str, equals: &str) -> Case {
+        Case {
+            id: pid(id),
+            equals: equals.into(),
+        }
+    }
+
+    #[test]
+    fn switch_takes_the_first_matching_case_and_out_when_unanswered() {
+        let classify = NodeKind::Classify(Classify {
+            model: "m".into(),
+            instructions: String::new(),
+            questions: vec![Question {
+                name: "agent".into(),
+                ask: String::new(),
+                choices: vec![choice("yes", "yes"), choice("no", "no")],
+            }],
+            branch_on: None,
+            gate: Gate::Direct,
+            fallback: Fallback::None,
+        });
+        let switched = |cases: Vec<Case>, stop_port: &str| {
+            library(vec![(
+                "c1",
+                graph(
+                    vec![
+                        node("t", "Trigger", trigger()),
+                        node("ask", "Ask", classify.clone()),
+                        node("s", "Switch", agent_switch(cases)),
+                        node("stop", "Stop", talk("stopped")),
+                        node("go", "Go", talk("onward")),
+                    ],
+                    vec![
+                        edge("t", "out", "ask"),
+                        edge("ask", "out", "s"),
+                        edge("s", stop_port, "stop"),
+                        edge("s", "out", "go"),
+                    ],
+                ),
+            )])
+        };
+        let input = model_input("ENG-7");
+        let classify_effect = Effect::Classify {
+            connector: "c1".into(),
+            node: nid("ask"),
+            input: input.clone(),
+        };
+        let claim = Effect::Claim {
+            connector: "c1".into(),
+            key: "uuid".into(),
+        };
+        let open = |prompt: &str| Effect::Open {
+            owner: "c1".into(),
+            prompt: prompt.into(),
+            seeded: false,
+        };
+        run_effects(
+            &switched(vec![case("no", "no"), case("later", "later")], "no"),
+            "c1",
+            linear(),
+            "ENG-7",
+            answers(&[("agent", "NO")], None),
+            vec![classify_effect.clone(), claim.clone(), open("stopped")],
+        );
+        run_effects(
+            &switched(vec![case("no", "no"), case("later", "later")], "no"),
+            "c1",
+            linear(),
+            "ENG-7",
+            answers(&[("agent", "yes")], None),
+            vec![classify_effect.clone(), claim.clone(), open("onward")],
+        );
+        run_effects(
+            &switched(vec![case("No", "No"), case("no", "no")], "No"),
+            "c1",
+            linear(),
+            "ENG-7",
+            answers(&[("agent", "no")], None),
+            vec![classify_effect, claim.clone(), open("stopped")],
+        );
+
+        let bare = library(vec![(
+            "c1",
+            graph(
+                vec![
+                    node("t", "Trigger", trigger()),
+                    node("s", "Switch", agent_switch(vec![case("no", "no")])),
+                    node("go", "Go", talk("onward")),
+                ],
+                vec![edge("t", "out", "s"), edge("s", "out", "go")],
+            ),
+        )]);
+        let run = run_effects(
+            &bare,
+            "c1",
+            linear(),
+            "ENG-7",
+            answers(&[], None),
+            vec![claim, open("onward")],
+        );
+        assert_eq!(
+            run.log
+                .iter()
+                .find(|entry| entry.what.get("why").is_some())
+                .unwrap()
+                .what["why"],
+            json!("classify \"ask\" has not answered \"agent\"")
+        );
+    }
+
+    #[test]
+    fn a_saved_run_still_switches_on_the_classify_answer() {
+        let lib = library(vec![(
+            "c1",
+            graph(
+                vec![
+                    node("t", "Trigger", trigger()),
+                    node(
+                        "ask",
+                        "Ask",
+                        NodeKind::Classify(Classify {
+                            model: "m".into(),
+                            instructions: String::new(),
+                            questions: vec![Question {
+                                name: "agent".into(),
+                                ask: String::new(),
+                                choices: vec![choice("no", "no")],
+                            }],
+                            branch_on: None,
+                            gate: Gate::Direct,
+                            fallback: Fallback::None,
+                        }),
+                    ),
+                    node("s", "Switch", agent_switch(vec![case("no", "no")])),
+                    node("stop", "Stop", talk("stopped")),
+                    node("go", "Go", talk("onward")),
+                ],
+                vec![
+                    edge("t", "out", "ask"),
+                    edge("ask", "out", "s"),
+                    edge("s", "no", "stop"),
+                    edge("s", "out", "go"),
+                ],
+            ),
+        )]);
+        let mut run = start(&lib, "c1", linear(), json!("ENG-7"), AT);
+        assert!(matches!(act(&mut run, &lib), Effect::Classify { .. }));
+        supply(
+            &mut run,
+            Supplied::Classified(answers(&[("agent", "no")], None)),
+            AT,
+        );
+        let saved = serde_json::to_string(&run).unwrap();
+        let mut restored: super::Run = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored, run);
+        assert_eq!(
+            act(&mut restored, &lib),
+            Effect::Claim {
+                connector: "c1".into(),
+                key: "uuid".into()
+            }
+        );
+        supply(&mut restored, Supplied::Done, AT);
+        assert_eq!(
+            act(&mut restored, &lib),
+            Effect::Open {
+                owner: "c1".into(),
+                prompt: "stopped".into(),
+                seeded: false
+            }
         );
     }
 

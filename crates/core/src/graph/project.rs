@@ -1,6 +1,6 @@
 //! The legacy fields an app that predates graphs reads, derived from a graph.
 
-use super::{Fallback, Gate, Graph, Node, NodeKind, PortId, Watch};
+use super::{Fallback, Gate, Graph, Node, NodeId, NodeKind, PortId, Watch};
 use crate::connectors::{Ask, Category, Decide, Question, Trigger};
 
 /// What an older app sees of a graph workflow.
@@ -13,8 +13,8 @@ pub struct Projected {
     pub ask: Option<Ask>,
 }
 
-/// Lossy once the graph is more than a trigger, at most one classify and the nodes `migrate`
-/// makes; it then keeps the trigger and the first classify before the first talk.
+/// Lossy once the graph is more than what `migrate` builds. It keeps the trigger, the first
+/// direct classify before the first talk, and that classify's switch cases as `stop_on`.
 pub fn project(graph: &Graph) -> Projected {
     let trigger = graph.trigger();
     let NodeKind::Trigger { watch } = &trigger.kind else { unreachable!("trigger() returns the trigger") };
@@ -80,48 +80,25 @@ fn ask_of(graph: &Graph, node: &Node) -> Ask {
     let questions = classify
         .questions
         .iter()
-        .enumerate()
-        .map(|(index, question)| Question {
+        .map(|question| Question {
             name: question.name.clone(),
             ask: question.ask.clone(),
             choices: question.choices.iter().map(|choice| choice.label.clone()).collect(),
-            stop_on: stop_on(graph, index, &question.name),
+            stop_on: stop_on(graph, &node.id, &question.name),
         })
         .collect();
     Ask { model: classify.model.clone(), instructions: classify.instructions.clone(), questions }
 }
 
-fn stop_on(graph: &Graph, question_index: usize, question: &str) -> Vec<String> {
-    let prefix = format!("stop-{question_index}-");
-    let mut indexed = Vec::new();
-    for node in &graph.nodes {
-        if !matches!(node.kind, NodeKind::Stop) {
-            continue;
-        }
-        let Some(rest) = node.id.0.strip_prefix(&prefix) else { continue };
-        let Ok(index) = rest.parse::<usize>() else { continue };
-        indexed.push((index, node.name.clone()));
-    }
-    if !indexed.is_empty() {
-        indexed.sort_by_key(|(index, _)| *index);
-        return indexed.into_iter().map(|(_, name)| name).collect();
-    }
-    let Some(classify) = graph.nodes.iter().find(|node| {
-        matches!(&node.kind, NodeKind::Classify(classify) if classify.branch_on.as_deref() == Some(question) && matches!(classify.gate, Gate::Direct))
-    }) else {
-        return Vec::new();
-    };
+fn stop_on(graph: &Graph, ask: &NodeId, question: &str) -> Vec<String> {
     graph
         .nodes
         .iter()
-        .filter(|node| matches!(node.kind, NodeKind::Stop))
-        .filter(|node| {
-            graph.edges.iter().any(|edge| {
-                edge.to == node.id && edge.from == classify.id && classify.kind.ports().iter().any(|port| port.id == edge.port)
-            })
+        .find_map(|node| {
+            let NodeKind::Switch(switch) = &node.kind else { return None };
+            (switch.classify == *ask && switch.question == question).then(|| switch.cases.iter().map(|case| case.equals.clone()).collect())
         })
-        .map(|node| node.name.clone())
-        .collect()
+        .unwrap_or_default()
 }
 
 fn decide_of(graph: &Graph, node: &Node) -> Decide {
