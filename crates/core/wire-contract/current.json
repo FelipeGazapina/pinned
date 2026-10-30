@@ -3683,6 +3683,44 @@
                 ]
               },
               {
+                "description": "`connectors::BoxAccess`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_box_access"
+                  },
+                  "access": {
+                    "$ref": "#/$defs/BoxAccess"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "access"
+                ]
+              },
+              {
+                "description": "Allows or refuses the pending box question `id`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "answer_box"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "allow": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "allow"
+                ]
+              },
+              {
                 "description": "The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has\nnone, or into `dest` when given.",
                 "type": "object",
                 "properties": {
@@ -4088,6 +4126,103 @@
                   "channel",
                   "thread",
                   "issue"
+                ]
+              }
+            ]
+          },
+          "BoxAccess": {
+            "description": "The account's choice for each kind of actor.",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "fresh"
+                }
+              },
+              "session": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "worker": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "orchestrator": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              }
+            },
+            "required": [
+              "workflow",
+              "session",
+              "worker",
+              "orchestrator"
+            ]
+          },
+          "BoxPermission": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "off"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "A new box for each issue or thread.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fresh"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "One box for this kind of actor.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fixed"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "ask"
+                  }
+                },
+                "required": [
+                  "mode"
                 ]
               }
             ]
@@ -8817,6 +8952,44 @@
                 ]
               },
               {
+                "description": "`connectors::BoxAccess`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_box_access"
+                  },
+                  "access": {
+                    "$ref": "#/$defs/BoxAccess"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "access"
+                ]
+              },
+              {
+                "description": "Allows or refuses the pending box question `id`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "answer_box"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "allow": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "allow"
+                ]
+              },
+              {
                 "description": "The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has\nnone, or into `dest` when given.",
                 "type": "object",
                 "properties": {
@@ -9217,6 +9390,97 @@
                   "channel",
                   "thread",
                   "issue"
+                ]
+              }
+            ]
+          },
+          "BoxAccess": {
+            "description": "The account's choice for each kind of actor.",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "fresh"
+                }
+              },
+              "session": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "worker": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "orchestrator": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              }
+            }
+          },
+          "BoxPermission": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "off"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "A new box for each issue or thread.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fresh"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "One box for this kind of actor.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fixed"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "ask"
+                  }
+                },
+                "required": [
+                  "mode"
                 ]
               }
             ]
@@ -11144,6 +11408,44 @@
                 ]
               },
               {
+                "description": "`connectors::BoxAccess`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_box_access"
+                  },
+                  "access": {
+                    "$ref": "#/$defs/BoxAccess"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "access"
+                ]
+              },
+              {
+                "description": "Allows or refuses the pending box question `id`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "answer_box"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "allow": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "allow"
+                ]
+              },
+              {
                 "description": "The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has\nnone, or into `dest` when given.",
                 "type": "object",
                 "properties": {
@@ -11549,6 +11851,103 @@
                   "channel",
                   "thread",
                   "issue"
+                ]
+              }
+            ]
+          },
+          "BoxAccess": {
+            "description": "The account's choice for each kind of actor.",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "fresh"
+                }
+              },
+              "session": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "worker": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "orchestrator": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              }
+            },
+            "required": [
+              "workflow",
+              "session",
+              "worker",
+              "orchestrator"
+            ]
+          },
+          "BoxPermission": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "off"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "A new box for each issue or thread.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fresh"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "One box for this kind of actor.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fixed"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "ask"
+                  }
+                },
+                "required": [
+                  "mode"
                 ]
               }
             ]
@@ -13468,6 +13867,44 @@
                 ]
               },
               {
+                "description": "`connectors::BoxAccess`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_box_access"
+                  },
+                  "access": {
+                    "$ref": "#/$defs/BoxAccess"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "access"
+                ]
+              },
+              {
+                "description": "Allows or refuses the pending box question `id`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "answer_box"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "allow": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "allow"
+                ]
+              },
+              {
                 "description": "The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has\nnone, or into `dest` when given.",
                 "type": "object",
                 "properties": {
@@ -13868,6 +14305,97 @@
                   "channel",
                   "thread",
                   "issue"
+                ]
+              }
+            ]
+          },
+          "BoxAccess": {
+            "description": "The account's choice for each kind of actor.",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "fresh"
+                }
+              },
+              "session": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "worker": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "orchestrator": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              }
+            }
+          },
+          "BoxPermission": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "off"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "A new box for each issue or thread.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fresh"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "One box for this kind of actor.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fixed"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "ask"
+                  }
+                },
+                "required": [
+                  "mode"
                 ]
               }
             ]
@@ -18022,6 +18550,16 @@
                 "type": "null"
               }
             ]
+          },
+          "boxes": {
+            "description": "Absent on the wire when it is still the legacy default: workflows fresh, every other kind off.",
+            "$ref": "#/$defs/BoxAccess"
+          },
+          "box_asks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/BoxAsk"
+            }
           }
         },
         "required": [
@@ -19137,6 +19675,157 @@
               "at",
               "error"
             ]
+          },
+          "BoxAccess": {
+            "description": "The account's choice for each kind of actor.",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "fresh"
+                }
+              },
+              "session": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "worker": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "orchestrator": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              }
+            },
+            "required": [
+              "workflow",
+              "session",
+              "worker",
+              "orchestrator"
+            ]
+          },
+          "BoxPermission": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "off"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "A new box for each issue or thread.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fresh"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "One box for this kind of actor.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fixed"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "ask"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            ]
+          },
+          "BoxAsk": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "connector": {
+                "type": "string"
+              },
+              "subject": {
+                "$ref": "#/$defs/Subject"
+              }
+            },
+            "required": [
+              "id",
+              "connector",
+              "subject"
+            ]
+          },
+          "Subject": {
+            "description": "What a connector's session works on, which its callbacks into pinned report against.\nUntagged, so a stage message from a Linear session reads `\"issue\": \"<id>\"` as it always has.",
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
+            ]
           }
         }
       },
@@ -19213,6 +19902,16 @@
                 "type": "null"
               }
             ]
+          },
+          "boxes": {
+            "description": "Absent on the wire when it is still the legacy default: workflows fresh, every other kind off.",
+            "$ref": "#/$defs/BoxAccess"
+          },
+          "box_asks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/BoxAsk"
+            }
           }
         },
         "required": [
@@ -20294,6 +20993,151 @@
             },
             "required": [
               "at"
+            ]
+          },
+          "BoxAccess": {
+            "description": "The account's choice for each kind of actor.",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "fresh"
+                }
+              },
+              "session": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "worker": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "orchestrator": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              }
+            }
+          },
+          "BoxPermission": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "off"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "A new box for each issue or thread.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fresh"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "One box for this kind of actor.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fixed"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "ask"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            ]
+          },
+          "BoxAsk": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "connector": {
+                "type": "string"
+              },
+              "subject": {
+                "$ref": "#/$defs/Subject"
+              }
+            },
+            "required": [
+              "id",
+              "connector",
+              "subject"
+            ]
+          },
+          "Subject": {
+            "description": "What a connector's session works on, which its callbacks into pinned report against.\nUntagged, so a stage message from a Linear session reads `\"issue\": \"<id>\"` as it always has.",
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
             ]
           }
         }
@@ -21843,6 +22687,16 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes": {
+                "description": "Absent on the wire when it is still the legacy default: workflows fresh, every other kind off.",
+                "$ref": "#/$defs/BoxAccess"
+              },
+              "box_asks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/BoxAsk"
+                }
               }
             },
             "required": [
@@ -22958,6 +23812,122 @@
               "at",
               "error"
             ]
+          },
+          "BoxAccess": {
+            "description": "The account's choice for each kind of actor.",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "fresh"
+                }
+              },
+              "session": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "worker": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "orchestrator": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              }
+            },
+            "required": [
+              "workflow",
+              "session",
+              "worker",
+              "orchestrator"
+            ]
+          },
+          "BoxPermission": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "off"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "A new box for each issue or thread.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fresh"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "One box for this kind of actor.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fixed"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "ask"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            ]
+          },
+          "BoxAsk": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "connector": {
+                "type": "string"
+              },
+              "subject": {
+                "$ref": "#/$defs/Subject"
+              }
+            },
+            "required": [
+              "id",
+              "connector",
+              "subject"
+            ]
           }
         }
       },
@@ -23693,6 +24663,16 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes": {
+                "description": "Absent on the wire when it is still the legacy default: workflows fresh, every other kind off.",
+                "$ref": "#/$defs/BoxAccess"
+              },
+              "box_asks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/BoxAsk"
+                }
               }
             },
             "required": [
@@ -24774,6 +25754,116 @@
             },
             "required": [
               "at"
+            ]
+          },
+          "BoxAccess": {
+            "description": "The account's choice for each kind of actor.",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "fresh"
+                }
+              },
+              "session": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "worker": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              },
+              "orchestrator": {
+                "$ref": "#/$defs/BoxPermission",
+                "default": {
+                  "mode": "off"
+                }
+              }
+            }
+          },
+          "BoxPermission": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "off"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "A new box for each issue or thread.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fresh"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "One box for this kind of actor.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "fixed"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "ask"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            ]
+          },
+          "BoxAsk": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "connector": {
+                "type": "string"
+              },
+              "subject": {
+                "$ref": "#/$defs/Subject"
+              }
+            },
+            "required": [
+              "id",
+              "connector",
+              "subject"
             ]
           }
         }

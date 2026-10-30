@@ -11,6 +11,7 @@ use crate::{github, linear, slack, upstash, vercel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -398,7 +399,7 @@ pub enum RunsOn {
     Any,
     /// This machine first, else whichever is online.
     Machine(MachineId),
-    /// A new Upstash Box for each issue or thread, which the hub deletes once its session ends.
+    /// This workflow's sessions run in an Upstash Box.
     FreshBox(BoxStep),
 }
 
@@ -416,6 +417,98 @@ pub enum BoxSize {
     #[default]
     Medium,
     Large,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+pub enum BoxPermission {
+    #[default]
+    Off,
+    /// A new box for each issue or thread.
+    Fresh,
+    /// One box for this kind of actor.
+    Fixed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        row: Option<String>,
+    },
+    /// Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.
+    Ask,
+}
+
+impl BoxPermission {
+    pub fn fixed_row(&self) -> Option<&str> {
+        match self {
+            BoxPermission::Fixed { row: Some(row) } => Some(row),
+            _ => None,
+        }
+    }
+}
+
+fn fresh_workflow() -> BoxPermission {
+    BoxPermission::Fresh
+}
+
+/// The account's choice for each kind of actor.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BoxAccess {
+    #[serde(default = "fresh_workflow")]
+    pub workflow: BoxPermission,
+    #[serde(default)]
+    pub session: BoxPermission,
+    #[serde(default)]
+    pub worker: BoxPermission,
+    #[serde(default)]
+    pub orchestrator: BoxPermission,
+}
+
+impl Default for BoxAccess {
+    fn default() -> Self {
+        Self { workflow: fresh_workflow(), session: BoxPermission::Off, worker: BoxPermission::Off, orchestrator: BoxPermission::Off }
+    }
+}
+
+impl BoxAccess {
+    pub fn owns_row(&self, id: &str) -> bool {
+        [self.workflow.fixed_row(), self.session.fixed_row(), self.worker.fixed_row(), self.orchestrator.fixed_row()].into_iter().flatten().any(|row| row == id)
+    }
+}
+
+fn box_access_is_legacy(access: &BoxAccess) -> bool {
+    access == &BoxAccess::default()
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BoxAsk {
+    pub id: String,
+    pub connector: String,
+    pub subject: Subject,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+struct BoxGrant {
+    connector: String,
+    subject: Subject,
+    allow: bool,
+}
+
+pub enum FixedClaim {
+    Create,
+    Use(String),
+}
+
+fn box_ask_id(connector: &str, subject: &Subject) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(connector.as_bytes());
+    hasher.update([0]);
+    hasher.update(serde_json::to_vec(subject).unwrap_or_default());
+    hasher.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn keep_fixed_row(incoming: BoxPermission, stored: &BoxPermission) -> BoxPermission {
+    match (incoming, stored) {
+        (BoxPermission::Fixed { row: None }, BoxPermission::Fixed { row: Some(kept) }) => BoxPermission::Fixed { row: Some(kept.clone()) },
+        (incoming, _) => incoming,
+    }
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -633,6 +726,12 @@ struct Store {
     vercel: Option<vercel::Account>,
     #[serde(default)]
     upstash: Option<upstash::Account>,
+    #[serde(default)]
+    boxes: BoxAccess,
+    #[serde(default)]
+    box_asks: Vec<BoxAsk>,
+    #[serde(default)]
+    box_grants: Vec<BoxGrant>,
     connectors: Vec<Connector>,
 }
 
@@ -886,6 +985,11 @@ pub struct Settings {
     pub upstash: Option<upstash::Account>,
     pub connectors: Vec<Connector>,
     pub checked: Option<Check>,
+    /// Absent on the wire when it is still the legacy default: workflows fresh, every other kind off.
+    #[serde(default, skip_serializing_if = "box_access_is_legacy")]
+    pub boxes: BoxAccess,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub box_asks: Vec<BoxAsk>,
 }
 
 /// The integrations' keys, which never leave a store but by `export`.
@@ -2844,6 +2948,8 @@ impl Connectors {
             upstash: store.upstash.clone(),
             connectors: store.connectors.iter().cloned().map(presented).collect(),
             checked: self.checked.lock().unwrap().clone(),
+            boxes: store.boxes.clone(),
+            box_asks: store.box_asks.clone(),
         }
     }
 
@@ -2969,6 +3075,116 @@ impl Connectors {
     /// What the hub creates and boots boxes with. Never serialized, never sent to a client.
     pub fn box_keys(&self) -> Option<upstash::Keys> {
         Some(upstash::Keys { api_key: self.key(UPSTASH_KEY)?, claude_token: self.key(CLAUDE_TOKEN)? })
+    }
+
+    pub fn box_access(&self) -> BoxAccess {
+        self.store.lock().unwrap().boxes.clone()
+    }
+
+    /// Saves the account's box permissions.
+    pub fn set_box_access(&self, access: BoxAccess) -> Result<BoxAccess, String> {
+        let mut store = self.store.lock().unwrap();
+        let kept = BoxAccess {
+            workflow: keep_fixed_row(access.workflow, &store.boxes.workflow),
+            session: keep_fixed_row(access.session, &store.boxes.session),
+            worker: keep_fixed_row(access.worker, &store.boxes.worker),
+            orchestrator: keep_fixed_row(access.orchestrator, &store.boxes.orchestrator),
+        };
+        store.boxes = kept.clone();
+        self.save(&store)?;
+        self.wake.notify_one();
+        Ok(kept)
+    }
+
+    pub fn box_grant(&self, connector: &str, subject: &Subject) -> Option<bool> {
+        self.store.lock().unwrap().box_grants.iter().find(|grant| grant.connector == connector && &grant.subject == subject).map(|grant| grant.allow)
+    }
+
+    /// Drops a yes, so the next run of this work asks again once its box is gone.
+    pub fn forget_box_grant(&self, connector: &str, subject: &Subject) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        let before = store.box_grants.len();
+        store.box_grants.retain(|grant| !(grant.connector == connector && &grant.subject == subject));
+        if store.box_grants.len() == before {
+            return Ok(());
+        }
+        self.save(&store)
+    }
+
+    /// Records one question for this work, and posts it in a Slack thread when that is where the work started.
+    pub async fn ensure_box_ask(&self, connector: &str, subject: &Subject) -> Result<(), String> {
+        let id = box_ask_id(connector, subject);
+        let fresh = {
+            let mut store = self.store.lock().unwrap();
+            if store.box_grants.iter().any(|grant| grant.connector == connector && &grant.subject == subject) {
+                return Ok(());
+            }
+            if store.box_asks.iter().any(|ask| ask.connector == connector && &ask.subject == subject) {
+                return Ok(());
+            }
+            store.box_asks.push(BoxAsk { id, connector: connector.to_owned(), subject: subject.clone() });
+            self.save(&store)?;
+            true
+        };
+        if fresh {
+            if let (Subject::SlackThread { channel, thread }, Some(token)) = (subject, self.key(SLACK_KEY)) {
+                if let Err(e) = slack::post(&token, channel, thread, "Pinned wants an Upstash box for this thread. Allow it on the Upstash card in Connectors.").await {
+                    eprintln!("pinned: could not ask for a box in {channel}/{thread}: {e}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn answer_box(&self, id: &str, allow: bool) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        let Some(index) = store.box_asks.iter().position(|ask| ask.id == id) else {
+            return Err("that box question is gone".into());
+        };
+        let ask = store.box_asks.remove(index);
+        store.box_grants.retain(|grant| !(grant.connector == ask.connector && grant.subject == ask.subject));
+        store.box_grants.push(BoxGrant { connector: ask.connector, subject: ask.subject, allow });
+        self.save(&store)?;
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    /// Claims `proposed` as the workflow kind's one box, or returns the row already claimed.
+    pub fn claim_fixed_row(&self, proposed: &str) -> Result<FixedClaim, String> {
+        let mut store = self.store.lock().unwrap();
+        match &store.boxes.workflow {
+            BoxPermission::Fixed { row: Some(existing) } => Ok(FixedClaim::Use(existing.clone())),
+            BoxPermission::Fixed { row: None } => {
+                store.boxes.workflow = BoxPermission::Fixed { row: Some(proposed.to_owned()) };
+                self.save(&store)?;
+                Ok(FixedClaim::Create)
+            }
+            _ => Ok(FixedClaim::Create),
+        }
+    }
+
+    /// Points the fixed box at `proposed` when it still names `stale`. Another claim that won is returned as `Use`.
+    pub fn retake_fixed_row(&self, stale: &str, proposed: &str) -> Result<FixedClaim, String> {
+        let mut store = self.store.lock().unwrap();
+        match &store.boxes.workflow {
+            BoxPermission::Fixed { row: Some(current) } if current == stale => {
+                store.boxes.workflow = BoxPermission::Fixed { row: Some(proposed.to_owned()) };
+                self.save(&store)?;
+                Ok(FixedClaim::Create)
+            }
+            BoxPermission::Fixed { row: Some(current) } => Ok(FixedClaim::Use(current.clone())),
+            _ => Ok(FixedClaim::Create),
+        }
+    }
+
+    /// Forgets a claim that never got a row, so a later run can claim again.
+    pub fn release_fixed_row(&self, row: &str) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        if store.boxes.workflow.fixed_row() == Some(row) {
+            store.boxes.workflow = BoxPermission::Fixed { row: None };
+            self.save(&store)?;
+        }
+        Ok(())
     }
 
     /// Channels the bot was invited to, which a Slack connector can watch.
@@ -4333,6 +4549,95 @@ mod tests {
         connectors.disconnect_upstash().unwrap();
         assert!(connectors.box_keys().is_none());
         assert!(connectors.get_settings().upstash.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn box_permissions_round_trip_and_an_older_workflow_machine_stays() {
+        let workflow = Connector { runs_on: RunsOn::FreshBox(BoxStep { size: BoxSize::Small }), ..linear_connector() };
+        let (connectors, dir) = stored("box-access", vec![workflow]);
+        let before = serde_json::to_value(&connectors.get_settings().connectors[0]).unwrap()["machine"].clone();
+        assert_eq!(before, json!({ "kind": "upstash-box", "size": "small" }));
+        assert_eq!(connectors.box_access(), BoxAccess::default());
+        let access = BoxAccess { workflow: BoxPermission::Ask, session: BoxPermission::Fresh, worker: BoxPermission::Off, orchestrator: BoxPermission::Fixed { row: None } };
+        assert_eq!(connectors.set_box_access(access.clone()).unwrap(), access);
+        assert_eq!(connectors.box_access(), access);
+        let settings = serde_json::to_value(connectors.get_settings()).unwrap();
+        assert_eq!(settings["boxes"]["workflow"]["mode"], "ask");
+        assert_eq!(settings["boxes"]["session"]["mode"], "fresh");
+        assert_eq!(settings["boxes"]["orchestrator"]["mode"], "fixed");
+        assert!(settings["boxes"]["orchestrator"].get("row").is_none());
+        assert_eq!(settings["connectors"][0]["machine"], before, "an older app still reads the workflow's machine");
+        let kept = connectors.set_box_access(BoxAccess { workflow: BoxPermission::Fixed { row: None }, ..access }).unwrap();
+        assert_eq!(kept.workflow, BoxPermission::Fixed { row: None });
+        connectors.claim_fixed_row("row-1").unwrap();
+        let again = connectors.set_box_access(BoxAccess { workflow: BoxPermission::Fixed { row: None }, ..BoxAccess::default() }).unwrap();
+        assert_eq!(again.workflow, BoxPermission::Fixed { row: Some("row-1".into()) }, "saving fixed without a row keeps the box the hub created");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_account_stored_before_box_permissions_still_runs_a_box_workflow() {
+        let dir = temp_dir("legacy-box");
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = r#"{
+          "connectors": [{
+            "id": "c1", "name": "Bugs", "enabled": true,
+            "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": "/repo", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+            "instructions": "",
+            "machine": { "kind": "upstash-box", "size": "small" }
+          }]
+        }"#;
+        std::fs::write(dir.join("connectors.json"), saved).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(connectors.box_access(), BoxAccess { workflow: BoxPermission::Fresh, ..BoxAccess::default() });
+        let settings = serde_json::to_value(connectors.get_settings()).unwrap();
+        assert!(settings.get("boxes").is_none());
+        assert!(settings.get("box_asks").is_none());
+        assert_eq!(settings["connectors"][0]["machine"], json!({ "kind": "upstash-box", "size": "small" }));
+        let disk = on_disk(&dir);
+        assert!(disk.get("boxes").is_none());
+        assert!(disk.get("box_asks").is_none());
+        assert!(disk.get("box_grants").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn answering_a_box_wakes_the_next_check() {
+        let (connectors, dir) = stored("box-wake", vec![]);
+        let connectors = std::sync::Arc::new(connectors);
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let watched = connectors.clone();
+        let counted = hits.clone();
+        // `rt-multi-thread` is off, so a current-thread runtime has to be driven on its own thread.
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
+                watched
+                    .watch(
+                        |_work| async { Ok(()) },
+                        move |_| {
+                            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        },
+                    )
+                    .await;
+            });
+        });
+        let start = std::time::Instant::now();
+        while hits.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            assert!(start.elapsed() < std::time::Duration::from_secs(2), "the check never started");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let subject = Subject::LinearIssue { issue: "uuid-1".into() };
+        block_on(connectors.ensure_box_ask("c1", &subject)).unwrap();
+        let id = connectors.get_settings().box_asks[0].id.clone();
+        let before = hits.load(std::sync::atomic::Ordering::SeqCst);
+        connectors.answer_box(&id, true).unwrap();
+        let start = std::time::Instant::now();
+        while hits.load(std::sync::atomic::Ordering::SeqCst) == before {
+            assert!(start.elapsed() < std::time::Duration::from_secs(2), "yes did not wake the check");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

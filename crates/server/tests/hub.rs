@@ -1057,6 +1057,7 @@ fn fast() -> Policy {
         cooldown: Duration::from_secs(3600),
         tick: ms(50),
         sweep: ms(100),
+        max_open: 8,
     }
 }
 
@@ -1297,4 +1298,140 @@ fn a_box_whose_row_this_hub_cannot_read_is_still_deleted() {
     wait_for("the box to be deleted", || hub.boxes.live().is_empty());
     ana.client.wait_machines(&[]);
     wait_for("the row to go", || ana.rows(&hub) == 0);
+}
+
+fn created(hub: &TestHub) -> usize {
+    hub.boxes.state.lock().unwrap().created.len()
+}
+
+fn set_workflow(client: &mut Client, mode: &str) {
+    client.hub(json!({ "cmd": "set_box_access", "access": { "workflow": { "mode": mode } } })).unwrap();
+}
+
+#[test]
+fn a_fresh_workflow_permission_opens_one_box_per_run() {
+    let hub = TestHub::start_with_boxes("box_fresh", true, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "fresh");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Ok(()));
+    assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
+    assert_eq!(created(&hub), 2);
+    assert_eq!(ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["machine"]["kind"], "upstash-box");
+}
+
+#[test]
+fn a_fixed_workflow_permission_reuses_one_box_across_two_runs() {
+    let hub = TestHub::start_with_boxes("box_fixed", true, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "fixed");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
+    assert_eq!(created(&hub), 1, "the second run uses the box the first run opened");
+}
+
+#[test]
+fn an_ask_workflow_permission_opens_nothing_until_it_is_allowed() {
+    let hub = TestHub::start_with_boxes("box_ask", true, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "ask");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Err("Upstash Box: waiting for a yes before it opens a box for this".into()));
+    assert_eq!(created(&hub), 0);
+    let settings = ana.client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    let id = settings["box_asks"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(settings["connectors"][0]["machine"], json!({ "kind": "upstash-box", "size": "small" }));
+    ana.client.hub(json!({ "cmd": "answer_box", "id": id, "allow": true })).unwrap();
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Ok(()));
+    assert_eq!(created(&hub), 1);
+    assert_eq!(open(ana.box_run(issue("uuid-2"))), Err("Upstash Box: waiting for a yes before it opens a box for this".into()));
+    assert_eq!(created(&hub), 1, "a different run still waits for its own yes");
+}
+
+#[test]
+fn workflow_boxes_that_are_off_or_disconnected_open_nothing() {
+    let hub = TestHub::start_with_boxes("box_off", true, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "off");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Err("Upstash Box is off for workflows: choose a box permission in Connectors settings".into()));
+    assert_eq!(created(&hub), 0);
+    set_workflow(&mut ana.client, "fresh");
+    assert_eq!(ana.client.hub(json!({ "cmd": "disconnect_upstash" })), Ok(Value::Null));
+    assert_eq!(open(ana.box_run(issue("uuid-2"))), Err("Upstash Box is not connected: connect it in pinned's Connectors settings".into()));
+    assert_eq!(created(&hub), 0);
+}
+
+#[test]
+fn an_account_without_a_stored_box_permission_still_opens_a_box() {
+    let mut hub = TestHub::start_with_boxes("box_legacy", true, fast());
+    let ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    admin_on(&hub.database, "update accounts set store = store - 'boxes' - 'box_asks' - 'box_grants'");
+    hub.restart();
+    assert_eq!(hub.runtime.block_on(hub.hub().open(account, ana.box_run(issue("uuid-1")))), Ok(()));
+    assert_eq!(created(&hub), 1);
+}
+
+#[test]
+fn a_denied_ask_opens_nothing() {
+    let hub = TestHub::start_with_boxes("box_deny", true, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "ask");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Err("Upstash Box: waiting for a yes before it opens a box for this".into()));
+    let settings = ana.client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    let id = settings["box_asks"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(settings["box_asks"][0]["subject"]["issue"], "uuid-1");
+    ana.client.hub(json!({ "cmd": "answer_box", "id": id, "allow": false })).unwrap();
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Err("Upstash Box: you said no to a box for this, so none was opened".into()));
+    assert_eq!(created(&hub), 0);
+    let after = ana.client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    assert_eq!(after["box_asks"].as_array().map(|asks| asks.len()).unwrap_or(0), 0);
+}
+
+#[test]
+fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
+    let hub = TestHub::start_with_boxes("box_fixed_stays", true, Policy { done: Duration::from_millis(300), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "fixed");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = ana.box_machine();
+    let stage = |stage| {
+        hub.boxes.with_node(|node| {
+            node.link.as_ref().unwrap().forward(agent::Message::Stage { connector: ana.connector.clone(), subject: issue("uuid-1"), stage })
+        })
+    };
+    stage(Stage::Review).unwrap();
+    ana.client.call(&machine, json!({ "cmd": "close_tab", "tab": "tab-1" })).unwrap();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(1500) {
+        assert_eq!(hub.boxes.live().len(), 1, "fixed box reaped");
+        assert_eq!(ana.rows(&hub), 1, "fixed row reaped");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
+    assert_eq!(created(&hub), 1);
+}
+
+#[test]
+fn a_fresh_permission_stops_at_the_accounts_box_limit() {
+    let hub = TestHub::start_with_boxes("box_cap", true, Policy { max_open: 1, ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "fresh");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Ok(()));
+    assert_eq!(open(ana.box_run(issue("uuid-2"))), Err("Upstash Box: 1 box is already open, and this account's limit is 1".into()));
+    assert_eq!(created(&hub), 1);
 }
