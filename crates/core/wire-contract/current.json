@@ -707,6 +707,27 @@
                 ]
               },
               {
+                "description": "The account's `View`, after this machine stored a Claude setup-token for it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "share_login"
+                  },
+                  "account": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account",
+                  "token"
+                ]
+              },
+              {
                 "description": "The project's `ProjectView`. `account: null` runs it under the default account again.",
                 "type": "object",
                 "properties": {
@@ -4072,6 +4093,40 @@
                   "thread",
                   "issue"
                 ]
+              },
+              {
+                "description": "The other machines of this account that can take a share. A machine asks. A client cannot.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "peers"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "Forwards `body` to `to`. The hub keeps nothing from it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "relay"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "$ref": "#/$defs/ShareBody"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "body"
+                ]
               }
             ]
           },
@@ -5157,6 +5212,125 @@
               }
             ]
           },
+          "ShareBody": {
+            "description": "What one machine sends another. Another kind of share is another variant of this enum.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "accounts"
+                  },
+                  "grants": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Grant"
+                    }
+                  },
+                  "projects": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/ProjectChoice"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "kind",
+                  "grants",
+                  "projects"
+                ]
+              }
+            ]
+          },
+          "Grant": {
+            "description": "A login that is still held, or the fact that it was removed.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "live"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "$ref": "#/$defs/Provider"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "id",
+                  "provider",
+                  "name",
+                  "revision",
+                  "token"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "gone"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "state",
+                  "id",
+                  "revision"
+                ]
+              }
+            ]
+          },
+          "ProjectChoice": {
+            "description": "Which account a repository's sessions run under. `account: null` is the default account.",
+            "type": "object",
+            "properties": {
+              "repo": {
+                "type": "string"
+              },
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "revision": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "repo",
+              "account",
+              "revision"
+            ]
+          },
           "Target": {
             "type": "object",
             "properties": {
@@ -5861,6 +6035,27 @@
                 "required": [
                   "cmd",
                   "account"
+                ]
+              },
+              {
+                "description": "The account's `View`, after this machine stored a Claude setup-token for it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "share_login"
+                  },
+                  "account": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account",
+                  "token"
                 ]
               },
               {
@@ -9184,6 +9379,40 @@
                   "thread",
                   "issue"
                 ]
+              },
+              {
+                "description": "The other machines of this account that can take a share. A machine asks. A client cannot.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "peers"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "Forwards `body` to `to`. The hub keeps nothing from it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "relay"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "$ref": "#/$defs/ShareBody"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "body"
+                ]
               }
             ]
           },
@@ -10240,6 +10469,123 @@
                 "type": "string",
                 "const": "review"
               }
+            ]
+          },
+          "ShareBody": {
+            "description": "What one machine sends another. Another kind of share is another variant of this enum.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "accounts"
+                  },
+                  "grants": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Grant"
+                    }
+                  },
+                  "projects": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/ProjectChoice"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "kind",
+                  "grants"
+                ]
+              }
+            ]
+          },
+          "Grant": {
+            "description": "A login that is still held, or the fact that it was removed.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "live"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "$ref": "#/$defs/Provider"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "id",
+                  "provider",
+                  "name",
+                  "revision",
+                  "token"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "gone"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "state",
+                  "id",
+                  "revision"
+                ]
+              }
+            ]
+          },
+          "ProjectChoice": {
+            "description": "Which account a repository's sessions run under. `account: null` is the default account.",
+            "type": "object",
+            "properties": {
+              "repo": {
+                "type": "string"
+              },
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "revision": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "repo",
+              "revision"
             ]
           },
           "Target": {
@@ -11511,6 +11857,40 @@
                   "thread",
                   "issue"
                 ]
+              },
+              {
+                "description": "The other machines of this account that can take a share. A machine asks. A client cannot.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "peers"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "Forwards `body` to `to`. The hub keeps nothing from it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "relay"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "$ref": "#/$defs/ShareBody"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "body"
+                ]
               }
             ]
           },
@@ -12594,6 +12974,134 @@
                 "type": "string",
                 "const": "review"
               }
+            ]
+          },
+          "ShareBody": {
+            "description": "What one machine sends another. Another kind of share is another variant of this enum.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "accounts"
+                  },
+                  "grants": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Grant"
+                    }
+                  },
+                  "projects": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/ProjectChoice"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "kind",
+                  "grants",
+                  "projects"
+                ]
+              }
+            ]
+          },
+          "Grant": {
+            "description": "A login that is still held, or the fact that it was removed.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "live"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "$ref": "#/$defs/Provider"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "id",
+                  "provider",
+                  "name",
+                  "revision",
+                  "token"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "gone"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "state",
+                  "id",
+                  "revision"
+                ]
+              }
+            ]
+          },
+          "Provider": {
+            "description": "One row per agent CLI pinned can host. A table, so adding a provider is one entry, not a\nbranch per call site.",
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex",
+              "cursor"
+            ]
+          },
+          "ProjectChoice": {
+            "description": "Which account a repository's sessions run under. `account: null` is the default account.",
+            "type": "object",
+            "properties": {
+              "repo": {
+                "type": "string"
+              },
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "revision": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "repo",
+              "account",
+              "revision"
             ]
           }
         }
@@ -13826,6 +14334,40 @@
                   "thread",
                   "issue"
                 ]
+              },
+              {
+                "description": "The other machines of this account that can take a share. A machine asks. A client cannot.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "peers"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "Forwards `body` to `to`. The hub keeps nothing from it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "relay"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "$ref": "#/$defs/ShareBody"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "to",
+                  "body"
+                ]
               }
             ]
           },
@@ -14882,6 +15424,132 @@
                 "type": "string",
                 "const": "review"
               }
+            ]
+          },
+          "ShareBody": {
+            "description": "What one machine sends another. Another kind of share is another variant of this enum.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "accounts"
+                  },
+                  "grants": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Grant"
+                    }
+                  },
+                  "projects": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/ProjectChoice"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "kind",
+                  "grants"
+                ]
+              }
+            ]
+          },
+          "Grant": {
+            "description": "A login that is still held, or the fact that it was removed.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "live"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "$ref": "#/$defs/Provider"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "id",
+                  "provider",
+                  "name",
+                  "revision",
+                  "token"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "gone"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "state",
+                  "id",
+                  "revision"
+                ]
+              }
+            ]
+          },
+          "Provider": {
+            "description": "One row per agent CLI pinned can host. A table, so adding a provider is one entry, not a\nbranch per call site.",
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex",
+              "cursor"
+            ]
+          },
+          "ProjectChoice": {
+            "description": "Which account a repository's sessions run under. `account: null` is the default account.",
+            "type": "object",
+            "properties": {
+              "repo": {
+                "type": "string"
+              },
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "revision": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "repo",
+              "revision"
             ]
           }
         }
@@ -24825,6 +25493,29 @@
               "tab",
               "viewer"
             ]
+          },
+          {
+            "description": "A share from another machine of this account. The hub keeps nothing from `body`.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "share"
+              },
+              "id": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "body": {
+                "$ref": "#/$defs/ShareBody"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "body"
+            ]
           }
         ],
         "$defs": {
@@ -25452,6 +26143,27 @@
                 "required": [
                   "cmd",
                   "account"
+                ]
+              },
+              {
+                "description": "The account's `View`, after this machine stored a Claude setup-token for it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "share_login"
+                  },
+                  "account": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account",
+                  "token"
                 ]
               },
               {
@@ -28230,6 +28942,125 @@
                 ]
               }
             ]
+          },
+          "ShareBody": {
+            "description": "What one machine sends another. Another kind of share is another variant of this enum.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "accounts"
+                  },
+                  "grants": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Grant"
+                    }
+                  },
+                  "projects": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/ProjectChoice"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "kind",
+                  "grants",
+                  "projects"
+                ]
+              }
+            ]
+          },
+          "Grant": {
+            "description": "A login that is still held, or the fact that it was removed.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "live"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "$ref": "#/$defs/Provider"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "id",
+                  "provider",
+                  "name",
+                  "revision",
+                  "token"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "gone"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "state",
+                  "id",
+                  "revision"
+                ]
+              }
+            ]
+          },
+          "ProjectChoice": {
+            "description": "Which account a repository's sessions run under. `account: null` is the default account.",
+            "type": "object",
+            "properties": {
+              "repo": {
+                "type": "string"
+              },
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "revision": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "repo",
+              "account",
+              "revision"
+            ]
           }
         }
       },
@@ -28329,6 +29160,29 @@
               "type",
               "tab",
               "viewer"
+            ]
+          },
+          {
+            "description": "A share from another machine of this account. The hub keeps nothing from `body`.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "share"
+              },
+              "id": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "body": {
+                "$ref": "#/$defs/ShareBody"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "body"
             ]
           }
         ],
@@ -28956,6 +29810,27 @@
                 "required": [
                   "cmd",
                   "account"
+                ]
+              },
+              {
+                "description": "The account's `View`, after this machine stored a Claude setup-token for it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "share_login"
+                  },
+                  "account": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account",
+                  "token"
                 ]
               },
               {
@@ -31693,6 +32568,123 @@
                   "err"
                 ]
               }
+            ]
+          },
+          "ShareBody": {
+            "description": "What one machine sends another. Another kind of share is another variant of this enum.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "accounts"
+                  },
+                  "grants": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Grant"
+                    }
+                  },
+                  "projects": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/ProjectChoice"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "kind",
+                  "grants"
+                ]
+              }
+            ]
+          },
+          "Grant": {
+            "description": "A login that is still held, or the fact that it was removed.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "live"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "$ref": "#/$defs/Provider"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "id",
+                  "provider",
+                  "name",
+                  "revision",
+                  "token"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "gone"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "state",
+                  "id",
+                  "revision"
+                ]
+              }
+            ]
+          },
+          "ProjectChoice": {
+            "description": "Which account a repository's sessions run under. `account: null` is the default account.",
+            "type": "object",
+            "properties": {
+              "repo": {
+                "type": "string"
+              },
+              "account": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "revision": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "repo",
+              "revision"
             ]
           }
         }

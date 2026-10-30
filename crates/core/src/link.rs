@@ -25,6 +25,7 @@ const SILENT: Duration = Duration::from_secs(60);
 const DIAL_WAIT: Duration = Duration::from_secs(15);
 const HELLO_WAIT: Duration = Duration::from_secs(15);
 const CALL_WAIT: Duration = Duration::from_secs(60);
+const SHARE_WAIT: Duration = Duration::from_secs(15);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const SYNC_FIRST: Duration = Duration::from_secs(5);
@@ -44,6 +45,7 @@ struct Shared {
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>,
     next_call: AtomicU64,
     subscribed: Mutex<HashSet<(TabId, ViewerId)>>,
+    sent: Mutex<HashMap<String, (u64, String)>>,
 }
 
 impl Shared {
@@ -54,6 +56,10 @@ impl Shared {
 
     /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
     fn call(&self, call: HubCall) -> Result<Value, String> {
+        self.call_for(call, CALL_WAIT)
+    }
+
+    fn call_for(&self, call: HubCall, wait: Duration) -> Result<Value, String> {
         let id = self.next_call.fetch_add(1, Ordering::Relaxed);
         let (answer, answered) = mpsc::channel();
         self.pending.lock().unwrap().insert(id, answer);
@@ -61,11 +67,11 @@ impl Shared {
             self.pending.lock().unwrap().remove(&id);
             return Err("not connected to the hub".into());
         }
-        match answered.recv_timeout(CALL_WAIT) {
+        match answered.recv_timeout(wait) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.pending.lock().unwrap().remove(&id);
-                Err("the hub did not answer within 60 seconds".into())
+                Err(format!("the hub did not answer within {} seconds", wait.as_secs()))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err("the connection to the hub dropped".into()),
         }
@@ -78,6 +84,7 @@ impl Shared {
     fn disconnected(&self, machine: &Machine) {
         *self.out.lock().unwrap() = None;
         self.pending.lock().unwrap().clear();
+        self.sent.lock().unwrap().clear();
         for (tab, viewer) in self.subscribed.lock().unwrap().drain() {
             machine.detach(&tab, &viewer);
         }
@@ -181,7 +188,49 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
             }
         }
         state.save(&file);
+        push_shares(shared, machine);
     }
+}
+
+#[derive(serde::Deserialize)]
+struct Peer {
+    id: String,
+    #[serde(default)]
+    generation: u64,
+}
+
+fn push_shares(shared: &Shared, machine: &Machine) {
+    let Some(body) = machine.share_body() else { return };
+    let Ok(bytes) = serde_json::to_vec(&body) else { return };
+    if bytes.len() > crate::share::RELAY_LIMIT {
+        return;
+    }
+    let fingerprint = fingerprint(&bytes);
+    let peers = match shared.call_for(HubCall::Peers, SHARE_WAIT) {
+        Ok(value) => serde_json::from_value::<Vec<Peer>>(value).unwrap_or_default(),
+        Err(e) => {
+            eprintln!("pinned: could not list machines to share with: {e}");
+            return;
+        }
+    };
+    let pending: Vec<Peer> = {
+        let mut sent = shared.sent.lock().unwrap();
+        sent.retain(|id, _| peers.iter().any(|peer| &peer.id == id));
+        peers.into_iter().filter(|peer| !sent.get(&peer.id).is_some_and(|(generation, have)| *generation == peer.generation && have == &fingerprint)).collect()
+    };
+    for peer in pending {
+        match shared.call_for(HubCall::Relay { to: peer.id.clone(), body: body.clone() }, SHARE_WAIT) {
+            Ok(_) => {
+                shared.sent.lock().unwrap().insert(peer.id, (peer.generation, fingerprint.clone()));
+            }
+            Err(e) => eprintln!("pinned: could not share with {}: {e}", peer.id),
+        }
+    }
+}
+
+fn fingerprint(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, version: String, mut stopped: watch::Receiver<bool>) {
@@ -324,6 +373,13 @@ fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSende
             shared.subscribed.lock().unwrap().remove(&(tab, viewer));
         }
         Ok(ToMachine::Hello { .. }) => {}
+        Ok(ToMachine::Share { id, body }) => {
+            let (machine, out) = (machine.clone(), out.clone());
+            std::thread::spawn(move || {
+                let reply = MachineFrame::Reply(Reply::new(id, machine.apply_share(body).map(|_| Value::Null)));
+                let _ = out.send(serde_json::to_string(&reply).unwrap());
+            });
+        }
         Err(e) => {
             let value: Value = serde_json::from_str(frame).unwrap_or_default();
             if let (Some("call"), Some(id)) = (value["type"].as_str(), value["id"].as_u64()) {

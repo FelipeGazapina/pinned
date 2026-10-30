@@ -1,6 +1,7 @@
 //! The agent CLI logins a machine runs sessions under. Each login lives in a CLI home folder of
 //! its own, so two subscriptions of one provider coexist on one Mac.
 
+use crate::share::{self, ShareBody};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
@@ -8,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+pub use crate::provider::Provider;
 
 /// Set on every session, so `pinned statusline` knows whose usage it reports.
 pub const ACCOUNT_ENV: &str = "PINNED_ACCOUNT";
@@ -19,16 +22,6 @@ const FILE: &str = "accounts.json";
 
 pub fn default_account() -> AccountId {
     DEFAULT.into()
-}
-
-/// One row per agent CLI pinned can host. A table, so adding a provider is one entry, not a
-/// branch per call site.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, schemars::JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum Provider {
-    Claude,
-    Codex,
-    Cursor,
 }
 
 pub struct Spec {
@@ -155,6 +148,7 @@ pub struct Accounts {
     dir: Option<PathBuf>,
     home: PathBuf,
     added: Mutex<Vec<Account>>,
+    share: Mutex<share::Ledger>,
 }
 
 impl Accounts {
@@ -162,7 +156,7 @@ impl Accounts {
     /// where the built-in accounts' CLIs keep their logins.
     pub fn load(dir: Option<&Path>, home: PathBuf) -> Accounts {
         let added = dir.and_then(|d| std::fs::read(d.join(FILE)).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        Accounts { dir: dir.map(Path::to_path_buf), home, added: Mutex::new(added) }
+        Accounts { dir: dir.map(Path::to_path_buf), home, added: Mutex::new(added), share: Mutex::new(share::Ledger::load(dir)) }
     }
 
     /// The built-in accounts, then the added ones in the order they were added.
@@ -191,14 +185,8 @@ impl Accounts {
             return Err(format!("an account {id} already exists"));
         }
         let account = Account { id, provider, name: name.into() };
-        let mut folder = std::fs::DirBuilder::new();
-        folder.recursive(true);
         // The home holds the CLI's login, so only its owner reads it.
-        #[cfg(unix)]
-        folder.mode(0o700);
-        folder
-            .create(self.home(&account))
-            .map_err(|e| format!("could not make {}'s folder: {e}", account.id))?;
+        make_home(&self.home(&account)).map_err(|e| format!("could not make {}'s folder: {e}", account.id))?;
         added.push(account.clone());
         save(dir, &added)?;
         Ok(account)
@@ -210,6 +198,7 @@ impl Accounts {
         if account.is_builtin() {
             return Err(format!("{id} is built in and can't be removed"));
         }
+        self.share.lock().unwrap().revoke(id)?;
         let mut added = self.added.lock().unwrap();
         added.retain(|a| a.id != id);
         save(self.dir.as_ref().expect("an added account has a folder"), &added)
@@ -233,8 +222,80 @@ impl Accounts {
         if !account.is_builtin() {
             env.push((account.provider.spec().home_env.to_owned(), self.home(account).display().to_string()));
         }
+        if let Some(pair) = self.share.lock().unwrap().session_env(account.provider, &account.id) {
+            env.push(pair);
+        }
         env.push((ACCOUNT_ENV.to_owned(), account.id.clone()));
         env
+    }
+
+    pub fn keep_token(&self, account: &Account, token: &str) -> Result<(), String> {
+        self.share.lock().unwrap().keep(&account.id, account.provider, &account.name, token)
+    }
+
+    pub fn shared_token(&self, id: &str) -> Option<String> {
+        self.share.lock().unwrap().token(id)
+    }
+
+    pub fn share_body(&self) -> Option<ShareBody> {
+        self.share.lock().unwrap().export()
+    }
+
+    pub fn apply_share(&self, body: &ShareBody) -> Result<(), String> {
+        self.share.lock().unwrap().apply(body)?;
+        self.reconcile()
+    }
+
+    pub fn note_project(&self, repo: &str, account: Option<String>) -> Result<(), String> {
+        self.share.lock().unwrap().note_project(repo, account)
+    }
+
+    pub fn shared_account(&self, repo: &str) -> Option<Option<String>> {
+        self.share.lock().unwrap().project(repo)
+    }
+
+    pub fn project_choices(&self) -> Vec<share::ProjectChoice> {
+        self.share.lock().unwrap().projects()
+    }
+
+    fn reconcile(&self) -> Result<(), String> {
+        let share = self.share.lock().unwrap();
+        let live = share.live();
+        let removed = share.removed();
+        drop(share);
+        let mut added = self.added.lock().unwrap();
+        let mut changed = false;
+        for id in &removed {
+            if builtin_id(id) {
+                continue;
+            }
+            let before = added.len();
+            added.retain(|account| &account.id != id);
+            changed |= added.len() != before;
+        }
+        for (id, provider, name) in &live {
+            if builtin_id(id) {
+                continue;
+            }
+            if let Some(existing) = added.iter_mut().find(|account| &account.id == id) {
+                if existing.provider != *provider || existing.name != *name {
+                    existing.provider = *provider;
+                    existing.name = name.clone();
+                    changed = true;
+                }
+            } else {
+                let account = Account { id: id.clone(), provider: *provider, name: name.clone() };
+                make_home(&self.home(&account)).map_err(|e| format!("could not make {id}'s folder: {e}"))?;
+                added.push(account);
+                changed = true;
+            }
+        }
+        if changed {
+            if let Some(dir) = &self.dir {
+                save(dir, &added)?;
+            }
+        }
+        Ok(())
     }
 
     /// Asks the account's CLI, at `bin`, who is signed in.
@@ -262,6 +323,18 @@ fn run(mut cmd: Command) -> Option<Output> {
         std::thread::sleep(Duration::from_millis(20));
     }
     child.wait_with_output().ok()
+}
+
+fn builtin_id(id: &str) -> bool {
+    Provider::ALL.iter().any(|provider| provider.spec().builtin == id)
+}
+
+fn make_home(path: &Path) -> Result<(), String> {
+    let mut folder = std::fs::DirBuilder::new();
+    folder.recursive(true);
+    #[cfg(unix)]
+    folder.mode(0o700);
+    folder.create(path).map_err(|e| e.to_string())
 }
 
 fn save(dir: &Path, added: &[Account]) -> Result<(), String> {

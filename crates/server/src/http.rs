@@ -11,7 +11,7 @@ use pinned_core::agent::Subject;
 use pinned_core::account::{Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn};
 use pinned_core::link::UNAUTHORIZED;
 use pinned_core::sync;
-use pinned_core::wire::{AccountView, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine};
+use pinned_core::wire::{AccountView, Call, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -381,6 +381,10 @@ async fn serve_client(hub: Arc<Hub>, mut socket: WebSocket) {
 fn client_frame(hub: &Arc<Hub>, account: &Arc<Account>, client: u64, text: &str) {
     match serde_json::from_str::<ClientFrame>(text) {
         Ok(ClientFrame::Call { id, machine, call }) => {
+            if matches!(&call, Call::ShareLogin { .. }) {
+                account.to_client(client, &ToClient::Reply(Reply::new(id, Err("a login is saved on this machine, not sent through the hub".into()))));
+                return;
+            }
             // Sent before anything is spawned, so fast typing reaches the machine in order.
             let sent = account.send_call(&machine, call);
             let (hub, account) = (hub.clone(), account.clone());
@@ -502,6 +506,21 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
             }
         }
         Ok(MachineFrame::Output { viewer, tab, data }) => account.output(machine, &viewer, tab, data),
+        Ok(MachineFrame::Call { id, call: HubCall::Peers }) => {
+            let peers = account.peers(machine);
+            let result = serde_json::to_value(&peers).map_err(|e| e.to_string());
+            account.to_machine(machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+        }
+        Ok(MachineFrame::Call { id, call: HubCall::Relay { to, body } }) => {
+            let (hub, account, machine) = (hub.clone(), account.clone(), machine.to_owned());
+            tokio::spawn(async move {
+                let result = hub.relay(&account, &machine, &to, body).await;
+                if let Err(e) = &result {
+                    eprintln!("pinned-server: could not share from {machine}: {e}");
+                }
+                account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+            });
+        }
         Ok(MachineFrame::Call { id, call }) => {
             let (hub, account, machine) = (hub.clone(), account.clone(), machine.to_owned());
             tokio::spawn(async move {
