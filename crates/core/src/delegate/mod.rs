@@ -263,6 +263,7 @@ pub struct Task {
     pub client_request_id: Option<String>,
     pub role: Option<String>,
     pub held: Option<HeldExit>,
+    pub parent_session: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1134,7 +1135,7 @@ exec '{real}' "$@"
         assert_ne!(fresh_id, first);
         let fresh = delegates.started_json(&fresh_id).unwrap();
         assert_eq!(fresh["workState"], "working");
-        let next = format!("end your turn and do not poll; pinned types a notice when this session is idle, or the user sends it from the task's card; then call task_status with this taskId \"{fresh_id}\"");
+        let next = format!("end your turn and do not poll; pinned delivers the notice when the turn ends or when this session is idle, or the user sends it from the task's card; then call task_status with this taskId \"{fresh_id}\"");
         assert_eq!(fresh["next"], next);
         let status = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &fresh_id).unwrap();
         assert_eq!(status["workState"], "working");

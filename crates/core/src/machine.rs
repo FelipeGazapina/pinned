@@ -30,6 +30,15 @@ pub type ViewerId = String;
 pub type Sink = Box<dyn Fn(&[u8]) + Send + Sync>;
 pub type Listener = Box<dyn Fn(&Event) + Send + Sync>;
 
+fn merge_context(recall: &str, notices: &str) -> String {
+    match (recall.is_empty(), notices.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => recall.to_owned(),
+        (true, false) => notices.to_owned(),
+        (false, false) => format!("{recall}\n\n{notices}"),
+    }
+}
+
 pub struct Launch {
     pub exe: PathBuf,
     /// Each provider's CLI. One left out runs as its bare name, found on PATH.
@@ -300,9 +309,19 @@ impl Tab {
         }
     }
 
-    /// A notice may be typed. Cursor never reports Done, so it is never idle.
     fn notice_idle(&self) -> bool {
-        self.session.is_some() && self.status == Some(AgentStatus::Done) && self.turn_pending.is_none() && self.draft.empty()
+        if self.session.is_none() || self.turn_pending.is_some() || !self.draft.empty() {
+            return false;
+        }
+        if self.account.provider == Provider::Cursor {
+            return self.status == Some(AgentStatus::Done);
+        }
+        match self.status {
+            Some(AgentStatus::Done) => true,
+            Some(AgentStatus::NeedsInput) => !self.interrupted,
+            None => self.claude_session.is_some(),
+            Some(AgentStatus::Working | AgentStatus::Failed) => false,
+        }
     }
 
     fn note_submit(&mut self) {
@@ -374,6 +393,7 @@ impl Machine {
         let models = dir.as_ref().map(|d| d.join("models")).filter(|_| launch.vector_search);
         let load = models.map(|models| -> memory::Loader { Arc::new(move || Ok(Arc::new(model2vec::Model2Vec::load(&model2vec::fetch(&models)?)?) as Arc<dyn memory::Embedder>)) });
         let memories = memory::Memories::new(dir.as_ref().map(|d| d.join("memory")), load);
+        let delegates = crate::delegate::Delegates::load(dir.as_ref().map(|d| d.join("tasks.json")));
         let home = home();
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
@@ -403,7 +423,7 @@ impl Machine {
             notice_loop: AtomicBool::new(false),
             usage: Mutex::default(),
             agents: Mutex::default(),
-            delegates: crate::delegate::Delegates::default(),
+            delegates,
             memories,
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
@@ -1490,9 +1510,16 @@ impl Machine {
             AgentStatus::Failed => format!("stopped on an error: {}", event.message.as_deref().unwrap_or("unknown")),
             AgentStatus::Working => return,
         };
-        if let Some(orchestrator) = self.live_tab(&role_env(Role::Orchestrator, project)) {
-            let _ = self.type_prompt(&orchestrator, &format!("[pinned] Worker {worker} \"{title}\" {what}"));
+        let Some(orchestrator) = self.live_tab(&role_env(Role::Orchestrator, project)) else { return };
+        let line = format!("[pinned] Worker {worker} \"{title}\" {what}");
+        let blocked = self.tab(&orchestrator, |t| !t.draft.empty() || t.session.as_ref().is_none_or(|session| !session.raw())).unwrap_or(true);
+        if blocked {
+            let session = self.tab(&orchestrator, |t| t.claude_session.clone()).ok().flatten();
+            self.delegates.queue_report(&orchestrator, session, line);
+            self.arm_notices();
+            return;
         }
+        let _ = self.type_prompt(&orchestrator, &line);
     }
 
     /// The projects this machine syncs: the most recently opened checkout of each git origin.
@@ -1650,6 +1677,14 @@ impl Machine {
         for id in &ids {
             self.refresh_stats(id, false);
         }
+        let sessions: Vec<(String, String)> = ids
+            .iter()
+            .filter_map(|id| self.tab(id, |t| t.claude_session.clone()).ok().flatten().map(|session| (session, id.clone())))
+            .collect();
+        self.delegates.rebind(&sessions);
+        if self.delegates.has_pending() {
+            self.arm_notices();
+        }
         ids
     }
 
@@ -1666,10 +1701,14 @@ impl Machine {
             let Some(machine) = me.upgrade() else { return Err("pinned is shutting down".into()) };
             match message {
                 Message::Agent(event) => {
-                    // Recorded first: recall can wait on a memory store, and a turn's later events
-                    // must not land before this one.
+                    let notices = if event.hook_feedback { machine.take_notices(&event) } else { String::new() };
                     machine.record_event(event.clone());
-                    Ok(machine.recall(&event))
+                    if !notices.is_empty() && event.status == AgentStatus::Done {
+                        if let Some(tab) = &event.tab {
+                            let _ = machine.tab(tab, |t| t.turn_pending = Some(Instant::now()));
+                        }
+                    }
+                    Ok(merge_context(&machine.recall(&event), &notices))
                 }
                 Message::Usage { usage: report, account } => {
                     let account = account.unwrap_or_else(accounts::default_account);
@@ -1695,11 +1734,10 @@ impl Machine {
     /// Ends every session as the machine shuts down, keeping them saved for the next launch.
     pub fn quit(&self) {
         self.quitting.store(true, Ordering::SeqCst);
-        let path = self.launch.path_env.clone();
-        for id in self.delegates.running() {
-            let _ = self.delegates.cancel_tree(&id, "pinned is shutting down", path.as_deref());
-        }
+        self.stamp_parent_sessions();
+        self.delegates.stop_for_restart(self.launch.path_env.as_deref());
         self.delegates.kill_remembered();
+        let path = self.launch.path_env.clone();
         let (tabs, owned) = {
             let tabs = self.tabs.lock().unwrap();
             let owned: Vec<PathBuf> = tabs.values().filter_map(|tab| tab.made.clone()).collect();
@@ -1770,7 +1808,7 @@ impl Machine {
     }
 
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
-        use crate::delegate::{driver_args, resolve_access, spawn, Access, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
+        use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
         let caller = Self::require_caller(tab, parent_task)?;
         let parent = if let Some(tab) = caller.tab.clone() {
             Parent::Tab(tab)
@@ -1824,6 +1862,10 @@ impl Machine {
             Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
             Claim::Fresh(task) => *task,
         };
+        if let Some(tab) = caller.tab.as_deref() {
+            let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
+            self.delegates.note_parent(&task.id, session);
+        }
         self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
         if account.provider == Provider::Cursor {
             if let Some(name) = model.clone() {
@@ -1895,8 +1937,6 @@ impl Machine {
         self.delegates.started_json(&task.id).map(|value| value.to_string())
     }
 
-    /// Idle means the session is up, the last report was Done, no submit is outstanding, and the
-    /// input line is empty. A tab that never reports Done, such as Cursor, is never idle.
     fn parent_idle(&self, tab: &str) -> bool {
         self.tab(tab, |t| t.notice_idle()).unwrap_or(false)
     }
@@ -1922,6 +1962,9 @@ impl Machine {
         let Some((text, ids)) = self.delegates.claim_notice(tab) else { return };
         if self.write_notice(tab, &text) != Ok(true) {
             self.delegates.release_notice(&ids);
+            self.delegates.release_reports(tab);
+        } else {
+            self.delegates.drop_claimed_reports(tab);
         }
     }
 
@@ -2145,8 +2188,28 @@ impl Machine {
         };
         if changed {
             self.save_sessions();
+            self.stamp_parent_sessions();
         }
         new
+    }
+
+    fn take_notices(&self, event: &AgentEvent) -> String {
+        let Some(tab) = event.tab.as_deref() else { return String::new() };
+        let wants = event.status == AgentStatus::Done || (event.status == AgentStatus::Working && event.prompt.is_some());
+        if !wants {
+            return String::new();
+        }
+        let Some((text, _)) = self.delegates.claim_notice(tab) else { return String::new() };
+        self.delegates.drop_claimed_reports(tab);
+        text
+    }
+
+    fn stamp_parent_sessions(&self) {
+        let sessions = {
+            let tabs = self.tabs.lock().unwrap();
+            tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session))).collect()
+        };
+        self.delegates.stamp_sessions(&sessions);
     }
 
     /// Reads what the tab's transcript gained, off the caller's thread, then sends the tabs again.
@@ -2969,6 +3032,7 @@ mod tests {
             prompt: None,
             snapshot: None,
             permission_mode: None,
+            hook_feedback: false,
         };
         m.record_event(event(AgentStatus::NeedsInput, Some("Fix the build"), Some("Claude needs your permission to use Bash")));
         let view = m.view(&tab).unwrap();
@@ -2989,7 +3053,7 @@ mod tests {
         git(&dir, &["branch", "other"]);
         let m = machine();
         let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
-        let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None };
+        let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false };
         m.record_event(working.clone());
         let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false, from: None };
         assert!(m.call(checkout.clone()).unwrap_err().contains("claude is working"));
@@ -3122,7 +3186,7 @@ mod tests {
     fn a_session_held_at_its_usage_limit_stays_held_until_the_next_turn() {
         let m = machine();
         let tab = m.open_tab(None, false).unwrap();
-        let failed = |resume_at| AgentEvent { status: AgentStatus::Failed, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at, prompt: None, snapshot: None, permission_mode: None };
+        let failed = |resume_at| AgentEvent { status: AgentStatus::Failed, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false };
         m.record_status(&tab, &failed(Some(1792400000)));
         m.call(Call::AutoResume { tab: tab.clone(), on: false }).unwrap();
         assert!(m.view(&tab).unwrap().held);
@@ -3458,6 +3522,7 @@ mod tests {
             prompt: Some("fix the bug".into()),
             snapshot: None,
             permission_mode: None,
+            hook_feedback: false,
         };
         m.record_event(working.clone());
         m.record_event(AgentEvent { status: AgentStatus::Done, prompt: None, snapshot: None, ..working });
@@ -4449,6 +4514,7 @@ exec sleep 30
             prompt: None,
             snapshot: None,
             permission_mode: None,
+            hook_feedback: false,
         }
     }
 
@@ -4806,7 +4872,7 @@ while True:
         assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
-        m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None });
+        m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false });
         assert_eq!(m.view(&tab).unwrap().cwd, path, "reviewing a worker's worktree moved the orchestrator into it");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4964,7 +5030,7 @@ while True:
             m.call(Call::MemorySave { path: path.clone(), title: title.into(), text: text.into(), kind: None, id: None }).unwrap();
         }
         let prompt = |tab: &str, status, prompt: &str| {
-            let event = AgentEvent { status, cwd: None, message: None, tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: Some(prompt.into()), snapshot: None, permission_mode: None };
+            let event = AgentEvent { status, cwd: None, message: None, tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: Some(prompt.into()), snapshot: None, permission_mode: None, hook_feedback: false };
             ask(&sock, &serde_json::to_string(&Message::Agent(event)).unwrap())
         };
         assert_eq!(
@@ -4976,6 +5042,210 @@ while True:
         assert_eq!(prompt(&scratch, AgentStatus::Working, "when does the hub deploy?"), Ok(String::new()));
         assert_eq!(m.view(&plain).unwrap().status, Some(AgentStatus::Done), "the events were not recorded");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Claude's idle Notification follows Stop and replaces Done. A child that finishes after that
+    /// still has to reach the parent with no click.
+    #[test]
+    #[cfg(unix)]
+    fn an_idle_notification_does_not_strand_a_notice() {
+        let (m, tab, file) = pty_file("notice-idle-notify");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.record_event(AgentEvent { status: AgentStatus::NeedsInput, message: Some("Claude is waiting for your input".into()), ..done_event(&tab) });
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "After idle");
+        m.maybe_deliver(&tab);
+        let needle = format!("[pinned] Delegated task {id} \"After idle\"");
+        wait_for("the notice after the idle notification", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(file);
+    }
+
+    /// A draft blocks typing. The turn's Stop hook still hands the notice to the model.
+    #[test]
+    #[cfg(unix)]
+    fn a_stop_hook_feeds_a_notice_the_draft_would_block() {
+        let root = temp("notice-stop");
+        let sock = root.join("hook.sock");
+        let file = root.join("typed.bin");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, None, Some(root.clone()), |_| {});
+        m.listen(|_| Err("not a connector".into())).unwrap();
+        let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
+        m.write_input(&tab, b"xyz").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Mid");
+        let mut message = serde_json::to_value(Message::Agent(done_event(&tab))).unwrap();
+        message["hook_feedback"] = json!(true);
+        let reply = ask(&sock, &message.to_string()).unwrap();
+        assert!(reply.contains(&id), "the Stop hook did not carry the notice: {reply}");
+        std::thread::sleep(Duration::from_millis(200));
+        let typed = read_pty(&file);
+        assert!(typed.contains("xyz"), "the draft was not in the terminal: {typed}");
+        assert!(!typed.contains("[pinned]"), "the notice was typed over the draft: {typed}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Submitting the draft must carry a notice that typing would have clobbered.
+    #[test]
+    #[cfg(unix)]
+    fn a_draft_does_not_strand_a_notice() {
+        let root = temp("notice-draft");
+        let sock = root.join("hook.sock");
+        let file = root.join("typed.bin");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, None, Some(root.clone()), |_| {});
+        m.listen(|_| Err("not a connector".into())).unwrap();
+        let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.write_input(&tab, b"xyz").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Draft");
+        m.maybe_deliver(&tab);
+        let mut message = serde_json::to_value(Message::Agent(AgentEvent {
+            status: AgentStatus::Working,
+            prompt: Some("ship it".into()),
+            ..done_event(&tab)
+        }))
+        .unwrap();
+        message["hook_feedback"] = json!(true);
+        let reply = ask(&sock, &message.to_string()).unwrap();
+        assert!(reply.contains(&id), "submitting the draft dropped the notice: {reply}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed over the draft: {}", read_pty(&file));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A runtime restart clears Done. The same conversation still receives the notice once it is back.
+    #[test]
+    #[cfg(unix)]
+    fn a_notice_survives_a_parent_session_restart() {
+        let file = std::env::temp_dir().join(format!("pinned-notice-restart-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let m = machine();
+        let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.record_event(AgentEvent { status: AgentStatus::Working, session: Some("sess-1".into()), ..done_event(&tab) });
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Restart");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed mid-turn: {}", read_pty(&file));
+        m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display())), pty::size(80, 24)).unwrap();
+        let needle = format!("[pinned] Delegated task {id} \"Restart\"");
+        wait_for("the notice after the session restart", || {
+            m.maybe_deliver(&tab);
+            read_pty(&file).contains(&needle)
+        });
+        let _ = std::fs::remove_file(file);
+    }
+
+    /// Quit kills the children. The next process still has the task, and a child that was running
+    /// tells its parent it was stopped.
+    #[test]
+    fn a_task_registry_survives_a_pinned_restart() {
+        let root = temp("notice-registry");
+        let config = root.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let project = root.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let _first = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let parent = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        m.record_event(AgentEvent {
+            status: AgentStatus::Done,
+            cwd: None,
+            message: None,
+            tab: Some(parent.clone()),
+            session: Some("orch-1".into()),
+            title: None,
+            resume_at: None,
+            prompt: None,
+            snapshot: None,
+            permission_mode: None,
+            hook_feedback: false,
+        });
+        m.close_tab(&_first);
+        let finished = {
+            use crate::delegate::{ChildEvent, Mode, NewTask};
+            let task = m.delegates.begin(NewTask {
+                parent: crate::delegate::Parent::Tab(parent.clone()),
+                tool: None,
+                title: "Kept".into(),
+                account: "cursor".into(),
+                provider: Provider::Cursor,
+                model: None,
+                cwd: project.clone(),
+                mode: Mode::Async,
+                access: crate::delegate::Access::Auto,
+                isolated: false,
+                caller_key: format!("tab:{parent}"),
+                client_request_id: None,
+                role: None,
+            });
+            m.delegates.apply(&task.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+            task.id
+        };
+        let running = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(parent.clone()),
+            tool: None,
+            title: "Killed".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: project.clone(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        });
+        m.quit();
+        let m2 = Machine::new(launch(), Some(config), None, |_| {});
+        let tabs = m2.restore_tabs();
+        assert_eq!(tabs.len(), 1, "the orchestrator session was not restored");
+        let notice = m2.delegates.claim_notice(&tabs[0]).map(|(text, _)| text).unwrap_or_default();
+        assert!(notice.contains(&finished), "the finished task was forgotten: {notice}");
+        assert!(notice.contains("result available"), "the finished task's notice was forgotten: {notice}");
+        assert!(notice.contains(&running.id), "the killed child was forgotten: {notice}");
+        assert!(notice.contains("stopped by restart"), "the killed child did not say why: {notice}");
+        let status: serde_json::Value = serde_json::from_str(&m2.task_status(Some(tabs[0].clone()), None, &finished).unwrap()).unwrap();
+        assert_eq!(status["summary"], "DONE");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A worker report must not type over a draft. The orchestrator's Stop hook carries it.
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_report_does_not_clobber_a_draft() {
+        let root = temp("notice-worker");
+        let sock = root.join("hook.sock");
+        let file = root.join("typed.bin");
+        let project = root.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, None, Some(root.clone()), |_| {});
+        m.listen(|_| Err("not a connector".into())).unwrap();
+        let orchestrator = running(&m, role_env(Role::Orchestrator, &project), &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&orchestrator, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&orchestrator) });
+        m.write_input(&orchestrator, b"xyz").unwrap();
+        let worker = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &project), false, None);
+        m.tab(&worker, |t| t.title = Some("JSON output".into())).unwrap();
+        m.record_event(AgentEvent { status: AgentStatus::Done, ..done_event(&worker) });
+        std::thread::sleep(Duration::from_millis(200));
+        let typed = read_pty(&file);
+        assert!(typed.contains("xyz"), "the draft was lost: {typed}");
+        assert!(!typed.contains("Worker"), "the worker report was typed over the draft: {typed}");
+        let mut message = serde_json::to_value(Message::Agent(done_event(&orchestrator))).unwrap();
+        message["hook_feedback"] = json!(true);
+        let reply = ask(&sock, &message.to_string()).unwrap();
+        assert!(reply.contains(&worker) && reply.contains("JSON output"), "the Stop hook missed the worker: {reply}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -5002,7 +5272,7 @@ while True:
         let worker = m.add_tab("/work/app/.claude/worktrees/pinned-1".into(), work.clone(), vec![], role_env(Role::Worker, app), false, Some("s1".into()));
         let elsewhere = m.add_tab("/work/api".into(), work, vec![], role_env(Role::Worker, Path::new("/work/api")), false, Some("s1".into()));
         m.tab(&worker, |t| t.title = Some("JSON output".into())).unwrap();
-        let event = |tab: &str, status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None };
+        let event = |tab: &str, status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false };
 
         m.record_event(event(&worker, AgentStatus::Working, None));
         m.record_event(event(&worker, AgentStatus::NeedsInput, Some("Claude needs your permission to use Bash")));

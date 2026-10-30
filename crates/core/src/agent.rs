@@ -135,6 +135,8 @@ pub struct AgentEvent {
     /// Claude Code's permission mode, such as `plan` or `default`. Absent when the hook does not report one.
     #[serde(default)]
     pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub hook_feedback: bool,
 }
 
 /// Where a connector's session is in its work on an issue. Each stage maps to a Linear column.
