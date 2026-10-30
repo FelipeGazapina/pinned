@@ -67,6 +67,11 @@ function findEdgeIndex(graph, edge) {
 export function ports(node) {
   const type = nodeKind(node);
   if (type === "stop") return [];
+  if (type === "switch") {
+    const list = (node.cases ?? []).map((item) => ({ id: String(item.id), label: item.equals ?? "" }));
+    list.push({ id: OUT, label: "otherwise" });
+    return list;
+  }
   if (type !== "classify") return [{ id: OUT, label: "" }];
 
   const branchOn = node.branchOn ?? node.branch_on ?? null;
@@ -85,7 +90,53 @@ export function ports(node) {
   return list;
 }
 
-export function newNode(type, graph) {
+export function nextCaseId(cases, equals = "") {
+  const used = new Set((cases ?? []).map((item) => String(item.id)));
+  used.add(OUT);
+  const text = String(equals ?? "").trim();
+  const base = text && !/\s/.test(text) ? text : "";
+  if (base && !used.has(base)) return base;
+  const stem = base || "case";
+  for (let i = 1; i < 1000; i += 1) {
+    const id = `${stem}-${i}`;
+    if (!used.has(id)) return id;
+  }
+  return `case-${used.size + 1}`;
+}
+
+function nearestClassify(graph, upstreamId) {
+  const classifies = graph.nodes.filter((n) => nodeKind(n) === "classify");
+  if (!classifies.length) return null;
+  if (upstreamId) {
+    const incoming = new Map();
+    for (const edge of graph.edges) {
+      const list = incoming.get(edge.to);
+      if (list) list.push(edge.from);
+      else incoming.set(edge.to, [edge.from]);
+    }
+    const seen = new Set();
+    const queue = [upstreamId];
+    while (queue.length) {
+      const id = queue.shift();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const node = nodeById(graph, id);
+      if (node && nodeKind(node) === "classify") return node;
+      for (const prev of incoming.get(id) ?? []) queue.push(prev);
+    }
+    return null;
+  }
+  return classifies.reduce((best, node) => {
+    if (!best) return node;
+    const [bx, by] = best.position;
+    const [x, y] = node.position;
+    if (x !== bx) return x > bx ? node : best;
+    if (y !== by) return y < by ? node : best;
+    return String(node.id) < String(best.id) ? node : best;
+  }, null);
+}
+
+export function newNode(type, graph, upstreamId) {
   const id = newId(type);
   const used = new Set(graph.nodes.map((n) => n.name));
   let name = type;
@@ -106,6 +157,16 @@ export function newNode(type, graph) {
         gate: { kind: "direct" },
         fallback: { kind: "none" },
       };
+    case "switch": {
+      const classify = nearestClassify(graph, upstreamId);
+      const question = classify?.questions?.[0]?.name ?? "";
+      let switchName = question ? `Stops on ${question}` : "switch";
+      if (used.has(switchName)) {
+        const stem = switchName;
+        for (let i = 2; used.has(switchName); i += 1) switchName = `${stem} ${i}`;
+      }
+      return { ...base, name: switchName, type: "switch", classify: classify?.id ?? "", question, cases: [] };
+    }
     case "talk":
       return { ...base, type: "talk", prompt: "" };
     case "page":
@@ -308,9 +369,27 @@ export function validate(graph, called) {
     if (nodeKind(n) === "call" && n.workflow) {
       if (!called(n.workflow)) return `“${n.name}” calls a missing workflow.`;
     }
+    const problem = switchProblem(graph, n);
+    if (problem) return problem;
   }
 
   return walk(trigger.id) ?? null;
+}
+
+export function switchProblem(graph, node) {
+  if (nodeKind(node) !== "switch") return null;
+  const target = nodeById(graph, node.classify);
+  if (!target || nodeKind(target) !== "classify") return `“${node.name}” must follow a classify node.`;
+  const asked = (target.questions ?? []).some((q) => q.name && q.name === node.question);
+  if (!asked) return `“${node.name}” must use a question on “${target.name}”.`;
+  const seen = new Set();
+  for (const item of node.cases ?? []) {
+    const id = String(item?.id ?? "");
+    if (!id || id === OUT) return `“${node.name}” needs a port name other than otherwise.`;
+    if (seen.has(id)) return `“${node.name}” repeats the port “${id}”.`;
+    seen.add(id);
+  }
+  return null;
 }
 
 function watchOf(trigger) {
@@ -334,4 +413,4 @@ export function startingGraph(connector) {
   };
 }
 
-export const PICKER_TYPES = ["classify", "talk", "page", "stage-picked", "call", "stop"];
+export const PICKER_TYPES = ["classify", "switch", "talk", "page", "stage-picked", "call", "stop"];
