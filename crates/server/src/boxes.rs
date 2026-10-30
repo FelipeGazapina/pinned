@@ -7,7 +7,7 @@ use crate::hub::{Account, Hub, RUN_WAIT};
 use futures_util::future::BoxFuture;
 use pinned_core::account::Credentials;
 use pinned_core::agent::Subject;
-use pinned_core::connectors::{BoxSize, BoxStep, Run};
+use pinned_core::connectors::{BoxSize, BoxStep, Placement, Run};
 use pinned_core::upstash::{self, BoxId, Exec, Keys, Listed, NewBox};
 use pinned_core::wire::{Call, RunSpec};
 use pinned_core::github;
@@ -364,7 +364,7 @@ impl Boxes {
     /// `Hub::open` for a box run. A run whose issue or thread has a box already goes to it.
     /// Otherwise the run gets a new row, and a box booted for it within `boot_wait`. On failure the
     /// row ends, and the answer says why, which reaches the workflow's check line.
-    pub async fn open(&self, hub: &Hub, account: &Arc<Account>, run: Run, step: BoxStep) -> Result<(), String> {
+    pub async fn open(&self, hub: &Hub, account: &Arc<Account>, run: Run, step: BoxStep) -> Result<Placement, String> {
         let keys = hub.connectors(account).await?.box_keys().ok_or("Upstash Box is not connected: connect it in pinned's Connectors settings")?;
         let cooled = self.cooling.lock().unwrap().get(&(account.id, run.connector.clone())).copied();
         if let Some(left) = cooled.and_then(|at| self.policy.cooldown.checked_sub(at.elapsed())) {
@@ -402,7 +402,7 @@ impl Boxes {
     /// Brings the row to running: its box's node online within `boot_wait`, then `spec` answered
     /// by it within `RUN_WAIT`, which leaves a slow clone its time. A row another hub process moved
     /// is left to that process.
-    async fn drive(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow, spec: &RunSpec, keys: &Keys) -> Result<(), String> {
+    async fn drive(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow, spec: &RunSpec, keys: &Keys) -> Result<Placement, String> {
         if row.phase == Phase::Running {
             return self.dispatch(hub, account, &row, spec).await;
         }
@@ -518,14 +518,18 @@ impl Boxes {
 
     /// Hands the run to the row's machine, unless its session there already works on it. The
     /// machine answers a run sent again with the session it started.
-    async fn dispatch(&self, hub: &Hub, account: &Arc<Account>, row: &BoxRow, spec: &RunSpec) -> Result<(), String> {
+    async fn dispatch(&self, hub: &Hub, account: &Arc<Account>, row: &BoxRow, spec: &RunSpec) -> Result<Placement, String> {
         let machine = row.machine.to_string();
-        if account.working_on(&row.connector, &row.subject, |id| *id == machine) {
-            return Ok(());
+        if let Some((id, tab)) = account.placed(&row.connector, &row.subject) {
+            if id == machine {
+                return Ok(Placement { machine: id, tab });
+            }
         }
         let mut spec = spec.clone();
         spec.token = hub.connectors(account).await?.github_token().filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
-        hub.call_machine(account, &machine, Call::Run { run: spec }, RUN_WAIT).await.map(drop).map_err(String::from)
+        let value = hub.call_machine(account, &machine, Call::Run { run: spec }, RUN_WAIT).await.map_err(String::from)?;
+        let tab = value.as_str().map(str::to_owned).ok_or_else(|| "the box started the session without a tab id".to_owned())?;
+        Ok(Placement { machine, tab })
     }
 
     /// Ending → gone, each step a no-op once done: the machine, so its node can't sign in again,
@@ -648,11 +652,21 @@ impl Boxes {
                     None => Some(End::Disconnected),
                 },
                 Phase::Running => {
+                    let held = hub.connectors(account).await?.holds_box(&row.connector, &row.subject);
                     let gone = listed.as_ref().zip(row.upstash.as_ref()).is_some_and(|(listed, id)| !listed.iter().any(|b| b.id == *id));
                     let seen = account.seen(&row.machine.to_string(), &row.connector, &row.subject);
                     let mut timers = self.timers.lock().unwrap();
-                    let verdict = verdict(row.age, seen, timers.entry(row.id.clone()).or_default(), now, &self.policy);
-                    if gone { Some(End::Vanished) } else { verdict }
+                    let slot = timers.entry(row.id.clone()).or_default();
+                    if held {
+                        slot.quiet_since = None;
+                        slot.exited_since = None;
+                        slot.gone_since = None;
+                        slot.offline_since = None;
+                        (row.age >= self.policy.max_life).then_some(End::Expired)
+                    } else {
+                        let verdict = verdict(row.age, seen, slot, now, &self.policy);
+                        if gone { Some(End::Vanished) } else { verdict }
+                    }
                 }
                 Phase::Ending(_) => None,
             };

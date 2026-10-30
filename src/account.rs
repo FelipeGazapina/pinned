@@ -76,6 +76,7 @@ fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
                 }
                 connectors::Work::Run(run) => machine.run(&run.spec()).map(drop),
                 connectors::Work::Delivery(d) => machine.deliver(&d.env(), &d.text()).then_some(()).ok_or_else(|| "no session answers that thread".to_owned()),
+                connectors::Work::Prompt { env, text } => machine.deliver(&env, &text).then_some(()).ok_or_else(|| "no session answers that thread".to_owned()),
             };
             async move { taken }
         };
