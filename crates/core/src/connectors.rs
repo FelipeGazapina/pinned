@@ -297,6 +297,10 @@ pub struct Connector {
     /// The account its sessions run under; empty runs them under their project's.
     #[serde(default)]
     pub account: String,
+    /// The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.
+    /// Older apps neither send nor read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<crate::graph::Graph>,
 }
 
 fn on() -> bool {
@@ -2143,6 +2147,7 @@ mod tests {
             runs_on: RunsOn::Any,
             repo: String::new(),
             account: String::new(),
+            graph: None,
         }
     }
 
@@ -2205,6 +2210,7 @@ mod tests {
             runs_on: RunsOn::Any,
             repo: String::new(),
             account: String::new(),
+            graph: None,
         }
     }
 
