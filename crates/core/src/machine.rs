@@ -4974,6 +4974,208 @@ while True:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Claude's idle Notification follows Stop and replaces Done. A child that finishes after that
+    /// still has to reach the parent with no click.
+    #[test]
+    #[cfg(unix)]
+    fn an_idle_notification_does_not_strand_a_notice() {
+        let (m, tab, file) = pty_file("notice-idle-notify");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.record_event(AgentEvent { status: AgentStatus::NeedsInput, message: Some("Claude is waiting for your input".into()), ..done_event(&tab) });
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "After idle");
+        m.maybe_deliver(&tab);
+        let needle = format!("[pinned] Delegated task {id} \"After idle\"");
+        wait_for("the notice after the idle notification", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(file);
+    }
+
+    /// A draft blocks typing. The turn's Stop hook still hands the notice to the model.
+    #[test]
+    #[cfg(unix)]
+    fn a_stop_hook_feeds_a_notice_the_draft_would_block() {
+        let root = temp("notice-stop");
+        let sock = root.join("hook.sock");
+        let file = root.join("typed.bin");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, None, Some(root.clone()), |_| {});
+        m.listen(|_| Err("not a connector".into())).unwrap();
+        let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
+        m.write_input(&tab, b"xyz").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Mid");
+        let mut message = serde_json::to_value(Message::Agent(done_event(&tab))).unwrap();
+        message["hook_feedback"] = json!(true);
+        let reply = ask(&sock, &message.to_string()).unwrap();
+        assert!(reply.contains(&id), "the Stop hook did not carry the notice: {reply}");
+        std::thread::sleep(Duration::from_millis(200));
+        let typed = read_pty(&file);
+        assert!(typed.contains("xyz"), "the draft was not in the terminal: {typed}");
+        assert!(!typed.contains("[pinned]"), "the notice was typed over the draft: {typed}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Submitting the draft must carry a notice that typing would have clobbered.
+    #[test]
+    #[cfg(unix)]
+    fn a_draft_does_not_strand_a_notice() {
+        let root = temp("notice-draft");
+        let sock = root.join("hook.sock");
+        let file = root.join("typed.bin");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, None, Some(root.clone()), |_| {});
+        m.listen(|_| Err("not a connector".into())).unwrap();
+        let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.write_input(&tab, b"xyz").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Draft");
+        m.maybe_deliver(&tab);
+        let mut message = serde_json::to_value(Message::Agent(AgentEvent {
+            status: AgentStatus::Working,
+            prompt: Some("ship it".into()),
+            ..done_event(&tab)
+        }))
+        .unwrap();
+        message["hook_feedback"] = json!(true);
+        let reply = ask(&sock, &message.to_string()).unwrap();
+        assert!(reply.contains(&id), "submitting the draft dropped the notice: {reply}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed over the draft: {}", read_pty(&file));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A runtime restart clears Done. The same conversation still receives the notice once it is back.
+    #[test]
+    #[cfg(unix)]
+    fn a_notice_survives_a_parent_session_restart() {
+        let file = std::env::temp_dir().join(format!("pinned-notice-restart-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let m = machine();
+        let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.record_event(AgentEvent { status: AgentStatus::Working, session: Some("sess-1".into()), ..done_event(&tab) });
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Restart");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed mid-turn: {}", read_pty(&file));
+        m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display())), pty::size(80, 24)).unwrap();
+        wait_for("the restarted session", || text(&seen).contains("ready"));
+        m.maybe_deliver(&tab);
+        let needle = format!("[pinned] Delegated task {id} \"Restart\"");
+        wait_for("the notice after the session restart", || read_pty(&file).contains(&needle));
+        let _ = std::fs::remove_file(file);
+    }
+
+    /// Quit kills the children. The next process still has the task, and a child that was running
+    /// tells its parent it was stopped.
+    #[test]
+    fn a_task_registry_survives_a_pinned_restart() {
+        let root = temp("notice-registry");
+        let config = root.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let project = root.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let _first = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let parent = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        m.record_event(AgentEvent {
+            status: AgentStatus::Done,
+            cwd: None,
+            message: None,
+            tab: Some(parent.clone()),
+            session: Some("orch-1".into()),
+            title: None,
+            resume_at: None,
+            prompt: None,
+            snapshot: None,
+            permission_mode: None,
+        });
+        m.close_tab(&_first);
+        let finished = {
+            use crate::delegate::{ChildEvent, Mode, NewTask};
+            let task = m.delegates.begin(NewTask {
+                parent: crate::delegate::Parent::Tab(parent.clone()),
+                tool: None,
+                title: "Kept".into(),
+                account: "cursor".into(),
+                provider: Provider::Cursor,
+                model: None,
+                cwd: project.clone(),
+                mode: Mode::Async,
+                access: crate::delegate::Access::Auto,
+                isolated: false,
+                caller_key: format!("tab:{parent}"),
+                client_request_id: None,
+                role: None,
+            });
+            m.delegates.apply(&task.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+            task.id
+        };
+        let running = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(parent.clone()),
+            tool: None,
+            title: "Killed".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: project.clone(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        });
+        m.quit();
+        let m2 = Machine::new(launch(), Some(config), None, |_| {});
+        let tabs = m2.restore_tabs();
+        assert_eq!(tabs.len(), 1, "the orchestrator session was not restored");
+        let notice = m2.delegates.claim_notice(&tabs[0]).map(|(text, _)| text).unwrap_or_default();
+        assert!(notice.contains(&finished), "the finished task was forgotten: {notice}");
+        assert!(notice.contains("DONE"), "the finished result was forgotten: {notice}");
+        assert!(notice.contains(&running.id), "the killed child was forgotten: {notice}");
+        assert!(notice.contains("stopped by restart"), "the killed child did not say why: {notice}");
+        let status: serde_json::Value = serde_json::from_str(&m2.task_status(Some(tabs[0].clone()), None, &finished).unwrap()).unwrap();
+        assert_eq!(status["summary"], "DONE");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A worker report must not type over a draft. The orchestrator's Stop hook carries it.
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_report_does_not_clobber_a_draft() {
+        let root = temp("notice-worker");
+        let sock = root.join("hook.sock");
+        let file = root.join("typed.bin");
+        let project = root.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, None, Some(root.clone()), |_| {});
+        m.listen(|_| Err("not a connector".into())).unwrap();
+        let orchestrator = running(&m, role_env(Role::Orchestrator, &project), &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&orchestrator, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&orchestrator) });
+        m.write_input(&orchestrator, b"xyz").unwrap();
+        let worker = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &project), false, None);
+        m.tab(&worker, |t| t.title = Some("JSON output".into())).unwrap();
+        m.record_event(AgentEvent { status: AgentStatus::Done, ..done_event(&worker) });
+        std::thread::sleep(Duration::from_millis(200));
+        let typed = read_pty(&file);
+        assert!(typed.contains("xyz"), "the draft was lost: {typed}");
+        assert!(!typed.contains("Worker"), "the worker report was typed over the draft: {typed}");
+        let mut message = serde_json::to_value(Message::Agent(done_event(&orchestrator))).unwrap();
+        message["hook_feedback"] = json!(true);
+        let reply = ask(&sock, &message.to_string()).unwrap();
+        assert!(reply.contains(&worker) && reply.contains("JSON output"), "the Stop hook missed the worker: {reply}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_workers_news_is_typed_into_its_projects_running_orchestrator() {
