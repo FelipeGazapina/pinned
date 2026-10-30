@@ -856,6 +856,38 @@ async function sweep(profileName) {
       }));
     check(placed[0] === (touch ? "hidden" : "inside"), `the header readout is ${placed[0]}`);
     check(placed[1] !== "spills", "the row readout spills out of its line");
+    if (!touch) {
+      const sidebarWidth = await page.evaluate(() => document.getElementById("sidebar").getBoundingClientRect().width);
+      const role = await page.evaluate(() => active.view.role ?? "");
+      await page.evaluate(() => {
+        setSidebarWidth(1);
+        active.view.role = "orchestrator";
+        renderSidebar();
+      });
+      const actsFit = () => page.evaluate(() => {
+        const row = document.querySelector("#thread-list .thread-row.active");
+        const side = document.getElementById("sidebar").getBoundingClientRect();
+        const clipped = [...row.querySelectorAll(".acts [data-act]")].filter((button) => {
+          const box = button.getBoundingClientRect();
+          const hit = box.width > 0 ? document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) : null;
+          const inside = box.width > 0 && box.left >= side.left - 0.5 && box.right <= side.right + 0.5 && box.top >= side.top - 0.5 && box.bottom <= side.bottom + 0.5;
+          return !(inside && hit && (hit === button || button.contains(hit)));
+        }).map((button) => button.dataset.act);
+        return { clipped, count: row.querySelectorAll(".acts [data-act]").length, focus: row.matches(":focus-visible") };
+      });
+      await page.hover("#thread-list .thread-row.active .l2");
+      const hovered = await actsFit();
+      await page.evaluate(() => document.querySelector("#thread-list .thread-row.active").focus({ focusVisible: true }));
+      const focused = await actsFit();
+      await page.evaluate(({ sidebarWidth, role }) => {
+        active.view.role = role;
+        renderSidebar();
+        setSidebarWidth(sidebarWidth);
+      }, { sidebarWidth, role });
+      await page.mouse.move(0, 0);
+      check(hovered.count > 0 && hovered.clipped.length === 0, `hover hides ${hovered.clipped.join(", ") || "the actions"}`);
+      check(focused.focus && focused.clipped.length === 0, `focus hides ${focused.clipped.join(", ") || "the actions"}`);
+    }
     await sendPrompt("think");
     await waitFor("the turn to start", async () => (await readouts()).status === "working");
     await sleep(2500);

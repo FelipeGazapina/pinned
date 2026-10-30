@@ -43,6 +43,9 @@
 @media (hover: hover) {
   .thread-row:hover .acts, .thread-row:focus-visible .acts { display: flex; }
   .thread-row:hover .stamp:not(.woke), .thread-row:focus-visible .stamp:not(.woke) { display: none; }
+  /* The slot is allowed to shrink, and it clips. Hovered actions keep their width; the role badge yields so they stay inside the panel. */
+  .thread-row:hover .slot, .thread-row:focus-visible .slot { overflow: visible; flex: none; }
+  .thread-row:hover .role:not(.worker), .thread-row:focus-visible .role:not(.worker) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
 .thread-row .stamp.when.unread { color: var(--g-warning); }
 .thread-row .l1 .draft-pen { display: flex; margin: 0; }
