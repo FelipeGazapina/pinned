@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   append,
   collisions,
+  insertCreateTicket,
   connect,
   disconnect,
   layout,
@@ -382,6 +383,32 @@ test("a migrated classify then a switch per stopping question does not overlap",
       ["talk", [COL * 4, 150]],
     ],
   );
+});
+
+test("insertCreateTicket continues, and the backlog preset files onto Backlog then stops", () => {
+  const graph = {
+    nodes: [{ id: "trigger-1", name: "T", position: [0, 0], type: "trigger", watch: { kind: "called" } }],
+    edges: [],
+  };
+  const open = insertCreateTicket(graph, "trigger-1", OUT, { backlog: false });
+  const ticket = open.nodes.find((node) => node.type === "create-ticket");
+  assert.equal(ticket.team, "");
+  assert.equal(ticket.label, "");
+  assert.equal(ticket.column, "");
+  assert.equal(ticket.instructions, "");
+  assert.equal(open.nodes.some((node) => node.type === "stop"), false);
+  assert.deepEqual(open.edges, [{ from: "trigger-1", port: OUT, to: ticket.id }]);
+
+  const backlog = insertCreateTicket(graph, "trigger-1", OUT, { backlog: true });
+  const filed = backlog.nodes.find((node) => node.type === "create-ticket");
+  const stop = backlog.nodes.find((node) => node.type === "stop");
+  assert.equal(filed.column, "Backlog");
+  assert.equal(filed.label, "");
+  assert.equal(stop.type, "stop");
+  assert.deepEqual(backlog.edges, [
+    { from: "trigger-1", port: OUT, to: filed.id },
+    { from: filed.id, port: OUT, to: stop.id },
+  ]);
 });
 
 test("newNode skips an id the graph already uses", () => {

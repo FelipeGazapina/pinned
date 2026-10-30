@@ -180,6 +180,8 @@ export function newNode(type, graph, upstreamId) {
       return { ...base, type: "stage-picked" };
     case "call":
       return { ...base, type: "call", workflow: "" };
+    case "create-ticket":
+      return { ...base, type: "create-ticket", team: "", label: "", column: "", instructions: "" };
     case "stop":
       return { ...base, type: "stop" };
     default:
@@ -418,4 +420,16 @@ export function startingGraph(connector) {
   };
 }
 
-export const PICKER_TYPES = ["classify", "switch", "talk", "page", "stage-picked", "call", "stop"];
+export const PICKER_TYPES = ["classify", "switch", "talk", "page", "stage-picked", "call", "create-ticket", "stop"];
+
+/** Places one create-ticket. `backlog` sets the column to Backlog, clears the label, and appends a Stop. */
+export function insertCreateTicket(graph, from, port, { backlog } = {}) {
+  const node = newNode("create-ticket", graph);
+  if (backlog) {
+    node.column = "Backlog";
+    node.label = "";
+  }
+  const placed = append(graph, from, port, node);
+  if (!backlog) return placed;
+  return append(placed, node.id, OUT, newNode("stop", placed));
+}
