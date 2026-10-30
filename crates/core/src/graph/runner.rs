@@ -387,6 +387,7 @@ fn step(run: &mut Run, library: &Library) -> Next {
             Ok(effect) => Next::Act(effect),
             Err(why) => Next::Fail(why),
         },
+        NodeKind::CreateTicket { .. } => Next::Fail(format!("node {} is a create-ticket", node_id.0)),
         NodeKind::Call { workflow } => enter_call(run, library, &connector, &node_id, &workflow),
         NodeKind::Switch(switch) => {
             let (port, why) = switch_port(run, &switch);
@@ -883,7 +884,7 @@ fn path_pages(
         };
         match &node.kind {
             NodeKind::Page { .. } => return true,
-            NodeKind::Talk { .. } | NodeKind::Call { .. } | NodeKind::Stop => return false,
+            NodeKind::Talk { .. } | NodeKind::Call { .. } | NodeKind::Stop | NodeKind::CreateTicket { .. } => return false,
             NodeKind::Trigger { .. } | NodeKind::StagePicked | NodeKind::Classify(_) | NodeKind::Switch(_) => node
                 .kind
                 .ports()

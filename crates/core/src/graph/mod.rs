@@ -61,9 +61,12 @@ pub struct Edge {
     pub to: NodeId,
 }
 
-/// Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the
-/// proof video are not nodes: the session does them through `pinned` callbacks, and the connector's
-/// `columns`, `fix` and `proof` still describe them, so nothing else writes the same state.
+/// Coding and review moves and the proof video are not nodes. The session does them through
+/// `pinned` callbacks, and the connector's `columns` and `proof` still describe them.
+///
+/// `create-ticket` is a node. It files a new Linear issue from the run's session. The session's
+/// `pinned linear create` callback is a different path. It still records one issue per Slack
+/// thread in `created`.
 ///
 /// Slack follow-ups in the thread are not a node either. While the run's session is open, new
 /// thread messages are typed into it, as today.
@@ -85,6 +88,18 @@ pub enum NodeKind {
     StagePicked,
     /// Walks another connector's graph inside this run, with this run's session.
     Call { workflow: String },
+    /// Files one Linear issue. Empty `column` keeps the team's default status. Empty `label`
+    /// adds no label. `instructions` guide the session's title and description.
+    CreateTicket {
+        #[serde(default)]
+        team: String,
+        #[serde(default)]
+        label: String,
+        #[serde(default)]
+        column: String,
+        #[serde(default)]
+        instructions: String,
+    },
     /// Ends this branch on purpose. A port with no edge also ends its branch.
     Stop,
 }
@@ -214,7 +229,7 @@ impl NodeKind {
     /// The node's output ports, in drawing order. Derived, never stored.
     pub fn ports(&self) -> Vec<Port> {
         match self {
-            NodeKind::Trigger { .. } | NodeKind::Talk { .. } | NodeKind::Page { .. } | NodeKind::StagePicked | NodeKind::Call { .. } => {
+            NodeKind::Trigger { .. } | NodeKind::Talk { .. } | NodeKind::Page { .. } | NodeKind::StagePicked | NodeKind::Call { .. } | NodeKind::CreateTicket { .. } => {
                 vec![out_port()]
             }
             NodeKind::Stop => Vec::new(),
@@ -476,5 +491,54 @@ mod tests {
             Graph { nodes: vec![trigger, ask, otherwise], edges: vec![] }.validate(&|_| false),
             Err("\"Stops\" uses the port \"out\", which is the otherwise port".into())
         );
+    }
+
+    #[test]
+    fn a_create_ticket_graph_validates_and_the_node_has_one_out_port() {
+        let raw = r##"{
+          "nodes": [
+            {
+              "id": "trigger",
+              "name": "Trigger",
+              "position": [0, 0],
+              "type": "trigger",
+              "watch": { "kind": "slack-mention", "channel": "#support" }
+            },
+            {
+              "id": "file-1",
+              "name": "File the bug",
+              "position": [230, 0],
+              "type": "create-ticket",
+              "team": "Engineering",
+              "label": "Bug",
+              "column": "",
+              "instructions": "Title it as the user would. Include what failed and what they asked for."
+            }
+          ],
+          "edges": [
+            { "from": "trigger", "port": "out", "to": "file-1" }
+          ]
+        }"##;
+        let graph: Graph = serde_json::from_str(raw).expect("create-ticket graph");
+        assert_eq!(graph.validate(&|_| false), Ok(()));
+        let node = graph.node(&NodeId("file-1".into())).expect("file-1");
+        assert_eq!(node.kind.ports(), vec![out_port()]);
+        let filed = serde_json::to_value(&node.kind).unwrap();
+        assert_eq!(filed["team"], "Engineering");
+        assert_eq!(filed["label"], "Bug");
+        assert_eq!(filed["column"], "");
+
+        let bare: Graph = serde_json::from_str(
+            r#"{"nodes":[{"id":"trigger","name":"Trigger","position":[0,0],"type":"trigger","watch":{"kind":"called"}},{"id":"file","name":"File","position":[1,0],"type":"create-ticket"}],"edges":[{"from":"trigger","port":"out","to":"file"}]}"#,
+        )
+        .expect("create-ticket defaults");
+        assert_eq!(bare.validate(&|_| false), Ok(()));
+        let bare_node = bare.node(&NodeId("file".into())).expect("file");
+        let value = serde_json::to_value(&bare_node.kind).unwrap();
+        assert_eq!(value["team"], "");
+        assert_eq!(value["label"], "");
+        assert_eq!(value["column"], "");
+        assert_eq!(value["instructions"], "");
+        assert_eq!(bare_node.kind.ports(), vec![out_port()]);
     }
 }
