@@ -902,6 +902,58 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_finished_childs_pid_is_forgotten_and_quit_does_not_kill_it() {
+        use std::os::unix::process::CommandExt;
+        let dir = std::env::temp_dir().join(format!("pinned-delegate-pid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = script(&dir, "sleeper", "sleep 30");
+        let spawn_sleeper = || {
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.process_group(0);
+            let child = cmd.spawn().unwrap();
+            let pid = child.id();
+            (child, pid)
+        };
+        let delegates = Delegates::default();
+
+        let exited = new_cursor(&delegates, Mode::Async);
+        let (mut child, pid) = spawn_sleeper();
+        delegates.remember_pid(&exited.id, pid);
+        assert_eq!(delegates.remembered(&exited.id), Some(pid));
+        delegates.apply(&exited.id, ChildEvent::Exited { code: Some(1), stderr: "gone".into() }, None);
+        assert_eq!(delegates.remembered(&exited.id), None, "an exited child kept its pid");
+        delegates.kill_remembered();
+        assert!(child.try_wait().unwrap().is_none(), "quit killed pid {pid} after the child had exited");
+
+        let failed = new_cursor(&delegates, Mode::Async);
+        let (mut failed_child, failed_pid) = spawn_sleeper();
+        delegates.remember_pid(&failed.id, failed_pid);
+        delegates.fail(&failed.id, "boom".into(), None);
+        assert_eq!(delegates.remembered(&failed.id), None, "a failed child kept its pid");
+        delegates.kill_remembered();
+        assert!(failed_child.try_wait().unwrap().is_none(), "quit killed pid {failed_pid} after the child had failed");
+
+        let late = new_cursor(&delegates, Mode::Async);
+        delegates.fail(&late.id, "already".into(), None);
+        let (mut late_child, late_pid) = spawn_sleeper();
+        delegates.remember_pid(&late.id, late_pid);
+        let start = Instant::now();
+        while late_child.try_wait().unwrap().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(2), "remember_pid left a finished task's pid {late_pid} running");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = failed_child.kill();
+        let _ = failed_child.wait();
+        let _ = late_child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_isolated_task_drops_its_worktree_after_the_task_lock() {
         let root = std::env::temp_dir().join(format!("pinned-wt-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);

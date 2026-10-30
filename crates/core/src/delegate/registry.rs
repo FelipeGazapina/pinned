@@ -94,6 +94,15 @@ impl Delegates {
         }
     }
 
+    /// The pid recorded for `id`, when the child is still one quit should stop.
+    pub fn remembered(&self, id: &str) -> Option<u32> {
+        self.pids.lock().unwrap().get(id).copied()
+    }
+
+    fn forget_pid(&self, id: &str) {
+        self.pids.lock().unwrap().remove(id);
+    }
+
     pub fn is_terminal(&self, id: &str) -> bool {
         self.tasks.lock().unwrap().iter().find(|task| task.id == id).is_none_or(|task| task.state.terminal())
     }
@@ -109,6 +118,7 @@ impl Delegates {
     pub fn fail(&self, id: &str, error: String, path: Option<&str>) {
         let dir = {
             let mut tasks = self.tasks.lock().unwrap();
+            self.forget_pid(id);
             let Some(task) = tasks.iter_mut().find(|task| task.id == id) else { return };
             if task.state.terminal() {
                 return;
@@ -140,7 +150,11 @@ impl Delegates {
                     }
                     held
                 }
-                ChildEvent::Exited { code, stderr } => tasks[index].exited(code, stderr),
+                ChildEvent::Exited { code, stderr } => {
+                    let id = tasks[index].id.clone();
+                    self.forget_pid(&id);
+                    tasks[index].exited(code, stderr)
+                }
             };
             if let Some(held) = held {
                 settle(&mut tasks, index, held);
