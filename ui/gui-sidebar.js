@@ -297,7 +297,7 @@ function renderSidebar() {
   for (const key of selected) if (!tabByKey(key)) selected.delete(key);
   noteReturns();
   const scope = projectGroups().find((g) => g.key === ui.project);
-  if (!scope) ui.project = "";
+  if (!scope && !projectListsPending()) ui.project = "";
   const trigger = `${scope ? projectIcon(scope.name, scope.tab) : icon("folder")}<span class="label">${esc(scope?.name ?? "All projects")}</span>${icon("chevron-down")}`;
   if (projectFilter.innerHTML !== trigger) projectFilter.innerHTML = trigger;
   projectFilter.setAttribute("aria-label", scope ? `Filter threads by project: ${scope.name}` : "Filter threads by project");
@@ -1372,17 +1372,49 @@ function sortedProjects(list, tabsOf) {
   const byName = (a, b) => a.name.localeCompare(b.name);
   return [...list].sort(order === "manual" ? (a, b) => first(a) - first(b) || byName(a, b) : (a, b) => latest(b) - latest(a) || byName(a, b));
 }
-/** The sidebar's projects: `{ key, name, tab, machine }`, `tab` the group's first thread. */
-function projectGroups() {
-  const groups = new Map();
-  for (const tab of tabs) {
-    const key = projectKeyOf(tab);
-    if (!groups.has(key)) groups.set(key, { key, name: projectName(tab), tab, machine: tab.machine, tabs: [] });
-    groups.get(key).tabs.push(tab);
+let redrawProjectMenu = () => {};
+
+function noteProjects(machine, projects) {
+  const known = machines.get(machine);
+  if (!known || !Array.isArray(projects)) return;
+  const same = Array.isArray(known.projects) && JSON.stringify(known.projects) === JSON.stringify(projects);
+  known.projects = projects;
+  if (same) return;
+  for (const project of projects) {
+    if (project?.path) projectRepos.set(`${machine}:${project.path}`, project.repo ?? null);
   }
-  return sortedProjects([...groups.values()], (g) => g.tabs);
+  if (guiOn()) renderSidebar();
+  redrawProjectMenu();
 }
-const tabOfProject = (key) => tabs.find((t) => projectKeyOf(t) === key);
+
+function refreshProjects(machine) {
+  const known = machines.get(machine);
+  if (!known || (machine !== LOCAL && !known.view?.online)) return;
+  callOn(machine, { cmd: "list_projects" }).then(
+    (list) => noteProjects(machine, Array.isArray(list) ? list : []),
+    () => noteProjects(machine, known.projects ?? []),
+  );
+}
+
+function refreshProjectLists() {
+  for (const id of machines.keys()) refreshProjects(id);
+}
+
+function projectListsPending() {
+  if (!ui.project) return false;
+  return onlineMachines().some((id) => machines.get(id).projects === undefined);
+}
+
+/** The sidebar's projects: `{ key, name, tab, machine, path }`. `tab` is the group's first thread, or null when the folder has none. */
+function projectGroups() {
+  const threads = [];
+  for (const tab of tabs) {
+    const path = projectPathOf(tab);
+    threads.push({ machine: tab.machine, path, name: projectName(tab), repo: projectRepos.get(`${tab.machine}:${path}`) || null, thread: tab });
+  }
+  const listed = Object.fromEntries(onlineMachines().map((id) => [id, machines.get(id).projects ?? []]));
+  return sortedProjects(PinnedProjects.groupProjects({ threads, listed, grouping: !!sideSettings.grouping }), (g) => g.tabs);
+}
 const projectFilter = document.getElementById("project-filter");
 const projectMenu = document.createElement("div");
 projectMenu.id = "project-menu";
@@ -1391,6 +1423,7 @@ document.body.append(projectMenu);
 /** T3 Code's project scope combobox: a searchable list under the search field, each project with its
  * settings gear, "All projects" first. */
 function openProjectMenu() {
+  refreshProjectLists();
   projectMenu.innerHTML = `<input type="text" aria-label="Search projects" placeholder="Search projects..." spellcheck="false" autocomplete="off"><div class="list" role="listbox"></div>`;
   const input = projectMenu.querySelector("input");
   const list = projectMenu.querySelector(".list");
@@ -1405,6 +1438,9 @@ function openProjectMenu() {
     list.innerHTML = shown.length
       ? shown.map((g, i) => `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(g.key)}" aria-selected="${g.key === ui.project}">${g.key ? projectIcon(g.name, g.tab) : icon("folder")}<span class="label">${esc(g.name)}</span>${machinesShown && g.key ? `<span class="where">${esc(machineName(g.machine))}</span>` : ""}${g.key ? `<button type="button" class="gear" data-orchestrate="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Open the ${esc(g.name)} orchestrator">${icon("bot")}</button><button type="button" class="gear" data-gear="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(g.name)}">${icon("gear")}</button>` : ""}</div>`).join("")
       : `<p class="empty">No matching projects.</p>`;
+  };
+  redrawProjectMenu = () => {
+    if (!projectMenu.hidden) draw();
   };
   const pick = (name) => {
     closeProjectMenu();
@@ -1430,18 +1466,16 @@ function openProjectMenu() {
       list.querySelectorAll(".item").forEach((el, j) => el.classList.toggle("hit", j === i));
     }
   };
+  const openGroup = (key, run) => {
+    const group = shown.find((g) => g.key === key);
+    closeProjectMenu();
+    if (group?.machine && group.path) run(group.machine, group.path);
+  };
   list.onclick = (e) => {
     const orchestrate = e.target.closest("[data-orchestrate]");
-    if (orchestrate) {
-      closeProjectMenu();
-      const tab = tabOfProject(orchestrate.dataset.orchestrate);
-      return openOrchestrator(tab.machine, projectPathOf(tab));
-    }
+    if (orchestrate) return openGroup(orchestrate.dataset.orchestrate, openOrchestrator);
     const gear = e.target.closest("[data-gear]");
-    if (gear) {
-      closeProjectMenu();
-      return openProjectSettings(tabOfProject(gear.dataset.gear));
-    }
+    if (gear) return openGroup(gear.dataset.gear, openProjectAt);
     const item = e.target.closest("[data-project]");
     if (item) pick(item.dataset.project);
   };
@@ -1449,8 +1483,7 @@ function openProjectMenu() {
     const item = e.target.closest("[data-project]");
     if (!item?.dataset.project) return;
     e.preventDefault();
-    closeProjectMenu();
-    openProjectSettings(tabOfProject(item.dataset.project));
+    openGroup(item.dataset.project, openProjectAt);
   };
   draw();
   const anchor = document.querySelector("#sidebar .search").getBoundingClientRect();
@@ -1464,6 +1497,7 @@ function openProjectMenu() {
 function closeProjectMenu() {
   projectMenu.hidden = true;
   projectFilter.setAttribute("aria-expanded", "false");
+  redrawProjectMenu = () => {};
 }
 projectFilter.onclick = () => (projectMenu.hidden ? openProjectMenu() : closeProjectMenu());
 window.addEventListener("mousedown", (e) => !projectMenu.hidden && !e.target.closest("#project-menu, #project-filter") && closeProjectMenu(), true);
@@ -1594,11 +1628,15 @@ function regenerateTitles(list) {
   }));
 }
 
-async function openProjectSettings(tab) {
+async function openProjectAt(machine, path) {
   if (!settingsOpen()) await toggleSettings();
-  projectsMachine = tab.machine;
+  projectsMachine = machine;
   await showPage("projects");
-  await showProjectHistory(threadOf(tab).workspace?.project ?? tab.view.cwd);
+  await showProjectHistory(path);
+}
+
+async function openProjectSettings(tab) {
+  await openProjectAt(tab.machine, threadOf(tab).workspace?.project ?? tab.view.cwd);
 }
 
 const isModClick = (e) => (IS_MAC ? e.metaKey : e.ctrlKey);

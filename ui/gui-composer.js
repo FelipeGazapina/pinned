@@ -2056,7 +2056,14 @@ async function runOn(tab, machine) {
   if (!remote) return showComposerNote("This project has no origin to find it by on another machine.", true);
   try {
     const folder = await callOn(machine, { cmd: "clone", repo: remote });
-    await openRemote(machine, folder, tab.view.bypass);
+    if (tab.view.role === "orchestrator") {
+      const id = await callOn(machine, { cmd: "open_orchestrator", path: folder });
+      const opened = await revealTab(machine, id);
+      if (tab.view.bypass && !opened.view.bypass) await setBypass(opened, true);
+      else if (!opened.view.running) await startTab(opened);
+    } else {
+      await openRemote(machine, folder, tab.view.bypass);
+    }
     closeTab(tab);
   } catch (e) {
     showComposerNote(String(e), true);

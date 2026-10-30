@@ -805,6 +805,52 @@ function automationHtml(user, t) {
     ${open ? `<div class="meta"><button type="button" class="link" data-open-automation>Open automation</button>${whenHtml(user.at)}<button type="button" class="xs" data-copy-item="${esc(user.id)}" title="Copy">${icon("copy")}</button></div>` : ""}</div>`;
 }
 
+/** An image a prompt names by path, as an upload saved on the session's machine: escaped as the composer
+ * sends it, with its spaces and brackets backslashed. */
+const UPLOAD_IMAGE = /(?:^|\s)((?:\\.|[^\s\\])+?\.(?:png|jpe?g|gif|webp|bmp|avif))(?=\s|$)/gi;
+const imagePathsIn = (text) => [...new Set([...text.matchAll(UPLOAD_IMAGE)].map((m) => m[1].replace(/\\(.)/g, "$1")))];
+
+/** Uploads are drawn from the machine that saved them, so a client on another machine sees the picture,
+ * not just its path. A missing file is remembered. A disconnect is asked again once the machine is back. */
+let uploadImages = null;
+const uploadImagesReady = import("./upload-images.js").then((mod) => {
+  uploadImages = mod.createUploadImages();
+});
+function drawUploadImages() {
+  if (!uploadImages) {
+    uploadImagesReady.then(() => drawUploadImages());
+    return;
+  }
+  for (const button of threadView.querySelectorAll("button.picture[data-upload]:not([data-drawing])")) {
+    button.dataset.drawing = "";
+    const { upload: path, machine } = button.dataset;
+    const key = `${machine}\n${path}`;
+    uploadImages.pull(key, () => callOn(machine, { cmd: "read_upload", path })).then((src) => {
+      if (!button.isConnected) return;
+      if (src === "wait") return;
+      if (src === "retry") {
+        delete button.dataset.drawing;
+        drawUploadImages();
+        return;
+      }
+      if (src === "drop") return button.remove();
+      button.dataset.zoom = "upload";
+      button.insertAdjacentHTML("beforeend", `<img src="${esc(src)}" alt="${esc(path.split("/").pop())}">`);
+    });
+  }
+}
+function retryUploadImages() {
+  if (!uploadImages) return;
+  const again = new Set(uploadImages.reconnect());
+  if (!again.size) return;
+  for (const button of threadView.querySelectorAll("button.picture[data-upload]")) {
+    const key = `${button.dataset.machine}\n${button.dataset.upload}`;
+    if (!again.has(key) || button.querySelector("img")) continue;
+    delete button.dataset.drawing;
+  }
+  drawUploadImages();
+}
+
 function userHtml(user, t, tab, first) {
   const by = sentBy(tab, user, first);
   if (by === "automation") return automationHtml(user, t);
@@ -814,9 +860,10 @@ function userHtml(user, t, tab, first) {
   const long = user.text.length > 600 || user.text.split("\n").length > 8;
   const clamped = long && !t.open.has(key);
   const pictures = user.pictures ?? [];
+  const uploads = imagePathsIn(user.text);
   const missing = user.images - pictures.length;
   const bubble = [
-    pictures.length && `<div class="pictures">${pictures.map((src, i) => `<button type="button" class="picture" data-zoom="${esc(user.id)}:${i}"><img src="${esc(src)}" alt="Image #${i + 1}"></button>`).join("")}</div>`,
+    (pictures.length || uploads.length) && `<div class="pictures">${pictures.map((src, i) => `<button type="button" class="picture" data-zoom="${esc(user.id)}:${i}"><img src="${esc(src)}" alt="Image #${i + 1}"></button>`).join("")}${uploads.map((path) => `<button type="button" class="picture" data-upload="${esc(path)}" data-machine="${esc(tab.machine)}" aria-label="${esc(path.split("/").pop())}"></button>`).join("")}</div>`,
     user.text && `<div class="body md${clamped ? " clamped" : ""}">${citationChips(markdown(user.text, promptMarked), user.citations)}</div>`,
     missing > 0 && `<span class="images">${missing} image${missing > 1 ? "s" : ""}</span>`,
     long && `<button type="button" class="show-full" data-toggle="${esc(key)}">${clamped ? "Show full message" : "Show less"}</button>`,
@@ -962,6 +1009,7 @@ function renderThread() {
   const card = threadView.querySelector("#dialog-slot > .dialog-card");
   const focused = card?.contains(document.activeElement);
   threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
+  drawUploadImages();
   laneGrowth.disconnect();
   laneGrowth.observe(threadView.firstElementChild);
   if (card) document.getElementById("dialog-slot")?.append(card);
@@ -1665,7 +1713,7 @@ threadView.addEventListener("click", (e) => {
     return e.metaKey || e.ctrlKey ? openOutside(pr.dataset.pr) : openPr(active, pr.dataset.pr);
   }
   const link = e.target.closest("a[href]");
-  if (link) {
+  if (link && !link.hasAttribute("download")) {
     e.preventDefault();
     openLink(link.href, e.metaKey || e.ctrlKey);
   }
@@ -1733,6 +1781,28 @@ function openLink(url, outside = false) {
   }
   openOutside(url);
 }
+
+document.addEventListener("click", (e) => {
+  const el = e.target.closest?.("[data-open-url], a[href]");
+  if (!el) return;
+  const link = el.closest("a[href]");
+  const decision = routeAnchorClick({
+    href: link?.href ?? "",
+    protocol: link?.protocol ?? "",
+    download: !!link?.hasAttribute("download"),
+    pr: link?.dataset.pr || "",
+    cardPr: link?.dataset.cardPr || "",
+    inPanel: !!el.closest("#panel-body"),
+    openUrl: el.closest("[data-open-url]")?.dataset.openUrl || "",
+    meta: e.metaKey,
+    ctrl: e.ctrlKey,
+  });
+  if (!decision) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (decision.openOutside) openOutside(decision.openOutside);
+  else openLink(decision.url, decision.outside);
+}, true);
 
 function renderUnsupported() {
   threadView.dataset.key = "";

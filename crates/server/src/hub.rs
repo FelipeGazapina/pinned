@@ -357,7 +357,7 @@ impl Hub {
             HubCall::SyncPush { project, files } => {
                 let mut kept = vec![];
                 for file in files {
-                    if !sync::shared_path(&file.entry.path) {
+                    if !sync::accepts(&project, &file.entry.path) {
                         return Err(format!("{} is not a file a project shares", file.entry.path));
                     }
                     let data = match &file.data {
@@ -397,6 +397,8 @@ impl Hub {
                 self.boxes.end_all(self, account).await?;
                 (json(c().await?.disconnect_upstash()?), true)
             }
+            HubCall::SetBoxAccess { access } => (json(c().await?.set_box_access(access)?), true),
+            HubCall::AnswerBox { id, allow } => (json(c().await?.answer_box(&id, allow)?), true),
             HubCall::Clone { machine, repo, dest } => {
                 let repo = github::clone_url(&repo);
                 let token = c().await?.github_token().filter(|_| github::hosts(&repo));

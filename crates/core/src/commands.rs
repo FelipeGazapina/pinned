@@ -62,9 +62,10 @@ const BUILTIN: &[(&str, &str)] = &[
 ];
 
 /// The commands claude offers in `cwd` when its home is `claude`: its own, then the user's, the
-/// project's, and the enabled plugins', each with its skills, then those claude.ai syncs for the
-/// signed-in account. A name seen before is skipped, as claude shows it once.
-pub fn list(claude: &Path, cwd: &Path) -> Vec<Command> {
+/// project's, and the enabled plugins', each with its skills, then plugins synced from the
+/// account's other machines (`shared`), then those claude.ai syncs for the signed-in account.
+/// A name seen before is skipped, as claude shows it once.
+pub fn list(claude: &Path, cwd: &Path, shared: &[PathBuf]) -> Vec<Command> {
     let mut out: Vec<Command> = BUILTIN
         .iter()
         .map(|(name, description)| Command { name: (*name).into(), description: (*description).into(), source: "builtin", skill: false })
@@ -73,6 +74,10 @@ pub fn list(claude: &Path, cwd: &Path) -> Vec<Command> {
     add_from(&mut out, &cwd.join(".claude"), "", "project");
     for (name, root) in plugins(claude) {
         add_from(&mut out, &root, &format!("{name}:"), "plugin");
+    }
+    for dir in shared {
+        let Some(name) = dir.file_name().and_then(|s| s.to_str()).and_then(|id| id.split('@').next()).filter(|name| !name.is_empty()) else { continue };
+        add_from(&mut out, dir, &format!("{name}:"), "plugin");
     }
     if let Some(account) = account(claude) {
         add_skills(&mut out, &claude.join("skills/synced").join(&account), "", "user");
@@ -188,8 +193,17 @@ fn front_matter(text: &str) -> (impl Fn(&str) -> Option<String> + '_, &str) {
     (lookup, body)
 }
 
-/// The enabled plugins' names and folders, from claude's settings and its plugin list.
-fn plugins(claude: &Path) -> Vec<(String, PathBuf)> {
+/// One enabled plugin. `enabledPlugins` is true, and the last install record supplies the folder.
+/// Older cache versions sit earlier in that list.
+pub(crate) struct EnabledPlugin {
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
+    pub version: String,
+    pub git_commit_sha: String,
+}
+
+pub(crate) fn enabled_plugins(claude: &Path) -> Vec<EnabledPlugin> {
     let read = |file: &str| std::fs::read_to_string(claude.join(file)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or_default();
     let settings = read("settings.json");
     let installed = read("plugins/installed_plugins.json");
@@ -198,10 +212,25 @@ fn plugins(claude: &Path) -> Vec<(String, PathBuf)> {
         .iter()
         .filter(|(key, _)| settings["enabledPlugins"][key.as_str()] == true)
         .filter_map(|(key, installs)| {
-            let path = installs.as_array()?.last()?["installPath"].as_str()?;
-            Some((key.split('@').next()?.to_owned(), PathBuf::from(path)))
+            let record = installs.as_array()?.last()?;
+            let path = record["installPath"].as_str()?;
+            let name = key.split('@').next()?.to_owned();
+            if name.is_empty() {
+                return None;
+            }
+            Some(EnabledPlugin {
+                id: (*key).clone(),
+                name,
+                path: PathBuf::from(path),
+                version: record["version"].as_str().unwrap_or("").to_owned(),
+                git_commit_sha: record["gitCommitSha"].as_str().unwrap_or("").to_owned(),
+            })
         })
         .collect()
+}
+
+fn plugins(claude: &Path) -> Vec<(String, PathBuf)> {
+    enabled_plugins(claude).into_iter().map(|plugin| (plugin.name, plugin.path)).collect()
 }
 
 #[cfg(test)]
@@ -243,7 +272,7 @@ mod tests {
             .to_string(),
         );
 
-        let all = list(&claude, project.path());
+        let all = list(&claude, project.path(), &[]);
         let mine: Vec<_> = all.iter().filter(|c| c.source != "builtin").map(|c| (c.name.as_str(), c.description.as_str(), c.source, c.skill)).collect();
         assert_eq!(
             mine,
@@ -264,6 +293,6 @@ mod tests {
     #[test]
     fn a_home_with_no_claude_folder_has_only_the_builtins() {
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(list(&home.path().join(".claude"), home.path()).len(), BUILTIN.len());
+        assert_eq!(list(&home.path().join(".claude"), home.path(), &[]).len(), BUILTIN.len());
     }
 }

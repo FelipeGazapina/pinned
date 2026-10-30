@@ -10,8 +10,20 @@ struct Cache {
 pub struct Delegates {
     tasks: Mutex<Vec<Task>>,
     pids: Mutex<HashMap<String, u32>>,
+    reports: Mutex<Vec<Report>>,
+    store: Option<PathBuf>,
     cursor: Arc<Mutex<Option<Cache>>>,
     warming: Arc<AtomicBool>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Report {
+    tab: String,
+    #[serde(default)]
+    session: Option<String>,
+    text: String,
+    #[serde(default)]
+    claimed: bool,
 }
 
 impl Default for Delegates {
@@ -19,6 +31,8 @@ impl Default for Delegates {
         Self {
             tasks: Mutex::new(vec![]),
             pids: Mutex::new(HashMap::new()),
+            reports: Mutex::new(vec![]),
+            store: None,
             cursor: Arc::new(Mutex::new(None)),
             warming: Arc::new(AtomicBool::new(false)),
         }
@@ -47,6 +61,19 @@ pub enum Claim {
 }
 
 impl Delegates {
+    pub fn load(file: Option<PathBuf>) -> Self {
+        let delegates = Self { store: file.clone(), ..Self::default() };
+        let Some(file) = file else { return delegates };
+        let Ok(bytes) = std::fs::read(&file) else { return delegates };
+        let Ok(saved) = serde_json::from_slice::<SavedFile>(&bytes) else { return delegates };
+        *delegates.tasks.lock().unwrap() = saved.tasks.into_iter().map(SavedTask::into_task).collect();
+        *delegates.reports.lock().unwrap() = saved.reports;
+        if delegates.adopt_restart() {
+            delegates.persist();
+        }
+        delegates
+    }
+
     /// The same caller and `clientRequestId` returns the task already started.
     pub fn claim(&self, new: NewTask) -> Claim {
         let mut tasks = self.tasks.lock().unwrap();
@@ -59,6 +86,8 @@ impl Delegates {
         }
         let task = fresh(new);
         tasks.push(task.clone());
+        drop(tasks);
+        self.persist();
         Claim::Fresh(Box::new(task))
     }
 
@@ -74,12 +103,22 @@ impl Delegates {
             task.cwd = cwd;
             task.isolated = isolated;
         }
+        self.persist();
     }
 
     pub fn set_model(&self, id: &str, model: Option<String>) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
             task.model = model;
         }
+        self.persist();
+    }
+
+    pub fn note_parent(&self, id: &str, session: Option<String>) {
+        let Some(session) = session.filter(|session| !session.is_empty()) else { return };
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.parent_session = Some(session);
+        }
+        self.persist();
     }
 
     /// Records `pid` for a task that is still working. A task that already finished is killed now,
@@ -137,6 +176,7 @@ impl Delegates {
         if let Some(dir) = dir {
             crate::branches::drop_worktree(&dir, path);
         }
+        self.persist();
     }
 
     /// Applies one child event. Returns the parent tab when a task just became deliverable.
@@ -178,32 +218,42 @@ impl Delegates {
         for dir in dirs {
             crate::branches::drop_worktree(&dir, path);
         }
+        self.persist();
         ready
     }
 
     pub fn started_json(&self, id: &str) -> Result<Value, String> {
-        let mut tasks = self.tasks.lock().unwrap();
-        let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| format!("no task {id}"))?;
-        if task.state.terminal() {
-            task.delivered = true;
-            let mut body = status_json(task);
-            body["next"] = json!(result_next(task));
-            return Ok(body);
-        }
-        Ok(json!({
-            "taskId": task.id,
-            "title": task.title,
-            "providerInstanceId": task.account,
-            "model": task.model,
-            "workState": task.state.as_str(),
-            "cwd": task.cwd.display().to_string(),
-            "next": next_line(task),
-        }))
+        let body = {
+            let mut tasks = self.tasks.lock().unwrap();
+            let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| format!("no task {id}"))?;
+            if task.state.terminal() {
+                task.delivered = true;
+                let mut body = status_json(task);
+                body["next"] = json!(result_next(task));
+                body
+            } else {
+                json!({
+                    "taskId": task.id,
+                    "title": task.title,
+                    "providerInstanceId": task.account,
+                    "model": task.model,
+                    "workState": task.state.as_str(),
+                    "cwd": task.cwd.display().to_string(),
+                    "next": next_line(task),
+                })
+            }
+        };
+        self.persist();
+        Ok(body)
     }
 
     pub fn status(&self, caller: &Caller, id: &str) -> Result<Value, String> {
-        let mut tasks = self.tasks.lock().unwrap();
-        self.read(&mut tasks, caller, id)
+        let value = {
+            let mut tasks = self.tasks.lock().unwrap();
+            self.read(&mut tasks, caller, id)?
+        };
+        self.persist();
+        Ok(value)
     }
 
     pub fn cancel(&self, caller: &Caller, id: &str, reason: &str, path: Option<&str>) -> Result<Value, String> {
@@ -233,12 +283,38 @@ impl Delegates {
         for id in &order {
             self.stop_one(id, reason, path);
         }
-        let mut tasks = self.tasks.lock().unwrap();
-        let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| format!("no task {id}"))?;
-        if task.state.terminal() {
-            task.delivered = true;
+        let body = {
+            let mut tasks = self.tasks.lock().unwrap();
+            let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| format!("no task {id}"))?;
+            if task.state.terminal() {
+                task.delivered = true;
+            }
+            status_json(task)
+        };
+        self.persist();
+        Ok(body)
+    }
+
+    pub fn stop_for_restart(&self, path: Option<&str>) {
+        let roots: Vec<String> = {
+            let tasks = self.tasks.lock().unwrap();
+            tasks.iter().filter(|task| !task.state.terminal() && matches!(task.parent, Parent::Tab(_))).map(|task| task.id.clone()).collect()
+        };
+        for id in roots {
+            let order = {
+                let tasks = self.tasks.lock().unwrap();
+                let mut order = vec![];
+                postorder(&tasks, &id, &mut order);
+                order
+            };
+            for id in order {
+                self.stop_one(&id, "stopped by restart", path);
+            }
         }
-        Ok(status_json(task))
+        for id in self.running() {
+            self.stop_one(&id, "stopped by restart", path);
+        }
+        self.persist();
     }
 
     fn read(&self, tasks: &mut [Task], caller: &Caller, id: &str) -> Result<Value, String> {
@@ -290,15 +366,24 @@ impl Delegates {
             })
             .map(|(index, _)| index)
             .collect();
-        if ready.is_empty() {
+        let mut reports = self.reports.lock().unwrap();
+        let pending: Vec<usize> = reports.iter().enumerate().filter(|(_, report)| report.tab == tab && !report.claimed).map(|(index, _)| index).collect();
+        if ready.is_empty() && pending.is_empty() {
             return None;
         }
-        let lines = ready.iter().map(|index| notice_line(&tasks[*index])).collect::<Vec<_>>().join("\n");
+        let mut lines: Vec<String> = ready.iter().map(|index| notice_line(&tasks[*index])).collect();
         let ids: Vec<String> = ready.iter().map(|index| tasks[*index].id.clone()).collect();
         for index in &ready {
             tasks[*index].delivered = true;
         }
-        Some((lines, ids))
+        for index in pending {
+            reports[index].claimed = true;
+            lines.push(reports[index].text.clone());
+        }
+        drop(reports);
+        drop(tasks);
+        self.persist();
+        Some((lines.join("\n"), ids))
     }
 
     /// Claims one finished task's notice for the session that is its direct parent and marks it delivered.
@@ -322,7 +407,10 @@ impl Delegates {
             return Err(format!("{id} was already sent"));
         }
         task.delivered = true;
-        Ok(notice_line(task))
+        let line = notice_line(task);
+        drop(tasks);
+        self.persist();
+        Ok(line)
     }
 
     pub fn release_notice(&self, ids: &[String]) {
@@ -331,6 +419,103 @@ impl Delegates {
             if ids.iter().any(|id| id == &task.id) {
                 task.delivered = false;
             }
+        }
+        drop(tasks);
+        self.persist();
+    }
+
+    pub fn queue_report(&self, tab: &str, session: Option<String>, text: String) {
+        self.reports.lock().unwrap().push(Report { tab: tab.to_owned(), session: session.filter(|session| !session.is_empty()), text, claimed: false });
+        self.persist();
+    }
+
+    pub fn drop_claimed_reports(&self, tab: &str) {
+        self.reports.lock().unwrap().retain(|report| !(report.tab == tab && report.claimed));
+        self.persist();
+    }
+
+    pub fn release_reports(&self, tab: &str) {
+        for report in self.reports.lock().unwrap().iter_mut() {
+            if report.tab == tab {
+                report.claimed = false;
+            }
+        }
+        self.persist();
+    }
+
+    pub fn stamp_sessions(&self, sessions: &HashMap<String, String>) {
+        for task in self.tasks.lock().unwrap().iter_mut() {
+            if let Parent::Tab(tab) = &task.parent {
+                if let Some(session) = sessions.get(tab) {
+                    task.parent_session = Some(session.clone());
+                }
+            }
+        }
+        for report in self.reports.lock().unwrap().iter_mut() {
+            if let Some(session) = sessions.get(&report.tab) {
+                report.session = Some(session.clone());
+            }
+        }
+        self.persist();
+    }
+
+    pub fn rebind(&self, sessions: &[(String, String)]) {
+        let tab_for = |session: &str| sessions.iter().find(|(id, _)| id == session).map(|(_, tab)| tab.clone());
+        for task in self.tasks.lock().unwrap().iter_mut() {
+            let (old, session) = match (&task.parent, task.parent_session.clone()) {
+                (Parent::Tab(old), Some(session)) => (old.clone(), session),
+                _ => continue,
+            };
+            let Some(tab) = tab_for(&session) else { continue };
+            if task.caller_key == format!("tab:{old}") {
+                task.caller_key = format!("tab:{tab}");
+            }
+            task.parent = Parent::Tab(tab);
+        }
+        for report in self.reports.lock().unwrap().iter_mut() {
+            let Some(session) = report.session.clone() else { continue };
+            if let Some(tab) = tab_for(&session) {
+                report.tab = tab;
+            }
+        }
+        self.persist();
+    }
+
+    pub fn has_pending(&self) -> bool {
+        let tasks = self.tasks.lock().unwrap().iter().any(|task| !task.delivered && task.state.terminal() && matches!(task.parent, Parent::Tab(_)));
+        let reports = self.reports.lock().unwrap().iter().any(|report| !report.claimed);
+        tasks || reports
+    }
+
+    fn adopt_restart(&self) -> bool {
+        let mut changed = false;
+        for task in self.tasks.lock().unwrap().iter_mut() {
+            if task.state.terminal() {
+                continue;
+            }
+            task.state = WorkState::Cancelled;
+            task.error = Some("stopped by restart".into());
+            task.ended = Some(unix_millis());
+            task.delivered = false;
+            task.held = None;
+            changed = true;
+        }
+        changed
+    }
+
+    fn persist(&self) {
+        let Some(path) = self.store.clone() else { return };
+        let saved = SavedFile {
+            tasks: self.tasks.lock().unwrap().iter().map(SavedTask::from_task).collect(),
+            reports: self.reports.lock().unwrap().clone(),
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let Ok(bytes) = serde_json::to_vec_pretty(&saved) else { return };
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
         }
     }
 
@@ -569,7 +754,7 @@ impl Task {
 fn working_next(task: &Task) -> String {
     match task.parent {
         Parent::Tab(_) => format!(
-            "end your turn and do not poll; pinned types a notice when this session is idle, or the user sends it from the task's card; then call task_status with this taskId \"{}\"",
+            "end your turn and do not poll; pinned delivers the notice when the turn ends or when this session is idle, or the user sends it from the task's card; then call task_status with this taskId \"{}\"",
             task.id
         ),
         Parent::Task(_) => format!("call task_status with taskId \"{}\" when you need it", task.id),
@@ -725,6 +910,138 @@ fn fresh(new: NewTask) -> Task {
         client_request_id: new.client_request_id,
         role: new.role,
         held: None,
+        parent_session: None,
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedFile {
+    tasks: Vec<SavedTask>,
+    #[serde(default)]
+    reports: Vec<Report>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedTask {
+    id: String,
+    parent_kind: String,
+    parent_id: String,
+    #[serde(default)]
+    parent_session: Option<String>,
+    #[serde(default)]
+    tool: Option<String>,
+    title: String,
+    account: AccountId,
+    provider: Provider,
+    #[serde(default)]
+    model: Option<String>,
+    cwd: PathBuf,
+    access: String,
+    started: u64,
+    #[serde(default)]
+    ended: Option<u64>,
+    state: String,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    conversation: Option<String>,
+    mode: Mode,
+    #[serde(default)]
+    delivered: bool,
+    #[serde(default)]
+    isolated: bool,
+    caller_key: String,
+    #[serde(default)]
+    client_request_id: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+}
+
+impl SavedTask {
+    fn from_task(task: &Task) -> Self {
+        let (parent_kind, parent_id) = match &task.parent {
+            Parent::Tab(id) => ("tab", id.clone()),
+            Parent::Task(id) => ("task", id.clone()),
+        };
+        Self {
+            id: task.id.clone(),
+            parent_kind: parent_kind.into(),
+            parent_id,
+            parent_session: task.parent_session.clone(),
+            tool: task.tool.clone(),
+            title: task.title.clone(),
+            account: task.account.clone(),
+            provider: task.provider,
+            model: task.model.clone(),
+            cwd: task.cwd.clone(),
+            access: task.access.as_str().into(),
+            started: task.started,
+            ended: task.ended,
+            state: task.state.as_str().into(),
+            summary: task.summary.clone(),
+            error: task.error.clone(),
+            conversation: task.conversation.clone(),
+            mode: task.mode,
+            delivered: task.delivered,
+            isolated: task.isolated,
+            caller_key: task.caller_key.clone(),
+            client_request_id: task.client_request_id.clone(),
+            role: task.role.clone(),
+        }
+    }
+
+    fn into_task(self) -> Task {
+        let parent = match self.parent_kind.as_str() {
+            "task" => Parent::Task(self.parent_id),
+            _ => Parent::Tab(self.parent_id),
+        };
+        Task {
+            id: self.id,
+            parent,
+            tool: self.tool,
+            title: self.title,
+            account: self.account,
+            provider: self.provider,
+            model: self.model,
+            cwd: self.cwd,
+            access: access_from(&self.access),
+            started: self.started,
+            ended: self.ended,
+            state: state_from(&self.state),
+            summary: self.summary,
+            error: self.error,
+            conversation: self.conversation,
+            steps: vec![],
+            assistant: None,
+            mode: self.mode,
+            delivered: self.delivered,
+            isolated: self.isolated,
+            caller_key: self.caller_key,
+            client_request_id: self.client_request_id,
+            role: self.role,
+            held: None,
+            parent_session: self.parent_session,
+        }
+    }
+}
+
+fn access_from(access: &str) -> Access {
+    match access {
+        "full" => Access::Full,
+        "read-only" => Access::ReadOnly,
+        _ => Access::Auto,
+    }
+}
+
+fn state_from(state: &str) -> WorkState {
+    match state {
+        "working" => WorkState::Working,
+        "waiting_for_children" => WorkState::WaitingForChildren,
+        "failed" => WorkState::Failed,
+        "cancelled" => WorkState::Cancelled,
+        _ => WorkState::ResultAvailable,
     }
 }
 

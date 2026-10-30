@@ -856,6 +856,38 @@ async function sweep(profileName) {
       }));
     check(placed[0] === (touch ? "hidden" : "inside"), `the header readout is ${placed[0]}`);
     check(placed[1] !== "spills", "the row readout spills out of its line");
+    if (!touch) {
+      const sidebarWidth = await page.evaluate(() => document.getElementById("sidebar").getBoundingClientRect().width);
+      const role = await page.evaluate(() => active.view.role ?? "");
+      await page.evaluate(() => {
+        setSidebarWidth(1);
+        active.view.role = "orchestrator";
+        renderSidebar();
+      });
+      const actsFit = () => page.evaluate(() => {
+        const row = document.querySelector("#thread-list .thread-row.active");
+        const side = document.getElementById("sidebar").getBoundingClientRect();
+        const clipped = [...row.querySelectorAll(".acts [data-act]")].filter((button) => {
+          const box = button.getBoundingClientRect();
+          const hit = box.width > 0 ? document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) : null;
+          const inside = box.width > 0 && box.left >= side.left - 0.5 && box.right <= side.right + 0.5 && box.top >= side.top - 0.5 && box.bottom <= side.bottom + 0.5;
+          return !(inside && hit && (hit === button || button.contains(hit)));
+        }).map((button) => button.dataset.act);
+        return { clipped, count: row.querySelectorAll(".acts [data-act]").length, focus: row.matches(":focus-visible") };
+      });
+      await page.hover("#thread-list .thread-row.active .l2");
+      const hovered = await actsFit();
+      await page.evaluate(() => document.querySelector("#thread-list .thread-row.active").focus({ focusVisible: true }));
+      const focused = await actsFit();
+      await page.evaluate(({ sidebarWidth, role }) => {
+        active.view.role = role;
+        renderSidebar();
+        setSidebarWidth(sidebarWidth);
+      }, { sidebarWidth, role });
+      await page.mouse.move(0, 0);
+      check(hovered.count > 0 && hovered.clipped.length === 0, `hover hides ${hovered.clipped.join(", ") || "the actions"}`);
+      check(focused.focus && focused.clipped.length === 0, `focus hides ${focused.clipped.join(", ") || "the actions"}`);
+    }
     await sendPrompt("think");
     await waitFor("the turn to start", async () => (await readouts()).status === "working");
     await sleep(2500);
@@ -2340,6 +2372,16 @@ async function sweep(profileName) {
     await waitFor("the prompt back", async () => (await page.inputValue("#prompt")) === "compare these", 10000);
     await waitFor("the pictures back", async () => (await page.locator("#attachments .tile img").count()) === 2, 10000);
     await page.evaluate(() => clearComposer(active));
+  });
+
+  await step("app view: an image named by its upload's path draws the picture, not only the path", async () => {
+    // A 1x1 PNG, saved where the node keeps its uploads, as a client's attachment lands there.
+    const shot = path.join(DIR, "node", "uploads", "sweep-shot.png");
+    fs.mkdirSync(path.dirname(shot), { recursive: true });
+    fs.writeFileSync(shot, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"));
+    await sendPrompt(`what is in ${shot}`);
+    await waitFor("the upload's picture", async () => /^data:image\/png;base64,/.test((await lastTurn(".user .pictures img").getAttribute("src").catch(() => "")) ?? ""), 15000);
+    check((await lastTurn(".user .body").textContent()).includes(shot), "the message doesn't keep the path");
   });
 
   await step("app view: a fork starts with a Forked from conversation divider that opens its source", async () => {
@@ -6214,7 +6256,7 @@ async function sweep(profileName) {
     await waitFor("the project menu", () => page.locator("#project-menu").isVisible());
     check((await attr("#project-menu input", "placeholder")) === "Search projects...", "the menu has no project search");
     const items = await page.locator("#project-menu .item .label").allTextContents();
-    check(items.join("|") === "All projects|alpha|beta", `items: ${items.join("|")}`);
+    check(items.join("|") === "All projects|alpha|beta|gamma", `items: ${items.join("|")}`);
     const [menu, search] = [await rect("#project-menu"), await rect("#sidebar .search")];
     check(Math.round(menu.left) === Math.round(search.left) && menu.width <= 288, `the menu sits at ${menu.left} (${menu.width}px), the search at ${search.left}`);
     await page.fill("#project-menu input", "nothing like it");
@@ -6649,11 +6691,11 @@ async function sweep(profileName) {
     await sendPrompt("past the limit");
     await answered("echo: past the limit");
 
-    check((await filterLabels()).join() === "All projects,beta,alpha", `by last message: ${(await filterLabels()).join()}`);
+    check((await filterLabels()).join() === "All projects,beta,alpha,gamma", `by last message: ${(await filterLabels()).join()}`);
     await sideSetting("grouping");
     await page.selectOption("#side-projectOrder", "manual");
     await closeSettings();
-    check((await filterLabels()).join() === "All projects,alpha,beta", `manual: ${(await filterLabels()).join()}`);
+    check((await filterLabels()).join() === "All projects,alpha,beta,gamma", `manual: ${(await filterLabels()).join()}`);
     await sideSetting("grouping");
     await page.selectOption("#side-projectOrder", "updated_at");
     await closeSettings();
@@ -6664,11 +6706,11 @@ async function sweep(profileName) {
       require("child_process").execFileSync("git", ["-C", two, "remote", "add", "origin", "https://github.com/example/alpha.git"]);
     }
     const copy = await openThreadIn("work/alpha-two");
-    await waitFor("alpha's two checkouts as one project", async () => [...(await filterLabels())].sort().join() === "All projects,alpha,beta", 10000);
+    await waitFor("alpha's two checkouts as one project", async () => [...(await filterLabels())].sort().join() === "All projects,alpha,beta,gamma", 10000);
     await sideSetting("grouping", false);
     await closeSettings();
     const apart = await filterLabels();
-    check([...apart].sort().join() === "All projects,alpha,alpha-two,beta", `kept apart: ${apart.join()}`);
+    check([...apart].sort().join() === "All projects,alpha,alpha-two,beta,gamma", `kept apart: ${apart.join()}`);
     await sideSetting("grouping", true);
     await closeSettings();
     await press(page.locator("#project-filter"));

@@ -1,13 +1,14 @@
-//! The Upstash Boxes workflow runs live in: one box per issue or thread, booted as a node of the
-//! account, given exactly that run, and deleted with its machine once the session ends. The `boxes`
-//! table is the only source of truth. Every step checks it before acting, so the first pass after a
-//! restart finishes whatever the last hub left halfway.
+//! The Upstash Boxes a workflow runs in. The account's box permission chooses a new box per issue
+//! or thread, one box reused by later runs, a question before any box, or none. A box boots as a
+//! node of the account, is given the run, and is deleted with its machine once the session ends.
+//! The `boxes` table is the only source of truth. Every step checks it before acting, so the first
+//! pass after a restart finishes whatever the last hub left halfway.
 
 use crate::hub::{Account, Hub, RUN_WAIT};
 use futures_util::future::BoxFuture;
 use pinned_core::account::Credentials;
 use pinned_core::agent::Subject;
-use pinned_core::connectors::{BoxSize, BoxStep, Placement, Run};
+use pinned_core::connectors::{BoxPermission, BoxSize, BoxStep, FixedClaim, Placement, Run};
 use pinned_core::upstash::{self, BoxId, Exec, Keys, Listed, NewBox};
 use pinned_core::wire::{Call, RunSpec};
 use pinned_core::github;
@@ -77,6 +78,8 @@ pub struct Policy {
     pub tick: Duration,
     /// Between looks for boxes of this hub that no row names.
     pub sweep: Duration,
+    /// How many of the account's boxes may exist at once. A run past this creates nothing.
+    pub max_open: u32,
 }
 
 impl Default for Policy {
@@ -93,6 +96,7 @@ impl Default for Policy {
             cooldown: minutes(10),
             tick: Duration::from_secs(60),
             sweep: minutes(10),
+            max_open: 8,
         }
     }
 }
@@ -361,25 +365,124 @@ impl Boxes {
         self.driving.lock().unwrap().insert(id.to_owned()).then(|| Driving { rows: &self.driving, id: id.to_owned() })
     }
 
-    /// `Hub::open` for a box run. A run whose issue or thread has a box already goes to it.
-    /// Otherwise the run gets a new row, and a box booted for it within `boot_wait`. On failure the
-    /// row ends, and the answer says why, which reaches the workflow's check line.
+    /// `Hub::open` for a box run. The account's workflow permission decides what happens.
+    /// `Fresh` gives the issue or thread its own box. `Fixed` reuses one box for every run.
+    /// `Ask` opens nothing until the user says yes. `Off`, and a disconnected Upstash, open nothing.
+    /// A run whose issue or thread already has a box goes to it. On failure the row ends, and the
+    /// answer says why, which reaches the workflow's check line.
     pub async fn open(&self, hub: &Hub, account: &Arc<Account>, run: Run, step: BoxStep) -> Result<Placement, String> {
-        let keys = hub.connectors(account).await?.box_keys().ok_or("Upstash Box is not connected: connect it in pinned's Connectors settings")?;
+        let connectors = hub.connectors(account).await?;
+        let keys = connectors.box_keys().ok_or("Upstash Box is not connected: connect it in pinned's Connectors settings")?;
+        match connectors.box_access().workflow {
+            BoxPermission::Off => return Err("Upstash Box is off for workflows: choose a box permission in Connectors settings".into()),
+            BoxPermission::Ask => match connectors.box_grant(&run.connector, &run.subject) {
+                Some(true) => {}
+                Some(false) => return Err("Upstash Box: you said no to a box for this, so none was opened".into()),
+                None => {
+                    connectors.ensure_box_ask(&run.connector, &run.subject).await?;
+                    return Err("Upstash Box: waiting for a yes before it opens a box for this".into());
+                }
+            },
+            BoxPermission::Fresh | BoxPermission::Fixed { .. } => {}
+        }
+        if matches!(connectors.box_access().workflow, BoxPermission::Fixed { .. }) {
+            return self.open_fixed(hub, account, &connectors, run, step, &keys).await;
+        }
+        self.open_new(hub, account, run, step, &keys, None, false).await
+    }
+
+    async fn open_fixed(
+        &self,
+        hub: &Hub,
+        account: &Arc<Account>,
+        connectors: &pinned_core::connectors::Connectors,
+        run: Run,
+        step: BoxStep,
+        keys: &Keys,
+    ) -> Result<Placement, String> {
+        let proposed = new_row_id();
+        let driving = self.drive_guard(&proposed);
+        match connectors.claim_fixed_row(&proposed)? {
+            FixedClaim::Use(existing) => {
+                drop(driving);
+                self.reuse_fixed(hub, account, connectors, &existing, run, step, keys).await
+            }
+            FixedClaim::Create => self.open_new(hub, account, run, step, keys, Some(proposed), driving.is_some()).await,
+        }
+    }
+
+    async fn reuse_fixed(
+        &self,
+        hub: &Hub,
+        account: &Arc<Account>,
+        connectors: &pinned_core::connectors::Connectors,
+        id: &str,
+        run: Run,
+        step: BoxStep,
+        keys: &Keys,
+    ) -> Result<Placement, String> {
+        let Some(_driving) = self.drive_guard(id) else {
+            return Err("Upstash Box: its box is still booting; the next check tries again".into());
+        };
+        match hub.db.box_by_id(id).await? {
+            None => {
+                drop(_driving);
+                let proposed = new_row_id();
+                let driving = self.drive_guard(&proposed);
+                match connectors.retake_fixed_row(id, &proposed)? {
+                    FixedClaim::Create => self.open_new(hub, account, run, step, keys, Some(proposed), driving.is_some()).await,
+                    FixedClaim::Use(other) => {
+                        drop(driving);
+                        Box::pin(self.reuse_fixed(hub, account, connectors, &other, run, step, keys)).await
+                    }
+                }
+            }
+            Some(Err(_)) => Err("Upstash Box: the last box for this is still being deleted; the next check tries again".into()),
+            Some(Ok(row)) => match row.phase {
+                Phase::Ending(_) => Err("Upstash Box: the last box for this is still being deleted; the next check tries again".into()),
+                Phase::Creating | Phase::Booting => Err("Upstash Box: its box is still booting; the next check tries again".into()),
+                Phase::Running => {
+                    let mut spec = run.spec();
+                    spec.token = None;
+                    self.place_run(hub, account, &row.machine.to_string(), &run.connector, &run.subject, &spec).await.map_err(|e| format!("Upstash Box: {e}"))
+                }
+            },
+        }
+    }
+
+    /// A new row, unless this subject already has one.
+    async fn open_new(
+        &self,
+        hub: &Hub,
+        account: &Arc<Account>,
+        run: Run,
+        step: BoxStep,
+        keys: &Keys,
+        claimed: Option<String>,
+        already_guarded: bool,
+    ) -> Result<Placement, String> {
         let cooled = self.cooling.lock().unwrap().get(&(account.id, run.connector.clone())).copied();
         if let Some(left) = cooled.and_then(|at| self.policy.cooldown.checked_sub(at.elapsed())) {
+            self.give_back(hub, account, claimed.as_deref()).await;
             let minutes = left.as_secs().div_ceil(60).max(1);
             return Err(format!("Upstash Box: this workflow's last box failed to boot, so pinned tries again in {minutes} min"));
+        }
+        if hub.db.box_for(account.id, &run.connector, &run.subject).await?.is_none() {
+            let rows = hub.db.boxes(account.id).await?;
+            if let Err(e) = self.within_cap(&rows) {
+                self.give_back(hub, account, claimed.as_deref()).await;
+                return Err(e);
+            }
         }
         let mut spec = run.spec();
         spec.token = None;
         let fresh = BoxRow {
-            id: new_row_id(),
+            id: claimed.clone().unwrap_or_else(new_row_id),
             account: account.id,
             machine: Uuid::new_v4(),
             upstash: None,
-            connector: run.connector,
-            subject: run.subject,
+            connector: run.connector.clone(),
+            subject: run.subject.clone(),
             spec: spec.clone(),
             size: step.size,
             phase: Phase::Creating,
@@ -387,16 +490,45 @@ impl Boxes {
         };
         // Driven before it is written, so a reap that reads it first leaves it alone.
         let driving = self.drive_guard(&fresh.id);
+        if driving.is_none() && !already_guarded {
+            self.give_back(hub, account, claimed.as_deref()).await;
+            return Err("Upstash Box: its box is still booting; the next check tries again".into());
+        }
         let (row, _) = hub.db.reserve_box(&fresh).await?;
+        if row.id != fresh.id {
+            self.give_back(hub, account, claimed.as_deref()).await;
+        }
         if let Phase::Ending(_) = row.phase {
             return Err("Upstash Box: the last box for this is still being deleted; the next check tries again".into());
         }
-        let driving = if row.id == fresh.id { driving } else { self.drive_guard(&row.id) };
-        let Some(_driving) = driving else {
+        let other = if row.id == fresh.id { None } else { self.drive_guard(&row.id) };
+        if row.id != fresh.id && other.is_none() {
             return Err("Upstash Box: its box is still booting; the next check tries again".into());
-        };
+        }
         // The run asked for now, which may carry newer thread messages than the one the row was made with.
-        self.drive(hub, account, row, &spec, &keys).await.map_err(|e| format!("Upstash Box: {e}"))
+        self.drive(hub, account, row, &spec, keys).await.map_err(|e| format!("Upstash Box: {e}"))
+    }
+
+    async fn give_back(&self, hub: &Hub, account: &Arc<Account>, id: Option<&str>) {
+        let Some(id) = id else { return };
+        if let Ok(connectors) = hub.connectors(account).await {
+            if let Err(e) = connectors.release_fixed_row(id) {
+                eprintln!("pinned-server: could not release box claim {id}: {e}");
+            }
+        }
+    }
+
+    fn within_cap(&self, rows: &[Result<BoxRow, Remains>]) -> Result<(), String> {
+        let open = rows.iter().filter(|row| match row {
+            Ok(row) => !matches!(row.phase, Phase::Ending(_)),
+            Err(_) => true,
+        }).count() as u32;
+        if open < self.policy.max_open {
+            return Ok(());
+        }
+        let n = self.policy.max_open;
+        let (noun, verb) = if n == 1 { ("box", "is") } else { ("boxes", "are") };
+        Err(format!("Upstash Box: {n} {noun} {verb} already open, and this account's limit is {n}"))
     }
 
     /// Brings the row to running: its box's node online within `boot_wait`, then `spec` answered
@@ -519,17 +651,21 @@ impl Boxes {
     /// Hands the run to the row's machine, unless its session there already works on it. The
     /// machine answers a run sent again with the session it started.
     async fn dispatch(&self, hub: &Hub, account: &Arc<Account>, row: &BoxRow, spec: &RunSpec) -> Result<Placement, String> {
-        let machine = row.machine.to_string();
-        if let Some((id, tab)) = account.placed(&row.connector, &row.subject) {
+        self.place_run(hub, account, &row.machine.to_string(), &row.connector, &row.subject, spec).await
+    }
+
+    /// Hands `spec` to `machine` for this connector and subject.
+    async fn place_run(&self, hub: &Hub, account: &Arc<Account>, machine: &str, connector: &str, subject: &Subject, spec: &RunSpec) -> Result<Placement, String> {
+        if let Some((id, tab)) = account.placed(connector, subject) {
             if id == machine {
                 return Ok(Placement { machine: id, tab });
             }
         }
         let mut spec = spec.clone();
         spec.token = hub.connectors(account).await?.github_token().filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
-        let value = hub.call_machine(account, &machine, Call::Run { run: spec }, RUN_WAIT).await.map_err(String::from)?;
+        let value = hub.call_machine(account, machine, Call::Run { run: spec }, RUN_WAIT).await.map_err(String::from)?;
         let tab = value.as_str().map(str::to_owned).ok_or_else(|| "the box started the session without a tab id".to_owned())?;
-        Ok(Placement { machine, tab })
+        Ok(Placement { machine: machine.to_owned(), tab })
     }
 
     /// Ending → gone, each step a no-op once done: the machine, so its node can't sign in again,
@@ -557,6 +693,7 @@ impl Boxes {
 
     /// Ends the row for `why`, unless it is ending already, and deletes its box.
     async fn finish(&self, hub: &Hub, account: &Arc<Account>, mut row: BoxRow, why: End, keys: Option<&Keys>) -> Result<(), String> {
+        let failed = matches!(why, End::Failed(_));
         if !matches!(row.phase, Phase::Ending(_)) {
             let ending = Phase::Ending(why);
             if !hub.db.set_box_phase(&row.id, &row.phase, &ending).await? {
@@ -564,7 +701,15 @@ impl Boxes {
             }
             row.phase = ending;
         }
-        self.end(hub, account, &row.remains(), keys).await
+        self.end(hub, account, &row.remains(), keys).await?;
+        if !failed {
+            if let Ok(connectors) = hub.connectors(account).await {
+                if let Err(e) = connectors.forget_box_grant(&row.connector, &row.subject) {
+                    eprintln!("pinned-server: could not clear the box answer for {}: {e}", row.id);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The session for `subject` opened its pull request, so its box ends once it stops working.
@@ -605,7 +750,8 @@ impl Boxes {
     }
 
     async fn reap_once(&self, hub: &Arc<Hub>, account: &Arc<Account>) -> Result<(), String> {
-        let keys = hub.connectors(account).await?.box_keys();
+        let connectors = hub.connectors(account).await?;
+        let keys = connectors.box_keys();
         let due = self.swept.lock().unwrap().get(&account.id).is_none_or(|at| at.elapsed() >= self.policy.sweep);
         // Listed before the rows are read, so every box listed has its row among them.
         let listed = match &keys {
@@ -652,20 +798,26 @@ impl Boxes {
                     None => Some(End::Disconnected),
                 },
                 Phase::Running => {
-                    let held = hub.connectors(account).await?.holds_box(&row.connector, &row.subject);
                     let gone = listed.as_ref().zip(row.upstash.as_ref()).is_some_and(|(listed, id)| !listed.iter().any(|b| b.id == *id));
-                    let seen = account.seen(&row.machine.to_string(), &row.connector, &row.subject);
-                    let mut timers = self.timers.lock().unwrap();
-                    let slot = timers.entry(row.id.clone()).or_default();
-                    if held {
-                        slot.quiet_since = None;
-                        slot.exited_since = None;
-                        slot.gone_since = None;
-                        slot.offline_since = None;
-                        (row.age >= self.policy.max_life).then_some(End::Expired)
+                    // Later runs reuse this row. The fresh-box timers would delete it between them.
+                    if connectors.box_access().owns_row(&row.id) {
+                        gone.then_some(End::Vanished)
                     } else {
-                        let verdict = verdict(row.age, seen, slot, now, &self.policy);
-                        if gone { Some(End::Vanished) } else { verdict }
+                        let held = connectors.holds_box(&row.connector, &row.subject);
+                        let machine = row.machine.to_string();
+                        let seen = account.seen(&machine, &row.connector, &row.subject);
+                        let mut timers = self.timers.lock().unwrap();
+                        let slot = timers.entry(row.id.clone()).or_default();
+                        if held {
+                            slot.quiet_since = None;
+                            slot.exited_since = None;
+                            slot.gone_since = None;
+                            slot.offline_since = None;
+                            (row.age >= self.policy.max_life).then_some(End::Expired)
+                        } else {
+                            let verdict = verdict(row.age, seen, slot, now, &self.policy);
+                            if gone { Some(End::Vanished) } else { verdict }
+                        }
                     }
                 }
                 Phase::Ending(_) => None,

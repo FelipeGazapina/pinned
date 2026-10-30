@@ -154,6 +154,7 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
     let Some(file) = machine.sync_file().map(Path::to_path_buf) else { return };
     let mut state = sync::State::load(&file, &crate::machine::home().join(".claude"));
     let mut shared_projects = HashSet::new();
+    let mut reported_old_hub = false;
     let mut wait = SYNC_FIRST;
     loop {
         let until = Instant::now() + wait;
@@ -178,6 +179,23 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
                 }
                 Ok(_) => {}
                 Err(e) => eprintln!("pinned: could not sync {key}: {e}"),
+            }
+        }
+        for share in machine.plugin_shares() {
+            match sync::sync_plugins(shared, &mut state, &share, SystemTime::now()) {
+                Ok(done) if !done.pushed.is_empty() || !done.pulled.is_empty() => {
+                    reported_old_hub = false;
+                    eprintln!("pinned: synced plugins: {} up, {} down", done.pushed.len(), done.pulled.len());
+                }
+                Ok(_) => reported_old_hub = false,
+                Err(e) if sync::old_hub(&e) => {
+                    if !reported_old_hub {
+                        eprintln!("pinned: this hub does not share plugins yet: {e}");
+                        reported_old_hub = true;
+                    }
+                    break;
+                }
+                Err(e) => eprintln!("pinned: could not sync plugins: {e}"),
             }
         }
         state.save(&file);

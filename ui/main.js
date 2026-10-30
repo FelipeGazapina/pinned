@@ -77,6 +77,11 @@ function setTabs(machine, views, { forget = true } = {}) {
     else addTab(machine, view);
   }
   placeTabs();
+  const paths = views.map((v) => v.cwd).sort().join("\n");
+  if (m.tabPaths !== paths) {
+    m.tabPaths = paths;
+    refreshProjects(machine);
+  }
   render();
 }
 
@@ -1225,6 +1230,7 @@ function connectHub(signedIn) {
     settings: (latest) => onHubSettings(latest),
     online(on) {
       document.body.dataset.hub = on ? "online" : "offline";
+      if (on) retryUploadImages();
       if (settingsOpen() && page === "account") showAccount();
     },
     refused: () => (TAURI ? (document.body.dataset.hub = "refused") : signOutWeb("You were signed out. Sign in again.")),
@@ -1243,7 +1249,10 @@ function showMachines(list, tabsByMachine) {
     else machines.set(view.id, { view, tabs: [], transport: hub.transport(view.id), usage: {} });
     if (!view.online) setTabs(view.id, [], { forget: false });
     else if (tabsByMachine) setTabs(view.id, tabsByMachine[view.id] ?? []);
-    else if (!wasOnline) refreshTabs(view.id).catch(console.warn);
+    else if (!wasOnline) {
+      refreshTabs(view.id).catch(console.warn);
+      retryUploadImages();
+    }
   }
   for (const id of [...machines.keys()]) {
     if (id === LOCAL || list.some((v) => v.id === id)) continue;

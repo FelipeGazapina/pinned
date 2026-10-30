@@ -1016,7 +1016,7 @@ panelBody.addEventListener("click", (e) => {
     return toggleMenu(e.target.closest("[data-pr-more]"), prMenu(shownSurface(active)));
   } else if (e.target.closest("[data-open-url]")) {
     return openOutside(e.target.closest("[data-open-url]").dataset.openUrl);
-  } else if (e.target.closest("a[href]")) {
+  } else if (e.target.closest("a[href]:not([download])")) {
     e.preventDefault();
     return openLink(e.target.closest("a[href]").href, e.metaKey || e.ctrlKey);
   } else return;

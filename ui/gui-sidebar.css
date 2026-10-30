@@ -25,7 +25,7 @@
 #chat-head .crumb :is(.monogram, .favicon) { width: 14px; height: 14px; }
 #chat-head .crumb .stats { flex: none; margin-left: -4px; font-size: 12px; font-weight: 400; color: var(--g-muted); font-variant-numeric: tabular-nums; }
 
-.thread-row .slot { margin-left: auto; height: 20px; min-width: 32px; display: flex; align-items: center; justify-content: flex-end; flex: none; }
+.thread-row .slot { margin-left: auto; height: 20px; min-width: 32px; display: flex; align-items: center; justify-content: flex-end; flex: 0 1 auto; overflow: hidden; }
 .thread-row .since, .thread-row .stats { font-variant-numeric: tabular-nums; }
 .thread-row .woke { cursor: pointer; }
 .thread-row .woke:hover { text-decoration: underline; }
@@ -43,6 +43,9 @@
 @media (hover: hover) {
   .thread-row:hover .acts, .thread-row:focus-visible .acts { display: flex; }
   .thread-row:hover .stamp:not(.woke), .thread-row:focus-visible .stamp:not(.woke) { display: none; }
+  /* The slot is allowed to shrink, and it clips. Hovered actions keep their width; the role badge yields so they stay inside the panel. */
+  .thread-row:hover .slot, .thread-row:focus-visible .slot { overflow: visible; flex: none; }
+  .thread-row:hover .role:not(.worker), .thread-row:focus-visible .role:not(.worker) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
 .thread-row .stamp.when.unread { color: var(--g-warning); }
 .thread-row .l1 .draft-pen { display: flex; margin: 0; }
@@ -50,7 +53,7 @@
 .thread-row .l3 .dim, .thread-row .branch .i { color: rgb(var(--g-muted-rgb) / 0.4); }
 .thread-row .branch .head { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .thread-row .branch .tail { flex: none; }
-.thread-row .l3 .right { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+.thread-row .l3 .right { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .thread-row .remote { display: flex; color: rgb(var(--g-side-muted-rgb) / 0.7); }
 .thread-row .remote .i { width: 14px; height: 14px; }
 .thread-row .account { font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--g-input); color: var(--g-side-muted); max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

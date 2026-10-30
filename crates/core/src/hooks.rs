@@ -68,7 +68,10 @@ pub fn forward(arg: Option<&str>) {
     }
     let payload = hook_payload();
     if let (Ok(sock), Some(event)) = (std::env::var(SOCK_ENV), event_from(arg, &payload)) {
-        if let Some(output) = deliver(&sock, event) {
+        let hook: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+        let notify = hook["type"].as_str() == Some("agent-turn-complete");
+        let stop_active = hook["stop_hook_active"].as_bool().unwrap_or(false);
+        if let Some(output) = feed(&sock, event, notify, stop_active) {
             println!("{output}");
         }
     }
@@ -136,24 +139,32 @@ pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
             .then(|| field("cwd").and_then(|cwd| history::snapshot(Path::new(&cwd))))
             .flatten(),
         permission_mode: field("permission_mode"),
+        hook_feedback: false,
     })
 }
 
-/// Sends the hook's event. A prompt waits up to `RECALL_WAIT` for the memories the harness
-/// recalls for it, returned as the hook's JSON output.
-fn deliver(sock: &str, event: AgentEvent) -> Option<String> {
-    if event.status != AgentStatus::Working || event.prompt.is_none() {
+fn feed(sock: &str, mut event: AgentEvent, codex_notify: bool, stop_hook_active: bool) -> Option<String> {
+    let prompt = event.status == AgentStatus::Working && event.prompt.is_some();
+    let stop = event.status == AgentStatus::Done && !codex_notify && !stop_hook_active;
+    if !prompt && !stop {
         tell(sock, &Message::Agent(event));
         return None;
     }
+    event.hook_feedback = true;
     let mut stream = UnixStream::connect(sock).ok()?;
     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
     writeln!(stream, "{}", serde_json::to_string(&Message::Agent(event)).unwrap()).ok()?;
     let _ = stream.set_read_timeout(Some(RECALL_WAIT));
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).ok()?;
-    let context = serde_json::from_str::<Reply>(&reply).ok()?.ok().filter(|c| !c.is_empty())?;
-    Some(serde_json::json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": context } }).to_string())
+    let context = serde_json::from_str::<Reply>(&reply).ok()?.ok().filter(|context| !context.is_empty())?;
+    let name = if stop { "Stop" } else { "UserPromptSubmit" };
+    Some(serde_json::json!({ "hookSpecificOutput": { "hookEventName": name, "additionalContext": context } }).to_string())
+}
+
+#[cfg(test)]
+fn deliver(sock: &str, event: AgentEvent) -> Option<String> {
+    feed(sock, event, false, false)
 }
 
 /// Sends one message to the running harness without waiting for its answer.
@@ -497,6 +508,8 @@ mod tests {
     fn a_prompt_gets_the_memory_the_harness_recalls_unless_it_takes_too_long() {
         let sock = std::env::temp_dir().join(format!("pinned-recall-{}.sock", std::process::id()));
         listen(sock.clone(), |message| match message {
+            Message::Agent(AgentEvent { status: AgentStatus::Done, prompt: Some(p), .. }) if p == "carry" => Ok("task-1 finished".into()),
+            Message::Agent(AgentEvent { status: AgentStatus::Done, .. }) => Ok(String::new()),
             Message::Agent(AgentEvent { prompt: Some(p), .. }) if p == "slow" => {
                 std::thread::sleep(Duration::from_secs(2));
                 Ok("[1] Late: too late".into())
@@ -507,13 +520,19 @@ mod tests {
         })
         .unwrap();
         let sock = sock.display().to_string();
-        let event = |status, prompt: Option<&str>| AgentEvent { status, cwd: None, message: None, tab: Some("tab-1".into()), session: None, title: None, resume_at: None, prompt: prompt.map(Into::into), snapshot: None, permission_mode: None };
+        let event = |status, prompt: Option<&str>| AgentEvent { status, cwd: None, message: None, tab: Some("tab-1".into()), session: None, title: None, resume_at: None, prompt: prompt.map(Into::into), snapshot: None, permission_mode: None, hook_feedback: false };
         assert_eq!(
             deliver(&sock, event(AgentStatus::Working, Some("how do we deploy?"))),
             Some(r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[1] Deploys: the hub deploys from tags (how do we deploy?)"}}"#.into())
         );
         assert_eq!(deliver(&sock, event(AgentStatus::Working, Some("nothing known"))), None);
+        assert_eq!(
+            deliver(&sock, event(AgentStatus::Done, Some("carry"))),
+            Some(r#"{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"task-1 finished"}}"#.into())
+        );
         assert_eq!(deliver(&sock, event(AgentStatus::Done, Some("how do we deploy?"))), None);
+        assert_eq!(feed(&sock, event(AgentStatus::Done, Some("carry")), false, true), None);
+        assert_eq!(feed(&sock, event(AgentStatus::Done, Some("carry")), true, false), None);
         let start = std::time::Instant::now();
         assert_eq!(deliver(&sock, event(AgentStatus::Working, Some("slow"))), None);
         assert!(start.elapsed() < Duration::from_millis(800), "the prompt waited {:?}", start.elapsed());

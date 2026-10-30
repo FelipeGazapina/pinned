@@ -366,6 +366,38 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
 }
 
 #[test]
+fn a_remote_project_with_no_thread_is_still_in_list_projects() {
+    let hub = TestHub::start("remote_projects");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let dir = temp("remote-projects");
+    let (machine, machine_token) = account::register_machine(&url, &token, "vps", "linux").unwrap();
+    let id = machine.id.clone();
+    let creds = Credentials { hub: url.clone(), email: account.email, user_token: token.clone(), machine_id: machine.id, machine_token };
+    creds.save(&dir).unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let node = Node::start(&dir, creds);
+    client.wait_machines(&[("vps", true)]);
+
+    let notes = dir.join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    let path = node.machine.open_project(notes).display().to_string();
+    assert!(node.machine.tabs().iter().all(|tab| tab.cwd != path), "the folder has a thread, so the tab list would already carry it");
+    let listed = client.call(&id, json!({ "cmd": "list_projects" })).unwrap();
+    assert!(
+        listed.as_array().unwrap().iter().any(|project| project["path"] == path),
+        "list_projects omitted a folder that exists and has no thread: {listed}"
+    );
+    assert!(
+        client.frames.iter().filter(|frame| frame["type"] == "event" && frame["machine"] == id && frame["event"]["kind"] == "tabs").all(|frame| {
+            frame["event"]["tabs"].as_array().is_none_or(|tabs| tabs.iter().all(|tab| tab["cwd"] != path))
+        }),
+        "the tab snapshot the client was given includes {path}"
+    );
+}
+
+#[test]
 fn the_hub_serves_the_install_script_binaries_and_the_web_app() {
     let hub = TestHub::start("files");
     let get = |path: &str| {
@@ -575,6 +607,95 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
     let (mut mac, mut mini) = (mac, mini);
     mac.kill();
     mini.kill();
+}
+
+#[test]
+fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
+    let hub = TestHub::start("plugins");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("plugins-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let install = mac_home.join("plugins/toy");
+    let skill = "---\nname: greet\ndescription: Say hello\n---\n";
+    std::fs::create_dir_all(install.join(".claude-plugin")).unwrap();
+    std::fs::create_dir_all(install.join("skills/greet")).unwrap();
+    std::fs::write(install.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#).unwrap();
+    std::fs::write(install.join("skills/greet/SKILL.md"), skill).unwrap();
+    std::fs::write(install.join("settings.json"), "token=1").unwrap();
+    std::fs::write(install.join(".env"), "SECRET=1").unwrap();
+    std::fs::write(install.join(".claude.json"), "{}").unwrap();
+    let installed = serde_json::json!({ "plugins": { "toy@demo": [{ "installPath": install, "version": "1.2.3", "gitCommitSha": "abc123" }] } });
+    std::fs::create_dir_all(mac_home.join(".claude/plugins")).unwrap();
+    std::fs::write(mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"toy@demo":true}}"#).unwrap();
+    std::fs::write(mac_home.join(".claude/plugins/installed_plugins.json"), installed.to_string()).unwrap();
+    let share = |home: &Path| sync::PluginShare { claude_home: home.join(".claude"), dir: home.join("synced-plugins") };
+    let now = std::time::SystemTime::now();
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    sync::sync_plugins(&Through(mac_link), &mut sync::State::default(), &share(&mac_home), now).unwrap();
+    let stored = stored_plugin_paths(&hub.database);
+    assert_eq!(
+        stored,
+        vec![
+            "plugins/toy@demo/.claude-plugin/plugin.json".to_owned(),
+            "plugins/toy@demo/.pinned-plugin.json".to_owned(),
+            "plugins/toy@demo/skills/greet/SKILL.md".to_owned(),
+        ]
+    );
+    let mut pulled = sync::sync_plugins(&Through(mini_link), &mut sync::State::default(), &share(&mini_home), now).unwrap().pulled;
+    pulled.sort();
+    assert_eq!(pulled, stored);
+    assert_eq!(std::fs::read_to_string(mini_home.join("synced-plugins/plugins/toy@demo/skills/greet/SKILL.md")).unwrap(), skill);
+    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1 }, data: Some("eA==".into()) };
+    for path in [
+        "plugins/toy@demo/settings.json",
+        "plugins/toy@demo/.claude.json",
+        "plugins/toy@demo/.env",
+        "plugins/toy@demo/Settings.json",
+        "plugins/toy@demo/.ENV",
+        "plugins/toy@demo/.env.local",
+        "plugins/toy@demo/settings.local.json",
+        "plugins/toy@demo/cert.PEM",
+        "plugins/toy@demo/Secrets/token.txt",
+        "plugins/toy@demo/../../.ssh/id_rsa",
+        "/etc/passwd",
+    ] {
+        assert_eq!(
+            mac_link.call_hub(HubCall::SyncPush { project: sync::PLUGINS_KEY.into(), files: vec![secret(path)] }),
+            Err(format!("{path} is not a file a project shares"))
+        );
+    }
+    let raw = vec![7u8; sync::FILE_LIMIT as usize + 1];
+    let oversized = sync::File {
+        entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64 },
+        data: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
+    };
+    assert_eq!(
+        mac_link.call_hub(HubCall::SyncPush { project: sync::PLUGINS_KEY.into(), files: vec![oversized] }),
+        Err("plugins/toy@demo/skills/greet/blob.bin is bigger than a synced file may be".into())
+    );
+    assert_eq!(stored_plugin_paths(&hub.database), stored);
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
+}
+
+fn stored_plugin_paths(database: &str) -> Vec<String> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let rows = client.query("select path from project_files where project = $1 order by path", &[&sync::PLUGINS_KEY]).await.unwrap();
+        rows.iter().map(|row| row.get(0)).collect()
+    })
 }
 
 #[test]
@@ -936,6 +1057,7 @@ fn fast() -> Policy {
         cooldown: Duration::from_secs(3600),
         tick: ms(50),
         sweep: ms(100),
+        max_open: 8,
     }
 }
 
@@ -1176,4 +1298,140 @@ fn a_box_whose_row_this_hub_cannot_read_is_still_deleted() {
     wait_for("the box to be deleted", || hub.boxes.live().is_empty());
     ana.client.wait_machines(&[]);
     wait_for("the row to go", || ana.rows(&hub) == 0);
+}
+
+fn created(hub: &TestHub) -> usize {
+    hub.boxes.state.lock().unwrap().created.len()
+}
+
+fn set_workflow(client: &mut Client, mode: &str) {
+    client.hub(json!({ "cmd": "set_box_access", "access": { "workflow": { "mode": mode } } })).unwrap();
+}
+
+#[test]
+fn a_fresh_workflow_permission_opens_one_box_per_run() {
+    let hub = TestHub::start_with_boxes("box_fresh", true, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "fresh");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Ok(()));
+    assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
+    assert_eq!(created(&hub), 2);
+    assert_eq!(ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["machine"]["kind"], "upstash-box");
+}
+
+#[test]
+fn a_fixed_workflow_permission_reuses_one_box_across_two_runs() {
+    let hub = TestHub::start_with_boxes("box_fixed", true, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "fixed");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
+    assert_eq!(created(&hub), 1, "the second run uses the box the first run opened");
+}
+
+#[test]
+fn an_ask_workflow_permission_opens_nothing_until_it_is_allowed() {
+    let hub = TestHub::start_with_boxes("box_ask", true, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "ask");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Err("Upstash Box: waiting for a yes before it opens a box for this".into()));
+    assert_eq!(created(&hub), 0);
+    let settings = ana.client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    let id = settings["box_asks"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(settings["connectors"][0]["machine"], json!({ "kind": "upstash-box", "size": "small" }));
+    ana.client.hub(json!({ "cmd": "answer_box", "id": id, "allow": true })).unwrap();
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Ok(()));
+    assert_eq!(created(&hub), 1);
+    assert_eq!(open(ana.box_run(issue("uuid-2"))), Err("Upstash Box: waiting for a yes before it opens a box for this".into()));
+    assert_eq!(created(&hub), 1, "a different run still waits for its own yes");
+}
+
+#[test]
+fn workflow_boxes_that_are_off_or_disconnected_open_nothing() {
+    let hub = TestHub::start_with_boxes("box_off", true, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "off");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Err("Upstash Box is off for workflows: choose a box permission in Connectors settings".into()));
+    assert_eq!(created(&hub), 0);
+    set_workflow(&mut ana.client, "fresh");
+    assert_eq!(ana.client.hub(json!({ "cmd": "disconnect_upstash" })), Ok(Value::Null));
+    assert_eq!(open(ana.box_run(issue("uuid-2"))), Err("Upstash Box is not connected: connect it in pinned's Connectors settings".into()));
+    assert_eq!(created(&hub), 0);
+}
+
+#[test]
+fn an_account_without_a_stored_box_permission_still_opens_a_box() {
+    let mut hub = TestHub::start_with_boxes("box_legacy", true, fast());
+    let ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    admin_on(&hub.database, "update accounts set store = store - 'boxes' - 'box_asks' - 'box_grants'");
+    hub.restart();
+    assert_eq!(hub.runtime.block_on(hub.hub().open(account, ana.box_run(issue("uuid-1")))), Ok(()));
+    assert_eq!(created(&hub), 1);
+}
+
+#[test]
+fn a_denied_ask_opens_nothing() {
+    let hub = TestHub::start_with_boxes("box_deny", true, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "ask");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Err("Upstash Box: waiting for a yes before it opens a box for this".into()));
+    let settings = ana.client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    let id = settings["box_asks"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(settings["box_asks"][0]["subject"]["issue"], "uuid-1");
+    ana.client.hub(json!({ "cmd": "answer_box", "id": id, "allow": false })).unwrap();
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Err("Upstash Box: you said no to a box for this, so none was opened".into()));
+    assert_eq!(created(&hub), 0);
+    let after = ana.client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    assert_eq!(after["box_asks"].as_array().map(|asks| asks.len()).unwrap_or(0), 0);
+}
+
+#[test]
+fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
+    let hub = TestHub::start_with_boxes("box_fixed_stays", true, Policy { done: Duration::from_millis(300), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "fixed");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = ana.box_machine();
+    let stage = |stage| {
+        hub.boxes.with_node(|node| {
+            node.link.as_ref().unwrap().forward(agent::Message::Stage { connector: ana.connector.clone(), subject: issue("uuid-1"), stage })
+        })
+    };
+    stage(Stage::Review).unwrap();
+    ana.client.call(&machine, json!({ "cmd": "close_tab", "tab": "tab-1" })).unwrap();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(1500) {
+        assert_eq!(hub.boxes.live().len(), 1, "fixed box reaped");
+        assert_eq!(ana.rows(&hub), 1, "fixed row reaped");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
+    assert_eq!(created(&hub), 1);
+}
+
+#[test]
+fn a_fresh_permission_stops_at_the_accounts_box_limit() {
+    let hub = TestHub::start_with_boxes("box_cap", true, Policy { max_open: 1, ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |work| hub.runtime.block_on(hub.hub().open(account, work));
+    set_workflow(&mut ana.client, "fresh");
+    assert_eq!(open(ana.box_run(issue("uuid-1"))), Ok(()));
+    assert_eq!(open(ana.box_run(issue("uuid-2"))), Err("Upstash Box: 1 box is already open, and this account's limit is 1".into()));
+    assert_eq!(created(&hub), 1);
 }

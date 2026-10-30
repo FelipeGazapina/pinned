@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 
 pub const SOCK_ENV: &str = "PINNED_SOCK";
 pub const TAB_ENV: &str = "PINNED_TAB";
-/// Set on a delegated child, so its own `pinned mcp` can delegate further and name its parent task.
 pub const TASK_ENV: &str = "PINNED_TASK";
 
 /// Set on a project's orchestrator and its workers, with the project in `PROJECT_ENV`, since a
@@ -135,6 +134,8 @@ pub struct AgentEvent {
     /// Claude Code's permission mode, such as `plan` or `default`. Absent when the hook does not report one.
     #[serde(default)]
     pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub hook_feedback: bool,
 }
 
 /// Where a connector's session is in its work on an issue. Each stage maps to a Linear column.

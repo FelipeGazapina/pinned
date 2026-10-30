@@ -2,6 +2,7 @@
 //! machine so claude can read them by path.
 
 use crate::{private, sync};
+use base64::Engine;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -41,6 +42,27 @@ pub fn save(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf, String> {
 
 pub fn too_big(name: &str) -> String {
     format!("{name} is over {} MB, the largest file pinned attaches", LIMIT >> 20)
+}
+
+/// The biggest image the chat draws from an upload. SVG stays out: a page can't show one safely as a picture.
+const IMAGE_LIMIT: u64 = 8_000_000;
+const IMAGES: &[(&str, &str)] = &[("png", "image/png"), ("jpg", "image/jpeg"), ("jpeg", "image/jpeg"), ("gif", "image/gif"), ("webp", "image/webp"), ("bmp", "image/bmp"), ("avif", "image/avif")];
+
+/// The image upload at `path` as a `data:` URL, so a client that can't reach this machine's files still draws it.
+/// Refused outside `dir`, for a file that isn't a picture, and past `IMAGE_LIMIT`.
+pub fn image(dir: &Path, path: &str) -> Result<String, String> {
+    let real = dunce::canonicalize(path).map_err(|e| format!("could not read {path}: {e}"))?;
+    if !real.starts_with(dunce::canonicalize(dir).map_err(|e| e.to_string())?) {
+        return Err(format!("{path} is not an upload"));
+    }
+    let ext = real.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let (_, mime) = IMAGES.iter().find(|(e, _)| *e == ext).ok_or_else(|| format!("{path} is not a picture"))?;
+    let size = std::fs::metadata(&real).map_err(|e| format!("could not read {path}: {e}"))?.len();
+    if size > IMAGE_LIMIT {
+        return Err(format!("{path} is over {} MB", IMAGE_LIMIT / 1_000_000));
+    }
+    let bytes = std::fs::read(&real).map_err(|e| format!("could not read {path}: {e}"))?;
+    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
 /// Deletes the uploads older than `KEEP`.
@@ -129,5 +151,23 @@ mod tests {
         sweep(&dir);
         assert_eq!((old.exists(), new.exists()), (false, true));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_upload_image_reads_as_a_data_url_and_nothing_else_does() {
+        let dir = temp("image");
+        let saved = save(&dir, "shot.png", b"\x89PNG").unwrap();
+        assert_eq!(image(&dir, &saved.display().to_string()).unwrap(), "data:image/png;base64,iVBORw==");
+        let svg = save(&dir, "logo.svg", b"<svg onload=\"x()\"/>").unwrap();
+        assert!(image(&dir, &svg.display().to_string()).unwrap_err().contains("not a picture"));
+        let notes = save(&dir, "notes.txt", b"hi").unwrap();
+        assert!(image(&dir, &notes.display().to_string()).unwrap_err().contains("not a picture"));
+        let outside = temp("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.png"), b"\x89PNG").unwrap();
+        assert!(image(&dir, &outside.join("secret.png").display().to_string()).unwrap_err().contains("not an upload"));
+        assert!(image(&dir, &dir.join("missing.png").display().to_string()).unwrap_err().contains("could not read"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }
