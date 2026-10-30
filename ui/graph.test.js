@@ -384,6 +384,15 @@ test("a migrated classify then a switch per stopping question does not overlap",
   );
 });
 
+test("newNode skips an id the graph already uses", () => {
+  resetIds(0);
+  const graph = {
+    nodes: [{ id: "talk-1", name: "talk", position: [0, 0], type: "talk", prompt: "" }],
+    edges: [],
+  };
+  assert.equal(newNode("talk", graph).id, "talk-2");
+});
+
 test("starting graph is a trigger and a talk, with no migrated classify", () => {
   const graph = startingGraph({
     trigger: {
