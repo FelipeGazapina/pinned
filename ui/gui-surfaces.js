@@ -134,7 +134,14 @@ function mountFileFrame(tab, s) {
   const frame = panelBody.querySelector("iframe.html-view[data-src]");
   if (!frame) return;
   fileUrl(tab, s).then((url) => {
-    if (frame.isConnected) frame.src = url;
+    if (!frame.isConnected) return;
+    const show = () => frame.isConnected && (frame.src = url);
+    if (!TAURI) return show();
+    invoke("permit_frame_navigation", { url }).then(show, () => {
+      const text = s.draft ?? fileTexts.get(fileTextKey(tab, s))?.file?.text ?? "";
+      frame.removeAttribute("data-src");
+      frame.srcdoc = text;
+    });
   }, () => {
     const text = s.draft ?? fileTexts.get(fileTextKey(tab, s))?.file?.text ?? "";
     frame.removeAttribute("data-src");

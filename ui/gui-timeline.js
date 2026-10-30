@@ -1713,7 +1713,7 @@ threadView.addEventListener("click", (e) => {
     return e.metaKey || e.ctrlKey ? openOutside(pr.dataset.pr) : openPr(active, pr.dataset.pr);
   }
   const link = e.target.closest("a[href]");
-  if (link) {
+  if (link && !link.hasAttribute("download")) {
     e.preventDefault();
     openLink(link.href, e.metaKey || e.ctrlKey);
   }
@@ -1781,6 +1781,28 @@ function openLink(url, outside = false) {
   }
   openOutside(url);
 }
+
+document.addEventListener("click", (e) => {
+  const el = e.target.closest?.("[data-open-url], a[href]");
+  if (!el) return;
+  const link = el.closest("a[href]");
+  const decision = routeAnchorClick({
+    href: link?.href ?? "",
+    protocol: link?.protocol ?? "",
+    download: !!link?.hasAttribute("download"),
+    pr: link?.dataset.pr || "",
+    cardPr: link?.dataset.cardPr || "",
+    inPanel: !!el.closest("#panel-body"),
+    openUrl: el.closest("[data-open-url]")?.dataset.openUrl || "",
+    meta: e.metaKey,
+    ctrl: e.ctrlKey,
+  });
+  if (!decision) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (decision.openOutside) openOutside(decision.openOutside);
+  else openLink(decision.url, decision.outside);
+}, true);
 
 function renderUnsupported() {
   threadView.dataset.key = "";
