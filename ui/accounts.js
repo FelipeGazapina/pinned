@@ -1,5 +1,5 @@
 /** The Accounts page: the agent accounts of one machine, each signed in to its CLI in a home of its own. */
-const PROVIDERS = { claude: "Claude Code", codex: "Codex" };
+const PROVIDERS = { claude: "Claude Code", codex: "Codex", cursor: "Cursor" };
 
 let accountsUi = { machine: LOCAL, removing: null, error: "" };
 
@@ -52,7 +52,7 @@ function accountCardHtml(a) {
            <button class="secondary" data-action="cancel-remove-account">Cancel</button></span></div>`
       : "";
   return `<div class="card" data-account="${esc(a.id)}">
-      <div class="card-head"><span class="logo ${esc(a.provider)}">${a.provider === "codex" ? "◎" : "✳"}</span>
+      <div class="card-head"><span class="logo ${esc(a.provider)}">${a.provider === "codex" ? "◎" : a.provider === "cursor" ? "▸" : "✳"}</span>
         <div><b>${esc(a.name)}</b><div class="hint">${esc(a.provider_name)}${a.builtin ? " · built in" : ""}</div></div></div>
       <p>${esc(status)}</p>
       <div class="actions start"><button class="${a.signed_in ? "secondary" : "primary"}" data-action="sign-in-account">${a.signed_in ? "Sign in again" : "Sign in"}</button>
@@ -115,4 +115,4 @@ Object.assign(actions, {
     drawAccountList();
   },
 });
-settingsSection({ page: "accounts", label: "Accounts", icon: "users", show: () => showAccountsPage(), search: [{ title: "Accounts", terms: ["claude code codex sign in login add remove agent account home"] }] });
+settingsSection({ page: "accounts", label: "Accounts", icon: "users", show: () => showAccountsPage(), search: [{ title: "Accounts", terms: ["claude code codex cursor sign in login add remove agent account home"] }] });

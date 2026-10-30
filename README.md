@@ -272,8 +272,38 @@ prompt or the session menu. pinned copies the conversation into that account's h
 it there. The same menu offers **Move to** an account at any time. Only the tab moves: the
 project keeps its account.
 
-Codex tabs run the `codex` CLI without pinned's hooks, so they get no status dot, no usage
-meter and no resume after a restart.
+Codex tabs run the `codex` CLI. pinned asks Codex to report when a turn ends, so a notice
+can land after that turn. They still have no usage meter and no resume after a restart.
+
+## Delegating to other providers
+
+pinned wires its MCP server into Claude and Codex tabs only, so a Cursor tab cannot
+delegate unless you add pinned to Cursor's MCP config. `cursor-agent` only loads MCP
+servers from `~/.cursor/mcp.json`, and pinned does not write that file. A Claude or
+Codex session can hand a task to another signed-in account. Ask for it in the session.
+
+pinned shows the child as a card on the turn. The card shows working, done, failed, or
+cancelled, and the error text when it failed. **Cancel** is on the card while the child is
+working. **Open as thread** appears when the child has finished and has a conversation to
+resume.
+
+The child sees only the task you give it. It does not see the session's history. A separate
+checkout is `isolation: "worktree"`. The default stays in the session's checkout.
+
+The default returns at once. pinned types a notice into the session when the child finishes
+and the session is live, its status is Done, no submit is waiting, and the input line is
+empty. Otherwise the card's **Send to session** types that notice now. End the turn instead
+of polling. A wait returns the result in that call, including the summary. If the wait times
+out, the child keeps running and the notice still comes. A child's own delegate calls always
+wait, so a grandchild's result goes back to the child and is not typed into the original session.
+
+A child cannot be given a wider mode than the session. A bypassed session can hand a child
+`auto`. `plan` is read-only. Omit the model on a different provider to use that provider's
+default.
+
+Codex and Cursor tabs have no transcript. Their children show in a strip under the terminal
+note, with the same state, **Cancel**, **Open as thread**, and **Send to session** once the
+child has finished and the notice has not been typed.
 
 ## Machines
 

@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"thread_01"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"reasoning"}}
+{"type":"item.completed","item":{"id":"item_1","type":"reasoning","text":"Look at the tests."}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"cargo test","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"cargo test","aggregated_output":"ok\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Ship it"}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":4}}

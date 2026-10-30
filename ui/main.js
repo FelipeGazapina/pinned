@@ -37,8 +37,12 @@ const initials = (name) => name.split(/[\s._-]+/).filter(Boolean).slice(0, 2).ma
 const tilde = (path) => path.replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)(?=\/|$)/, "~");
 const accountOf = (machine, id) => machines.get(machine)?.accounts?.find((a) => a.id === id);
 const accountName = (machine, id) => accountOf(machine, id)?.name ?? id;
-/** A tab with no Claude Code transcript to show as a thread: a sign-in, or a Codex session. */
-const terminalOnly = (tab) => tab.view.program === "sign-in" || accountOf(tab.machine, tab.view.account)?.provider === "codex";
+/** A tab with no Claude Code transcript to show as a thread: a sign-in, or a provider that is not the harness. */
+const HARNESS = new Set(["claude"]);
+const terminalOnly = (tab) => {
+  const provider = accountOf(tab.machine, tab.view.account)?.provider;
+  return tab.view.program === "sign-in" || (provider != null && !HARNESS.has(provider));
+};
 const tabName = (tab) =>
   tab.view.program === "sign-in"
     ? `Sign in · ${accountName(tab.machine, tab.view.account)}`
