@@ -1100,6 +1100,42 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[test]
+    fn a_grandchild_notice_is_refused_from_the_root_tab() {
+        let delegates = Delegates::default();
+        let parent = new_cursor(&delegates, Mode::Async);
+        let child = delegates.begin(NewTask {
+            parent: Parent::Task(parent.id.clone()),
+            tool: None,
+            title: "Grandchild".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: Some("composer-2.5".into()),
+            cwd: PathBuf::from("/tmp"),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("task:{}", parent.id),
+            client_request_id: None,
+            role: None,
+        });
+        delegates.apply(&child.id, ChildEvent::Line(json!({"type":"result","result":"NESTED"}).to_string()), None);
+        let root = Caller { tab: Some("tab-1".into()), task: None };
+        assert_eq!(
+            delegates.claim_task_notice(&root, &child.id).unwrap_err(),
+            format!("task {} belongs to another session", child.id)
+        );
+        let status = delegates.status(&Caller { tab: None, task: Some(parent.id.clone()) }, &child.id).unwrap();
+        assert_eq!(status["summary"], "NESTED");
+        assert_eq!(status["workState"], "result_available");
+        let direct = delegates.claim_task_notice(&root, &parent.id);
+        assert!(direct.is_err(), "an unfinished parent was sent: {direct:?}");
+        delegates.apply(&parent.id, ChildEvent::Line(json!({"type":"result","result":"PARENT"}).to_string()), None);
+        let sent = delegates.claim_task_notice(&root, &parent.id).unwrap();
+        assert!(sent.contains("PARENT") || sent.contains(&parent.id), "{sent}");
+        assert!(sent.contains("result available"), "{sent}");
+    }
+
+    #[test]
     fn another_tab_cannot_read_or_cancel_a_task_or_consume_its_notice() {
         let delegates = Delegates::default();
         let task = new_cursor(&delegates, Mode::Wait);

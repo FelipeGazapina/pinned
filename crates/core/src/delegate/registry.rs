@@ -301,13 +301,17 @@ impl Delegates {
         Some((lines, ids))
     }
 
-    /// Claims one finished task's notice for the owning session and marks it delivered.
+    /// Claims one finished task's notice for the session that is its direct parent and marks it delivered.
+    /// A grandchild stays with its headless parent. The root tab can read it, and does not send it.
     pub fn claim_task_notice(&self, caller: &Caller, id: &str) -> Result<String, String> {
         let mut tasks = self.tasks.lock().unwrap();
         if !tasks.iter().any(|task| task.id == id) {
             return Err(format!("no task {id}"));
         }
-        if !allows(&tasks, id, caller) {
+        let parent_is_caller = tasks.iter().any(|task| {
+            task.id == id && matches!(&task.parent, Parent::Tab(parent) if caller.tab.as_deref() == Some(parent.as_str()))
+        });
+        if !parent_is_caller {
             return Err(format!("task {id} belongs to another session"));
         }
         let task = tasks.iter_mut().find(|task| task.id == id).unwrap();
