@@ -363,7 +363,8 @@ fn walk_calls(graph: &Graph, stack: &mut Vec<String>, origin: &str, origin_graph
     for node in &graph.nodes {
         let NodeKind::Call { workflow } = &node.kind else { continue };
         if stack.iter().any(|seen| seen == workflow) {
-            return Err(format!("\"{}\" calls \"{workflow}\", which calls back", node.name));
+            let called = store.connectors.iter().find(|c| &c.id == workflow).map_or(workflow.as_str(), |c| c.name.as_str());
+            return Err(format!("\"{}\" calls \"{called}\", which calls back", node.name));
         }
         stack.push(workflow.clone());
         let result = if workflow == origin {
@@ -4489,7 +4490,7 @@ mod tests {
         back.id = "c7".into();
         back.name = "Other".into();
         back.graph = Some(calling("c6"));
-        assert_eq!(connectors.save_connector(back).err().as_deref(), Some("\"Route\" calls \"c7\", which calls back"));
+        assert_eq!(connectors.save_connector(back).err().as_deref(), Some("\"Route\" calls \"Other\", which calls back"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
