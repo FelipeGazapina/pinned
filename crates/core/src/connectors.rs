@@ -4342,6 +4342,30 @@ mod tests {
     }
 
     #[test]
+    fn two_new_workflows_saved_in_one_millisecond_keep_distinct_ids() {
+        let start = chrono::Utc::now().timestamp_millis();
+        let occupied = (0..500)
+            .map(|offset| {
+                let mut connector = slack_connector();
+                connector.id = format!("c{}", start + offset);
+                connector.name = format!("keep-{offset}");
+                connector
+            })
+            .collect();
+        let (connectors, dir) = stored("fresh-id", occupied);
+        let mut incoming = slack_connector();
+        incoming.id.clear();
+        incoming.name = "New".into();
+        let saved = connectors.save_connector(incoming).unwrap();
+        let on_disk = on_disk(&dir)["connectors"].as_array().unwrap().clone();
+        let same = on_disk.iter().filter(|connector| connector["id"] == saved.id).count();
+        assert_eq!(same, 1, "id {} shared by {same} workflows", saved.id);
+        assert!(on_disk.iter().any(|connector| connector["name"] == "New"));
+        assert!(on_disk.iter().any(|connector| connector["name"] == "keep-0"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_read_sends_a_graph_and_leaves_the_store_without_one() {
         let (connectors, dir) = stored("send-graph", vec![slack_connector()]);
         let sent = connectors.get_settings().connectors;
