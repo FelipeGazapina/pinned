@@ -4215,6 +4215,16 @@
                 },
                 "default": {}
               },
+              "receipts": {
+                "description": "Issues a create-ticket node filed, by run id then node id. Not `created`: `working_on` matches that map.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "$ref": "#/$defs/Receipt"
+                  }
+                }
+              },
               "followed": {
                 "description": "How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.",
                 "type": "object",
@@ -4517,6 +4527,26 @@
               "url"
             ]
           },
+          "Receipt": {
+            "description": "An issue a create-ticket node filed. Separate from `Filed` so `working_on` cannot treat it as a Slack thread's issue.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "identifier": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "identifier",
+              "url"
+            ]
+          },
           "Followed": {
             "type": "object",
             "properties": {
@@ -4680,7 +4710,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Coding and review moves and the proof video are not nodes. The session does them through\n`pinned` callbacks, and the connector's `columns` and `proof` still describe them.\n\n`create-ticket` is a node. It files a new Linear issue from the run's session. The session's\n`pinned linear create` callback is a different path. It still records one issue per Slack\nthread in `created`.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -4813,6 +4843,39 @@
                 "required": [
                   "type",
                   "workflow"
+                ]
+              },
+              {
+                "description": "Files one Linear issue. Empty `column` keeps the team's default status. Empty `label`\nadds no label. `instructions` guide the session's title and description.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "create-ticket"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "team",
+                  "label",
+                  "column",
+                  "instructions"
                 ]
               },
               {
@@ -9326,6 +9389,16 @@
                 },
                 "default": {}
               },
+              "receipts": {
+                "description": "Issues a create-ticket node filed, by run id then node id. Not `created`: `working_on` matches that map.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "$ref": "#/$defs/Receipt"
+                  }
+                }
+              },
               "followed": {
                 "description": "How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.",
                 "type": "object",
@@ -9611,6 +9684,26 @@
               "url"
             ]
           },
+          "Receipt": {
+            "description": "An issue a create-ticket node filed. Separate from `Filed` so `working_on` cannot treat it as a Slack thread's issue.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "identifier": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "identifier",
+              "url"
+            ]
+          },
           "Followed": {
             "type": "object",
             "properties": {
@@ -9770,7 +9863,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Coding and review moves and the proof video are not nodes. The session does them through\n`pinned` callbacks, and the connector's `columns` and `proof` still describe them.\n\n`create-ticket` is a node. It files a new Linear issue from the run's session. The session's\n`pinned linear create` callback is a different path. It still records one issue per Slack\nthread in `created`.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -9903,6 +9996,35 @@
                 "required": [
                   "type",
                   "workflow"
+                ]
+              },
+              {
+                "description": "Files one Linear issue. Empty `column` keeps the team's default status. Empty `label`\nadds no label. `instructions` guide the session's title and description.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "create-ticket"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
                 ]
               },
               {
@@ -11654,6 +11776,16 @@
                 },
                 "default": {}
               },
+              "receipts": {
+                "description": "Issues a create-ticket node filed, by run id then node id. Not `created`: `working_on` matches that map.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "$ref": "#/$defs/Receipt"
+                  }
+                }
+              },
               "followed": {
                 "description": "How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.",
                 "type": "object",
@@ -11956,6 +12088,26 @@
               "url"
             ]
           },
+          "Receipt": {
+            "description": "An issue a create-ticket node filed. Separate from `Filed` so `working_on` cannot treat it as a Slack thread's issue.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "identifier": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "identifier",
+              "url"
+            ]
+          },
           "Followed": {
             "type": "object",
             "properties": {
@@ -12119,7 +12271,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Coding and review moves and the proof video are not nodes. The session does them through\n`pinned` callbacks, and the connector's `columns` and `proof` still describe them.\n\n`create-ticket` is a node. It files a new Linear issue from the run's session. The session's\n`pinned linear create` callback is a different path. It still records one issue per Slack\nthread in `created`.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -12252,6 +12404,39 @@
                 "required": [
                   "type",
                   "workflow"
+                ]
+              },
+              {
+                "description": "Files one Linear issue. Empty `column` keeps the team's default status. Empty `label`\nadds no label. `instructions` guide the session's title and description.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "create-ticket"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "team",
+                  "label",
+                  "column",
+                  "instructions"
                 ]
               },
               {
@@ -13968,6 +14153,16 @@
                 },
                 "default": {}
               },
+              "receipts": {
+                "description": "Issues a create-ticket node filed, by run id then node id. Not `created`: `working_on` matches that map.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "$ref": "#/$defs/Receipt"
+                  }
+                }
+              },
               "followed": {
                 "description": "How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.",
                 "type": "object",
@@ -14253,6 +14448,26 @@
               "url"
             ]
           },
+          "Receipt": {
+            "description": "An issue a create-ticket node filed. Separate from `Filed` so `working_on` cannot treat it as a Slack thread's issue.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "identifier": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "identifier",
+              "url"
+            ]
+          },
           "Followed": {
             "type": "object",
             "properties": {
@@ -14412,7 +14627,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Coding and review moves and the proof video are not nodes. The session does them through\n`pinned` callbacks, and the connector's `columns` and `proof` still describe them.\n\n`create-ticket` is a node. It files a new Linear issue from the run's session. The session's\n`pinned linear create` callback is a different path. It still records one issue per Slack\nthread in `created`.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -14545,6 +14760,35 @@
                 "required": [
                   "type",
                   "workflow"
+                ]
+              },
+              {
+                "description": "Files one Linear issue. Empty `column` keeps the team's default status. Empty `label`\nadds no label. `instructions` guide the session's title and description.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "create-ticket"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
                 ]
               },
               {
@@ -15168,6 +15412,16 @@
             },
             "default": {}
           },
+          "receipts": {
+            "description": "Issues a create-ticket node filed, by run id then node id. Not `created`: `working_on` matches that map.",
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Receipt"
+              }
+            }
+          },
           "followed": {
             "description": "How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.",
             "type": "object",
@@ -15470,6 +15724,26 @@
               "url"
             ]
           },
+          "Receipt": {
+            "description": "An issue a create-ticket node filed. Separate from `Filed` so `working_on` cannot treat it as a Slack thread's issue.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "identifier": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "identifier",
+              "url"
+            ]
+          },
           "Followed": {
             "type": "object",
             "properties": {
@@ -15633,7 +15907,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Coding and review moves and the proof video are not nodes. The session does them through\n`pinned` callbacks, and the connector's `columns` and `proof` still describe them.\n\n`create-ticket` is a node. It files a new Linear issue from the run's session. The session's\n`pinned linear create` callback is a different path. It still records one issue per Slack\nthread in `created`.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -15766,6 +16040,39 @@
                 "required": [
                   "type",
                   "workflow"
+                ]
+              },
+              {
+                "description": "Files one Linear issue. Empty `column` keeps the team's default status. Empty `label`\nadds no label. `instructions` guide the session's title and description.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "create-ticket"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "team",
+                  "label",
+                  "column",
+                  "instructions"
                 ]
               },
               {
@@ -16174,6 +16481,16 @@
             },
             "default": {}
           },
+          "receipts": {
+            "description": "Issues a create-ticket node filed, by run id then node id. Not `created`: `working_on` matches that map.",
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/Receipt"
+              }
+            }
+          },
           "followed": {
             "description": "How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.",
             "type": "object",
@@ -16459,6 +16776,26 @@
               "url"
             ]
           },
+          "Receipt": {
+            "description": "An issue a create-ticket node filed. Separate from `Filed` so `working_on` cannot treat it as a Slack thread's issue.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "identifier": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "identifier",
+              "url"
+            ]
+          },
           "Followed": {
             "type": "object",
             "properties": {
@@ -16618,7 +16955,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Coding and review moves and the proof video are not nodes. The session does them through\n`pinned` callbacks, and the connector's `columns` and `proof` still describe them.\n\n`create-ticket` is a node. It files a new Linear issue from the run's session. The session's\n`pinned linear create` callback is a different path. It still records one issue per Slack\nthread in `created`.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -16751,6 +17088,35 @@
                 "required": [
                   "type",
                   "workflow"
+                ]
+              },
+              {
+                "description": "Files one Linear issue. Empty `column` keeps the team's default status. Empty `label`\nadds no label. `instructions` guide the session's title and description.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "create-ticket"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
                 ]
               },
               {
@@ -18155,6 +18521,16 @@
                 },
                 "default": {}
               },
+              "receipts": {
+                "description": "Issues a create-ticket node filed, by run id then node id. Not `created`: `working_on` matches that map.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "$ref": "#/$defs/Receipt"
+                  }
+                }
+              },
               "followed": {
                 "description": "How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.",
                 "type": "object",
@@ -18457,6 +18833,26 @@
               "url"
             ]
           },
+          "Receipt": {
+            "description": "An issue a create-ticket node filed. Separate from `Filed` so `working_on` cannot treat it as a Slack thread's issue.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "identifier": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "identifier",
+              "url"
+            ]
+          },
           "Followed": {
             "type": "object",
             "properties": {
@@ -18620,7 +19016,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Coding and review moves and the proof video are not nodes. The session does them through\n`pinned` callbacks, and the connector's `columns` and `proof` still describe them.\n\n`create-ticket` is a node. It files a new Linear issue from the run's session. The session's\n`pinned linear create` callback is a different path. It still records one issue per Slack\nthread in `created`.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -18753,6 +19149,39 @@
                 "required": [
                   "type",
                   "workflow"
+                ]
+              },
+              {
+                "description": "Files one Linear issue. Empty `column` keeps the team's default status. Empty `label`\nadds no label. `instructions` guide the session's title and description.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "create-ticket"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "team",
+                  "label",
+                  "column",
+                  "instructions"
                 ]
               },
               {
@@ -19340,6 +19769,16 @@
                 },
                 "default": {}
               },
+              "receipts": {
+                "description": "Issues a create-ticket node filed, by run id then node id. Not `created`: `working_on` matches that map.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "$ref": "#/$defs/Receipt"
+                  }
+                }
+              },
               "followed": {
                 "description": "How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.",
                 "type": "object",
@@ -19625,6 +20064,26 @@
               "url"
             ]
           },
+          "Receipt": {
+            "description": "An issue a create-ticket node filed. Separate from `Filed` so `working_on` cannot treat it as a Slack thread's issue.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "identifier": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "identifier",
+              "url"
+            ]
+          },
           "Followed": {
             "type": "object",
             "properties": {
@@ -19784,7 +20243,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Coding and review moves and the proof video are not nodes. The session does them through\n`pinned` callbacks, and the connector's `columns` and `proof` still describe them.\n\n`create-ticket` is a node. It files a new Linear issue from the run's session. The session's\n`pinned linear create` callback is a different path. It still records one issue per Slack\nthread in `created`.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -19917,6 +20376,35 @@
                 "required": [
                   "type",
                   "workflow"
+                ]
+              },
+              {
+                "description": "Files one Linear issue. Empty `column` keeps the team's default status. Empty `label`\nadds no label. `instructions` guide the session's title and description.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "create-ticket"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
                 ]
               },
               {
@@ -21971,6 +22459,16 @@
                 },
                 "default": {}
               },
+              "receipts": {
+                "description": "Issues a create-ticket node filed, by run id then node id. Not `created`: `working_on` matches that map.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "$ref": "#/$defs/Receipt"
+                  }
+                }
+              },
               "followed": {
                 "description": "How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.",
                 "type": "object",
@@ -22273,6 +22771,26 @@
               "url"
             ]
           },
+          "Receipt": {
+            "description": "An issue a create-ticket node filed. Separate from `Filed` so `working_on` cannot treat it as a Slack thread's issue.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "identifier": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "identifier",
+              "url"
+            ]
+          },
           "Followed": {
             "type": "object",
             "properties": {
@@ -22436,7 +22954,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Coding and review moves and the proof video are not nodes. The session does them through\n`pinned` callbacks, and the connector's `columns` and `proof` still describe them.\n\n`create-ticket` is a node. It files a new Linear issue from the run's session. The session's\n`pinned linear create` callback is a different path. It still records one issue per Slack\nthread in `created`.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -22569,6 +23087,39 @@
                 "required": [
                   "type",
                   "workflow"
+                ]
+              },
+              {
+                "description": "Files one Linear issue. Empty `column` keeps the team's default status. Empty `label`\nadds no label. `instructions` guide the session's title and description.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "create-ticket"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type",
+                  "team",
+                  "label",
+                  "column",
+                  "instructions"
                 ]
               },
               {
@@ -23811,6 +24362,16 @@
                 },
                 "default": {}
               },
+              "receipts": {
+                "description": "Issues a create-ticket node filed, by run id then node id. Not `created`: `working_on` matches that map.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "$ref": "#/$defs/Receipt"
+                  }
+                }
+              },
               "followed": {
                 "description": "How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.",
                 "type": "object",
@@ -24096,6 +24657,26 @@
               "url"
             ]
           },
+          "Receipt": {
+            "description": "An issue a create-ticket node filed. Separate from `Filed` so `working_on` cannot treat it as a Slack thread's issue.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "identifier": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "identifier",
+              "url"
+            ]
+          },
           "Followed": {
             "type": "object",
             "properties": {
@@ -24255,7 +24836,7 @@
             ]
           },
           "Node": {
-            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "description": "Coding and review moves and the proof video are not nodes. The session does them through\n`pinned` callbacks, and the connector's `columns` and `proof` still describe them.\n\n`create-ticket` is a node. It files a new Linear issue from the run's session. The session's\n`pinned linear create` callback is a different path. It still records one issue per Slack\nthread in `created`.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
             "type": "object",
             "properties": {
               "id": {
@@ -24388,6 +24969,35 @@
                 "required": [
                   "type",
                   "workflow"
+                ]
+              },
+              {
+                "description": "Files one Linear issue. Empty `column` keeps the team's default status. Empty `label`\nadds no label. `instructions` guide the session's title and description.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "create-ticket"
+                  },
+                  "team": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "label": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "column": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "type"
                 ]
               },
               {
