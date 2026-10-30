@@ -1107,7 +1107,6 @@ fn note_claude(run: &mut Run, claude: Option<String>) {
     }
 }
 
-/// A bad fence fails the wait. A run that has left `WaitDraft`, or still has a pending effect, stays.
 pub(crate) fn fail_run(run: &mut Run, why: String) {
     if run.pending.is_some() || !run.waiting_draft() {
         return;

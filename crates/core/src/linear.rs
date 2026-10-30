@@ -185,7 +185,6 @@ pub(crate) fn create_input(team: &str, assignee: &str, title: &str, description:
     input
 }
 
-/// An issue in `data` whose description contains `marker`.
 pub(crate) fn issued<'a>(data: &'a Value, marker: &str) -> Option<&'a Value> {
     nodes(&data["issues"]).find(|issue| issue["description"].as_str().is_some_and(|text| text.contains(marker)))
 }

@@ -4,7 +4,6 @@ use serde_json::Value;
 use super::runner::RunId;
 use super::NodeId;
 
-/// One ticket fence the prompt shows and the parser accepts.
 pub const TICKET_FENCE: &str = "```ticket\nTitle: Export 500s\n\nThe worker returns 500 when the cursor is past the end.\n```";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -13,14 +12,11 @@ pub struct Draft {
     pub description: String,
 }
 
-/// Context JSON, then the node's instructions, then the fence rules. The rules come after the
-/// instructions so a workflow cannot ask the session to call `pinned linear create` on this turn.
 pub(crate) fn draft_prompt(instructions: &str, context: &Value) -> String {
     let context = serde_json::to_string(context).unwrap_or_else(|_| "{}".into());
     format!("{context}\n\n{instructions}\n\nReply with one ticket fence and nothing else. Do not call `pinned linear create` on this turn.\n\n{TICKET_FENCE}")
 }
 
-/// `pinned-receipt:{run_id}:{node_id}`. Search uses the whole string.
 pub(crate) fn receipt_marker(run: &RunId, node: &NodeId) -> String {
     format!("pinned-receipt:{}:{}", run.0, node.0)
 }
