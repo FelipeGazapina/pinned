@@ -1206,9 +1206,14 @@ exec '{real}' "$@"
         let direct = delegates.claim_task_notice(&root, &parent.id);
         assert!(direct.is_err(), "an unfinished parent was sent: {direct:?}");
         delegates.apply(&parent.id, ChildEvent::Line(json!({"type":"result","result":"PARENT"}).to_string()), None);
-        let sent = delegates.claim_task_notice(&root, &parent.id).unwrap();
-        assert!(sent.contains("PARENT") || sent.contains(&parent.id), "{sent}");
-        assert!(sent.contains("result available"), "{sent}");
+        assert_eq!(
+            delegates.claim_task_notice(&root, &parent.id).unwrap(),
+            format!(
+                "[pinned] Delegated task {0} \"Ping\" (Cursor · composer-2.5) finished: result available. Call task_status with taskId \"{0}\".",
+                parent.id
+            )
+        );
+        assert_eq!(delegates.status(&root, &parent.id).unwrap()["summary"], "PARENT");
     }
 
     #[test]
