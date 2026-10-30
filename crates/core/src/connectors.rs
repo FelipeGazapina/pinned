@@ -3013,7 +3013,15 @@ impl Connectors {
                 *existing = connector.clone();
             }
             None => {
-                connector.id = format!("c{}", chrono::Utc::now().timestamp_millis());
+                let millis = chrono::Utc::now().timestamp_millis();
+                let mut bump = 0;
+                connector.id = loop {
+                    let id = if bump == 0 { format!("c{millis}") } else { format!("c{millis}-{bump}") };
+                    if !store.connectors.iter().any(|existing| existing.id == id) {
+                        break id;
+                    }
+                    bump += 1;
+                };
                 connector.since = chrono::Utc::now().to_rfc3339();
                 connector.handled.clear();
                 connector.created.clear();
