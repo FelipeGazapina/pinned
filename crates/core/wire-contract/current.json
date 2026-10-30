@@ -4196,7 +4196,7 @@
                 ]
               },
               {
-                "description": "Ask in the work's thread, and open nothing until the user says yes.",
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -9437,7 +9437,7 @@
                 ]
               },
               {
-                "description": "Ask in the work's thread, and open nothing until the user says yes.",
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -11899,7 +11899,7 @@
                 ]
               },
               {
-                "description": "Ask in the work's thread, and open nothing until the user says yes.",
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -14343,7 +14343,7 @@
                 ]
               },
               {
-                "description": "Ask in the work's thread, and open nothing until the user says yes.",
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -19716,7 +19716,7 @@
                 ]
               },
               {
-                "description": "Ask in the work's thread, and open nothing until the user says yes.",
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -19731,7 +19731,6 @@
             ]
           },
           "BoxAsk": {
-            "description": "A question waiting in the work's thread. The id is a hash of the connector and subject, so a retry records it once.",
             "type": "object",
             "properties": {
               "id": {
@@ -21030,7 +21029,7 @@
                 ]
               },
               {
-                "description": "Ask in the work's thread, and open nothing until the user says yes.",
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -21045,7 +21044,6 @@
             ]
           },
           "BoxAsk": {
-            "description": "A question waiting in the work's thread. The id is a hash of the connector and subject, so a retry records it once.",
             "type": "object",
             "properties": {
               "id": {
@@ -23850,7 +23848,7 @@
                 ]
               },
               {
-                "description": "Ask in the work's thread, and open nothing until the user says yes.",
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -23865,7 +23863,6 @@
             ]
           },
           "BoxAsk": {
-            "description": "A question waiting in the work's thread. The id is a hash of the connector and subject, so a retry records it once.",
             "type": "object",
             "properties": {
               "id": {
@@ -25784,7 +25781,7 @@
                 ]
               },
               {
-                "description": "Ask in the work's thread, and open nothing until the user says yes.",
+                "description": "Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -25799,7 +25796,6 @@
             ]
           },
           "BoxAsk": {
-            "description": "A question waiting in the work's thread. The id is a hash of the connector and subject, so a retry records it once.",
             "type": "object",
             "properties": {
               "id": {
