@@ -952,6 +952,255 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    fn texts(hub: &MemHub) -> BTreeMap<String, String> {
+        hub.0
+            .borrow()
+            .iter()
+            .map(|(path, file)| {
+                let text = file.data.as_ref().and_then(|data| unpack(data).ok()).and_then(|bytes| String::from_utf8(bytes).ok()).unwrap_or_default();
+                (path.clone(), text)
+            })
+            .collect()
+    }
+
+    fn stamp(path: &Path, when: SystemTime) {
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(when).unwrap();
+    }
+
+    #[test]
+    fn secret_files_and_outside_symlinks_stay_on_the_machine() {
+        let root = root("secrets");
+        let hub = MemHub::default();
+        let mac_home = root.join("mac");
+        let outside = root.join("outside");
+        put(&outside.join("id_rsa"), "PRIVATE-KEY");
+        put(&outside.join("SKILL.md"), "STOLEN-SKILL");
+        put(&outside.join("notes.md"), "STOLEN-NOTES");
+        let install = mac_home.join("plugins/toy");
+        put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#);
+        put(&install.join("skills/greet/SKILL.md"), "---\nname: greet\ndescription: Say hello\n---\n");
+        for (rel, body) in [
+            ("Settings.json", "CASE-SETTINGS"),
+            (".ENV", "CASE-ENV"),
+            (".env.local", "ENV-LOCAL"),
+            ("Credentials.JSON", "CASE-CREDENTIALS"),
+            (".Claude.json", "CASE-CLAUDE"),
+            ("Installed_Plugins.json", "CASE-INSTALLED"),
+            ("settings.local.json", "LOCAL-SETTINGS"),
+            ("cert.PEM", "CASE-PEM"),
+            ("id.KEY", "CASE-KEY"),
+            ("Secrets/token.txt", "DIR-SECRETS"),
+            (".SECRETS/note.txt", "DIR-DOT-SECRETS"),
+            ("target/release/toy", "TREE-TARGET"),
+            ("dist/app.js", "TREE-DIST"),
+            ("build/out.js", "TREE-BUILD"),
+            ("vendor/lib.js", "TREE-VENDOR"),
+        ] {
+            put(&install.join(rel), body);
+        }
+        std::os::unix::fs::symlink(&outside, install.join("skills/escape")).unwrap();
+        std::fs::create_dir_all(install.join("agents")).unwrap();
+        std::os::unix::fs::symlink(outside.join("id_rsa"), install.join("agents/helper.md")).unwrap();
+        let linked_real = root.join("linked-real");
+        put(&linked_real.join(".claude-plugin/plugin.json"), r#"{"name":"linked"}"#);
+        put(&linked_real.join("readme.txt"), "LINKED-SECRET");
+        std::os::unix::fs::symlink(&linked_real, mac_home.join("plugins/linked")).unwrap();
+        put(&mac_home.join(".claude/skills/ship/SKILL.md"), "---\nname: ship\ndescription: Ship the branch\n---\n");
+        std::os::unix::fs::symlink(&outside, mac_home.join(".claude/skills/stolen")).unwrap();
+        let installed = serde_json::json!({ "plugins": {
+            "toy@demo": [{ "installPath": install, "version": "1.2.3", "gitCommitSha": "abc123" }],
+            "linked@demo": [{ "installPath": mac_home.join("plugins/linked"), "version": "1", "gitCommitSha": "def" }],
+        }});
+        put(&mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"toy@demo":true,"linked@demo":true}}"#);
+        put(&mac_home.join(".claude/plugins/installed_plugins.json"), &installed.to_string());
+        let ssh = root.join("ssh");
+        put(&ssh.join("id_rsa"), "ROOT-PRIVATE");
+        put(&ssh.join("config"), "ROOT-CONFIG");
+        let rooted = root.join("rooted");
+        std::fs::create_dir_all(rooted.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(&ssh, rooted.join(".claude/skills")).unwrap();
+        let mac = PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") };
+        let rooted_share = PluginShare { claude_home: rooted.join(".claude"), dir: root.join("rooted-synced") };
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut State::default(), &mac, now).unwrap();
+        sync_plugins(&hub, &mut State::default(), &rooted_share, now).unwrap();
+        let stored = texts(&hub);
+        let markers = [
+            "CASE-SETTINGS",
+            "CASE-ENV",
+            "ENV-LOCAL",
+            "CASE-CREDENTIALS",
+            "CASE-CLAUDE",
+            "CASE-INSTALLED",
+            "LOCAL-SETTINGS",
+            "CASE-PEM",
+            "CASE-KEY",
+            "DIR-SECRETS",
+            "DIR-DOT-SECRETS",
+            "TREE-TARGET",
+            "TREE-DIST",
+            "TREE-BUILD",
+            "TREE-VENDOR",
+            "PRIVATE-KEY",
+            "STOLEN-SKILL",
+            "STOLEN-NOTES",
+            "LINKED-SECRET",
+            "ROOT-PRIVATE",
+            "ROOT-CONFIG",
+        ];
+        let leaked: Vec<String> = stored
+            .iter()
+            .flat_map(|(path, text)| markers.iter().filter(move |marker| text.contains(**marker)).map(move |marker| format!("{path} contains {marker}")))
+            .collect();
+        assert_eq!(leaked, Vec::<String>::new(), "a secret left the machine");
+        assert_eq!(stored["plugins/toy@demo/skills/greet/SKILL.md"], "---\nname: greet\ndescription: Say hello\n---\n");
+        assert_eq!(stored["user-skills/ship/SKILL.md"], "---\nname: ship\ndescription: Ship the branch\n---\n");
+        assert_eq!(std::fs::read_to_string(ssh.join("id_rsa")).unwrap(), "ROOT-PRIVATE");
+        assert!(!ssh.join("ship").exists(), "a pulled skill was written through the skills symlink");
+        assert_eq!(std::fs::read_to_string(outside.join("id_rsa")).unwrap(), "PRIVATE-KEY");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_hub_refuses_secret_names_and_paths_that_leave_the_tree() {
+        let refused = [
+            "plugins/toy@demo/Settings.json",
+            "plugins/toy@demo/.ENV",
+            "plugins/toy@demo/.env.local",
+            "plugins/toy@demo/Credentials.JSON",
+            "plugins/toy@demo/.Claude.json",
+            "plugins/toy@demo/Installed_Plugins.json",
+            "plugins/toy@demo/settings.local.json",
+            "plugins/toy@demo/cert.PEM",
+            "plugins/toy@demo/id.KEY",
+            "plugins/toy@demo/Secrets/token.txt",
+            "plugins/toy@demo/.SECRETS/note.txt",
+            "plugins/toy@demo/../../.ssh/id_rsa",
+            "plugins/../.ssh/id_rsa",
+            "/etc/passwd",
+            "user-skills/../../.ssh/id_rsa",
+            "user-skills/stolen/../../../.ssh/id_rsa",
+            "plugins/toy@demo/target/release/toy",
+            "plugins/toy@demo/dist/app.js",
+            "plugins/toy@demo/build/out.js",
+            "plugins/toy@demo/vendor/lib.js",
+            "plugins/toy@demo/node_modules/pkg/index.js",
+            "user-skills/synced/org/SKILL.md",
+            "claude/settings.json",
+        ];
+        let accepted: Vec<_> = refused.into_iter().filter(|path| accepts(PLUGINS_KEY, path)).collect();
+        assert_eq!(accepted, Vec::<&str>::new());
+        assert!(accepts(PLUGINS_KEY, "plugins/toy@demo/skills/greet/SKILL.md"));
+        assert!(accepts(PLUGINS_KEY, "user-skills/ship/SKILL.md"));
+        assert!(!accepts("github.com/acme/app", "plugins/toy@demo/skills/greet/SKILL.md"));
+    }
+
+    #[test]
+    fn a_skill_this_machine_wrote_is_not_replaced_or_removed() {
+        let root = root("local-skill");
+        let hub = MemHub::default();
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        let (mac, mini) = (
+            PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") },
+        );
+        let older = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let newer = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        put(&mini_home.join(".claude/skills/notes/SKILL.md"), "from mini");
+        stamp(&mini_home.join(".claude/skills/notes/SKILL.md"), older);
+        put(&mac_home.join(".claude/skills/notes/SKILL.md"), "from mac");
+        stamp(&mac_home.join(".claude/skills/notes/SKILL.md"), newer);
+        put(&mac_home.join(".claude/skills/ship/SKILL.md"), "ship v1");
+        stamp(&mac_home.join(".claude/skills/ship/SKILL.md"), older);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/notes/SKILL.md")).unwrap(), "from mini");
+        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/ship/SKILL.md")).unwrap(), "ship v1");
+        put(&mac_home.join(".claude/skills/ship/SKILL.md"), "ship v2");
+        stamp(&mac_home.join(".claude/skills/ship/SKILL.md"), newer);
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/ship/SKILL.md")).unwrap(), "ship v2");
+        std::fs::remove_file(mac_home.join(".claude/skills/notes/SKILL.md")).unwrap();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/notes/SKILL.md")).unwrap(), "from mini");
+        std::fs::remove_file(mac_home.join(".claude/skills/ship/SKILL.md")).unwrap();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert!(!mini_home.join(".claude/skills/ship/SKILL.md").exists(), "a skill mini did not write is removed when mac deletes it");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disabling_a_plugin_does_not_delete_outside_the_synced_copy() {
+        let root = root("keep");
+        let hub = MemHub::default();
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        let install = mac_home.join("plugins/toy");
+        put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#);
+        put(&install.join("skills/greet/SKILL.md"), "---\nname: greet\ndescription: Say hello\n---\n");
+        enable(&mac_home, "toy@demo", &install, "1.2.3", "abc123");
+        put(&mini_home.join("plugins/toy/skills/greet/SKILL.md"), "hand installed");
+        put(&mini_home.join("keep.txt"), "keep");
+        put(&mini_home.join(".claude/skills/hand/SKILL.md"), "hand skill");
+        let (mac, mini) = (
+            PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") },
+        );
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let outside = root.join("precious");
+        put(&outside.join("precious.txt"), "precious");
+        std::fs::remove_dir_all(mac.dir.join("plugins/toy@demo")).unwrap();
+        std::os::unix::fs::symlink(&outside, mac.dir.join("plugins/toy@demo")).unwrap();
+        put(&mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"toy@demo":false}}"#);
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(std::fs::read_to_string(outside.join("precious.txt")).unwrap(), "precious");
+        assert_eq!(std::fs::read_to_string(mini_home.join("plugins/toy/skills/greet/SKILL.md")).unwrap(), "hand installed");
+        assert_eq!(std::fs::read_to_string(mini_home.join("keep.txt")).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/hand/SKILL.md")).unwrap(), "hand skill");
+        assert!(!mini.dir.join("plugins/toy@demo/skills/greet/SKILL.md").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn two_enabled_copies_with_the_same_mtime_do_not_trade_edits() {
+        let root = root("pong");
+        let hub = MemHub::default();
+        let when = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        for (home, body) in [(&mac_home, "mac-body-aaaa"), (&mini_home, "mini-body-bbbb-longer")] {
+            let install = home.join("plugins/toy");
+            put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#);
+            put(&install.join("skills/greet/SKILL.md"), body);
+            stamp(&install.join(".claude-plugin/plugin.json"), when);
+            stamp(&install.join("skills/greet/SKILL.md"), when);
+            enable(home, "toy@demo", &install, "1.2.3", "abc123");
+        }
+        let (mac, mini) = (
+            PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") },
+        );
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let again = sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        assert_eq!(again.pushed, Vec::<String>::new(), "the machines kept publishing the same file");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     struct OldHub;
 
     impl Hub for OldHub {
