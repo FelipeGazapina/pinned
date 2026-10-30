@@ -932,7 +932,7 @@ function renderThread() {
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit, t.agentsKey, phaseOf(tab)]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab)]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
@@ -1362,14 +1362,19 @@ async function editFromHere(id) {
   await attachFiles(tabByKey(tab.key) ?? tab, files);
 }
 
-/** Types a finished task's notice into this session now. The card redraws from the next agents poll. */
+/** Types a finished task's notice into this session now. A draft stays in the prompt, and the error sits on the card. */
 async function sendDelegated(task) {
   const tab = active;
+  const t = threadOf(tab);
   try {
     await callOn(tab.machine, { cmd: "deliver_task", tab: tab.view.id, task });
+    if (t.sendErrors) delete t.sendErrors[task];
   } catch (e) {
+    t.sendErrors = { ...(t.sendErrors ?? {}), [task]: String(e) };
     showComposerNote(String(e), true);
   }
+  if (terminalOnly(tab)) renderTerminalOnly();
+  else renderThread();
 }
 
 /** Stops a delegated task this tab owns. The card redraws from the next agents poll. */

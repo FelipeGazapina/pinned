@@ -1610,6 +1610,9 @@ impl Machine {
 
     /// Types one finished task's notice now. The tab must own the task. The idle gate does not apply.
     fn deliver_task(&self, tab: &str, task: &str) -> Result<(), String> {
+        if self.tab(tab, |t| t.draft_len)? > 0 {
+            return Err("The prompt has unsent text. Send or clear it (Ctrl-U), then try again.".into());
+        }
         let caller = crate::delegate::Caller { tab: Some(tab.to_owned()), task: None };
         let text = self.delegates.claim_task_notice(&caller, task)?;
         if let Err(error) = self.type_prompt(tab, &text) {
@@ -4004,9 +4007,16 @@ echo '{"type":"result","result":"ok"}'
         let refused = m.call(Call::DeliverTask { tab: other, task: id.clone() });
         assert_eq!(refused, Err(format!("task {id} belongs to another session")));
         assert!(!read_pty(&file).contains("[pinned]"), "another tab typed the notice: {}", read_pty(&file));
-        assert_eq!(m.call(Call::DeliverTask { tab: tab.clone(), task: id.clone() }), Ok(json!(null)));
+        let blocked = m.call(Call::DeliverTask { tab: tab.clone(), task: id.clone() });
+        assert_eq!(blocked, Err("The prompt has unsent text. Send or clear it (Ctrl-U), then try again.".into()));
+        assert!(!read_pty(&file).contains("[pinned]"), "Send to session submitted the draft: {}", read_pty(&file));
+        m.write_input(&tab, b"\x15").unwrap();
         let needle = format!("[pinned] Delegated task {id} \"Held\"");
-        wait_for("Send to session typed the notice", || read_pty(&file).contains(&needle));
+        wait_for("the notice after the draft is cleared", || read_pty(&file).contains(&needle));
+        let second = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Clear");
+        assert_eq!(m.call(Call::DeliverTask { tab: tab.clone(), task: second.clone() }), Ok(json!(null)));
+        let second_needle = format!("[pinned] Delegated task {second} \"Clear\"");
+        wait_for("Send to session typed the notice", || read_pty(&file).contains(&second_needle));
         let again = m.call(Call::DeliverTask { tab, task: id });
         assert!(again.is_err(), "a second send typed it again: {again:?}");
         let _ = std::fs::remove_file(file);
