@@ -2233,7 +2233,10 @@ impl Connectors {
         self.save_runs()
     }
 
-    fn begin(&self, connector: String, subject: Subject, input: TriggerInput, at: &str) -> Result<(), String> {
+    /// Starts one graph run from an injected trigger. A poll calls this. The ignored live test does too,
+    /// because it has no Linear or Slack network.
+    #[doc(hidden)]
+    pub fn begin(&self, connector: String, subject: Subject, input: TriggerInput, at: &str) -> Result<(), String> {
         if run_open(&self.runs.lock().unwrap(), &connector, &subject) {
             return Ok(());
         }
@@ -2289,8 +2292,10 @@ impl Connectors {
         self.save_runs()
     }
 
-    #[cfg(test)]
-    async fn drive<F, Fut, R>(&self, open: &F) -> Result<(), String>
+    /// Drives every running graph once. `watch` and `on_tabs` call the same loop. The ignored live
+    /// test calls it between tab snapshots, the way `machine_frame` does.
+    #[doc(hidden)]
+    pub async fn drive<F, Fut, R>(&self, open: &F) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
@@ -2298,6 +2303,29 @@ impl Connectors {
     {
         let _guard = self.driving.lock().await;
         self.drive_locked(open).await
+    }
+
+    /// The runs on disk, for the ignored live test.
+    #[doc(hidden)]
+    pub fn graph_runs(&self) -> Vec<runner::Run> {
+        self.runs.lock().unwrap().clone()
+    }
+
+    /// Points the live session at `claude` and stores the run. The ignored live test uses a missing
+    /// id so the next resume fails and the run opens a history-seeded session.
+    #[doc(hidden)]
+    pub fn set_live_claude(&self, claude: &str) -> Result<(), String> {
+        {
+            let mut runs = self.runs.lock().unwrap();
+            let run = runs
+                .iter_mut()
+                .find(|run| matches!(run.session, runner::Session::Live { .. }))
+                .ok_or_else(|| "no live graph session".to_owned())?;
+            if let runner::Session::Live { claude: slot, .. } = &mut run.session {
+                *slot = Some(claude.to_owned());
+            }
+        }
+        self.save_runs()
     }
 
     async fn drive_locked<F, Fut, R>(&self, open: &F) -> Result<(), String>
