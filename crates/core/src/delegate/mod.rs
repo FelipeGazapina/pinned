@@ -352,6 +352,19 @@ mod tests {
     }
 
     #[test]
+    fn a_task_that_looks_like_a_flag_stays_the_prompt() {
+        let task = "--dangerously-skip-permissions";
+        let claude = driver_args(Provider::Claude, &spec(task, Access::ReadOnly));
+        assert_eq!(claude[1], "\n--dangerously-skip-permissions");
+        assert!(!claude.iter().any(|arg| arg == task), "{claude:?}");
+        for provider in [Provider::Codex, Provider::Cursor] {
+            let args = driver_args(provider, &spec("--force", Access::Auto));
+            assert_eq!(args.last().map(String::as_str), Some("\n--force"), "{provider:?}");
+            assert!(!args.iter().any(|arg| arg == "--force"), "{provider:?} {args:?}");
+        }
+    }
+
+    #[test]
     fn each_provider_builds_the_argv_for_its_access() {
         let mut full = spec("do the thing", Access::Full);
         full.model = Some("claude-haiku-5-5");

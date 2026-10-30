@@ -1388,7 +1388,10 @@ async function cancelDelegated(task) {
 }
 
 /** Opens the delegated child's conversation as a tab on its folder and account. */
+const opening = new Set();
 async function openDelegated(task) {
+  if (opening.has(task)) return;
+  opening.add(task);
   const tab = active;
   try {
     const created = await callOn(tab.machine, { cmd: "open_task", tab: tab.view.id, task });
@@ -1399,6 +1402,8 @@ async function openDelegated(task) {
     await startTab(next);
   } catch (e) {
     showComposerNote(String(e), true);
+  } finally {
+    opening.delete(task);
   }
 }
 

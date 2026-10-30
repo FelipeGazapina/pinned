@@ -38,10 +38,15 @@ const CURSOR: Driver = Driver {
     resume: resume_flag,
 };
 
+/// A task starting with a dash would read as an option, such as a bypass flag, so it leads with a newline.
+fn prompt_arg(task: &str) -> String {
+    if task.starts_with('-') { format!("\n{task}") } else { task.to_owned() }
+}
+
 fn claude_args(spec: &SpawnSpec) -> Vec<String> {
     let mut args = vec![
         "-p".into(),
-        spec.task.into(),
+        prompt_arg(spec.task),
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
@@ -87,7 +92,7 @@ fn codex_args(spec: &SpawnSpec) -> Vec<String> {
         Some(spec.task_id),
         spec.reminders,
     ));
-    args.push(spec.task.into());
+    args.push(prompt_arg(spec.task));
     args
 }
 
@@ -108,7 +113,7 @@ fn cursor_args(spec: &SpawnSpec) -> Vec<String> {
     if let Some(model) = spec.model {
         args.extend(["--model".into(), model.into()]);
     }
-    args.push(spec.task.into());
+    args.push(prompt_arg(spec.task));
     args
 }
 

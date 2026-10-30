@@ -1676,10 +1676,10 @@ impl Machine {
         };
         let (account_id, inherited_model, parent_provider, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
             self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.cwd.clone(), t.child_access()))?
-        } else if let Some(task) = caller.task.as_deref().and_then(|id| self.delegates.lineage(id)) {
-            (Some(task.account), task.model, task.provider, task.cwd, task.access)
         } else {
-            (None, None, Provider::Claude, self.default_cwd.clone(), Access::Auto)
+            let id = caller.task.as_deref().unwrap_or_default();
+            let task = self.delegates.lineage(id).ok_or_else(|| format!("no task {id}"))?;
+            (Some(task.account), task.model, task.provider, task.cwd, task.access)
         };
         let account = if let Some(id) = request.target.account.clone().filter(|id| !id.is_empty()) {
             self.accounts.get(&id).ok_or_else(|| format!("no account {id} on this machine"))?
@@ -3770,6 +3770,14 @@ echo '{"type":"result","result":"ok"}'
         let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
         assert_eq!(lines, vec!["-p", "--output-format", "stream-json", "--trust", "--model", "composer-2.5-high", "look"]);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_task_caller_the_registry_does_not_know_is_refused() {
+        let m = Machine::new(launch(), None, None, |_| {});
+        let request = crate::delegate::parse_request(&json!({ "task": "look" })).unwrap();
+        assert_eq!(m.start_delegate(None, Some("task-gone".into()), None, request), Err("no task task-gone".into()));
+        assert!(m.delegates.running().is_empty());
     }
 
     #[test]
