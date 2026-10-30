@@ -41,9 +41,14 @@ export function resetIds(forTests = 0) {
   seq = forTests;
 }
 
-function newId(prefix) {
-  seq += 1;
-  return `${prefix}-${seq}`;
+function newId(prefix, graph) {
+  const used = new Set(graph?.nodes?.map((node) => node.id) ?? []);
+  let id;
+  do {
+    seq += 1;
+    id = `${prefix}-${seq}`;
+  } while (used.has(id));
+  return id;
 }
 
 function clone(value) {
@@ -137,7 +142,7 @@ function nearestClassify(graph, upstreamId) {
 }
 
 export function newNode(type, graph, upstreamId) {
-  const id = newId(type);
+  const id = newId(type, graph);
   const used = new Set(graph.nodes.map((n) => n.name));
   let name = type;
   for (let i = 2; used.has(name); i += 1) name = `${type} ${i}`;
