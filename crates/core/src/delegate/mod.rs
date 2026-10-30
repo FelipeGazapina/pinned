@@ -21,8 +21,6 @@ const MODEL_CACHE: Duration = Duration::from_secs(10 * 60);
 const MODEL_MISS: Duration = Duration::from_secs(15);
 const CATALOG_WAIT: Duration = Duration::from_secs(2);
 
-/// A worker thread and a delegated child cannot start another pinned worker.
-/// An orchestrator and a role-less session can. A caller that is both is refused as a child.
 pub fn delegate_block(role: Option<crate::agent::Role>, child: bool) -> Option<&'static str> {
     if child {
         Some("a delegated child cannot start another pinned worker")

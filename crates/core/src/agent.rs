@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 
 pub const SOCK_ENV: &str = "PINNED_SOCK";
 pub const TAB_ENV: &str = "PINNED_TAB";
-/// Set on a delegated child. Its MCP server sees this and does not offer `delegate_task`.
 pub const TASK_ENV: &str = "PINNED_TASK";
 
 /// Set on a project's orchestrator and its workers, with the project in `PROJECT_ENV`, since a
