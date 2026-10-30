@@ -2342,6 +2342,16 @@ async function sweep(profileName) {
     await page.evaluate(() => clearComposer(active));
   });
 
+  await step("app view: an image named by its upload's path draws the picture, not only the path", async () => {
+    // A 1x1 PNG, saved where the node keeps its uploads, as a client's attachment lands there.
+    const shot = path.join(DIR, "node", "uploads", "sweep-shot.png");
+    fs.mkdirSync(path.dirname(shot), { recursive: true });
+    fs.writeFileSync(shot, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"));
+    await sendPrompt(`what is in ${shot}`);
+    await waitFor("the upload's picture", async () => /^data:image\/png;base64,/.test((await lastTurn(".user .pictures img").getAttribute("src").catch(() => "")) ?? ""), 15000);
+    check((await lastTurn(".user .body").textContent()).includes(shot), "the message doesn't keep the path");
+  });
+
   await step("app view: a fork starts with a Forked from conversation divider that opens its source", async () => {
     const tabs = await tabCount();
     const source = await page.evaluate(() => active.view.session);

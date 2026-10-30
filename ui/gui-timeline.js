@@ -805,6 +805,32 @@ function automationHtml(user, t) {
     ${open ? `<div class="meta"><button type="button" class="link" data-open-automation>Open automation</button>${whenHtml(user.at)}<button type="button" class="xs" data-copy-item="${esc(user.id)}" title="Copy">${icon("copy")}</button></div>` : ""}</div>`;
 }
 
+/** An image a prompt names by path, as an upload saved on the session's machine: escaped as the composer
+ * sends it, with its spaces and brackets backslashed. */
+const UPLOAD_IMAGE = /(?:^|\s)((?:\\.|[^\s\\])+?\.(?:png|jpe?g|gif|webp|bmp|avif))(?=\s|$)/gi;
+const imagePathsIn = (text) => [...new Set([...text.matchAll(UPLOAD_IMAGE)].map((m) => m[1].replace(/\\(.)/g, "$1")))];
+
+/** Uploads are drawn from the machine that saved them, so a client on another machine sees the picture,
+ * not just its path. Each file is asked for once and kept for a while after. */
+const uploadImages = new Map();
+function drawUploadImages() {
+  for (const button of threadView.querySelectorAll("button.picture[data-upload]:not([data-drawing])")) {
+    button.dataset.drawing = "";
+    const { upload: path, machine } = button.dataset;
+    const key = `${machine}\n${path}`;
+    if (!uploadImages.has(key)) {
+      if (uploadImages.size >= 40) uploadImages.delete(uploadImages.keys().next().value);
+      uploadImages.set(key, callOn(machine, { cmd: "read_upload", path }).catch(() => null));
+    }
+    uploadImages.get(key).then((src) => {
+      if (!button.isConnected) return;
+      if (!src) return button.remove();
+      button.dataset.zoom = "upload";
+      button.insertAdjacentHTML("beforeend", `<img src="${esc(src)}" alt="${esc(path.split("/").pop())}">`);
+    });
+  }
+}
+
 function userHtml(user, t, tab, first) {
   const by = sentBy(tab, user, first);
   if (by === "automation") return automationHtml(user, t);
@@ -814,9 +840,10 @@ function userHtml(user, t, tab, first) {
   const long = user.text.length > 600 || user.text.split("\n").length > 8;
   const clamped = long && !t.open.has(key);
   const pictures = user.pictures ?? [];
+  const uploads = imagePathsIn(user.text);
   const missing = user.images - pictures.length;
   const bubble = [
-    pictures.length && `<div class="pictures">${pictures.map((src, i) => `<button type="button" class="picture" data-zoom="${esc(user.id)}:${i}"><img src="${esc(src)}" alt="Image #${i + 1}"></button>`).join("")}</div>`,
+    (pictures.length || uploads.length) && `<div class="pictures">${pictures.map((src, i) => `<button type="button" class="picture" data-zoom="${esc(user.id)}:${i}"><img src="${esc(src)}" alt="Image #${i + 1}"></button>`).join("")}${uploads.map((path) => `<button type="button" class="picture" data-upload="${esc(path)}" data-machine="${esc(tab.machine)}" aria-label="${esc(path.split("/").pop())}"></button>`).join("")}</div>`,
     user.text && `<div class="body md${clamped ? " clamped" : ""}">${citationChips(markdown(user.text, promptMarked), user.citations)}</div>`,
     missing > 0 && `<span class="images">${missing} image${missing > 1 ? "s" : ""}</span>`,
     long && `<button type="button" class="show-full" data-toggle="${esc(key)}">${clamped ? "Show full message" : "Show less"}</button>`,
@@ -962,6 +989,7 @@ function renderThread() {
   const card = threadView.querySelector("#dialog-slot > .dialog-card");
   const focused = card?.contains(document.activeElement);
   threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
+  drawUploadImages();
   laneGrowth.disconnect();
   laneGrowth.observe(threadView.firstElementChild);
   if (card) document.getElementById("dialog-slot")?.append(card);

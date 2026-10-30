@@ -477,6 +477,10 @@ impl Machine {
                 let dir = self.uploads.as_ref().ok_or("this machine keeps no files")?;
                 json(uploads::save(dir, &name, &data.0)?.display().to_string())
             }
+            Call::ReadUpload { path } => {
+                let dir = self.uploads.as_ref().ok_or("this machine keeps no files")?;
+                json(uploads::image(dir, &path)?)
+            }
             Call::ListAccounts => json(self.list_accounts()),
             Call::AddAccount { provider, name } => {
                 let account = self.accounts.add(provider, &name)?;

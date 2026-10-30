@@ -194,6 +194,9 @@ pub enum Call {
     /// The absolute path the file was saved under, in a private folder of the machine, for a
     /// session to read. Refused past `uploads::LIMIT`.
     Upload { name: String, data: Bytes },
+    /// The `data:` URL of an image upload at `path`, so a chat draws it from any machine. Refused
+    /// outside the uploads folder, for a file that isn't a picture, and past 8 MB.
+    ReadUpload { path: String },
     /// `Vec<accounts::View>`: the built-in accounts, then the added ones, each as its CLI reports it.
     ListAccounts,
     /// The new account's `accounts::View`. Its id is a slug of `name`.
@@ -540,6 +543,7 @@ impl Call {
                 | Call::Git { .. }
                 | Call::SetWorkspace { .. }
                 | Call::ReadFile { .. }
+                | Call::ReadUpload { .. }
                 | Call::FileUrl { .. }
                 | Call::WatchPr { .. }
                 | Call::WriteFile { .. }
@@ -961,6 +965,10 @@ mod tests {
         round_trip(
             Call::Upload { name: "photo.jpg".into(), data: Bytes(b"\xff\xd8".to_vec()) },
             json!({ "cmd": "upload", "name": "photo.jpg", "data": "/9g=" }),
+        );
+        round_trip(
+            Call::ReadUpload { path: "/home/ana/.config/pinned/uploads/shot.png".into() },
+            json!({ "cmd": "read_upload", "path": "/home/ana/.config/pinned/uploads/shot.png" }),
         );
         round_trip(
             Call::Diff { tab: "tab-1".into(), scope: DiffScope::Base, ignore_whitespace: true, base: None },

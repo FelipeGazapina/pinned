@@ -656,6 +656,23 @@
                 ]
               },
               {
+                "description": "The `data:` URL of an image upload at `path`, so a chat draws it from any machine. Refused\noutside the uploads folder, for a file that isn't a picture, and past 8 MB.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_upload"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
                 "description": "`Vec<accounts::View>`: the built-in accounts, then the added ones, each as its CLI reports it.",
                 "type": "object",
                 "properties": {
@@ -5318,6 +5335,23 @@
                   "cmd",
                   "name",
                   "data"
+                ]
+              },
+              {
+                "description": "The `data:` URL of an image upload at `path`, so a chat draws it from any machine. Refused\noutside the uploads folder, for a file that isn't a picture, and past 8 MB.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_upload"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
                 ]
               },
               {
@@ -20509,6 +20543,23 @@
                 ]
               },
               {
+                "description": "The `data:` URL of an image upload at `path`, so a chat draws it from any machine. Refused\noutside the uploads folder, for a file that isn't a picture, and past 8 MB.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_upload"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
                 "description": "`Vec<accounts::View>`: the built-in accounts, then the added ones, each as its CLI reports it.",
                 "type": "object",
                 "properties": {
@@ -24010,6 +24061,23 @@
                   "cmd",
                   "name",
                   "data"
+                ]
+              },
+              {
+                "description": "The `data:` URL of an image upload at `path`, so a chat draws it from any machine. Refused\noutside the uploads folder, for a file that isn't a picture, and past 8 MB.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "read_upload"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
                 ]
               },
               {
