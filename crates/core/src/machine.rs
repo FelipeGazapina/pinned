@@ -1766,8 +1766,13 @@ impl Machine {
     }
 
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
-        use crate::delegate::{driver_args, resolve_access, spawn, Access, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
+        use crate::delegate::{driver_args, resolve_access, spawn, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
         let caller = Self::require_caller(tab, parent_task)?;
+        let child = caller.task.is_some();
+        let role = caller.tab.as_deref().and_then(|id| self.tab(id, |t| role_of(&t.env)).ok().flatten().map(|(role, _)| role));
+        if let Some(error) = crate::delegate::delegate_block(role, child) {
+            return Err(error.to_owned());
+        }
         let parent = if let Some(tab) = caller.tab.clone() {
             Parent::Tab(tab)
         } else {
