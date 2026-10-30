@@ -9,19 +9,95 @@ struct Cache {
 
 pub struct Delegates {
     tasks: Mutex<Vec<Task>>,
+    notes: Mutex<Vec<Note>>,
+    inflight: Mutex<Vec<Note>>,
     pids: Mutex<HashMap<String, u32>>,
     cursor: Arc<Mutex<Option<Cache>>>,
     warming: Arc<AtomicBool>,
+    file: Option<PathBuf>,
+    store: Mutex<()>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Note {
+    id: String,
+    tab: String,
+    text: String,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct Disk {
+    tasks: Vec<Task>,
+    #[serde(default)]
+    notes: Vec<Note>,
 }
 
 impl Default for Delegates {
     fn default() -> Self {
-        Self {
-            tasks: Mutex::new(vec![]),
+        Self::load(None)
+    }
+}
+
+impl Delegates {
+    pub fn load(file: Option<PathBuf>) -> Self {
+        let mut disk = file
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<Disk>(&bytes).ok())
+            .unwrap_or_default();
+        let now = unix_millis();
+        let mut stopped = false;
+        for task in &mut disk.tasks {
+            if task.state.terminal() {
+                continue;
+            }
+            task.state = WorkState::Cancelled;
+            task.error = Some("stopped by restart".into());
+            task.ended = Some(now);
+            task.delivered = false;
+            task.held = None;
+            stopped = true;
+        }
+        let delegates = Self {
+            tasks: Mutex::new(disk.tasks),
+            notes: Mutex::new(disk.notes),
+            inflight: Mutex::new(vec![]),
             pids: Mutex::new(HashMap::new()),
             cursor: Arc::new(Mutex::new(None)),
             warming: Arc::new(AtomicBool::new(false)),
+            file,
+            store: Mutex::new(()),
+        };
+        if stopped {
+            delegates.persist();
         }
+        delegates
+    }
+
+    fn persist(&self) {
+        let Some(file) = &self.file else { return };
+        let _write = self.store.lock().unwrap();
+        let disk = Disk { tasks: self.tasks.lock().unwrap().clone(), notes: self.notes.lock().unwrap().clone() };
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(&disk) {
+            let _ = std::fs::write(file, bytes);
+        }
+    }
+
+    pub fn pending(&self) -> bool {
+        if !self.notes.lock().unwrap().is_empty() {
+            return true;
+        }
+        self.tasks.lock().unwrap().iter().any(|task| !task.delivered && task.state.terminal() && matches!(task.parent, Parent::Tab(_)))
+    }
+
+    pub fn push_note(&self, tab: &str, text: &str) {
+        static NEXT: AtomicU32 = AtomicU32::new(1);
+        let id = format!("note-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+        self.notes.lock().unwrap().push(Note { id, tab: tab.to_owned(), text: text.to_owned() });
+        self.persist();
     }
 }
 
@@ -59,6 +135,8 @@ impl Delegates {
         }
         let task = fresh(new);
         tasks.push(task.clone());
+        drop(tasks);
+        self.persist();
         Claim::Fresh(Box::new(task))
     }
 
@@ -74,12 +152,14 @@ impl Delegates {
             task.cwd = cwd;
             task.isolated = isolated;
         }
+        self.persist();
     }
 
     pub fn set_model(&self, id: &str, model: Option<String>) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
             task.model = model;
         }
+        self.persist();
     }
 
     /// Records `pid` for a task that is still working. A task that already finished is killed now,
@@ -137,6 +217,7 @@ impl Delegates {
         if let Some(dir) = dir {
             crate::branches::drop_worktree(&dir, path);
         }
+        self.persist();
     }
 
     /// Applies one child event. Returns the parent tab when a task just became deliverable.
@@ -178,32 +259,42 @@ impl Delegates {
         for dir in dirs {
             crate::branches::drop_worktree(&dir, path);
         }
+        self.persist();
         ready
     }
 
     pub fn started_json(&self, id: &str) -> Result<Value, String> {
-        let mut tasks = self.tasks.lock().unwrap();
-        let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| format!("no task {id}"))?;
-        if task.state.terminal() {
-            task.delivered = true;
-            let mut body = status_json(task);
-            body["next"] = json!(result_next(task));
-            return Ok(body);
-        }
-        Ok(json!({
-            "taskId": task.id,
-            "title": task.title,
-            "providerInstanceId": task.account,
-            "model": task.model,
-            "workState": task.state.as_str(),
-            "cwd": task.cwd.display().to_string(),
-            "next": next_line(task),
-        }))
+        let body = {
+            let mut tasks = self.tasks.lock().unwrap();
+            let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| format!("no task {id}"))?;
+            if task.state.terminal() {
+                task.delivered = true;
+                let mut body = status_json(task);
+                body["next"] = json!(result_next(task));
+                body
+            } else {
+                json!({
+                    "taskId": task.id,
+                    "title": task.title,
+                    "providerInstanceId": task.account,
+                    "model": task.model,
+                    "workState": task.state.as_str(),
+                    "cwd": task.cwd.display().to_string(),
+                    "next": next_line(task),
+                })
+            }
+        };
+        self.persist();
+        Ok(body)
     }
 
     pub fn status(&self, caller: &Caller, id: &str) -> Result<Value, String> {
-        let mut tasks = self.tasks.lock().unwrap();
-        self.read(&mut tasks, caller, id)
+        let body = {
+            let mut tasks = self.tasks.lock().unwrap();
+            self.read(&mut tasks, caller, id)?
+        };
+        self.persist();
+        Ok(body)
     }
 
     pub fn cancel(&self, caller: &Caller, id: &str, reason: &str, path: Option<&str>) -> Result<Value, String> {
@@ -233,12 +324,32 @@ impl Delegates {
         for id in &order {
             self.stop_one(id, reason, path);
         }
-        let mut tasks = self.tasks.lock().unwrap();
-        let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| format!("no task {id}"))?;
-        if task.state.terminal() {
-            task.delivered = true;
+        let body = {
+            let mut tasks = self.tasks.lock().unwrap();
+            let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| format!("no task {id}"))?;
+            if task.state.terminal() {
+                task.delivered = true;
+            }
+            status_json(task)
+        };
+        self.persist();
+        Ok(body)
+    }
+
+    pub fn halt(&self, id: &str, reason: &str, path: Option<&str>) {
+        let order = {
+            let tasks = self.tasks.lock().unwrap();
+            if !tasks.iter().any(|task| task.id == id) {
+                return;
+            }
+            let mut order = vec![];
+            postorder(&tasks, id, &mut order);
+            order
+        };
+        for id in &order {
+            self.stop_one(id, reason, path);
         }
-        Ok(status_json(task))
+        self.persist();
     }
 
     fn read(&self, tasks: &mut [Task], caller: &Caller, id: &str) -> Result<Value, String> {
@@ -281,23 +392,39 @@ impl Delegates {
     /// A grandchild stays out: its headless parent reads it, and it is never typed into the root tab.
     /// The caller puts the ids back with `release_notice` when the bytes were not written.
     pub fn claim_notice(&self, tab: &str) -> Option<(String, Vec<String>)> {
-        let mut tasks = self.tasks.lock().unwrap();
-        let ready: Vec<usize> = tasks
-            .iter()
-            .enumerate()
-            .filter(|(_, task)| {
-                !task.delivered && task.state.terminal() && matches!(&task.parent, Parent::Tab(parent) if parent == tab)
-            })
-            .map(|(index, _)| index)
-            .collect();
-        if ready.is_empty() {
-            return None;
-        }
-        let lines = ready.iter().map(|index| notice_line(&tasks[*index])).collect::<Vec<_>>().join("\n");
-        let ids: Vec<String> = ready.iter().map(|index| tasks[*index].id.clone()).collect();
-        for index in &ready {
-            tasks[*index].delivered = true;
-        }
+        let (lines, ids, taken) = {
+            let mut tasks = self.tasks.lock().unwrap();
+            let mut notes = self.notes.lock().unwrap();
+            let ready: Vec<usize> = tasks
+                .iter()
+                .enumerate()
+                .filter(|(_, task)| {
+                    !task.delivered && task.state.terminal() && matches!(&task.parent, Parent::Tab(parent) if parent == tab)
+                })
+                .map(|(index, _)| index)
+                .collect();
+            let note_at: Vec<usize> = notes.iter().enumerate().filter(|(_, note)| note.tab == tab).map(|(index, _)| index).collect();
+            if ready.is_empty() && note_at.is_empty() {
+                return None;
+            }
+            let mut lines: Vec<String> = ready.iter().map(|index| notice_line(&tasks[*index])).collect();
+            let mut ids: Vec<String> = ready.iter().map(|index| tasks[*index].id.clone()).collect();
+            for index in &ready {
+                tasks[*index].delivered = true;
+            }
+            let mut taken = Vec::new();
+            for index in note_at.into_iter().rev() {
+                taken.push(notes.remove(index));
+            }
+            taken.reverse();
+            for note in &taken {
+                lines.push(note.text.clone());
+                ids.push(note.id.clone());
+            }
+            (lines.join("\n"), ids, taken)
+        };
+        self.inflight.lock().unwrap().extend(taken);
+        self.persist();
         Some((lines, ids))
     }
 
@@ -322,16 +449,32 @@ impl Delegates {
             return Err(format!("{id} was already sent"));
         }
         task.delivered = true;
-        Ok(notice_line(task))
+        let text = notice_line(task);
+        drop(tasks);
+        self.persist();
+        Ok(text)
     }
 
     pub fn release_notice(&self, ids: &[String]) {
-        let mut tasks = self.tasks.lock().unwrap();
-        for task in tasks.iter_mut() {
-            if ids.iter().any(|id| id == &task.id) {
-                task.delivered = false;
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            for task in tasks.iter_mut() {
+                if ids.iter().any(|id| id == &task.id) {
+                    task.delivered = false;
+                }
             }
+            let mut inflight = self.inflight.lock().unwrap();
+            let mut notes = self.notes.lock().unwrap();
+            inflight.retain(|note| {
+                if ids.iter().any(|id| id == &note.id) {
+                    notes.push(note.clone());
+                    false
+                } else {
+                    true
+                }
+            });
         }
+        self.persist();
     }
 
     pub fn lineage(&self, id: &str) -> Option<Lineage> {
@@ -569,7 +712,7 @@ impl Task {
 fn working_next(task: &Task) -> String {
     match task.parent {
         Parent::Tab(_) => format!(
-            "end your turn and do not poll; pinned types a notice when this session is idle, or the user sends it from the task's card; then call task_status with this taskId \"{}\"",
+            "end your turn and do not poll; pinned delivers the result when the turn ends, types it when this session is idle, or the user sends it from the task's card; then call task_status with this taskId \"{}\"",
             task.id
         ),
         Parent::Task(_) => format!("call task_status with taskId \"{}\" when you need it", task.id),

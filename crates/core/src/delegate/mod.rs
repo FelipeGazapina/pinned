@@ -36,7 +36,8 @@ pub fn child_model(parent: Provider, child: Provider, inherited: Option<String>,
 
 /// What the child is allowed to do. Never wider than the parent tab: plan narrows a bypassed
 /// parent to read-only, and a parent that asks before acting does not hand the child a bypass.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Access {
     Full,
     Auto,
@@ -174,7 +175,8 @@ pub struct Request {
     pub client_request_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkState {
     Working,
     /// The process exited and a descendant is still working.
@@ -227,13 +229,14 @@ pub struct HeldExit {
     pub failed: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Parent {
     Tab(String),
     Task(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
     pub parent: Parent,
@@ -251,8 +254,10 @@ pub struct Task {
     pub summary: Option<String>,
     pub error: Option<String>,
     pub conversation: Option<String>,
+    #[serde(skip)]
     pub steps: Vec<Item>,
     /// The full latest assistant message, kept after the step ring drops it.
+    #[serde(skip)]
     pub assistant: Option<String>,
     pub mode: Mode,
     pub delivered: bool,
@@ -262,6 +267,7 @@ pub struct Task {
     pub caller_key: String,
     pub client_request_id: Option<String>,
     pub role: Option<String>,
+    #[serde(skip)]
     pub held: Option<HeldExit>,
 }
 
@@ -1134,7 +1140,7 @@ exec '{real}' "$@"
         assert_ne!(fresh_id, first);
         let fresh = delegates.started_json(&fresh_id).unwrap();
         assert_eq!(fresh["workState"], "working");
-        let next = format!("end your turn and do not poll; pinned types a notice when this session is idle, or the user sends it from the task's card; then call task_status with this taskId \"{fresh_id}\"");
+        let next = format!("end your turn and do not poll; pinned delivers the result when the turn ends, types it when this session is idle, or the user sends it from the task's card; then call task_status with this taskId \"{fresh_id}\"");
         assert_eq!(fresh["next"], next);
         let status = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &fresh_id).unwrap();
         assert_eq!(status["workState"], "working");

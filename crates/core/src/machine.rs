@@ -254,6 +254,7 @@ impl Tab {
             return None;
         }
         Some(sessions::Saved {
+            id: None,
             cwd: self.cwd.clone(),
             session: self.claude_session.clone()?,
             env: self.env.clone(),
@@ -300,9 +301,22 @@ impl Tab {
         }
     }
 
-    /// A notice may be typed. Cursor never reports Done, so it is never idle.
+    fn turn_open(&self) -> bool {
+        self.status == Some(AgentStatus::Working)
+            || self.status == Some(AgentStatus::Failed)
+            || (self.status == Some(AgentStatus::NeedsInput) && self.interrupted)
+    }
+
     fn notice_idle(&self) -> bool {
-        self.session.is_some() && self.status == Some(AgentStatus::Done) && self.turn_pending.is_none() && self.draft.empty()
+        self.account.provider != Provider::Cursor
+            && self.session.as_ref().is_some_and(|session| session.raw())
+            && !self.turn_open()
+            && self.turn_pending.is_none()
+            && self.draft.empty()
+    }
+
+    fn report_idle(&self) -> bool {
+        self.account.provider != Provider::Cursor && self.session.as_ref().is_some_and(|session| session.raw()) && !self.turn_open() && self.draft.empty()
     }
 
     fn note_submit(&mut self) {
@@ -378,7 +392,7 @@ impl Machine {
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
             .unwrap_or_else(|| home.clone());
-        Arc::new_cyclic(|me| Machine {
+        let machine = Arc::new_cyclic(|me| Machine {
             launch,
             default_cwd,
             scratch: dir.as_ref().map(|d| d.join("scratch")).unwrap_or_else(|| std::env::temp_dir().join("pinned-scratch")),
@@ -403,13 +417,17 @@ impl Machine {
             notice_loop: AtomicBool::new(false),
             usage: Mutex::default(),
             agents: Mutex::default(),
-            delegates: crate::delegate::Delegates::default(),
+            delegates: crate::delegate::Delegates::load(dir.as_ref().map(|d| d.join("tasks.json"))),
             memories,
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
             me: me.clone(),
-        })
+        });
+        if machine.delegates.pending() {
+            machine.arm_notices();
+        }
+        machine
     }
 
     pub fn launch(&self) -> &Launch {
@@ -1203,6 +1221,7 @@ impl Machine {
                 machine.arm_notices();
             }
             if done {
+                machine.maybe_deliver(&tab);
                 return;
             }
             drop(machine);
@@ -1487,7 +1506,13 @@ impl Machine {
             AgentStatus::Working => return,
         };
         if let Some(orchestrator) = self.live_tab(&role_env(Role::Orchestrator, project)) {
-            let _ = self.type_prompt(&orchestrator, &format!("[pinned] Worker {worker} \"{title}\" {what}"));
+            let text = format!("[pinned] Worker {worker} \"{title}\" {what}");
+            if self.tab(&orchestrator, |t| t.report_idle()).unwrap_or(false) {
+                let _ = self.type_prompt(&orchestrator, &text);
+            } else {
+                self.delegates.push_note(&orchestrator, &text);
+                self.arm_notices();
+            }
         }
     }
 
@@ -1636,7 +1661,7 @@ impl Machine {
                 // The transcript is in its account's home: with that account gone, nothing can resume it.
                 let account = self.account_for(Some(&s.account), &s.cwd).ok()?;
                 let (launch, resume_at) = s.reopen(now, account.provider);
-                let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session));
+                let id = self.add_tab_id(s.id, s.cwd, account, launch, s.env, s.bypass, Some(s.session));
                 let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode) = (s.interrupted, resume_at, s.held, s.model, s.permission_mode));
                 Some(id)
             })
@@ -1654,6 +1679,20 @@ impl Machine {
         self.usage.lock().unwrap().clone()
     }
 
+    /// Codex notify ignores stdout, so its notices stay for the pty.
+    fn notices_for_hook(&self, event: &AgentEvent) -> String {
+        let Some(tab) = &event.tab else { return String::new() };
+        let claude = self.tab(tab, |t| t.account.provider == Provider::Claude).unwrap_or(false);
+        if !claude {
+            return String::new();
+        }
+        let take = event.status == AgentStatus::Done || (event.status == AgentStatus::Working && event.prompt.is_some());
+        if !take {
+            return String::new();
+        }
+        self.delegates.claim_notice(tab).map(|(text, _)| text).unwrap_or_default()
+    }
+
     /// Answers the hook socket. Hook events and usage update the tabs and project tools act on
     /// them; every other message, a connector session's callbacks and the reminders tools, goes to `other`.
     pub fn listen(&self, other: impl Fn(Message) -> Result<String, String> + Send + Sync + 'static) -> std::io::Result<()> {
@@ -1662,10 +1701,9 @@ impl Machine {
             let Some(machine) = me.upgrade() else { return Err("pinned is shutting down".into()) };
             match message {
                 Message::Agent(event) => {
-                    // Recorded first: recall can wait on a memory store, and a turn's later events
-                    // must not land before this one.
+                    let notices = machine.notices_for_hook(&event);
                     machine.record_event(event.clone());
-                    Ok(machine.recall(&event))
+                    Ok(Self::combine_context(&machine.recall(&event), &notices))
                 }
                 Message::Usage { usage: report, account } => {
                     let account = account.unwrap_or_else(accounts::default_account);
@@ -1688,12 +1726,22 @@ impl Machine {
         })
     }
 
+    fn combine_context(memory: &str, notices: &str) -> String {
+        match (memory.is_empty(), notices.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => memory.to_owned(),
+            (true, false) => notices.to_owned(),
+            (false, false) => format!("{memory}\n\n{notices}"),
+        }
+    }
+
     /// Ends every session as the machine shuts down, keeping them saved for the next launch.
     pub fn quit(&self) {
         self.quitting.store(true, Ordering::SeqCst);
+        self.save_sessions();
         let path = self.launch.path_env.clone();
         for id in self.delegates.running() {
-            let _ = self.delegates.cancel_tree(&id, "pinned is shutting down", path.as_deref());
+            self.delegates.halt(&id, "stopped by restart", path.as_deref());
         }
         self.delegates.kill_remembered();
         let (tabs, owned) = {
@@ -1745,7 +1793,7 @@ impl Machine {
             branches::drop_worktree(dir, self.launch.path_env.as_deref());
         }
         if !self.delegates.is_terminal(id) {
-            let _ = self.delegates.cancel_tree(id, "pinned is shutting down", self.launch.path_env.as_deref());
+            self.delegates.halt(id, "stopped by restart", self.launch.path_env.as_deref());
         }
         true
     }
@@ -1891,8 +1939,6 @@ impl Machine {
         self.delegates.started_json(&task.id).map(|value| value.to_string())
     }
 
-    /// Idle means the session is up, the last report was Done, no submit is outstanding, and the
-    /// input line is empty. A tab that never reports Done, such as Cursor, is never idle.
     fn parent_idle(&self, tab: &str) -> bool {
         self.tab(tab, |t| t.notice_idle()).unwrap_or(false)
     }
@@ -2051,7 +2097,19 @@ impl Machine {
     }
 
     fn add_tab(&self, cwd: PathBuf, account: Account, launch: Vec<String>, env: Vec<(String, String)>, bypass: bool, claude_session: Option<String>) -> TabId {
-        let id = format!("tab-{}", self.next_tab.fetch_add(1, Ordering::Relaxed));
+        self.add_tab_id(None, cwd, account, launch, env, bypass, claude_session)
+    }
+
+    fn add_tab_id(&self, preferred: Option<String>, cwd: PathBuf, account: Account, launch: Vec<String>, env: Vec<(String, String)>, bypass: bool, claude_session: Option<String>) -> TabId {
+        let id = match preferred.filter(|id| id.starts_with("tab-") && !self.tabs.lock().unwrap().contains_key(id)) {
+            Some(id) => {
+                if let Some(n) = id.strip_prefix("tab-").and_then(|n| n.parse::<u32>().ok()) {
+                    self.next_tab.fetch_max(n + 1, Ordering::Relaxed);
+                }
+                id
+            }
+            None => format!("tab-{}", self.next_tab.fetch_add(1, Ordering::Relaxed)),
+        };
         let tab = Tab {
             cwd,
             account,
@@ -2112,7 +2170,14 @@ impl Machine {
         let Some(file) = &self.sessions_file else { return };
         let saved: Vec<sessions::Saved> = {
             let tabs = self.tabs.lock().unwrap();
-            let mut open: Vec<(u32, sessions::Saved)> = tabs.iter().filter_map(|(id, t)| Some((tab_number(id), t.saved()?))).collect();
+            let mut open: Vec<(u32, sessions::Saved)> = tabs
+                .iter()
+                .filter_map(|(id, t)| {
+                    let mut saved = t.saved()?;
+                    saved.id = Some(id.clone());
+                    Some((tab_number(id), saved))
+                })
+                .collect();
             open.sort_by_key(|(n, _)| *n);
             open.into_iter().map(|(_, s)| s).collect()
         };
@@ -4188,6 +4253,7 @@ echo '{"type":"result","result":"ok"}'
         sessions::save(
             &root.join("sessions.json"),
             &[sessions::Saved {
+                id: None,
                 cwd: repo.clone(),
                 session: "s1".into(),
                 env: vec![],
@@ -4972,6 +5038,214 @@ while True:
         assert_eq!(prompt(&scratch, AgentStatus::Working, "when does the hub deploy?"), Ok(String::new()));
         assert_eq!(m.view(&plain).unwrap().status, Some(AgentStatus::Done), "the events were not recorded");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_restart_keeps_the_task_and_a_killed_child_notifies_its_parent() {
+        use crate::delegate::{Access, ChildEvent, Mode, NewTask, Parent};
+        let dir = temp("task-restart");
+        let m = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        let spec = |title: &str| NewTask {
+            parent: Parent::Tab("tab-1".into()),
+            tool: None,
+            title: title.into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: dir.clone(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        };
+        let running = m.delegates.begin(spec("Running"));
+        let done = m.delegates.begin(spec("Done"));
+        m.delegates.apply(&done.id, ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        let m2 = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        let claimed = m2.delegates.claim_notice("tab-1");
+        let (text, ids) = claimed.expect("the restarted machine still owes the parent a notice");
+        assert!(ids.contains(&running.id), "{ids:?}");
+        assert!(ids.contains(&done.id), "{ids:?}");
+        assert!(text.contains("stopped by restart"), "{text}");
+        assert!(text.contains(&done.id) && text.contains("result available"), "{text}");
+        let body = m2.task_status(Some("tab-1".into()), None, &running.id).expect("task_status");
+        assert!(body.contains("stopped by restart"), "{body}");
+        let live = m2.delegates.begin(spec("Live"));
+        m2.quit();
+        let m3 = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        let again = m3.task_status(Some("tab-1".into()), None, &live.id).expect("quit kept the task");
+        assert!(again.contains("stopped by restart"), "{again}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_relaunch_keeps_the_tab_a_notice_is_addressed_to() {
+        use crate::delegate::{Access, Mode, NewTask, Parent};
+        let dir = temp("tab-id-restart");
+        let m = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        let tab = m.open_tab(Some(dir.display().to_string()), false).unwrap();
+        m.record_event(AgentEvent {
+            status: AgentStatus::Working,
+            cwd: None,
+            message: None,
+            tab: Some(tab.clone()),
+            session: Some("sess-1".into()),
+            title: None,
+            resume_at: None,
+            prompt: None,
+            snapshot: None,
+            permission_mode: None,
+        });
+        let child = m.delegates.begin(NewTask {
+            parent: Parent::Tab(tab.clone()),
+            tool: None,
+            title: "Live".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: dir.clone(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{tab}"),
+            client_request_id: None,
+            role: None,
+        });
+        m.quit();
+        let m2 = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        assert_eq!(m2.restore_tabs(), vec![tab.clone()]);
+        let (text, ids) = m2.delegates.claim_notice(&tab).expect("the restored tab is still the parent");
+        assert!(ids.contains(&child.id), "{ids:?}");
+        assert!(text.contains("stopped by restart"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_needs_input_session_is_typed_the_notice_without_a_click() {
+        let (m, tab, file) = pty_file("notice-needs-input");
+        m.tab(&tab, |t| {
+            t.status = Some(AgentStatus::NeedsInput);
+            t.interrupted = true;
+        })
+        .unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Ping");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "a permission prompt was treated as idle: {}", read_pty(&file));
+        m.tab(&tab, |t| t.interrupted = false).unwrap();
+        let needle = format!("[pinned] Delegated task {id} \"Ping\"");
+        wait_for("the notice while Claude is waiting for input", || {
+            m.maybe_deliver(&tab);
+            read_pty(&file).contains(&needle)
+        });
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_turn_ending_carries_the_notice_without_typing_it() {
+        let (m, sock) = listening("notice-stop");
+        let (tab, file) = pty_on(&m, "notice-stop");
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Ping");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed mid-turn: {}", read_pty(&file));
+        let line = serde_json::to_string(&Message::Agent(done_event(&tab))).unwrap();
+        let reply = ask(&sock, &line).expect("stop hook reply");
+        let needle = format!("[pinned] Delegated task {id} \"Ping\"");
+        assert!(reply.contains(&needle), "the turn ended without the notice: {reply}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the stop hook also typed the notice: {}", read_pty(&file));
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_dir_all(sock.parent().unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_draft_does_not_strand_a_notice() {
+        let (m, sock) = listening("notice-draft");
+        let (tab, file) = pty_on(&m, "notice-draft");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.write_input(&tab, b"xyz").unwrap();
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Ping");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(Duration::from_millis(200));
+        let early = read_pty(&file);
+        assert!(early.contains("xyz"), "the draft was not typed: {early:?}");
+        assert!(!early.contains("[pinned]"), "the notice was typed over the draft: {early:?}");
+        let event = AgentEvent { status: AgentStatus::Working, prompt: Some("ship it".into()), ..done_event(&tab) };
+        let reply = ask(&sock, &serde_json::to_string(&Message::Agent(event)).unwrap()).expect("prompt hook reply");
+        let needle = format!("[pinned] Delegated task {id} \"Ping\"");
+        assert!(reply.contains(&needle), "submitting the draft left the notice on the card: {reply}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed over the draft: {}", read_pty(&file));
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_dir_all(sock.parent().unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_notice_is_typed_after_the_parent_session_restarts() {
+        let (m, tab, _file) = pty_file("notice-restart");
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
+        let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Ping");
+        m.maybe_deliver(&tab);
+        let file2 = std::env::temp_dir().join(format!("pinned-notice-restart-2-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file2);
+        m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file2.display())), pty::size(80, 24)).unwrap();
+        let needle = format!("[pinned] Delegated task {id} \"Ping\"");
+        wait_for("the notice after the session restarts", || {
+            m.maybe_deliver(&tab);
+            read_pty(&file2).contains(&needle)
+        });
+        let _ = std::fs::remove_file(file2);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_report_waits_until_the_orchestrator_turn_ends() {
+        let file = std::env::temp_dir().join(format!("pinned-worker-held-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let m = machine();
+        let app = Path::new("/work/app");
+        let orchestrator = running(&m, role_env(Role::Orchestrator, app), &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&orchestrator, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&orchestrator) });
+        let worker = m.add_tab("/work/app/.claude/worktrees/pinned-1".into(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, app), false, None);
+        m.tab(&worker, |t| t.title = Some("JSON output".into())).unwrap();
+        m.record_event(done_event(&worker));
+        std::thread::sleep(Duration::from_millis(200));
+        let early = read_pty(&file);
+        assert!(!early.contains("finished"), "a worker report was typed during the turn: {early}");
+        m.record_event(done_event(&orchestrator));
+        wait_for("the worker report after the turn ends", || read_pty(&file).contains("finished"));
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[cfg(unix)]
+    fn listening(name: &str) -> (Arc<Machine>, PathBuf) {
+        let dir = temp(name);
+        let sock = dir.join("sock");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        (m, sock)
+    }
+
+    #[cfg(unix)]
+    fn pty_on(m: &Machine, name: &str) -> (String, PathBuf) {
+        let file = std::env::temp_dir().join(format!("pinned-{name}-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let tab = running(m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
+        let (seen, sink) = viewer();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        (tab, file)
     }
 
     #[test]

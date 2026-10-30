@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Saved {
+    /// The tab this session belonged to. A relaunch reuses it so a task notice still finds its parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub cwd: PathBuf,
     /// Claude Code's session id, passed back as `claude --resume`.
     pub session: String,
@@ -83,7 +86,7 @@ mod tests {
 
     #[test]
     fn interrupted_sessions_continue_once_no_limit_blocks_them() {
-        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, held: false, account: "claude".into(), model: None, permission_mode: None };
+        let saved = |interrupted, resume_at| Saved { id: None, cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, held: false, account: "claude".into(), model: None, permission_mode: None };
         let resumed = vec!["--resume".to_owned(), "s1".to_owned()];
         let continued = [resumed.clone(), vec![CONTINUE_PROMPT.to_owned()]].concat();
         let claude = crate::accounts::Provider::Claude;
@@ -102,6 +105,7 @@ mod tests {
     fn saved_sessions_survive_a_round_trip() {
         let file = std::env::temp_dir().join(format!("pinned-sessions-test-{}.json", std::process::id()));
         let saved = vec![Saved {
+            id: Some("tab-2".into()),
             cwd: "/repo".into(),
             session: "23ec76b4-2867-49e2-b564-22c6c9e7b090".into(),
             env: vec![("PINNED_ISSUE".into(), "uuid".into())],

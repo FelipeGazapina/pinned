@@ -23,6 +23,8 @@ type Reply = Result<String, String>;
 /// goes on without it.
 const RECALL_WAIT: Duration = Duration::from_millis(300);
 
+const STOP_WAIT: Duration = Duration::from_secs(2);
+
 /// Claude Code settings layered onto the harnessed session via `--settings`, so the user's
 /// own ~/.claude/settings.json stays untouched.
 pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
@@ -139,21 +141,36 @@ pub fn event_from(arg: Option<&str>, input: &str) -> Option<AgentEvent> {
     })
 }
 
-/// Sends the hook's event. A prompt waits up to `RECALL_WAIT` for the memories the harness
-/// recalls for it, returned as the hook's JSON output.
+/// A prompt waits `RECALL_WAIT` and a finished turn waits `STOP_WAIT`. The reply is hook JSON.
 fn deliver(sock: &str, event: AgentEvent) -> Option<String> {
-    if event.status != AgentStatus::Working || event.prompt.is_none() {
+    let stop = event.status == AgentStatus::Done;
+    let prompt = event.status == AgentStatus::Working && event.prompt.is_some();
+    if !stop && !prompt {
         tell(sock, &Message::Agent(event));
         return None;
     }
     let mut stream = UnixStream::connect(sock).ok()?;
     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
     writeln!(stream, "{}", serde_json::to_string(&Message::Agent(event)).unwrap()).ok()?;
-    let _ = stream.set_read_timeout(Some(RECALL_WAIT));
+    let _ = stream.set_read_timeout(Some(if stop { STOP_WAIT } else { RECALL_WAIT }));
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).ok()?;
     let context = serde_json::from_str::<Reply>(&reply).ok()?.ok().filter(|c| !c.is_empty())?;
-    Some(serde_json::json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": context } }).to_string())
+    if stop {
+        Some(stop_output(&context))
+    } else {
+        Some(serde_json::json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": context } }).to_string())
+    }
+}
+
+/// Claude continues the turn when Stop returns `decision: block` or Stop `additionalContext`.
+fn stop_output(context: &str) -> String {
+    serde_json::json!({
+        "decision": "block",
+        "reason": context,
+        "hookSpecificOutput": { "hookEventName": "Stop", "additionalContext": context }
+    })
+    .to_string()
 }
 
 /// Sends one message to the running harness without waiting for its answer.
@@ -513,7 +530,33 @@ mod tests {
             Some(r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[1] Deploys: the hub deploys from tags (how do we deploy?)"}}"#.into())
         );
         assert_eq!(deliver(&sock, event(AgentStatus::Working, Some("nothing known"))), None);
-        assert_eq!(deliver(&sock, event(AgentStatus::Done, Some("how do we deploy?"))), None);
+        let remembered = "[1] Deploys: the hub deploys from tags (how do we deploy?)";
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&deliver(&sock, event(AgentStatus::Done, Some("how do we deploy?"))).unwrap()).unwrap(),
+            serde_json::json!({
+                "decision": "block",
+                "reason": remembered,
+                "hookSpecificOutput": { "hookEventName": "Stop", "additionalContext": remembered }
+            })
+        );
+        assert_eq!(deliver(&sock, event(AgentStatus::Done, Some("nothing known"))), None);
+        let notice = "[pinned] Delegated task task-1 \"Ping\" finished: result available.";
+        let stop_sock = std::env::temp_dir().join(format!("pinned-stop-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&stop_sock);
+        listen(stop_sock.clone(), |message| match message {
+            Message::Agent(AgentEvent { status: AgentStatus::Done, .. }) => Ok(notice.into()),
+            _ => Ok(String::new()),
+        })
+        .unwrap();
+        let stop = deliver(&stop_sock.display().to_string(), event(AgentStatus::Done, None)).expect("a stop hook with a notice prints JSON");
+        let expected = serde_json::json!({
+            "decision": "block",
+            "reason": notice,
+            "hookSpecificOutput": { "hookEventName": "Stop", "additionalContext": notice }
+        });
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&stop).unwrap(), expected);
+        assert_eq!(deliver(&stop_sock.display().to_string(), event(AgentStatus::NeedsInput, None)), None);
+        let _ = std::fs::remove_file(&stop_sock);
         let start = std::time::Instant::now();
         assert_eq!(deliver(&sock, event(AgentStatus::Working, Some("slow"))), None);
         assert!(start.elapsed() < Duration::from_millis(800), "the prompt waited {:?}", start.elapsed());
