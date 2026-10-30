@@ -68,12 +68,12 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         }
     };
     let runtime = match args["runtimeMode"].as_str() {
-        None => None,
+        None | Some("inherit") => None,
         Some("auto") => Some(RuntimeMode::Auto),
         Some("full-access") => Some(RuntimeMode::FullAccess),
         Some(other) => {
             return Err(format!(
-                "runtimeMode must be auto or full-access, not {other:?}"
+                "runtimeMode must be inherit, auto, or full-access, not {other:?}. A child runs headless and cannot pause for approval"
             ))
         }
     };

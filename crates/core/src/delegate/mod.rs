@@ -491,6 +491,10 @@ mod tests {
 
     #[test]
     fn a_request_accepts_t3_argument_names() {
+        let inherit = parse_request(&json!({ "task": "look", "runtimeMode": "inherit" })).unwrap();
+        assert_eq!(inherit.runtime, None, "inherit is the same as leaving runtimeMode out");
+        let narrow = parse_request(&json!({ "task": "look", "runtimeMode": "approval-required" })).unwrap_err();
+        assert!(narrow.contains("cannot pause for approval"), "{narrow}");
         let args = json!({
             "task": "fix the flaky test",
             "title": "Flaky",

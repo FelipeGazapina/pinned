@@ -256,7 +256,7 @@ fn tool_definitions(reminders: bool) -> Value {
                     "mode": { "type": "string", "enum": ["async", "wait"], "default": "async", "description": "async returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. wait blocks until the result is in this call." },
                     "timeoutMs": { "type": "number", "description": "How long wait blocks, in milliseconds. The child keeps running after a timeout." },
                     "interactionMode": { "type": "string", "enum": ["inherit", "default", "plan"], "description": "plan is read-only. inherit and default leave this session's mode as it is." },
-                    "runtimeMode": { "type": "string", "enum": ["full-access", "auto"], "description": "How wide the child may act. Anything wider than this session is rejected. A bypassed session can hand the child auto. Omit it to inherit this session's mode." },
+                    "runtimeMode": { "type": "string", "enum": ["inherit", "full-access", "auto"], "description": "How wide the child may act. inherit, or omitting it, keeps this session's mode. Anything wider than this session is rejected. A bypassed session can hand the child auto." },
                     "role": { "type": "string", "description": "A label for the child, such as explore. The child does not see it." },
                     "clientRequestId": { "type": "string", "description": "The same caller and clientRequestId returns the task already started. If that task has finished, the answer is its status, including summary and error. A new attempt uses a new id." },
                 },
@@ -265,7 +265,7 @@ fn tool_definitions(reminders: bool) -> Value {
         }),
         json!({
             "name": STATUS_TOOL,
-            "description": "The child task's state. Do not call this on a running task. Wait for the notice, or use mode \"wait\". Reading a finished task marks its result delivered. A finished body has next.",
+            "description": "The child task's state. Do not call this on a running task. Wait for the notice, or use mode \"wait\". Reading a finished task marks its result delivered. Every body has next, which says what to do now.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "taskId": { "type": "string" } },
@@ -604,7 +604,7 @@ mod tests {
         assert_eq!(props["mode"]["enum"], json!(["async", "wait"]));
         assert_eq!(props["isolation"]["enum"], json!(["shared", "worktree"]));
         assert_eq!(props["interactionMode"]["enum"], json!(["inherit", "default", "plan"]));
-        assert_eq!(props["runtimeMode"]["enum"], json!(["full-access", "auto"]));
+        assert_eq!(props["runtimeMode"]["enum"], json!(["inherit", "full-access", "auto"]));
         assert_eq!(props["task"]["description"], "The whole assignment the child sees. It does not see this session's history.");
         assert_eq!(
             props["clientRequestId"]["description"],
