@@ -2037,7 +2037,7 @@ fn route_note(run: &runner::Run, library: &runner::Library, names: &BTreeMap<Str
     let taken = question.choices.iter().position(|choice| choice.id.0 == port)?;
     let router = names.get(&entry.connector).map(String::as_str).unwrap_or(entry.connector.as_str());
     let taken_name = question.choices[taken].label.as_str();
-    let Some(chosen) = run.context.get("_route").and_then(|value| serde_json::from_value::<ChosenOn>(value.clone()).ok()) else {
+    let Some(chosen) = run.answers(&entry.node).and_then(|answers| answers.chosen.clone()) else {
         return Some(routed_note(router, taken_name));
     };
     let likelihood = chosen.probabilities.get(chosen.index).copied().unwrap_or(1.0);
@@ -2049,6 +2049,21 @@ fn route_note(run: &runner::Run, library: &runner::Library, names: &BTreeMap<Str
         ));
     }
     Some(routed_note(router, taken_name))
+}
+
+/// The session `Effect::Open` starts for `owner`: the trigger as today's builders read it, the
+/// router's note when another workflow handed the thread over, every direct classify's answers, the
+/// talk text, and the run's history when seeded.
+fn run_opening(run: &runner::Run, owner: &Connector, prompt: &str, seeded: bool, library: &runner::Library, names: &BTreeMap<String, String>, exe: &str) -> Result<Run, String> {
+    let mut trigger = trigger_of(run)?;
+    if owner.id != run.connector {
+        if let Some(note) = route_note(run, library, names) {
+            set_note(&mut trigger, note);
+        }
+    }
+    let talk = talk_text(run, prompt, seeded);
+    let history = seeded.then(|| runner::history(run));
+    graph_opening(owner, &trigger, &direct_answers(run, library), &talk, history.as_deref(), exe)
 }
 
 /// The session today's builders would open for `owner`, plus the run's direct answers, the talk, and,
@@ -2303,13 +2318,6 @@ impl Connectors {
                         Ok(supplied) => supplied,
                         Err(why) => Supplied::Failed(why),
                     };
-                    if let Supplied::Classified(answers) = &supplied {
-                        if let Some(chosen) = &answers.chosen {
-                            if let Some(object) = run.context.as_object_mut() {
-                                object.insert("_route".to_owned(), serde_json::to_value(chosen).unwrap_or(Value::Null));
-                            }
-                        }
-                    }
                     runner::supply(&mut run, supplied, &Utc::now().to_rfc3339());
                     if let Status::Failed { why } = &run.status {
                         failed.push(why.clone());
@@ -2550,17 +2558,15 @@ impl Connectors {
         R: Taken,
     {
         let owner_c = self.store.lock().unwrap().connector(owner).cloned()?;
-        let mut trigger = trigger_of(run)?;
-        if owner_c.id != run.connector {
-            if let Some(note) = route_note(run, library, &self.names()) {
-                set_note(&mut trigger, note);
-            }
-        }
         let inbox = self.take_inbox(&run.subject);
-        let talk = join_text(&talk_text(run, prompt, seeded), &inbox_text(&inbox));
-        let history = seeded.then(|| runner::history(run));
-        let spec = match graph_opening(&owner_c, &trigger, &direct_answers(run, library), &talk, history.as_deref(), &self.exe) {
-            Ok(spec) => spec,
+        let spec = match run_opening(run, &owner_c, prompt, seeded, library, &self.names(), &self.exe) {
+            Ok(mut spec) => {
+                let waiting = inbox_text(&inbox);
+                if let Some(last) = spec.args.last_mut().filter(|_| !waiting.is_empty()) {
+                    *last = join_text(last, &waiting);
+                }
+                spec
+            }
             Err(why) => {
                 self.restore_inbox(inbox);
                 return Err(why);

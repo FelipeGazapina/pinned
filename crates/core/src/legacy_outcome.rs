@@ -572,7 +572,7 @@ fn walked(connectors: &[Connector], fixture: Fixture, scripted: ScriptedModel) -
     let library: runner::Library = connectors.iter().map(|connector| (connector.id.clone(), migrate(connector))).collect();
     let source_id = fixture.source();
     let subject = fixture_subject(fixture);
-    let mut run = start(&library, source_id, subject, serde_json::json!(source_id), GRAPH_AT);
+    let mut run = start(&library, source_id, subject.clone(), serde_json::to_value(trigger_input(connectors, &subject)).unwrap(), GRAPH_AT);
     let mut claims = Vec::new();
     let mut pages = Vec::new();
     let mut stages = Vec::new();
@@ -619,8 +619,7 @@ fn walked(connectors: &[Connector], fixture: Fixture, scripted: ScriptedModel) -
                     }
                     Effect::Open { owner, prompt, seeded } => {
                         if opened.is_none() {
-                            let talk = if *seeded { "" } else { prompt.as_str() };
-                            opened = Some(open_observation(connectors, source_id, owner, &run.subject, talk, &collected, scripted));
+                            opened = Some(open_observation(connectors, owner, &run, &library, prompt, *seeded));
                         }
                         Supplied::Opened { machine: "mac".into(), tab: "tab-1".into() }
                     }
@@ -725,45 +724,32 @@ fn stop_name(run: &runner::Run, library: &runner::Library) -> Option<String> {
     Some(node.name.clone())
 }
 
-/// The session today's hub opens for an `Open` effect: `run` for a Linear issue, `slack_run` for a
-/// Slack thread, then `append_answers` and the talk text. A routed thread gets `Decide::pick`'s note.
-/// The hub's `perform` replaces this function.
-fn open_observation(
-    connectors: &[Connector],
-    source_id: &str,
-    owner: &str,
-    subject: &Subject,
-    talk: &str,
-    collected: &BTreeMap<String, String>,
-    scripted: ScriptedModel,
-) -> Observation {
+/// The session the hub's `perform` opens for an `Open` effect, through the same `run_opening`.
+fn open_observation(connectors: &[Connector], owner: &str, run: &runner::Run, library: &runner::Library, prompt: &str, seeded: bool) -> Observation {
     let owner_connector = connectors.iter().find(|connector| connector.id == owner).expect("owner");
-    let mut session = match subject {
-        Subject::LinearIssue { .. } => run(owner_connector, &issue(), GRAPH_EXE),
-        Subject::SlackThread { channel, thread } => {
-            let note = slack_note(connectors, source_id, owner, scripted);
-            slack_run(owner_connector, channel, &channel_label(connectors), thread, &posts(), note.as_deref(), GRAPH_EXE)
-        }
-    };
-    if let Some(ask) = &owner_connector.ask {
-        let pairs: Vec<(String, String)> = ask
-            .questions
-            .iter()
-            .filter_map(|question| collected.get(&question.name).map(|answer| (question.name.clone(), answer.clone())))
-            .collect();
-        if pairs.len() == ask.questions.len() {
-            append_answers(&mut session, ask, &pairs);
-        }
-    }
-    if !talk.is_empty() {
-        if let Some(prompt) = session.args.last_mut() {
-            prompt.push_str("\n\n");
-            prompt.push_str(talk);
-        }
-    }
+    let names = connectors.iter().map(|connector| (connector.id.clone(), connector.name.clone())).collect();
+    let session = run_opening(run, owner_connector, prompt, seeded, library, &names, GRAPH_EXE).expect("opening");
     let prompt = session.args.last().cloned().unwrap_or_default();
     let args_contain = if session.args.is_empty() { Vec::new() } else { session.args[..session.args.len() - 1].to_vec() };
     Observation::Open { connector: owner.into(), subject: session.subject, prompt_contains: vec![prompt], args_contain }
+}
+
+/// What the trigger found, as the hub stores it on the run.
+fn trigger_input(connectors: &[Connector], subject: &Subject) -> TriggerInput {
+    match subject {
+        Subject::LinearIssue { .. } => {
+            let issue = issue();
+            TriggerInput::Issue { id: issue.id, identifier: issue.identifier, title: issue.title, description: issue.description, url: issue.url }
+        }
+        Subject::SlackThread { channel, thread } => TriggerInput::Slack {
+            channel: channel.clone(),
+            channel_name: channel_label(connectors),
+            thread: thread.clone(),
+            posts: posts().iter().map(|post| TriggerPost { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect(),
+            note: None,
+            mentioned: vec![],
+        },
+    }
 }
 
 fn channel_label(connectors: &[Connector]) -> String {
@@ -774,18 +760,6 @@ fn channel_label(connectors: &[Connector]) -> String {
             _ => None,
         })
         .unwrap_or_else(|| "support".into())
-}
-
-fn slack_note(connectors: &[Connector], source_id: &str, owner: &str, scripted: ScriptedModel) -> Option<String> {
-    if source_id == owner {
-        return None;
-    }
-    let source = connectors.iter().find(|connector| connector.id == source_id)?;
-    let Trigger::SlackMessage { decide, .. } = &source.trigger else { return None };
-    let ScriptedModel::Decide { index, probabilities } = scripted else { return None };
-    let pick = decide.pick(&vercel::Chosen { index, probabilities: probabilities.to_vec() });
-    let note = pick.note(&decide.categories, &source.name);
-    (!note.is_empty()).then_some(note)
 }
 
 fn free_text_ask() -> Vec<Connector> {

@@ -190,6 +190,13 @@ pub enum Drive {
     Done,
 }
 
+impl Run {
+    /// What the classify node `node` answered in this run, with the decision model's pick.
+    pub fn answers(&self, node: &NodeId) -> Option<&Answers> {
+        self.classified.get(node)
+    }
+}
+
 /// Starts a run at the trigger of `library[connector]`. `input` is the trigger's text: the Linear
 /// issue or the Slack message, which goes into `context.trigger` and the first log entry.
 pub fn start(library: &Library, connector: &str, subject: Subject, input: Value, at: &str) -> Run {
