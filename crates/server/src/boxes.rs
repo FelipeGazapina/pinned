@@ -798,21 +798,26 @@ impl Boxes {
                     None => Some(End::Disconnected),
                 },
                 Phase::Running => {
-                    let held = connectors.holds_box(&row.connector, &row.subject);
                     let gone = listed.as_ref().zip(row.upstash.as_ref()).is_some_and(|(listed, id)| !listed.iter().any(|b| b.id == *id));
-                    let machine = row.machine.to_string();
-                    let seen = if connectors.box_access().owns_row(&row.id) { account.seen_any(&machine) } else { account.seen(&machine, &row.connector, &row.subject) };
-                    let mut timers = self.timers.lock().unwrap();
-                    let slot = timers.entry(row.id.clone()).or_default();
-                    if held {
-                        slot.quiet_since = None;
-                        slot.exited_since = None;
-                        slot.gone_since = None;
-                        slot.offline_since = None;
-                        (row.age >= self.policy.max_life).then_some(End::Expired)
+                    // Later runs reuse this row. The fresh-box timers would delete it between them.
+                    if connectors.box_access().owns_row(&row.id) {
+                        gone.then_some(End::Vanished)
                     } else {
-                        let verdict = verdict(row.age, seen, slot, now, &self.policy);
-                        if gone { Some(End::Vanished) } else { verdict }
+                        let held = connectors.holds_box(&row.connector, &row.subject);
+                        let machine = row.machine.to_string();
+                        let seen = account.seen(&machine, &row.connector, &row.subject);
+                        let mut timers = self.timers.lock().unwrap();
+                        let slot = timers.entry(row.id.clone()).or_default();
+                        if held {
+                            slot.quiet_since = None;
+                            slot.exited_since = None;
+                            slot.gone_since = None;
+                            slot.offline_since = None;
+                            (row.age >= self.policy.max_life).then_some(End::Expired)
+                        } else {
+                            let verdict = verdict(row.age, seen, slot, now, &self.policy);
+                            if gone { Some(End::Vanished) } else { verdict }
+                        }
                     }
                 }
                 Phase::Ending(_) => None,

@@ -537,18 +537,6 @@ impl Account {
         self.live.lock().unwrap().machines.contains_key(machine)
     }
 
-    /// What a box's machine shows of any of its sessions. A shared box stays up while one of them works.
-    pub fn seen_any(&self, machine: &str) -> Seen {
-        let live = self.live.lock().unwrap();
-        let Some(m) = live.machines.get(machine) else { return Seen::Offline };
-        if m.tabs.is_empty() {
-            return Seen::NoTab;
-        }
-        let running = m.tabs.iter().any(|t| t.running);
-        let working = m.tabs.iter().any(|t| t.running && t.status == Some(AgentStatus::Working));
-        Seen::Tab { running, quiet: !working }
-    }
-
     /// What a box's machine shows of the session of `connector` on `subject`.
     pub fn seen(&self, machine: &str, connector: &str, subject: &Subject) -> Seen {
         let live = self.live.lock().unwrap();
