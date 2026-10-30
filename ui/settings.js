@@ -1951,7 +1951,7 @@ for (const type of ["pointerup", "pointercancel"]) {
       return;
     }
     if (view.connectFrom) {
-      const target = e.target.closest(".graph-node");
+      const target = [...document.elementsFromPoint(e.clientX, e.clientY)].map((el) => el.closest?.(".graph-node")).find(Boolean);
       const api = graphApi();
       if (target && api) {
         try {
