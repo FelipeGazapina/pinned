@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "pinned",
         "width": 760,
         "height": 460,

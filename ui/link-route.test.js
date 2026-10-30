@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import vm from "node:vm";
 
-const context = {};
-vm.runInNewContext(readFileSync(new URL("./link-route.js", import.meta.url), "utf8"), context);
-const route = context.routeAnchorClick;
+const route = new Function(`${readFileSync(new URL("./link-route.js", import.meta.url), "utf8")}; return routeAnchorClick;`)();
 
 const link = (over) => ({
   href: "https://example.com/notes",

@@ -5,6 +5,7 @@ mod awake;
 mod browser;
 mod commands;
 mod fonts;
+mod navigation;
 
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::wire::{Call, MachineEvent, TabId};
@@ -331,9 +332,13 @@ fn main() {
             browser::browser_window,
             browser::save_capture,
             browser::reveal_file,
-            browser::browser_debug_key
+            browser::browser_debug_key,
+            navigation::permit_frame_navigation
         ])
         .setup(move |app| {
+            let frames = Arc::new(Mutex::new(None));
+            app.manage(navigation::FramePermit(frames.clone()));
+            navigation::install_main_window(app, frames)?;
             let config = app.path().app_config_dir().ok();
             let from_arg = std::env::args().nth(1).and_then(|d| dunce::canonicalize(d).ok()).filter(|p| p.is_dir());
             let handle = app.handle().clone();
