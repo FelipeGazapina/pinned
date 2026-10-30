@@ -1768,6 +1768,11 @@ impl Machine {
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         use crate::delegate::{driver_args, resolve_access, spawn, Access, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
         let caller = Self::require_caller(tab, parent_task)?;
+        let child = caller.task.is_some();
+        let role = caller.tab.as_deref().and_then(|id| self.tab(id, |t| role_of(&t.env)).ok().flatten().map(|(role, _)| role));
+        if let Some(error) = crate::delegate::delegate_block(role, child) {
+            return Err(error.to_owned());
+        }
         let parent = if let Some(tab) = caller.tab.clone() {
             Parent::Tab(tab)
         } else {
@@ -3992,7 +3997,7 @@ echo '{"type":"result","result":"ok"}'
     fn a_task_caller_the_registry_does_not_know_is_refused() {
         let m = Machine::new(launch(), None, None, |_| {});
         let request = crate::delegate::parse_request(&json!({ "task": "look" })).unwrap();
-        assert_eq!(m.start_delegate(None, Some("task-gone".into()), None, request), Err("no task task-gone".into()));
+        assert_eq!(m.start_delegate(None, Some("task-gone".into()), None, request), Err("a delegated child cannot start another pinned worker".into()));
         assert!(m.delegates.running().is_empty());
     }
 

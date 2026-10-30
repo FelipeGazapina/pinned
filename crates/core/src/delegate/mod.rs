@@ -21,6 +21,18 @@ const MODEL_CACHE: Duration = Duration::from_secs(10 * 60);
 const MODEL_MISS: Duration = Duration::from_secs(15);
 const CATALOG_WAIT: Duration = Duration::from_secs(2);
 
+/// A worker thread and a delegated child cannot start another pinned worker.
+/// An orchestrator and a role-less session can. A caller that is both is refused as a child.
+pub fn delegate_block(role: Option<crate::agent::Role>, child: bool) -> Option<&'static str> {
+    if child {
+        Some("a delegated child cannot start another pinned worker")
+    } else if role == Some(crate::agent::Role::Worker) {
+        Some("a worker cannot start another pinned worker")
+    } else {
+        None
+    }
+}
+
 /// A missing model keeps the parent's model only when the child runs on the same provider.
 /// A different provider gets that provider's own default, which is no `--model`.
 pub fn child_model(parent: Provider, child: Provider, inherited: Option<String>, requested: Option<String>) -> Option<String> {
@@ -706,7 +718,7 @@ grok-4.7-high - Grok 4.7  High
         );
         assert_eq!(
             value["providers"][2]["constraints"][1],
-            "Cursor sessions can't delegate further."
+            "A worker or a delegated child cannot start another pinned worker. A Cursor session cannot delegate."
         );
         let found = capabilities(&parent, &accounts, Some("grok"));
         assert_eq!(found["providers"].as_array().unwrap().len(), 1);
