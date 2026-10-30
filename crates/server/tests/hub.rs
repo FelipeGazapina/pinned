@@ -578,6 +578,74 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
 }
 
 #[test]
+fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
+    let hub = TestHub::start("plugins");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("plugins-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let install = mac_home.join("plugins/toy");
+    let skill = "---\nname: greet\ndescription: Say hello\n---\n";
+    std::fs::create_dir_all(install.join(".claude-plugin")).unwrap();
+    std::fs::create_dir_all(install.join("skills/greet")).unwrap();
+    std::fs::write(install.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#).unwrap();
+    std::fs::write(install.join("skills/greet/SKILL.md"), skill).unwrap();
+    std::fs::write(install.join("settings.json"), "token=1").unwrap();
+    std::fs::write(install.join(".env"), "SECRET=1").unwrap();
+    std::fs::write(install.join(".claude.json"), "{}").unwrap();
+    let installed = serde_json::json!({ "plugins": { "toy@demo": [{ "installPath": install, "version": "1.2.3", "gitCommitSha": "abc123" }] } });
+    std::fs::create_dir_all(mac_home.join(".claude/plugins")).unwrap();
+    std::fs::write(mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"toy@demo":true}}"#).unwrap();
+    std::fs::write(mac_home.join(".claude/plugins/installed_plugins.json"), installed.to_string()).unwrap();
+    let share = |home: &Path| sync::PluginShare { claude_home: home.join(".claude"), dir: home.join("synced-plugins") };
+    let now = std::time::SystemTime::now();
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    sync::sync_plugins(&Through(mac_link), &mut sync::State::default(), &share(&mac_home), now).unwrap();
+    let stored = stored_plugin_paths(&hub.database);
+    assert_eq!(
+        stored,
+        vec![
+            "plugins/toy@demo/.claude-plugin/plugin.json".to_owned(),
+            "plugins/toy@demo/.pinned-plugin.json".to_owned(),
+            "plugins/toy@demo/skills/greet/SKILL.md".to_owned(),
+        ]
+    );
+    let mut pulled = sync::sync_plugins(&Through(mini_link), &mut sync::State::default(), &share(&mini_home), now).unwrap().pulled;
+    pulled.sort();
+    assert_eq!(pulled, stored);
+    assert_eq!(std::fs::read_to_string(mini_home.join("synced-plugins/plugins/toy@demo/skills/greet/SKILL.md")).unwrap(), skill);
+    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1 }, data: Some("eA==".into()) };
+    for path in ["plugins/toy@demo/settings.json", "plugins/toy@demo/.claude.json", "plugins/toy@demo/.env"] {
+        assert_eq!(
+            mac_link.call_hub(HubCall::SyncPush { project: sync::PLUGINS_KEY.into(), files: vec![secret(path)] }),
+            Err(format!("{path} is not a file a project shares"))
+        );
+    }
+    assert_eq!(stored_plugin_paths(&hub.database), stored);
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
+}
+
+fn stored_plugin_paths(database: &str) -> Vec<String> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let rows = client.query("select path from project_files where project = $1 order by path", &[&sync::PLUGINS_KEY]).await.unwrap();
+        rows.iter().map(|row| row.get(0)).collect()
+    })
+}
+
+#[test]
 fn a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link() {
     let hub = TestHub::start("big_sync");
     let url = hub.url.clone();

@@ -357,7 +357,7 @@ impl Hub {
             HubCall::SyncPush { project, files } => {
                 let mut kept = vec![];
                 for file in files {
-                    if !sync::shared_path(&file.entry.path) {
+                    if !sync::accepts(&project, &file.entry.path) {
                         return Err(format!("{} is not a file a project shares", file.entry.path));
                     }
                     let data = match &file.data {
