@@ -245,7 +245,7 @@ export function splice(graph, edge, newNode) {
 
   const insertX = to.position[0];
   const shifted = graph.nodes.map((n) => (n.position[0] >= insertX ? { ...n, position: [n.position[0] + COL, n.position[1]] } : n));
-  const placed = { ...newNode, position: [insertX, from.position[1]] };
+  const placed = { ...newNode, position: [insertX, to.position[1]] };
   placed.position = [insertX, clearY({ nodes: shifted }, placed)];
   const nodes = [...shifted, placed].sort((a, b) => a.position[0] - b.position[0] || String(a.id).localeCompare(String(b.id)));
   const outPort = ports(placed)[0]?.id ?? OUT;

@@ -3292,6 +3292,7 @@ mod tests {
             resume_at: None,
             prompt: Some("fix the bug".into()),
             snapshot: None,
+            permission_mode: None,
         };
         m.record_event(working.clone());
         m.record_event(AgentEvent { status: AgentStatus::Done, prompt: None, snapshot: None, ..working });

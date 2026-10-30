@@ -5,7 +5,7 @@ use crate::connectors::{self, Ask, Category, Connector, Decide, Question as Lega
 use std::collections::BTreeMap;
 
 const COLUMN: i32 = 240;
-const ROW: i32 = 120;
+const ROW: i32 = 150;
 
 #[derive(Clone)]
 struct Tail {

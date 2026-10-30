@@ -651,11 +651,8 @@ fn walked(connectors: &[Connector], fixture: Fixture, scripted: ScriptedModel) -
     observations.extend(stages);
     if let Some(open) = opened {
         observations.push(open);
-    } else if let ScriptedModel::Ask(json) = scripted {
-        let source = connectors.iter().find(|connector| connector.id == source_id).expect("connector");
-        if let Some(why) = ask_stop_why(source, json) {
-            observations.push(Observation::Stop { connector: source_id.into(), why });
-        }
+    } else if let Some(why) = switch_stop_why(&run, &collected) {
+        observations.push(Observation::Stop { connector: source_id.into(), why });
     } else if let Some(why) = stop_name(&run, &library) {
         observations.push(Observation::Stop { connector: source_id.into(), why });
     }
@@ -714,20 +711,11 @@ fn decide_answers(classify: &Classify, index: usize, probabilities: &[f64]) -> A
     Answers { answers: vec![(name, label)], chosen: Some(ChosenOn { index, probabilities: probabilities.to_vec() }) }
 }
 
-fn ask_stop_why(connector: &Connector, json: &str) -> Option<String> {
-    let ask = connector.ask.as_ref()?;
-    let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    let answers: Vec<(String, String)> = ask
-        .questions
-        .iter()
-        .map(|question| {
-            let raw = value.get(&question.name).and_then(|value| value.as_str()).unwrap_or("");
-            let answer = question.choices.iter().find(|choice| choice.eq_ignore_ascii_case(raw)).cloned().unwrap_or_else(|| raw.to_owned());
-            (question.name.clone(), answer)
-        })
-        .collect();
-    let (name, answer) = stops(ask, &answers)?;
-    Some(format!("{name}={answer}"))
+/// Today's `stops` reason, read from the switch the run actually took: `question=answer`.
+fn switch_stop_why(run: &runner::Run, collected: &BTreeMap<String, String>) -> Option<String> {
+    let entry = run.log.iter().rev().find(|entry| entry.what.get("switch").is_some() && entry.what["port"] != serde_json::json!(PortId::OUT))?;
+    let question = entry.what["switch"].as_str()?;
+    Some(format!("{question}={}", collected.get(question)?))
 }
 
 fn stop_name(run: &runner::Run, library: &runner::Library) -> Option<String> {
