@@ -159,6 +159,7 @@ fn observe(work: Work) -> Observation {
             Observation::Open { connector: run.connector, subject: run.subject, prompt_contains: vec![prompt], args_contain }
         }
         Work::Delivery(delivery) => Observation::Deliver { connector: delivery.connector, thread: delivery.thread, messages: delivery.messages },
+        Work::Prompt { .. } => panic!("a graph prompt is not a legacy observation"),
     }
 }
 

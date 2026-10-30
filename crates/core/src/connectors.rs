@@ -1,15 +1,16 @@
 //! Connectors make the harness proactive: each one watches an integration and opens a tab
 //! with a claude session already working on what it found.
 
-use crate::agent::{self, Stage, Subject};
+use crate::agent::{self, AgentStatus, Stage, Subject};
 use crate::graph::migrate::migrate;
 use crate::graph::project::project;
-use crate::graph::{Graph, NodeKind, Watch};
-use crate::wire::{MachineId, RunSpec};
+use crate::graph::runner::{self, Drive, Effect, Session, Status, Supplied, Wake};
+use crate::graph::{Answers, ChosenOn, Gate, Graph, NodeKind, Watch};
+use crate::wire::{MachineId, RunSpec, TabView};
 use crate::{github, linear, slack, upstash, vercel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -715,7 +716,7 @@ impl Store {
         Some(Page { channel, thread, reply, react })
     }
 
-    fn settle(&mut self, checked: &[String], found: Vec<(String, Found)>, now: DateTime<Utc>, exe: &str) -> Settled {
+    fn settle(&mut self, checked: &[String], found: Vec<(String, Found)>, now: DateTime<Utc>, exe: &str, runs: &[runner::Run]) -> Settled {
         let mut settled = Settled::default();
         let watermark = now - SLACK_OVERLAP;
         for connector in self.connectors.iter_mut().filter(|c| checked.contains(&c.id)) {
@@ -730,6 +731,17 @@ impl Store {
             }
             let Some(connector) = self.connectors.iter_mut().find(|c| c.id == id && c.enabled) else { continue };
             let key = found.key();
+            let subject = found.subject();
+            // An edited graph walks the runner. The stored graph is None when it still equals migrate.
+            if connector.graph.is_some() && matches!(found, Found::Issue(_) | Found::Mention { .. }) {
+                if run_open(runs, &id, &subject) || connector.handled.iter().any(|h| h == &key) {
+                    continue;
+                }
+                if let Some(input) = found.trigger(now) {
+                    settled.starts.push(GraphStart { connector: id, subject, input });
+                }
+                continue;
+            }
             match found {
                 Found::Issue(issue) => {
                     if connector.claim(key) {
@@ -762,6 +774,26 @@ impl Store {
                         }
                         continue;
                     }
+                    if self.connectors.iter().any(|c| c.id == workflow && c.graph.is_some()) {
+                        let subject = Subject::SlackThread { channel: channel.clone(), thread: thread.clone() };
+                        if !run_open(runs, &workflow, &subject) && !self.handled(&key) {
+                            settled.starts.push(GraphStart {
+                                connector: workflow.clone(),
+                                subject,
+                                input: TriggerInput::Slack {
+                                    channel: channel.clone(),
+                                    channel_name: channel_name.clone(),
+                                    thread: thread.clone(),
+                                    posts: trigger_posts(&posts),
+                                    note: Some(note),
+                                    mentioned: vec![thread.clone()],
+                                },
+                            });
+                        }
+                        settled.pages.extend(self.page(&id, channel, thread, page, now, false));
+                        settled.needs_save = true;
+                        continue;
+                    }
                     let Some(target) = self.claim_thread(&workflow, &key) else { continue };
                     let cursor = posts.last().map_or_else(|| thread.clone(), |p| p.ts.clone());
                     target.followed.insert(key, Followed { cursor, seen: None, replied: false });
@@ -776,24 +808,60 @@ impl Store {
                         settled.needs_save = true;
                     }
                 }
-                Found::Replies { channel, replies } => settled.work.push(Work::Delivery(Delivery {
-                    connector: id,
-                    channel,
-                    thread: replies.thread,
-                    messages: replies.posts.iter().map(reply_block).collect(),
-                    cursor: replies.newest,
-                    mentioned: replies.mentioned,
-                })),
+                Found::Replies { channel, replies } => {
+                    let subject = Subject::SlackThread { channel: channel.clone(), thread: replies.thread.clone() };
+                    if run_owns(runs, &subject) {
+                        settled.inbox.push(GraphInbox {
+                            channel,
+                            thread: replies.thread,
+                            messages: replies.posts.iter().map(reply_block).collect(),
+                            cursor: replies.newest,
+                            mentioned: replies.mentioned,
+                        });
+                        continue;
+                    }
+                    settled.work.push(Work::Delivery(Delivery {
+                        connector: id,
+                        channel,
+                        thread: replies.thread,
+                        messages: replies.posts.iter().map(reply_block).collect(),
+                        cursor: replies.newest,
+                        mentioned: replies.mentioned,
+                    }))
+                }
             }
         }
         settled
     }
 }
 
+/// A subject whose edited graph starts a run instead of today's session.
+struct GraphStart {
+    connector: String,
+    subject: Subject,
+    input: TriggerInput,
+}
+
+/// Replies for a graph run's thread, typed into its session rather than today's delivery.
+struct GraphInbox {
+    channel: String,
+    thread: String,
+    messages: Vec<String>,
+    cursor: String,
+    mentioned: Vec<String>,
+}
+
+enum InboxDone {
+    Sent,
+    Later,
+}
+
 #[derive(Default)]
 struct Settled {
     work: Vec<Work>,
     pages: Vec<Page>,
+    starts: Vec<GraphStart>,
+    inbox: Vec<GraphInbox>,
     needs_save: bool,
     errors: Vec<String>,
 }
@@ -864,6 +932,70 @@ pub enum Work {
     Run(Run),
     /// New messages for the session that answers a Slack thread.
     Delivery(Delivery),
+    /// Types `text` into the live session `env` names. Linear and Slack share this path.
+    Prompt { env: Vec<(String, String)>, text: String },
+}
+
+/// Where a machine put a session. Desktop opens report none, and the run records a local stand-in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Placement {
+    pub machine: String,
+    pub tab: String,
+}
+
+/// What `open` answered. A hub returns the tab it used. The desktop app returns `()`.
+pub trait Taken {
+    fn taken(self) -> Result<Option<Placement>, String>;
+}
+
+impl Taken for Result<(), String> {
+    fn taken(self) -> Result<Option<Placement>, String> {
+        self.map(|()| None)
+    }
+}
+
+impl Taken for Result<Option<Placement>, String> {
+    fn taken(self) -> Result<Option<Placement>, String> {
+        self
+    }
+}
+
+/// The trigger text a graph run keeps, so a later `talk` can rebuild today's session prompt.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum TriggerInput {
+    Issue {
+        id: String,
+        identifier: String,
+        title: String,
+        description: Option<String>,
+        url: String,
+    },
+    Slack {
+        channel: String,
+        #[serde(rename = "channelName")]
+        channel_name: String,
+        thread: String,
+        posts: Vec<TriggerPost>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default)]
+        mentioned: Vec<String>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct TriggerPost {
+    pub ts: String,
+    pub author: String,
+    pub text: String,
+}
+
+/// Direct answers from one classify model, in question order. A decide's pick is not one of these.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClassifyAnswers {
+    pub model: String,
+    pub answers: Vec<(String, String)>,
 }
 
 #[derive(Clone)]
@@ -925,6 +1057,37 @@ impl Found {
         match self {
             Found::Issue(_) | Found::Mention { .. } | Found::Routed { .. } => true,
             Found::Replies { .. } | Found::Stopped { .. } => false,
+        }
+    }
+
+    fn subject(&self) -> Subject {
+        match self {
+            Found::Issue(issue) => Subject::LinearIssue { issue: issue.id.clone() },
+            Found::Mention { channel, mention, .. } => Subject::SlackThread { channel: channel.clone(), thread: mention.thread.clone() },
+            Found::Replies { channel, replies } => Subject::SlackThread { channel: channel.clone(), thread: replies.thread.clone() },
+            Found::Stopped { channel, thread, .. } | Found::Routed { channel, thread, .. } => Subject::SlackThread { channel: channel.clone(), thread: thread.clone() },
+        }
+    }
+
+    /// The trigger a graph run stores. Stopped and routed finds carry a note of their own.
+    fn trigger(&self, now: DateTime<Utc>) -> Option<TriggerInput> {
+        match self {
+            Found::Issue(issue) => Some(TriggerInput::Issue {
+                id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                title: issue.title.clone(),
+                description: issue.description.clone(),
+                url: issue.url.clone(),
+            }),
+            Found::Mention { channel, channel_name, mention, posts } => Some(TriggerInput::Slack {
+                channel: channel.clone(),
+                channel_name: channel_name.clone(),
+                thread: mention.thread.clone(),
+                posts: trigger_posts(posts),
+                note: mention_note(mention, now).map(str::to_owned),
+                mentioned: vec![mention.ts.clone()],
+            }),
+            Found::Replies { .. } | Found::Stopped { .. } | Found::Routed { .. } => None,
         }
     }
 }
@@ -1001,6 +1164,9 @@ pub trait Storage: Send + Sync {
     fn key(&self, name: &str) -> Option<String>;
     fn write_key(&self, name: &str, key: &str) -> Result<(), String>;
     fn remove_key(&self, name: &str);
+    /// Graph runs, kept beside the store and never sent to apps.
+    fn load_runs(&self) -> Option<Vec<u8>>;
+    fn save_runs(&self, bytes: &[u8]) -> Result<(), String>;
 }
 
 pub struct FileStorage {
@@ -1042,6 +1208,15 @@ impl Storage for FileStorage {
     fn remove_key(&self, name: &str) {
         let _ = std::fs::remove_file(self.dir.join(name));
     }
+
+    fn load_runs(&self) -> Option<Vec<u8>> {
+        std::fs::read(self.dir.join("runs.json")).ok()
+    }
+
+    fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        std::fs::write(self.dir.join("runs.json"), bytes).map_err(|e| e.to_string())
+    }
 }
 
 pub struct Connectors {
@@ -1055,11 +1230,18 @@ pub struct Connectors {
     /// Held while a session files or takes a Linear issue, and while a check hands out issues, so
     /// two calls from one thread can't both file one and a check never starts an issue a thread holds.
     filing: tokio::sync::Mutex<()>,
+    /// Graph runs. A restart reads them back and `drive` continues each one.
+    runs: Mutex<Vec<runner::Run>>,
+    /// Slack replies waiting to be typed into a graph run's session.
+    inbox: Mutex<Vec<GraphInbox>>,
+    /// One drive at a time, so a tab wake cannot perform the effect a check is already performing.
+    driving: tokio::sync::Mutex<()>,
 }
 
 impl Connectors {
     pub fn new(storage: impl Storage + 'static, exe: String) -> Self {
         let store = storage.load().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let runs = storage.load_runs().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         Self {
             storage: Box::new(storage),
             exe,
@@ -1068,6 +1250,9 @@ impl Connectors {
             wake: Notify::new(),
             channels: Mutex::new(HashMap::new()),
             filing: tokio::sync::Mutex::new(()),
+            runs: Mutex::new(runs),
+            inbox: Mutex::new(vec![]),
+            driving: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -1108,9 +1293,10 @@ impl Connectors {
         }
 
         let settled = {
+            let runs = self.runs.lock().unwrap().clone();
             let _filing = self.filing.lock().await;
             let mut store = self.store.lock().unwrap();
-            let settled = store.settle(&checked, found, now, &self.exe);
+            let settled = store.settle(&checked, found, now, &self.exe, &runs);
             if settled.needs_save {
                 if let Err(e) = self.save(&store) {
                     errors.push(e);
@@ -1118,6 +1304,14 @@ impl Connectors {
             }
             settled
         };
+        for start in settled.starts {
+            if let Err(e) = self.begin(start.connector, start.subject, start.input, &now.to_rfc3339()) {
+                errors.push(e);
+            }
+        }
+        for item in settled.inbox {
+            self.enqueue(item);
+        }
         errors.extend(settled.errors);
         for page in &settled.pages {
             if let Err(e) = self.page(page).await {
@@ -1143,10 +1337,11 @@ impl Connectors {
     /// Gives `work` to the tabs. A thread's cursor moves only once its messages reached a session,
     /// its own or a new one, so messages that didn't are passed on again at the next check. A run
     /// no tab took gives its subject back, so the next check tries it again.
-    async fn hand_over<F, Fut>(&self, work: Work, open: &F) -> Result<(), String>
+    async fn hand_over<F, Fut, R>(&self, work: Work, open: &F) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
-        Fut: Future<Output = Result<(), String>>,
+        Fut: Future<Output = R>,
+        R: Taken,
     {
         match work {
             Work::Run(mut run) => {
@@ -1162,7 +1357,7 @@ impl Connectors {
                     }
                     Err(why) => return Err(self.unclaim(&connector, &subject, &folder, &why)),
                 }
-                if let Err(why) = open(Work::Run(run)).await {
+                if let Err(why) = open(Work::Run(run)).await.taken() {
                     return Err(self.unclaim(&connector, &subject, &folder, &why));
                 }
                 // The session starts even when Linear won't move the issue or Slack won't take the
@@ -1174,12 +1369,12 @@ impl Connectors {
                 }
             }
             Work::Delivery(d) => {
-                let cursor = if open(Work::Delivery(d.clone())).await.is_ok() {
+                let cursor = if open(Work::Delivery(d.clone())).await.taken().is_ok() {
                     d.cursor.clone()
                 } else {
                     let (run, newest) = self.fallback(&d).await?;
                     let folder = run.cwd.clone();
-                    if let Err(why) = open(Work::Run(run)).await {
+                    if let Err(why) = open(Work::Run(run)).await.taken() {
                         return Err(format!("could not open a session in {} for a Slack thread: {why}; the next check tries again", folder.display()));
                     }
                     newest
@@ -1187,6 +1382,7 @@ impl Connectors {
                 self.follow(&d.connector, &d.channel, &d.thread, cursor)?;
                 self.acknowledge(&d.channel, &d.mentioned).await
             }
+            Work::Prompt { env, text } => open(Work::Prompt { env, text }).await.taken().map(drop),
         }
     }
 
@@ -1288,7 +1484,7 @@ impl Connectors {
                 // Oldest first, so a thread's first new mention is the one its session answers.
                 for mention in activity.mentions {
                     let key = thread_key(&channel, &mention.thread);
-                    if self.store.lock().unwrap().handled(&key) || found.iter().any(|f| f.key() == key) {
+                    if self.busy(&key) || found.iter().any(|f| f.key() == key) {
                         continue;
                     }
                     let posts = slack::thread(&token, &channel, &mention.thread).await?;
@@ -1299,13 +1495,14 @@ impl Connectors {
                 found.extend(self.follow_ups(&token, &bot, c, Some(&channel), now).await?);
                 Ok(Some(found))
             }
+            Trigger::SlackMessage { channel: name, .. } if c.graph.is_some() => self.scan_graph_channel(c, name, now).await,
             Trigger::SlackMessage { channel: name, decide } => {
                 let bot = self.store.lock().unwrap().slack.as_ref().map(|a| a.user_id.clone());
                 let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
                 let channel = self.channel_id(&token, name).await?;
                 let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
                 let mut messages = slack::messages(&token, &channel, &bot, since).await?;
-                messages.retain(|m| !self.store.lock().unwrap().handled(&thread_key(&channel, &m.ts)));
+                messages.retain(|m| !self.busy(&thread_key(&channel, &m.ts)));
                 if messages.is_empty() {
                     return Ok(Some(vec![]));
                 }
@@ -1345,6 +1542,36 @@ impl Connectors {
                 Ok(Some(self.follow_ups(&token, &bot, c, None, now).await?))
             }
         }
+    }
+
+    /// A graph watches the channel's new threads and lets the runner classify them.
+    async fn scan_graph_channel(&self, c: &Connector, name: &str, now: DateTime<Utc>) -> Result<Option<Vec<Found>>, String> {
+        let bot = self.store.lock().unwrap().slack.as_ref().map(|a| a.user_id.clone());
+        let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
+        let channel = self.channel_id(&token, name).await?;
+        let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
+        let mut messages = slack::messages(&token, &channel, &bot, since).await?;
+        messages.retain(|m| !self.busy(&thread_key(&channel, &m.ts)));
+        let channel_name = channel_name(name).to_owned();
+        let mut found = vec![];
+        for message in messages {
+            let posts = slack::thread(&token, &channel, &message.ts).await?;
+            found.push(Found::Mention {
+                channel: channel.clone(),
+                channel_name: channel_name.clone(),
+                mention: slack::Mention { thread: message.ts.clone(), ts: message.ts, at: now },
+                posts,
+            });
+        }
+        Ok(Some(found))
+    }
+
+    /// Handled by any connector, or already inside a run that has not failed.
+    fn busy(&self, key: &str) -> bool {
+        if self.store.lock().unwrap().handled(key) {
+            return true;
+        }
+        self.runs.lock().unwrap().iter().any(|run| !matches!(run.status, Status::Failed { .. } | Status::Done) && subject_key(&run.subject) == key)
     }
 
     async fn follow_ups(&self, token: &str, bot: &str, c: &Connector, own: Option<&str>, now: DateTime<Utc>) -> Result<Vec<Found>, String> {
@@ -1679,26 +1906,745 @@ fn filed_note(filed: &Filed) -> String {
     )
 }
 
+fn trigger_posts(posts: &[slack::Post]) -> Vec<TriggerPost> {
+    posts.iter().map(|post| TriggerPost { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect()
+}
+
+fn subject_key(subject: &Subject) -> String {
+    match subject {
+        Subject::LinearIssue { issue } => issue.clone(),
+        Subject::SlackThread { channel, thread } => thread_key(channel, thread),
+    }
+}
+
+fn run_open(runs: &[runner::Run], connector: &str, subject: &Subject) -> bool {
+    runs.iter().any(|run| run.connector == connector && &run.subject == subject && matches!(run.status, Status::Running | Status::Waiting))
+}
+
+/// A reply belongs to a graph run until that run has failed.
+fn run_owns(runs: &[runner::Run], subject: &Subject) -> bool {
+    runs.iter().any(|run| &run.subject == subject && !matches!(run.status, Status::Failed { .. }))
+}
+
+fn trigger_of(run: &runner::Run) -> Result<TriggerInput, String> {
+    serde_json::from_value(run.context.get("trigger").cloned().unwrap_or(Value::Null)).map_err(|e| format!("the run has no trigger input: {e}"))
+}
+
+fn trigger_text(input: &TriggerInput) -> String {
+    match input {
+        TriggerInput::Issue { identifier, title, url, description, .. } => {
+            format!("{identifier}: {title}\n{url}\n\n{}", description.as_deref().unwrap_or("(no description)"))
+        }
+        TriggerInput::Slack { posts, .. } => posts.iter().map(|post| format!("{}: {}", post.author, post.text)).collect::<Vec<_>>().join("\n"),
+    }
+}
+
+fn set_note(trigger: &mut TriggerInput, note: String) {
+    if let TriggerInput::Slack { note: slot, .. } = trigger {
+        *slot = Some(note);
+    }
+}
+
+fn join_text(left: &str, right: &str) -> String {
+    match (left.is_empty(), right.is_empty()) {
+        (true, _) => right.to_owned(),
+        (_, true) => left.to_owned(),
+        _ => format!("{left}\n\n{right}"),
+    }
+}
+
+fn talk_text(run: &runner::Run, prompt: &str, seeded: bool) -> String {
+    if !seeded {
+        return prompt.to_owned();
+    }
+    let prefix = format!("{}\n\n", runner::history(run));
+    prompt.strip_prefix(&prefix).unwrap_or(prompt).to_owned()
+}
+
+fn ask_from(classify: &crate::graph::Classify) -> Ask {
+    Ask {
+        model: classify.model.clone(),
+        instructions: classify.instructions.clone(),
+        questions: classify
+            .questions
+            .iter()
+            .map(|question| Question {
+                name: question.name.clone(),
+                ask: question.ask.clone(),
+                choices: question.choices.iter().map(|choice| choice.label.clone()).collect(),
+                stop_on: vec![],
+            })
+            .collect(),
+    }
+}
+
+fn decide_state(trigger: &TriggerInput) -> Value {
+    match trigger {
+        TriggerInput::Slack { channel_name, posts, .. } => {
+            let author = posts.first().map(|post| post.author.as_str()).unwrap_or("");
+            let message = posts.first().map(|post| post.text.as_str()).unwrap_or("");
+            json!({ "channel": format!("#{channel_name}"), "author": author, "message": message })
+        }
+        TriggerInput::Issue { .. } => json!({ "message": trigger_text(trigger) }),
+    }
+}
+
+/// Direct classify answers, one group per model, in the order the run logged them.
+fn direct_answers(run: &runner::Run, library: &runner::Library) -> Vec<ClassifyAnswers> {
+    let mut grouped: Vec<ClassifyAnswers> = vec![];
+    for entry in &run.log {
+        let Some(object) = entry.what.get("answers").and_then(|value| value.as_object()) else { continue };
+        let Some(graph) = library.get(&entry.connector) else { continue };
+        let Some(node) = graph.node(&entry.node) else { continue };
+        let NodeKind::Classify(classify) = &node.kind else { continue };
+        if !matches!(classify.gate, Gate::Direct) {
+            continue;
+        }
+        let mut pairs = vec![];
+        for question in &classify.questions {
+            if let Some(answer) = object.get(&question.name).and_then(|value| value.as_str()) {
+                pairs.push((question.name.clone(), answer.to_owned()));
+            }
+        }
+        if let Some(group) = grouped.iter_mut().find(|group| group.model == classify.model) {
+            for pair in pairs {
+                if !group.answers.iter().any(|(name, _)| name == &pair.0) {
+                    group.answers.push(pair);
+                }
+            }
+        } else if !pairs.is_empty() {
+            grouped.push(ClassifyAnswers { model: classify.model.clone(), answers: pairs });
+        }
+    }
+    grouped
+}
+
+/// The note today's routed session gets. A downgrade keeps the sure wording and names the category taken.
+fn route_note(run: &runner::Run, library: &runner::Library, names: &BTreeMap<String, String>) -> Option<String> {
+    let entry = run.log.iter().rev().find(|entry| entry.what.get("port").and_then(|port| port.as_str()).is_some())?;
+    let port = entry.what["port"].as_str()?;
+    if port.is_empty() || port == "nowhere" {
+        return None;
+    }
+    let graph = library.get(&entry.connector)?;
+    let node = graph.node(&entry.node)?;
+    let NodeKind::Classify(classify) = &node.kind else { return None };
+    if !matches!(classify.gate, Gate::Decide { .. }) {
+        return None;
+    }
+    let name = classify.branch_on.as_deref()?;
+    let question = classify.questions.iter().find(|question| question.name == name)?;
+    let taken = question.choices.iter().position(|choice| choice.id.0 == port)?;
+    let router = names.get(&entry.connector).map(String::as_str).unwrap_or(entry.connector.as_str());
+    let taken_name = question.choices[taken].label.as_str();
+    let Some(chosen) = run.context.get("_route").and_then(|value| serde_json::from_value::<ChosenOn>(value.clone()).ok()) else {
+        return Some(routed_note(router, taken_name));
+    };
+    let likelihood = chosen.probabilities.get(chosen.index).copied().unwrap_or(1.0);
+    if chosen.index != taken && likelihood < UNSURE_BELOW {
+        let guess = question.choices.get(chosen.index).map(|choice| choice.label.as_str()).unwrap_or(taken_name);
+        return Some(format!(
+            "\n\nThe decision model was unsure (it guessed {guess:?} at {:.0}%), so workflow {router:?} handed this thread over as {taken_name:?}.",
+            likelihood * 100.0
+        ));
+    }
+    Some(routed_note(router, taken_name))
+}
+
+/// The session today's builders would open for `owner`, plus the run's direct answers, the talk, and,
+/// when restarting a lost conversation, the history first. A migrated connector passes an empty talk
+/// and no history, and the result equals `run` or `slack_run` plus `append_answers`.
+pub fn graph_opening(owner: &Connector, trigger: &TriggerInput, answers: &[ClassifyAnswers], talk: &str, history: Option<&str>, exe: &str) -> Result<Run, String> {
+    let mut opened = match trigger {
+        TriggerInput::Issue { id, identifier, title, description, url } => {
+            let issue = linear::Issue { id: id.clone(), identifier: identifier.clone(), title: title.clone(), description: description.clone(), url: url.clone() };
+            run(owner, &issue, exe)
+        }
+        TriggerInput::Slack { channel, channel_name, thread, posts, note, mentioned } => {
+            let posts: Vec<slack::Post> = posts.iter().map(|post| slack::Post { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect();
+            let mut opened = slack_run(owner, channel, channel_name, thread, &posts, note.as_deref(), exe);
+            opened.mentioned = mentioned.clone();
+            opened
+        }
+    };
+    for group in answers {
+        if group.answers.is_empty() {
+            continue;
+        }
+        let ask = Ask { model: group.model.clone(), instructions: String::new(), questions: vec![] };
+        append_answers(&mut opened, &ask, &group.answers);
+    }
+    if !talk.is_empty() {
+        if let Some(prompt) = opened.args.last_mut() {
+            prompt.push_str("\n\n");
+            prompt.push_str(talk);
+        }
+    }
+    if let Some(history) = history.filter(|history| !history.is_empty()) {
+        if let Some(prompt) = opened.args.last_mut() {
+            *prompt = format!("{history}\n\n{prompt}");
+        }
+    }
+    Ok(opened)
+}
+
+fn note_followed(store: &mut Store, connector: &str, run: &runner::Run) {
+    let Ok(TriggerInput::Slack { channel, thread, posts, .. }) = trigger_of(run) else { return };
+    let Some(connector) = store.connectors.iter_mut().find(|c| c.id == connector) else { return };
+    let key = thread_key(&channel, &thread);
+    if connector.followed.contains_key(&key) {
+        return;
+    }
+    let cursor = posts.last().map(|post| post.ts.clone()).unwrap_or(thread);
+    connector.followed.insert(key, Followed { cursor, seen: None, replied: false });
+}
+
+fn tab_matches(view: &TabView, tab: &str, owner: &str, subject: &Subject) -> bool {
+    view.id == tab || (view.connector.as_deref() == Some(owner) && view.subject.as_ref() == Some(subject))
+}
+
+fn graph_wakes(machine: &str, before: &[TabView], after: &[TabView], runs: &[runner::Run]) -> Vec<(String, Wake)> {
+    let mut wakes = vec![];
+    for run in runs {
+        if !matches!(run.status, Status::Waiting) {
+            continue;
+        }
+        let Session::Live { machine: live, tab, .. } = &run.session else { continue };
+        if live != machine {
+            continue;
+        }
+        let owner = run.session_owner.as_deref().unwrap_or(run.connector.as_str());
+        let prev = before.iter().find(|view| tab_matches(view, tab, owner, &run.subject));
+        let next = after.iter().find(|view| tab_matches(view, tab, owner, &run.subject));
+        if prev.is_some() && next.is_none() {
+            wakes.push((run.id.0.clone(), Wake::TabGone));
+            continue;
+        }
+        let Some(view) = next else { continue };
+        let ended = matches!(view.status, Some(AgentStatus::Done | AgentStatus::Failed));
+        if ended && prev.and_then(|view| view.status) != view.status {
+            wakes.push((run.id.0.clone(), Wake::TurnEnded { claude: view.session.clone() }));
+        }
+    }
+    wakes
+}
+
+fn inbox_text(items: &[GraphInbox]) -> String {
+    items.iter().flat_map(|item| item.messages.iter().cloned()).collect::<Vec<_>>().join("\n\n")
+}
+
 impl Connectors {
     /// Polls forever. `open` receives what each check found and answers whether a tab took it, or
     /// why none did, and `on_check` hears how each check went. A settings change wakes it early.
-    pub async fn watch<F, Fut>(&self, open: F, on_check: impl Fn(&Check))
+    pub async fn watch<F, Fut, R>(&self, open: F, on_check: impl Fn(&Check))
     where
         F: Fn(Work) -> Fut,
-        Fut: Future<Output = Result<(), String>>,
+        Fut: Future<Output = R>,
+        R: Taken,
     {
         loop {
+            let _guard = self.driving.lock().await;
             let (work, mut error) = self.poll().await;
             for work in work {
                 if let Err(e) = self.hand_over(work, &open).await {
                     error.get_or_insert(e);
                 }
             }
+            if let Err(e) = self.drive_locked(&open).await {
+                error.get_or_insert(e);
+            }
+            drop(_guard);
             let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
             *self.checked.lock().unwrap() = Some(check.clone());
             on_check(&check);
             let _ = tokio::time::timeout(INTERVAL, self.wake.notified()).await;
         }
+    }
+
+    /// True while a run of `subject` is still going and its session belongs to `connector`.
+    /// A box stays up for that, and its idle timers wait until the run ends.
+    pub fn holds_box(&self, connector: &str, subject: &Subject) -> bool {
+        self.runs.lock().unwrap().iter().any(|run| {
+            matches!(run.status, Status::Running | Status::Waiting)
+                && &run.subject == subject
+                && run.session_owner.as_deref().unwrap_or(run.connector.as_str()) == connector
+        })
+    }
+
+    /// Tab statuses changed on `machine`. Waiting runs wake, then every running graph continues.
+    pub async fn on_tabs<F, Fut, R>(&self, machine: &str, before: &[TabView], after: &[TabView], open: F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let _guard = self.driving.lock().await;
+        self.apply_wakes(machine, before, after)?;
+        self.drive_locked(&open).await
+    }
+
+    fn apply_wakes(&self, machine: &str, before: &[TabView], after: &[TabView]) -> Result<(), String> {
+        let at = Utc::now().to_rfc3339();
+        {
+            let mut runs = self.runs.lock().unwrap();
+            let wakes = graph_wakes(machine, before, after, &runs);
+            for (id, wake) in wakes {
+                if let Some(run) = runs.iter_mut().find(|run| run.id.0 == id) {
+                    runner::push(run, wake, &at);
+                }
+            }
+            let mut detached = vec![];
+            for run in runs.iter() {
+                if !matches!(run.status, Status::Done) {
+                    continue;
+                }
+                let Session::Live { machine: live, tab, claude } = &run.session else { continue };
+                if live != machine {
+                    continue;
+                }
+                let owner = run.session_owner.as_deref().unwrap_or(run.connector.as_str());
+                let seen = before.iter().any(|view| tab_matches(view, tab, owner, &run.subject));
+                let still = after.iter().any(|view| tab_matches(view, tab, owner, &run.subject));
+                if seen && !still {
+                    detached.push((run.id.0.clone(), claude.clone()));
+                }
+            }
+            for (id, claude) in detached {
+                if let Some(run) = runs.iter_mut().find(|run| run.id.0 == id) {
+                    run.session = Session::Detached { claude };
+                }
+            }
+        }
+        self.save_runs()
+    }
+
+    fn begin(&self, connector: String, subject: Subject, input: TriggerInput, at: &str) -> Result<(), String> {
+        if run_open(&self.runs.lock().unwrap(), &connector, &subject) {
+            return Ok(());
+        }
+        let value = serde_json::to_value(&input).map_err(|e| e.to_string())?;
+        let run = runner::start(&self.library(), &connector, subject, value, at);
+        if let Status::Failed { why } = &run.status {
+            return Err(why.clone());
+        }
+        self.runs.lock().unwrap().push(run);
+        self.save_runs()
+    }
+
+    fn enqueue(&self, item: GraphInbox) {
+        let mut inbox = self.inbox.lock().unwrap();
+        if inbox.iter().any(|have| have.channel == item.channel && have.thread == item.thread && have.cursor == item.cursor) {
+            return;
+        }
+        inbox.push(item);
+    }
+
+    fn library(&self) -> runner::Library {
+        self.store.lock().unwrap().connectors.iter().map(|c| (c.id.clone(), c.graph.clone().unwrap_or_else(|| migrate(c)))).collect()
+    }
+
+    fn names(&self) -> BTreeMap<String, String> {
+        self.store.lock().unwrap().connectors.iter().map(|c| (c.id.clone(), c.name.clone())).collect()
+    }
+
+    fn save_runs(&self) -> Result<(), String> {
+        let bytes = serde_json::to_vec(&*self.runs.lock().unwrap()).map_err(|e| e.to_string())?;
+        self.storage.save_runs(&bytes)
+    }
+
+    fn replace_run(&self, run: runner::Run) -> Result<(), String> {
+        {
+            let mut runs = self.runs.lock().unwrap();
+            if let Some(slot) = runs.iter_mut().find(|have| have.id == run.id) {
+                *slot = run;
+            } else {
+                runs.push(run);
+            }
+        }
+        self.save_runs()
+    }
+
+    fn mark_live(&self, id: &str, place: Placement, claude: Option<String>) -> Result<(), String> {
+        {
+            let mut runs = self.runs.lock().unwrap();
+            if let Some(run) = runs.iter_mut().find(|run| run.id.0 == id) {
+                run.session = Session::Live { machine: place.machine, tab: place.tab, claude };
+            }
+        }
+        self.save_runs()
+    }
+
+    #[cfg(test)]
+    async fn drive<F, Fut, R>(&self, open: &F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let _guard = self.driving.lock().await;
+        self.drive_locked(open).await
+    }
+
+    async fn drive_locked<F, Fut, R>(&self, open: &F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let library = self.library();
+        let mut failed = vec![];
+        for _ in 0..256 {
+            let index = self.runs.lock().unwrap().iter().position(|run| matches!(run.status, Status::Running));
+            let Some(index) = index else { break };
+            let mut run = self.runs.lock().unwrap()[index].clone();
+            match runner::drive(&mut run, &library) {
+                Drive::Act(effect) => {
+                    let supplied = match self.perform(&run, effect, &library, open).await {
+                        Ok(supplied) => supplied,
+                        Err(why) => Supplied::Failed(why),
+                    };
+                    if let Supplied::Classified(answers) = &supplied {
+                        if let Some(chosen) = &answers.chosen {
+                            if let Some(object) = run.context.as_object_mut() {
+                                object.insert("_route".to_owned(), serde_json::to_value(chosen).unwrap_or(Value::Null));
+                            }
+                        }
+                    }
+                    runner::supply(&mut run, supplied, &Utc::now().to_rfc3339());
+                    if let Status::Failed { why } = &run.status {
+                        failed.push(why.clone());
+                    }
+                    self.replace_run(run)?;
+                }
+                Drive::Park | Drive::Done => self.replace_run(run)?,
+            }
+        }
+        self.flush_locked(open).await?;
+        let stuck = self.runs.lock().unwrap().iter().any(|run| matches!(run.status, Status::Running));
+        if stuck {
+            failed.push("a workflow run did not settle".into());
+        }
+        match failed.is_empty() {
+            true => Ok(()),
+            false => Err(failed.join("; ")),
+        }
+    }
+
+    async fn flush_locked<F, Fut, R>(&self, open: &F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let pending = std::mem::take(&mut *self.inbox.lock().unwrap());
+        let mut later = vec![];
+        let mut errors = vec![];
+        for item in pending {
+            match self.deliver_inbox(&item, open).await {
+                Ok(InboxDone::Sent) => {}
+                Ok(InboxDone::Later) => later.push(item),
+                Err(e) => {
+                    later.push(item);
+                    errors.push(e);
+                }
+            }
+        }
+        self.inbox.lock().unwrap().extend(later);
+        match errors.is_empty() {
+            true => Ok(()),
+            false => Err(errors.join("; ")),
+        }
+    }
+
+    async fn deliver_inbox<F, Fut, R>(&self, item: &GraphInbox, open: &F) -> Result<InboxDone, String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let run = {
+            let runs = self.runs.lock().unwrap();
+            runs.iter()
+                .rev()
+                .find(|run| subject_key(&run.subject) == thread_key(&item.channel, &item.thread) && !matches!(run.status, Status::Failed { .. }))
+                .cloned()
+        };
+        let Some(run) = run else { return Ok(InboxDone::Later) };
+        let owner = run.session_owner.clone().unwrap_or_else(|| run.connector.clone());
+        let text = item.messages.join("\n\n");
+        match &run.session {
+            Session::Live { .. } => {
+                let env = agent::session_env(&owner, &run.subject);
+                open(Work::Prompt { env, text }).await.taken()?;
+                let _ = self.follow(&owner, &item.channel, &item.thread, item.cursor.clone());
+                let _ = self.acknowledge(&item.channel, &item.mentioned).await;
+                Ok(InboxDone::Sent)
+            }
+            Session::Detached { .. } if matches!(run.status, Status::Done) => {
+                self.resume_finished(&run, &owner, &text, open).await?;
+                let _ = self.follow(&owner, &item.channel, &item.thread, item.cursor.clone());
+                let _ = self.acknowledge(&item.channel, &item.mentioned).await;
+                Ok(InboxDone::Sent)
+            }
+            Session::Detached { .. } | Session::None => Ok(InboxDone::Later),
+        }
+    }
+
+    /// A finished run's thread got another reply. Resume its conversation, or seed a new one.
+    async fn resume_finished<F, Fut, R>(&self, run: &runner::Run, owner: &str, text: &str, open: &F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let owner_c = self.store.lock().unwrap().connector(owner).cloned()?;
+        let trigger = trigger_of(run)?;
+        let claude = match &run.session {
+            Session::Detached { claude } => claude.clone(),
+            Session::Live { .. } | Session::None => None,
+        };
+        if let Some(claude) = claude {
+            let mut spec = graph_opening(&owner_c, &trigger, &[], "", None, &self.exe)?;
+            spec.args.pop();
+            spec.args.extend(["--resume".into(), claude.clone()]);
+            match open(Work::Run(spec)).await.taken() {
+                Ok(place) => {
+                    let place = place.unwrap_or(Placement { machine: "local".into(), tab: "local".into() });
+                    if !text.is_empty() {
+                        let env = agent::session_env(owner, &run.subject);
+                        open(Work::Prompt { env, text: text.to_owned() }).await.taken()?;
+                    }
+                    return self.mark_live(&run.id.0, place, Some(claude));
+                }
+                Err(why) if why.contains("No conversation found") => {}
+                Err(why) => return Err(why),
+            }
+        }
+        let spec = graph_opening(&owner_c, &trigger, &direct_answers(run, &self.library()), text, Some(&runner::history(run)), &self.exe)?;
+        let place = open(Work::Run(spec)).await.taken()?.unwrap_or(Placement { machine: "local".into(), tab: "local".into() });
+        self.mark_live(&run.id.0, place, None)
+    }
+
+    fn take_inbox(&self, subject: &Subject) -> Vec<GraphInbox> {
+        let key = subject_key(subject);
+        let mut inbox = self.inbox.lock().unwrap();
+        let mut kept = vec![];
+        let mut mine = vec![];
+        for item in inbox.drain(..) {
+            if thread_key(&item.channel, &item.thread) == key {
+                mine.push(item);
+            } else {
+                kept.push(item);
+            }
+        }
+        *inbox = kept;
+        mine
+    }
+
+    fn restore_inbox(&self, items: Vec<GraphInbox>) {
+        self.inbox.lock().unwrap().splice(0..0, items);
+    }
+
+    async fn perform<F, Fut, R>(&self, run: &runner::Run, effect: Effect, library: &runner::Library, open: &F) -> Result<Supplied, String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        match effect {
+            Effect::Claim { connector, key } => {
+                let mut store = self.store.lock().unwrap();
+                if !store.handled(&key) && store.claim_thread(&connector, &key).is_none() {
+                    return Err(format!("workflow {connector:?} was deleted"));
+                }
+                note_followed(&mut store, &connector, run);
+                self.save(&store)?;
+                Ok(Supplied::Done)
+            }
+            Effect::Classify { connector, node, .. } => {
+                let classify = {
+                    let graph = library.get(&connector).ok_or_else(|| format!("workflow {connector:?} has no graph"))?;
+                    let found = graph.node(&node).ok_or_else(|| format!("node {} is not in workflow {connector:?}", node.0))?;
+                    match &found.kind {
+                        NodeKind::Classify(classify) => classify.clone(),
+                        _ => return Err(format!("node {} is not a classify", node.0)),
+                    }
+                };
+                let key = self.key(VERCEL_KEY).ok_or_else(|| "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".to_owned())?;
+                let trigger = trigger_of(run)?;
+                let text = trigger_text(&trigger);
+                let answers = match &classify.gate {
+                    Gate::Direct => Answers { answers: vercel::ask(&key, &ask_from(&classify), &text).await?, chosen: None },
+                    Gate::Decide { .. } => {
+                        let name = classify.branch_on.as_deref().ok_or_else(|| "the classify decides a port but branches on no question".to_owned())?;
+                        let question = classify
+                            .questions
+                            .iter()
+                            .find(|question| question.name == name)
+                            .ok_or_else(|| format!("the classify branches on {name:?}, which is not one of its questions"))?;
+                        let choices: Vec<(&str, &str)> = question.choices.iter().map(|choice| (choice.label.as_str(), choice.description.as_str())).collect();
+                        let chosen = vercel::choose(&key, classify.model.trim(), &classify.instructions, &choices, &decide_state(&trigger)).await?;
+                        let label = question.choices.get(chosen.index).map(|choice| choice.label.clone()).unwrap_or_default();
+                        Answers { answers: vec![(question.name.clone(), label)], chosen: Some(ChosenOn::from(&chosen)) }
+                    }
+                };
+                Ok(Supplied::Classified(answers))
+            }
+            Effect::Page { connector, group } => {
+                let Subject::SlackThread { channel, thread } = &run.subject else {
+                    return Err("a page node needs the run's Slack thread".into());
+                };
+                let (channel, thread) = (channel.clone(), thread.clone());
+                let paging = self.paging_for(&connector, &group).await?;
+                let now = Utc::now();
+                let reply = {
+                    let mut store = self.store.lock().unwrap();
+                    let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) else {
+                        return Err("the workflow was deleted".into());
+                    };
+                    let reply = c.escalation_reply(&channel, &thread, paging, now);
+                    if let Some(reply) = &reply {
+                        c.record_escalation(&channel, &thread, reply, now);
+                    }
+                    self.save(&store)?;
+                    reply
+                };
+                if let Some(reply) = reply {
+                    self.page(&Page { channel, thread, reply, react: true }).await?;
+                }
+                Ok(Supplied::Done)
+            }
+            Effect::StagePicked { connector } => {
+                self.stage(&connector, &run.subject, Stage::Picked).await?;
+                Ok(Supplied::Done)
+            }
+            Effect::Open { owner, prompt, seeded } => self.perform_open(run, &owner, &prompt, seeded, library, open).await,
+            Effect::Resume { owner, claude, text } => self.perform_resume(run, &owner, &claude, &text, open).await,
+            Effect::Type { text } => self.perform_type(run, &text, open).await,
+        }
+    }
+
+    async fn paging_for(&self, connector: &str, group: &str) -> Result<Paging, String> {
+        let (name, category) = {
+            let store = self.store.lock().unwrap();
+            let c = store.connector(connector)?;
+            let category = match &c.trigger {
+                Trigger::SlackMessage { decide, .. } => decide.categories.iter().find(|category| category.group() == Some(group.trim().trim_start_matches('@'))).cloned(),
+                _ => None,
+            };
+            (c.name.clone(), category)
+        };
+        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
+        let id = slack::group_id(&token, group).await.map_err(|e| format!("workflow {name:?} could not page {group:?}: {e}"))?;
+        let ping = match &category {
+            Some(category) => page_text(&id, category),
+            None => format!("{} {}", slack::group_mention(&id), group.trim().trim_start_matches('@')),
+        };
+        Ok(Paging { ping, handle: group.trim().trim_start_matches('@').to_owned() })
+    }
+
+    async fn perform_open<F, Fut, R>(&self, run: &runner::Run, owner: &str, prompt: &str, seeded: bool, library: &runner::Library, open: &F) -> Result<Supplied, String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let owner_c = self.store.lock().unwrap().connector(owner).cloned()?;
+        let mut trigger = trigger_of(run)?;
+        if owner_c.id != run.connector {
+            if let Some(note) = route_note(run, library, &self.names()) {
+                set_note(&mut trigger, note);
+            }
+        }
+        let inbox = self.take_inbox(&run.subject);
+        let talk = join_text(&talk_text(run, prompt, seeded), &inbox_text(&inbox));
+        let history = seeded.then(|| runner::history(run));
+        let spec = match graph_opening(&owner_c, &trigger, &direct_answers(run, library), &talk, history.as_deref(), &self.exe) {
+            Ok(spec) => spec,
+            Err(why) => {
+                self.restore_inbox(inbox);
+                return Err(why);
+            }
+        };
+        let folder = spec.cwd.clone();
+        let mentioned = spec.mentioned.clone();
+        match open(Work::Run(spec)).await.taken() {
+            Ok(place) => {
+                if let Subject::SlackThread { channel, .. } = &run.subject {
+                    let _ = self.acknowledge(channel, &mentioned).await;
+                }
+                let _ = self.ack_inbox(owner, &inbox).await;
+                let place = place.unwrap_or(Placement { machine: "local".into(), tab: "local".into() });
+                Ok(Supplied::Opened { machine: place.machine, tab: place.tab })
+            }
+            Err(why) => {
+                self.restore_inbox(inbox);
+                Err(self.unclaim(owner, &run.subject, &folder, &why))
+            }
+        }
+    }
+
+    async fn perform_resume<F, Fut, R>(&self, run: &runner::Run, owner: &str, claude: &str, text: &str, open: &F) -> Result<Supplied, String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let owner_c = self.store.lock().unwrap().connector(owner).cloned()?;
+        let trigger = trigger_of(run)?;
+        let mut spec = graph_opening(&owner_c, &trigger, &[], "", None, &self.exe)?;
+        spec.args.pop();
+        spec.args.extend(["--resume".into(), claude.to_owned()]);
+        let inbox = self.take_inbox(&run.subject);
+        let text = join_text(text, &inbox_text(&inbox));
+        let place = match open(Work::Run(spec)).await.taken() {
+            Err(why) if why.contains("No conversation found") => {
+                self.restore_inbox(inbox);
+                return Ok(Supplied::NoConversation);
+            }
+            Err(why) => {
+                self.restore_inbox(inbox);
+                return Err(why);
+            }
+            Ok(place) => place.unwrap_or(Placement { machine: "local".into(), tab: "local".into() }),
+        };
+        if !text.is_empty() {
+            let env = agent::session_env(owner, &run.subject);
+            if let Err(why) = open(Work::Prompt { env, text }).await.taken() {
+                self.restore_inbox(inbox);
+                return Err(why);
+            }
+        }
+        let _ = self.ack_inbox(owner, &inbox).await;
+        Ok(Supplied::Opened { machine: place.machine, tab: place.tab })
+    }
+
+    async fn perform_type<F, Fut, R>(&self, run: &runner::Run, text: &str, open: &F) -> Result<Supplied, String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let owner = run.session_owner.clone().unwrap_or_else(|| run.connector.clone());
+        let inbox = self.take_inbox(&run.subject);
+        let text = join_text(text, &inbox_text(&inbox));
+        if !text.is_empty() {
+            let env = agent::session_env(&owner, &run.subject);
+            if let Err(why) = open(Work::Prompt { env, text }).await.taken() {
+                self.restore_inbox(inbox);
+                return Err(why);
+            }
+        }
+        let _ = self.ack_inbox(&owner, &inbox).await;
+        Ok(Supplied::Done)
+    }
+
+    async fn ack_inbox(&self, owner: &str, items: &[GraphInbox]) -> Result<(), String> {
+        for item in items {
+            self.follow(owner, &item.channel, &item.thread, item.cursor.clone())?;
+            self.acknowledge(&item.channel, &item.mentioned).await?;
+        }
+        Ok(())
     }
 
     pub fn get_settings(&self) -> Settings {
@@ -1947,7 +2893,9 @@ impl Connectors {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentStatus;
     use crate::graph::{Edge, Node, NodeId, PortId};
+    use crate::wire::{Program, TabView};
 
     fn block_on<F: Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(future)
@@ -2002,7 +2950,7 @@ mod tests {
         slack.handled = vec!["C0123ABCD:1792400050.000200".into()];
         slack.followed.insert("C0123ABCD:1792400050.000200".into(), Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
         let (connectors, dir) = stored("unclaim", vec![linear, slack]);
-        let refuse = |_: Work| async { Err("Upstash Box: the bootstrap failed: curl: (22) 404".to_owned()) };
+        let refuse = |_: Work| async { Err::<(), String>("Upstash Box: the bootstrap failed: curl: (22) 404".to_owned()) };
 
         let issue_run = run(&linear_connector(), &issue(), "/bin/pinned");
         assert_eq!(
@@ -2717,7 +3665,7 @@ mod tests {
 
     fn settle_at(store: &mut Store, found: Vec<(&str, Found)>, now: DateTime<Utc>) -> Settled {
         let checked: Vec<String> = found.iter().map(|(id, _)| id.to_string()).collect();
-        store.settle(&checked, found.into_iter().map(|(id, f)| (id.to_owned(), f)).collect(), now, "/bin/pinned")
+        store.settle(&checked, found.into_iter().map(|(id, f)| (id.to_owned(), f)).collect(), now, "/bin/pinned", &[])
     }
 
     fn runs(settled: &Settled) -> (Vec<(String, Subject, Vec<String>)>, String) {
@@ -2731,6 +3679,7 @@ mod tests {
                     (run.connector.clone(), run.subject.clone(), run.mentioned.clone())
                 }
                 Work::Delivery(d) => panic!("a delivery for {}", d.connector),
+                Work::Prompt { .. } => panic!("a graph prompt is not a settled run"),
             })
             .collect();
         (runs, prompt)
@@ -2796,7 +3745,7 @@ mod tests {
         let settled = settle(&mut connectors.store.lock().unwrap(), vec![("c5", routed("escalation", "c2", Some(paging())))]);
         assert_eq!(settled.pages.len(), 1);
         let work = settled.work.into_iter().next().unwrap();
-        assert!(block_on(connectors.hand_over(work, &|_| async { Err("no tab took it".to_owned()) })).is_err());
+        assert!(block_on(connectors.hand_over(work, &|_| async { Err::<(), String>("no tab took it".to_owned()) })).is_err());
         let mut store = connectors.store.lock().unwrap();
         let later = checked_at() + chrono::Duration::hours(2);
         let settled = settle_at(&mut store, vec![("c5", routed("escalation", "c2", Some(paging())))], later);
@@ -2875,7 +3824,7 @@ mod tests {
         let settled = settle_at(&mut connectors.store.lock().unwrap(), vec![("c5", routed("escalation", "c2", Some(paging())))], at(5));
         assert_eq!(replies(&settled), [("1792400050.000200".to_owned(), already("1792399000.000000"))]);
         let work = settled.work.into_iter().next().unwrap();
-        assert!(block_on(connectors.hand_over(work, &|_| async { Err("no tab took it".to_owned()) })).is_err());
+        assert!(block_on(connectors.hand_over(work, &|_| async { Err::<(), String>("no tab took it".to_owned()) })).is_err());
 
         let mut store = connectors.store.lock().unwrap();
         let settled = settle_at(&mut store, vec![("c5", routed("escalation", "c2", Some(paging())))], at(8));
@@ -2936,7 +3885,7 @@ mod tests {
         let settled = settle(&mut connectors.store.lock().unwrap(), vec![("c5", routed("error", "c2", None))]);
         let work = settled.work.into_iter().next().unwrap();
         assert_eq!(
-            block_on(connectors.hand_over(work, &|_| async { Err("no tab took it".to_owned()) })),
+            block_on(connectors.hand_over(work, &|_| async { Err::<(), String>("no tab took it".to_owned()) })),
             Err("could not open a session in /repo: no tab took it; the next check tries again".into())
         );
         let mut store = connectors.store.lock().unwrap();
@@ -3323,6 +4272,199 @@ mod tests {
         back.name = "Other".into();
         back.graph = Some(calling("c6"));
         assert_eq!(connectors.save_connector(back).err().as_deref(), Some("\"Route\" calls \"c7\", which calls back"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn talks(prompts: &[&str]) -> crate::graph::Graph {
+        let mut nodes = vec![Node {
+            id: NodeId("t".into()),
+            name: "Trigger".into(),
+            position: [0, 0],
+            kind: NodeKind::Trigger { watch: Watch::LinearLabel { label: "claude".into() } },
+        }];
+        let mut edges = vec![];
+        let mut prev = "t".to_owned();
+        for (index, prompt) in prompts.iter().enumerate() {
+            let id = format!("talk-{index}");
+            nodes.push(Node {
+                id: NodeId(id.clone()),
+                name: format!("Talk {index}"),
+                position: [(index + 1) as i32, 0],
+                kind: NodeKind::Talk { prompt: (*prompt).into() },
+            });
+            edges.push(Edge { from: NodeId(prev), port: PortId("out".into()), to: NodeId(id.clone()) });
+            prev = id;
+        }
+        crate::graph::Graph { nodes, edges }
+    }
+
+    fn issue_trigger() -> TriggerInput {
+        let issue = issue();
+        TriggerInput::Issue { id: issue.id, identifier: issue.identifier, title: issue.title, description: issue.description, url: issue.url }
+    }
+
+    fn slack_trigger(note: Option<String>) -> TriggerInput {
+        TriggerInput::Slack {
+            channel: "C0123ABCD".into(),
+            channel_name: "support".into(),
+            thread: "1792400050.000200".into(),
+            posts: posts().into_iter().map(|post| TriggerPost { ts: post.ts, author: post.author, text: post.text }).collect(),
+            note,
+            mentioned: vec!["1792400050.000200".into()],
+        }
+    }
+
+    #[test]
+    fn graph_opening_matches_the_session_a_migrated_connector_opens_today() {
+        let linear = linear_connector();
+        let opened = graph_opening(&linear, &issue_trigger(), &[], "", None, "/bin/pinned").unwrap();
+        let today = run(&linear, &issue(), "/bin/pinned");
+        assert_eq!(opened.args, today.args);
+        assert_eq!(opened.input, today.input);
+        assert_eq!((opened.connector, opened.subject, opened.cwd), (today.connector, today.subject, today.cwd));
+
+        let slack = slack_connector();
+        let note = routed_note("Support router", "error");
+        let opened = graph_opening(&slack, &slack_trigger(Some(note.clone())), &[], "", None, "/bin/pinned").unwrap();
+        let mut today = slack_run(&slack, "C0123ABCD", "support", "1792400050.000200", &posts(), Some(&note), "/bin/pinned");
+        today.mentioned = vec!["1792400050.000200".into()];
+        assert_eq!(opened.args, today.args);
+        assert_eq!(opened.args.last().unwrap(), ROUTED);
+        assert_eq!(opened.input, today.input);
+
+        let answers = [ClassifyAnswers { model: classifying().model.clone(), answers: vec![("kind".into(), "bug".into()), ("agent".into(), "yes".into())] }];
+        let opened = graph_opening(&slack, &slack_trigger(None), &answers, "", None, "/bin/pinned").unwrap();
+        let mut today = slack_run(&slack, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        append_answers(&mut today, &classifying(), &[("kind".into(), "bug".into()), ("agent".into(), "yes".into())]);
+        today.mentioned = vec!["1792400050.000200".into()];
+        assert_eq!(opened.args, today.args);
+
+        let opened = graph_opening(&linear, &issue_trigger(), &[], "look here", Some("HISTORY"), "/bin/pinned").unwrap();
+        let prompt = opened.args.last().unwrap();
+        assert!(prompt.starts_with("HISTORY\n\n"), "{prompt}");
+        assert!(prompt.contains("ENG-7: Broken button"), "{prompt}");
+        assert!(prompt.ends_with("\n\nlook here"), "{prompt}");
+    }
+
+    #[test]
+    fn an_edited_graph_starts_a_run_and_a_fixed_pipeline_still_claims() {
+        let mut graphed = linear_connector();
+        graphed.graph = Some(talks(&[""]));
+        let mut store = Store { connectors: vec![graphed], ..Store::default() };
+        let settled = settle(&mut store, vec![("c1", Found::Issue(issue()))]);
+        assert!(settled.work.is_empty());
+        assert_eq!(settled.starts.len(), 1);
+        assert_eq!(settled.starts[0].connector, "c1");
+        assert!(store.connectors[0].handled.is_empty());
+
+        let library = BTreeMap::from([("c1".into(), talks(&[""]))]);
+        let open = runner::start(&library, "c1", Subject::LinearIssue { issue: "uuid".into() }, serde_json::json!({}), "t");
+        let again = store.settle(&["c1".into()], vec![("c1".into(), Found::Issue(issue()))], checked_at(), "/bin/pinned", &[open]);
+        assert!(again.starts.is_empty());
+
+        let mut plain = Store { connectors: vec![linear_connector()], ..Store::default() };
+        let settled = settle(&mut plain, vec![("c1", Found::Issue(issue()))]);
+        assert_eq!(settled.work.len(), 1);
+        assert!(settled.starts.is_empty());
+        assert_eq!(plain.connectors[0].handled, ["uuid"]);
+    }
+
+    #[test]
+    fn a_graph_run_is_stored_beside_the_connectors() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one"]));
+        let (connectors, dir) = stored("graph-store", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        assert!(connectors.holds_box("c1", &Subject::LinearIssue { issue: "uuid".into() }));
+        assert!(!connectors.holds_box("c2", &Subject::LinearIssue { issue: "uuid".into() }));
+        drop(connectors);
+        let store = std::fs::read_to_string(dir.join("connectors.json")).unwrap();
+        assert!(!store.contains("2026-10-29T12:00:00Z"), "{store}");
+        let saved: Vec<runner::Run> = serde_json::from_slice(&std::fs::read(dir.join("runs.json")).unwrap()).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].connector, "c1");
+        assert!(matches!(saved[0].status, Status::Running));
+        let loaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(loaded.runs.lock().unwrap().len(), 1);
+        assert!(loaded.holds_box("c1", &Subject::LinearIssue { issue: "uuid".into() }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn session_tab(status: Option<AgentStatus>, session: Option<&str>) -> TabView {
+        TabView {
+            id: "tab-1".into(),
+            cwd: "/repo".into(),
+            account: crate::accounts::default_account(),
+            program: Program::Agent,
+            bypass: false,
+            running: true,
+            status,
+            title: None,
+            message: None,
+            resume_at: None,
+            held: false,
+            connector: Some("c1".into()),
+            subject: Some(Subject::LinearIssue { issue: "uuid".into() }),
+            opened: 1,
+            updated: None,
+            session: session.map(str::to_owned),
+            stats: None,
+            role: None,
+        }
+    }
+
+    #[test]
+    fn two_talks_share_one_session_and_a_missing_resume_is_seeded() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two"]));
+        let (connectors, dir) = stored("graph-talks", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let seen = std::sync::Mutex::new(Vec::<String>::new());
+        let open = |work: Work| {
+            let line = match &work {
+                Work::Run(run) => {
+                    let env = run.spec().env.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join("\n");
+                    format!("run\n{env}\n{}", run.args.join("\n"))
+                }
+                Work::Prompt { env, text } => {
+                    let env = env.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join("\n");
+                    format!("prompt\n{env}\n{text}")
+                }
+                Work::Delivery(delivery) => format!("delivery {}", delivery.connector),
+            };
+            seen.lock().unwrap().push(line);
+            let missing = matches!(&work, Work::Run(run) if run.args.windows(2).any(|pair| pair[0] == "--resume"));
+            async move {
+                if missing {
+                    Err::<Option<Placement>, String>("No conversation found".into())
+                } else {
+                    Ok(Some(Placement { machine: "m1".into(), tab: "tab-1".into() }))
+                }
+            }
+        };
+        block_on(connectors.drive(&open)).unwrap();
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(&done), &open)).unwrap();
+        {
+            let run = connectors.runs.lock().unwrap()[0].clone();
+            assert!(matches!(run.session, Session::Live { ref machine, ref tab, ref claude } if machine == "m1" && tab == "tab-1" && claude.as_deref() == Some("claude-1")));
+        }
+        block_on(connectors.on_tabs("m1", std::slice::from_ref(&done), &[], &open)).unwrap();
+        let lines = seen.lock().unwrap().clone();
+        assert_eq!(lines.len(), 4, "{lines:#?}");
+        assert!(lines[0].contains("PINNED_CONNECTOR=c1\nPINNED_ISSUE=uuid"), "{}", lines[0]);
+        assert!(lines[0].contains("ENG-7: Broken button"), "{}", lines[0]);
+        assert!(lines[0].contains("\none\n") || lines[0].ends_with("\none"), "{}", lines[0]);
+        assert!(!lines[0].contains("--resume"), "{}", lines[0]);
+        assert!(lines[1].contains("PINNED_CONNECTOR=c1\nPINNED_ISSUE=uuid"), "{}", lines[1]);
+        assert!(lines[1].ends_with("\ntwo") || lines[1].ends_with("two"), "{}", lines[1]);
+        assert!(lines[2].contains("--resume\nclaude-1"), "{}", lines[2]);
+        assert!(!lines[2].contains("Fix it."), "{}", lines[2]);
+        assert!(lines[2].contains("PINNED_CONNECTOR=c1\nPINNED_ISSUE=uuid"), "{}", lines[2]);
+        assert!(lines[3].contains("PINNED_CONNECTOR=c1\nPINNED_ISSUE=uuid"), "{}", lines[3]);
+        assert!(lines[3].starts_with("run\n") && lines[3].contains("This session continues a run that already happened."), "{}", lines[3]);
+        assert!(lines[3].contains("ENG-7: Broken button"), "{}", lines[3]);
+        assert!(lines[3].contains("\n\ntwo"), "{}", lines[3]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -1,8 +1,8 @@
 use crate::boxes::{self, BoxApi, Boxes, Seen};
 use crate::db::{self, Db};
 use pinned_core::accounts::AccountId;
-use pinned_core::agent::{AgentStatus, Stage, Subject, Usage};
-use pinned_core::connectors::{Connectors, Delivery, Keys, Run, RunsOn, Storage, Work};
+use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
+use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
 use pinned_core::upstash;
 use base64::Engine;
 use pinned_core::{github, sync};
@@ -178,7 +178,7 @@ impl Hub {
         tokio::spawn(async move {
             let open = |work| {
                 let hub = hub.clone();
-                async move { hub.open(id, work).await }
+                async move { hub.open_placed(id, work).await }
             };
             let on_check = |_: &pinned_core::connectors::Check| {
                 let (hub, account) = checked.clone();
@@ -201,30 +201,39 @@ impl Hub {
     /// when it is online, else to the others, the most recently connected first, never to a box.
     /// New thread messages go to whichever machine runs a session of that connector and has the thread's.
     pub async fn open(&self, account: Uuid, work: Work) -> Result<(), String> {
+        self.open_placed(account, work).await.map(drop)
+    }
+
+    /// Hands `work` to a machine and returns the tab that took a run, or none for a delivery.
+    pub async fn open_placed(&self, account: Uuid, work: Work) -> Result<Option<Placement>, String> {
         let account = self.account(account).await?;
         match work {
             Work::Run(run) => {
-                if account.working_on(&run.connector, &run.subject, |_| true) {
-                    return Ok(());
+                if let Some((machine, tab)) = account.placed(&run.connector, &run.subject) {
+                    return Ok(Some(Placement { machine, tab }));
                 }
                 match run.runs_on.clone() {
-                    RunsOn::FreshBox(step) => self.boxes.open(self, &account, run, step).await,
-                    RunsOn::Any => self.open_on_pool(&account, run, "").await,
-                    RunsOn::Machine(id) => self.open_on_pool(&account, run, &id).await,
+                    RunsOn::FreshBox(step) => self.boxes.open(self, &account, run, step).await.map(Some),
+                    RunsOn::Any => self.open_on_pool(&account, run, "").await.map(Some),
+                    RunsOn::Machine(id) => self.open_on_pool(&account, run, &id).await.map(Some),
                 }
             }
-            Work::Delivery(d) => self.deliver(&account, d).await,
+            Work::Delivery(d) => self.deliver(&account, d).await.map(|()| None),
+            Work::Prompt { env, text } => self.type_prompt(&account, &env, &text).await.map(|()| None),
         }
     }
 
-    async fn open_on_pool(&self, account: &Account, run: Run, preferred: &str) -> Result<(), String> {
+    async fn open_on_pool(&self, account: &Account, run: Run, preferred: &str) -> Result<Placement, String> {
         let token = self.connectors(account).await.ok().and_then(|c| c.github_token());
         let mut spec = run.spec();
         spec.token = token.filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
         let mut refused = vec![];
         for machine in account.run_pool(preferred) {
             match self.call_machine(account, &machine, Call::Run { run: spec.clone() }, RUN_WAIT).await {
-                Ok(_) => return Ok(()),
+                Ok(value) => {
+                    let tab = value.as_str().map(str::to_owned).ok_or_else(|| "the machine started the session without a tab id".to_owned())?;
+                    return Ok(Placement { machine, tab });
+                }
                 Err(Unanswered::Refused(e)) => {
                     eprintln!("pinned-server: {machine} refused a run of workflow {}: {e}", run.connector);
                     refused.push(e);
@@ -249,6 +258,19 @@ impl Hub {
             match self.call_machine(account, &machine, call, MACHINE_CALL_WAIT).await {
                 Ok(Value::Bool(true)) => return Ok(()),
                 // The messages were likely typed; opening another session for the thread would answer it twice.
+                Err(Unanswered::Lost(_)) => return Ok(()),
+                _ => {}
+            }
+        }
+        Err("no session answers that thread".into())
+    }
+
+    async fn type_prompt(&self, account: &Account, env: &[(String, String)], text: &str) -> Result<(), String> {
+        let connector = env.iter().find(|(key, _)| key == CONNECTOR_ENV).map(|(_, value)| value.as_str()).unwrap_or("");
+        for machine in account.running(connector) {
+            let call = Call::Deliver { env: env.to_vec(), text: text.to_owned() };
+            match self.call_machine(account, &machine, call, MACHINE_CALL_WAIT).await {
+                Ok(Value::Bool(true)) => return Ok(()),
                 Err(Unanswered::Lost(_)) => return Ok(()),
                 _ => {}
             }
@@ -470,6 +492,18 @@ impl Account {
         }
     }
 
+    /// The online machine and tab already working on the connector's `subject`.
+    pub fn placed(&self, connector: &str, subject: &Subject) -> Option<(MachineId, TabId)> {
+        let live = self.live.lock().unwrap();
+        live.machines.iter().find_map(|(id, machine)| {
+            machine
+                .tabs
+                .iter()
+                .find(|tab| tab.running && tab.connector.as_deref() == Some(connector) && tab.subject.as_ref() == Some(subject))
+                .map(|tab| (id.clone(), tab.id.clone()))
+        })
+    }
+
     /// Whether a session on an online machine that `on` picks works on the connector's `subject`.
     pub fn working_on(&self, connector: &str, subject: &Subject, on: impl Fn(&MachineId) -> bool) -> bool {
         let live = self.live.lock().unwrap();
@@ -536,11 +570,13 @@ impl Account {
     }
 
     /// Passes a machine's event to the clients, keeping its tabs and usage for those that connect later.
-    pub fn machine_event(&self, machine: &str, socket: u64, event: MachineEvent) {
+    /// The tabs this machine showed before a `Tabs` event, so a wake can see what changed.
+    pub fn machine_event(&self, machine: &str, socket: u64, event: MachineEvent) -> Vec<TabView> {
+        let mut previous = Vec::new();
         let mut live = self.live.lock().unwrap();
-        let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return };
+        let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return previous };
         match &event {
-            MachineEvent::Tabs { tabs } => m.tabs = tabs.clone(),
+            MachineEvent::Tabs { tabs } => previous = std::mem::replace(&mut m.tabs, tabs.clone()),
             MachineEvent::Usage { usage, account } => {
                 m.usage.insert(account.clone(), *usage);
             }
@@ -550,6 +586,7 @@ impl Account {
         for client in live.clients.values() {
             let _ = client.out.send(text.clone());
         }
+        previous
     }
 
     pub fn output(&self, machine: &str, viewer: &str, tab: TabId, data: pinned_core::wire::Bytes) {
@@ -636,6 +673,7 @@ impl Account {
 /// connectors' back, so `Storage`'s synchronous calls never wait on Postgres.
 struct PgStorage {
     store: Mutex<Option<Vec<u8>>>,
+    runs: Mutex<Vec<u8>>,
     keys: Mutex<BTreeMap<String, String>>,
     writes: mpsc::UnboundedSender<Write>,
 }
@@ -672,8 +710,27 @@ impl PgStorage {
                 }
             }
         });
-        let store = (stored.store != serde_json::json!({})).then(|| serde_json::to_vec(&stored.store).unwrap());
-        PgStorage { store: Mutex::new(store), keys: Mutex::new(stored.secrets), writes }
+        let mut doc = stored.store;
+        let runs = doc.as_object_mut().and_then(|map| map.remove("runs")).and_then(|value| serde_json::to_vec(&value).ok()).unwrap_or_default();
+        let store = (doc != serde_json::json!({})).then(|| serde_json::to_vec(&doc).unwrap());
+        PgStorage { store: Mutex::new(store), runs: Mutex::new(runs), keys: Mutex::new(stored.secrets), writes }
+    }
+
+    /// Writes the store and the runs together, so one of a burst cannot drop the other.
+    fn persist(&self) -> Result<(), String> {
+        let store = self.store.lock().unwrap().clone();
+        let runs = self.runs.lock().unwrap().clone();
+        let mut doc: Value = match &store {
+            Some(bytes) => serde_json::from_slice(bytes).map_err(|e| e.to_string())?,
+            None => serde_json::json!({}),
+        };
+        let object = doc.as_object_mut().ok_or("the workflow store is not an object")?;
+        if runs.is_empty() {
+            object.remove("runs");
+        } else {
+            object.insert("runs".to_owned(), serde_json::from_slice(&runs).map_err(|e| e.to_string())?);
+        }
+        self.writes.send(Write::Store(doc)).map_err(|_| "the hub is shutting down".to_string())
     }
 
     fn write_keys(&self, keys: &BTreeMap<String, String>) {
@@ -687,9 +744,19 @@ impl Storage for PgStorage {
     }
 
     fn save(&self, store: &[u8]) -> Result<(), String> {
-        let value: Value = serde_json::from_slice(store).map_err(|e| e.to_string())?;
+        serde_json::from_slice::<Value>(store).map_err(|e| e.to_string())?;
         *self.store.lock().unwrap() = Some(store.to_vec());
-        self.writes.send(Write::Store(value)).map_err(|_| "the hub is shutting down".to_string())
+        self.persist()
+    }
+
+    fn load_runs(&self) -> Option<Vec<u8>> {
+        let runs = self.runs.lock().unwrap().clone();
+        (!runs.is_empty()).then_some(runs)
+    }
+
+    fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
+        *self.runs.lock().unwrap() = bytes.to_vec();
+        self.persist()
     }
 
     fn key(&self, name: &str) -> Option<String> {
