@@ -13,12 +13,16 @@ pub mod migrate;
 pub mod project;
 pub mod runner;
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema)]
+#[derive(
+    Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema,
+)]
 #[serde(transparent)]
 pub struct NodeId(pub String);
 
 /// A choice's stable id, or one of the fixed ports below. Reordering or renaming choices keeps edges.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema)]
+#[derive(
+    Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema,
+)]
 #[serde(transparent)]
 pub struct PortId(pub String);
 
@@ -90,9 +94,15 @@ pub enum NodeKind {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Watch {
-    LinearLabel { label: String },
-    SlackMention { channel: String },
-    SlackMessage { channel: String },
+    LinearLabel {
+        label: String,
+    },
+    SlackMention {
+        channel: String,
+    },
+    SlackMessage {
+        channel: String,
+    },
     /// Runs only when another graph `call`s it.
     Called,
 }
@@ -165,8 +175,51 @@ pub struct Port {
 impl NodeKind {
     /// The node's output ports, in drawing order. Derived, never stored.
     pub fn ports(&self) -> Vec<Port> {
-        todo!("trigger/talk/page/stage-picked/call: out; stop: none; classify: one per choice of branch_on, then fallback if Extra, then nowhere if Gate::Decide; no branch_on: out")
+        match self {
+            NodeKind::Stop => Vec::new(),
+            NodeKind::Trigger { .. }
+            | NodeKind::Talk { .. }
+            | NodeKind::Page { .. }
+            | NodeKind::StagePicked
+            | NodeKind::Call { .. } => {
+                vec![fixed_port(PortId::OUT)]
+            }
+            NodeKind::Classify(classify) => classify_ports(classify),
+        }
     }
+}
+
+fn fixed_port(id: &str) -> Port {
+    Port {
+        id: PortId(id.to_owned()),
+        label: id.to_owned(),
+    }
+}
+
+fn classify_ports(classify: &Classify) -> Vec<Port> {
+    let Some(name) = &classify.branch_on else {
+        return vec![fixed_port(PortId::OUT)];
+    };
+    let mut ports = Vec::new();
+    if let Some(question) = classify
+        .questions
+        .iter()
+        .find(|question| &question.name == name)
+    {
+        for choice in &question.choices {
+            ports.push(Port {
+                id: choice.id.clone(),
+                label: choice.label.clone(),
+            });
+        }
+    }
+    if matches!(classify.fallback, Fallback::Extra) {
+        ports.push(fixed_port(PortId::FALLBACK));
+    }
+    if matches!(classify.gate, Gate::Decide { .. }) {
+        ports.push(fixed_port(PortId::NOWHERE));
+    }
+    ports
 }
 
 impl Graph {
@@ -178,7 +231,10 @@ impl Graph {
     }
 
     pub fn trigger(&self) -> &Node {
-        todo!("the one trigger node")
+        self.nodes
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::Trigger { .. }))
+            .expect("a graph has one trigger")
     }
 
     pub fn node(&self, id: &NodeId) -> Option<&Node> {
@@ -187,7 +243,11 @@ impl Graph {
 
     /// The targets of `port` on `from`, in edge order.
     pub fn next(&self, from: &NodeId, port: &PortId) -> Vec<&NodeId> {
-        self.edges.iter().filter(|e| &e.from == from && &e.port == port).map(|e| &e.to).collect()
+        self.edges
+            .iter()
+            .filter(|e| &e.from == from && &e.port == port)
+            .map(|e| &e.to)
+            .collect()
     }
 }
 
@@ -209,6 +269,9 @@ pub struct ChosenOn {
 
 impl From<&Chosen> for ChosenOn {
     fn from(chosen: &Chosen) -> Self {
-        ChosenOn { index: chosen.index, probabilities: chosen.probabilities.clone() }
+        ChosenOn {
+            index: chosen.index,
+            probabilities: chosen.probabilities.clone(),
+        }
     }
 }
