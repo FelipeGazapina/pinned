@@ -367,7 +367,8 @@ fn main() {
                 | agent::Message::Delegate { .. }
                 | agent::Message::TaskStatus { .. }
                 | agent::Message::TaskCancel { .. }
-                | agent::Message::Capabilities { .. } => Err("the machine answers this itself".into()),
+                | agent::Message::Capabilities { .. }
+                | agent::Message::Project { .. } => Err("the machine answers this itself".into()),
                 callback => match handle.state::<account::Account>().forward(callback) {
                     Ok(answer) => answer,
                     Err(agent::Message::Stage { connector, subject, stage }) => tauri::async_runtime::block_on(

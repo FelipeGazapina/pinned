@@ -64,7 +64,7 @@ function turnsOf(items) {
       turns.push(turn);
       if (user) continue;
     }
-    if (item.kind === "pr") turn.prs.push(item);
+    if (item.kind === "pr") turn.prs.some((p) => p.url === item.url) || turn.prs.push(item);
     else if (item.kind === "note") turn.notes.push(item);
     else if (DIVIDERS.has(item.kind)) turn.dividers.push(item);
     else turn.steps.push(item.kind === "tool" ? { ...item, result: results.get(item.id) } : item);

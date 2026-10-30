@@ -18,7 +18,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
             return Some(0);
         }
         reminders::SUBCOMMAND => {
-            reminders::serve(rest);
+            reminders::serve(first != Some(reminders::NO_REMINDERS));
             return Some(0);
         }
         hooks::STAGE_SUBCOMMAND => hooks::stage(first),

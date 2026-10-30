@@ -86,6 +86,7 @@ esac"#,
         plugin_dir: dir.join("plugin"),
         tutorial_helper: dir.join("helper"),
         sock: dir.join("pinned.sock"),
+        vector_search: false,
     };
     let machine = Machine::new(launch, Some(dir.clone()), Some(dir.clone()), |_| {});
     machine

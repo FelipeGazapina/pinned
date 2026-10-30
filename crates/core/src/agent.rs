@@ -1,10 +1,94 @@
 use crate::accounts::AccountId;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 pub const SOCK_ENV: &str = "PINNED_SOCK";
 pub const TAB_ENV: &str = "PINNED_TAB";
 /// Set on a delegated child, so its own `pinned mcp` can delegate further and name its parent task.
 pub const TASK_ENV: &str = "PINNED_TASK";
+
+/// Set on a project's orchestrator and its workers, with the project in `PROJECT_ENV`, since a
+/// worker runs in a worktree whose folder is not the project's.
+pub const ROLE_ENV: &str = "PINNED_ROLE";
+pub const PROJECT_ENV: &str = "PINNED_PROJECT";
+
+const ORCHESTRATOR_PROMPT: &str = "You are this project's orchestrator in pinned. You cannot edit files. Hand every piece of work to a worker with the delegate tool, and write each brief so it stands alone: the goal, the files involved, the constraints, and how to verify the result. Workers are threads the user can open and steer; agents lists them. To run a task on another provider or model, such as Cursor or Codex, call orchestrator_capabilities and then delegate_task. You get a message when a worker finishes or needs input: review what it reports, and tell the user what was done. Keep the project's memory: save durable facts with memory_save (the user's preferences, decisions, conventions, architecture facts), look them up with memory_search, and remove wrong ones with memory_forget.";
+const WORKER_PROMPT: &str = "You are a worker of this project's orchestrator in pinned. Do the task you were given fully and verify it. End with a concise report of what changed and how you verified it, which the orchestrator reads. Save durable facts about the project you learn with memory_save.";
+
+/// The part a session plays in its project's orchestration.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Role {
+    /// Hands every request to workers.
+    Orchestrator,
+    /// Does one task the orchestrator delegated.
+    Worker,
+}
+
+impl Role {
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::Orchestrator => "orchestrator",
+            Role::Worker => "worker",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Role> {
+        [Role::Orchestrator, Role::Worker].into_iter().find(|r| r.name() == name)
+    }
+
+    /// What the role's sessions are told on top of Claude Code's own system prompt.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            Role::Orchestrator => ORCHESTRATOR_PROMPT,
+            Role::Worker => WORKER_PROMPT,
+        }
+    }
+
+    pub fn disallowed_tools(self) -> &'static [&'static str] {
+        match self {
+            Role::Orchestrator => &["Edit", "Write", "NotebookEdit"],
+            Role::Worker => &[],
+        }
+    }
+}
+
+/// The role and project a session's environment names, for an orchestrator's or a worker's session.
+pub fn role_of(env: &[(String, String)]) -> Option<(Role, PathBuf)> {
+    let var = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+    Some((Role::parse(var(ROLE_ENV)?)?, PathBuf::from(var(PROJECT_ENV)?)))
+}
+
+pub fn role_env(role: Role, project: &Path) -> Vec<(String, String)> {
+    vec![(ROLE_ENV.to_owned(), role.name().to_owned()), (PROJECT_ENV.to_owned(), project.display().to_string())]
+}
+
+/// What an orchestrator or a worker asks of its project through pinned's MCP tools.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(tag = "name", rename_all = "snake_case")]
+pub enum ProjectTool {
+    /// Starts a worker on `task`, in a worktree of its own when the project is a git repository.
+    Delegate {
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    Agents,
+    MemorySearch {
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    MemorySave {
+        title: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<i64>,
+    },
+    MemoryForget { id: i64 },
+}
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";
 pub const ISSUE_ENV: &str = "PINNED_ISSUE";
@@ -188,9 +272,9 @@ pub enum Message {
         when: When,
     },
     ListReminders,
-    CancelReminder {
-        id: u64,
-    },
+    CancelReminder { id: u64 },
+    /// Not flattened, since a tool's own `kind` argument would collide with the message's tag.
+    Project { tab: String, tool: ProjectTool },
     Usage {
         #[serde(flatten)]
         usage: Usage,
@@ -278,6 +362,27 @@ mod tests {
                 seven_day: known.seven_day
             }
         );
+    }
+
+    #[test]
+    fn a_project_tool_message_names_the_tab_and_the_tool() {
+        let line = r#"{"kind":"project","tab":"tab-3","tool":{"name":"delegate","task":"Add a --json flag","title":"JSON output"}}"#;
+        let message: Message = serde_json::from_str(line).unwrap();
+        let delegate = ProjectTool::Delegate { task: "Add a --json flag".into(), title: Some("JSON output".into()) };
+        assert!(matches!(&message, Message::Project { tab, tool } if tab == "tab-3" && *tool == delegate));
+        assert_eq!(serde_json::to_string(&message).unwrap(), line);
+        let save: Message = serde_json::from_str(r#"{"kind":"project","tab":"tab-3","tool":{"name":"memory_save","title":"Deploys","text":"From tags.","kind":"decision","id":2}}"#).unwrap();
+        let tool = ProjectTool::MemorySave { title: "Deploys".into(), text: "From tags.".into(), kind: Some("decision".into()), id: Some(2) };
+        assert!(matches!(&save, Message::Project { tool: t, .. } if *t == tool));
+    }
+
+    #[test]
+    fn a_sessions_environment_names_its_role_and_project() {
+        let env = [vec![(CONNECTOR_ENV.to_owned(), "c1".to_owned())], role_env(Role::Worker, Path::new("/repo"))].concat();
+        assert_eq!(env[1..], [("PINNED_ROLE".to_owned(), "worker".to_owned()), ("PINNED_PROJECT".to_owned(), "/repo".to_owned())]);
+        assert_eq!(role_of(&env), Some((Role::Worker, PathBuf::from("/repo"))));
+        assert_eq!(role_of(&[("PINNED_ROLE".into(), "boss".into()), ("PINNED_PROJECT".into(), "/repo".into())]), None);
+        assert_eq!(role_of(&[("PINNED_ROLE".into(), "orchestrator".into())]), None, "a role without its project");
     }
 
     #[test]

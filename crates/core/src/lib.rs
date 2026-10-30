@@ -17,6 +17,8 @@ pub mod ipc;
 pub mod linear;
 pub mod link;
 pub mod machine;
+pub mod memory;
+pub mod model2vec;
 pub mod panel;
 pub mod plugin;
 pub mod private;

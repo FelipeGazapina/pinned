@@ -327,6 +327,7 @@ function shelfRows(list) {
   by.snoozed.sort((a, b) => sideMarks.snoozed[threadKey(a)].until - sideMarks.snoozed[threadKey(b)].until);
   const settledAt = (t) => sideMarks.settled[threadKey(t)] || latestUserAt(t);
   by.settled.sort((a, b) => settledAt(b) - settledAt(a));
+  for (const shelf of [by.active, by.working, by.settled]) shelf.sort((a, b) => isOrchestrator(b) - isOrchestrator(a));
   const rows = [...by.pinned, ...by.active].map(cardRow);
   let sink = true;
   const shelf = (kind, list, label, open, visible, rowOf) => {
@@ -364,7 +365,7 @@ function rowShell(tab, cls) {
   row.classList.toggle("active", tab === active);
   row.classList.toggle("selected", selected.has(tab.key));
   row.classList.toggle("titling", titling.has(tab.key));
-  row.setAttribute("aria-label", threadTitle(tab));
+  row.setAttribute("aria-label", tab.view.role === "orchestrator" || tab.view.role === "worker" ? `${threadTitle(tab)}, ${tab.view.role}` : threadTitle(tab));
   return row;
 }
 
@@ -469,6 +470,9 @@ function openLinkedPrs(tab) {
   if (tab !== active) activate(tab);
   addSurface(tab, { id: "prs", kind: "prs" });
 }
+const isOrchestrator = (tab) => tab.view.role === "orchestrator";
+const roleMark = (tab) =>
+  isOrchestrator(tab) ? `<span class="role">Orchestrator</span>` : tab.view.role === "worker" ? `<span class="role worker" title="A worker of the project's orchestrator">${icon("bot")}</span>` : "";
 const pinMark = (tab) => (isPinned(tab) ? `<span class="pin" role="button" data-act="unpin" title="Unpin thread">${icon("pin")}${icon("pin-off")}</span>` : "");
 const titleHtml = (tab) =>
   ui.renaming === tab.key ? `<input class="rename" value="${esc(threadTitle(tab))}" aria-label="Thread title" spellcheck="false">` : esc(threadTitle(tab));
@@ -496,7 +500,7 @@ function cardRow(tab) {
     ? `<span class="stamp status ${slot.tone}${woke ? " woke" : ""}"${woke ? ` role="button" data-act="dismiss" title="Dismiss Woke notification"` : ""}>${icon(slot.icon)}${slot.text}${slot.since ? ` <span class="since" data-since="${slot.since}"></span>` : ""}</span>`
     : `<span class="stamp when${unseenDone(tab) ? " unread" : ""}">${esc(ago(latestUserAt(tab)))}</span>`;
   const acts = `<span class="acts">${draft ? `<span role="button" data-act="discard" title="Discard draft" aria-label="Discard draft">${icon("x")}</span>` : ""}${canSnooze(tab) ? `<span role="button" data-act="snooze" title="Snooze thread">${icon("clock")}</span>` : ""}<span role="button" data-act="settle" title="Settle thread (${bindingLabel("thread.settle") ?? ""})">${icon("check")}Settle</span></span>`;
-  row.innerHTML = `<span class="l1">${draft ? `<span class="draft-pen" role="img" title="Unsent draft" aria-label="Unsent draft">${icon("square-pen")}</span>` : ""}${projectIcon(projectName(tab), tab)}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>
+  row.innerHTML = `<span class="l1">${draft ? `<span class="draft-pen" role="img" title="Unsent draft" aria-label="Unsent draft">${icon("square-pen")}</span>` : ""}${projectIcon(projectName(tab), tab)}${pinMark(tab)}<span class="project">${esc(projectName(tab))}</span>${roleMark(tab)}${tab.view.bypass ? `<span class="warn" title="Permissions skipped">⚠</span>` : ""}<span class="slot">${state}${acts}</span></span>
     <span class="l2">${titleHtml(tab)}</span>
     <span class="l3">${where}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="right">${statsHtml(tab)}${remote}${account}<span class="provider">${icon("claude")}</span></span></span>`;
   return row;
@@ -509,7 +513,7 @@ function slimRow(tab, action) {
   const act = action === "wake"
     ? `<span role="button" data-act="wake" title="Wake thread now">${icon("alarm-clock-off")}</span>`
     : `<span role="button" data-act="unsettle" title="Un-settle thread">${icon("undo-2")}</span>`;
-  row.innerHTML = `${projectIcon(projectName(tab), tab)}<span class="l2">${titleHtml(tab)}</span>${pinMark(tab)}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="slot">${time}<span class="acts">${act}</span></span>`;
+  row.innerHTML = `${projectIcon(projectName(tab), tab)}<span class="l2">${titleHtml(tab)}</span>${roleMark(tab)}${pinMark(tab)}${terminalPulse(tab)}${rowPrBadge(tab)}<span class="slot">${time}<span class="acts">${act}</span></span>`;
   return row;
 }
 
@@ -900,6 +904,7 @@ function rowMenuItems(tab) {
   const session = threadOf(tab).session;
   return [
     { label: ws?.branch ? `New thread on ${ws.branch}` : `New thread in ${project}`, icon: "message-square-plus", run: () => newThreadIn(tab) },
+    { label: `Open the ${project} orchestrator`, icon: "bot", run: () => openOrchestrator(tab.machine, projectPathOf(tab)) },
     isPinned(tab) ? { label: "Unpin thread", icon: "pin-off", hint: bindingLabel("thread.pin"), run: () => pin(tab) } : { label: "Pin thread", icon: "pin", hint: bindingLabel("thread.pin"), run: () => pin(tab) },
     settled(tab) ? { label: "Un-settle thread", icon: "circle-check", run: () => unsettle(tab) } : { label: "Settle thread", icon: "circle-check", hint: bindingLabel("thread.settle"), run: () => settle(tab) },
     sideMarks.snoozed[threadKey(tab)] && snoozedNow(tab)
@@ -1398,7 +1403,7 @@ function openProjectMenu() {
     shown = [{ key: "", name: "All projects" }, ...groups].filter((g) => !q || g.name.toLowerCase().includes(q));
     hit = Math.min(hit, Math.max(0, shown.length - 1));
     list.innerHTML = shown.length
-      ? shown.map((g, i) => `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(g.key)}" aria-selected="${g.key === ui.project}">${g.key ? projectIcon(g.name, g.tab) : icon("folder")}<span class="label">${esc(g.name)}</span>${machinesShown && g.key ? `<span class="where">${esc(machineName(g.machine))}</span>` : ""}${g.key ? `<button type="button" class="gear" data-gear="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(g.name)}">${icon("gear")}</button>` : ""}</div>`).join("")
+      ? shown.map((g, i) => `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(g.key)}" aria-selected="${g.key === ui.project}">${g.key ? projectIcon(g.name, g.tab) : icon("folder")}<span class="label">${esc(g.name)}</span>${machinesShown && g.key ? `<span class="where">${esc(machineName(g.machine))}</span>` : ""}${g.key ? `<button type="button" class="gear" data-orchestrate="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Open the ${esc(g.name)} orchestrator">${icon("bot")}</button><button type="button" class="gear" data-gear="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(g.name)}">${icon("gear")}</button>` : ""}</div>`).join("")
       : `<p class="empty">No matching projects.</p>`;
   };
   const pick = (name) => {
@@ -1426,6 +1431,12 @@ function openProjectMenu() {
     }
   };
   list.onclick = (e) => {
+    const orchestrate = e.target.closest("[data-orchestrate]");
+    if (orchestrate) {
+      closeProjectMenu();
+      const tab = tabOfProject(orchestrate.dataset.orchestrate);
+      return openOrchestrator(tab.machine, projectPathOf(tab));
+    }
     const gear = e.target.closest("[data-gear]");
     if (gear) {
       closeProjectMenu();
@@ -1458,6 +1469,15 @@ projectFilter.onclick = () => (projectMenu.hidden ? openProjectMenu() : closePro
 window.addEventListener("mousedown", (e) => !projectMenu.hidden && !e.target.closest("#project-menu, #project-filter") && closeProjectMenu(), true);
 
 const projectCount = () => projectGroups().length;
+async function openOrchestrator(machine, path) {
+  if (narrow(768)) toggleSidebar(false);
+  try {
+    const tab = await revealTab(machine, await callOn(machine, { cmd: "open_orchestrator", path }));
+    if (!tab.view.running) await startTab(tab);
+  } catch (e) {
+    tell(`Couldn't open the orchestrator: ${esc(e)}`, 6000);
+  }
+}
 /** A new session in the thread's folder, on its machine, without the picker. */
 async function newThreadIn(tab) {
   if (!tab) return toggleProjects();

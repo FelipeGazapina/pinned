@@ -72,6 +72,8 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("PairCode".into(), schemas::<PairCode>());
     outbound.insert("TabView".into(), schemas::<TabView>());
     outbound.insert("ProjectView".into(), schemas::<ProjectView>());
+    outbound.insert("Memory".into(), schemas::<crate::memory::Memory>());
+    outbound.insert("MemoryStatus".into(), schemas::<crate::memory::Status>());
     // Hub replies travel as `serde_json::Value`. These are the named structs a handler builds one from.
     outbound.insert("Settings".into(), schemas::<Settings>());
     outbound.insert("LinearAccount".into(), schemas::<linear::Account>());

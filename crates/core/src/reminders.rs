@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
-use crate::agent::{Message, When, SOCK_ENV, TAB_ENV, TASK_ENV};
+use crate::agent::{Message, ProjectTool, Role, When, ROLE_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::delegate::{self, Mode};
 use crate::ipc::UnixStream;
 
@@ -19,7 +19,8 @@ const DELEGATE_TOOL: &str = "delegate_task";
 const STATUS_TOOL: &str = "task_status";
 const CANCEL_TASK_TOOL: &str = "task_cancel";
 pub const SERVER: &str = "pinned";
-const NO_REMINDERS: &str = "--no-reminders";
+/// Leaves the reminders tools out, on a machine with no desktop to show them on.
+pub const NO_REMINDERS: &str = "--no-reminders";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Reminder {
@@ -121,21 +122,20 @@ fn next_at<Tz: TimeZone>(now: &DateTime<Tz>, time: NaiveTime) -> Option<DateTime
     })
 }
 
-// Claude Code expands `${PINNED_SOCK}` from the session's own environment. A node passes
-// `reminders: false` so the same server can delegate without offering desktop notifications.
+// Claude Code expands `${PINNED_SOCK}` from the session's own environment, and `${PINNED_TAB:-}`,
+// `${PINNED_TASK:-}`, and `${PINNED_ROLE:-}` to nothing where they are unset. A node passes
+// `reminders: false` so the same server delegates without offering desktop notifications.
 pub fn write_mcp_config(path: &Path, exe: &Path, reminders: bool) -> std::io::Result<()> {
-    let mut args = vec![SUBCOMMAND.to_owned()];
-    if !reminders {
-        args.push(NO_REMINDERS.to_owned());
-    }
+    let args = if reminders { vec![SUBCOMMAND] } else { vec![SUBCOMMAND, NO_REMINDERS] };
     let config = json!({
         "mcpServers": { SERVER: {
             "command": exe,
             "args": args,
             "env": {
                 SOCK_ENV: format!("${{{SOCK_ENV}}}"),
-                TAB_ENV: format!("${{{TAB_ENV}}}"),
-                TASK_ENV: format!("${{{TASK_ENV}}}"),
+                TAB_ENV: format!("${{{TAB_ENV}:-}}"),
+                TASK_ENV: format!("${{{TASK_ENV}:-}}"),
+                ROLE_ENV: format!("${{{ROLE_ENV}:-}}"),
             },
         } }
     });
@@ -143,13 +143,16 @@ pub fn write_mcp_config(path: &Path, exe: &Path, reminders: bool) -> std::io::Re
 }
 
 pub fn permissions() -> Vec<String> {
+    let project = project_tools().map(|(_, tool)| tool["name"].as_str().unwrap().to_owned());
     [TOOL, LIST_TOOL, CANCEL_TOOL, CAPABILITIES_TOOL, DELEGATE_TOOL, STATUS_TOOL, CANCEL_TASK_TOOL]
+        .map(String::from)
+        .into_iter()
+        .chain(project)
         .map(|tool| format!("mcp__{SERVER}__{tool}"))
-        .into()
+        .collect()
 }
 
-pub fn serve(args: &[String]) {
-    let reminders = !args.iter().any(|arg| arg == NO_REMINDERS);
+pub fn serve(reminders: bool) {
     let stdin = std::io::stdin();
     let _ = serve_io(reminders, stdin.lock(), std::io::stdout());
 }
@@ -178,7 +181,7 @@ pub fn serve_io(reminders: bool, input: impl BufRead, output: impl Write + Send 
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": SERVER, "version": env!("CARGO_PKG_VERSION") },
             })),
-            Some("tools/list") => Ok(json!({ "tools": tool_definitions(reminders) })),
+            Some("tools/list") => Ok(json!({ "tools": tool_definitions(reminders, std::env::var(ROLE_ENV).ok().as_deref().and_then(Role::parse)) })),
             Some("ping") => Ok(json!({})),
             other => Err(format!("method not found: {other:?}")),
         };
@@ -202,8 +205,16 @@ fn write_msg(output: &Mutex<impl Write>, value: &Value) -> std::io::Result<()> {
     output.flush()
 }
 
-fn tool_definitions(reminders: bool) -> Value {
-    let mut tools = vec![
+fn tool_definitions(reminders: bool, role: Option<Role>) -> Value {
+    let project = project_tools().into_iter().filter(|(orchestrator_only, _)| !orchestrator_only || role == Some(Role::Orchestrator)).map(|(_, tool)| tool);
+    let mut tools = if reminders { reminder_tools() } else { vec![] };
+    tools.extend(delegation_tools());
+    tools.extend(project);
+    Value::Array(tools)
+}
+
+fn delegation_tools() -> Vec<Value> {
+    vec![
         json!({
             "name": CAPABILITIES_TOOL,
             "description": "Call this before the first delegate_task and pick providerInstanceId, model, and options from it. It lists the accounts this machine can run a child agent on, and the access this session inherits.",
@@ -284,15 +295,18 @@ fn tool_definitions(reminders: bool) -> Value {
                 "required": ["taskId"],
             },
         }),
-    ];
-    if reminders {
-        tools.insert(0, remind_definition());
-        tools.insert(1, json!({
+    ]
+}
+
+fn reminder_tools() -> Vec<Value> {
+    vec![
+        remind_definition(),
+        json!({
             "name": LIST_TOOL,
             "description": "List the reminders still pending, each with its id, time and message.",
             "inputSchema": { "type": "object", "properties": {} },
-        }));
-        tools.insert(2, json!({
+        }),
+        json!({
             "name": CANCEL_TOOL,
             "description": "Cancel a pending reminder by the id list_reminders or remind_me gave.",
             "inputSchema": {
@@ -300,9 +314,68 @@ fn tool_definitions(reminders: bool) -> Value {
                 "properties": { "id": { "type": "integer", "description": "The reminder's id." } },
                 "required": ["id"],
             },
-        }));
-    }
-    Value::Array(tools)
+        }),
+    ]
+}
+
+/// Each project tool, named as `ProjectTool` tags it, and whether only an orchestrator has it.
+/// Every session gets the memory tools; one outside a project is told it has no memory.
+fn project_tools() -> [(bool, serde_json::Value); 5] {
+    let no_args = serde_json::json!({ "type": "object", "properties": {} });
+    [
+        (true, serde_json::json!({
+            "name": "delegate",
+            "description": "Start a worker thread on a task. It works in its own git worktree when the project is a repository, and you get a message when it finishes or needs input. Returns the worker's tab id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "A self-contained brief: the goal, the files involved, the constraints, and how to verify the result." },
+                    "title": { "type": "string", "description": "A few words naming the task, shown on the worker's thread." },
+                },
+                "required": ["task"],
+            },
+        })),
+        (true, serde_json::json!({
+            "name": "agents",
+            "description": "List your workers, each with its tab id, title, status and folder.",
+            "inputSchema": no_args,
+        })),
+        (false, serde_json::json!({
+            "name": "memory_search",
+            "description": "Search this project's memory: facts saved by earlier sessions, such as the user's preferences, decisions, conventions and how the code works. Matches by words and by meaning, in any language. Returns one memory per line as [id] title: text.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What you want to know, in a few words or a question. Empty lists the latest memories." },
+                    "limit": { "type": "integer", "description": "At most this many memories; 8 when left out." },
+                },
+                "required": ["query"],
+            },
+        })),
+        (false, serde_json::json!({
+            "name": "memory_save",
+            "description": "Save a durable fact about this project for later sessions: a user preference, a decision, a convention or an architecture fact. One fact per memory. With id, replaces that memory instead. A memory that repeats an existing one is not saved; you get the existing one's id to update.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "A few words naming the subject." },
+                    "text": { "type": "string", "description": "The fact, in one to three sentences." },
+                    "kind": { "type": "string", "description": "preference, decision, convention or fact." },
+                    "id": { "type": "integer", "description": "The memory to replace." },
+                },
+                "required": ["title", "text"],
+            },
+        })),
+        (false, serde_json::json!({
+            "name": "memory_forget",
+            "description": "Remove a memory that is wrong or no longer holds, by its id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "integer", "description": "The memory's id." } },
+                "required": ["id"],
+            },
+        })),
+    ]
 }
 
 fn remind_definition() -> Value {
@@ -356,7 +429,8 @@ fn call(params: &Value, reminders: bool, output: &Mutex<impl Write>) -> Value {
             id,
             reason: args["reason"].as_str().unwrap_or("the parent asked").to_owned(),
         }),
-        _ => Err(format!("unknown tool {name}")),
+        "" => Err(format!("unknown tool {}", params["name"])),
+        name => project_request(name, args, std::env::var(TAB_ENV).ok()),
     };
     tool_result(request.and_then(|request| send(&request)))
 }
@@ -461,6 +535,14 @@ fn tool_result(reply: Result<String, String>) -> Value {
         Err(text) => (text, true),
     };
     json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
+}
+
+fn project_request(name: &str, args: &serde_json::Value, tab: Option<String>) -> Result<Message, String> {
+    let mut tool = if args.is_object() { args.clone() } else { serde_json::json!({}) };
+    tool["name"] = name.into();
+    let tool: ProjectTool = serde_json::from_value(tool).map_err(|e| format!("{name}: {e}"))?;
+    let tab = tab.filter(|t| !t.is_empty()).ok_or_else(|| format!("{TAB_ENV} is not set: run this inside a pinned tab"))?;
+    Ok(Message::Project { tab, tool })
 }
 
 fn send(message: &Message) -> Result<String, String> {
@@ -568,7 +650,7 @@ mod tests {
 
     #[test]
     fn delegate_task_names_every_argument() {
-        let tools = tool_definitions(true);
+        let tools = tool_definitions(true, None);
         let tool = tools.as_array().unwrap().iter().find(|tool| tool["name"] == "delegate_task").unwrap();
         let props = tool["inputSchema"]["properties"].as_object().unwrap();
         let mut names: Vec<_> = props.keys().cloned().collect();
@@ -811,4 +893,38 @@ fn restore_var(name: &str, value: Option<String>) {
         None => std::env::remove_var(name),
     }
 }
+
+    #[test]
+    fn a_session_gets_the_project_tools_its_role_has() {
+        let names = |role| tool_definitions(true, role).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
+        let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel"];
+        let memory = ["memory_search", "memory_save", "memory_forget"];
+        assert_eq!(names(None), [&reminders[..], &delegation, &memory].concat());
+        assert_eq!(names(Some(Role::Worker)), names(None));
+        assert_eq!(names(Some(Role::Orchestrator)), [&reminders[..], &delegation, &["delegate", "agents"], &memory].concat());
+        let on_a_node = tool_definitions(false, None).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(on_a_node, [&delegation[..], &memory].concat());
+        assert_eq!(permissions()[7..], ["mcp__pinned__delegate", "mcp__pinned__agents", "mcp__pinned__memory_search", "mcp__pinned__memory_save", "mcp__pinned__memory_forget"]);
+
+        let ask = |name, args, tab: Option<&str>| project_request(name, &args, tab.map(Into::into)).map(|m| serde_json::to_string(&m).unwrap());
+        assert_eq!(ask("agents", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"agents"}}"#.into()));
+        assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
+        assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({}), Some("tab-2")), Err("delegate: missing field `task`".into()));
+        assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
+    }
+
+    #[test]
+    fn the_mcp_server_hears_which_tab_and_role_runs_it() {
+        let file = std::env::temp_dir().join(format!("pinned-mcp-config-{}.json", std::process::id()));
+        write_mcp_config(&file, Path::new("/opt/pinned/bin/pinned"), true).unwrap();
+        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["pinned"]["env"], serde_json::json!({ "PINNED_SOCK": "${PINNED_SOCK}", "PINNED_TAB": "${PINNED_TAB:-}", "PINNED_TASK": "${PINNED_TASK:-}", "PINNED_ROLE": "${PINNED_ROLE:-}" }));
+        assert_eq!(config["mcpServers"]["pinned"]["args"], serde_json::json!(["mcp"]));
+        write_mcp_config(&file, Path::new("/opt/pinned/bin/pinned"), false).unwrap();
+        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["pinned"]["args"], serde_json::json!(["mcp", "--no-reminders"]));
+        let _ = std::fs::remove_file(file);
+    }
 }

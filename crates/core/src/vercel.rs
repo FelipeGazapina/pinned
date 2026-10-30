@@ -4,10 +4,13 @@
 use crate::connectors::{Ask, Question};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::time::Duration;
 
 const API: &str = "https://ai-gateway.vercel.sh/v1";
 const CALL_WAIT: Duration = Duration::from_secs(60);
+/// The one question a router asks: which category fits.
+const CATEGORY: &str = "category";
 
 /// What the Connectors card shows of the key pinned keeps.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -125,7 +128,8 @@ fn models_from(body: &Value) -> Result<Vec<Model>, String> {
 fn kind_of_type(type_name: &str) -> Option<Kind> {
     match type_name {
         "language" => Some(Kind::Chat),
-        "evaluation" => Some(Kind::Decision),
+        // The gateway types them `evaluation`; its docs now say `decision`.
+        "evaluation" | "decision" => Some(Kind::Decision),
         _ => None,
     }
 }
@@ -371,9 +375,80 @@ fn choice_spelling(question: &Question, raw: &str) -> Option<String> {
         .cloned()
 }
 
+#[derive(Deserialize)]
+struct Evaluation {
+    answers: HashMap<String, Choice>,
+}
+
+#[derive(Deserialize)]
+struct Choice {
+    choice: Option<String>,
+    #[serde(default)]
+    probabilities: HashMap<String, f64>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Chosen {
+    /// The position of the choice it picked.
+    pub index: usize,
+    /// How likely it found each choice, by position. A choice it gave no probability gets 0.
+    pub probabilities: Vec<f64>,
+}
+
+/// Asks the decision `model` which of `choices`, as (name, description), fits `state`. Answers
+/// positions, so the caller takes the choice without looking the name up again.
+pub async fn choose(key: &str, model: &str, instructions: &str, choices: &[(&str, &str)], state: &impl Serialize) -> Result<Chosen, String> {
+    let criteria: serde_json::Map<String, Value> = choices.iter().map(|(name, description)| (name.to_string(), json!(description))).collect();
+    let body = json!({
+        "model": model,
+        "state": state,
+        "questions": { CATEGORY: { "type": "choice", "instructions": instructions, "criteria": criteria } },
+    });
+    chosen(call(reqwest::Method::POST, "/evaluate", Some(key), Some(&body)).await?, choices)
+}
+
+fn chosen(answer: Value, choices: &[(&str, &str)]) -> Result<Chosen, String> {
+    let evaluation: Evaluation = serde_json::from_value(answer).map_err(|e| format!("Vercel AI Gateway: sent a bad answer: {e}"))?;
+    let answer = evaluation.answers.get(CATEGORY).ok_or("the decision model gave no answer")?;
+    let choice = answer.choice.as_deref().ok_or("the decision model gave no answer")?;
+    let index = choices
+        .iter()
+        .position(|(name, _)| *name == choice)
+        .ok_or_else(|| format!("the decision model answered {choice:?}, which is not one of the categories"))?;
+    let probabilities = choices.iter().map(|(name, _)| answer.probabilities.get(*name).copied().unwrap_or(0.0)).collect();
+    Ok(Chosen { index, probabilities })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CHOICES: [(&str, &str); 3] = [("error", "a bug report"), ("doubt", "a question"), ("ignore", "anything else")];
+
+    #[test]
+    fn the_answer_is_the_position_of_the_category_the_model_chose() {
+        let answer = json!({
+            "model": "typesafe-ai/jev",
+            "answers": { "category": { "type": "choice", "choice": "doubt", "probabilities": { "error": 0.02, "doubt": 0.97, "ignore": 0.01 } } },
+            "usage": { "input_tokens": 80 },
+        });
+        assert_eq!(chosen(answer, &CHOICES), Ok(Chosen { index: 1, probabilities: vec![0.02, 0.97, 0.01] }));
+        assert_eq!(
+            chosen(json!({ "answers": { "category": { "type": "choice", "choice": "error", "probabilities": { "error": 0.6 } } } }), &CHOICES),
+            Ok(Chosen { index: 0, probabilities: vec![0.6, 0.0, 0.0] }),
+            "a choice the model gave no probability is unlikely"
+        );
+        assert_eq!(chosen(json!({ "answers": {} }), &CHOICES), Err("the decision model gave no answer".into()));
+        assert_eq!(
+            chosen(json!({ "answers": { "category": { "type": "choice", "choice": null } } }), &CHOICES),
+            Err("the decision model gave no answer".into())
+        );
+        assert_eq!(
+            chosen(json!({ "answers": { "category": { "type": "choice", "choice": "spam" } } }), &CHOICES),
+            Err("the decision model answered \"spam\", which is not one of the categories".into())
+        );
+        assert!(chosen(json!({ "error": { "message": "nope" } }), &CHOICES).unwrap_err().starts_with("Vercel AI Gateway: sent a bad answer"));
+    }
 
     fn two_questions() -> Ask {
         Ask {

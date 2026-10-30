@@ -731,6 +731,129 @@
                 ]
               },
               {
+                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_orchestrator"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_search"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "query"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` saved. With `id`, replaces that memory. Refused when the project\nalready has a memory with the same title or nearly the same meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_save"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "title",
+                  "text"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` removed.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_forget"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id"
+                ]
+              },
+              {
+                "description": "`memory::Status`: how many memories the project has and whether search also matches by meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_status"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
                 "description": "The new tab's id, running the CLI's login for the account in the account's home.",
                 "type": "object",
                 "properties": {
@@ -4100,6 +4223,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -4149,6 +4279,7 @@
               "fix",
               "created",
               "followed",
+              "paged",
               "proof",
               "machine",
               "repo",
@@ -4190,7 +4321,107 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories",
+              "fallback"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "workflow",
+              "mention"
             ]
           },
           "Effort": {
@@ -4298,6 +4529,21 @@
             "required": [
               "cursor",
               "replied"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -5141,6 +5387,129 @@
                       "string",
                       "null"
                     ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_orchestrator"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_search"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "query"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` saved. With `id`, replaces that memory. Refused when the project\nalready has a memory with the same title or nearly the same meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_save"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "title",
+                  "text"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` removed.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_forget"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id"
+                ]
+              },
+              {
+                "description": "`memory::Status`: how many memories the project has and whether search also matches by meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_status"
+                  },
+                  "path": {
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -8473,6 +8842,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -8550,7 +8926,104 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description"
             ]
           },
           "Effort": {
@@ -8657,6 +9130,21 @@
             },
             "required": [
               "cursor"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -9153,6 +9641,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "role": {
+                "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Role"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -9259,6 +9758,21 @@
                 "format": "double"
               }
             }
+          },
+          "Role": {
+            "description": "The part a session plays in its project's orchestration.",
+            "oneOf": [
+              {
+                "description": "Hands every request to workers.",
+                "type": "string",
+                "const": "orchestrator"
+              },
+              {
+                "description": "Does one task the orchestrator delegated.",
+                "type": "string",
+                "const": "worker"
+              }
+            ]
           },
           "AgentEvent": {
             "type": "object",
@@ -10169,6 +10683,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -10218,6 +10739,7 @@
               "fix",
               "created",
               "followed",
+              "paged",
               "proof",
               "machine",
               "repo",
@@ -10259,7 +10781,107 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories",
+              "fallback"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "workflow",
+              "mention"
             ]
           },
           "Effort": {
@@ -10367,6 +10989,21 @@
             "required": [
               "cursor",
               "replied"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -10848,6 +11485,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "role": {
+                "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Role"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -10947,6 +11595,21 @@
                 "format": "double"
               }
             }
+          },
+          "Role": {
+            "description": "The part a session plays in its project's orchestration.",
+            "oneOf": [
+              {
+                "description": "Hands every request to workers.",
+                "type": "string",
+                "const": "orchestrator"
+              },
+              {
+                "description": "Does one task the orchestrator delegated.",
+                "type": "string",
+                "const": "worker"
+              }
+            ]
           },
           "AgentEvent": {
             "type": "object",
@@ -11842,6 +12505,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -11919,7 +12589,104 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description"
             ]
           },
           "Effort": {
@@ -12026,6 +12793,21 @@
             },
             "required": [
               "cursor"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -12436,6 +13218,13 @@
             },
             "default": {}
           },
+          "paged": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/Paged"
+            },
+            "default": {}
+          },
           "proof": {
             "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
             "type": "boolean",
@@ -12485,6 +13274,7 @@
           "fix",
           "created",
           "followed",
+          "paged",
           "proof",
           "machine",
           "repo",
@@ -12526,7 +13316,107 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories",
+              "fallback"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "workflow",
+              "mention"
             ]
           },
           "Effort": {
@@ -12634,6 +13524,21 @@
             "required": [
               "cursor",
               "replied"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -12827,6 +13732,13 @@
             },
             "default": {}
           },
+          "paged": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/Paged"
+            },
+            "default": {}
+          },
           "proof": {
             "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
             "type": "boolean",
@@ -12904,7 +13816,104 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description"
             ]
           },
           "Effort": {
@@ -13011,6 +14020,21 @@
             },
             "required": [
               "cursor"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -13351,6 +14375,174 @@
           "online",
           "last_seen"
         ]
+      }
+    },
+    "Memory": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Memory",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "What sort of fact it is, such as a preference, a decision or a convention.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created": {
+            "description": "Unix seconds.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "text",
+          "created",
+          "updated"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Memory",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "What sort of fact it is, such as a preference, a decision or a convention.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created": {
+            "description": "Unix seconds.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "text",
+          "created",
+          "updated"
+        ]
+      }
+    },
+    "MemoryStatus": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Status",
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "vectors": {
+            "$ref": "#/$defs/VectorSearch"
+          }
+        },
+        "required": [
+          "count",
+          "vectors"
+        ],
+        "$defs": {
+          "VectorSearch": {
+            "description": "Whether a search also matches by meaning, as the Memory panel shows it.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ready"
+                ]
+              },
+              {
+                "description": "The model is downloading or loading; until then, search is by words.",
+                "type": "string",
+                "const": "loading"
+              },
+              {
+                "description": "By words only: the model is not needed yet, or failed to load.",
+                "type": "string",
+                "const": "off"
+              }
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Status",
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "vectors": {
+            "$ref": "#/$defs/VectorSearch"
+          }
+        },
+        "required": [
+          "count",
+          "vectors"
+        ],
+        "$defs": {
+          "VectorSearch": {
+            "description": "Whether a search also matches by meaning, as the Memory panel shows it.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ready"
+                ]
+              },
+              {
+                "description": "The model is downloading or loading; until then, search is by words.",
+                "type": "string",
+                "const": "loading"
+              },
+              {
+                "description": "By words only: the model is not needed yet, or failed to load.",
+                "type": "string",
+                "const": "off"
+              }
+            ]
+          }
+        }
       }
     },
     "PairCode": {
@@ -14034,6 +15226,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -14083,6 +15282,7 @@
               "fix",
               "created",
               "followed",
+              "paged",
               "proof",
               "machine",
               "repo",
@@ -14124,7 +15324,107 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories",
+              "fallback"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "workflow",
+              "mention"
             ]
           },
           "Effort": {
@@ -14232,6 +15532,21 @@
             "required": [
               "cursor",
               "replied"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -14604,6 +15919,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -14681,7 +16003,104 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description"
             ]
           },
           "Effort": {
@@ -14788,6 +16207,21 @@
             },
             "required": [
               "cursor"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -15324,6 +16758,17 @@
                 "type": "null"
               }
             ]
+          },
+          "role": {
+            "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Role"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -15430,6 +16875,21 @@
                 "format": "double"
               }
             }
+          },
+          "Role": {
+            "description": "The part a session plays in its project's orchestration.",
+            "oneOf": [
+              {
+                "description": "Hands every request to workers.",
+                "type": "string",
+                "const": "orchestrator"
+              },
+              {
+                "description": "Does one task the orchestrator delegated.",
+                "type": "string",
+                "const": "worker"
+              }
+            ]
           }
         }
       },
@@ -15544,6 +17004,17 @@
                 "type": "null"
               }
             ]
+          },
+          "role": {
+            "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Role"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -15643,6 +17114,21 @@
                 "format": "double"
               }
             }
+          },
+          "Role": {
+            "description": "The part a session plays in its project's orchestration.",
+            "oneOf": [
+              {
+                "description": "Hands every request to workers.",
+                "type": "string",
+                "const": "orchestrator"
+              },
+              {
+                "description": "Does one task the orchestrator delegated.",
+                "type": "string",
+                "const": "worker"
+              }
+            ]
           }
         }
       }
@@ -15919,6 +17405,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "role": {
+                "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Role"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -16025,6 +17522,21 @@
                 "format": "double"
               }
             }
+          },
+          "Role": {
+            "description": "The part a session plays in its project's orchestration.",
+            "oneOf": [
+              {
+                "description": "Hands every request to workers.",
+                "type": "string",
+                "const": "orchestrator"
+              },
+              {
+                "description": "Does one task the orchestrator delegated.",
+                "type": "string",
+                "const": "worker"
+              }
+            ]
           },
           "Reply": {
             "description": "The answer to the call that carried `id`: `{\"id\":4,\"ok\":…}` or `{\"id\":4,\"err\":\"…\"}`.",
@@ -16551,6 +18063,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -16600,6 +18119,7 @@
               "fix",
               "created",
               "followed",
+              "paged",
               "proof",
               "machine",
               "repo",
@@ -16641,7 +18161,107 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories",
+              "fallback"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "workflow",
+              "mention"
             ]
           },
           "Effort": {
@@ -16749,6 +18369,21 @@
             "required": [
               "cursor",
               "replied"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -17141,6 +18776,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "role": {
+                "description": "The tab is its project's orchestrator, or a worker the orchestrator started.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Role"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -17240,6 +18886,21 @@
                 "format": "double"
               }
             }
+          },
+          "Role": {
+            "description": "The part a session plays in its project's orchestration.",
+            "oneOf": [
+              {
+                "description": "Hands every request to workers.",
+                "type": "string",
+                "const": "orchestrator"
+              },
+              {
+                "description": "Does one task the orchestrator delegated.",
+                "type": "string",
+                "const": "worker"
+              }
+            ]
           },
           "Reply": {
             "description": "The answer to the call that carried `id`: `{\"id\":4,\"ok\":…}` or `{\"id\":4,\"err\":\"…\"}`.",
@@ -17750,6 +19411,13 @@
                 },
                 "default": {}
               },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                },
+                "default": {}
+              },
               "proof": {
                 "description": "Whether a session that opens a pull request must prove it works, with a Playwright video.",
                 "type": "boolean",
@@ -17827,7 +19495,104 @@
                   "kind",
                   "channel"
                 ]
+              },
+              {
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "decide": {
+                    "$ref": "#/$defs/Decide"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel",
+                  "decide"
+                ]
+              },
+              {
+                "description": "A Slack thread a message workflow's category hands it, which its session answers as a\nmention's session would. It watches no channel of its own.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
+            ]
+          },
+          "Decide": {
+            "description": "How a message workflow sorts each message, and where each category sends it.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "categories": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Category"
+                }
+              },
+              "fallback": {
+                "description": "The category, by name, that takes a message the model is unsure about. None keeps its guess.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "categories"
+            ]
+          },
+          "Category": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the decision model reads to tell this category from the others.",
+                "type": "string"
+              },
+              "workflow": {
+                "description": "The id of the `slack-mention` or `called` workflow that then owns the thread. None stops\nat the category.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mention": {
+                "description": "A Slack user group, by handle or id, paged in the thread of each message in the category.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "name",
+              "description"
             ]
           },
           "Effort": {
@@ -17934,6 +19699,21 @@
             },
             "required": [
               "cursor"
+            ]
+          },
+          "Paged": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "ping": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "at",
+              "ping"
             ]
           },
           "Ask": {
@@ -18801,6 +20581,129 @@
                   "cmd",
                   "path",
                   "account"
+                ]
+              },
+              {
+                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_orchestrator"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_search"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "query"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` saved. With `id`, replaces that memory. Refused when the project\nalready has a memory with the same title or nearly the same meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_save"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "title",
+                  "text"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` removed.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_forget"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id"
+                ]
+              },
+              {
+                "description": "`memory::Status`: how many memories the project has and whether search also matches by meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_status"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
                 ]
               },
               {
@@ -22176,6 +24079,129 @@
                       "string",
                       "null"
                     ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "open_orchestrator"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path"
+                ]
+              },
+              {
+                "description": "`Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the\nlatest ones for an empty query.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_search"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "query"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` saved. With `id`, replaces that memory. Refused when the project\nalready has a memory with the same title or nearly the same meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_save"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "title",
+                  "text"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` removed.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_forget"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id"
+                ]
+              },
+              {
+                "description": "`memory::Status`: how many memories the project has and whether search also matches by meaning.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_status"
+                  },
+                  "path": {
+                    "type": "string"
                   }
                 },
                 "required": [

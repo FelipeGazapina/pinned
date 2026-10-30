@@ -6,6 +6,7 @@ use crate::wire::{MachineId, RunSpec};
 use crate::{github, linear, slack, upstash, vercel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,9 @@ const CLAUDE_TOKEN: &str = "claude-oauth-token";
 const SLACK_OVERLAP: chrono::Duration = chrono::Duration::seconds(60);
 /// A mention older than this when pinned picks it up arrived while pinned was closed.
 const OFFLINE_AFTER: chrono::Duration = chrono::Duration::minutes(5);
+const MIN_CONFIDENCE_TO_PAGE: f64 = 0.85;
+const UNSURE_BELOW: f64 = 0.6;
+const PAGE_COOLDOWN: chrono::Duration = chrono::Duration::minutes(30);
 
 #[derive(Serialize, Deserialize, Clone, Copy, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -76,21 +80,141 @@ fn fix_or_auto_fix<'de, D: Deserializer<'de>>(d: D) -> Result<Fix, D::Error> {
     })
 }
 
-#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Trigger {
     /// A Linear issue created with this label.
     LinearLabel { label: String },
     /// A Slack message in this channel, by name or id, that mentions the bot.
     SlackMention { channel: String },
+    /// Every new message people start in this channel, by name or id, which a decision model sorts
+    /// into one of `decide`'s categories. The workflow has no session of its own.
+    SlackMessage { channel: String, decide: Decide },
+    /// A Slack thread a message workflow's category hands it, which its session answers as a
+    /// mention's session would. It watches no channel of its own.
+    Called,
 }
 
 impl Trigger {
     fn integration(&self) -> &'static str {
         match self {
             Trigger::LinearLabel { .. } => "Linear",
-            Trigger::SlackMention { .. } => "Slack",
+            Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } | Trigger::Called => "Slack",
         }
+    }
+
+    fn answers_threads(&self) -> bool {
+        match self {
+            Trigger::SlackMention { .. } | Trigger::Called => true,
+            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } => false,
+        }
+    }
+}
+
+/// How a message workflow sorts each message, and where each category sends it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Decide {
+    /// A decision model on the Vercel AI Gateway, such as `typesafe-ai/jev`.
+    pub model: String,
+    pub instructions: String,
+    pub categories: Vec<Category>,
+    /// The category, by name, that takes a message the model is unsure about. None keeps its guess.
+    #[serde(default)]
+    pub fallback: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Category {
+    pub name: String,
+    /// What the decision model reads to tell this category from the others.
+    pub description: String,
+    /// The id of the `slack-mention` or `called` workflow that then owns the thread. None stops
+    /// at the category.
+    pub workflow: Option<String>,
+    /// A Slack user group, by handle or id, paged in the thread of each message in the category.
+    #[serde(default)]
+    pub mention: Option<String>,
+}
+
+impl Decide {
+    fn choices(&self, workflow: &str) -> Result<Vec<(&str, &str)>, String> {
+        if self.model.trim().is_empty() {
+            return Err(format!("workflow {workflow:?} has no decision model: pick one in its settings"));
+        }
+        if self.categories.is_empty() {
+            return Err(format!("workflow {workflow:?} has no categories to sort messages into: add one in its settings"));
+        }
+        if let Some(name) = &self.fallback {
+            let unsure = format!("workflow {workflow:?} sends the messages its decision model is unsure about to {name:?}");
+            match self.fallback() {
+                None => return Err(format!("{unsure}, which is not one of its categories: pick another one in its settings")),
+                Some(i) if self.categories[i].group().is_some() => {
+                    return Err(format!(
+                        "{unsure}, which pings a group: the fallback can't ping a group, so pick a category without a mention in its settings"
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(self.categories.iter().map(|c| (c.name.as_str(), c.description.as_str())).collect())
+    }
+
+    fn fallback(&self) -> Option<usize> {
+        let name = self.fallback.as_deref()?;
+        self.categories.iter().position(|c| c.name == name)
+    }
+
+    fn pick(&self, chosen: &vercel::Chosen) -> Pick {
+        let quiet = |i: &usize| self.categories[*i].group().is_none();
+        let (guess, likelihood) = (chosen.index, chosen.probabilities[chosen.index]);
+        if let Some(fallback) = self.fallback().filter(quiet) {
+            if likelihood < UNSURE_BELOW {
+                return Pick::Unsure { guess, likelihood, fallback };
+            }
+        }
+        if quiet(&guess) || likelihood >= MIN_CONFIDENCE_TO_PAGE {
+            return Pick::Sure(guess);
+        }
+        match (0..self.categories.len()).filter(quiet).reduce(|best, i| if chosen.probabilities[i] > chosen.probabilities[best] { i } else { best }) {
+            Some(quiet) => Pick::Downgraded(quiet),
+            None => Pick::Nowhere,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Pick {
+    Sure(usize),
+    Unsure { guess: usize, likelihood: f64, fallback: usize },
+    Downgraded(usize),
+    Nowhere,
+}
+
+impl Pick {
+    fn category(&self) -> Option<usize> {
+        match *self {
+            Pick::Sure(i) | Pick::Downgraded(i) | Pick::Unsure { fallback: i, .. } => Some(i),
+            Pick::Nowhere => None,
+        }
+    }
+
+    fn note(&self, categories: &[Category], router: &str) -> String {
+        match *self {
+            Pick::Sure(i) | Pick::Downgraded(i) => routed_note(router, &categories[i].name),
+            Pick::Unsure { guess, likelihood, fallback } => format!(
+                "\n\nThe decision model was unsure (it guessed {:?} at {:.0}%), so workflow {router:?} handed this thread over as {:?}.",
+                categories[guess].name,
+                likelihood * 100.0,
+                categories[fallback].name
+            ),
+            Pick::Nowhere => String::new(),
+        }
+    }
+}
+
+impl Category {
+    fn group(&self) -> Option<&str> {
+        self.mention.as_deref().map(str::trim).filter(|g| !g.is_empty())
     }
 }
 
@@ -158,6 +282,8 @@ pub struct Connector {
     /// How far each handled Slack thread was passed on to its session, by `<channel id>:<thread ts>`.
     #[serde(default)]
     pub followed: BTreeMap<String, Followed>,
+    #[serde(default)]
+    pub paged: BTreeMap<String, Paged>,
     /// Whether a session that opens a pull request must prove it works, with a Playwright video.
     #[serde(default = "on")]
     pub proof: bool,
@@ -175,6 +301,13 @@ pub struct Connector {
 
 fn on() -> bool {
     true
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Paged {
+    pub at: String,
+    pub ping: bool,
 }
 
 /// Where a workflow's sessions run. Kept under the connector's original `machine` key: a machine
@@ -320,17 +453,43 @@ impl Connector {
         Some(github::clone_url(&self.repo)).filter(|r| !r.is_empty())
     }
 
-    /// Moves a Slack connector's watermark up to `watermark`, and answers whether it moved. A check
-    /// that found a mention leaves it where it is: the mention's run may find no machine, and
-    /// `unclaim` alone doesn't bring back a mention the watermark has passed. Once a session takes
-    /// the mention it is handled, and the next check moves the watermark on.
-    fn advance(&mut self, watermark: DateTime<Utc>, mentioned: bool) -> bool {
+    fn advance(&mut self, watermark: DateTime<Utc>, opening: bool) -> bool {
+        let watched = match self.trigger {
+            Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } => true,
+            Trigger::LinearLabel { .. } | Trigger::Called => false,
+        };
         let behind = DateTime::parse_from_rfc3339(&self.since).map_or(true, |since| since < watermark);
-        if !matches!(self.trigger, Trigger::SlackMention { .. }) || !behind || mentioned {
+        if !watched || !behind || opening {
             return false;
         }
         self.since = watermark.to_rfc3339();
         true
+    }
+
+    fn escalation_reply(&self, channel: &str, thread: &str, paging: Paging, now: DateTime<Utc>) -> Option<Reply> {
+        if self.paged.contains_key(&thread_key(channel, thread)) {
+            return None;
+        }
+        Some(match self.recent_page(channel, now) {
+            Some(paged) => Reply::Already { handle: paging.handle, thread: paged },
+            None => Reply::Ping(paging.ping),
+        })
+    }
+
+    fn record_escalation(&mut self, channel: &str, thread: &str, reply: &Reply, now: DateTime<Utc>) {
+        let ping = matches!(reply, Reply::Ping(_));
+        self.paged.insert(thread_key(channel, thread), Paged { at: now.to_rfc3339(), ping });
+    }
+
+    fn recent_page(&self, channel: &str, now: DateTime<Utc>) -> Option<String> {
+        let prefix = thread_key(channel, "");
+        self.paged
+            .iter()
+            .filter(|(_, paged)| paged.ping)
+            .filter_map(|(key, paged)| Some((key.strip_prefix(&prefix)?, DateTime::parse_from_rfc3339(&paged.at).ok()?)))
+            .filter(|(_, at)| now.signed_duration_since(*at) < PAGE_COOLDOWN)
+            .max_by_key(|(_, at)| *at)
+            .map(|(thread, _)| thread.to_owned())
     }
 
     /// A box has only the account its Claude token signs in.
@@ -405,6 +564,40 @@ impl Store {
         self.connectors.iter().find(|c| c.id == id).ok_or_else(|| "the workflow was deleted".into())
     }
 
+    fn handled(&self, key: &str) -> bool {
+        self.connectors.iter().any(|c| c.handled.iter().any(|h| h == key))
+    }
+
+    fn claim_thread(&mut self, connector: &str, key: &str) -> Option<&mut Connector> {
+        if self.handled(key) {
+            return None;
+        }
+        let c = self.connectors.iter_mut().find(|c| c.id == connector)?;
+        c.handled.push(key.to_owned());
+        Some(c)
+    }
+
+    fn check_route(&self, router: &str, category: &str, workflow: &str) -> Result<(), String> {
+        let Some(target) = self.connectors.iter().find(|c| c.id == workflow) else {
+            return Err(format!(
+                "workflow {router:?} hands {category:?} messages to a workflow that was deleted: pick another one for the category in its settings"
+            ));
+        };
+        if !target.enabled {
+            return Err(format!(
+                "workflow {router:?} hands {category:?} messages to workflow {:?}, which is off: turn it on, or pick another one for the category",
+                target.name
+            ));
+        }
+        if !target.trigger.answers_threads() {
+            return Err(format!(
+                "workflow {router:?} hands {category:?} messages to workflow {:?}, which does not answer Slack threads: pick a Slack mention or called workflow for the category",
+                target.name
+            ));
+        }
+        Ok(())
+    }
+
     /// The connector whose session works on the Linear issue `id`, with the thread it answers when a
     /// Slack thread's session filed or took the issue. An issue gets one session across connectors.
     fn working_on(&self, id: &str) -> Option<(&Connector, Option<&str>)> {
@@ -439,6 +632,95 @@ impl Store {
         c.created.insert(key, filed.clone());
         Ok(filed)
     }
+
+    fn page(&mut self, router: &str, channel: String, thread: String, paging: Option<Paging>, now: DateTime<Utc>, react: bool) -> Option<Page> {
+        let c = self.connectors.iter_mut().find(|c| c.id == router)?;
+        let reply = c.escalation_reply(&channel, &thread, paging?, now)?;
+        c.record_escalation(&channel, &thread, &reply, now);
+        Some(Page { channel, thread, reply, react })
+    }
+
+    fn settle(&mut self, checked: &[String], found: Vec<(String, Found)>, now: DateTime<Utc>, exe: &str) -> Settled {
+        let mut settled = Settled::default();
+        let watermark = now - SLACK_OVERLAP;
+        for connector in self.connectors.iter_mut().filter(|c| checked.contains(&c.id)) {
+            let opening = found.iter().any(|(id, f)| *id == connector.id && f.opens_session());
+            settled.needs_save |= connector.advance(watermark, opening);
+        }
+        for (id, found) in found {
+            if let Found::Issue(issue) = &found {
+                if self.working_on(&issue.id).is_some_and(|(owner, _)| owner.id != id) {
+                    continue;
+                }
+            }
+            let Some(connector) = self.connectors.iter_mut().find(|c| c.id == id && c.enabled) else { continue };
+            let key = found.key();
+            match found {
+                Found::Issue(issue) => {
+                    if connector.claim(key) {
+                        settled.work.push(Work::Run(run(connector, &issue, exe)));
+                        settled.needs_save = true;
+                    }
+                }
+                Found::Mention { channel, channel_name, mention, posts } => {
+                    let Some(connector) = self.claim_thread(&id, &key) else { continue };
+                    let cursor = posts.last().map_or_else(|| mention.thread.clone(), |p| p.ts.clone());
+                    connector.followed.insert(key, Followed { cursor, seen: None, replied: false });
+                    let note = mention_note(&mention, now);
+                    let run = slack_run(connector, &channel, &channel_name, &mention.thread, &posts, note, exe);
+                    settled.work.push(Work::Run(Run { mentioned: vec![mention.ts], ..run }));
+                    settled.needs_save = true;
+                }
+                Found::Stopped { channel, thread, page } => {
+                    if self.claim_thread(&id, &key).is_some() {
+                        settled.pages.extend(self.page(&id, channel, thread, page, now, true));
+                        settled.needs_save = true;
+                    }
+                }
+                Found::Routed { channel, channel_name, thread, category, workflow, note, posts, page } => {
+                    let router = connector.name.clone();
+                    if let Err(e) = self.check_route(&router, &category, &workflow) {
+                        if self.claim_thread(&id, &key).is_some() {
+                            settled.pages.extend(self.page(&id, channel, thread, page, now, true));
+                            settled.errors.push(e);
+                            settled.needs_save = true;
+                        }
+                        continue;
+                    }
+                    let Some(target) = self.claim_thread(&workflow, &key) else { continue };
+                    let cursor = posts.last().map_or_else(|| thread.clone(), |p| p.ts.clone());
+                    target.followed.insert(key, Followed { cursor, seen: None, replied: false });
+                    let run = slack_run(target, &channel, &channel_name, &thread, &posts, Some(&note), exe);
+                    settled.work.push(Work::Run(Run { mentioned: vec![thread.clone()], ..run }));
+                    settled.pages.extend(self.page(&id, channel, thread, page, now, false));
+                    settled.needs_save = true;
+                }
+                Found::Replies { replies, .. } if replies.posts.is_empty() => {
+                    if let Some(followed) = connector.followed.get_mut(&key) {
+                        followed.seen = Some(replies.newest);
+                        settled.needs_save = true;
+                    }
+                }
+                Found::Replies { channel, replies } => settled.work.push(Work::Delivery(Delivery {
+                    connector: id,
+                    channel,
+                    thread: replies.thread,
+                    messages: replies.posts.iter().map(reply_block).collect(),
+                    cursor: replies.newest,
+                    mentioned: replies.mentioned,
+                })),
+            }
+        }
+        settled
+    }
+}
+
+#[derive(Default)]
+struct Settled {
+    work: Vec<Work>,
+    pages: Vec<Page>,
+    needs_save: bool,
+    errors: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
@@ -540,6 +822,17 @@ enum Found {
     Mention { channel: String, channel_name: String, mention: slack::Mention, posts: Vec<slack::Post> },
     /// New messages in a thread that already started a session.
     Replies { channel: String, replies: slack::Replies },
+    Stopped { channel: String, thread: String, page: Option<Paging> },
+    Routed {
+        channel: String,
+        channel_name: String,
+        thread: String,
+        category: String,
+        workflow: String,
+        note: String,
+        posts: Vec<slack::Post>,
+        page: Option<Paging>,
+    },
 }
 
 impl Found {
@@ -549,12 +842,68 @@ impl Found {
             Found::Issue(issue) => issue.id.clone(),
             Found::Mention { channel, mention, .. } => thread_key(channel, &mention.thread),
             Found::Replies { channel, replies } => thread_key(channel, &replies.thread),
+            Found::Stopped { channel, thread, .. } | Found::Routed { channel, thread, .. } => thread_key(channel, thread),
+        }
+    }
+
+    fn opens_session(&self) -> bool {
+        match self {
+            Found::Issue(_) | Found::Mention { .. } | Found::Routed { .. } => true,
+            Found::Replies { .. } | Found::Stopped { .. } => false,
         }
     }
 }
 
 fn thread_key(channel: &str, thread: &str) -> String {
     format!("{channel}:{thread}")
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Paging {
+    ping: String,
+    handle: String,
+}
+
+#[derive(Debug, PartialEq)]
+struct Page {
+    channel: String,
+    thread: String,
+    reply: Reply,
+    react: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Reply {
+    Ping(String),
+    Already { handle: String, thread: String },
+}
+
+fn page_text(group: &str, category: &Category) -> String {
+    format!("{} {}: {}", slack::group_mention(group), category.name, category.description.trim())
+}
+
+/// What an escalation says when the group was paged for another thread a moment ago. It names the
+/// group in plain text, which notifies no one.
+fn already_text(handle: &str, permalink: &str) -> String {
+    format!("Already escalated to @{}: {permalink}", handle.trim_start_matches('@'))
+}
+
+fn cursors(followed: &BTreeMap<String, Followed>, channel: &str) -> BTreeMap<String, slack::Cursor> {
+    let prefix = thread_key(channel, "");
+    followed
+        .iter()
+        .filter_map(|(key, f)| {
+            let read = f.seen.clone().unwrap_or_else(|| f.cursor.clone());
+            Some((key.strip_prefix(&prefix)?.to_owned(), slack::Cursor { given: f.cursor.clone(), read }))
+        })
+        .collect()
+}
+
+fn followed_channels(followed: &BTreeMap<String, Followed>, own: Option<&str>) -> Vec<String> {
+    let mut channels: Vec<String> =
+        followed.keys().filter_map(|key| key.split_once(':')).map(|(channel, _)| channel).filter(|c| Some(*c) != own).map(str::to_owned).collect();
+    channels.dedup();
+    channels
 }
 
 /// A Slack connector's channel as the user typed it, without the `#`.
@@ -683,68 +1032,37 @@ impl Connectors {
             }
         }
 
-        let _filing = self.filing.lock().await;
-        let mut store = self.store.lock().unwrap();
-        let mut changed = false;
-        let watermark = now - SLACK_OVERLAP;
-        for connector in store.connectors.iter_mut().filter(|c| checked.contains(&c.id)) {
-            let mentioned = found.iter().any(|(id, f)| *id == connector.id && matches!(f, Found::Mention { .. }));
-            changed |= connector.advance(watermark, mentioned);
-        }
-        let mut work = vec![];
-        for (id, found) in found {
-            // A Slack thread's session filed or took the issue, or another connector started it.
-            if let Found::Issue(issue) = &found {
-                if store.working_on(&issue.id).is_some_and(|(owner, _)| owner.id != id) {
-                    continue;
+        let settled = {
+            let _filing = self.filing.lock().await;
+            let mut store = self.store.lock().unwrap();
+            let settled = store.settle(&checked, found, now, &self.exe);
+            if settled.needs_save {
+                if let Err(e) = self.save(&store) {
+                    errors.push(e);
                 }
             }
-            // The connector may have been edited or deleted while the integration answered.
-            let Some(connector) = store.connectors.iter_mut().find(|c| c.id == id && c.enabled) else { continue };
-            let key = found.key();
-            match found {
-                Found::Issue(issue) => {
-                    if connector.claim(key) {
-                        work.push(Work::Run(run(connector, &issue, &self.exe)));
-                        changed = true;
-                    }
-                }
-                Found::Mention { channel, channel_name, mention, posts } => {
-                    if !connector.claim(key.clone()) {
-                        continue;
-                    }
-                    // The session starts with these messages, so only later ones are passed on.
-                    let cursor = posts.last().map_or_else(|| mention.thread.clone(), |p| p.ts.clone());
-                    connector.followed.insert(key, Followed { cursor, seen: None, replied: false });
-                    let note = mention_note(&mention, now);
-                    let run = slack_run(connector, &channel, &channel_name, &mention.thread, &posts, note, &self.exe);
-                    work.push(Work::Run(Run { mentioned: vec![mention.ts], ..run }));
-                    changed = true;
-                }
-                Found::Replies { replies, .. } if replies.posts.is_empty() => {
-                    // Nobody mentioned the bot, so nothing is passed on yet. The session gets these
-                    // messages with the next mention, and nothing reads them again until then.
-                    if let Some(followed) = connector.followed.get_mut(&key) {
-                        followed.seen = Some(replies.newest);
-                        changed = true;
-                    }
-                }
-                Found::Replies { channel, replies } => work.push(Work::Delivery(Delivery {
-                    connector: id,
-                    channel,
-                    thread: replies.thread,
-                    messages: replies.posts.iter().map(reply_block).collect(),
-                    cursor: replies.newest,
-                    mentioned: replies.mentioned,
-                })),
-            }
-        }
-        if changed {
-            if let Err(e) = self.save(&store) {
+            settled
+        };
+        errors.extend(settled.errors);
+        for page in &settled.pages {
+            if let Err(e) = self.page(page).await {
                 errors.push(e);
             }
         }
-        (work, (!errors.is_empty()).then(|| errors.join("; ")))
+        (settled.work, (!errors.is_empty()).then(|| errors.join("; ")))
+    }
+
+    async fn page(&self, page: &Page) -> Result<(), String> {
+        let token = self.key(SLACK_KEY).ok_or("Slack is not connected: connect it in pinned's Connectors settings")?;
+        let text = match &page.reply {
+            Reply::Ping(text) => text.clone(),
+            Reply::Already { handle, thread } => already_text(handle, &slack::permalink(&token, &page.channel, thread).await?),
+        };
+        slack::post(&token, &page.channel, &page.thread, &text).await?;
+        if page.react {
+            slack::react(&token, &page.channel, &page.thread, slack::WORKING).await?;
+        }
+        Ok(())
     }
 
     /// Gives `work` to the tabs. A thread's cursor moves only once its messages reached a session,
@@ -847,12 +1165,21 @@ impl Connectors {
     /// newest message it was given.
     async fn fallback(&self, d: &Delivery) -> Result<(Run, String), String> {
         let c = self.store.lock().unwrap().connector(&d.connector)?.clone();
-        let Trigger::SlackMention { channel: name } = &c.trigger else { return Err("the workflow no longer watches Slack".into()) };
+        let watched = match &c.trigger {
+            Trigger::SlackMention { channel } => Some(channel.as_str()),
+            Trigger::Called => None,
+            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } => return Err("the workflow no longer answers Slack threads".into()),
+        };
         let token = self.key(SLACK_KEY).ok_or("Slack is not connected")?;
+        let own = watched.filter(|name| self.channels.lock().unwrap().get(*name) == Some(&d.channel));
+        let name = match own {
+            Some(name) => channel_name(name).to_owned(),
+            None => slack::channel_name(&token, &d.channel).await?,
+        };
         let posts = slack::thread(&token, &d.channel, &d.thread).await?;
         let newest = posts.last().map_or_else(|| d.cursor.clone(), |p| p.ts.clone());
         let note = c.created.get(&thread_key(&d.channel, &d.thread)).map(filed_note);
-        let mut run = slack_run(&c, &d.channel, channel_name(name), &d.thread, &posts, note.as_deref(), &self.exe);
+        let mut run = slack_run(&c, &d.channel, &name, &d.thread, &posts, note.as_deref(), &self.exe);
         run.mentioned = d.mentioned.clone();
         // The thread already passed the step, so a stop answer does not end this new session.
         if let Some((ask, answers)) = self.consult(&run.connector, &run.input).await? {
@@ -881,21 +1208,12 @@ impl Connectors {
                 let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
                 let channel = self.channel_id(&token, name).await?;
                 let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
-                let prefix = thread_key(&channel, "");
-                let cursors = c
-                    .followed
-                    .iter()
-                    .filter_map(|(key, f)| {
-                        let read = f.seen.clone().unwrap_or_else(|| f.cursor.clone());
-                        Some((key.strip_prefix(&prefix)?.to_owned(), slack::Cursor { given: f.cursor.clone(), read }))
-                    })
-                    .collect();
-                let activity = slack::activity(&token, &channel, &bot, since, &cursors).await?;
+                let activity = slack::activity(&token, &channel, &bot, since, &cursors(&c.followed, &channel)).await?;
                 let mut found: Vec<Found> = vec![];
                 // Oldest first, so a thread's first new mention is the one its session answers.
                 for mention in activity.mentions {
                     let key = thread_key(&channel, &mention.thread);
-                    if c.handled.contains(&key) || found.iter().any(|f| f.key() == key) {
+                    if self.store.lock().unwrap().handled(&key) || found.iter().any(|f| f.key() == key) {
                         continue;
                     }
                     let posts = slack::thread(&token, &channel, &mention.thread).await?;
@@ -903,9 +1221,87 @@ impl Connectors {
                     found.push(Found::Mention { channel: channel.clone(), channel_name, mention, posts });
                 }
                 found.extend(activity.replies.into_iter().map(|replies| Found::Replies { channel: channel.clone(), replies }));
+                found.extend(self.follow_ups(&token, &bot, c, Some(&channel), now).await?);
                 Ok(Some(found))
             }
+            Trigger::SlackMessage { channel: name, decide } => {
+                let bot = self.store.lock().unwrap().slack.as_ref().map(|a| a.user_id.clone());
+                let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
+                let channel = self.channel_id(&token, name).await?;
+                let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
+                let mut messages = slack::messages(&token, &channel, &bot, since).await?;
+                messages.retain(|m| !self.store.lock().unwrap().handled(&thread_key(&channel, &m.ts)));
+                if messages.is_empty() {
+                    return Ok(Some(vec![]));
+                }
+                let key = self.key(VERCEL_KEY).ok_or("the Vercel AI Gateway is not connected: connect it in pinned's Connectors settings")?;
+                let choices = decide.choices(&c.name)?;
+                let pages = self.pages(&token, c, decide).await?;
+                let channel_name = channel_name(name);
+                let mut found = vec![];
+                for message in messages {
+                    let state = json!({ "channel": format!("#{channel_name}"), "author": message.author, "message": message.text });
+                    let chosen = vercel::choose(&key, decide.model.trim(), &decide.instructions, &choices, &state).await?;
+                    let pick = decide.pick(&chosen);
+                    let Some(chosen) = pick.category() else {
+                        found.push(Found::Stopped { channel: channel.clone(), thread: message.ts, page: None });
+                        continue;
+                    };
+                    let (category, page) = (&decide.categories[chosen], pages[chosen].clone());
+                    found.push(match &category.workflow {
+                        None => Found::Stopped { channel: channel.clone(), thread: message.ts, page },
+                        Some(workflow) => Found::Routed {
+                            posts: slack::thread(&token, &channel, &message.ts).await?,
+                            channel: channel.clone(),
+                            channel_name: channel_name.to_owned(),
+                            thread: message.ts,
+                            category: category.name.clone(),
+                            workflow: workflow.clone(),
+                            note: pick.note(&decide.categories, &c.name),
+                            page,
+                        },
+                    });
+                }
+                Ok(Some(found))
+            }
+            Trigger::Called => {
+                let bot = self.store.lock().unwrap().slack.as_ref().map(|a| a.user_id.clone());
+                let (Some(token), Some(bot)) = (self.key(SLACK_KEY), bot) else { return Ok(None) };
+                Ok(Some(self.follow_ups(&token, &bot, c, None, now).await?))
+            }
         }
+    }
+
+    async fn follow_ups(&self, token: &str, bot: &str, c: &Connector, own: Option<&str>, now: DateTime<Utc>) -> Result<Vec<Found>, String> {
+        let mut found = vec![];
+        for channel in followed_channels(&c.followed, own) {
+            let activity = slack::activity(token, &channel, bot, now, &cursors(&c.followed, &channel)).await?;
+            found.extend(activity.replies.into_iter().map(|replies| Found::Replies { channel: channel.clone(), replies }));
+        }
+        Ok(found)
+    }
+
+    async fn pages(&self, token: &str, c: &Connector, decide: &Decide) -> Result<Vec<Option<Paging>>, String> {
+        let mut groups: HashMap<String, String> = HashMap::new();
+        let mut pages = vec![];
+        for category in &decide.categories {
+            let Some(group) = category.group() else {
+                pages.push(None);
+                continue;
+            };
+            let id = match groups.get(group) {
+                Some(id) => id.clone(),
+                None => {
+                    let id = slack::group_id(token, group)
+                        .await
+                        .map_err(|e| format!("workflow {:?} could not page category {:?}'s group: {e}", c.name, category.name))?;
+                    groups.insert(group.to_owned(), id.clone());
+                    id
+                }
+            };
+            pages.push(Some(Paging { ping: page_text(&id, category), handle: group.to_owned() }));
+        }
+        Ok(pages)
     }
 
     async fn channel_id(&self, token: &str, name: &str) -> Result<String, String> {
@@ -1196,6 +1592,10 @@ fn reply_block(post: &slack::Post) -> String {
     format!("{}\n{}", reply_header(&post.author), post.text)
 }
 
+fn routed_note(router: &str, category: &str) -> String {
+    format!("\n\nWorkflow {router:?} handed you this thread: its decision model put the first message in the category {category:?}.")
+}
+
 /// The note a thread's new session gets when an earlier session of it filed an issue.
 fn filed_note(filed: &Filed) -> String {
     format!(
@@ -1314,6 +1714,7 @@ impl Connectors {
         let mut store = self.store.lock().unwrap();
         store.vercel = Some(account.clone());
         self.save(&store)?;
+        self.wake.notify_one();
         Ok(account)
     }
 
@@ -1368,7 +1769,7 @@ impl Connectors {
         slack::member_channels(&token).await
     }
 
-    /// Adds or replaces a connector. Its watermark, handled issues, filed issues and thread cursors stay with the stored copy.
+    /// Adds or replaces a connector. Its watermark, handled issues, filed issues, thread cursors and pages stay with the stored copy.
     pub fn save_connector(&self, mut connector: Connector) -> Result<Connector, String> {
         let mut store = self.store.lock().unwrap();
         match store.connectors.iter_mut().find(|c| c.id == connector.id && !c.id.is_empty()) {
@@ -1377,6 +1778,7 @@ impl Connectors {
                 connector.handled = std::mem::take(&mut existing.handled);
                 connector.created = std::mem::take(&mut existing.created);
                 connector.followed = std::mem::take(&mut existing.followed);
+                connector.paged = std::mem::take(&mut existing.paged);
                 *existing = connector.clone();
             }
             None => {
@@ -1385,6 +1787,7 @@ impl Connectors {
                 connector.handled.clear();
                 connector.created.clear();
                 connector.followed.clear();
+                connector.paged.clear();
                 store.connectors.push(connector.clone());
             }
         }
@@ -1693,6 +2096,7 @@ mod tests {
         let exported = serde_json::json!({
             "linear": { "name": "Ana", "email": "ana@acme.dev", "organization": "Acme" },
             "slack": { "team": "Acme", "userId": "UBOT", "name": "pinned" },
+            "vercel": { "key_hint": "…ck_1" },
             "connectors": [serde_json::to_value(Connector { id: "c9".into(), ..slack_connector() }).unwrap()],
         });
         let keys = Keys { linear: Some(" lin_api_1 ".into()), github: Some("ghp_1".into()), vercel: Some(" vck_1 ".into()), ..Keys::default() };
@@ -1700,6 +2104,8 @@ mod tests {
         let (store, keys) = connectors.export();
         assert_eq!(keys, Keys { linear: Some("lin_api_1".into()), slack: None, github: Some("ghp_1".into()), vercel: Some("vck_1".into()) });
         assert_eq!(store["linear"]["email"], "ana@acme.dev");
+        assert_eq!(store["vercel"], serde_json::json!({ "key_hint": "…ck_1" }));
+        assert_eq!(std::fs::read_to_string(dir.join("vercel-key")).unwrap(), "vck_1");
         assert_eq!(store["slack"], serde_json::Value::Null);
         assert_eq!(store["connectors"][0]["id"], "c9");
         assert_eq!(std::fs::read_to_string(dir.join("linear-key")).unwrap(), "lin_api_1");
@@ -1731,6 +2137,7 @@ mod tests {
             fix: Fix::Off,
             created: BTreeMap::new(),
             followed: BTreeMap::new(),
+            paged: BTreeMap::new(),
             proof: false,
             ask: None,
             runs_on: RunsOn::Any,
@@ -1792,6 +2199,7 @@ mod tests {
             fix: Fix::Off,
             created: BTreeMap::new(),
             followed: BTreeMap::new(),
+            paged: BTreeMap::new(),
             proof: false,
             ask: None,
             runs_on: RunsOn::Any,
@@ -2097,6 +2505,8 @@ mod tests {
         }"#;
         let store: Store = serde_json::from_str(saved).unwrap();
         assert!(store.slack.is_none());
+        assert!(store.vercel.is_none(), "a store saved before the Vercel AI Gateway has no account for it");
+        assert_eq!(store.connectors[0].paged, BTreeMap::new(), "a store saved before pages loads with none");
         let json = serde_json::to_value(&store.connectors).unwrap();
         assert_eq!(json[0]["trigger"], serde_json::json!({ "kind": "linear-label", "label": "claude" }));
         assert_eq!(json[0]["handled"], serde_json::json!(["uuid"]));
@@ -2129,6 +2539,455 @@ mod tests {
             )
         );
         assert!(!prompt(false).contains("Proof"));
+    }
+
+    const THREAD: &str = "C0123ABCD:1792400050.000200";
+    const ROUTED: &str = "Triage the thread.\n\nAnswer in the Slack thread below by running `'/bin/pinned' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Keep every answer short. Before each `slack reply`, invoke the `pinned:bro` skill on your draft and post the message it gives you, not the draft. Later messages in the thread reach you only when one of them mentions you, as `[Slack reply from <name> in the thread]` blocks with every message written since the last one you got; answer them in the thread the same way.\n\nThis workflow only triages: never change code, and never file or take a Linear issue. `pinned linear create` and `pinned linear take` are turned off for it.\n\nSlack thread in #support, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here\n\nWorkflow \"Support router\" handed you this thread: its decision model put the first message in the category \"error\".";
+
+    fn category(name: &str, description: &str, workflow: Option<&str>, mention: Option<&str>) -> Category {
+        Category { name: name.into(), description: description.into(), workflow: workflow.map(Into::into), mention: mention.map(Into::into) }
+    }
+
+    fn router() -> Connector {
+        let decide = Decide {
+            model: "typesafe-ai/jev".into(),
+            instructions: "Categorize this Slack message.".into(),
+            categories: vec![
+                category("error", "Someone reports a bug or an error", Some("c2"), None),
+                category("doubt", "Someone asks a question", Some("c6"), None),
+                category("escalation", "Someone needs an engineer on support now", None, Some("prod-engg")),
+                category("ignore", "Anything else", None, None),
+            ],
+            fallback: None,
+        };
+        Connector {
+            id: "c5".into(),
+            name: "Support router".into(),
+            trigger: Trigger::SlackMessage { channel: "#support".into(), decide },
+            since: "2026-10-19T10:00:00+00:00".into(),
+            ..slack_connector()
+        }
+    }
+
+    fn called() -> Connector {
+        Connector { id: "c6".into(), name: "Answer".into(), trigger: Trigger::Called, ..slack_connector() }
+    }
+
+    fn routed(category: &str, workflow: &str, page: Option<Paging>) -> Found {
+        Found::Routed {
+            channel: "C0123ABCD".into(),
+            channel_name: "support".into(),
+            thread: "1792400050.000200".into(),
+            category: category.into(),
+            workflow: workflow.into(),
+            note: routed_note("Support router", category),
+            posts: posts().into(),
+            page,
+        }
+    }
+
+    fn stopped(page: Option<Paging>) -> Found {
+        Found::Stopped { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), page }
+    }
+
+    fn paging() -> Paging {
+        let escalation = category("escalation", " Someone needs an engineer on support now ", None, Some("prod-engg"));
+        Paging { ping: page_text("S0123ABC", &escalation), handle: "prod-engg".into() }
+    }
+
+    fn escalated(channel: &str, thread: &str) -> Found {
+        Found::Stopped { channel: channel.into(), thread: thread.into(), page: Some(paging()) }
+    }
+
+    fn mentioned() -> Found {
+        let at = DateTime::parse_from_rfc3339("2026-10-19T10:00:00Z").unwrap().with_timezone(&Utc);
+        let mention = slack::Mention { thread: "1792400050.000200".into(), ts: "1792400050.000200".into(), at };
+        Found::Mention { channel: "C0123ABCD".into(), channel_name: "support".into(), mention, posts: posts().into() }
+    }
+
+    fn checked_at() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-10-19T10:01:00Z").unwrap().with_timezone(&Utc)
+    }
+
+    fn settle(store: &mut Store, found: Vec<(&str, Found)>) -> Settled {
+        settle_at(store, found, checked_at())
+    }
+
+    fn settle_at(store: &mut Store, found: Vec<(&str, Found)>, now: DateTime<Utc>) -> Settled {
+        let checked: Vec<String> = found.iter().map(|(id, _)| id.to_string()).collect();
+        store.settle(&checked, found.into_iter().map(|(id, f)| (id.to_owned(), f)).collect(), now, "/bin/pinned")
+    }
+
+    fn runs(settled: &Settled) -> (Vec<(String, Subject, Vec<String>)>, String) {
+        let mut prompt = String::new();
+        let runs = settled
+            .work
+            .iter()
+            .map(|w| match w {
+                Work::Run(run) => {
+                    prompt = run.args.last().unwrap().clone();
+                    (run.connector.clone(), run.subject.clone(), run.mentioned.clone())
+                }
+                Work::Delivery(d) => panic!("a delivery for {}", d.connector),
+            })
+            .collect();
+        (runs, prompt)
+    }
+
+    fn thread_subject() -> Subject {
+        Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() }
+    }
+
+    #[test]
+    fn a_routed_message_starts_a_session_of_the_workflow_its_category_names() {
+        let mut store = Store { connectors: vec![router(), slack_connector(), called()], ..Store::default() };
+        let settled = settle(&mut store, vec![("c5", routed("error", "c2", None))]);
+        let (started, prompt) = runs(&settled);
+        assert_eq!(started, [("c2".to_owned(), thread_subject(), vec!["1792400050.000200".to_owned()])]);
+        assert_eq!(prompt, ROUTED);
+        assert_eq!((settled.errors.len(), settled.pages.len(), settled.needs_save), (0, 0, true));
+        let [kept, target, _] = &store.connectors[..] else { unreachable!() };
+        assert_eq!(target.handled, [THREAD], "the target owns the thread");
+        assert_eq!(target.followed[THREAD], Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
+        assert_eq!((kept.handled.len(), kept.followed.len()), (0, 0), "the router keeps nothing it handed on");
+        assert_eq!(kept.since, "2026-10-19T10:00:00+00:00", "the watermark waits until a session takes the message");
+
+        let mut store = Store { connectors: vec![router(), slack_connector(), called()], ..Store::default() };
+        let (started, _) = runs(&settle(&mut store, vec![("c5", routed("doubt", "c6", None))]));
+        assert_eq!(started, [("c6".to_owned(), thread_subject(), vec!["1792400050.000200".to_owned()])], "a called workflow takes it too");
+        assert_eq!(store.connectors[2].handled, [THREAD]);
+    }
+
+    #[test]
+    fn a_category_without_a_workflow_stops_on_the_router() {
+        let mut store = Store { connectors: vec![router(), slack_connector()], ..Store::default() };
+        let settled = settle(&mut store, vec![("c5", stopped(None))]);
+        assert_eq!((settled.work.len(), settled.pages, settled.errors.len()), (0, vec![], 0));
+        assert_eq!(store.connectors[0].handled, [THREAD]);
+        assert!(!settle(&mut store, vec![("c5", stopped(None))]).needs_save, "a stopped thread is recorded once");
+    }
+
+    #[test]
+    fn a_category_that_mentions_a_group_pages_it_once() {
+        let ping = "<!subteam^S0123ABC> escalation: Someone needs an engineer on support now";
+        assert_eq!(paging().ping, ping);
+
+        let mut store = Store { connectors: vec![router(), slack_connector()], ..Store::default() };
+        let settled = settle(&mut store, vec![("c5", stopped(Some(paging())))]);
+        let posted = Page { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), reply: Reply::Ping(ping.into()), react: true };
+        assert_eq!((settled.work.len(), settled.pages, settled.errors.len()), (0, vec![posted], 0), "it stops, pages and reacts");
+        assert_eq!(store.connectors[0].handled, [THREAD]);
+        let pinged = Paged { at: "2026-10-19T10:01:00+00:00".into(), ping: true };
+        assert_eq!(store.connectors[0].paged, BTreeMap::from([(THREAD.to_owned(), pinged)]));
+        assert_eq!(settle(&mut store, vec![("c5", stopped(Some(paging())))]).pages, [], "the next check pages no one again");
+
+        let mut store = Store { connectors: vec![router(), slack_connector()], ..Store::default() };
+        let settled = settle(&mut store, vec![("c5", routed("error", "c2", Some(paging())))]);
+        let posted = Page { channel: "C0123ABCD".into(), thread: "1792400050.000200".into(), reply: Reply::Ping(ping.into()), react: false };
+        assert_eq!((runs(&settled).0.len(), settled.pages), (1, vec![posted]), "the session reacts once a tab takes it");
+        assert_eq!(store.connectors[0].paged.len(), 1, "the router records the page of a thread it handed on");
+    }
+
+    #[test]
+    fn a_thread_sorted_again_is_not_paged_again() {
+        let (connectors, dir) = stored("paged-once", vec![router(), slack_connector()]);
+        let settled = settle(&mut connectors.store.lock().unwrap(), vec![("c5", routed("escalation", "c2", Some(paging())))]);
+        assert_eq!(settled.pages.len(), 1);
+        let work = settled.work.into_iter().next().unwrap();
+        assert!(block_on(connectors.hand_over(work, &|_| async { Err("no tab took it".to_owned()) })).is_err());
+        let mut store = connectors.store.lock().unwrap();
+        let later = checked_at() + chrono::Duration::hours(2);
+        let settled = settle_at(&mut store, vec![("c5", routed("escalation", "c2", Some(paging())))], later);
+        assert_eq!((runs(&settled).0.len(), settled.pages), (1, vec![]), "the thread starts a session again but pages no one");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_category_that_pages_wins_only_when_the_model_is_sure() {
+        let Trigger::SlackMessage { decide, .. } = router().trigger else { unreachable!() };
+        let picked = |index, probabilities: [f64; 4]| {
+            decide.pick(&vercel::Chosen { index, probabilities: probabilities.into() }).category().map(|i| decide.categories[i].name.clone())
+        };
+        assert_eq!(picked(2, [0.03, 0.10, 0.84, 0.03]), Some("doubt".into()), "the likeliest category that pages no one");
+        assert_eq!(picked(2, [0.04, 0.03, 0.90, 0.03]), Some("escalation".into()));
+        assert_eq!(picked(2, [0.05, 0.05, 0.85, 0.05]), Some("escalation".into()));
+        assert_eq!(picked(0, [0.40, 0.30, 0.20, 0.10]), Some("error".into()), "a category that pages no one needs no certainty");
+        assert_eq!(picked(2, [0.0, 0.0, 0.0, 0.0]), Some("error".into()), "an answer without probabilities pages no one");
+
+        let paging_only = Decide { categories: vec![category("escalation", "Production is down", None, Some("prod-engg"))], ..decide.clone() };
+        assert_eq!(paging_only.pick(&vercel::Chosen { index: 0, probabilities: vec![0.6] }), Pick::Nowhere);
+        assert_eq!(paging_only.pick(&vercel::Chosen { index: 0, probabilities: vec![0.9] }), Pick::Sure(0));
+    }
+
+    #[test]
+    fn escalations_in_a_channel_page_once_per_cooldown() {
+        let mut store = Store { connectors: vec![router(), slack_connector()], ..Store::default() };
+        let at = |minutes| checked_at() + chrono::Duration::minutes(minutes);
+        let page = |channel: &str, thread: &str, reply, react| Page { channel: channel.into(), thread: thread.into(), reply, react };
+        let ping = || Reply::Ping("<!subteam^S0123ABC> escalation: Someone needs an engineer on support now".into());
+        let already = || Reply::Already { handle: "prod-engg".into(), thread: "1792399000.000000".into() };
+
+        let settled = settle_at(&mut store, vec![("c5", escalated("C0123ABCD", "1792399000.000000"))], at(0));
+        assert_eq!(settled.pages, [page("C0123ABCD", "1792399000.000000", ping(), true)]);
+
+        let settled = settle_at(&mut store, vec![("c5", escalated("C0123ABCD", "1792399600.000000"))], at(10));
+        assert_eq!(settled.pages, [page("C0123ABCD", "1792399600.000000", already(), true)], "it points at the page and reacts");
+        let text = already_text("prod-engg", "https://acme.slack.com/archives/C0123ABCD/p1792399000000000");
+        assert_eq!(text, "Already escalated to @prod-engg: https://acme.slack.com/archives/C0123ABCD/p1792399000000000");
+        assert_eq!(already_text("@prod-engg", "https://x"), "Already escalated to @prod-engg: https://x");
+
+        let settled = settle_at(&mut store, vec![("c5", routed("escalation", "c2", Some(paging())))], at(20));
+        assert_eq!(runs(&settled).0.len(), 1, "a category with a workflow still hands the thread on");
+        assert_eq!(settled.pages, [page("C0123ABCD", "1792400050.000200", already(), false)]);
+
+        let settled = settle_at(&mut store, vec![("c5", escalated("C0999WXYZ", "1792400100.000000"))], at(21));
+        assert_eq!(settled.pages, [page("C0999WXYZ", "1792400100.000000", ping(), true)], "another channel is another incident");
+
+        let settled = settle_at(&mut store, vec![("c5", escalated("C0123ABCD", "1792400900.000000"))], at(31));
+        assert_eq!(settled.pages, [page("C0123ABCD", "1792400900.000000", ping(), true)], "after the cooldown it pages again");
+
+        let router = &store.connectors[0];
+        assert_eq!(router.handled, ["C0123ABCD:1792399000.000000", "C0123ABCD:1792399600.000000", "C0999WXYZ:1792400100.000000", "C0123ABCD:1792400900.000000"]);
+        assert_eq!(
+            router.paged.iter().map(|(key, paged)| (key.as_str(), paged.ping)).collect::<Vec<_>>(),
+            [
+                ("C0123ABCD:1792399000.000000", true),
+                ("C0123ABCD:1792399600.000000", false),
+                ("C0123ABCD:1792400050.000200", false),
+                ("C0123ABCD:1792400900.000000", true),
+                ("C0999WXYZ:1792400100.000000", true),
+            ],
+            "every escalation is recorded, and the cooldown runs from the pings"
+        );
+    }
+
+    #[test]
+    fn a_thread_told_it_was_already_escalated_is_told_once() {
+        let (connectors, dir) = stored("already-once", vec![router(), slack_connector()]);
+        let at = |minutes| checked_at() + chrono::Duration::minutes(minutes);
+        let already = |thread: &str| Reply::Already { handle: "prod-engg".into(), thread: thread.into() };
+        let replies = |settled: &Settled| settled.pages.iter().map(|p| (p.thread.clone(), p.reply.clone())).collect::<Vec<_>>();
+
+        let settled = settle_at(&mut connectors.store.lock().unwrap(), vec![("c5", escalated("C0123ABCD", "1792399000.000000"))], at(0));
+        assert_eq!(settled.pages.len(), 1);
+        let settled = settle_at(&mut connectors.store.lock().unwrap(), vec![("c5", routed("escalation", "c2", Some(paging())))], at(5));
+        assert_eq!(replies(&settled), [("1792400050.000200".to_owned(), already("1792399000.000000"))]);
+        let work = settled.work.into_iter().next().unwrap();
+        assert!(block_on(connectors.hand_over(work, &|_| async { Err("no tab took it".to_owned()) })).is_err());
+
+        let mut store = connectors.store.lock().unwrap();
+        let settled = settle_at(&mut store, vec![("c5", routed("escalation", "c2", Some(paging())))], at(8));
+        assert_eq!((runs(&settled).0.len(), replies(&settled)), (1, vec![]), "the thread sorted again starts a session and posts nothing");
+        assert_eq!(store.connectors[0].paged[THREAD], Paged { at: "2026-10-19T10:06:00+00:00".into(), ping: false });
+
+        let settled = settle_at(&mut store, vec![("c5", escalated("C0123ABCD", "1792400300.000000"))], at(12));
+        assert_eq!(replies(&settled), [("1792400300.000000".to_owned(), already("1792399000.000000"))], "the link points at the thread that was pinged");
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_target_that_cannot_answer_the_thread_stops_it_on_the_router_with_an_error() {
+        let off = Connector { enabled: false, ..slack_connector() };
+        let linear = Connector { id: "c2".into(), name: "Resolve".into(), ..linear_connector() };
+        let cases = [
+            (vec![router()], "workflow \"Support router\" hands \"error\" messages to a workflow that was deleted: pick another one for the category in its settings"),
+            (vec![router(), off], "workflow \"Support router\" hands \"error\" messages to workflow \"Triage\", which is off: turn it on, or pick another one for the category"),
+            (vec![router(), linear], "workflow \"Support router\" hands \"error\" messages to workflow \"Resolve\", which does not answer Slack threads: pick a Slack mention or called workflow for the category"),
+        ];
+        for (connectors, error) in cases {
+            let mut store = Store { connectors, ..Store::default() };
+            let settled = settle(&mut store, vec![("c5", routed("error", "c2", None))]);
+            assert_eq!((settled.work.len(), settled.errors), (0, vec![error.to_owned()]));
+            assert_eq!(store.connectors[0].handled, [THREAD], "{error}");
+            assert!(store.connectors[1..].iter().all(|c| c.handled.is_empty()), "{error}");
+            assert_eq!(settle(&mut store, vec![("c5", routed("error", "c2", None))]).errors, Vec::<String>::new(), "reported once");
+        }
+        let mut store = Store { connectors: vec![router(), Connector { id: "c7".into(), ..router() }], ..Store::default() };
+        let settled = settle(&mut store, vec![("c5", routed("error", "c7", None))]);
+        assert_eq!(
+            settled.errors,
+            ["workflow \"Support router\" hands \"error\" messages to workflow \"Support router\", which does not answer Slack threads: pick a Slack mention or called workflow for the category"]
+        );
+    }
+
+    #[test]
+    fn a_message_that_mentions_the_bot_and_is_routed_starts_one_session() {
+        let watching = Connector { id: "c3".into(), name: "Mentions".into(), ..slack_connector() };
+        let store = || Store { connectors: vec![router(), slack_connector(), watching.clone()], ..Store::default() };
+
+        let mut routed_first = store();
+        let settled = settle(&mut routed_first, vec![("c5", routed("error", "c2", None)), ("c3", mentioned())]);
+        assert_eq!(runs(&settled).0, [("c2".to_owned(), thread_subject(), vec!["1792400050.000200".to_owned()])]);
+        assert_eq!(routed_first.connectors[2].handled.len(), 0);
+
+        let mut mention_first = store();
+        let settled = settle(&mut mention_first, vec![("c3", mentioned()), ("c5", routed("error", "c2", None))]);
+        assert_eq!(runs(&settled).0, [("c3".to_owned(), thread_subject(), vec!["1792400050.000200".to_owned()])]);
+        assert_eq!(mention_first.connectors[1].handled.len(), 0);
+        assert_eq!(runs(&settle(&mut mention_first, vec![("c5", routed("error", "c2", None))])).0, [], "and later checks start none");
+    }
+
+    #[test]
+    fn a_routed_run_no_tab_took_is_classified_again() {
+        let (connectors, dir) = stored("routed-unclaim", vec![router(), slack_connector()]);
+        let settled = settle(&mut connectors.store.lock().unwrap(), vec![("c5", routed("error", "c2", None))]);
+        let work = settled.work.into_iter().next().unwrap();
+        assert_eq!(
+            block_on(connectors.hand_over(work, &|_| async { Err("no tab took it".to_owned()) })),
+            Err("could not open a session in /repo: no tab took it; the next check tries again".into())
+        );
+        let mut store = connectors.store.lock().unwrap();
+        assert!(!store.handled(THREAD), "the router's next check asks the decision model again");
+        assert_eq!(store.connectors[0].since, "2026-10-19T10:00:00+00:00", "and still sees the message");
+        let (started, _) = runs(&settle(&mut store, vec![("c5", routed("error", "c2", None))]));
+        assert_eq!(started, [("c2".to_owned(), thread_subject(), vec!["1792400050.000200".to_owned()])]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_workflow_follows_up_on_threads_outside_the_channel_it_watches() {
+        let at = |cursor: &str| Followed { cursor: cursor.into(), seen: None, replied: false };
+        let followed = BTreeMap::from([
+            ("C0123ABCD:1792400050.000200".to_owned(), at("1792400060.000000")),
+            ("C0123ABCD:1792400070.000000".to_owned(), Followed { seen: Some("1792400090.000000".into()), ..at("1792400080.000000") }),
+            ("C0999WXYZ:1792400100.000000".to_owned(), at("1792400100.000000")),
+        ]);
+        assert_eq!(followed_channels(&followed, Some("C0123ABCD")), ["C0999WXYZ"]);
+        assert_eq!(followed_channels(&followed, None), ["C0123ABCD", "C0999WXYZ"], "a called workflow follows every thread it was handed");
+        let read: Vec<(String, String, String)> =
+            cursors(&followed, "C0123ABCD").into_iter().map(|(thread, c)| (thread, c.given, c.read)).collect();
+        assert_eq!(
+            read,
+            [
+                ("1792400050.000200".to_owned(), "1792400060.000000".to_owned(), "1792400060.000000".to_owned()),
+                ("1792400070.000000".to_owned(), "1792400080.000000".to_owned(), "1792400090.000000".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_delivery_no_tab_took_needs_a_workflow_that_answers_threads() {
+        let delivery = Delivery {
+            connector: "c5".into(),
+            channel: "C0123ABCD".into(),
+            thread: "1792400050.000200".into(),
+            messages: vec!["any news?".into()],
+            cursor: "1792400090.000000".into(),
+            mentioned: vec![],
+        };
+        let (connectors, dir) = stored("fallback", vec![router(), called()]);
+        assert_eq!(block_on(connectors.fallback(&delivery)).err(), Some("the workflow no longer answers Slack threads".into()));
+        let called = Delivery { connector: "c6".into(), ..delivery };
+        assert_eq!(block_on(connectors.fallback(&called)).err(), Some("Slack is not connected".into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn message_and_called_triggers_round_trip() {
+        let message = serde_json::json!({
+            "kind": "slack-message", "channel": "support",
+            "decide": { "model": "typesafe-ai/jev", "instructions": "Categorize this Slack message.", "categories": [
+                { "name": "error", "description": "Someone reports a bug or an error", "workflow": "c1793" },
+                { "name": "escalation", "description": "Someone needs an engineer on support now", "workflow": null, "mention": "prod-engg" },
+                { "name": "ignore", "description": "Anything else", "workflow": null },
+            ] },
+        });
+        let trigger: Trigger = serde_json::from_value(message).unwrap();
+        let decide = Decide {
+            model: "typesafe-ai/jev".into(),
+            instructions: "Categorize this Slack message.".into(),
+            categories: vec![
+                category("error", "Someone reports a bug or an error", Some("c1793"), None),
+                category("escalation", "Someone needs an engineer on support now", None, Some("prod-engg")),
+                category("ignore", "Anything else", None, None),
+            ],
+            fallback: None,
+        };
+        assert_eq!(trigger, Trigger::SlackMessage { channel: "support".into(), decide });
+        assert_eq!(
+            serde_json::to_value(&trigger).unwrap()["decide"]["categories"][2],
+            serde_json::json!({ "name": "ignore", "description": "Anything else", "workflow": null, "mention": null })
+        );
+        let json = serde_json::to_value(&trigger).unwrap();
+        assert_eq!(serde_json::from_value::<Trigger>(json).unwrap(), trigger);
+        assert_eq!(serde_json::to_value(Trigger::Called).unwrap(), serde_json::json!({ "kind": "called" }));
+        assert_eq!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "called" })).unwrap(), Trigger::Called);
+        assert!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "slack-message", "channel": "support" })).is_err(), "a message trigger needs its decision");
+    }
+
+    #[test]
+    fn a_fallback_round_trips_and_defaults_to_the_models_guess() {
+        let Trigger::SlackMessage { decide, .. } = router().trigger else { unreachable!() };
+        let json = serde_json::to_value(&decide).unwrap();
+        assert_eq!(json["fallback"], serde_json::Value::Null);
+        let mut absent = json;
+        absent.as_object_mut().unwrap().remove("fallback");
+        assert_eq!(serde_json::from_value::<Decide>(absent).unwrap(), decide, "a decision saved before the fallback keeps the model's guess");
+
+        let with = Decide { fallback: Some("doubt".into()), ..decide };
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(json["fallback"], serde_json::json!("doubt"));
+        assert_eq!(serde_json::from_value::<Decide>(json).unwrap(), with);
+    }
+
+    #[test]
+    fn an_unsure_answer_goes_to_the_fallback() {
+        let Trigger::SlackMessage { decide, .. } = router().trigger else { unreachable!() };
+        let routed = |decide: &Decide, index, probabilities: [f64; 4]| {
+            let pick = decide.pick(&vercel::Chosen { index, probabilities: probabilities.into() });
+            (pick.category().map(|i| decide.categories[i].name.clone()), pick.note(&decide.categories, "Support router"))
+        };
+        let sure = |category: &str| (Some(category.to_owned()), routed_note("Support router", category));
+        let with = Decide { fallback: Some("doubt".into()), ..decide.clone() };
+
+        assert_eq!(
+            routed(&with, 0, [0.55, 0.30, 0.10, 0.05]),
+            (
+                Some("doubt".into()),
+                "\n\nThe decision model was unsure (it guessed \"error\" at 55%), so workflow \"Support router\" handed this thread over as \"doubt\".".into()
+            )
+        );
+        assert_eq!(routed(&with, 0, [0.70, 0.20, 0.05, 0.05]), sure("error"));
+        assert_eq!(routed(&with, 0, [0.60, 0.30, 0.05, 0.05]), sure("error"), "60% is sure enough");
+        assert_eq!(routed(&decide, 0, [0.55, 0.30, 0.10, 0.05]), sure("error"), "without a fallback the guess stands");
+        assert_eq!(
+            routed(&with, 2, [0.10, 0.20, 0.52, 0.18]).1,
+            "\n\nThe decision model was unsure (it guessed \"escalation\" at 52%), so workflow \"Support router\" handed this thread over as \"doubt\".",
+            "an unsure guess that pages goes to the fallback, not the likeliest quiet category"
+        );
+        let to_ignore = Decide { fallback: Some("ignore".into()), ..decide };
+        assert_eq!(routed(&to_ignore, 2, [0.20, 0.25, 0.52, 0.03]).0, Some("ignore".into()));
+        assert_eq!(routed(&to_ignore, 2, [0.03, 0.10, 0.84, 0.03]), sure("doubt"), "a sure but not certain page still goes to the likeliest quiet category");
+    }
+
+    #[test]
+    fn a_fallback_must_be_a_category_that_pings_no_one() {
+        let Trigger::SlackMessage { decide, .. } = router().trigger else { unreachable!() };
+        let check = |fallback: &str| Decide { fallback: Some(fallback.into()), ..decide.clone() }.choices("Support router").map(|c| c.len());
+        assert_eq!(check("doubt"), Ok(4));
+        assert_eq!(
+            check("escalation"),
+            Err("workflow \"Support router\" sends the messages its decision model is unsure about to \"escalation\", which pings a group: the fallback can't ping a group, so pick a category without a mention in its settings".into())
+        );
+        assert_eq!(
+            check("spam"),
+            Err("workflow \"Support router\" sends the messages its decision model is unsure about to \"spam\", which is not one of its categories: pick another one in its settings".into())
+        );
+    }
+
+    #[test]
+    fn a_decision_needs_a_model_and_categories() {
+        let Trigger::SlackMessage { decide, .. } = router().trigger else { unreachable!() };
+        assert_eq!(decide.choices("Support router").unwrap()[2], ("escalation", "Someone needs an engineer on support now"));
+        assert_eq!(
+            Decide { model: " ".into(), ..decide.clone() }.choices("Support router"),
+            Err("workflow \"Support router\" has no decision model: pick one in its settings".into())
+        );
+        assert_eq!(
+            Decide { categories: vec![], ..decide }.choices("Support router"),
+            Err("workflow \"Support router\" has no categories to sort messages into: add one in its settings".into())
+        );
     }
 
     #[test]

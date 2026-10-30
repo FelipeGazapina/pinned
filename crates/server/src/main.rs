@@ -142,10 +142,10 @@ fn node(args: &[String]) -> Result<(), String> {
     let creds = Credentials::load(&dir).ok_or_else(|| format!("{} has no account.json: run `pinned-server pair <hub url> <code>` first", dir.display()))?;
     let exe = std::env::current_exe().map_err(|e| format!("could not find pinned-server's own binary: {e}"))?;
     let mut launch = Launch::prepare(&exe).map_err(|e| format!("could not prepare claude's settings: {e}"))?;
-    // A node has no desktop for a notification, and it keeps the MCP server so a session can delegate.
+    // Reminders notify on a desktop, which a node doesn't have, so its sessions get delegation and the project tools.
     launch.reminders = false;
-    if let Some(path) = launch.mcp_config.clone() {
-        reminders::write_mcp_config(&path, &exe, false).map_err(|e| format!("could not write the MCP config: {e}"))?;
+    if let Some(config) = &launch.mcp_config {
+        reminders::write_mcp_config(config, &exe, false).map_err(|e| format!("could not write claude's MCP config: {e}"))?;
     }
     let machine = Machine::new(launch, Some(dir), None, |_| {});
     let link = Arc::new(link::spawn(creds, machine.clone(), VERSION));

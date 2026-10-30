@@ -527,6 +527,102 @@ function prsClick(e) {
 panelBody.addEventListener("click", (e) => {
   if (e.target.closest(".prs, .prs-empty")) prsClick(e);
 });
+
+/** Each project's Memory panel, by `machine:path`: the search, its hits and the status the machine
+ * last sent, and the add form's unsent title and text, which a redraw would otherwise drop. */
+const memoryPanels = new Map();
+const hasProject = (tab) => !!tab && !threadOf(tab).workspace?.scratch;
+function memoryOf(tab) {
+  const key = `${tab.machine}:${projectPathOf(tab)}`;
+  if (!memoryPanels.has(key)) memoryPanels.set(key, { query: "", hits: null, status: null, title: "", text: "", at: 0 });
+  return memoryPanels.get(key);
+}
+async function refreshMemory(tab) {
+  const m = memoryOf(tab);
+  // One read per project at a time, so a slow machine isn't asked again on every render. A search
+  // or change made meanwhile reads once more after it.
+  if (m.reading) return void (m.again = true);
+  m.reading = true;
+  const path = projectPathOf(tab);
+  const query = m.query;
+  m.at = Date.now();
+  try {
+    const [hits, status] = await Promise.all([callOn(tab.machine, { cmd: "memory_search", path, query, limit: 50 }), callOn(tab.machine, { cmd: "memory_status", path })]);
+    if (m.query === query) Object.assign(m, { hits, status });
+    else m.again = true;
+  } catch (e) {
+    m.hits ??= [];
+    flash(`Couldn't read the memory: ${String(e)}`);
+  }
+  m.reading = false;
+  if (m.again) {
+    m.again = false;
+    return refreshMemory(tab);
+  }
+  const shown = tab === active && shownSurface(tab)?.kind === "memory";
+  if (shown) renderPanel();
+  // The model downloads in the background, and nothing else would tell the panel it finished.
+  if (shown && m.status?.vectors === "loading") setTimeout(() => !m.reading && m.at < Date.now() - 1500 && refreshMemory(tab), 2000);
+}
+async function changeMemory(tab, call) {
+  try {
+    await callOn(tab.machine, { ...call, path: projectPathOf(tab) });
+    return true;
+  } catch (e) {
+    flash(String(e));
+    return false;
+  } finally {
+    refreshMemory(tab);
+  }
+}
+const VECTORS = { ready: "vector search ready", loading: "downloading model", off: "word search only" };
+/** What any thread of the project can look up: agents save to it as they work, and pinned adds
+ * the closest memories to each prompt. A panel shown again after a few seconds asks again. */
+function renderMemoryPanel() {
+  const tab = active;
+  if (!hasProject(tab)) return showPanel(`<div class="memory"><p class="memory-empty">This thread is not in a project, so it has no memory.</p></div>`);
+  const m = memoryOf(tab);
+  if (!m.reading && (!m.hits || Date.now() - m.at > 5000)) refreshMemory(tab);
+  const count = m.status ? `${m.status.count} ${m.status.count === 1 ? "memory" : "memories"} · ${VECTORS[m.status.vectors] ?? m.status.vectors}` : "";
+  const hits = !m.hits
+    ? `<p class="memory-empty">Loading…</p>`
+    : m.hits.length
+      ? `<ul class="memory-list">${m.hits.map((h) => `<li><span class="id">#${h.id}</span><span class="body"><span class="title">${esc(h.title)}</span>${h.kind ? `<span class="kind">${esc(h.kind)}</span>` : ""}<span class="text">${esc(h.text)}</span></span><button type="button" class="ghost" data-forget="${h.id}" title="Forget #${h.id}" aria-label="Forget #${h.id}">${icon("x")}</button></li>`).join("")}</ul>`
+      : `<p class="memory-empty">${m.query ? "No memory matches that." : "No memories yet. Agents save them as they work, or add one below."}</p>`;
+  const focus = panelBody.contains(document.activeElement) ? document.activeElement : null;
+  const shown = showPanel(`<div class="memory"><p class="memory-state">${esc(count)}</p>
+    <input class="memory-find" name="query" type="search" value="${esc(m.query)}" placeholder="Search ${esc(projectName(tab))}'s memory" aria-label="Search memory" autocomplete="off" spellcheck="false">
+    ${hits}
+    <form class="memory-add"><input name="title" type="text" value="${esc(m.title)}" placeholder="Title" aria-label="New memory's title" autocomplete="off"><textarea name="text" rows="3" placeholder="What to remember about this project" aria-label="New memory's text">${esc(m.text)}</textarea><button type="submit" class="outline">Add</button></form></div>`);
+  const again = shown && focus?.name && panelBody.querySelector(`.memory [name="${focus.name}"]`);
+  if (again) {
+    again.focus();
+    again.setSelectionRange(focus.selectionStart, focus.selectionEnd);
+  }
+}
+let memorySearchTimer;
+panelBody.addEventListener("input", (e) => {
+  const field = e.target.closest(".memory [name]");
+  if (!field || !active) return;
+  const tab = active;
+  memoryOf(tab)[field.name] = field.value;
+  if (field.name !== "query") return;
+  clearTimeout(memorySearchTimer);
+  memorySearchTimer = setTimeout(() => refreshMemory(tab), 250);
+});
+panelBody.addEventListener("click", (e) => {
+  const forget = e.target.closest(".memory [data-forget]");
+  if (forget && active) changeMemory(active, { cmd: "memory_forget", id: Number(forget.dataset.forget) });
+});
+panelBody.addEventListener("submit", async (e) => {
+  const form = e.target.closest(".memory-add");
+  if (!form || !active) return;
+  e.preventDefault();
+  const tab = active;
+  const m = memoryOf(tab);
+  if (!m.title.trim() || !m.text.trim()) return flash("A memory needs a title and a text.");
+  if (await changeMemory(tab, { cmd: "memory_save", title: m.title, text: m.text })) Object.assign(m, { title: "", text: "", query: "" });
+});
 panelBody.addEventListener("contextmenu", (e) => {
   const row = e.target.closest(".prs [data-prs-open]");
   if (!row || !active) return;

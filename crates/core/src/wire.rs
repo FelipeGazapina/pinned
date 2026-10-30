@@ -2,7 +2,7 @@
 //! Every enum is internally tagged and unknown fields are ignored, so versions can drift.
 
 use crate::accounts::{self, AccountId, Provider};
-use crate::agent::{AgentEvent, AgentStatus, Stage, Subject, Usage};
+use crate::agent::{AgentEvent, AgentStatus, Role, Stage, Subject, Usage};
 use crate::connectors::{Connector, Settings};
 use crate::branches::GitStep;
 use crate::scripts::Script;
@@ -103,6 +103,9 @@ pub struct TabView {
     /// What the conversation's work came to so far, once its transcript holds any of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<ThreadStats>,
+    /// The tab is its project's orchestrator, or a worker the orchestrator started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -199,6 +202,31 @@ pub enum Call {
     RemoveAccount { account: AccountId },
     /// The project's `ProjectView`. `account: null` runs it under the default account again.
     SetProjectAccount { path: String, account: Option<AccountId> },
+    /// The id of the project's orchestrator tab: the one already open, else a new one, not yet started.
+    OpenOrchestrator { path: String },
+    /// `Vec<memory::Memory>`: the project's memories that best match `query`, best first, or the
+    /// latest ones for an empty query.
+    MemorySearch {
+        path: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    /// The `memory::Memory` saved. With `id`, replaces that memory. Refused when the project
+    /// already has a memory with the same title or nearly the same meaning.
+    MemorySave {
+        path: String,
+        title: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<i64>,
+    },
+    /// The `memory::Memory` removed.
+    MemoryForget { path: String, id: i64 },
+    /// `memory::Status`: how many memories the project has and whether search also matches by meaning.
+    MemoryStatus { path: String },
     /// The new tab's id, running the CLI's login for the account in the account's home.
     SignIn { account: AccountId },
     /// The tab's folder, as `start_claude`. Moves the tab's conversation to another Claude Code
@@ -535,6 +563,10 @@ impl Call {
                 | Call::PublishProject { .. }
                 | Call::BusyShells { .. }
                 | Call::SearchThreads { .. }
+                | Call::MemorySearch { .. }
+                | Call::MemorySave { .. }
+                | Call::MemoryForget { .. }
+                | Call::MemoryStatus { .. }
         )
     }
 }
@@ -857,6 +889,7 @@ mod tests {
             updated: Some(1792400000),
             session: Some("s1".into()),
             stats: Some(ThreadStats { active_ms: Some(4_320_000), cost_usd: Some(3.42) }),
+            role: None,
         }
     }
 
@@ -1042,12 +1075,17 @@ mod tests {
             json!({ "cmd": "linear_take", "connector": "c2", "channel": "C1", "thread": "1.2", "issue": "ENG-7" }),
         );
         round_trip(
-            HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None, vercel_key: None },
-            json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": "lin_api_1", "slack_key": null, "github_key": null, "vercel_key": null }),
+            HubCall::Import { store: json!({ "connectors": [] }), linear_key: Some("lin_api_1".into()), slack_key: None, github_key: None, vercel_key: Some("vck_1".into()) },
+            json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": "lin_api_1", "slack_key": null, "github_key": null, "vercel_key": "vck_1" }),
         );
         round_trip(HubCall::ConnectVercel { key: "vck_1".into() }, json!({ "cmd": "connect_vercel", "key": "vck_1" }));
         round_trip(HubCall::DisconnectVercel, json!({ "cmd": "disconnect_vercel" }));
         round_trip(HubCall::VercelModels, json!({ "cmd": "vercel_models" }));
+        let before_vercel = json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": null, "slack_key": "xoxb-1" });
+        match serde_json::from_value::<HubCall>(before_vercel).unwrap() {
+            HubCall::Import { slack_key, github_key, vercel_key, .. } => assert_eq!((slack_key.as_deref(), github_key, vercel_key), (Some("xoxb-1"), None, None)),
+            _ => panic!("not an import"),
+        }
     }
 
     #[test]

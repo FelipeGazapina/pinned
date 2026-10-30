@@ -33,11 +33,82 @@ const FIXES = {
   ask: "Analyze, then ask me in the thread before filing",
   auto: "Fix obvious bugs on its own, ask for the rest",
 };
-/** What can start a connector, matching the backend's `Trigger`. */
+const routedText = (text, how = "Another workflow routed the Slack thread below here.") => text.replace("Someone mentioned you in the Slack thread below.", how);
+const DECISION_MODEL = "typesafe-ai/jev";
+const DEFAULT_CATEGORIES = [
+  { name: "error", description: "Someone reports a bug or an error", workflow: null, mention: null },
+  { name: "doubt", description: "Someone asks a question", workflow: null, mention: null },
+  {
+    name: "escalation",
+    description: "Production is down or customers are blocked right now and someone on support must act; not questions, bug reports or feature requests",
+    workflow: null,
+    mention: "prod-engg",
+  },
+  { name: "ignore", description: "Anything else", workflow: null, mention: null },
+];
+const sessionSteps = (c, event) => [["ask", event], ["agent", ""], ["reply", ""], ["bug", ""], ...(c.fix === "off" ? [] : [["coding", "starts the fix"], ["review", "pull request opened"], ["proof", ""]])];
 const TRIGGERS = {
-  "linear-label": "A Linear issue gets a label",
-  "slack-mention": "The bot is @mentioned in Slack",
+  "linear-label": {
+    text: "A Linear issue gets a label",
+    pitch: "Claude resolves the issue, opens a pull request and moves the issue through your columns.",
+    needs: "linear",
+    step: "linear-trigger",
+    steps: () => [["ask", "new issue"], ["picked", ""], ["agent", ""], ["coding", "starts changing code"], ["review", "pull request opened"], ["proof", ""]],
+    subject: "issue",
+    name: "Resolve labeled Linear issues",
+    defaults: { worktree: true, columns: { picked: "Analyzing", coding: "In Dev", review: "Ready to Review" } },
+    trigger: () => ({ kind: "linear-label", label: "claude" }),
+    instructions: () => DEFAULT_INSTRUCTIONS,
+    sentence: (c, where) => `When an issue gets the label “${c.trigger.label}”, ${who(c)} picks it up${where}.`,
+  },
+  "slack-mention": {
+    text: "The bot is @mentioned in Slack",
+    pitch: "Claude answers in the thread, and can file a Linear issue and fix the bug.",
+    needs: "slack",
+    step: "slack-trigger",
+    steps: (c) => sessionSteps(c, "new thread"),
+    subject: "thread",
+    name: "Triage Slack mentions",
+    trigger: (was) => ({ kind: "slack-mention", channel: was?.channel ?? "" }),
+    instructions: (c) => (c.fix === "off" ? SLACK_INSTRUCTIONS : SLACK_FIX_INSTRUCTIONS),
+    sentence: (c, where, then) => `When the bot is mentioned in #${c.trigger.channel.replace(/^#/, "")}, ${who(c)} ${then}${where}.`,
+  },
+  "slack-message": {
+    text: "A Slack message, sorted by a decision model",
+    pitch: "A model on the Vercel AI Gateway puts each new message in a category, and each category pings a group, runs its own workflow or stops.",
+    needs: "slack",
+    step: "message-trigger",
+    steps: () => [["decide", "new message"]],
+    subject: "thread",
+    name: "Route Slack messages",
+    trigger: (was) => ({
+      kind: "slack-message",
+      channel: was?.channel ?? "",
+      decide: {
+        model: DECISION_MODEL,
+        instructions: "Categorize this Slack message. Choose escalation only for urgent production problems.",
+        categories: clone(DEFAULT_CATEGORIES),
+        fallback: null,
+      },
+    }),
+    instructions: (c) => TRIGGERS["slack-mention"].instructions(c),
+    sentence: (c) =>
+      `When someone posts in #${c.trigger.channel.replace(/^#/, "")}, a decision model sorts the message into ${orList(c.trigger.decide.categories.map((cat) => cat.name))}.`,
+  },
+  called: {
+    text: "Called by another workflow",
+    pitch: "A Slack message workflow hands it the threads of one category, and Claude answers them as it does a mention.",
+    needs: "slack",
+    step: "called-trigger",
+    steps: (c) => sessionSteps(c, "routed thread"),
+    subject: "thread",
+    name: "Answer routed Slack threads",
+    trigger: () => ({ kind: "called" }),
+    instructions: (c) => routedText(TRIGGERS["slack-mention"].instructions(c)),
+    sentence: (c, where, then) => `When ${orList(routesTo(c).map((r) => `“${r.router}”`)) || "another workflow"} routes a Slack thread here, ${who(c)} ${then}${where}.`,
+  },
 };
+const orList = (names) => new Intl.ListFormat("en", { type: "disjunction" }).format(names);
 
 const settingsPage = document.getElementById("settings-page");
 const LINEAR_KEYS = "https://linear.app/settings/account/security";
@@ -101,6 +172,7 @@ function showPage(name) {
   const section = settingsSectionOf(name) ?? settingsSections[0];
   name = page = section.page;
   save("settings-page", name);
+  delete settingsPage.dataset.view;
   renderSettingsNav();
   if (name === "connectors" && settings.linear && !suggestions.labels.length) {
     connectorCall("linear_suggestions").then((found) => {
@@ -181,7 +253,7 @@ function integrationsHtml() {
   return `<h2>Connectors</h2>
     <p class="hint">Services the harness can read from and act on.</p>
     <div class="card">
-      <div class="card-head"><span class="logo">◐</span><div><b>Linear</b><div class="hint">Issues, labels and comments</div></div>
+      <div class="card-head"><span class="logo" data-tone="linear" data-logo="linear">${LOGOS.linear}</span><div><b>Linear</b><div class="hint">Issues, labels and comments</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>
@@ -215,26 +287,6 @@ function upstashCardHtml() {
     </div>`;
 }
 
-function vercelCardHtml() {
-  const account = settings.vercel;
-  const body = account
-    ? `<p class="connected">Key <b>${esc(account.key_hint)}</b></p>
-       <div class="actions"><button class="secondary" data-action="disconnect-vercel">Disconnect</button></div>`
-    : `<ol class="steps">
-         <li>Create an AI Gateway API key in your Vercel dashboard.
-           <button class="secondary" data-action="open-vercel-keys">Open Vercel ↗</button></li>
-         <li>Paste the key here.
-           <div class="row"><input id="vercel-key" type="password" placeholder="vck_…" autocomplete="off">
-           <button class="primary" data-action="connect-vercel">Connect</button></div></li>
-       </ol>
-       <p class="error" id="vercel-error"></p>`;
-  return `<div class="card">
-      <div class="card-head"><span class="logo vercel">▲</span><div><b>Vercel AI Gateway</b><div class="hint">Models that read and classify what a workflow picks up</div></div>
-        <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
-      ${body}
-    </div>`;
-}
-
 function githubCardHtml() {
   const account = settings.github;
   const body = account
@@ -249,7 +301,27 @@ function githubCardHtml() {
        </ol>
        <p class="error" id="github-error"></p>`;
   return `<div class="card">
-      <div class="card-head"><span class="logo github">⎇</span><div><b>GitHub</b><div class="hint">Clones your repositories on any machine that lacks them, private ones too</div></div>
+      <div class="card-head"><span class="logo" data-logo="github">${LOGOS.github}</span><div><b>GitHub</b><div class="hint">Clones your repositories on any machine that lacks them, private ones too</div></div>
+        <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
+      ${body}
+    </div>`;
+}
+
+function vercelCardHtml() {
+  const account = settings.vercel;
+  const body = account
+    ? `<p class="connected">Key <b>${esc(account.key_hint)}</b></p>
+       <div class="actions"><button class="secondary" data-action="disconnect-vercel">Disconnect</button></div>`
+    : `<ol class="steps">
+         <li>Create an AI Gateway API key in your Vercel team.
+           <button class="secondary" data-action="open-vercel-keys">Open Vercel ↗</button></li>
+         <li>Paste the key here.
+           <div class="row"><input id="vercel-key" type="password" placeholder="vck_…" autocomplete="off">
+           <button class="primary" data-action="connect-vercel">Connect</button></div></li>
+       </ol>
+       <p class="error" id="vercel-error"></p>`;
+  return `<div class="card">
+      <div class="card-head"><span class="logo" data-tone="vercel" data-logo="vercel">${LOGOS.vercel}</span><div><b>Vercel AI Gateway</b><div class="hint">Models that read, classify and sort what a workflow picks up</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
@@ -263,7 +335,7 @@ function slackCardHtml() {
     : `<ol class="steps">
          <li>Create a Slack app at <code>api.slack.com/apps</code>. Under OAuth &amp; Permissions, give its bot the scopes
            <code>channels:history</code>, <code>groups:history</code>, <code>channels:read</code>, <code>groups:read</code>,
-           <code>users:read</code>, <code>chat:write</code> and <code>reactions:write</code>, then install it to your workspace.</li>
+           <code>users:read</code>, <code>usergroups:read</code>, <code>chat:write</code> and <code>reactions:write</code>, then install it to your workspace.</li>
          <li>Invite the bot to the channel it should watch, with <code>/invite @your-bot</code>.</li>
          <li>Paste the Bot User OAuth Token here.
            <div class="row"><input id="slack-token" type="password" placeholder="xoxb-…" autocomplete="off">
@@ -271,7 +343,7 @@ function slackCardHtml() {
        </ol>
        <p class="error" id="slack-error"></p>`;
   return `<div class="card">
-      <div class="card-head"><span class="logo slack">#</span><div><b>Slack</b><div class="hint">Mentions of the bot, answered in their thread</div></div>
+      <div class="card-head"><span class="logo" data-logo="slack">${LOGOS.slack}</span><div><b>Slack</b><div class="hint">Mentions of the bot, answered in their thread</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
@@ -282,16 +354,34 @@ function slackCardHtml() {
 let view = { name: "list" };
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
-const isSlack = (c) => c.trigger.kind === "slack-mention";
-const subject = (c) => (isSlack(c) ? "thread" : "issue");
+const subject = (c) => TRIGGERS[c.trigger.kind].subject;
 const folderName = (path) => path.split(/[\\/]/).filter(Boolean).pop() ?? "";
 
 const input = (path, value, attrs = "") => `<input data-bind="${path}" value="${esc(value)}" ${attrs}>`;
 const select = (path, values, labelOf, selected) => `<select data-bind="${path}">${options(values, labelOf, selected)}</select>`;
 const check = (path, on, text) => `<label class="toggle"><input type="checkbox" data-bind="${path}"${on ? " checked" : ""}> ${text}</label>`;
 const switchHtml = (attrs, on) => `<label class="switch" title="On: the workflow watches and starts sessions"><input type="checkbox" ${attrs}${on ? " checked" : ""}><span></span></label>`;
-const iconHtml = (step) => `<span class="icon" data-tone="${step.tone}" title="${esc(`${step.app}: ${step.title}`)}">${step.icon}</span>`;
-const kindHtml = (c) => `<label>Starts when ${select("trigger.kind", Object.keys(TRIGGERS), (t) => TRIGGERS[t], c.trigger.kind)}</label>`;
+const SLACK_MARK = [
+  ["red", "M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zm1.271 0a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313z"],
+  ["blue", "M8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zm0 1.271a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312z"],
+  ["green", "M18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zm-1.268 0a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312z"],
+  ["yellow", "M15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zm0-1.268a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"],
+];
+const CLAUDE_RAYS = Array.from({ length: 12 }, (_, i) => {
+  const a = (i * Math.PI) / 6 + 0.2;
+  const r = i % 2 ? 8.5 : 11;
+  return `M${(12 + 2.6 * Math.cos(a)).toFixed(2)} ${(12 + 2.6 * Math.sin(a)).toFixed(2)}L${(12 + r * Math.cos(a)).toFixed(2)} ${(12 + r * Math.sin(a)).toFixed(2)}`;
+}).join("");
+const LOGOS = {
+  slack: `<svg viewBox="0 0 24 24">${SLACK_MARK.map(([part, d]) => `<path class="${part}" d="${d}"/>`).join("")}</svg>`,
+  linear: `<svg viewBox="0 0 24 24"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg>`,
+  vercel: `<svg viewBox="0 0 24 24"><path d="M12 2.5 23 21.5H1z"/></svg>`,
+  claude: `<svg viewBox="0 0 24 24"><path d="${CLAUDE_RAYS}"/></svg>`,
+  github: `<svg viewBox="0 0 24 24"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 0-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.2.5-2.3 1.3-3.1-.2-.4-.6-1.6 0-3.2 0 0 1-.3 3.4 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8 0 3.2.9.8 1.3 1.9 1.3 3.2 0 4.6-2.8 5.6-5.5 5.9.5.4.9 1 .9 2.2v3.3c0 .3.1.7.8.6A12 12 0 0 0 12 .3"/></svg>`,
+};
+const iconHtml = (step) =>
+  `<span class="icon" data-tone="${step.tone}"${LOGOS[step.tone] ? ` data-logo="${step.tone}"` : ""} title="${esc(`${step.app}: ${step.title}`)}">${LOGOS[step.tone] ?? step.icon}</span>`;
+const kindHtml = (c) => `<label>Starts when ${select("trigger.kind", Object.keys(TRIGGERS), (t) => TRIGGERS[t].text, c.trigger.kind)}</label>`;
 
 /** An optional step that moves the Linear issue to a column at `stage`, matching the backend's `Stage`. Off while it names no column. */
 const moveStep = (stage, ghost) => ({
@@ -305,7 +395,7 @@ const moveStep = (stage, ghost) => ({
   remove: (c) => (c.columns[stage] = ""),
   summary: (c) => (c.columns[stage].trim() ? `to “${c.columns[stage].trim()}”` : "Name a column"),
   fields: (c) => `<label>Column ${input(`columns.${stage}`, c.columns[stage], 'list="linear-columns" placeholder="In Dev"')}</label>
-    <p class="hint">Matched by name, ignoring case, within the issue's team.${isSlack(c) ? " A thread has no issue until the session files one, so this applies from then on." : ""}</p>`,
+    <p class="hint">Matched by name, ignoring case, within the issue's team.${subject(c) === "thread" ? " A thread has no issue until the session files one, so this applies from then on." : ""}</p>`,
 });
 
 /** Every step a connector can run. `flowOf` puts them in order; the backend runs them. */
@@ -333,6 +423,67 @@ const STEPS = {
     fields: (c) => `${kindHtml(c)}
       <label>Channel ${input("trigger.channel", c.trigger.channel, 'list="slack-channels" placeholder="support"')}</label>
       <p class="hint">Invite the bot with <code>/invite @your-bot</code>. Each new thread that mentions it starts one session, checked every minute.</p>`,
+  },
+  "message-trigger": {
+    tone: "slack",
+    icon: "#",
+    app: "Slack",
+    title: "Message in channel",
+    trigger: true,
+    summary: (c) => (c.trigger.channel.trim() ? `in #${c.trigger.channel.trim().replace(/^#/, "")}` : "Name a channel"),
+    issues: (c) => [!settings.slack && "Connect Slack under Connectors.", !c.trigger.channel.trim() && "Name the channel to watch."].filter(Boolean),
+    fields: (c) => `${kindHtml(c)}
+      <label>Channel ${input("trigger.channel", c.trigger.channel, 'list="slack-channels" placeholder="support"')}</label>
+      <p class="hint">Invite the bot with <code>/invite @your-bot</code>. Every new message a person posts in the channel is sorted once, checked every minute. Thread replies and bots are skipped.</p>`,
+  },
+  "called-trigger": {
+    tone: "called",
+    icon: "↳",
+    app: "Workflow",
+    title: "Called by another workflow",
+    trigger: true,
+    summary: (c) => (routesTo(c).length ? `from ${[...new Set(routesTo(c).map((r) => r.router))].join(", ")}` : "No workflow routes here yet"),
+    issues: () => [!settings.slack && "Connect Slack under Connectors."].filter(Boolean),
+    fields: (c) => {
+      const from = routesTo(c).map((r) => `“${esc(r.router)}” sorts a message into “${esc(r.category)}”`);
+      return `${kindHtml(c)}
+        <p class="hint">${
+          from.length
+            ? `Runs when ${orList(from)}. Claude answers in that message's thread as it does a mention.`
+            : "No workflow routes threads here yet. In a Slack message workflow, choose this one as a category's route."
+        }</p>`;
+    },
+  },
+  decide: {
+    tone: "vercel",
+    icon: "◆",
+    app: "Vercel AI Gateway",
+    title: "Decide",
+    summary: (c) => c.trigger.decide.model.trim() || "Name a model",
+    issues: (c) => {
+      const categories = c.trigger.decide.categories;
+      const names = categories.map((cat) => cat.name.trim().toLowerCase());
+      const twice = categories.find((cat, i) => names[i] && names.indexOf(names[i]) !== i);
+      const vague = categories.find((cat) => cat.name.trim() && !cat.description.trim());
+      const removed = categories.find((cat) => cat.workflow && !settings.connectors.some((k) => k.id === cat.workflow));
+      const deaf = categories.find((cat) => !answersThreads(settings.connectors.find((k) => k.id === cat.workflow) ?? { trigger: { kind: "called" } }));
+      const fallback = fallbackOf(c.trigger.decide);
+      return [
+        !settings.vercel && "Connect the Vercel AI Gateway under Connectors.",
+        !c.trigger.decide.model.trim() && "Name the decision model.",
+        suggestions.models.some((m) => m.id === c.trigger.decide.model.trim() && m.kind !== "decision") && `${c.trigger.decide.model.trim()} is a chat model: the Decide step needs a decision model.`,
+        categories.length < 2 && "Add at least two categories.",
+        names.some((name) => !name) && "Name every category.",
+        twice && `Two categories are named “${twice.name.trim()}”.`,
+        vague && `Describe the category “${vague.name.trim()}”.`,
+        removed && `The workflow that “${removed.name.trim()}” routes to was deleted.`,
+        deaf && `“${deaf.name.trim()}” routes to a workflow that can't answer a Slack thread.`,
+        fallback?.mention?.trim() && `The fallback can't ping a group, so saving sets it back to “${BEST_GUESS}”.`,
+      ].filter(Boolean);
+    },
+    fields: (c) => decideHtml(c),
+    branches: (c) => c.trigger.decide.categories.map((cat, i) => ({ label: cat.name.trim() || "unnamed", nodes: branchNodes(cat, i), end: cat.workflow ? undefined : i })),
+    stub: "＋ Add category",
   },
   picked: moveStep("picked", "Move the issue when pinned picks it up"),
   agent: {
@@ -491,12 +642,91 @@ const STEPS = {
 };
 
 /** A connector's steps in run order, each with the event that leads into it. */
-function flowOf(c) {
-  if (!isSlack(c)) {
-    return [["linear-trigger"], ["ask", "new issue"], ["picked", ""], ["agent", ""], ["coding", "starts changing code"], ["review", "pull request opened"], ["proof", ""]];
+const flowOf = (c) => [[TRIGGERS[c.trigger.kind].step], ...TRIGGERS[c.trigger.kind].steps(c)];
+
+const routesTo = (c) =>
+  settings.connectors.flatMap((r) =>
+    r.trigger.kind === "slack-message" && c.id ? r.trigger.decide.categories.filter((cat) => cat.workflow === c.id).map((cat) => ({ router: r.name, category: cat.name })) : [],
+  );
+
+function branchNodes(category, i) {
+  const mention = (category.mention ?? "").trim().replace(/^@/, "");
+  const nodes = mention ? [{ kind: "mention", category: i, tone: "slack", icon: "@", app: "Slack", title: `Mention @${mention}`, summary: "Pings the group" }] : [];
+  const target = category.workflow && settings.connectors.find((k) => k.id === category.workflow);
+  if (target) {
+    const trigger = TRIGGERS[target.trigger.kind];
+    const { tone, icon } = STEPS[trigger.step];
+    nodes.push({ kind: "route", category: i, tone, icon, app: "Workflow", title: target.name, summary: trigger.text });
+  } else if (category.workflow) {
+    nodes.push({ kind: "route", category: i, tone: "", icon: "?", app: "Workflow", title: "A deleted workflow", summary: "Choose another route" });
+  } else if (!mention) {
+    nodes.push({ kind: "stop", category: i, tone: "", icon: "■", app: "", title: "Stop", summary: "Nothing else happens" });
   }
-  const fixing = c.fix === "off" ? [] : [["coding", "starts the fix"], ["review", "pull request opened"], ["proof", ""]];
-  return [["slack-trigger"], ["ask", "new thread"], ["agent", ""], ["reply", ""], ["bug", ""], ...fixing];
+  return nodes;
+}
+
+const NEW_ROUTE = "＋new";
+
+/** A route's target must answer the thread it is handed, as the backend's `Trigger::answers_threads`. */
+const answersThreads = (k) => ["slack-mention", "called"].includes(k.trigger.kind);
+const routeName = (id) => {
+  const target = settings.connectors.find((k) => k.id === id);
+  return target ? `${target.name} (can't answer threads)` : "A deleted workflow";
+};
+
+function decideHtml(c) {
+  const decide = c.trigger.decide;
+  const targets = settings.connectors.filter((k) => k.id !== c.id && answersThreads(k));
+  const row = (cat, i) => {
+    const at = `trigger.decide.categories.${i}`;
+    const routes = Object.fromEntries([
+      ["", "Stop"],
+      ...targets.map((k) => [k.id, k.name]),
+      ...(cat.workflow && !targets.some((k) => k.id === cat.workflow) ? [[cat.workflow, routeName(cat.workflow)]] : []),
+      [NEW_ROUTE, "＋ New workflow for this category"],
+    ]);
+    return `<div class="category" data-category="${i}">
+      <div class="row">${input(`${at}.name`, cat.name, 'class="name" placeholder="Category" aria-label="Category name" spellcheck="false"')}
+        <button class="secondary" data-action="remove-category" title="Remove this category">✕</button></div>
+      <textarea data-bind="${at}.description" rows="2" placeholder="What a message in it looks like" aria-label="Description">${esc(cat.description)}</textarea>
+      <div class="grid">
+        <label>Mention ${input(`${at}.mention`, cat.mention ?? "", 'placeholder="No one" spellcheck="false"')}</label>
+        <label>Then ${select(`${at}.workflow`, Object.keys(routes), (id) => routes[id], cat.workflow ?? "")}</label>
+      </div>
+      <p class="hint mention-hint">Pings only when the model is at least 85% sure, once per thread, and at most once every 30 minutes per channel.</p>
+    </div>`;
+  };
+  return `<label>Model ${input("trigger.decide.model", decide.model, `list="vercel-models" placeholder="${DECISION_MODEL}" spellcheck="false"`)}</label>
+    <label>Instructions <textarea data-bind="trigger.decide.instructions" rows="3">${esc(decide.instructions)}</textarea></label>
+    <div class="categories">${decide.categories.map(row).join("")}</div>
+    <div class="actions start"><button class="secondary" data-action="add-category">＋ Add category</button></div>
+    <label>When the model is less than 60% sure ${fallbackHtml(decide)}</label>
+    <p class="hint">The model puts each message in one category, judged by its description. A mention pings a Slack user group, by its handle or ID, in the message's thread. A route hands the thread to a Slack mention or called workflow, which answers it there. When the model is unsure, the fallback category takes the message instead of its guess.</p>`;
+}
+
+const BEST_GUESS = "Use its best guess";
+const fallbackOf = (decide) => (decide.fallback ? decide.categories.find((cat) => cat.name.trim() === decide.fallback) : undefined);
+
+function fallbackHtml(decide) {
+  const pingsNoOne = (cat) => !cat.mention?.trim();
+  const chosen = (cat) => cat === fallbackOf(decide);
+  const names = decide.categories.filter((cat) => cat.name.trim() && (pingsNoOne(cat) || chosen(cat))).map((cat) => cat.name.trim());
+  return select("trigger.decide.fallback", ["", ...new Set(names)], (name) => name || BEST_GUESS, decide.fallback ?? "");
+}
+
+function routePanelHtml(c, i) {
+  const category = c.trigger.decide.categories[i];
+  const target = settings.connectors.find((k) => k.id === category?.workflow);
+  if (!target) return "";
+  return `<aside class="node-panel" aria-label="${esc(target.name)}">
+    <div class="node-panel-head">${iconHtml(STEPS[TRIGGERS[target.trigger.kind].step])}<span class="text"><span class="app">Workflow</span><b>${esc(target.name)}</b></span>
+      <button class="secondary close" data-action="close-step" title="Close (Esc)">✕</button></div>
+    <div class="details">
+      <p class="hint">Messages the decision model puts in “${esc(category.name.trim())}” go to this workflow${category.mention?.trim() ? " after the mention" : ""}, which answers in their thread.</p>
+      <div class="actions start"><button class="primary" data-action="open-route" data-id="${esc(target.id)}">Open “${esc(target.name)}”</button></div>
+      <p class="hint">Change the route in the Decide step.</p>
+    </div>
+  </aside>`;
 }
 
 const isOn = (c, id) => !STEPS[id].optional || STEPS[id].on(c);
@@ -563,6 +793,24 @@ const repoHint = (c) =>
     ? "A machine without the folder can't run this session."
     : `A machine without ${c.folder.trim() ? "this folder" : "a clone"} clones <code>${esc(c.repo.trim())}</code> into <code>~/pinned</code>${settings.github ? " with your GitHub token" : ""}.`;
 
+async function newRoute(select) {
+  const router = view.draft;
+  const category = router.trigger.decide.categories[Number(select.closest("[data-category]").dataset.category)];
+  const name = category.name.trim() || "a category";
+  const draft = blank("called");
+  draft.name = `${router.name.trim() || TRIGGERS["slack-message"].name}: ${name}`;
+  draft.instructions = routedText(TRIGGERS["slack-mention"].instructions(draft), `A decision model sorted the Slack thread below into “${name}” and routed it here.`);
+  try {
+    const saved = await connectorCall("save_connector", { connector: tidy(draft) });
+    if (!settings.connectors.some((k) => k.id === saved.id)) settings.connectors.push(saved);
+    category.workflow = saved.id;
+    redraw();
+  } catch (err) {
+    redraw();
+    document.getElementById("editor-error").textContent = err;
+  }
+}
+
 async function loadFolders(c) {
   const machine = folderMachine(c);
   suggestions.folders = [];
@@ -617,33 +865,29 @@ function cardHtml(c, i) {
   </div>`;
 }
 
+const who = (c) => (c.ask ? `${c.ask.model.trim() || "a model"} classifies it, then Claude` : "Claude");
+
 function sentence(c) {
   const machine = (account || isBox(c)) && c.machine ? ` on ${isBox(c) ? "a fresh Upstash Box" : runOnName(c)}` : "";
   const as = connectorAccountName(c) ? ` with the ${connectorAccountName(c)} account` : "";
   const folder = isBox(c) ? folderName(c.repo.replace(/\.git$/, "")) : folderName(c.folder);
   const where = (folder ? ` in ${folder}${machine}` : machine) + as;
-  const who = c.ask ? `${c.ask.model.trim() || "a model"} classifies it, then Claude` : "Claude";
-  if (!isSlack(c)) return `When an issue gets the label “${c.trigger.label}”, ${who} picks it up${where}.`;
   const then = c.fix === "off" ? "answers in the thread" : "answers in the thread and fixes bugs";
-  return `When the bot is mentioned in #${c.trigger.channel.replace(/^#/, "")}, ${who} ${then}${where}.`;
+  return TRIGGERS[c.trigger.kind].sentence(c, where, then);
 }
-
-const TEMPLATES = [
-  { kind: "linear-label", integration: "linear", text: "Claude resolves the issue, opens a pull request and moves the issue through your columns." },
-  { kind: "slack-mention", integration: "slack", text: "Claude answers in the thread, and can file a Linear issue and fix the bug." },
-];
 
 function triggerChoiceHtml() {
   return `<div class="editor-bar"><button class="secondary" data-action="close-editor" title="Back to workflows">←</button><h2>New workflow</h2></div>
     <p class="hint">Pick what starts the agent. You set up the rest of the flow next.</p>
-    ${TEMPLATES.map(({ kind, integration, text }) => {
-      const step = STEPS[`${integration}-trigger`];
-      const connected = settings[integration];
-      return `<button class="template" data-action="${connected ? "pick-trigger" : "go-integrations"}" data-kind="${kind}">
-        ${iconHtml(step)}
-        <span><b>${TRIGGERS[kind]}</b><span class="hint">${connected ? text : `Connect ${step.app} under Connectors first.`}</span></span>
+    ${Object.entries(TRIGGERS)
+      .map(([kind, { text, pitch, needs, step }]) => {
+        const connected = settings[needs];
+        return `<button class="template" data-action="${connected ? "pick-trigger" : "go-integrations"}" data-kind="${kind}">
+        ${iconHtml(STEPS[step])}
+        <span><b>${text}</b><span class="hint">${connected ? pitch : `Connect ${needs === "slack" ? "Slack" : "Linear"} under Connectors first.`}</span></span>
       </button>`;
-    }).join("")}`;
+      })
+      .join("")}`;
 }
 
 function editorHtml() {
@@ -660,81 +904,245 @@ function editorHtml() {
       <button class="secondary" data-action="close-editor" title="Back to workflows">←</button>
       ${input("name", c.name, 'class="title" placeholder="Workflow name"')}
       ${switchHtml('data-bind="enabled"', c.enabled)}
+      ${c.id ? `<button class="secondary danger" data-action="delete-connector">Delete</button>` : ""}
       <button class="primary" id="save-connector" data-action="save-connector" title="Save (⌘S)"></button>
     </div>
-    <p class="error" id="editor-error"></p>
-    <div class="flow">${flowOf(c).map(([id, edge]) => stepHtml(c, id, edge)).join("")}</div>
-    ${c.id ? `<div class="actions start"><button class="secondary danger" data-action="delete-connector">Delete workflow</button></div>` : ""}`;
+    <div class="editor">
+      <div class="canvas-wrap">
+        <div class="canvas"></div>
+        <div class="canvas-zoom" role="toolbar" aria-label="Zoom">
+          <button data-action="zoom-fit" title="Fit to view">${icon("maximize")}</button>
+          <button data-action="zoom-in" title="Zoom in">${icon("zoom-in")}</button>
+          <button data-action="zoom-out" title="Zoom out">${icon("zoom-out")}</button>
+        </div>
+      </div>
+      <p class="error" id="editor-error"></p>
+      ${panelHtml(c)}
+    </div>`;
 }
 
-function stepHtml(c, id, edge) {
-  const step = STEPS[id];
-  const edgeHtml = edge === undefined ? "" : `<div class="edge">${edge ? `<span>${esc(edge)}</span>` : ""}</div>`;
-  if (!shown(c, id)) {
-    return `${edgeHtml}<div class="step" data-step="${id}">
-      <button class="node ghost" data-action="add-step"><span class="icon">＋</span><span class="text">${esc(step.ghost)}</span></button></div>`;
-  }
-  const open = view.open === id;
-  return `${edgeHtml}<div class="step${open ? " open" : ""}" data-step="${id}">
-    <button class="node${step.trigger ? " trigger" : ""}" data-action="toggle-step" aria-expanded="${open}">
-      ${iconHtml(step)}
-      <span class="text"><span class="app">${step.app}</span><b>${step.title}</b><span class="summary"></span></span>
-      <span class="warn" hidden>!</span>
-      <span class="chevron">›</span>
-    </button>
-    ${open ? `<div class="details">${step.fields(c)}${step.optional ? `<div class="actions start"><button class="secondary" data-action="remove-step">Remove step</button></div>` : ""}</div>` : ""}
+const TILE = 84;
+const TEXT_W = 150;
+const TEXT_H = 56;
+const COL = 230;
+const ROW = 150;
+const PAD = 48;
+const STUB = 40;
+const END = 24;
+const MENU_W = 280;
+
+const offSteps = (c) => flowOf(c).map(([id]) => id).filter((id) => !shown(c, id));
+
+function layoutOf(c) {
+  const nodes = [];
+  const edges = [];
+  const ends = [];
+  const place = (node, col, row, h = node.ports > 2 ? Math.max(TILE, node.ports * 28 + 16) : TILE) => {
+    nodes.push({ ...node, cx: PAD + TEXT_W / 2 + col * COL, cy: row * ROW, h });
+    return nodes.at(-1);
+  };
+  let prev = null;
+  flowOf(c).forEach(([id, label], col) => {
+    const step = STEPS[id];
+    const branches = shown(c, id) ? step.branches?.(c) ?? [] : [];
+    const node = place({ step: id, ghost: !shown(c, id), ports: branches.length || 1 }, col, 0);
+    if (prev) edges.push({ from: prev, to: node, label, dashed: prev.ghost || node.ghost });
+    prev = node;
+    const middle = (branches.length - 1) / 2;
+    branches.forEach((branch, port) => {
+      let from = node;
+      branch.nodes.forEach((target, i) => {
+        const placed = place(target, col + 1 + i, port - middle);
+        edges.push(i ? { from, to: placed } : { from, to: placed, port, portLabel: branch.label });
+        from = placed;
+      });
+      if (branch.end !== undefined) ends.push({ from, category: branch.end });
+    });
+    if (branches.length && step.stub) place({ stub: step.stub }, col + 1, middle + 0.9, 32);
+  });
+  if (offSteps(c).length) ends.push({ from: prev, menu: true });
+  const top = Math.min(...nodes.map((n) => n.cy - n.h / 2));
+  const bottom = Math.max(...nodes.map((n) => n.cy + n.h / 2 + TEXT_H));
+  for (const n of nodes) n.cy += PAD - top;
+  const right = Math.max(...nodes.map((n) => n.cx + TEXT_W / 2), ...ends.map((e) => e.from.cx + TILE / 2 + STUB + END));
+  return { nodes, edges, ends, width: right + PAD, height: bottom - top + 2 * PAD };
+}
+
+function flowHtml(c) {
+  const { nodes, edges, ends, width, height } = layoutOf(c);
+  return `<div class="flow" data-width="${width}" data-height="${height}" style="width:${width}px;height:${height}px">
+    ${nodes.map((n) => nodeHtml(c, n)).join("")}
+    <svg class="edges" width="${width}" height="${height}" aria-hidden="true">
+      <defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow" d="M0 1 9 5 0 9z"/></marker></defs>
+      ${edges.map(edgeHtml).join("")}
+      ${ends.map(({ from }) => `<path d="M${from.cx + TILE / 2} ${from.cy}h${STUB}"/><circle cx="${from.cx + TILE / 2}" cy="${from.cy}" r="4.5"/>`).join("")}
+    </svg>
+    ${edges.map(edgeLabelHtml).join("")}
+    ${ends.map((end) => endHtml(c, end)).join("")}
   </div>`;
 }
 
+function endHtml(c, { from, menu, category }) {
+  const x = from.cx + TILE / 2 + STUB;
+  const at = `left:${x}px;top:${from.cy - END / 2}px`;
+  if (!menu) {
+    const name = c.trigger.decide.categories[category].name.trim();
+    return `<button class="end" data-action="choose-route" data-category="${category}" title="${esc(`Choose what happens after “${name}”`)}" style="${at}">${icon("plus")}</button>`;
+  }
+  const items = offSteps(c).map((id) => `<button data-action="add-step" data-step="${id}">${iconHtml(STEPS[id])}<span>${esc(STEPS[id].ghost)}</span></button>`);
+  return `<button class="end" data-action="open-add-menu" aria-expanded="${!!view.menu}" title="Add a step" style="${at}">${icon("plus")}</button>
+    ${view.menu ? `<div class="add-menu" style="width:${MENU_W}px;left:${x + END - MENU_W}px;top:${from.cy + END / 2 + 6}px">${items.join("")}</div>` : ""}`;
+}
+
+const nodeAt = (n) => `left:${n.cx - TEXT_W / 2}px;top:${n.cy - n.h / 2}px`;
+
+function nodeHtml(c, n) {
+  if (n.stub) return `<div class="stub" style="${nodeAt(n)}"><button data-action="add-category">${esc(n.stub)}</button></div>`;
+  if (!n.step) {
+    const open = n.kind === "route" && view.open === `route:${n.category}`;
+    return `<div class="branch${open ? " open" : ""}" data-branch="${n.kind}" data-category="${n.category}" style="${nodeAt(n)}">
+      <button class="node" data-action="open-branch" title="${esc(n.title)}">${iconHtml(n)}</button>
+      <span class="text"><b>${esc(n.title)}</b><span class="summary">${esc(n.summary)}</span></span>
+    </div>`;
+  }
+  const step = STEPS[n.step];
+  if (n.ghost) {
+    return `<div class="step" data-step="${n.step}" style="${nodeAt(n)}">
+      <button class="node ghost" data-action="add-step" title="${esc(step.ghost)}"><span class="icon">＋</span></button>
+      <span class="text"><span class="summary">${esc(step.ghost)}</span></span></div>`;
+  }
+  const issues = step.issues?.(c) ?? [];
+  const open = view.open === n.step;
+  return `<div class="step${open ? " open" : ""}" data-step="${n.step}" style="${nodeAt(n)}">
+    <button class="node${step.trigger ? " trigger" : ""}" data-action="toggle-step" aria-expanded="${open}" title="${esc(`${step.app}: ${step.title}`)}" style="height:${n.h}px">
+      ${iconHtml(step)}${issues.length ? `<span class="warn" title="${esc(issues.join(" "))}">!</span>` : ""}
+    </button>
+    <span class="text"><b>${step.title}</b><span class="summary">${esc(step.summary(c))}</span></span>
+  </div>`;
+}
+
+function ends({ from, to, port }) {
+  const y1 = port === undefined ? from.cy : from.cy - from.h / 2 + (from.h * (port + 0.5)) / from.ports;
+  return [from.cx + TILE / 2, y1, to.cx - TILE / 2, to.cy];
+}
+
+function edgeHtml(edge) {
+  const [x1, y1, x2, y2] = ends(edge);
+  const bend = (x2 - x1) / 2;
+  return `<path${edge.dashed ? ' class="dashed"' : ""} d="M${x1} ${y1}C${x1 + bend} ${y1} ${x2 - bend} ${y2} ${x2 - 6} ${y2}" marker-end="url(#flow-arrow)"/>
+    <circle cx="${x1}" cy="${y1}" r="4.5"/><circle cx="${x2}" cy="${y2}" r="4.5"/>`;
+}
+
+function edgeLabelHtml(edge) {
+  const [x1, y1, x2, y2] = ends(edge);
+  if (edge.portLabel !== undefined) return `<span class="port-label" style="left:${x1 + 8}px;top:${y1}px">${esc(edge.portLabel)}</span>`;
+  return edge.label ? `<span class="edge-label" style="left:${(x1 + x2) / 2}px;top:${(y1 + y2) / 2}px">${esc(edge.label)}</span>` : "";
+}
+
+function panelHtml(c) {
+  const route = /^route:(\d+)$/.exec(view.open ?? "");
+  if (route) return routePanelHtml(c, Number(route[1]));
+  const step = STEPS[view.open];
+  if (!step || !shown(c, view.open)) return "";
+  return `<aside class="node-panel" aria-label="${esc(step.title)}">
+    <div class="node-panel-head">${iconHtml(step)}<span class="text"><span class="app">${step.app}</span><b>${step.title}</b></span>
+      <button class="secondary close" data-action="close-step" title="Close (Esc)">✕</button></div>
+    <div class="details">${step.fields(c)}${step.optional ? `<div class="actions start"><button class="secondary" data-action="remove-step">Remove step</button></div>` : ""}</div>
+  </aside>`;
+}
+
+const READABLE_ZOOM = 0.75;
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 1.5;
+
+function fitZoom(floor) {
+  const canvas = settingsPage.querySelector(".canvas");
+  const flow = canvas.firstElementChild;
+  return Math.max(floor, Math.min(1, canvas.clientWidth / flow.dataset.width, canvas.clientHeight / flow.dataset.height));
+}
+
+function applyZoom() {
+  const canvas = settingsPage.querySelector(".canvas");
+  const flow = canvas?.firstElementChild;
+  if (!flow) return;
+  const zoom = view.zoom ?? fitZoom(READABLE_ZOOM);
+  flow.style.zoom = zoom;
+  if (view.pan) [canvas.scrollLeft, canvas.scrollTop] = view.pan;
+  settingsPage.querySelector('[data-action="zoom-in"]').disabled = zoom >= MAX_ZOOM;
+  settingsPage.querySelector('[data-action="zoom-out"]').disabled = zoom <= MIN_ZOOM;
+}
+
+function zoomAround(zoom, at) {
+  const canvas = settingsPage.querySelector(".canvas");
+  const flow = canvas.firstElementChild;
+  const box = canvas.getBoundingClientRect();
+  const [x, y] = at ?? [box.left + canvas.clientWidth / 2, box.top + canvas.clientHeight / 2];
+  const was = flow.getBoundingClientRect();
+  const scale = Number(flow.style.zoom) || 1;
+  view.zoom = Math.round(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom)) * 100) / 100;
+  view.pan = null;
+  applyZoom();
+  const now = flow.getBoundingClientRect();
+  canvas.scrollLeft += now.left + ((x - was.left) / scale) * view.zoom - x;
+  canvas.scrollTop += now.top + ((y - was.top) / scale) * view.zoom - y;
+  view.pan = [canvas.scrollLeft, canvas.scrollTop];
+}
+
+const zoomNow = () => Number(settingsPage.querySelector(".flow").style.zoom);
+
 const changed = () => JSON.stringify(view.draft) !== view.original;
 
-/** Updates the parts of the editor that follow the draft without redrawing it, so the field being typed in keeps focus. */
 function refresh() {
   const c = view.draft;
-  for (const el of settingsPage.querySelectorAll(".step")) {
-    const step = STEPS[el.dataset.step];
-    const summary = el.querySelector(".summary");
-    if (summary) summary.textContent = step.summary(c);
-    const warn = el.querySelector(".warn");
-    if (warn) {
-      const issues = step.issues?.(c) ?? [];
-      warn.hidden = !issues.length;
-      warn.title = issues.join(" ");
-    }
-  }
+  settingsPage.querySelector(".canvas").innerHTML = flowHtml(c);
+  applyZoom();
   const command = document.getElementById("command");
   if (command) command.textContent = commandPreview(c);
   const repo = document.getElementById("repo");
   if (repo) repo.innerHTML = repoHint(c);
+  const fallback = settingsPage.querySelector('.node-panel [data-bind="trigger.decide.fallback"]');
+  if (fallback && fallback !== document.activeElement) fallback.outerHTML = fallbackHtml(c.trigger.decide);
   const save = document.getElementById("save-connector");
   save.disabled = !!c.id && !changed();
   save.textContent = !c.id ? "Create" : changed() ? "Save" : "Saved";
 }
 
 function redraw() {
+  settingsPage.dataset.view = view.name;
   settingsPage.innerHTML = connectorsHtml();
   if (view.name === "edit") refresh();
 }
 
 function edit(index, draft = clone(settings.connectors[index]), open = null) {
-  view = { name: "edit", index, draft, original: JSON.stringify(draft), open };
+  view = { name: "edit", index, draft, original: JSON.stringify(draft), open, zoom: null, pan: null, menu: false };
   loadFolders(draft);
 }
 
 /** A fresh connector of `kind`, filled with the defaults that make it work once a folder is chosen. */
 function blank(kind) {
   const machine = active ? hubIdOf(active.machine) : "";
-  const common = { id: "", account: "", enabled: true, folder: active?.view.cwd ?? "", machine, repo: "", model: "opus", effort: "high", permissionMode: "auto", proof: true, team: "", label: "", fix: "off" };
-  return kind === "linear-label"
-    ? {
-        ...common,
-        name: DEFAULT_NAMES[kind],
-        trigger: { kind, label: "claude" },
-        worktree: true,
-        instructions: DEFAULT_INSTRUCTIONS,
-        columns: { picked: "Analyzing", coding: "In Dev", review: "Ready to Review" },
-      }
-    : { ...common, name: DEFAULT_NAMES[kind], trigger: { kind, channel: "" }, worktree: false, instructions: SLACK_INSTRUCTIONS, columns: { picked: "", coding: "", review: "" } };
+  const { name, trigger, defaults } = TRIGGERS[kind];
+  const c = {
+    id: "",
+    account: "",
+    enabled: true,
+    name,
+    trigger: trigger(),
+    folder: active?.view.cwd ?? "",
+    machine,
+    repo: "",
+    model: "opus",
+    effort: "high",
+    permissionMode: "auto",
+    proof: true,
+    team: "",
+    label: "",
+    fix: "off",
+    worktree: false,
+    columns: { picked: "", coding: "", review: "" },
+    ...clone(defaults ?? {}),
+  };
+  return { ...c, instructions: defaultText(c) };
 }
 
 function commandPreview(c) {
@@ -752,9 +1160,31 @@ function checkedText() {
   return checked.error ? `Last check at ${at} failed: ${checked.error}` : `Last checked at ${at}. Connectors are checked every minute.`;
 }
 
+const trimmed = (s) => (s ?? "").trim();
+
+function tidyTrigger({ kind, label, channel, decide }) {
+  const trigger = { kind };
+  if (label !== undefined) trigger.label = trimmed(label);
+  if (channel !== undefined) trigger.channel = trimmed(channel);
+  if (decide) {
+    trigger.decide = {
+      model: trimmed(decide.model),
+      instructions: trimmed(decide.instructions),
+      categories: decide.categories.map((cat) => ({
+        name: trimmed(cat.name),
+        description: trimmed(cat.description),
+        workflow: cat.workflow || null,
+        mention: trimmed(cat.mention).replace(/^@/, "") || null,
+      })),
+      fallback: decide.fallback || null,
+    };
+  }
+  return trigger;
+}
+
 /** The draft with its typed names trimmed, as the backend matches them. */
 function tidy(c) {
-  const t = (s) => (s ?? "").trim();
+  const t = trimmed;
   const list = (values) => (values ?? []).map(t).filter(Boolean);
   const out = {
     ...c,
@@ -765,7 +1195,7 @@ function tidy(c) {
     account: t(c.account),
     team: t(c.team),
     label: t(c.label),
-    trigger: isSlack(c) ? { kind: c.trigger.kind, channel: t(c.trigger.channel) } : { kind: c.trigger.kind, label: t(c.trigger.label) },
+    trigger: tidyTrigger(c.trigger),
     columns: Object.fromEntries(Object.entries(c.columns).map(([stage, column]) => [stage, t(column)])),
   };
   if (c.ask) {
@@ -778,13 +1208,11 @@ function tidy(c) {
   return out;
 }
 
-const DEFAULT_NAMES = { "linear-label": "Resolve labeled Linear issues", "slack-mention": "Triage Slack mentions" };
-const defaultText = (c) =>
-  c.trigger.kind === "linear-label" ? DEFAULT_INSTRUCTIONS : c.fix === "off" ? SLACK_INSTRUCTIONS : SLACK_FIX_INSTRUCTIONS;
+const defaultText = (c) => TRIGGERS[c.trigger.kind].instructions(c);
 
 /** Fields that change which steps the flow has, so the draft is reshaped and the editor redrawn. */
 const RESHAPES = {
-  "trigger.kind": (c, kind) => ({ ...c, trigger: kind === "slack-mention" ? { kind, channel: "" } : { kind, label: "" } }),
+  "trigger.kind": (c, kind) => ({ ...c, trigger: TRIGGERS[kind].trigger(c.trigger) }),
   fix: (c, fix) => ({ ...c, fix }),
   machine: (c, machine) => ({ ...c, machine: machine === BOX ? { kind: BOX, size: "medium" } : machine }),
 };
@@ -793,7 +1221,7 @@ const RESHAPES = {
 function reshape(change) {
   const before = view.draft;
   const after = change(clone(before));
-  if (before.name === DEFAULT_NAMES[before.trigger.kind]) after.name = DEFAULT_NAMES[after.trigger.kind];
+  if (before.name === TRIGGERS[before.trigger.kind].name) after.name = TRIGGERS[after.trigger.kind].name;
   if (before.instructions.trim() === defaultText(before).trim()) after.instructions = defaultText(after);
   if (before.trigger.kind !== after.trigger.kind) view.open = flowOf(after)[0][0];
   view.draft = after;
@@ -825,13 +1253,20 @@ function armed(button, text) {
 
 function showStep(id, focus) {
   view.open = id;
+  view.menu = false;
   redraw();
-  const step = settingsPage.querySelector(".step.open");
-  step?.scrollIntoView({ block: "nearest" });
-  if (focus) step?.querySelector(".details [data-bind]")?.focus();
+  settingsPage.querySelector(".flow .open")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (focus) settingsPage.querySelector(".node-panel .details [data-bind]")?.focus();
 }
 
-const stepOf = (button) => button.closest(".step").dataset.step;
+const stepOf = (button) => button.dataset.step ?? button.closest(".step").dataset.step;
+
+function focusCategory(category, field) {
+  showStep("decide");
+  const input = settingsPage.querySelector(`.node-panel [data-bind="trigger.decide.categories.${category}.${field}"]`);
+  input?.scrollIntoView({ block: "nearest" });
+  input?.focus();
+}
 
 const actions = {
   "go-integrations": () => showPage("integrations"),
@@ -961,8 +1396,43 @@ const actions = {
     STEPS[id].add?.(view.draft);
     showStep(id, true);
   },
-  "remove-step"(button) {
-    STEPS[stepOf(button)].remove(view.draft);
+  "close-step": () => showStep(null),
+  "add-category"() {
+    const categories = view.draft.trigger.decide.categories;
+    categories.push({ name: "", description: "", workflow: null, mention: null });
+    showStep("decide");
+    settingsPage.querySelector(`.node-panel [data-bind="trigger.decide.categories.${categories.length - 1}.name"]`)?.focus();
+  },
+  "remove-category"(button) {
+    const decide = view.draft.trigger.decide;
+    const [removed] = decide.categories.splice(Number(button.closest("[data-category]").dataset.category), 1);
+    if (removed.name.trim() === decide.fallback) decide.fallback = null;
+    showStep("decide");
+  },
+  "open-branch"(button) {
+    const { branch, category } = button.closest(".branch").dataset;
+    if (branch === "route") return showStep(`route:${category}`);
+    focusCategory(category, branch === "mention" ? "mention" : "workflow");
+  },
+  "choose-route": (button) => focusCategory(button.dataset.category, "workflow"),
+  "open-add-menu"() {
+    view.menu = !view.menu;
+    refresh();
+  },
+  "zoom-in": () => zoomAround(Math.floor(zoomNow() * 10 + 1e-6) / 10 + 0.1),
+  "zoom-out": () => zoomAround(Math.ceil(zoomNow() * 10 - 1e-6) / 10 - 0.1),
+  "zoom-fit"() {
+    view.zoom = fitZoom(MIN_ZOOM);
+    view.pan = [0, 0];
+    applyZoom();
+  },
+  "open-route"(button) {
+    if ((!view.draft.id || changed()) && !armed(button, "Discard changes and open?")) return;
+    edit(settings.connectors.findIndex((k) => k.id === button.dataset.id));
+    redraw();
+  },
+  "remove-step"() {
+    STEPS[view.open].remove(view.draft);
     showStep(null);
   },
   async "pick-folder"() {
@@ -973,6 +1443,8 @@ const actions = {
     fillRepo();
   },
   async "save-connector"() {
+    const decide = view.draft.trigger.decide;
+    if (decide && fallbackOf(decide)?.mention?.trim()) decide.fallback = null;
     const c = tidy(view.draft);
     const error = document.getElementById("editor-error");
     if (!c.name) {
@@ -992,7 +1464,7 @@ const actions = {
       let index = settings.connectors.findIndex((known) => known.id === saved.id);
       if (index < 0) index = settings.connectors.push(saved) - 1;
       settings.connectors[index] = saved;
-      edit(index, clone(saved), view.open);
+      Object.assign(view, { index, draft: clone(saved), original: JSON.stringify(saved) });
       redraw();
     } catch (err) {
       error.textContent = err;
@@ -1007,21 +1479,84 @@ const actions = {
   },
 };
 
+let canvasPan = null;
+let canvasPanned = false;
+
 settingsPage.addEventListener("click", (e) => {
   const button = e.target.closest("[data-action]");
-  if (!button) return;
-  e.preventDefault();
-  actions[button.dataset.action](button);
+  if (button) {
+    e.preventDefault();
+    return actions[button.dataset.action](button);
+  }
+  if (canvasPanned || !e.target.closest(".canvas") || e.target.closest(".step, .branch, .add-menu")) return;
+  if (view.menu) {
+    view.menu = false;
+    return refresh();
+  }
+  if (view.open) showStep(null);
 });
+
+settingsPage.addEventListener("pointerdown", (e) => {
+  canvasPanned = false;
+  const canvas = e.target.closest(".canvas");
+  if (!canvas || e.button !== 0 || e.pointerType === "touch" || e.target.closest(".step, .branch, button, .add-menu")) return;
+  canvasPan = { canvas, id: e.pointerId, x: e.clientX, y: e.clientY, left: canvas.scrollLeft, top: canvas.scrollTop };
+});
+
+settingsPage.addEventListener("pointermove", (e) => {
+  if (canvasPan?.id !== e.pointerId) return;
+  const dx = e.clientX - canvasPan.x;
+  const dy = e.clientY - canvasPan.y;
+  if (!canvasPanned && Math.hypot(dx, dy) < 4) return;
+  if (!canvasPanned) {
+    canvasPanned = true;
+    canvasPan.canvas.setPointerCapture(e.pointerId);
+    canvasPan.canvas.classList.add("panning");
+  }
+  canvasPan.canvas.scrollLeft = canvasPan.left - dx;
+  canvasPan.canvas.scrollTop = canvasPan.top - dy;
+});
+
+for (const type of ["pointerup", "pointercancel"]) {
+  settingsPage.addEventListener(type, (e) => {
+    if (canvasPan?.id !== e.pointerId) return;
+    canvasPan.canvas.classList.remove("panning");
+    canvasPan = null;
+  });
+}
+
+settingsPage.addEventListener(
+  "wheel",
+  (e) => {
+    if (!(e.ctrlKey || e.metaKey) || !e.target.closest(".canvas")) return;
+    e.preventDefault();
+    // A mouse notch is about 100 and a pinch frame a few units, so both zoom by at most 10% a frame.
+    zoomAround(zoomNow() * Math.exp(-Math.max(-10, Math.min(10, e.deltaY)) / 100), [e.clientX, e.clientY]);
+  },
+  { passive: false },
+);
+
+settingsPage.addEventListener(
+  "scroll",
+  (e) => {
+    if (e.target.classList?.contains("canvas") && view.name === "edit") view.pan = [e.target.scrollLeft, e.target.scrollTop];
+  },
+  true,
+);
 
 settingsPage.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "linear-key") actions["connect-linear"]();
   if (e.key === "Enter" && e.target.id === "slack-token") actions["connect-slack"]();
+  if (e.key === "Enter" && e.target.id === "vercel-key") actions["connect-vercel"]();
   if (e.key === "Enter" && e.target.id === "claude-token") actions["connect-upstash"]();
   if (view.name !== "edit" || page !== "connectors") return;
   if (e.key === "s" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
     actions["save-connector"]();
+  }
+  if (e.key === "Escape" && view.menu) {
+    view.menu = false;
+    return refresh();
   }
   if (e.key === "Escape" && view.open) showStep(null);
 });
@@ -1029,8 +1564,12 @@ settingsPage.addEventListener("keydown", (e) => {
 settingsPage.addEventListener("input", (e) => {
   const path = e.target.dataset.bind;
   if (!path || path in RESHAPES) return;
+  if (e.target.tagName === "SELECT" && e.target.value === NEW_ROUTE) return newRoute(e.target);
+  const decide = view.draft.trigger.decide;
+  const renamed = /^trigger\.decide\.categories\.\d+\.name$/.test(path) && decide.fallback && fallbackOf(decide);
   const listed = "list" in e.target.dataset;
   bind(path, e.target.type === "checkbox" ? e.target.checked : listed ? e.target.value.split(",").map((s) => s.trim()) : e.target.value);
+  if (renamed) decide.fallback = renamed.name.trim() || null;
   refresh();
 });
 
@@ -1050,6 +1589,8 @@ settingsPage.addEventListener("change", async (e) => {
   }
   e.target.closest(".flow-card").dataset.on = e.target.checked;
 });
+
+addEventListener("resize", applyZoom);
 
 document.querySelector("#settings-nav .links").addEventListener("click", (e) => {
   const b = e.target.closest("[data-page]");
