@@ -1508,6 +1508,9 @@ impl Machine {
         } else {
             Account::builtin(Provider::Claude)
         };
+        if let Some(kind) = request.target.driver_kind.as_deref() {
+            crate::delegate::require_driver(&account.id, account.provider, kind)?;
+        }
         let bin = self.launch.bin(account.provider);
         if !bin.is_file() {
             return Err(format!("{} is not installed on this machine", account.provider.spec().name));

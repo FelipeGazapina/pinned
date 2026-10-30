@@ -565,9 +565,16 @@ impl Task {
     }
 }
 
+fn working_next(task: &Task) -> String {
+    format!(
+        "end your turn and do not poll; pinned types a notice when this session is idle, or the user sends it from the task's card; then call task_status with this taskId \"{}\"",
+        task.id
+    )
+}
+
 fn next_line(task: &Task) -> String {
     match task.mode {
-        Mode::Async => format!("end your turn and do not poll; pinned types a notice when the child finishes; then call task_status with this taskId \"{}\"", task.id),
+        Mode::Async => working_next(task),
         Mode::Wait => format!("call task_status with taskId \"{}\"", task.id),
     }
 }
@@ -595,9 +602,7 @@ fn status_json(task: &Task) -> Value {
         "conversationId": task.conversation,
         "cwd": task.cwd.display().to_string(),
     });
-    if task.state.terminal() {
-        body["next"] = json!(result_next(task));
-    }
+    body["next"] = if task.state.terminal() { json!(result_next(task)) } else { json!(working_next(task)) };
     body
 }
 

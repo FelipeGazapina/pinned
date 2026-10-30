@@ -23,7 +23,7 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         ),
     };
     let target = &args["target"];
-    let account = account_from(target)?;
+    let (account, driver_kind) = account_from(target)?;
     let model = optional_str(&target["model"]);
     if let Some(model) = &model {
         if !token_ok(model) {
@@ -86,6 +86,7 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
             account,
             model,
             effort,
+            driver_kind,
         },
         isolation,
         mode,
@@ -97,18 +98,41 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
     })
 }
 
-fn account_from(target: &Value) -> Result<Option<String>, String> {
-    if let Some(id) = optional_str(&target["providerInstanceId"]) {
-        return Ok(Some(id));
+fn account_from(target: &Value) -> Result<(Option<String>, Option<String>), String> {
+    let id = optional_str(&target["providerInstanceId"]);
+    let kind = optional_str(&target["driverKind"]);
+    if let (Some(id), Some(kind)) = (&id, &kind) {
+        if let Some(provider) = Provider::ALL.into_iter().find(|provider| provider.spec().builtin == id) {
+            require_driver(id, provider, kind)?;
+        }
     }
-    let Some(kind) = optional_str(&target["driverKind"]) else { return Ok(None) };
-    let provider = match kind.as_str() {
-        "claude" => Provider::Claude,
-        "codex" => Provider::Codex,
-        "cursor" => Provider::Cursor,
-        other => return Err(format!("driverKind must be claude, codex, or cursor, not {other:?}")),
-    };
-    Ok(Some(crate::accounts::Account::builtin(provider).id))
+    if id.is_some() {
+        return Ok((id, kind));
+    }
+    let Some(kind) = kind else { return Ok((None, None)) };
+    let provider = driver_provider(&kind)?;
+    Ok((Some(crate::accounts::Account::builtin(provider).id), Some(kind)))
+}
+
+/// Both were named, and the account's provider is not `driverKind`.
+pub fn require_driver(account_id: &str, provider: Provider, kind: &str) -> Result<(), String> {
+    let expected = driver_provider(kind)?;
+    if provider != expected {
+        return Err(format!(
+            "providerInstanceId \"{account_id}\" is {} and does not match driverKind \"{kind}\"",
+            provider.spec().name
+        ));
+    }
+    Ok(())
+}
+
+fn driver_provider(kind: &str) -> Result<Provider, String> {
+    match kind {
+        "claude" => Ok(Provider::Claude),
+        "codex" => Ok(Provider::Codex),
+        "cursor" => Ok(Provider::Cursor),
+        other => Err(format!("driverKind must be claude, codex, or cursor, not {other:?}")),
+    }
 }
 
 fn effort_from(options: &Value) -> Option<String> {

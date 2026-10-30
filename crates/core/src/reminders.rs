@@ -214,7 +214,7 @@ fn tool_definitions(reminders: bool) -> Value {
         }),
         json!({
             "name": DELEGATE_TOOL,
-            "description": "Run a child agent on a signed-in account. The child receives only task, with no parent history. mode \"async\" (the default) returns at once: pinned types a notice into this session when the child finishes, so end your turn and do not poll. mode \"wait\" blocks until the child finishes and returns the task_status body, including summary and error. A wait that times out does not cancel the child; the notice still comes.",
+            "description": "Run a child agent on a signed-in account. The child receives only task, with no parent history. mode \"async\" (the default) returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. mode \"wait\" blocks until the child finishes and returns the task_status body, including summary and error. A wait that times out does not cancel the child.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -253,8 +253,8 @@ fn tool_definitions(reminders: bool) -> Value {
                         },
                     },
                     "isolation": { "type": "string", "enum": ["shared", "worktree"], "description": "shared runs in this checkout. worktree makes a separate checkout and runs the child there." },
-                    "mode": { "type": "string", "enum": ["async", "wait"], "default": "async", "description": "async returns at once and types a notice into this session when the child finishes, so end your turn and do not poll. wait blocks until the result is in this call." },
-                    "timeoutMs": { "type": "number", "description": "How long wait blocks, in milliseconds. The child keeps running after a timeout, and the notice still comes." },
+                    "mode": { "type": "string", "enum": ["async", "wait"], "default": "async", "description": "async returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. wait blocks until the result is in this call." },
+                    "timeoutMs": { "type": "number", "description": "How long wait blocks, in milliseconds. The child keeps running after a timeout." },
                     "interactionMode": { "type": "string", "enum": ["inherit", "default", "plan"], "description": "plan is read-only. inherit and default leave this session's mode as it is." },
                     "runtimeMode": { "type": "string", "enum": ["full-access", "auto"], "description": "How wide the child may act. Anything wider than this session is rejected. A bypassed session can hand the child auto. Omit it to inherit this session's mode." },
                     "role": { "type": "string", "description": "A label for the child, such as explore. The child does not see it." },
@@ -587,6 +587,18 @@ mod tests {
                 "timeoutMs".into(),
                 "title".into(),
             ]
+        );
+        assert!(
+            tool["description"].as_str().unwrap().contains("typed automatically only when this session is idle")
+                && tool["description"].as_str().unwrap().contains("the user sends it from the task's card"),
+            "{}",
+            tool["description"]
+        );
+        assert!(
+            props["mode"]["description"].as_str().unwrap().contains("typed automatically only when this session is idle")
+                && props["mode"]["description"].as_str().unwrap().contains("the user sends it from the task's card"),
+            "{}",
+            props["mode"]["description"]
         );
         assert_eq!(props["mode"]["default"], "async");
         assert_eq!(props["mode"]["enum"], json!(["async", "wait"]));

@@ -150,6 +150,9 @@ pub struct Target {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+    /// Set when the request named `driverKind`, so a custom account can be checked against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_kind: Option<String>,
 }
 
 /// The delegation request, after the MCP arguments have been read once.
@@ -505,7 +508,8 @@ mod tests {
                 target: Target {
                     account: Some("cursor".into()),
                     model: Some("grok-4.7".into()),
-                    effort: Some("high".into())
+                    effort: Some("high".into()),
+                    driver_kind: None,
                 },
                 isolation: Isolation::Worktree,
                 mode: Mode::Wait,
@@ -528,8 +532,18 @@ mod tests {
         let listed = parse_request(&listed).unwrap();
         assert_eq!(listed.target.account.as_deref(), Some("codex"));
         assert_eq!(listed.target.effort.as_deref(), Some("low"));
-        let named = parse_request(&json!({"task": "look", "target": {"providerInstanceId": "cursor", "driverKind": "claude"}})).unwrap();
-        assert_eq!(named.target.account.as_deref(), Some("cursor"));
+        let named = parse_request(&json!({"task": "look", "target": {"providerInstanceId": "cursor", "driverKind": "claude"}}));
+        assert_eq!(
+            named.unwrap_err(),
+            "providerInstanceId \"cursor\" is Cursor and does not match driverKind \"claude\""
+        );
+        let matched = parse_request(&json!({"task": "look", "target": {"providerInstanceId": "cursor", "driverKind": "cursor"}})).unwrap();
+        assert_eq!(matched.target.account.as_deref(), Some("cursor"));
+        assert_eq!(matched.target.driver_kind.as_deref(), Some("cursor"));
+        assert_eq!(
+            require_driver("work", Provider::Codex, "claude").unwrap_err(),
+            "providerInstanceId \"work\" is Codex and does not match driverKind \"claude\""
+        );
         assert_eq!(
             parse_request(&json!({"task": "hello"})).unwrap(),
             Request {
@@ -538,7 +552,8 @@ mod tests {
                 target: Target {
                     account: None,
                     model: None,
-                    effort: None
+                    effort: None,
+                    driver_kind: None,
                 },
                 isolation: Isolation::Shared,
                 mode: Mode::Async,
@@ -1058,7 +1073,11 @@ grok-4.7-high - Grok 4.7  High
         assert_ne!(fresh_id, first);
         let fresh = delegates.started_json(&fresh_id).unwrap();
         assert_eq!(fresh["workState"], "working");
-        assert_eq!(fresh["next"], format!("end your turn and do not poll; pinned types a notice when the child finishes; then call task_status with this taskId \"{fresh_id}\""));
+        let next = format!("end your turn and do not poll; pinned types a notice when this session is idle, or the user sends it from the task's card; then call task_status with this taskId \"{fresh_id}\"");
+        assert_eq!(fresh["next"], next);
+        let status = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &fresh_id).unwrap();
+        assert_eq!(status["workState"], "working");
+        assert_eq!(status["next"], next);
         let other = match delegates.claim(spec("tab:tab-2", "tab-2", "req-7")) {
             Claim::Fresh(task) => task.id,
             Claim::Existing(id) => id,
