@@ -10822,6 +10822,10 @@
                   "null"
                 ],
                 "default": null
+              },
+              "hook_feedback": {
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -10834,7 +10838,8 @@
               "resume_at",
               "prompt",
               "snapshot",
-              "permission_mode"
+              "permission_mode",
+              "hook_feedback"
             ]
           },
           "Bytes": {
@@ -13151,6 +13156,10 @@
                   "null"
                 ],
                 "default": null
+              },
+              "hook_feedback": {
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -21660,6 +21669,10 @@
                   "null"
                 ],
                 "default": null
+              },
+              "hook_feedback": {
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -21672,7 +21685,8 @@
               "resume_at",
               "prompt",
               "snapshot",
-              "permission_mode"
+              "permission_mode",
+              "hook_feedback"
             ]
           },
           "Bytes": {
@@ -23515,6 +23529,10 @@
                   "null"
                 ],
                 "default": null
+              },
+              "hook_feedback": {
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
