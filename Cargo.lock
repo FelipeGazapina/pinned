@@ -3283,7 +3283,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinned"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "block2",
  "dunce",
@@ -3306,7 +3306,7 @@ dependencies = [
 
 [[package]]
 name = "pinned-core"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3332,7 +3332,7 @@ dependencies = [
 
 [[package]]
 name = "pinned-server"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "argon2",
  "axum",
