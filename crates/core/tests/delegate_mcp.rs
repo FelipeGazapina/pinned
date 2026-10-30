@@ -1,5 +1,6 @@
 //! `pinned mcp` to the machine socket to a fake provider, then back.
 //! The binary's `mcp` subcommand is `reminders::serve_io`.
+#![cfg(unix)]
 
 use pinned_core::accounts::Provider;
 use pinned_core::agent::{SOCK_ENV, TAB_ENV, TASK_ENV};

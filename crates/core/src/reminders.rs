@@ -874,8 +874,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+#[cfg(unix)]
 struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
+#[cfg(unix)]
 impl Write for Shared {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().extend_from_slice(data);
@@ -887,6 +889,7 @@ impl Write for Shared {
     }
 }
 
+#[cfg(unix)]
 fn restore_var(name: &str, value: Option<String>) {
     match value {
         Some(value) => std::env::set_var(name, value),

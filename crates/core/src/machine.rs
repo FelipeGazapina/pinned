@@ -4227,6 +4227,7 @@ exec sleep 30
         let _ = std::fs::remove_file(file);
     }
 
+    #[cfg(unix)]
     fn done_event(tab: &str) -> AgentEvent {
         AgentEvent {
             status: AgentStatus::Done,
