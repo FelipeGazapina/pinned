@@ -85,7 +85,7 @@ impl Launch {
         self.bins.get(&provider).cloned().unwrap_or_else(|| provider.spec().bin.into())
     }
 
-    fn command(&self, program: Program, provider: Provider, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)]) -> CommandBuilder {
+    fn command(&self, program: Program, provider: Provider, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf]) -> CommandBuilder {
         let spec = provider.spec();
         let mut cmd = CommandBuilder::new(self.bin(provider));
         for key in INHERITED_SESSION_ENV {
@@ -103,6 +103,10 @@ impl Launch {
                     cmd.arg(&self.settings);
                     cmd.arg("--plugin-dir");
                     cmd.arg(&self.plugin_dir);
+                    for dir in plugin_dirs {
+                        cmd.arg("--plugin-dir");
+                        cmd.arg(dir);
+                    }
                 } else if provider == Provider::Codex {
                     if self.mcp_config.is_some() {
                         cmd.args(crate::delegate::codex_mcp_flags(&self.exe, &self.sock, Some(tab), None, self.reminders));
@@ -531,7 +535,8 @@ impl Machine {
             }
             Call::Commands { tab } => {
                 let (cwd, account) = self.tab(&tab, |t| (t.cwd.clone(), t.account.clone()))?;
-                json(commands::list(&self.accounts.home(&account), &cwd))
+                let shared = self.shared_plugin_dirs(&account);
+                json(commands::list(&self.accounts.home(&account), &cwd, &shared))
             }
             Call::Files { tab } => json(files::list(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())),
             Call::Branches { tab } => json(branches::of(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
@@ -999,7 +1004,8 @@ impl Machine {
         }
         self.save_sessions();
         let env = [self.accounts.env(&account), env].concat();
-        let cmd = self.launch.command(program, account.provider, tab, &cwd, bypass, args, &env);
+        let plugin_dirs = self.shared_plugin_dirs(&account);
+        let cmd = self.launch.command(program, account.provider, tab, &cwd, bypass, args, &env, &plugin_dirs);
         self.spawn(tab, cmd, pty::size(cols, rows))?;
         self.continue_when_limit_lifts(tab);
         self.emit_tabs();
@@ -1517,6 +1523,30 @@ impl Machine {
     /// Where this machine remembers what it synced, or None when it keeps nothing.
     pub fn sync_file(&self) -> Option<&Path> {
         self.sync_file.as_deref()
+    }
+
+    /// One share per Claude home. A test binary under `deps` shares only homes inside its config dir.
+    pub fn plugin_shares(&self) -> Vec<sync::PluginShare> {
+        let Some(config) = self.sync_file.as_ref().and_then(|file| file.parent()).map(Path::to_path_buf) else { return vec![] };
+        let dir = config.join("synced-plugins");
+        let mut homes = vec![home().join(".claude")];
+        for account in self.accounts.list() {
+            if account.provider == Provider::Claude {
+                homes.push(self.accounts.home(&account));
+            }
+        }
+        homes.sort();
+        homes.dedup();
+        let test_bin = std::env::current_exe().ok().is_some_and(|exe| exe.components().any(|part| part.as_os_str() == "deps"));
+        if test_bin {
+            homes.retain(|path| path.starts_with(&config));
+        }
+        homes.into_iter().map(|claude_home| sync::PluginShare { claude_home, dir: dir.clone() }).collect()
+    }
+
+    fn shared_plugin_dirs(&self, account: &Account) -> Vec<PathBuf> {
+        let Some(config) = self.sync_file.as_ref().and_then(|file| file.parent()) else { return vec![] };
+        sync::plugin_dirs(&self.accounts.home(account), &config.join("synced-plugins"))
     }
 
     /// The turns saved for the project at `path`, newest first.
@@ -3471,10 +3501,23 @@ mod tests {
     fn claude_does_not_inherit_the_session_pinned_was_started_from() {
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session");
         std::env::set_var("CLAUDECODE", "1");
-        let cmd = launch().command(Program::Agent, Provider::Claude, "tab-1", Path::new("/repo"), false, vec![], &[]);
+        let cmd = launch().command(Program::Agent, Provider::Claude, "tab-1", Path::new("/repo"), false, vec![], &[], &[]);
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
+    }
+
+    #[test]
+    fn each_shared_plugin_folder_is_its_own_plugin_dir() {
+        let dir = temp("plugin-argv");
+        let plugin = dir.join("toy@demo");
+        std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+        std::fs::write(plugin.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#).unwrap();
+        let cmd = launch().command(Program::Agent, Provider::Claude, "tab-1", Path::new("/repo"), false, vec![], &[], &[plugin.clone()]);
+        let args: Vec<String> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let flags: Vec<_> = args.windows(2).filter(|w| w[0] == "--plugin-dir").map(|w| w[1].as_str()).collect();
+        assert_eq!(flags, vec!["p", plugin.to_str().unwrap()]);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
