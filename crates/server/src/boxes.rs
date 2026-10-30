@@ -391,8 +391,6 @@ impl Boxes {
         self.open_new(hub, account, run, step, &keys, None, false).await
     }
 
-    /// One box for the workflow kind. The row's subject is whoever opened it. Later runs are sent
-    /// to that machine, because a second row would be a second box: the table is unique per subject.
     async fn open_fixed(
         &self,
         hub: &Hub,
@@ -452,8 +450,7 @@ impl Boxes {
         }
     }
 
-    /// A new row, unless this subject already has one. `claimed` is a fixed-box id the caller holds
-    /// the drive guard for. A create that stops before the row exists gives that id back.
+    /// A new row, unless this subject already has one.
     async fn open_new(
         &self,
         hub: &Hub,
@@ -657,8 +654,7 @@ impl Boxes {
         self.place_run(hub, account, &row.machine.to_string(), &row.connector, &row.subject, spec).await
     }
 
-    /// Hands `spec` to `machine` for this connector and subject. A shared box uses this for a run
-    /// whose subject is not the one stored on the row.
+    /// Hands `spec` to `machine` for this connector and subject.
     async fn place_run(&self, hub: &Hub, account: &Arc<Account>, machine: &str, connector: &str, subject: &Subject, spec: &RunSpec) -> Result<Placement, String> {
         if let Some((id, tab)) = account.placed(connector, subject) {
             if id == machine {
@@ -696,7 +692,6 @@ impl Boxes {
     }
 
     /// Ends the row for `why`, unless it is ending already, and deletes its box.
-    /// A failed boot keeps the user's yes, so the retry does not ask again.
     async fn finish(&self, hub: &Hub, account: &Arc<Account>, mut row: BoxRow, why: End, keys: Option<&Keys>) -> Result<(), String> {
         let failed = matches!(why, End::Failed(_));
         if !matches!(row.phase, Phase::Ending(_)) {

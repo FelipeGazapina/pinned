@@ -3666,7 +3666,7 @@
                 ]
               },
               {
-                "description": "`connectors::BoxAccess`. How each actor kind may use a box.",
+                "description": "`connectors::BoxAccess`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -4114,7 +4114,7 @@
             ]
           },
           "BoxAccess": {
-            "description": "The account's choice for each kind of actor. Workflows default to a fresh box. The others default\nto off, because they have no box behavior until a later change.",
+            "description": "The account's choice for each kind of actor.",
             "type": "object",
             "properties": {
               "workflow": {
@@ -4150,7 +4150,6 @@
             ]
           },
           "BoxPermission": {
-            "description": "How one kind of actor may use a box. `Off` is also what a disconnected Upstash account does,\nwhatever is stored. A missing `workflow` loads as `Fresh`, which is what box workflows do today.",
             "oneOf": [
               {
                 "type": "object",
@@ -4178,7 +4177,7 @@
                 ]
               },
               {
-                "description": "One box. `row` is empty until the hub creates it, then every later run of this kind reuses it.",
+                "description": "One box for this kind of actor.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -8919,7 +8918,7 @@
                 ]
               },
               {
-                "description": "`connectors::BoxAccess`. How each actor kind may use a box.",
+                "description": "`connectors::BoxAccess`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -9362,7 +9361,7 @@
             ]
           },
           "BoxAccess": {
-            "description": "The account's choice for each kind of actor. Workflows default to a fresh box. The others default\nto off, because they have no box behavior until a later change.",
+            "description": "The account's choice for each kind of actor.",
             "type": "object",
             "properties": {
               "workflow": {
@@ -9392,7 +9391,6 @@
             }
           },
           "BoxPermission": {
-            "description": "How one kind of actor may use a box. `Off` is also what a disconnected Upstash account does,\nwhatever is stored. A missing `workflow` loads as `Fresh`, which is what box workflows do today.",
             "oneOf": [
               {
                 "type": "object",
@@ -9420,7 +9418,7 @@
                 ]
               },
               {
-                "description": "One box. `row` is empty until the hub creates it, then every later run of this kind reuses it.",
+                "description": "One box for this kind of actor.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -11371,7 +11369,7 @@
                 ]
               },
               {
-                "description": "`connectors::BoxAccess`. How each actor kind may use a box.",
+                "description": "`connectors::BoxAccess`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -11819,7 +11817,7 @@
             ]
           },
           "BoxAccess": {
-            "description": "The account's choice for each kind of actor. Workflows default to a fresh box. The others default\nto off, because they have no box behavior until a later change.",
+            "description": "The account's choice for each kind of actor.",
             "type": "object",
             "properties": {
               "workflow": {
@@ -11855,7 +11853,6 @@
             ]
           },
           "BoxPermission": {
-            "description": "How one kind of actor may use a box. `Off` is also what a disconnected Upstash account does,\nwhatever is stored. A missing `workflow` loads as `Fresh`, which is what box workflows do today.",
             "oneOf": [
               {
                 "type": "object",
@@ -11883,7 +11880,7 @@
                 ]
               },
               {
-                "description": "One box. `row` is empty until the hub creates it, then every later run of this kind reuses it.",
+                "description": "One box for this kind of actor.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -13827,7 +13824,7 @@
                 ]
               },
               {
-                "description": "`connectors::BoxAccess`. How each actor kind may use a box.",
+                "description": "`connectors::BoxAccess`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -14270,7 +14267,7 @@
             ]
           },
           "BoxAccess": {
-            "description": "The account's choice for each kind of actor. Workflows default to a fresh box. The others default\nto off, because they have no box behavior until a later change.",
+            "description": "The account's choice for each kind of actor.",
             "type": "object",
             "properties": {
               "workflow": {
@@ -14300,7 +14297,6 @@
             }
           },
           "BoxPermission": {
-            "description": "How one kind of actor may use a box. `Off` is also what a disconnected Upstash account does,\nwhatever is stored. A missing `workflow` loads as `Fresh`, which is what box workflows do today.",
             "oneOf": [
               {
                 "type": "object",
@@ -14328,7 +14324,7 @@
                 ]
               },
               {
-                "description": "One box. `row` is empty until the hub creates it, then every later run of this kind reuses it.",
+                "description": "One box for this kind of actor.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -19638,7 +19634,7 @@
             ]
           },
           "BoxAccess": {
-            "description": "The account's choice for each kind of actor. Workflows default to a fresh box. The others default\nto off, because they have no box behavior until a later change.",
+            "description": "The account's choice for each kind of actor.",
             "type": "object",
             "properties": {
               "workflow": {
@@ -19674,7 +19670,6 @@
             ]
           },
           "BoxPermission": {
-            "description": "How one kind of actor may use a box. `Off` is also what a disconnected Upstash account does,\nwhatever is stored. A missing `workflow` loads as `Fresh`, which is what box workflows do today.",
             "oneOf": [
               {
                 "type": "object",
@@ -19702,7 +19697,7 @@
                 ]
               },
               {
-                "description": "One box. `row` is empty until the hub creates it, then every later run of this kind reuses it.",
+                "description": "One box for this kind of actor.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -20959,7 +20954,7 @@
             ]
           },
           "BoxAccess": {
-            "description": "The account's choice for each kind of actor. Workflows default to a fresh box. The others default\nto off, because they have no box behavior until a later change.",
+            "description": "The account's choice for each kind of actor.",
             "type": "object",
             "properties": {
               "workflow": {
@@ -20989,7 +20984,6 @@
             }
           },
           "BoxPermission": {
-            "description": "How one kind of actor may use a box. `Off` is also what a disconnected Upstash account does,\nwhatever is stored. A missing `workflow` loads as `Fresh`, which is what box workflows do today.",
             "oneOf": [
               {
                 "type": "object",
@@ -21017,7 +21011,7 @@
                 ]
               },
               {
-                "description": "One box. `row` is empty until the hub creates it, then every later run of this kind reuses it.",
+                "description": "One box for this kind of actor.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -23774,7 +23768,7 @@
             ]
           },
           "BoxAccess": {
-            "description": "The account's choice for each kind of actor. Workflows default to a fresh box. The others default\nto off, because they have no box behavior until a later change.",
+            "description": "The account's choice for each kind of actor.",
             "type": "object",
             "properties": {
               "workflow": {
@@ -23810,7 +23804,6 @@
             ]
           },
           "BoxPermission": {
-            "description": "How one kind of actor may use a box. `Off` is also what a disconnected Upstash account does,\nwhatever is stored. A missing `workflow` loads as `Fresh`, which is what box workflows do today.",
             "oneOf": [
               {
                 "type": "object",
@@ -23838,7 +23831,7 @@
                 ]
               },
               {
-                "description": "One box. `row` is empty until the hub creates it, then every later run of this kind reuses it.",
+                "description": "One box for this kind of actor.",
                 "type": "object",
                 "properties": {
                   "mode": {
@@ -25715,7 +25708,7 @@
             ]
           },
           "BoxAccess": {
-            "description": "The account's choice for each kind of actor. Workflows default to a fresh box. The others default\nto off, because they have no box behavior until a later change.",
+            "description": "The account's choice for each kind of actor.",
             "type": "object",
             "properties": {
               "workflow": {
@@ -25745,7 +25738,6 @@
             }
           },
           "BoxPermission": {
-            "description": "How one kind of actor may use a box. `Off` is also what a disconnected Upstash account does,\nwhatever is stored. A missing `workflow` loads as `Fresh`, which is what box workflows do today.",
             "oneOf": [
               {
                 "type": "object",
@@ -25773,7 +25765,7 @@
                 ]
               },
               {
-                "description": "One box. `row` is empty until the hub creates it, then every later run of this kind reuses it.",
+                "description": "One box for this kind of actor.",
                 "type": "object",
                 "properties": {
                   "mode": {

@@ -674,7 +674,7 @@ pub enum HubCall {
     ConnectUpstash { key: String, claude_token: String },
     /// Deletes the account's boxes before it forgets the keys.
     DisconnectUpstash,
-    /// `connectors::BoxAccess`. How each actor kind may use a box.
+    /// `connectors::BoxAccess`.
     SetBoxAccess { access: BoxAccess },
     /// Allows or refuses the pending box question `id`.
     AnswerBox { id: String, allow: bool },

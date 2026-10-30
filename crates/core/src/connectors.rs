@@ -399,8 +399,7 @@ pub enum RunsOn {
     Any,
     /// This machine first, else whichever is online.
     Machine(MachineId),
-    /// This workflow runs in an Upstash Box. The account's box permission says whether that box is
-    /// new, shared, or waiting on a yes. The hub deletes it once its session ends.
+    /// This workflow's sessions run in an Upstash Box.
     FreshBox(BoxStep),
 }
 
@@ -420,8 +419,6 @@ pub enum BoxSize {
     Large,
 }
 
-/// How one kind of actor may use a box. `Off` is also what a disconnected Upstash account does,
-/// whatever is stored. A missing `workflow` loads as `Fresh`, which is what box workflows do today.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "mode", rename_all = "lowercase")]
 pub enum BoxPermission {
@@ -429,7 +426,7 @@ pub enum BoxPermission {
     Off,
     /// A new box for each issue or thread.
     Fresh,
-    /// One box. `row` is empty until the hub creates it, then every later run of this kind reuses it.
+    /// One box for this kind of actor.
     Fixed {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         row: Option<String>,
@@ -451,8 +448,7 @@ fn fresh_workflow() -> BoxPermission {
     BoxPermission::Fresh
 }
 
-/// The account's choice for each kind of actor. Workflows default to a fresh box. The others default
-/// to off, because they have no box behavior until a later change.
+/// The account's choice for each kind of actor.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BoxAccess {
     #[serde(default = "fresh_workflow")]
@@ -509,7 +505,6 @@ fn box_ask_id(connector: &str, subject: &Subject) -> String {
     hasher.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A save of `fixed` with no row keeps the row the hub already created.
 fn keep_fixed_row(incoming: BoxPermission, stored: &BoxPermission) -> BoxPermission {
     match (incoming, stored) {
         (BoxPermission::Fixed { row: None }, BoxPermission::Fixed { row: Some(kept) }) => BoxPermission::Fixed { row: Some(kept.clone()) },
@@ -3087,7 +3082,7 @@ impl Connectors {
         self.store.lock().unwrap().boxes.clone()
     }
 
-    /// Saves the account's box permissions. A `fixed` value with no row keeps the row the hub already created.
+    /// Saves the account's box permissions.
     pub fn set_box_access(&self, access: BoxAccess) -> Result<BoxAccess, String> {
         let mut store = self.store.lock().unwrap();
         let kept = BoxAccess {
@@ -3101,7 +3096,6 @@ impl Connectors {
         Ok(kept)
     }
 
-    /// `Some` when this work was already answered. `None` when it is still waiting, or was never asked.
     pub fn box_grant(&self, connector: &str, subject: &Subject) -> Option<bool> {
         self.store.lock().unwrap().box_grants.iter().find(|grant| grant.connector == connector && &grant.subject == subject).map(|grant| grant.allow)
     }
