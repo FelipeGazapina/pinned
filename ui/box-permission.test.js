@@ -49,3 +49,31 @@ test("the Upstash card offers a box permission for each actor kind", () => {
   assert.match(chosen, /id="box-session"[\s\S]*<option value="fixed" selected>One box, reused<\/option>/);
   assert.doesNotMatch(chosen, /answer-box/);
 });
+
+test("an ask that arrives while the Upstash card is open is drawn", () => {
+  const asks = element();
+  const context = {
+    console,
+    addEventListener() {},
+    account: { email: "ana@acme.dev" },
+    load(key) { return key === "settings-page" ? "integrations" : null; },
+    save() {},
+    listen() {},
+    document: {
+      body: { dataset: { page: "settings" } },
+      getElementById(id) { return id === "box-asks" ? asks : element(); },
+      querySelector() { return element(); },
+    },
+  };
+  context.globalThis = context;
+  const source = readFileSync(new URL("./settings.js", import.meta.url), "utf8");
+  vm.runInNewContext(`${source}\nglobalThis.__onHubSettings = onHubSettings;\nglobalThis.__card = upstashCardHtml;\nglobalThis.__settings = settings;`, context);
+  context.__settings.upstash = { key_hint: "…a1b2", claude_hint: "…9f3c" };
+  assert.match(context.__card(), /id="box-asks"/);
+  context.__onHubSettings({
+    upstash: { key_hint: "…a1b2", claude_hint: "…9f3c" },
+    box_asks: [{ id: "ask9", connector: "c1", subject: { issue: "ENG-9" } }],
+  });
+  assert.match(asks.innerHTML, /data-action="answer-box" data-id="ask9" data-allow="yes"/);
+  assert.match(asks.innerHTML, /Allow a box for issue ENG-9/);
+});

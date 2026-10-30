@@ -156,7 +156,13 @@ async function toggleSettings() {
 
 function onHubSettings(latest) {
   settings = latest;
-  if (!settingsOpen() || page !== "connectors") return;
+  if (!settingsOpen()) return;
+  if (page === "integrations") {
+    const asks = document.getElementById("box-asks");
+    if (asks) asks.innerHTML = boxAskRows();
+    return;
+  }
+  if (page !== "connectors") return;
   if (view.name === "list") return redraw();
   const line = document.getElementById("checked");
   if (line) line.textContent = checkedText();
@@ -317,13 +323,17 @@ function boxAccess() {
   };
 }
 
-function boxAsksHtml() {
+function boxAskRows() {
   return (settings.box_asks || []).map((ask) => {
     const what = ask.subject.issue ? `issue ${ask.subject.issue}` : `thread ${ask.subject.thread}`;
     return `<p class="hint">Allow a box for ${esc(what)}?
       <button class="primary" data-action="answer-box" data-id="${esc(ask.id)}" data-allow="yes">Yes</button>
       <button class="secondary" data-action="answer-box" data-id="${esc(ask.id)}" data-allow="no">No</button></p>`;
   }).join("");
+}
+
+function boxAsksHtml() {
+  return `<div id="box-asks">${boxAskRows()}</div>`;
 }
 
 function boxPermissionsHtml() {
