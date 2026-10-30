@@ -811,24 +811,44 @@ const UPLOAD_IMAGE = /(?:^|\s)((?:\\.|[^\s\\])+?\.(?:png|jpe?g|gif|webp|bmp|avif
 const imagePathsIn = (text) => [...new Set([...text.matchAll(UPLOAD_IMAGE)].map((m) => m[1].replace(/\\(.)/g, "$1")))];
 
 /** Uploads are drawn from the machine that saved them, so a client on another machine sees the picture,
- * not just its path. Each file is asked for once and kept for a while after. */
-const uploadImages = new Map();
+ * not just its path. A missing file is remembered. A disconnect is asked again once the machine is back. */
+let uploadImages = null;
+const uploadImagesReady = import("./upload-images.js").then((mod) => {
+  uploadImages = mod.createUploadImages();
+});
 function drawUploadImages() {
+  if (!uploadImages) {
+    uploadImagesReady.then(() => drawUploadImages());
+    return;
+  }
   for (const button of threadView.querySelectorAll("button.picture[data-upload]:not([data-drawing])")) {
     button.dataset.drawing = "";
     const { upload: path, machine } = button.dataset;
     const key = `${machine}\n${path}`;
-    if (!uploadImages.has(key)) {
-      if (uploadImages.size >= 40) uploadImages.delete(uploadImages.keys().next().value);
-      uploadImages.set(key, callOn(machine, { cmd: "read_upload", path }).catch(() => null));
-    }
-    uploadImages.get(key).then((src) => {
+    uploadImages.pull(key, () => callOn(machine, { cmd: "read_upload", path })).then((src) => {
       if (!button.isConnected) return;
-      if (!src) return button.remove();
+      if (src === "wait") return;
+      if (src === "retry") {
+        delete button.dataset.drawing;
+        drawUploadImages();
+        return;
+      }
+      if (src === "drop") return button.remove();
       button.dataset.zoom = "upload";
       button.insertAdjacentHTML("beforeend", `<img src="${esc(src)}" alt="${esc(path.split("/").pop())}">`);
     });
   }
+}
+function retryUploadImages() {
+  if (!uploadImages) return;
+  const again = new Set(uploadImages.reconnect());
+  if (!again.size) return;
+  for (const button of threadView.querySelectorAll("button.picture[data-upload]")) {
+    const key = `${button.dataset.machine}\n${button.dataset.upload}`;
+    if (!again.has(key) || button.querySelector("img")) continue;
+    delete button.dataset.drawing;
+  }
+  drawUploadImages();
 }
 
 function userHtml(user, t, tab, first) {
