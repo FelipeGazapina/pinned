@@ -7,7 +7,7 @@ use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::sync;
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
-use pinned_core::wire::HubCall;
+use pinned_core::wire::{Call, HubCall};
 use pinned_server::boxes::{BoxApi, Policy};
 use serde_json::{json, Value};
 use std::net::TcpStream;
@@ -120,6 +120,37 @@ fn admin_on(database: &str, sql: &str) {
         tokio::spawn(connection);
         client.batch_execute(sql).await.unwrap();
     });
+}
+
+/// `(secrets text, project file count, rows whose stored text or bytes contain token)`.
+fn hub_holds(database: &str, token: &str) -> (String, i64, i64) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let secrets: String = client.query_one("select coalesce(string_agg(secrets::text, ','), '') from accounts", &[]).await.unwrap().get(0);
+        let files: i64 = client.query_one("select count(*) from project_files", &[]).await.unwrap().get(0);
+        let pattern = format!("%{token}%");
+        let bytes = token.as_bytes().to_vec();
+        let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&pattern, &bytes];
+        let hits: i64 = client
+            .query_one(
+                "select (
+                    (select count(*) from accounts where store::text like $1 or secrets::text like $1 or email like $1 or password_hash like $1)
+                    + (select count(*) from project_files where position($2::bytea in data) > 0 or path like $1 or project like $1 or sha like $1)
+                    + (select count(*) from shared_projects where name like $1 or repo like $1 or key like $1)
+                    + (select count(*) from boxes where id like $1 or coalesce(spec::text, '') like $1 or coalesce(subject::text, '') like $1 or connector like $1 or coalesce(reason, '') like $1 or coalesce(upstash, '') like $1)
+                    + (select count(*) from machines where name like $1 or os like $1)
+                    + (select count(*) from pair_codes where code like $1)
+                    + (select count(*) from logins where position($2::bytea in token_hash) > 0)
+                )::bigint",
+                &params,
+            )
+            .await
+            .unwrap()
+            .get(0);
+        (secrets, files, hits)
+    })
 }
 
 fn temp(name: &str) -> PathBuf {
@@ -270,6 +301,38 @@ impl Node {
 
     fn online(&self) -> bool {
         self.link.as_ref().is_some_and(Link::online)
+    }
+
+    fn hub(&self, call: HubCall) -> Result<Value, String> {
+        self.link.as_ref().expect("the node is connected").call_hub(call)
+    }
+
+    fn logged_out(dir: &Path, creds: Credentials) -> Node {
+        let write = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, PermissionsExt::from_mode(0o755)).unwrap();
+            path
+        };
+        let launch = Launch {
+            exe: "/opt/pinned/bin/pinned-server".into(),
+            bins: BTreeMap::from([
+                (Provider::Claude, write("claude", "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then echo '{\"loggedIn\":false}'; exit 0; fi\nprintf '%s\\n' \"$CLAUDE_CODE_OAUTH_TOKEN\"\nsleep 30\n")),
+                (Provider::Codex, write("codex", "#!/bin/sh\necho 'Not logged in'\nexit 1\n")),
+                (Provider::Cursor, write("cursor-agent", "#!/bin/sh\necho 'Not logged in'\nexit 1\n")),
+            ]),
+            path_env: None,
+            settings: dir.join("settings.json"),
+            mcp_config: None,
+            reminders: true,
+            plugin_dir: dir.join("plugin"),
+            tutorial_helper: dir.join("plugin/tutorial.mjs"),
+            sock: dir.join("sock"),
+            vector_search: false,
+        };
+        let machine = Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), |_| {});
+        let link = link::spawn(creds, machine.clone(), "0.0.0-test");
+        Node { machine, link: Some(link) }
     }
 
     fn kill(&mut self) {
@@ -1176,4 +1239,51 @@ fn a_box_whose_row_this_hub_cannot_read_is_still_deleted() {
     wait_for("the box to be deleted", || hub.boxes.live().is_empty());
     ana.client.wait_machines(&[]);
     wait_for("the row to go", || ana.rows(&hub) == 0);
+}
+
+#[test]
+fn a_shared_login_reaches_another_machine_and_is_absent_from_the_hubs_database() {
+    let token = "sk-ant-oat01-TESTTOKEN";
+    let hub = TestHub::start("share_login");
+    let url = hub.url.clone();
+    let (login, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &login);
+    client.wait("hello", |frame| frame["type"] == "hello");
+    let (dir_a, dir_b) = (temp("share-a"), temp("share-b"));
+    let creds_a = pair(&url, &mut client, "share-a", &dir_a);
+    let creds_b = pair(&url, &mut client, "share-b", &dir_b);
+    let node_a = Node::logged_out(&dir_a, creds_a.clone());
+    let node_b = Node::logged_out(&dir_b, creds_b.clone());
+    wait_for("both machines", || node_a.online() && node_b.online());
+    client.wait_machines(&[("share-a", true), ("share-b", true)]);
+
+    let refused = client.call(&creds_b.machine_id, json!({ "cmd": "share_login", "account": "bloom", "token": token }));
+    assert_eq!(refused, Err("a login is saved on this machine, not sent through the hub".into()));
+    assert_eq!(hub_holds(&hub.database, token), ("{}".into(), 0, 0));
+    assert!(node_b.machine.list_accounts().iter().all(|view| view.account.id != "bloom"));
+
+    node_a.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Bloom".into() }).unwrap();
+    node_a.machine.keep_token("bloom", token).unwrap();
+    let first = node_a.machine.share_body().unwrap();
+    let peers = node_a.hub(HubCall::Peers).unwrap();
+    assert!(peers.as_array().unwrap().iter().any(|peer| peer["id"].as_str() == Some(creds_b.machine_id.as_str())));
+    assert!(peers.as_array().unwrap().iter().all(|peer| peer["id"].as_str() != Some(creds_a.machine_id.as_str())));
+    assert_eq!(node_a.hub(HubCall::Relay { to: creds_b.machine_id.clone(), body: first.clone() }).unwrap(), Value::Null);
+
+    let bloom = node_b.machine.list_accounts().into_iter().find(|view| view.account.id == "bloom").expect("bloom is on the other machine");
+    assert!(bloom.status.signed_in);
+    assert_eq!(std::fs::read_to_string(dir_b.join("share-tokens/bloom")).unwrap(), token);
+    let catalog = std::fs::read_to_string(dir_b.join("share.json")).unwrap();
+    assert!(!catalog.contains(token), "{catalog}");
+    let listed = serde_json::to_string(&node_b.machine.list_accounts()).unwrap();
+    assert!(!listed.contains(token));
+    assert_eq!(hub_holds(&hub.database, token), ("{}".into(), 0, 0));
+
+    node_a.machine.call(Call::RemoveAccount { account: "bloom".into() }).unwrap();
+    node_a.hub(HubCall::Relay { to: creds_b.machine_id.clone(), body: node_a.machine.share_body().unwrap() }).unwrap();
+    assert!(node_b.machine.list_accounts().iter().all(|view| view.account.id != "bloom"));
+    assert!(!dir_b.join("share-tokens/bloom").exists());
+    node_a.hub(HubCall::Relay { to: creds_b.machine_id, body: first }).unwrap();
+    assert!(node_b.machine.list_accounts().iter().all(|view| view.account.id != "bloom"));
+    assert_eq!(hub_holds(&hub.database, token), ("{}".into(), 0, 0));
 }
