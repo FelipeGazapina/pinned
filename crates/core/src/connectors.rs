@@ -734,7 +734,7 @@ impl Store {
             let subject = found.subject();
             // An edited graph walks the runner. The stored graph is None when it still equals migrate.
             if connector.graph.is_some() && matches!(found, Found::Issue(_) | Found::Mention { .. }) {
-                if run_open(runs, &id, &subject) || connector.handled.iter().any(|h| h == &key) {
+                if subject_taken(runs, &key) || self.handled(&key) || settled.starts.iter().any(|start| subject_key(&start.subject) == key) {
                     continue;
                 }
                 if let Some(input) = found.trigger(now) {
@@ -776,7 +776,8 @@ impl Store {
                     }
                     if self.connectors.iter().any(|c| c.id == workflow && c.graph.is_some()) {
                         let subject = Subject::SlackThread { channel: channel.clone(), thread: thread.clone() };
-                        if !run_open(runs, &workflow, &subject) && !self.handled(&key) {
+                        let taken = subject_taken(runs, &key) || self.handled(&key) || settled.starts.iter().any(|start| subject_key(&start.subject) == key);
+                        if !taken {
                             settled.starts.push(GraphStart {
                                 connector: workflow.clone(),
                                 subject,
@@ -936,7 +937,7 @@ pub enum Work {
     Prompt { env: Vec<(String, String)>, text: String },
 }
 
-/// Where a machine put a session. Desktop opens report none, and the run records a local stand-in.
+/// Where a machine put a session. The desktop app reports machine `local` and the tab it opened.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placement {
     pub machine: String,
@@ -957,6 +958,14 @@ impl Taken for Result<(), String> {
 impl Taken for Result<Option<Placement>, String> {
     fn taken(self) -> Result<Option<Placement>, String> {
         self
+    }
+}
+
+/// Runs `work` off the async worker. Resume detection sleeps, and a desktop watcher must not block on it.
+pub async fn off_worker<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(error) => Err(format!("workflow work could not run off the async worker: {error}")),
     }
 }
 
@@ -1214,8 +1223,48 @@ impl Storage for FileStorage {
     }
 
     fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
-        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
-        std::fs::write(self.dir.join("runs.json"), bytes).map_err(|e| e.to_string())
+        replace_file(&self.dir, "runs.json", bytes)
+    }
+}
+
+/// Writes `bytes` to `dir/name` by renaming a temp file over it, so a crash mid-write leaves the previous file.
+fn replace_file(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
+    crate::private::dir(dir).map_err(|e| e.to_string())?;
+    let path = dir.join(name);
+    let tmp = dir.join(format!(".{name}.tmp"));
+    {
+        use std::io::Write;
+        let mut file = crate::private::file().create(true).truncate(true).open(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(bytes).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+    }
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&path);
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
+    }
+    Ok(())
+}
+
+fn read_runs(bytes: Option<Vec<u8>>) -> (Vec<runner::Run>, Option<String>) {
+    let Some(bytes) = bytes else { return (Vec::new(), None) };
+    match serde_json::from_slice(&bytes) {
+        Ok(runs) => (runs, None),
+        Err(e) => (Vec::new(), Some(format!("could not read workflow runs: {e}"))),
+    }
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+fn merge_error(error: Option<String>, extra: Option<String>) -> Option<String> {
+    match (error, extra) {
+        (Some(error), Some(extra)) if !error.contains(&extra) => Some(format!("{error}; {extra}")),
+        (Some(error), _) => Some(error),
+        (None, extra) => extra,
     }
 }
 
@@ -1236,23 +1285,30 @@ pub struct Connectors {
     inbox: Mutex<Vec<GraphInbox>>,
     /// One drive at a time, so a tab wake cannot perform the effect a check is already performing.
     driving: tokio::sync::Mutex<()>,
+    /// `runs.json` did not parse. Saves stay off so a later write does not replace the file with nothing.
+    runs_broken: Mutex<Option<String>>,
+    /// The latest tab list each machine has sent, with the unix millis it was observed.
+    known_tabs: Mutex<HashMap<String, (u64, Vec<TabView>)>>,
 }
 
 impl Connectors {
     pub fn new(storage: impl Storage + 'static, exe: String) -> Self {
         let store = storage.load().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        let runs = storage.load_runs().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let (runs, runs_broken) = read_runs(storage.load_runs());
+        let checked = runs_broken.as_ref().map(|why| Check { at: Utc::now().to_rfc3339(), error: Some(why.clone()) });
         Self {
             storage: Box::new(storage),
             exe,
             store: Mutex::new(store),
-            checked: Mutex::new(None),
+            checked: Mutex::new(checked),
             wake: Notify::new(),
             channels: Mutex::new(HashMap::new()),
             filing: tokio::sync::Mutex::new(()),
             runs: Mutex::new(runs),
             inbox: Mutex::new(vec![]),
             driving: tokio::sync::Mutex::new(()),
+            runs_broken: Mutex::new(runs_broken),
+            known_tabs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1563,6 +1619,9 @@ impl Connectors {
                 posts,
             });
         }
+        let activity = slack::activity(&token, &channel, &bot, now, &cursors(&c.followed, &channel)).await?;
+        found.extend(activity.replies.into_iter().map(|replies| Found::Replies { channel: channel.clone(), replies }));
+        found.extend(self.follow_ups(&token, &bot, c, Some(&channel), now).await?);
         Ok(Some(found))
     }
 
@@ -1921,6 +1980,11 @@ fn run_open(runs: &[runner::Run], connector: &str, subject: &Subject) -> bool {
     runs.iter().any(|run| run.connector == connector && &run.subject == subject && matches!(run.status, Status::Running | Status::Waiting))
 }
 
+/// A live run already has this subject, on any connector.
+fn subject_taken(runs: &[runner::Run], key: &str) -> bool {
+    runs.iter().any(|run| subject_key(&run.subject) == key && matches!(run.status, Status::Running | Status::Waiting))
+}
+
 /// A reply belongs to a graph run until that run has failed.
 fn run_owns(runs: &[runner::Run], subject: &Subject) -> bool {
     runs.iter().any(|run| &run.subject == subject && !matches!(run.status, Status::Failed { .. }))
@@ -2114,34 +2178,75 @@ fn note_followed(store: &mut Store, connector: &str, run: &runner::Run) {
     connector.followed.insert(key, Followed { cursor, seen: None, replied: false });
 }
 
-fn tab_matches(view: &TabView, tab: &str, owner: &str, subject: &Subject) -> bool {
-    view.id == tab || (view.connector.as_deref() == Some(owner) && view.subject.as_ref() == Some(subject))
+/// The run's tab, by id. A different tab with the same subject is not this one.
+fn tab_of<'a>(after: &'a [TabView], tab: &str) -> Option<&'a TabView> {
+    after.iter().find(|view| view.id == tab)
 }
 
-fn graph_wakes(machine: &str, before: &[TabView], after: &[TabView], runs: &[runner::Run]) -> Vec<(String, Wake)> {
-    let mut wakes = vec![];
-    for run in runs {
-        if !matches!(run.status, Status::Waiting) {
+/// Level-triggered wakes against one machine's current tab list.
+/// A list captured before the wait started cannot say the tab left.
+/// A terminal status ends the wait when it belongs to this turn: Working was seen after the wait
+/// started, the status time is newer than the wait, or the wait is the session's first turn.
+/// A wait after a typed message ignores a Done still showing from the previous turn.
+fn reconcile_runs(machine: &str, after: &[TabView], observed: u64, runs: &mut [runner::Run], at: &str) -> bool {
+    let notes: Vec<_> = runs
+        .iter()
+        .filter_map(|run| {
+            let Session::Live { machine: live, tab, since, saw_working, await_working, .. } = &run.session else { return None };
+            if live != machine {
+                return None;
+            }
+            Some((run.id.0.clone(), tab.clone(), *since, *saw_working, *await_working, run.status.clone(), tab_of(after, tab).cloned()))
+        })
+        .collect();
+    let mut changed = false;
+    for (id, _tab, since, saw_working, await_working, status, view) in notes {
+        let Some(run) = runs.iter_mut().find(|run| run.id.0 == id) else { continue };
+        let Some(view) = view else {
+            if observed < since {
+                continue;
+            }
+            match status {
+                Status::Waiting => {
+                    runner::push(run, Wake::TabGone, at);
+                    changed = true;
+                }
+                Status::Done => {
+                    if let Session::Live { claude, .. } = &run.session {
+                        let claude = claude.clone();
+                        run.session = Session::Detached { claude };
+                        changed = true;
+                    }
+                }
+                Status::Running | Status::Failed { .. } => {}
+            }
+            continue;
+        };
+        if let Session::Live { claude, saw_working: flag, .. } = &mut run.session {
+            if claude.is_none() && view.session.is_some() {
+                *claude = view.session.clone();
+                changed = true;
+            }
+            if matches!(view.status, Some(AgentStatus::Working)) && !*flag {
+                *flag = true;
+                changed = true;
+            }
+        }
+        if !matches!(status, Status::Waiting) {
             continue;
         }
-        let Session::Live { machine: live, tab, .. } = &run.session else { continue };
-        if live != machine {
-            continue;
-        }
-        let owner = run.session_owner.as_deref().unwrap_or(run.connector.as_str());
-        let prev = before.iter().find(|view| tab_matches(view, tab, owner, &run.subject));
-        let next = after.iter().find(|view| tab_matches(view, tab, owner, &run.subject));
-        if prev.is_some() && next.is_none() {
-            wakes.push((run.id.0.clone(), Wake::TabGone));
-            continue;
-        }
-        let Some(view) = next else { continue };
+        let saw = match &run.session {
+            Session::Live { saw_working, .. } => *saw_working,
+            _ => saw_working,
+        };
         let ended = matches!(view.status, Some(AgentStatus::Done | AgentStatus::Failed));
-        if ended && prev.and_then(|view| view.status) != view.status {
-            wakes.push((run.id.0.clone(), Wake::TurnEnded { claude: view.session.clone() }));
+        let newer = view.updated.is_some_and(|updated| since > 0 && updated > since / 1000);
+        if ended && (saw || newer || !await_working) {
+            runner::push(run, Wake::TurnEnded { claude: view.session.clone() }, at);
+            changed = true;
         }
     }
-    wakes
+    changed
 }
 
 fn inbox_text(items: &[GraphInbox]) -> String {
@@ -2169,6 +2274,7 @@ impl Connectors {
                 error.get_or_insert(e);
             }
             drop(_guard);
+            let error = merge_error(error, self.runs_broken.lock().unwrap().clone());
             let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
             *self.checked.lock().unwrap() = Some(check.clone());
             on_check(&check);
@@ -2193,44 +2299,23 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
+        let _ = before;
         let _guard = self.driving.lock().await;
-        self.apply_wakes(machine, before, after)?;
+        self.known_tabs.lock().unwrap().insert(machine.to_owned(), (unix_millis(), after.to_vec()));
         self.drive_locked(&open).await
     }
 
-    fn apply_wakes(&self, machine: &str, before: &[TabView], after: &[TabView]) -> Result<(), String> {
+    fn reconcile_known(&self) -> Result<(), String> {
+        let known: Vec<_> = self.known_tabs.lock().unwrap().iter().map(|(machine, (at, tabs))| (machine.clone(), *at, tabs.clone())).collect();
         let at = Utc::now().to_rfc3339();
-        {
+        let changed = {
             let mut runs = self.runs.lock().unwrap();
-            let wakes = graph_wakes(machine, before, after, &runs);
-            for (id, wake) in wakes {
-                if let Some(run) = runs.iter_mut().find(|run| run.id.0 == id) {
-                    runner::push(run, wake, &at);
-                }
-            }
-            let mut detached = vec![];
-            for run in runs.iter() {
-                if !matches!(run.status, Status::Done) {
-                    continue;
-                }
-                let Session::Live { machine: live, tab, claude } = &run.session else { continue };
-                if live != machine {
-                    continue;
-                }
-                let owner = run.session_owner.as_deref().unwrap_or(run.connector.as_str());
-                let seen = before.iter().any(|view| tab_matches(view, tab, owner, &run.subject));
-                let still = after.iter().any(|view| tab_matches(view, tab, owner, &run.subject));
-                if seen && !still {
-                    detached.push((run.id.0.clone(), claude.clone()));
-                }
-            }
-            for (id, claude) in detached {
-                if let Some(run) = runs.iter_mut().find(|run| run.id.0 == id) {
-                    run.session = Session::Detached { claude };
-                }
-            }
+            known.into_iter().fold(false, |changed, (machine, observed, tabs)| reconcile_runs(&machine, &tabs, observed, &mut runs, &at) || changed)
+        };
+        if changed {
+            self.save_runs()?;
         }
-        self.save_runs()
+        Ok(())
     }
 
     /// Starts one graph run from an injected trigger. A poll calls this. The ignored live test does too,
@@ -2266,8 +2351,33 @@ impl Connectors {
     }
 
     fn save_runs(&self) -> Result<(), String> {
+        if let Some(why) = self.runs_broken.lock().unwrap().clone() {
+            return Err(why);
+        }
         let bytes = serde_json::to_vec(&*self.runs.lock().unwrap()).map_err(|e| e.to_string())?;
         self.storage.save_runs(&bytes)
+    }
+
+    fn persist_run(&self, run: &runner::Run) -> Result<(), String> {
+        {
+            let mut runs = self.runs.lock().unwrap();
+            if let Some(slot) = runs.iter_mut().find(|have| have.id == run.id) {
+                *slot = run.clone();
+            }
+        }
+        self.save_runs()
+    }
+
+    /// Fills the wait clock once, when the run enters Waiting. Later parks leave it alone.
+    fn stamp_wait(run: &mut runner::Run) {
+        if !matches!(run.status, Status::Waiting) {
+            return;
+        }
+        if let Session::Live { since, .. } = &mut run.session {
+            if *since == 0 {
+                *since = unix_millis();
+            }
+        }
     }
 
     fn replace_run(&self, run: runner::Run) -> Result<(), String> {
@@ -2286,7 +2396,14 @@ impl Connectors {
         {
             let mut runs = self.runs.lock().unwrap();
             if let Some(run) = runs.iter_mut().find(|run| run.id.0 == id) {
-                run.session = Session::Live { machine: place.machine, tab: place.tab, claude };
+                run.session = Session::Live {
+                    machine: place.machine,
+                    tab: place.tab,
+                    claude,
+                    since: unix_millis(),
+                    saw_working: false,
+                    await_working: true,
+                };
             }
         }
         self.save_runs()
@@ -2334,6 +2451,7 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
+        self.reconcile_known()?;
         let library = self.library();
         let mut failed = vec![];
         for _ in 0..256 {
@@ -2342,17 +2460,21 @@ impl Connectors {
             let mut run = self.runs.lock().unwrap()[index].clone();
             match runner::drive(&mut run, &library) {
                 Drive::Act(effect) => {
-                    let supplied = match self.perform(&run, effect, &library, open).await {
+                    let supplied = match self.perform(&mut run, effect, &library, open).await {
                         Ok(supplied) => supplied,
                         Err(why) => Supplied::Failed(why),
                     };
                     runner::supply(&mut run, supplied, &Utc::now().to_rfc3339());
+                    Self::stamp_wait(&mut run);
                     if let Status::Failed { why } = &run.status {
                         failed.push(why.clone());
                     }
                     self.replace_run(run)?;
                 }
-                Drive::Park | Drive::Done => self.replace_run(run)?,
+                Drive::Park | Drive::Done => {
+                    Self::stamp_wait(&mut run);
+                    self.replace_run(run)?;
+                }
             }
         }
         self.flush_locked(open).await?;
@@ -2481,7 +2603,7 @@ impl Connectors {
         self.inbox.lock().unwrap().splice(0..0, items);
     }
 
-    async fn perform<F, Fut, R>(&self, run: &runner::Run, effect: Effect, library: &runner::Library, open: &F) -> Result<Supplied, String>
+    async fn perform<F, Fut, R>(&self, run: &mut runner::Run, effect: Effect, library: &runner::Library, open: &F) -> Result<Supplied, String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
@@ -2490,7 +2612,16 @@ impl Connectors {
         match effect {
             Effect::Claim { connector, key } => {
                 let mut store = self.store.lock().unwrap();
-                if !store.handled(&key) && store.claim_thread(&connector, &key).is_none() {
+                if let Some(name) = store
+                    .connectors
+                    .iter()
+                    .find(|c| c.id != connector && c.handled.iter().any(|handled| handled == &key))
+                    .map(|c| c.name.clone())
+                {
+                    return Ok(Supplied::Held { why: format!("{key} is already handled by workflow {name:?}") });
+                }
+                let already = store.handled(&key);
+                if !already && store.claim_thread(&connector, &key).is_none() {
                     return Err(format!("workflow {connector:?} was deleted"));
                 }
                 note_followed(&mut store, &connector, run);
@@ -2534,19 +2665,18 @@ impl Connectors {
                 let paging = self.paging_for(&connector, &group).await?;
                 let now = Utc::now();
                 let reply = {
-                    let mut store = self.store.lock().unwrap();
-                    let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) else {
-                        return Err("the workflow was deleted".into());
-                    };
-                    let reply = c.escalation_reply(&channel, &thread, paging, now);
-                    if let Some(reply) = &reply {
-                        c.record_escalation(&channel, &thread, reply, now);
-                    }
-                    self.save(&store)?;
-                    reply
+                    let store = self.store.lock().unwrap();
+                    let c = store.connectors.iter().find(|c| c.id == connector).ok_or_else(|| "the workflow was deleted".to_owned())?;
+                    c.escalation_reply(&channel, &thread, paging, now)
                 };
                 if let Some(reply) = reply {
-                    self.page(&Page { channel, thread, reply, react: true }).await?;
+                    // Post first. A missed page is the failure a retry has to repair, so a crash after a successful post may page twice.
+                    self.page(&Page { channel: channel.clone(), thread: thread.clone(), reply: reply.clone(), react: true }).await?;
+                    let mut store = self.store.lock().unwrap();
+                    if let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) {
+                        c.record_escalation(&channel, &thread, &reply, now);
+                    }
+                    self.save(&store)?;
                 }
                 Ok(Supplied::Done)
             }
@@ -2618,7 +2748,7 @@ impl Connectors {
         }
     }
 
-    async fn perform_resume<F, Fut, R>(&self, run: &runner::Run, owner: &str, claude: &str, text: &str, open: &F) -> Result<Supplied, String>
+    async fn perform_resume<F, Fut, R>(&self, run: &mut runner::Run, owner: &str, claude: &str, text: &str, open: &F) -> Result<Supplied, String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
@@ -2642,18 +2772,15 @@ impl Connectors {
             }
             Ok(place) => place.unwrap_or(Placement { machine: "local".into(), tab: "local".into() }),
         };
-        if !text.is_empty() {
-            let env = agent::session_env(owner, &run.subject);
-            if let Err(why) = open(Work::Prompt { env, text }).await.taken() {
-                self.restore_inbox(inbox);
-                return Err(why);
-            }
+        if let Err(why) = self.type_into(run, owner, &text, open).await {
+            self.restore_inbox(inbox);
+            return Err(why);
         }
         let _ = self.ack_inbox(owner, &inbox).await;
         Ok(Supplied::Opened { machine: place.machine, tab: place.tab })
     }
 
-    async fn perform_type<F, Fut, R>(&self, run: &runner::Run, text: &str, open: &F) -> Result<Supplied, String>
+    async fn perform_type<F, Fut, R>(&self, run: &mut runner::Run, text: &str, open: &F) -> Result<Supplied, String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
@@ -2662,15 +2789,34 @@ impl Connectors {
         let owner = run.session_owner.clone().unwrap_or_else(|| run.connector.clone());
         let inbox = self.take_inbox(&run.subject);
         let text = join_text(text, &inbox_text(&inbox));
-        if !text.is_empty() {
-            let env = agent::session_env(&owner, &run.subject);
-            if let Err(why) = open(Work::Prompt { env, text }).await.taken() {
-                self.restore_inbox(inbox);
-                return Err(why);
-            }
+        if let Err(why) = self.type_into(run, &owner, &text, open).await {
+            self.restore_inbox(inbox);
+            return Err(why);
         }
         let _ = self.ack_inbox(&owner, &inbox).await;
         Ok(Supplied::Done)
+    }
+
+    /// Records `text` and saves the run before the prompt, so a crash mid-send does not type it twice.
+    /// The window between the save and the machine accepting the prompt can still drop one send.
+    async fn type_into<F, Fut, R>(&self, run: &mut runner::Run, owner: &str, text: &str, open: &F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        if text.is_empty() || runner::already_sent(run, text) {
+            return Ok(());
+        }
+        runner::note_sent(run, text);
+        self.persist_run(run)?;
+        let env = agent::session_env(owner, &run.subject);
+        if let Err(why) = open(Work::Prompt { env, text: text.to_owned() }).await.taken() {
+            runner::forget_sent(run, text);
+            let _ = self.persist_run(run);
+            return Err(why);
+        }
+        Ok(())
     }
 
     async fn ack_inbox(&self, owner: &str, items: &[GraphInbox]) -> Result<(), String> {
@@ -4481,7 +4627,7 @@ mod tests {
         block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(&done), &open)).unwrap();
         {
             let run = connectors.runs.lock().unwrap()[0].clone();
-            assert!(matches!(run.session, Session::Live { ref machine, ref tab, ref claude } if machine == "m1" && tab == "tab-1" && claude.as_deref() == Some("claude-1")));
+            assert!(matches!(run.session, Session::Live { ref machine, ref tab, ref claude, .. } if machine == "m1" && tab == "tab-1" && claude.as_deref() == Some("claude-1")));
         }
         block_on(connectors.on_tabs("m1", std::slice::from_ref(&done), &[], &open)).unwrap();
         let lines = seen.lock().unwrap().clone();
@@ -4499,6 +4645,397 @@ mod tests {
         assert!(lines[3].starts_with("run\n") && lines[3].contains("This session continues a run that already happened."), "{}", lines[3]);
         assert!(lines[3].contains("ENG-7: Broken button"), "{}", lines[3]);
         assert!(lines[3].contains("\n\ntwo"), "{}", lines[3]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(to);
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+            }
+        }
+    }
+
+    fn placed(work: Work) -> impl Future<Output = Result<Option<Placement>, String>> {
+        let _ = work;
+        async { Ok(Some(Placement { machine: "m1".into(), tab: "tab-1".into() })) }
+    }
+
+    #[test]
+    fn two_edited_graphs_do_not_both_start_one_issue() {
+        let mut first = linear_connector();
+        first.graph = Some(talks(&["one"]));
+        let mut second = linear_connector();
+        second.id = "c2".into();
+        second.name = "Other".into();
+        second.graph = Some(talks(&["one"]));
+        let mut store = Store { connectors: vec![first, second], ..Store::default() };
+        let settled = settle(&mut store, vec![("c1", Found::Issue(issue())), ("c2", Found::Issue(issue()))]);
+        let started: Vec<_> = settled.starts.iter().map(|start| start.connector.clone()).collect();
+        assert_eq!(started, vec!["c1".to_owned()]);
+    }
+
+    #[test]
+    fn a_waiting_run_wakes_when_the_first_tab_list_lacks_its_tab() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two"]));
+        let (connectors, dir) = stored("tab-gone-first-list", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let opened = std::sync::Mutex::new(0u32);
+        let open = |work: Work| {
+            if matches!(work, Work::Run(_)) {
+                *opened.lock().unwrap() += 1;
+            }
+            placed(work)
+        };
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(*opened.lock().unwrap(), 1);
+        block_on(connectors.on_tabs("m1", &[], &[], &open)).unwrap();
+        assert_eq!(*opened.lock().unwrap(), 2, "the tab is already gone, so the run opens its next session");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_stores_the_session_from_its_own_tab_and_ignores_another_with_the_same_subject() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two"]));
+        let (connectors, dir) = stored("tab-id-only", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let open = |work: Work| placed(work);
+        block_on(connectors.drive(&open)).unwrap();
+        let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
+        block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(&working), &open)).unwrap();
+        {
+            let run = connectors.runs.lock().unwrap()[0].clone();
+            assert!(matches!(run.status, Status::Waiting), "working is not the end of the turn");
+            assert!(matches!(run.session, Session::Live { ref claude, .. } if claude.as_deref() == Some("claude-1")));
+        }
+        let mut other = session_tab(Some(AgentStatus::Done), Some("claude-other"));
+        other.id = "tab-9".into();
+        block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(&other), &open)).unwrap();
+        let run = connectors.runs.lock().unwrap()[0].clone();
+        assert!(
+            matches!(run.session, Session::Live { ref tab, ref claude, .. } if tab == "tab-1" && claude.as_deref() == Some("claude-1"))
+                || matches!(run.session, Session::Detached { ref claude } if claude.is_none()),
+            "a different tab is not this run's session: {:?}",
+            run.session
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_broken_runs_file_is_reported_and_left_in_place() {
+        let (connectors, dir) = stored("broken-runs", vec![linear_connector()]);
+        drop(connectors);
+        let broken = b"{not json";
+        std::fs::write(dir.join("runs.json"), broken).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        let error = connectors.get_settings().checked.and_then(|check| check.error).unwrap_or_default();
+        assert!(error.contains("could not read workflow runs"), "{error}");
+        let _ = connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z");
+        assert_eq!(std::fs::read(dir.join("runs.json")).unwrap(), broken);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_replayed_type_does_not_type_again() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two"]));
+        let (connectors, dir) = stored("replay-type", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let snap = dir.join("mid-type");
+        let dir_for_copy = dir.clone();
+        let snap_for_open = snap.clone();
+        let open = move |work: Work| {
+            if matches!(work, Work::Prompt { .. }) {
+                copy_dir(&dir_for_copy, &snap_for_open);
+            }
+            placed(work)
+        };
+        block_on(connectors.drive(&open)).unwrap();
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(&done), &open)).unwrap();
+        let replay = Connectors::new(FileStorage::new(snap), "/bin/pinned".into());
+        let again = std::sync::Mutex::new(0u32);
+        let open = |work: Work| {
+            if matches!(work, Work::Prompt { .. }) {
+                *again.lock().unwrap() += 1;
+            }
+            placed(work)
+        };
+        block_on(replay.drive(&open)).unwrap();
+        assert_eq!(*again.lock().unwrap(), 0, "the prompt was already handed to the tab");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resume_detection_runs_off_the_async_worker() {
+        let here = std::thread::current().id();
+        let there = block_on(off_worker(|| Ok(std::thread::current().id()))).unwrap();
+        assert_ne!(there, here);
+    }
+
+    #[test]
+    fn a_claim_another_workflow_holds_ends_without_a_session() {
+        let mut first = linear_connector();
+        first.name = "Resolve".into();
+        first.handled = vec!["uuid".into()];
+        first.graph = Some(talks(&["one"]));
+        let mut second = linear_connector();
+        second.id = "c2".into();
+        second.name = "Other".into();
+        second.graph = Some(talks(&["one"]));
+        let (connectors, dir) = stored("held-claim", vec![first, second]);
+        let opened = std::sync::Mutex::new(0u32);
+        let open = |work: Work| {
+            if matches!(work, Work::Run(_)) {
+                *opened.lock().unwrap() += 1;
+            }
+            placed(work)
+        };
+        connectors.begin("c2".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(*opened.lock().unwrap(), 0);
+        let run = connectors.runs.lock().unwrap()[0].clone();
+        assert!(matches!(run.status, Status::Done));
+        assert!(matches!(run.session, Session::None));
+        let log = serde_json::to_string(&run.log).unwrap();
+        assert!(log.contains("already handled"), "{log}");
+        assert!(log.contains("Resolve"), "{log}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_later_drive_ends_a_turn_the_tab_list_already_showed() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two"]));
+        let (connectors, dir) = stored("known-done", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let prompts = std::sync::Mutex::new(0u32);
+        let open = |work: Work| {
+            if matches!(work, Work::Prompt { .. }) {
+                *prompts.lock().unwrap() += 1;
+            }
+            placed(work)
+        };
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(&done), &open)).unwrap();
+        assert_eq!(*prompts.lock().unwrap(), 0, "opening the session is not the end of a turn the list already showed");
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(*prompts.lock().unwrap(), 1, "the next check types the next talk");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_tab_list_from_before_the_wait_does_not_say_the_tab_is_gone() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two"]));
+        let (connectors, dir) = stored("old-list", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let opened = std::sync::Mutex::new(0u32);
+        let open = |work: Work| {
+            if matches!(work, Work::Run(_)) {
+                *opened.lock().unwrap() += 1;
+            }
+            placed(work)
+        };
+        block_on(connectors.drive(&open)).unwrap();
+        connectors.known_tabs.lock().unwrap().insert("m1".into(), (1, Vec::new()));
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(*opened.lock().unwrap(), 1, "a list from before the wait cannot drop the tab");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn tab_at(status: Option<AgentStatus>, updated: Option<u64>) -> TabView {
+        let mut tab = session_tab(status, Some("claude-1"));
+        tab.updated = updated;
+        tab
+    }
+
+    #[test]
+    fn a_stale_done_does_not_end_the_turn_a_typed_message_is_waiting_on() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two"]));
+        let (connectors, dir) = stored("stale-done", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let prompts = std::sync::Mutex::new(0u32);
+        let open = |work: Work| {
+            if matches!(work, Work::Prompt { .. }) {
+                *prompts.lock().unwrap() += 1;
+            }
+            placed(work)
+        };
+        let show = |tab: &TabView| block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(tab), &open)).unwrap();
+        block_on(connectors.drive(&open)).unwrap();
+        let working = tab_at(Some(AgentStatus::Working), Some(u64::MAX));
+        show(&working);
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting));
+        let done = tab_at(Some(AgentStatus::Done), Some(u64::MAX));
+        show(&done);
+        assert_eq!(*prompts.lock().unwrap(), 1, "working then done ends the first turn");
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting));
+        let stale = tab_at(Some(AgentStatus::Done), Some(1));
+        show(&stale);
+        assert_eq!(*prompts.lock().unwrap(), 1, "a done from before this wait does not end it");
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting));
+        show(&working);
+        assert_eq!(*prompts.lock().unwrap(), 1);
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting));
+        show(&done);
+        assert_eq!(*prompts.lock().unwrap(), 1, "the second turn has no further talk");
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Done));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn install_rustls() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    struct RestoreSlack;
+
+    impl Drop for RestoreSlack {
+        fn drop(&mut self) {
+            slack::set_api_root(None);
+        }
+    }
+
+    fn serve_slack() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut served = 0u32;
+            while served < 32 && started.elapsed() < std::time::Duration::from_secs(8) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        served += 1;
+                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                        let mut buf = Vec::new();
+                        let mut tmp = [0u8; 1024];
+                        loop {
+                            match std::io::Read::read(&mut stream, &mut tmp) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    buf.extend_from_slice(&tmp[..n]);
+                                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let req = String::from_utf8_lossy(&buf);
+                        let body = if req.contains("conversations.history") {
+                            r#"{"ok":true,"messages":[{"type":"message","user":"U1","text":"start","ts":"1792400050.000200","thread_ts":"1792400050.000200","latest_reply":"1792400090.000000"}]}"#
+                        } else if req.contains("conversations.replies") {
+                            r#"{"ok":true,"messages":[{"type":"message","user":"U1","text":"start","ts":"1792400050.000200"},{"type":"message","user":"U3","text":"<@UBOT> here is the log","ts":"1792400090.000000"}]}"#
+                        } else if req.contains("users.info") {
+                            r#"{"ok":true,"user":{"name":"cara","profile":{"display_name":"Cara"}}}"#
+                        } else {
+                            r#"{"ok":true}"#
+                        };
+                        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(std::time::Duration::from_millis(20)),
+                    Err(_) => break,
+                }
+            }
+        });
+        format!("http://{address}/")
+    }
+
+    #[test]
+    fn a_channel_graph_run_receives_a_later_reply_in_its_thread() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        slack::set_api_root(Some(serve_slack()));
+        let mut connector = slack_connector();
+        connector.trigger = Trigger::SlackMessage {
+            channel: "C0123ABCD".into(),
+            decide: Decide { model: String::new(), instructions: String::new(), categories: vec![], fallback: None },
+        };
+        let mut graph = talks(&["one"]);
+        graph.nodes[0].kind = NodeKind::Trigger { watch: Watch::SlackMessage { channel: "C0123ABCD".into() } };
+        connector.graph = Some(graph);
+        let (connectors, dir) = stored("channel-replies", vec![connector]);
+        std::fs::write(dir.join("slack-key"), "xoxb-test").unwrap();
+        connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        connectors
+            .begin("c2".into(), Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() }, slack_trigger(None), "2026-10-29T12:00:00Z")
+            .unwrap();
+        let open = |work: Work| placed(work);
+        block_on(connectors.drive(&open)).unwrap();
+        let (work, error) = block_on(connectors.poll());
+        assert!(error.is_none(), "{error:?}");
+        assert!(work.is_empty(), "the reply belongs to the run");
+        let prompts = std::sync::Mutex::new(Vec::new());
+        let open = |work: Work| {
+            if let Work::Prompt { text, .. } = &work {
+                prompts.lock().unwrap().push(text.clone());
+            }
+            placed(work)
+        };
+        block_on(connectors.drive(&open)).unwrap();
+        let prompts = prompts.lock().unwrap().clone();
+        assert!(prompts.iter().any(|text| text.contains("here is the log")), "{prompts:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_later_check_keeps_a_broken_runs_file_on_the_line() {
+        let mut connector = linear_connector();
+        connector.enabled = false;
+        let (connectors, dir) = stored("broken-stays", vec![connector]);
+        drop(connectors);
+        std::fs::write(dir.join("runs.json"), b"{not json").unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        let before = connectors.get_settings().checked.unwrap().at;
+        block_on(async {
+            let watch = connectors.watch(|_| async { Ok::<(), String>(()) }, |_| {});
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), watch).await;
+        });
+        let check = connectors.get_settings().checked.expect("a check ran");
+        assert_ne!(check.at, before, "the check did not finish");
+        let error = check.error.unwrap_or_default();
+        assert!(error.contains("could not read workflow runs"), "{error}");
+        assert_eq!(std::fs::read(dir.join("runs.json")).unwrap(), b"{not json");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_page_that_fails_to_post_is_not_recorded() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let mut connector = slack_connector();
+        connector.trigger = Trigger::SlackMessage {
+            channel: "C0123ABCD".into(),
+            decide: Decide { model: "typesafe-ai/jev".into(), instructions: String::new(), categories: vec![], fallback: None },
+        };
+        connector.graph = Some(crate::graph::Graph {
+            nodes: vec![
+                Node { id: NodeId("t".into()), name: "Trigger".into(), position: [0, 0], kind: NodeKind::Trigger { watch: Watch::SlackMessage { channel: "C0123ABCD".into() } } },
+                Node { id: NodeId("p".into()), name: "Page".into(), position: [1, 0], kind: NodeKind::Page { group: "S0123ABCD".into() } },
+            ],
+            edges: vec![Edge { from: NodeId("t".into()), port: PortId("out".into()), to: NodeId("p".into()) }],
+        });
+        let (connectors, dir) = stored("page-order", vec![connector]);
+        std::fs::write(dir.join("slack-key"), "xoxb-test").unwrap();
+        slack::set_api_root(Some("http://127.0.0.1:1/".into()));
+        connectors
+            .begin("c2".into(), Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() }, slack_trigger(None), "2026-10-29T12:00:00Z")
+            .unwrap();
+        let open = |work: Work| placed(work);
+        let failed = block_on(connectors.drive(&open));
+        slack::set_api_root(None);
+        assert!(failed.is_err(), "the post did not reach Slack");
+        assert!(connectors.store.lock().unwrap().connectors[0].paged.is_empty(), "the thread stays unpaged so the next attempt posts");
         let _ = std::fs::remove_dir_all(dir);
     }
 

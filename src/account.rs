@@ -1,7 +1,7 @@
 use pinned_core::account::{self, Credentials};
 use pinned_core::connectors::{self, Connectors, Keys};
 use pinned_core::link::{self, Link};
-use pinned_core::machine::Machine;
+use pinned_core::machine::{Event, Listener, Machine};
 use pinned_core::process;
 use pinned_core::wire::HubCall;
 use std::path::PathBuf;
@@ -69,20 +69,70 @@ fn connect(creds: &Credentials, machine: Arc<Machine>) -> Link {
 
 fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
-        let open = |work| {
-            let taken = match work {
-                connectors::Work::Run(run) if matches!(run.runs_on, connectors::RunsOn::FreshBox(_)) => {
-                    Err("this workflow runs in an Upstash Box, which needs pinned signed in".to_owned())
-                }
-                connectors::Work::Run(run) => machine.run(&run.spec()).map(drop),
-                connectors::Work::Delivery(d) => machine.deliver(&d.env(), &d.text()).then_some(()).ok_or_else(|| "no session answers that thread".to_owned()),
-                connectors::Work::Prompt { env, text } => machine.deliver(&env, &text).then_some(()).ok_or_else(|| "no session answers that thread".to_owned()),
-            };
-            async move { taken }
-        };
+        let id = machine.subscribe(local_tabs(app.clone(), machine.clone()));
+        let _stop = StopListening { machine: machine.clone(), id };
+        let initial = machine.tabs();
+        let connectors = app.state::<Connectors>();
+        if let Err(error) = connectors.on_tabs("local", &[], &initial, local_open(machine.clone())).await {
+            eprintln!("pinned: could not wake a workflow run: {error}");
+        }
         let checked = |check: &connectors::Check| drop(app.emit("connectors-checked", check));
-        app.state::<Connectors>().watch(open, checked).await
+        connectors.watch(local_open(machine), checked).await
     })
+}
+
+struct StopListening {
+    machine: Arc<Machine>,
+    id: u64,
+}
+
+impl Drop for StopListening {
+    fn drop(&mut self) {
+        self.machine.unsubscribe(self.id);
+    }
+}
+
+fn local_tabs(app: AppHandle, machine: Arc<Machine>) -> Listener {
+    Box::new(move |event| {
+        let Event::Tabs { tabs } = event else { return };
+        let tabs = tabs.clone();
+        let app = app.clone();
+        let machine = machine.clone();
+        // The listener can run on the thread that holds a run, so the wake waits on its own task.
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = app.state::<Connectors>().on_tabs("local", &[], &tabs, local_open(machine)).await {
+                eprintln!("pinned: could not wake a workflow run: {error}");
+            }
+        });
+    })
+}
+
+fn local_open(
+    machine: Arc<Machine>,
+) -> impl Fn(connectors::Work) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<connectors::Placement>, String>> + Send>> + Send + Sync {
+    move |work| {
+        let machine = machine.clone();
+        Box::pin(async move { take_local(machine, work).await })
+    }
+}
+
+async fn take_local(machine: Arc<Machine>, work: connectors::Work) -> Result<Option<connectors::Placement>, String> {
+    match work {
+        connectors::Work::Run(run) if matches!(run.runs_on, connectors::RunsOn::FreshBox(_)) => {
+            Err("this workflow runs in an Upstash Box, which needs pinned signed in".into())
+        }
+        connectors::Work::Run(run) => {
+            let spec = run.spec();
+            let tab = connectors::off_worker(move || machine.run(&spec)).await?;
+            Ok(Some(connectors::Placement { machine: "local".into(), tab }))
+        }
+        connectors::Work::Delivery(delivery) => {
+            if machine.deliver(&delivery.env(), &delivery.text()) { Ok(None) } else { Err("no session answers that thread".into()) }
+        }
+        connectors::Work::Prompt { env, text } => {
+            if machine.deliver(&env, &text) { Ok(None) } else { Err("no session answers that thread".into()) }
+        }
+    }
 }
 
 fn computer_name() -> String {

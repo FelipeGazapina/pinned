@@ -47,6 +47,9 @@ pub struct Run {
     ready: Option<ReadyClassify>,
     /// Set once a claim has been supplied, so a finished run does not claim twice.
     claimed: bool,
+    /// Prompts already handed to the live tab. A replayed type or resume does not send them again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sent: Vec<String>,
 }
 
 /// One graph the walk is inside. `queue` is the nodes still to run at this depth, front first.
@@ -100,6 +103,15 @@ pub enum Session {
         machine: String,
         tab: String,
         claude: Option<String>,
+        /// Unix millis when this wait started. A tab list captured earlier cannot end it.
+        #[serde(default)]
+        since: u64,
+        /// A Working frame arrived after `since`.
+        #[serde(default)]
+        saw_working: bool,
+        /// This wait follows a typed message, so a Done still showing from the previous turn does not end it.
+        #[serde(default)]
+        await_working: bool,
     },
     /// The tab is gone. The next `talk` resumes `claude`, or opens a seeded session when it is None.
     Detached {
@@ -168,6 +180,8 @@ pub enum Supplied {
     },
     /// `claude --resume` found no conversation; the runner opens a seeded session next.
     NoConversation,
+    /// Another connector already holds the subject. The run ends without a session.
+    Held { why: String },
     Failed(String),
 }
 
@@ -214,6 +228,7 @@ pub fn start(library: &Library, connector: &str, subject: Subject, input: Value,
         pending: None,
         ready: None,
         claimed: false,
+        sent: Vec::new(),
     };
     let Some(graph) = library.get(connector) else {
         return failed(run, format!("workflow {connector:?} has no graph"));
@@ -492,6 +507,16 @@ fn apply(
             }
             Ok(())
         }
+        (Effect::Claim { .. }, Supplied::Held { why }) => {
+            if let Ok(node) = front_node(run) {
+                let connector = run.stack.last().map(|frame| frame.connector.clone()).unwrap_or_else(|| run.connector.clone());
+                record(run, &connector, &node, json!({ "held": why }), at);
+            }
+            run.claimed = true;
+            run.status = Status::Done;
+            run.stack.clear();
+            Ok(())
+        }
         (Effect::Classify { .. }, Supplied::Classified(answers)) => {
             classify_supplied(run, ready, &answers, at)
         }
@@ -588,8 +613,11 @@ fn talk_supplied(
                 machine,
                 tab,
                 claude: None,
+                since: 0,
+                saw_working: false,
+                await_working: false,
             };
-            wait_turn(run);
+            wait_turn(run, false);
             Ok(())
         }
         (Effect::Resume { claude, .. }, Supplied::Opened { machine, tab }) => {
@@ -598,13 +626,16 @@ fn talk_supplied(
                 machine,
                 tab,
                 claude: Some(claude),
+                since: 0,
+                saw_working: false,
+                await_working: false,
             };
-            wait_turn(run);
+            wait_turn(run, true);
             Ok(())
         }
         (Effect::Type { .. }, Supplied::Done) => {
             log_talk(run, &prompt, at)?;
-            wait_turn(run);
+            wait_turn(run, true);
             Ok(())
         }
         (effect, _) => Err(format!(
@@ -621,10 +652,32 @@ fn log_talk(run: &mut Run, prompt: &str, at: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn wait_turn(run: &mut Run) {
+fn wait_turn(run: &mut Run, await_working: bool) {
     run.status = Status::Waiting;
+    if let Session::Live { saw_working, await_working: flag, since, .. } = &mut run.session {
+        *saw_working = false;
+        *flag = await_working;
+        *since = 0;
+    }
     if let Some(frame) = run.stack.last_mut() {
         frame.phase = Phase::WaitTurn;
+    }
+}
+
+/// Whether `text` was already handed to the tab, so a replayed type does not send it again.
+pub fn already_sent(run: &Run, text: &str) -> bool {
+    run.sent.iter().any(|sent| sent == text)
+}
+
+pub fn note_sent(run: &mut Run, text: &str) {
+    if !already_sent(run, text) {
+        run.sent.push(text.to_owned());
+    }
+}
+
+pub fn forget_sent(run: &mut Run, text: &str) {
+    if let Some(index) = run.sent.iter().rposition(|sent| sent == text) {
+        run.sent.remove(index);
     }
 }
 
@@ -1353,7 +1406,10 @@ mod tests {
             Session::Live {
                 machine: "mac".into(),
                 tab: "tab-1".into(),
-                claude: Some(CLAUDE.into())
+                claude: Some(CLAUDE.into()),
+                since: 0,
+                saw_working: false,
+                await_working: true,
             }
         );
     }
@@ -1418,7 +1474,10 @@ mod tests {
                 Session::Live {
                     machine: "mac".into(),
                     tab: "tab-1".into(),
-                    claude: Some(CLAUDE.into())
+                    claude: Some(CLAUDE.into()),
+                    since: 0,
+                    saw_working: false,
+                    await_working: true,
                 }
             );
         }
@@ -2132,7 +2191,10 @@ mod tests {
             Session::Live {
                 machine: "mac".into(),
                 tab: "tab-1".into(),
-                claude: Some("ses_9".into())
+                claude: Some("ses_9".into()),
+                since: 0,
+                saw_working: false,
+                await_working: false,
             }
         );
     }
@@ -2174,7 +2236,10 @@ mod tests {
             Session::Live {
                 machine: "mac".into(),
                 tab: "tab-1".into(),
-                claude: Some("ses_1".into())
+                claude: Some("ses_1".into()),
+                since: 0,
+                saw_working: false,
+                await_working: true,
             }
         );
         push(

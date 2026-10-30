@@ -269,10 +269,10 @@ impl Hub {
         let connector = env.iter().find(|(key, _)| key == CONNECTOR_ENV).map(|(_, value)| value.as_str()).unwrap_or("");
         for machine in account.running(connector) {
             let call = Call::Deliver { env: env.to_vec(), text: text.to_owned() };
-            match self.call_machine(account, &machine, call, MACHINE_CALL_WAIT).await {
-                Ok(Value::Bool(true)) => return Ok(()),
-                Err(Unanswered::Lost(_)) => return Ok(()),
-                _ => {}
+            match prompt_outcome(self.call_machine(account, &machine, call, MACHINE_CALL_WAIT).await) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(why) => return Err(why),
             }
         }
         Err("no session answers that thread".into())
@@ -669,13 +669,30 @@ impl Account {
     }
 }
 
+/// One moment of the account document. Store and runs share a row, so they share this lock.
+struct Stored {
+    store: Option<Vec<u8>>,
+    runs: Vec<u8>,
+}
+
 /// Keeps an account's store and keys in memory and writes them to its row behind the
 /// connectors' back, so `Storage`'s synchronous calls never wait on Postgres.
 struct PgStorage {
-    store: Mutex<Option<Vec<u8>>>,
-    runs: Mutex<Vec<u8>>,
+    state: Mutex<Stored>,
     keys: Mutex<BTreeMap<String, String>>,
     writes: mpsc::UnboundedSender<Write>,
+    /// Runs before the snapshot, so a test can move both halves and still see one generation.
+    #[cfg(test)]
+    before_snapshot: Mutex<Option<Box<dyn Fn(&PgStorage) + Send>>>,
+}
+
+/// A graph prompt treats a lost machine as not delivered. The cursor stays and the next check retries.
+fn prompt_outcome(answer: Result<Value, Unanswered>) -> Result<bool, String> {
+    match answer {
+        Ok(Value::Bool(true)) => Ok(true),
+        Err(Unanswered::Lost(why)) => Err(why),
+        _ => Ok(false),
+    }
 }
 
 enum Write {
@@ -713,13 +730,31 @@ impl PgStorage {
         let mut doc = stored.store;
         let runs = doc.as_object_mut().and_then(|map| map.remove("runs")).and_then(|value| serde_json::to_vec(&value).ok()).unwrap_or_default();
         let store = (doc != serde_json::json!({})).then(|| serde_json::to_vec(&doc).unwrap());
-        PgStorage { store: Mutex::new(store), runs: Mutex::new(runs), keys: Mutex::new(stored.secrets), writes }
+        PgStorage {
+            state: Mutex::new(Stored { store, runs }),
+            keys: Mutex::new(stored.secrets),
+            writes,
+            #[cfg(test)]
+            before_snapshot: Mutex::new(None),
+        }
     }
 
-    /// Writes the store and the runs together, so one of a burst cannot drop the other.
+    #[cfg(test)]
+    fn run_before_snapshot(&self) {
+        let hook = self.before_snapshot.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook(self);
+        }
+    }
+
+    /// Writes the store and the runs from one snapshot, so a burst cannot mix two generations.
     fn persist(&self) -> Result<(), String> {
-        let store = self.store.lock().unwrap().clone();
-        let runs = self.runs.lock().unwrap().clone();
+        #[cfg(test)]
+        self.run_before_snapshot();
+        let (store, runs) = {
+            let state = self.state.lock().unwrap();
+            (state.store.clone(), state.runs.clone())
+        };
         let mut doc: Value = match &store {
             Some(bytes) => serde_json::from_slice(bytes).map_err(|e| e.to_string())?,
             None => serde_json::json!({}),
@@ -740,22 +775,22 @@ impl PgStorage {
 
 impl Storage for PgStorage {
     fn load(&self) -> Option<Vec<u8>> {
-        self.store.lock().unwrap().clone()
+        self.state.lock().unwrap().store.clone()
     }
 
     fn save(&self, store: &[u8]) -> Result<(), String> {
         serde_json::from_slice::<Value>(store).map_err(|e| e.to_string())?;
-        *self.store.lock().unwrap() = Some(store.to_vec());
+        self.state.lock().unwrap().store = Some(store.to_vec());
         self.persist()
     }
 
     fn load_runs(&self) -> Option<Vec<u8>> {
-        let runs = self.runs.lock().unwrap().clone();
+        let runs = self.state.lock().unwrap().runs.clone();
         (!runs.is_empty()).then_some(runs)
     }
 
     fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
-        *self.runs.lock().unwrap() = bytes.to_vec();
+        self.state.lock().unwrap().runs = bytes.to_vec();
         self.persist()
     }
 
@@ -775,5 +810,44 @@ impl Storage for PgStorage {
         if keys.remove(name).is_some() {
             self.write_keys(&keys);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn memory() -> (PgStorage, mpsc::UnboundedReceiver<Write>) {
+        let (writes, incoming) = mpsc::unbounded_channel();
+        let storage = PgStorage {
+            state: Mutex::new(Stored { store: None, runs: Vec::new() }),
+            keys: Mutex::new(BTreeMap::new()),
+            writes,
+            before_snapshot: Mutex::new(None),
+        };
+        (storage, incoming)
+    }
+
+    #[test]
+    fn a_lost_prompt_is_not_delivered() {
+        assert_eq!(prompt_outcome(Err(Unanswered::Lost("gone".into()))), Err("gone".into()));
+        assert_eq!(prompt_outcome(Ok(serde_json::Value::Bool(true))), Ok(true));
+        assert_eq!(prompt_outcome(Ok(serde_json::Value::Bool(false))), Ok(false));
+        assert_eq!(prompt_outcome(Err(Unanswered::Refused("no".into()))), Ok(false));
+    }
+
+    #[test]
+    fn a_snapshot_writes_one_generation_of_store_and_runs() {
+        let (storage, mut written) = memory();
+        *storage.state.lock().unwrap() = Stored { store: Some(br#"{"gen":1}"#.to_vec()), runs: br#"[{"gen":1}]"#.to_vec() };
+        *storage.before_snapshot.lock().unwrap() = Some(Box::new(|storage| {
+            let mut state = storage.state.lock().unwrap();
+            state.store = Some(br#"{"gen":2}"#.to_vec());
+            state.runs = br#"[{"gen":2}]"#.to_vec();
+        }));
+        storage.persist().unwrap();
+        let Write::Store(doc) = written.try_recv().unwrap() else { panic!("the snapshot was not a store") };
+        assert_eq!(doc["gen"], 2);
+        assert_eq!(doc["runs"][0]["gen"], 2);
     }
 }
