@@ -570,13 +570,11 @@ impl Account {
     }
 
     /// Passes a machine's event to the clients, keeping its tabs and usage for those that connect later.
-    /// The tabs this machine showed before a `Tabs` event, so a wake can see what changed.
-    pub fn machine_event(&self, machine: &str, socket: u64, event: MachineEvent) -> Vec<TabView> {
-        let mut previous = Vec::new();
+    pub fn machine_event(&self, machine: &str, socket: u64, event: MachineEvent) {
         let mut live = self.live.lock().unwrap();
-        let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return previous };
+        let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return };
         match &event {
-            MachineEvent::Tabs { tabs } => previous = std::mem::replace(&mut m.tabs, tabs.clone()),
+            MachineEvent::Tabs { tabs } => m.tabs = tabs.clone(),
             MachineEvent::Usage { usage, account } => {
                 m.usage.insert(account.clone(), *usage);
             }
@@ -586,7 +584,6 @@ impl Account {
         for client in live.clients.values() {
             let _ = client.out.send(text.clone());
         }
-        previous
     }
 
     pub fn output(&self, machine: &str, viewer: &str, tab: TabId, data: pinned_core::wire::Bytes) {
@@ -681,9 +678,6 @@ struct PgStorage {
     state: Mutex<Stored>,
     keys: Mutex<BTreeMap<String, String>>,
     writes: mpsc::UnboundedSender<Write>,
-    /// Runs before the snapshot, so a test can move both halves and still see one generation.
-    #[cfg(test)]
-    before_snapshot: Mutex<Option<Box<dyn Fn(&PgStorage) + Send>>>,
 }
 
 /// A graph prompt treats a lost machine as not delivered. The cursor stays and the next check retries.
@@ -734,28 +728,14 @@ impl PgStorage {
             state: Mutex::new(Stored { store, runs }),
             keys: Mutex::new(stored.secrets),
             writes,
-            #[cfg(test)]
-            before_snapshot: Mutex::new(None),
         }
     }
 
-    #[cfg(test)]
-    fn run_before_snapshot(&self) {
-        let hook = self.before_snapshot.lock().unwrap().take();
-        if let Some(hook) = hook {
-            hook(self);
-        }
-    }
-
-    /// Writes the store and the runs from one snapshot, so a burst cannot mix two generations.
-    fn persist(&self) -> Result<(), String> {
-        #[cfg(test)]
-        self.run_before_snapshot();
-        let (store, runs) = {
-            let state = self.state.lock().unwrap();
-            (state.store.clone(), state.runs.clone())
-        };
-        let mut doc: Value = match &store {
+    /// Queues the store and the runs as one document. Callers hold the `state` lock, so the
+    /// writer receives the documents in the order the state changed and the newest one wins.
+    fn persist(&self, state: &Stored) -> Result<(), String> {
+        let (store, runs) = (&state.store, &state.runs);
+        let mut doc: Value = match store {
             Some(bytes) => serde_json::from_slice(bytes).map_err(|e| e.to_string())?,
             None => serde_json::json!({}),
         };
@@ -763,7 +743,7 @@ impl PgStorage {
         if runs.is_empty() {
             object.remove("runs");
         } else {
-            object.insert("runs".to_owned(), serde_json::from_slice(&runs).map_err(|e| e.to_string())?);
+            object.insert("runs".to_owned(), serde_json::from_slice(runs).map_err(|e| e.to_string())?);
         }
         self.writes.send(Write::Store(doc)).map_err(|_| "the hub is shutting down".to_string())
     }
@@ -780,8 +760,9 @@ impl Storage for PgStorage {
 
     fn save(&self, store: &[u8]) -> Result<(), String> {
         serde_json::from_slice::<Value>(store).map_err(|e| e.to_string())?;
-        self.state.lock().unwrap().store = Some(store.to_vec());
-        self.persist()
+        let mut state = self.state.lock().unwrap();
+        state.store = Some(store.to_vec());
+        self.persist(&state)
     }
 
     fn load_runs(&self) -> Option<Vec<u8>> {
@@ -790,8 +771,9 @@ impl Storage for PgStorage {
     }
 
     fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
-        self.state.lock().unwrap().runs = bytes.to_vec();
-        self.persist()
+        let mut state = self.state.lock().unwrap();
+        state.runs = bytes.to_vec();
+        self.persist(&state)
     }
 
     fn key(&self, name: &str) -> Option<String> {
@@ -817,37 +799,11 @@ impl Storage for PgStorage {
 mod tests {
     use super::*;
 
-    fn memory() -> (PgStorage, mpsc::UnboundedReceiver<Write>) {
-        let (writes, incoming) = mpsc::unbounded_channel();
-        let storage = PgStorage {
-            state: Mutex::new(Stored { store: None, runs: Vec::new() }),
-            keys: Mutex::new(BTreeMap::new()),
-            writes,
-            before_snapshot: Mutex::new(None),
-        };
-        (storage, incoming)
-    }
-
     #[test]
     fn a_lost_prompt_is_not_delivered() {
         assert_eq!(prompt_outcome(Err(Unanswered::Lost("gone".into()))), Err("gone".into()));
         assert_eq!(prompt_outcome(Ok(serde_json::Value::Bool(true))), Ok(true));
         assert_eq!(prompt_outcome(Ok(serde_json::Value::Bool(false))), Ok(false));
         assert_eq!(prompt_outcome(Err(Unanswered::Refused("no".into()))), Ok(false));
-    }
-
-    #[test]
-    fn a_snapshot_writes_one_generation_of_store_and_runs() {
-        let (storage, mut written) = memory();
-        *storage.state.lock().unwrap() = Stored { store: Some(br#"{"gen":1}"#.to_vec()), runs: br#"[{"gen":1}]"#.to_vec() };
-        *storage.before_snapshot.lock().unwrap() = Some(Box::new(|storage| {
-            let mut state = storage.state.lock().unwrap();
-            state.store = Some(br#"{"gen":2}"#.to_vec());
-            state.runs = br#"[{"gen":2}]"#.to_vec();
-        }));
-        storage.persist().unwrap();
-        let Write::Store(doc) = written.try_recv().unwrap() else { panic!("the snapshot was not a store") };
-        assert_eq!(doc["gen"], 2);
-        assert_eq!(doc["runs"][0]["gen"], 2);
     }
 }

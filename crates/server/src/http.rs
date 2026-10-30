@@ -484,8 +484,9 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 MachineEvent::Tabs { tabs } => Some(tabs.clone()),
                 _ => None,
             };
-            let before = account.machine_event(machine, socket, event);
+            account.machine_event(machine, socket, event);
             if let Some(after) = after {
+                let observed = pinned_core::connectors::unix_millis();
                 let (hub, account, machine) = (hub.clone(), account.clone(), machine.to_owned());
                 tokio::spawn(async move {
                     let Ok(connectors) = hub.connectors(&account).await else { return };
@@ -494,7 +495,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                         let hub = hub.clone();
                         async move { hub.open_placed(id, work).await }
                     };
-                    if let Err(e) = connectors.on_tabs(&machine, &before, &after, open).await {
+                    if let Err(e) = connectors.on_tabs(&machine, observed, &after, open).await {
                         eprintln!("pinned-server: could not wake a workflow run: {e}");
                     }
                 });

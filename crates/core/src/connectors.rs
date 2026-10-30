@@ -1256,7 +1256,8 @@ fn read_runs(bytes: Option<Vec<u8>>) -> (Vec<runner::Run>, Option<String>) {
     }
 }
 
-fn unix_millis() -> u64 {
+/// Unix millis now. A machine's tab list is stamped with this when it arrives.
+pub fn unix_millis() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
@@ -2293,15 +2294,20 @@ impl Connectors {
     }
 
     /// Tab statuses changed on `machine`. Waiting runs wake, then every running graph continues.
-    pub async fn on_tabs<F, Fut, R>(&self, machine: &str, before: &[TabView], after: &[TabView], open: F) -> Result<(), String>
+    /// `observed` is the unix millis the list arrived. Lists can queue behind a drive, so an older one never replaces a newer one.
+    pub async fn on_tabs<F, Fut, R>(&self, machine: &str, observed: u64, after: &[TabView], open: F) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
         R: Taken,
     {
-        let _ = before;
         let _guard = self.driving.lock().await;
-        self.known_tabs.lock().unwrap().insert(machine.to_owned(), (unix_millis(), after.to_vec()));
+        {
+            let mut known = self.known_tabs.lock().unwrap();
+            if known.get(machine).is_none_or(|(at, _)| *at <= observed) {
+                known.insert(machine.to_owned(), (observed, after.to_vec()));
+            }
+        }
         self.drive_locked(&open).await
     }
 
@@ -4624,12 +4630,12 @@ mod tests {
         };
         block_on(connectors.drive(&open)).unwrap();
         let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
-        block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(&done), &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open)).unwrap();
         {
             let run = connectors.runs.lock().unwrap()[0].clone();
             assert!(matches!(run.session, Session::Live { ref machine, ref tab, ref claude, .. } if machine == "m1" && tab == "tab-1" && claude.as_deref() == Some("claude-1")));
         }
-        block_on(connectors.on_tabs("m1", std::slice::from_ref(&done), &[], &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), &[], &open)).unwrap();
         let lines = seen.lock().unwrap().clone();
         assert_eq!(lines.len(), 4, "{lines:#?}");
         assert!(lines[0].contains("PINNED_CONNECTOR=c1\nPINNED_ISSUE=uuid"), "{}", lines[0]);
@@ -4693,7 +4699,7 @@ mod tests {
         };
         block_on(connectors.drive(&open)).unwrap();
         assert_eq!(*opened.lock().unwrap(), 1);
-        block_on(connectors.on_tabs("m1", &[], &[], &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), &[], &open)).unwrap();
         assert_eq!(*opened.lock().unwrap(), 2, "the tab is already gone, so the run opens its next session");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4707,7 +4713,7 @@ mod tests {
         let open = |work: Work| placed(work);
         block_on(connectors.drive(&open)).unwrap();
         let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
-        block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(&working), &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&working), &open)).unwrap();
         {
             let run = connectors.runs.lock().unwrap()[0].clone();
             assert!(matches!(run.status, Status::Waiting), "working is not the end of the turn");
@@ -4715,7 +4721,7 @@ mod tests {
         }
         let mut other = session_tab(Some(AgentStatus::Done), Some("claude-other"));
         other.id = "tab-9".into();
-        block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(&other), &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&other), &open)).unwrap();
         let run = connectors.runs.lock().unwrap()[0].clone();
         assert!(
             matches!(run.session, Session::Live { ref tab, ref claude, .. } if tab == "tab-1" && claude.as_deref() == Some("claude-1"))
@@ -4757,7 +4763,7 @@ mod tests {
         };
         block_on(connectors.drive(&open)).unwrap();
         let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
-        block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(&done), &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open)).unwrap();
         let replay = Connectors::new(FileStorage::new(snap), "/bin/pinned".into());
         let again = std::sync::Mutex::new(0u32);
         let open = |work: Work| {
@@ -4768,6 +4774,54 @@ mod tests {
         };
         block_on(replay.drive(&open)).unwrap();
         assert_eq!(*again.lock().unwrap(), 0, "the prompt was already handed to the tab");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_later_talk_with_the_same_text_still_types() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["again", "again", "again"]));
+        let (connectors, dir) = stored("same-text", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let typed = std::sync::Mutex::new(0u32);
+        let open = |work: Work| {
+            if matches!(work, Work::Prompt { .. }) {
+                *typed.lock().unwrap() += 1;
+            }
+            placed(work)
+        };
+        block_on(connectors.drive(&open)).unwrap();
+        let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        for _ in 0..3 {
+            block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&working), &open)).unwrap();
+            block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open)).unwrap();
+        }
+        assert_eq!(*typed.lock().unwrap(), 2, "the second and third talks each type");
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Done));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_tab_list_that_arrived_earlier_does_not_replace_a_newer_one() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two"]));
+        let (connectors, dir) = stored("stale-list", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let opened = std::sync::Mutex::new(0u32);
+        let open = |work: Work| {
+            if matches!(work, Work::Run(_)) {
+                *opened.lock().unwrap() += 1;
+            }
+            placed(work)
+        };
+        block_on(connectors.drive(&open)).unwrap();
+        let fresh = unix_millis() + 10;
+        let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
+        block_on(connectors.on_tabs("m1", fresh, std::slice::from_ref(&working), &open)).unwrap();
+        block_on(connectors.on_tabs("m1", fresh - 1, &[], &open)).unwrap();
+        assert_eq!(*opened.lock().unwrap(), 1, "the list without the tab arrived first, so the tab is still there");
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -4822,7 +4876,7 @@ mod tests {
             placed(work)
         };
         let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
-        block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(&done), &open)).unwrap();
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open)).unwrap();
         assert_eq!(*prompts.lock().unwrap(), 0, "opening the session is not the end of a turn the list already showed");
         block_on(connectors.drive(&open)).unwrap();
         assert_eq!(*prompts.lock().unwrap(), 1, "the next check types the next talk");
@@ -4868,7 +4922,7 @@ mod tests {
             }
             placed(work)
         };
-        let show = |tab: &TabView| block_on(connectors.on_tabs("m1", &[], std::slice::from_ref(tab), &open)).unwrap();
+        let show = |tab: &TabView| block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(tab), &open)).unwrap();
         block_on(connectors.drive(&open)).unwrap();
         let working = tab_at(Some(AgentStatus::Working), Some(u64::MAX));
         show(&working);

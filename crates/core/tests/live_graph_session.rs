@@ -82,7 +82,7 @@ fn run_case(name: &str, proof: Proof) {
     kept.note(format!("first tab {first_tab} session {first_id}"));
     kept.save_thread(&machine, &first_tab, "first");
 
-    feed(&connectors, &machine, &open, &[], &[first.clone()]);
+    feed(&connectors, &machine, &open, std::slice::from_ref(&first));
     match proof {
         Proof::SameTab => {
             let second = wait_turn(&machine, &first_tab, 1, BETA, &kept);
@@ -94,9 +94,8 @@ fn run_case(name: &str, proof: Proof) {
             finish(&connectors, &machine, &open, &second);
         }
         Proof::Resume => {
-            let before = machine.view(&first_tab).expect("tab");
             assert!(machine.close_tab(&first_tab), "close_tab");
-            feed(&connectors, &machine, &open, &[before], &machine.tabs());
+            feed(&connectors, &machine, &open, &machine.tabs());
             let (tab, claude) = live_session(&connectors);
             assert_eq!(claude.as_deref(), Some(first_id.as_str()), "resume stored a different session id");
             assert_ne!(tab, first_tab, "resume reused the closed tab");
@@ -110,9 +109,8 @@ fn run_case(name: &str, proof: Proof) {
         }
         Proof::Seeded => {
             connectors.set_live_claude(BOGUS).expect("edit stored session");
-            let before = machine.view(&first_tab).expect("tab");
             assert!(machine.close_tab(&first_tab), "close_tab");
-            feed(&connectors, &machine, &open, &[before], &machine.tabs());
+            feed(&connectors, &machine, &open, &machine.tabs());
             assert!(kept.log_contains(&format!("--resume\n{BOGUS}")), "the bogus id was not resumed\n{}", kept.log_text());
             assert!(
                 kept.log_contains("This session continues a run that already happened."),
@@ -149,8 +147,8 @@ fn drive(connectors: &Connectors, open: &impl Fn(Work) -> std::pin::Pin<Box<dyn 
     }
 }
 
-fn feed(connectors: &Connectors, machine: &Machine, open: &impl Fn(Work) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Placement>, String>> + Send>>, before: &[TabView], after: &[TabView]) {
-    let error = block_on(connectors.on_tabs(MACHINE, before, after, open));
+fn feed(connectors: &Connectors, machine: &Machine, open: &impl Fn(Work) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Placement>, String>> + Send>>, after: &[TabView]) {
+    let error = block_on(connectors.on_tabs(MACHINE, pinned_core::connectors::unix_millis(), after, open));
     if let Err(error) = &error {
         eprintln!("LIVE tabs now: {}", serde_json::to_string(&machine.tabs()).unwrap_or_default());
         panic!("on_tabs: {error}");
@@ -158,7 +156,7 @@ fn feed(connectors: &Connectors, machine: &Machine, open: &impl Fn(Work) -> std:
 }
 
 fn finish(connectors: &Connectors, machine: &Machine, open: &impl Fn(Work) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Placement>, String>> + Send>>, done: &TabView) {
-    feed(connectors, machine, open, &[], std::slice::from_ref(done));
+    feed(connectors, machine, open, std::slice::from_ref(done));
 }
 
 fn opener(machine: Arc<Machine>, log: Arc<Mutex<Vec<String>>>, screen: Arc<Mutex<Vec<u8>>>) -> impl Fn(Work) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Placement>, String>> + Send>> {

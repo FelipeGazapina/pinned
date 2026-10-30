@@ -73,7 +73,7 @@ fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
         let _stop = StopListening { machine: machine.clone(), id };
         let initial = machine.tabs();
         let connectors = app.state::<Connectors>();
-        if let Err(error) = connectors.on_tabs("local", &[], &initial, local_open(machine.clone())).await {
+        if let Err(error) = connectors.on_tabs("local", connectors::unix_millis(), &initial, local_open(machine.clone())).await {
             eprintln!("pinned: could not wake a workflow run: {error}");
         }
         let checked = |check: &connectors::Check| drop(app.emit("connectors-checked", check));
@@ -95,12 +95,13 @@ impl Drop for StopListening {
 fn local_tabs(app: AppHandle, machine: Arc<Machine>) -> Listener {
     Box::new(move |event| {
         let Event::Tabs { tabs } = event else { return };
+        let observed = connectors::unix_millis();
         let tabs = tabs.clone();
         let app = app.clone();
         let machine = machine.clone();
         // The listener can run on the thread that holds a run, so the wake waits on its own task.
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = app.state::<Connectors>().on_tabs("local", &[], &tabs, local_open(machine)).await {
+            if let Err(error) = app.state::<Connectors>().on_tabs("local", observed, &tabs, local_open(machine)).await {
                 eprintln!("pinned: could not wake a workflow run: {error}");
             }
         });

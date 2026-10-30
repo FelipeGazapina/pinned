@@ -47,7 +47,8 @@ pub struct Run {
     ready: Option<ReadyClassify>,
     /// Set once a claim has been supplied, so a finished run does not claim twice.
     claimed: bool,
-    /// Prompts already handed to the live tab. A replayed type or resume does not send them again.
+    /// Prompts the pending effect already handed to the live tab, so a replay does not send them again.
+    /// Cleared when the effect is supplied, so a later talk with the same text still types.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     sent: Vec<String>,
 }
@@ -299,6 +300,7 @@ pub fn supply(run: &mut Run, supplied: Supplied, at: &str) {
     let Some(effect) = run.pending.take() else {
         return;
     };
+    run.sent.clear();
     let ready = run.ready.take();
     if let Supplied::Failed(why) = supplied {
         fail_status(run, why);
