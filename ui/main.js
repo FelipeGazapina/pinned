@@ -77,6 +77,11 @@ function setTabs(machine, views, { forget = true } = {}) {
     else addTab(machine, view);
   }
   placeTabs();
+  const paths = views.map((v) => v.cwd).sort().join("\n");
+  if (m.tabPaths !== paths) {
+    m.tabPaths = paths;
+    refreshProjects(machine);
+  }
   render();
 }
 
