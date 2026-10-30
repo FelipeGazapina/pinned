@@ -463,6 +463,12 @@ impl Db {
         Ok(n == 1)
     }
 
+    /// The row, or what is left of one this hub cannot read. `None` when no row has this id.
+    pub async fn box_by_id(&self, id: &str) -> Result<Option<Result<BoxRow, Remains>>, String> {
+        let row = self.client().await?.query_opt(&format!("select {BOX_COLUMNS} from boxes where id = $1"), &[&id]).await.map_err(err)?;
+        Ok(row.as_ref().map(box_row))
+    }
+
     /// The id of the account's row for the workflow's subject.
     pub async fn box_for(&self, account: Uuid, connector: &str, subject: &Subject) -> Result<Option<String>, String> {
         let subject = serde_json::to_value(subject).unwrap();

@@ -3,7 +3,7 @@
 
 use crate::accounts::{self, AccountId, Provider};
 use crate::agent::{AgentEvent, AgentStatus, Role, Stage, Subject, Usage};
-use crate::connectors::{Connector, Settings};
+use crate::connectors::{BoxAccess, Connector, Settings};
 use crate::branches::GitStep;
 use crate::scripts::Script;
 use crate::panel::{Candidates, MergeMethod, PrChange, ReviewComment, ReviewEvent, StackAction, StackHead};
@@ -674,6 +674,10 @@ pub enum HubCall {
     ConnectUpstash { key: String, claude_token: String },
     /// Deletes the account's boxes before it forgets the keys.
     DisconnectUpstash,
+    /// `connectors::BoxAccess`. How each actor kind may use a box.
+    SetBoxAccess { access: BoxAccess },
+    /// Allows or refuses the pending box question `id`.
+    AnswerBox { id: String, allow: bool },
     /// The folder of `repo` on `machine`, cloned there with the account's GitHub token when it has
     /// none, or into `dest` when given.
     Clone {
@@ -862,6 +866,7 @@ pub enum ToMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connectors::BoxPermission;
     use serde_json::json;
 
     fn round_trip<T: Serialize + serde::de::DeserializeOwned>(frame: T, expected: Value) {
@@ -1067,6 +1072,11 @@ mod tests {
         );
         round_trip(HubCall::DisconnectUpstash, json!({ "cmd": "disconnect_upstash" }));
         round_trip(
+            HubCall::SetBoxAccess { access: BoxAccess { workflow: BoxPermission::Ask, ..BoxAccess::default() } },
+            json!({ "cmd": "set_box_access", "access": { "workflow": { "mode": "ask" }, "session": { "mode": "off" }, "worker": { "mode": "off" }, "orchestrator": { "mode": "off" } } }),
+        );
+        round_trip(HubCall::AnswerBox { id: "a1".into(), allow: true }, json!({ "cmd": "answer_box", "id": "a1", "allow": true }));
+        round_trip(
             HubCall::Stage { connector: "c1".into(), subject: Subject::LinearIssue { issue: "uuid".into() }, stage: Stage::Coding },
             json!({ "cmd": "stage", "connector": "c1", "issue": "uuid", "stage": "coding" }),
         );
@@ -1131,7 +1141,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, connectors: vec![], checked: None } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![] } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
     }

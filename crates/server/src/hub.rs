@@ -397,6 +397,8 @@ impl Hub {
                 self.boxes.end_all(self, account).await?;
                 (json(c().await?.disconnect_upstash()?), true)
             }
+            HubCall::SetBoxAccess { access } => (json(c().await?.set_box_access(access)?), true),
+            HubCall::AnswerBox { id, allow } => (json(c().await?.answer_box(&id, allow)?), true),
             HubCall::Clone { machine, repo, dest } => {
                 let repo = github::clone_url(&repo);
                 let token = c().await?.github_token().filter(|_| github::hosts(&repo));
@@ -533,6 +535,18 @@ impl Account {
 
     pub fn is_online(&self, machine: &str) -> bool {
         self.live.lock().unwrap().machines.contains_key(machine)
+    }
+
+    /// What a box's machine shows of any of its sessions. A shared box stays up while one of them works.
+    pub fn seen_any(&self, machine: &str) -> Seen {
+        let live = self.live.lock().unwrap();
+        let Some(m) = live.machines.get(machine) else { return Seen::Offline };
+        if m.tabs.is_empty() {
+            return Seen::NoTab;
+        }
+        let running = m.tabs.iter().any(|t| t.running);
+        let working = m.tabs.iter().any(|t| t.running && t.status == Some(AgentStatus::Working));
+        Seen::Tab { running, quiet: !working }
     }
 
     /// What a box's machine shows of the session of `connector` on `subject`.
