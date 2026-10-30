@@ -181,7 +181,11 @@ pub fn serve_io(reminders: bool, input: impl BufRead, output: impl Write + Send 
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": SERVER, "version": env!("CARGO_PKG_VERSION") },
             })),
-            Some("tools/list") => Ok(json!({ "tools": tool_definitions(reminders, std::env::var(ROLE_ENV).ok().as_deref().and_then(Role::parse)) })),
+            Some("tools/list") => {
+                let role = std::env::var(ROLE_ENV).ok().as_deref().and_then(Role::parse);
+                let child = std::env::var(TASK_ENV).ok().is_some_and(|value| !value.is_empty());
+                Ok(json!({ "tools": tool_definitions(reminders, role, child) }))
+            }
             Some("ping") => Ok(json!({})),
             other => Err(format!("method not found: {other:?}")),
         };
@@ -205,10 +209,16 @@ fn write_msg(output: &Mutex<impl Write>, value: &Value) -> std::io::Result<()> {
     output.flush()
 }
 
-fn tool_definitions(reminders: bool, role: Option<Role>) -> Value {
-    let project = project_tools().into_iter().filter(|(orchestrator_only, _)| !orchestrator_only || role == Some(Role::Orchestrator)).map(|(_, tool)| tool);
+fn tool_definitions(reminders: bool, role: Option<Role>, child: bool) -> Value {
+    let blocked = delegate::delegate_block(role, child).is_some();
+    let project = project_tools().into_iter().filter(|(orchestrator_only, tool)| {
+        if blocked && tool["name"] == "delegate" {
+            return false;
+        }
+        !orchestrator_only || role == Some(Role::Orchestrator)
+    }).map(|(_, tool)| tool);
     let mut tools = if reminders { reminder_tools() } else { vec![] };
-    tools.extend(delegation_tools());
+    tools.extend(delegation_tools().into_iter().filter(|tool| tool["name"] != DELEGATE_TOOL || !blocked));
     tools.extend(project);
     Value::Array(tools)
 }
@@ -650,7 +660,7 @@ mod tests {
 
     #[test]
     fn delegate_task_names_every_argument() {
-        let tools = tool_definitions(true, None);
+        let tools = tool_definitions(true, None, false);
         let tool = tools.as_array().unwrap().iter().find(|tool| tool["name"] == "delegate_task").unwrap();
         let props = tool["inputSchema"]["properties"].as_object().unwrap();
         let mut names: Vec<_> = props.keys().cloned().collect();
@@ -708,8 +718,7 @@ mod tests {
     fn a_wait_returns_the_summary_while_a_second_call_answers_and_progress_is_sent() {
         use std::os::unix::net::UnixListener;
         use std::sync::{Arc, Mutex};
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
+        let _guard = session_env_lock();
         let dir = std::env::temp_dir().join(format!("pinned-mcp-wait-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -890,6 +899,12 @@ impl Write for Shared {
 }
 
 #[cfg(unix)]
+fn session_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap()
+}
+
+#[cfg(unix)]
 fn restore_var(name: &str, value: Option<String>) {
     match value {
         Some(value) => std::env::set_var(name, value),
@@ -899,14 +914,16 @@ fn restore_var(name: &str, value: Option<String>) {
 
     #[test]
     fn a_session_gets_the_project_tools_its_role_has() {
-        let names = |role| tool_definitions(true, role).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let names = |role| tool_definitions(true, role, false).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel"];
         let memory = ["memory_search", "memory_save", "memory_forget"];
-        assert_eq!(names(None), [&reminders[..], &delegation, &memory].concat());
-        assert_eq!(names(Some(Role::Worker)), names(None));
+        let plain = names(None);
+        assert_eq!(plain, [&reminders[..], &delegation, &memory].concat());
+        let worker = names(Some(Role::Worker));
+        assert_eq!(worker, plain.iter().filter(|name| name.as_str() != "delegate_task").cloned().collect::<Vec<_>>());
         assert_eq!(names(Some(Role::Orchestrator)), [&reminders[..], &delegation, &["delegate", "agents"], &memory].concat());
-        let on_a_node = tool_definitions(false, None).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let on_a_node = tool_definitions(false, None, false).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(on_a_node, [&delegation[..], &memory].concat());
         assert_eq!(permissions()[7..], ["mcp__pinned__delegate", "mcp__pinned__agents", "mcp__pinned__memory_search", "mcp__pinned__memory_save", "mcp__pinned__memory_forget"]);
 
@@ -916,6 +933,49 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
         assert_eq!(ask("delegate", serde_json::json!({}), Some("tab-2")), Err("delegate: missing field `task`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
+    }
+
+    #[cfg(unix)]
+    fn offered(role: Option<&str>, task: Option<&str>) -> Vec<String> {
+        let _guard = session_env_lock();
+        let previous = (std::env::var(ROLE_ENV).ok(), std::env::var(TASK_ENV).ok());
+        match role {
+            Some(value) => std::env::set_var(ROLE_ENV, value),
+            None => std::env::remove_var(ROLE_ENV),
+        }
+        match task {
+            Some(value) => std::env::set_var(TASK_ENV, value),
+            None => std::env::remove_var(TASK_ENV),
+        }
+        let input = format!("{}\n", json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}));
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        serve_io(true, std::io::Cursor::new(input.into_bytes()), Shared(buf.clone())).unwrap();
+        restore_var(ROLE_ENV, previous.0);
+        restore_var(TASK_ENV, previous.1);
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let value: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        value["result"]["tools"].as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap().to_owned()).collect()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_and_a_child_are_not_offered_delegate_task() {
+        let plain = offered(None, None);
+        assert!(plain.contains(&"delegate_task".to_owned()), "{plain:?}");
+        let empty_task = offered(None, Some(""));
+        assert!(empty_task.contains(&"delegate_task".to_owned()), "{empty_task:?}");
+        let orchestrator = offered(Some("orchestrator"), None);
+        assert!(orchestrator.contains(&"delegate_task".to_owned()) && orchestrator.contains(&"delegate".to_owned()), "{orchestrator:?}");
+        let worker = offered(Some("worker"), None);
+        assert!(!worker.contains(&"delegate_task".to_owned()), "{worker:?}");
+        assert!(!worker.contains(&"delegate".to_owned()), "{worker:?}");
+        assert!(worker.contains(&"memory_search".to_owned()) && worker.contains(&"task_status".to_owned()), "{worker:?}");
+        let child = offered(None, Some("task-1"));
+        assert!(!child.contains(&"delegate_task".to_owned()), "{child:?}");
+        assert!(!child.contains(&"delegate".to_owned()), "{child:?}");
+        let child_orchestrator = offered(Some("orchestrator"), Some("task-1"));
+        assert!(!child_orchestrator.contains(&"delegate_task".to_owned()), "{child_orchestrator:?}");
+        assert!(!child_orchestrator.contains(&"delegate".to_owned()), "{child_orchestrator:?}");
     }
 
     #[test]
