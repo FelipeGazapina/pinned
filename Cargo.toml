@@ -30,8 +30,8 @@ tauri-nspanel = "2.1.1"
 # Already in the build through wry; the browser panel calls WKWebView for what tauri doesn't wrap.
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSData", "NSDate", "NSDictionary", "NSError", "NSSet", "NSString", "NSURL"] }
-objc2-app-kit = { version = "0.3", features = ["NSAppearance", "NSApplication", "NSBitmapImageRep", "NSEvent", "NSImage", "NSImageRep", "NSResponder", "NSView", "NSWindow", "block2"] }
+objc2-foundation = { version = "0.3", features = ["NSData", "NSDate", "NSDictionary", "NSError", "NSNotification", "NSOperation", "NSSet", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", features = ["NSAppearance", "NSApplication", "NSBitmapImageRep", "NSEvent", "NSImage", "NSImageRep", "NSPanel", "NSResponder", "NSSavePanel", "NSView", "NSWindow", "block2"] }
 objc2-web-kit = { version = "0.3", features = ["WKNavigation", "WKSnapshotConfiguration", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataRecord", "WKWebsiteDataStore", "block2", "objc2-app-kit"] }
 
 [target.'cfg(windows)'.dependencies]
