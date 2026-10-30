@@ -1,0 +1,3 @@
+function routeAnchorClick() {
+  return null;
+}
