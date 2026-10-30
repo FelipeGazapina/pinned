@@ -269,6 +269,7 @@ function upstashCardHtml() {
     ? `<p class="hint">Sign in to pinned to run sessions in Upstash Boxes.</p>`
     : connected
       ? `<p class="connected">Box key <b>${esc(connected.key_hint)}</b> · Claude token <b>${esc(connected.claude_hint)}</b></p>
+         ${boxPermissionsHtml()}
          <div class="actions"><span class="hint">Deletes the boxes running now</span><button class="secondary" data-action="disconnect-upstash">Disconnect</button></div>
          <p class="error" id="upstash-error"></p>`
       : `<ol class="steps">
@@ -281,10 +282,59 @@ function upstashCardHtml() {
          </ol>
          <p class="error" id="upstash-error"></p>`;
   return `<div class="card">
-      <div class="card-head"><span class="logo upstash">▢</span><div><b>Upstash Box</b><div class="hint">A fresh cloud sandbox for each issue or thread a workflow picks up</div></div>
+      <div class="card-head"><span class="logo upstash">▢</span><div><b>Upstash Box</b><div class="hint">Cloud sandboxes for runs. Pick who may open one.</div></div>
         <span class="badge" data-on="${!!connected}">${connected ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
+}
+
+const BOX_MODES = [
+  ["off", "Off"],
+  ["fresh", "New box each time"],
+  ["fixed", "One box, reused"],
+  ["ask", "Ask first"],
+];
+const BOX_KINDS = [
+  ["workflow", "Workflows", "Connector runs"],
+  ["session", "Sessions", "Plain threads"],
+  ["worker", "Workers", "Started by an orchestrator"],
+  ["orchestrator", "Orchestrators", "The orchestrator"],
+];
+
+function boxAccess() {
+  const stored = settings.boxes || {};
+  const one = (kind, fallback) => {
+    const mode = stored[kind]?.mode || fallback;
+    const out = { mode };
+    if (mode === "fixed" && stored[kind]?.row) out.row = stored[kind].row;
+    return out;
+  };
+  return {
+    workflow: one("workflow", "fresh"),
+    session: one("session", "off"),
+    worker: one("worker", "off"),
+    orchestrator: one("orchestrator", "off"),
+  };
+}
+
+function boxAsksHtml() {
+  return (settings.box_asks || []).map((ask) => {
+    const what = ask.subject.issue ? `issue ${ask.subject.issue}` : `thread ${ask.subject.thread}`;
+    return `<p class="hint">Allow a box for ${esc(what)}?
+      <button class="primary" data-action="answer-box" data-id="${esc(ask.id)}" data-allow="yes">Yes</button>
+      <button class="secondary" data-action="answer-box" data-id="${esc(ask.id)}" data-allow="no">No</button></p>`;
+  }).join("");
+}
+
+function boxPermissionsHtml() {
+  const access = boxAccess();
+  const rows = BOX_KINDS.map(([kind, label, hint]) => {
+    const choices = BOX_MODES.map(([value, name]) => `<option value="${value}"${value === access[kind].mode ? " selected" : ""}>${name}</option>`).join("");
+    return `<div class="look"><label for="box-${kind}">${label}</label><p class="meta">${hint}</p><select id="box-${kind}" data-box-kind="${kind}">${choices}</select></div>`;
+  }).join("");
+  return `<h2 class="looks-title">Who may use a box</h2>${rows}
+    <p class="hint">Workflows follow this now. Sessions, workers, and orchestrators keep the choice and follow it in the next update.</p>
+    ${boxAsksHtml()}`;
 }
 
 function githubCardHtml() {
@@ -1617,6 +1667,18 @@ const actions = {
       document.getElementById("upstash-error").textContent = e;
     }
   },
+  async "answer-box"(button) {
+    const id = button.dataset.id;
+    const allow = button.dataset.allow === "yes";
+    try {
+      await connectorCall("answer_box", { id, allow });
+      settings.box_asks = (settings.box_asks || []).filter((ask) => ask.id !== id);
+      showPage("integrations");
+    } catch (e) {
+      const line = document.getElementById("upstash-error");
+      if (line) line.textContent = e;
+    }
+  },
   async "disconnect-upstash"(button) {
     if (!armed(button, "Delete the boxes?")) return;
     try {
@@ -2013,6 +2075,22 @@ settingsPage.addEventListener("keydown", (e) => {
   }
 });
 
+settingsPage.addEventListener("change", (e) => {
+  const kind = e.target.dataset.boxKind;
+  if (!kind) return;
+  const access = boxAccess();
+  const mode = e.target.value;
+  access[kind] = { mode };
+  if (mode === "fixed" && settings.boxes?.[kind]?.row) access[kind].row = settings.boxes[kind].row;
+  connectorCall("set_box_access", { access }).then((saved) => {
+    settings.boxes = saved;
+    showPage("integrations");
+  }, (err) => {
+    const line = document.getElementById("upstash-error");
+    if (line) line.textContent = err;
+  });
+});
+
 settingsPage.addEventListener("input", (e) => {
   const path = e.target.dataset.bind;
   if (!path || path in RESHAPES) return;
@@ -2076,7 +2154,7 @@ settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show:
   { title: "Slack", terms: ["bot token channels mentions connector"] },
   { title: "GitHub", terms: ["token repositories clone connector"] },
   { title: "Vercel AI Gateway", terms: ["api key models classify connector"] },
-  { title: "Upstash Box", terms: ["sandbox cloud box claude setup-token subscription connector"] },
+  { title: "Upstash Box", terms: ["sandbox cloud box claude setup-token subscription connector permission fresh fixed ask"] },
 ] });
 settingsSection({ page: "projects", label: "Projects", icon: "folder", show: () => showProjectsPage(), search: [{ title: "Projects", terms: ["history turns changed files"] }] });
 settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show: () => redraw(), search: [{ title: "Workflows", terms: ["linear label slack mention automation trigger"] }] });
