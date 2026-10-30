@@ -1,6 +1,6 @@
 //! The graph a fixed-pipeline connector already is.
 
-use super::{Choice, Classify, Edge, Fallback, Gate, Graph, Node, NodeId, NodeKind, PortId, Question, Watch};
+use super::{Case, Choice, Classify, Edge, Fallback, Gate, Graph, Node, NodeId, NodeKind, PortId, Question, Switch, Watch};
 use crate::connectors::{self, Ask, Category, Connector, Decide, Question as LegacyQuestion, Trigger};
 use std::collections::BTreeMap;
 
@@ -52,16 +52,12 @@ impl Built {
 }
 
 /// Builds the graph `connector`'s legacy fields describe, with positions laid out left to right.
-/// It adds no branch the pipeline lacked: `ask` choices in `stop_on` lead to `stop`, the others
-/// share the rest of the chain; a slack-message `decide` becomes a `Gate::Decide` classify whose
-/// categories route to `call`, `page` or `stop`. Deterministic, so the same connector always gives
-/// an equal graph: that is how a stored graph is told apart from an edited one.
-///
-/// Several questions with `stop_on` become a chain of classifies, one per question that can
-/// actually branch, in question order. Today's ask stops at the first matching answer, so a later
-/// classify is only reached when the earlier choice continues. Each stop string is a `Stop` node
-/// named with that exact string and id `stop-{question index}-{stop index}`, which is how `project`
-/// gives the list back, including a string that matches no choice.
+/// It adds no branch the pipeline lacked: an `ask` is one classify for every question, then one
+/// switch per question with a non-empty `stop_on`, in question order. Each stop string is a case
+/// whose port goes to a `Stop`; `out` goes to the next switch, then the rest of the spine. A
+/// slack-message `decide` becomes a `Gate::Decide` classify whose categories route to `call`,
+/// `page` or `stop`. Deterministic, so the same connector always gives an equal graph: that is how
+/// a stored graph is told apart from an edited one.
 pub fn migrate(connector: &Connector) -> Graph {
     let mut built = Built { nodes: Vec::new(), edges: Vec::new(), rows: BTreeMap::new() };
     let trigger = built.add("trigger", "Trigger", 0, 0, NodeKind::Trigger { watch: watch_of(&connector.trigger) });
@@ -100,49 +96,50 @@ fn watch_of(trigger: &Trigger) -> Watch {
 
 fn lay_ask(built: &mut Built, mut column: i32, tails: &[Tail], ask: &Ask) -> (i32, Vec<Tail>) {
     let questions: Vec<Question> = ask.questions.iter().map(graph_question).collect();
-    let branch: Vec<usize> = ask
-        .questions
-        .iter()
-        .enumerate()
-        .filter(|(_, question)| question.choices.iter().any(|choice| question.stop_on.iter().any(|stop| stop.eq_ignore_ascii_case(choice))))
-        .map(|(index, _)| index)
-        .collect();
-    if branch.is_empty() {
-        let id = built.add("ask", "Ask", column, 0, classify(ask, questions, None));
-        built.link(tails, &id);
-        for (index, question) in ask.questions.iter().enumerate() {
-            place_stops(built, index, question, column + 1, None);
+    let id = built.add("ask", "Ask", column, 0, classify(ask, questions, None));
+    built.link(tails, &id);
+    column += 1;
+    let mut incoming = vec![Tail { from: id.clone(), port: PortId::OUT.into() }];
+    for (index, question) in ask.questions.iter().enumerate() {
+        if question.stop_on.is_empty() {
+            continue;
         }
-        return (column + 1, vec![Tail { from: id, port: PortId::OUT.into() }]);
-    }
-    let mut incoming = tails.to_vec();
-    let mut placed = Vec::new();
-    for (step, question_index) in branch.iter().copied().enumerate() {
-        let question = &ask.questions[question_index];
-        let id_text = if step == 0 { "ask".to_owned() } else { format!("ask-{question_index}") };
-        let name = if step == 0 { "Ask".to_owned() } else { format!("Ask {}", question.name) };
-        let id = built.add(&id_text, &name, column, 0, classify(ask, questions.clone(), Some(question.name.clone())));
-        built.link(&incoming, &id);
-        place_stops(built, question_index, question, column + 1, Some(&id));
-        placed.push(question_index);
-        if step == 0 {
-            for (index, other) in ask.questions.iter().enumerate() {
-                if placed.contains(&index) || branch.contains(&index) {
-                    continue;
-                }
-                place_stops(built, index, other, column + 1, None);
-            }
-        }
-        incoming = continue_tails(&id, question);
+        let cases = case_ids(&question.stop_on);
+        let switch_id = built.add(
+            &format!("switch-{index}"),
+            &switch_name(question),
+            column,
+            0,
+            NodeKind::Switch(Switch {
+                classify: id.clone(),
+                question: question.name.clone(),
+                cases: cases.iter().map(|(port, equals)| Case { id: PortId(port.clone()), equals: equals.clone() }).collect(),
+            }),
+        );
+        built.link(&incoming, &switch_id);
+        place_stops(built, index, &cases, &switch_id, column + 1);
+        incoming = vec![Tail { from: switch_id, port: PortId::OUT.into() }];
         column += 1;
-        if incoming.is_empty() {
-            for index in branch.iter().copied().filter(|index| !placed.contains(index)) {
-                place_stops(built, index, &ask.questions[index], column, None);
-            }
-            break;
-        }
     }
     (column, incoming)
+}
+
+fn switch_name(question: &LegacyQuestion) -> String {
+    match question.stop_on.as_slice() {
+        [only] => format!("Stops when {} is {only}", question.name),
+        _ => format!("Stops on {}", question.name),
+    }
+}
+
+fn case_ids(stops: &[String]) -> Vec<(String, String)> {
+    stops
+        .iter()
+        .enumerate()
+        .map(|(index, equals)| {
+            let id = if stops.iter().filter(|stop| *stop == equals).count() == 1 { equals.clone() } else { format!("{equals}#{index}") };
+            (id, equals.clone())
+        })
+        .collect()
 }
 
 fn classify(ask: &Ask, questions: Vec<Question>, branch_on: Option<String>) -> NodeKind {
@@ -236,23 +233,11 @@ fn choice_ids(question: &LegacyQuestion) -> Vec<(String, String)> {
         .collect()
 }
 
-fn continue_tails(from: &NodeId, question: &LegacyQuestion) -> Vec<Tail> {
-    choice_ids(question)
-        .into_iter()
-        .filter(|(label, _)| !question.stop_on.iter().any(|stop| stop.eq_ignore_ascii_case(label)))
-        .map(|(_, port)| Tail { from: from.clone(), port })
-        .collect()
-}
-
-fn place_stops(built: &mut Built, question_index: usize, question: &LegacyQuestion, column: i32, from: Option<&NodeId>) {
-    let ports = choice_ids(question);
-    for (index, stop) in question.stop_on.iter().enumerate() {
+fn place_stops(built: &mut Built, question_index: usize, cases: &[(String, String)], from: &NodeId, column: i32) {
+    for (index, (port, equals)) in cases.iter().enumerate() {
         let row = built.stack(column);
-        let id = built.add(&format!("stop-{question_index}-{index}"), stop, column, row, NodeKind::Stop);
-        let Some(from) = from else { continue };
-        if let Some((_, port)) = ports.iter().find(|(label, _)| label.eq_ignore_ascii_case(stop)) {
-            built.edge(from, port, &id);
-        }
+        let id = built.add(&format!("stop-{question_index}-{index}"), equals, column, row, NodeKind::Stop);
+        built.edge(from, port, &id);
     }
 }
 
@@ -373,8 +358,21 @@ mod tests {
         round_trip(&called);
     }
 
+    fn switched(id: &str, name: &str, column: i32, question: &str, cases: &[(&str, &str)]) -> Node {
+        node(
+            id,
+            name,
+            at(column, 0),
+            NodeKind::Switch(Switch {
+                classify: NodeId("ask".into()),
+                question: question.into(),
+                cases: cases.iter().map(|(id, equals)| Case { id: PortId((*id).into()), equals: (*equals).into() }).collect(),
+            }),
+        )
+    }
+
     #[test]
-    fn an_ask_chains_one_classify_per_stopping_question_and_keeps_the_stop_spelling() {
+    fn an_ask_is_one_classify_then_a_switch_per_stopping_question() {
         let ask = Ask {
             model: "google/gemini-3.5-flash".into(),
             instructions: "Classify.".into(),
@@ -388,43 +386,73 @@ mod tests {
             Question { name: "kind".into(), ask: "What does it ask for?".into(), choices: vec![choice("bug", "bug", ""), choice("question", "question", "")] },
             Question { name: "agent".into(), ask: "Can a coding agent handle it?".into(), choices: vec![choice("yes", "yes", ""), choice("no", "no", "")] },
         ];
-        let ask_node = |id: &str, name: &str, column: i32, branch: &str| {
-            node(
-                id,
-                name,
-                at(column, 0),
-                NodeKind::Classify(Classify {
-                    model: "google/gemini-3.5-flash".into(),
-                    instructions: "Classify.".into(),
-                    questions: questions.clone(),
-                    branch_on: Some(branch.into()),
-                    gate: Gate::Direct,
-                    fallback: Fallback::None,
-                }),
-            )
-        };
         assert_eq!(
             migrate(&connector),
             Graph {
                 nodes: vec![
                     node("trigger", "Trigger", at(0, 0), NodeKind::Trigger { watch: Watch::SlackMention { channel: "#support".into() } }),
-                    ask_node("ask", "Ask", 1, "kind"),
-                    node("stop-0-0", "question", at(2, 1), NodeKind::Stop),
-                    ask_node("ask-1", "Ask agent", 2, "agent"),
-                    node("stop-1-0", "No", at(3, 1), NodeKind::Stop),
-                    node("stop-1-1", "maybe", at(3, 2), NodeKind::Stop),
-                    node("talk", "Talk", at(3, 0), NodeKind::Talk { prompt: String::new() }),
+                    node(
+                        "ask",
+                        "Ask",
+                        at(1, 0),
+                        NodeKind::Classify(Classify {
+                            model: "google/gemini-3.5-flash".into(),
+                            instructions: "Classify.".into(),
+                            questions,
+                            branch_on: None,
+                            gate: Gate::Direct,
+                            fallback: Fallback::None,
+                        }),
+                    ),
+                    switched("switch-0", "Stops when kind is question", 2, "kind", &[("question", "question")]),
+                    node("stop-0-0", "question", at(3, 1), NodeKind::Stop),
+                    switched("switch-1", "Stops on agent", 3, "agent", &[("No", "No"), ("maybe", "maybe")]),
+                    node("stop-1-0", "No", at(4, 1), NodeKind::Stop),
+                    node("stop-1-1", "maybe", at(4, 2), NodeKind::Stop),
+                    node("talk", "Talk", at(4, 0), NodeKind::Talk { prompt: String::new() }),
                 ],
                 edges: vec![
                     edge("trigger", "out", "ask"),
-                    edge("ask", "question", "stop-0-0"),
-                    edge("ask", "bug", "ask-1"),
-                    edge("ask-1", "no", "stop-1-0"),
-                    edge("ask-1", "yes", "talk"),
+                    edge("ask", "out", "switch-0"),
+                    edge("switch-0", "question", "stop-0-0"),
+                    edge("switch-0", "out", "switch-1"),
+                    edge("switch-1", "No", "stop-1-0"),
+                    edge("switch-1", "maybe", "stop-1-1"),
+                    edge("switch-1", "out", "talk"),
                 ],
             }
         );
         round_trip(&connector);
+    }
+
+    #[test]
+    fn project_reads_stop_on_from_the_switch_cases() {
+        let ask = node(
+            "ask",
+            "Ask",
+            at(1, 0),
+            NodeKind::Classify(Classify {
+                model: "m".into(),
+                instructions: String::new(),
+                questions: vec![Question { name: "agent".into(), ask: String::new(), choices: vec![choice("no", "no", "")] }],
+                branch_on: None,
+                gate: Gate::Direct,
+                fallback: Fallback::None,
+            }),
+        );
+        let graph = Graph {
+            nodes: vec![
+                node("trigger", "Trigger", at(0, 0), NodeKind::Trigger { watch: Watch::SlackMention { channel: "#support".into() } }),
+                ask,
+                switched("switch-1", "Stops on agent", 2, "agent", &[("No", "No")]),
+                node("stop-1-0", "renamed", at(3, 1), NodeKind::Stop),
+                node("talk", "Talk", at(3, 0), NodeKind::Talk { prompt: String::new() }),
+            ],
+            edges: vec![edge("trigger", "out", "ask"), edge("ask", "out", "switch-1"), edge("switch-1", "No", "stop-1-0"), edge("switch-1", "out", "talk")],
+        };
+        let projected = project(&graph);
+        let questions = projected.ask.expect("ask").questions;
+        assert_eq!(questions[0].stop_on, vec!["No".to_owned()]);
     }
 
     #[test]

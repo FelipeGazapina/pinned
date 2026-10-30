@@ -74,6 +74,8 @@ pub enum NodeKind {
     Trigger { watch: Watch },
     /// One Vercel AI Gateway call that answers every question, and branches on one of them.
     Classify(Classify),
+    /// Branches on an answer an earlier classify already gave. No model call.
+    Switch(Switch),
     /// Tells the run's one Claude session something. The first `talk` of a run opens the session
     /// with the session owner's settings; every later one, on any branch, types into it.
     Talk { prompt: String },
@@ -145,6 +147,22 @@ pub enum Gate {
     Decide { unsure_below: f64, page_at: f64 },
 }
 
+/// Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Switch {
+    pub classify: NodeId,
+    pub question: String,
+    /// In order. The first `equals` that matches the answer wins.
+    pub cases: Vec<Case>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct Case {
+    pub id: PortId,
+    pub equals: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Fallback {
@@ -186,6 +204,12 @@ fn classify_ports(classify: &Classify) -> Vec<Port> {
     ports
 }
 
+fn switch_ports(switch: &Switch) -> Vec<Port> {
+    let mut ports: Vec<Port> = switch.cases.iter().map(|case| Port { id: case.id.clone(), label: case.equals.clone() }).collect();
+    ports.push(Port { id: PortId(PortId::OUT.into()), label: "otherwise".into() });
+    ports
+}
+
 impl NodeKind {
     /// The node's output ports, in drawing order. Derived, never stored.
     pub fn ports(&self) -> Vec<Port> {
@@ -195,6 +219,7 @@ impl NodeKind {
             }
             NodeKind::Stop => Vec::new(),
             NodeKind::Classify(classify) => classify_ports(classify),
+            NodeKind::Switch(switch) => switch_ports(switch),
         }
     }
 }
@@ -238,6 +263,31 @@ impl Graph {
                 if !called(workflow) {
                     return Err(format!("\"{name}\" calls \"{workflow}\", which is not a called workflow", name = node.name));
                 }
+            }
+            if let NodeKind::Switch(switch) = &node.kind {
+                self.check_switch(node, switch)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_switch(&self, node: &Node, switch: &Switch) -> Result<(), String> {
+        let Some(target) = self.node(&switch.classify) else {
+            return Err(format!("\"{}\" switches on \"{}\", which is not a node", node.name, switch.classify.0));
+        };
+        let NodeKind::Classify(classify) = &target.kind else {
+            return Err(format!("\"{}\" switches on \"{}\", which is not a classify", node.name, target.name));
+        };
+        if !classify.questions.iter().any(|question| question.name == switch.question) {
+            return Err(format!("\"{}\" switches on \"{}\", which \"{}\" does not ask", node.name, switch.question, target.name));
+        }
+        let mut seen = BTreeSet::new();
+        for case in &switch.cases {
+            if case.id.0 == PortId::OUT {
+                return Err(format!("\"{}\" uses the port \"out\", which is the otherwise port", node.name));
+            }
+            if !seen.insert(case.id.0.clone()) {
+                return Err(format!("\"{}\" repeats the port \"{}\"", node.name, case.id.0));
             }
         }
         Ok(())
@@ -328,6 +378,15 @@ mod tests {
                 Port { id: PortId("nowhere".into()), label: "nowhere".into() },
             ]
         );
+        assert_eq!(
+            NodeKind::Switch(Switch {
+                classify: NodeId("ask".into()),
+                question: "agent".into(),
+                cases: vec![Case { id: PortId("no".into()), equals: "no".into() }],
+            })
+            .ports(),
+            vec![Port { id: PortId("no".into()), label: "no".into() }, Port { id: PortId("out".into()), label: "otherwise".into() }]
+        );
     }
 
     #[test]
@@ -368,6 +427,54 @@ mod tests {
         assert_eq!(
             Graph { nodes: vec![trigger, call], edges: vec![edge("trigger", "out", "route")] }.validate(&|id| id == "kept"),
             Err("\"Route\" calls \"gone\", which is not a called workflow".into())
+        );
+    }
+
+    fn switch_kind(classify_id: &str, question: &str, cases: &[(&str, &str)]) -> NodeKind {
+        NodeKind::Switch(Switch {
+            classify: NodeId(classify_id.into()),
+            question: question.into(),
+            cases: cases.iter().map(|(id, equals)| Case { id: PortId((*id).into()), equals: (*equals).into() }).collect(),
+        })
+    }
+
+    #[test]
+    fn a_switch_must_name_a_question_on_a_classify() {
+        let trigger = node("trigger", "Start", NodeKind::Trigger { watch: Watch::Called });
+        let ask = node("ask", "Ask", classify(None, &[("bug", "Bug")], Gate::Direct, Fallback::None));
+        let stop = node("stop", "Stop", NodeKind::Stop);
+        let switch = node("s", "Stops", switch_kind("ask", "kind", &[("bug", "bug")]));
+        let ok = Graph {
+            nodes: vec![trigger.clone(), ask.clone(), switch.clone(), stop.clone()],
+            edges: vec![edge("trigger", "out", "ask"), edge("ask", "out", "s"), edge("s", "bug", "stop")],
+        };
+        assert_eq!(ok.validate(&|_| false), Ok(()));
+
+        let missing = node("s", "Stops", switch_kind("gone", "kind", &[("bug", "bug")]));
+        assert_eq!(
+            Graph { nodes: vec![trigger.clone(), ask.clone(), missing], edges: vec![edge("trigger", "out", "ask")] }.validate(&|_| false),
+            Err("\"Stops\" switches on \"gone\", which is not a node".into())
+        );
+        let talk = node("talk", "Talk", NodeKind::Talk { prompt: String::new() });
+        let on_talk = node("s", "Stops", switch_kind("talk", "kind", &[("bug", "bug")]));
+        assert_eq!(
+            Graph { nodes: vec![trigger.clone(), talk, on_talk], edges: vec![edge("trigger", "out", "talk")] }.validate(&|_| false),
+            Err("\"Stops\" switches on \"Talk\", which is not a classify".into())
+        );
+        let wrong = node("s", "Stops", switch_kind("ask", "agent", &[("bug", "bug")]));
+        assert_eq!(
+            Graph { nodes: vec![trigger.clone(), ask.clone(), wrong], edges: vec![edge("trigger", "out", "ask")] }.validate(&|_| false),
+            Err("\"Stops\" switches on \"agent\", which \"Ask\" does not ask".into())
+        );
+        let repeated = node("s", "Stops", switch_kind("ask", "kind", &[("bug", "bug"), ("bug", "other")]));
+        assert_eq!(
+            Graph { nodes: vec![trigger.clone(), ask.clone(), repeated], edges: vec![edge("trigger", "out", "ask")] }.validate(&|_| false),
+            Err("\"Stops\" repeats the port \"bug\"".into())
+        );
+        let otherwise = node("s", "Stops", switch_kind("ask", "kind", &[("out", "bug")]));
+        assert_eq!(
+            Graph { nodes: vec![trigger, ask, otherwise], edges: vec![] }.validate(&|_| false),
+            Err("\"Stops\" uses the port \"out\", which is the otherwise port".into())
         );
     }
 }
