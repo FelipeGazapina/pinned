@@ -186,7 +186,7 @@ pub(crate) fn create_input(team: &str, assignee: &str, title: &str, description:
 }
 
 pub(crate) fn issued<'a>(data: &'a Value, marker: &str) -> Option<&'a Value> {
-    nodes(&data["issues"]).find(|issue| issue["description"].as_str().is_some_and(|text| text.contains(marker)))
+    nodes(&data["issues"]).find(|issue| issue["description"].as_str().is_some_and(|text| text.lines().any(|line| line.trim() == marker)))
 }
 
 pub(crate) async fn find_marked(key: &str, team: &str, marker: &str) -> Result<Option<Issue>, String> {
@@ -444,6 +444,16 @@ mod tests {
         ] } });
         let found = labeled(&data, "X", "2026-10-21T00:00:00Z").unwrap();
         assert_eq!(found.iter().map(|issue| issue.identifier.as_str()).collect::<Vec<_>>(), ["NEW-1"]);
+    }
+
+    #[test]
+    fn issued_keeps_the_issue_with_the_marker_on_its_own_line_and_skips_a_longer_id() {
+        let data = json!({ "issues": { "nodes": [
+            { "identifier": "ENG-10", "description": "notes\n\npinned-receipt:run-1:file-10" },
+            { "identifier": "ENG-1", "description": "The worker returns 500.\n\npinned-receipt:run-1:file-1" },
+        ] } });
+        assert_eq!(issued(&data, "pinned-receipt:run-1:file-1").unwrap()["identifier"], "ENG-1");
+        assert!(issued(&data, "pinned-receipt:missing:file-1").is_none());
     }
 
     #[test]
