@@ -105,8 +105,8 @@ button.outline .i { width: 14px; height: 14px; }
 .thread-row.active .l2 { color: var(--g-fg); }
 .thread-row .l3 { margin-top: 2px; font-size: 12px; color: rgb(var(--g-muted-rgb) / 0.8); }
 .thread-row .l3 .i { width: 12px; height: 12px; }
-.thread-row .branch { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; white-space: nowrap; color: rgb(var(--g-muted-rgb) / 0.4); }
-.thread-row .pr { display: flex; align-items: center; gap: 3px; color: var(--g-muted); font-variant-numeric: tabular-nums; flex: none; }
+.thread-row .branch { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden; color: rgb(var(--g-muted-rgb) / 0.4); }
+.thread-row .pr { display: flex; align-items: center; gap: 3px; color: var(--g-muted); font-variant-numeric: tabular-nums; flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .thread-row .pr:hover { text-decoration: underline; }
 .thread-row .provider { opacity: 0.6; display: flex; }
 .thread-row .provider .i { width: 14px; height: 14px; }
