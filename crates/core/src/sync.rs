@@ -101,6 +101,9 @@ impl State {
     pub fn load(file: &Path, legacy_claude_home: &Path) -> State {
         let mut state: State = std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         for key in state.agreed.keys() {
+            if key.starts_with(PLUGINS_KEY) {
+                continue;
+            }
             state.claude_homes.entry(key.clone()).or_insert_with(|| legacy_claude_home.to_owned());
         }
         state
@@ -152,7 +155,6 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
             local.insert(path, hashed);
         }
     }
-    let remote: BTreeMap<String, Entry> = hub.list(key)?.into_iter().map(|e| (e.path.clone(), e)).collect();
     let agreed_key = format!("{key} {}", checkout.path.display());
     let mut agreed = state.agreed.remove(&agreed_key).unwrap_or_default();
     if let Some(home) = &checkout.claude_home {
@@ -160,9 +162,25 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
             agreed.retain(|path, _| !path.starts_with("claude/"));
         }
     }
+    let synced = exchange(hub, state, key, &mut agreed, &local, &|path| roots.local(path), now, true)?;
+    state.agreed.insert(agreed_key, agreed);
+    Ok(synced)
+}
+
+fn exchange(
+    hub: &impl Hub,
+    state: &mut State,
+    key: &str,
+    mut agreed: &mut BTreeMap<String, String>,
+    local: &BTreeMap<String, (String, u64)>,
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+    now: SystemTime,
+    sessions: bool,
+) -> Result<Synced, String> {
+    let remote: BTreeMap<String, Entry> = hub.list(key)?.into_iter().map(|e| (e.path.clone(), e)).collect();
     // A file of a folder this checkout doesn't share, such as Claude's for a Codex project, is
     // neither fetched nor taken for deleted.
-    let paths: BTreeSet<String> = local.keys().chain(remote.keys()).chain(agreed.keys()).filter(|p| roots.local(p).is_some()).cloned().collect();
+    let paths: BTreeSet<String> = local.keys().chain(remote.keys()).chain(agreed.keys()).filter(|p| resolve(p).is_some()).cloned().collect();
     let (mut push, mut pull, mut merge) = (vec![], vec![], vec![]);
     for path in &paths {
         let mine = local.get(path).map(|(sha, _)| sha.clone());
@@ -176,11 +194,11 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
         } else if mine == before {
             pull.push(path.clone());
         } else if theirs == before {
-            let old = local.get(path).is_some_and(|(_, modified)| millis(now).saturating_sub(*modified) > SESSION_AGE.as_millis() as u64);
+            let old = sessions && local.get(path).is_some_and(|(_, modified)| millis(now).saturating_sub(*modified) > SESSION_AGE.as_millis() as u64);
             if !(before.is_none() && theirs.is_none() && old && path.starts_with("claude/") && path.ends_with(".jsonl")) {
                 push.push(path.clone());
             }
-        } else if path.as_str() == HISTORY {
+        } else if sessions && path.as_str() == HISTORY {
             merge.push(path.clone());
         } else if local.get(path).map_or(0, |(_, m)| *m) >= remote.get(path).map_or(0, |e| e.modified) {
             push.push(path.clone());
@@ -191,7 +209,7 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
     let mut synced = Synced::default();
     for path in merge {
         let theirs = hub.pull(key, vec![path.clone()])?.into_iter().next().and_then(|f| f.data).map(|d| unpack(&d)).transpose()?.unwrap_or_default();
-        let target = roots.local(&path).ok_or("no history here")?;
+        let target = resolve(&path).ok_or("no history here")?;
         let mine = std::fs::read(&target).unwrap_or_default();
         write(&target, &merge_history(&mine, &theirs), None)?;
         push.push(path);
@@ -200,7 +218,7 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
     let mut batch: Vec<File> = vec![];
     let mut size = 0;
     for path in push {
-        let file = match roots.local(&path).filter(|f| f.is_file()) {
+        let file = match resolve(&path).filter(|f| f.is_file()) {
             None => File { entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0 }, data: None },
             Some(target) => {
                 let Some((sha, modified)) = state.hash(&target) else { continue };
@@ -231,7 +249,7 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
     let mut size = 0;
     let fetch = |wanted: Vec<String>, agreed: &mut BTreeMap<String, String>, synced: &mut Synced, state: &mut State| -> Result<(), String> {
         for file in hub.pull(key, wanted)? {
-            let Some(target) = roots.local(&file.entry.path) else { continue };
+            let Some(target) = resolve(&file.entry.path) else { continue };
             match &file.data {
                 None => {
                     let _ = std::fs::remove_file(&target);
@@ -264,7 +282,6 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
     if !wanted.is_empty() {
         fetch(wanted, &mut agreed, &mut synced, state)?;
     }
-    state.agreed.insert(agreed_key, agreed);
     Ok(synced)
 }
 
@@ -324,6 +341,281 @@ impl Roots {
         let shared = rest.starts_with("memory") || (rest.components().count() == 1 && rest.extension().is_some_and(|e| e == "jsonl"));
         (inside && (!claude || shared)).then(|| root.join(rest))
     }
+}
+
+/// Files of enabled plugins and of `~/.claude/skills`, one set per account.
+pub const PLUGINS_KEY: &str = "pinned:plugins";
+
+/// The Claude home that publishes plugins, and the pinned-owned folder pulled copies land in.
+#[derive(Clone, Debug)]
+pub struct PluginShare {
+    pub claude_home: PathBuf,
+    pub dir: PathBuf,
+}
+
+pub fn old_hub(err: &str) -> bool {
+    err.contains("is not a file a project shares")
+}
+
+/// Folders a session loads with `--plugin-dir`. One per synced plugin this Claude home does not
+/// already enable.
+pub fn plugin_dirs(claude_home: &Path, dir: &Path) -> Vec<PathBuf> {
+    let enabled: BTreeSet<String> = crate::commands::enabled_plugins(claude_home).into_iter().map(|plugin| plugin.id).collect();
+    let mut dirs = vec![];
+    let Ok(entries) = std::fs::read_dir(dir.join("plugins")) else { return dirs };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else { continue };
+        if !path.is_dir() || enabled.contains(&id) || !path.join(".claude-plugin/plugin.json").is_file() {
+            continue;
+        }
+        dirs.push(path);
+    }
+    dirs.sort();
+    dirs
+}
+
+/// Brings this Claude home's enabled plugins and its `skills` folder into line with the hub.
+/// Pulled plugins land under `share.dir`. Pulled user skills land in the home's `skills` folder.
+/// Claude Code has no flag for a second skills directory.
+/// A user skill this home already has, and has not synced before, stays when the hub holds a different copy.
+pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now: SystemTime) -> Result<Synced, String> {
+    publish(share)?;
+    let mut local = BTreeMap::new();
+    for (path, file) in plugin_files(share) {
+        if let Some(hashed) = state.hash(&file) {
+            local.insert(path, hashed);
+        }
+    }
+    let agreed_key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
+    let mut agreed = state.agreed.remove(&agreed_key).unwrap_or_default();
+    let keep = conflicting_user_skills(&local, &agreed, &hub.list(PLUGINS_KEY)?);
+    let synced = exchange(hub, state, PLUGINS_KEY, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false)?;
+    state.agreed.insert(agreed_key, agreed);
+    Ok(synced)
+}
+
+fn conflicting_user_skills(local: &BTreeMap<String, (String, u64)>, agreed: &BTreeMap<String, String>, remote: &[Entry]) -> BTreeSet<String> {
+    let on_hub: BTreeMap<&str, &str> = remote.iter().map(|entry| (entry.path.as_str(), entry.sha.as_str())).collect();
+    local
+        .iter()
+        .filter(|(path, (sha, _))| path.starts_with("user-skills/") && !agreed.contains_key(path.as_str()) && on_hub.get(path.as_str()).is_some_and(|hub_sha| *hub_sha != sha.as_str()))
+        .map(|(path, _)| (*path).clone())
+        .collect()
+}
+
+const DENY_FILE: &[&str] = &["settings.json", "settings.local.json", ".claude.json", "installed_plugins.json", ".env", "credentials.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
+const SKIP_DIR: &[&str] = &["node_modules", ".git", "secrets", ".secrets", "target", "dist", "build", "vendor"];
+
+fn blocked(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    DENY_FILE.iter().any(|item| *item == name) || SKIP_DIR.iter().any(|item| *item == name) || name.starts_with(".env") || name.ends_with(".pem") || name.ends_with(".key")
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// Whether the hub should store `path` for `project`. Plugin paths are stored only under `PLUGINS_KEY`.
+pub fn accepts(project: &str, path: &str) -> bool {
+    if project == PLUGINS_KEY { plugin_path(path) } else { shared_path(path) }
+}
+
+fn plugin_path(path: &str) -> bool {
+    let rest = Path::new(path);
+    if path.is_empty() || !rest.components().all(|c| matches!(c, Component::Normal(_))) {
+        return false;
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.iter().any(|part| part.is_empty() || blocked(part)) {
+        return false;
+    }
+    match parts.as_slice() {
+        ["plugins", id, _, ..] if plugin_id(id) => true,
+        ["user-skills", first, ..] if !first.eq_ignore_ascii_case("synced") && plugin_id(first) => true,
+        _ => false,
+    }
+}
+
+fn plugin_id(id: &str) -> bool {
+    !id.is_empty() && id != "." && id != ".." && !id.contains('/') && !id.contains('\\')
+}
+
+fn publish(share: &PluginShare) -> Result<(), String> {
+    let record = share.dir.join(".published").join(sha(share.claude_home.to_string_lossy().as_bytes()));
+    let before = read_ids(&record);
+    let mut keep = BTreeSet::new();
+    for plugin in crate::commands::enabled_plugins(&share.claude_home) {
+        if !plugin_id(&plugin.id) || plugin.path.components().any(|c| c.as_os_str() == "marketplaces") || is_symlink(&plugin.path) {
+            continue;
+        }
+        mirror(&plugin, &share.dir.join("plugins").join(&plugin.id))?;
+        keep.insert(plugin.id);
+    }
+    for id in &before {
+        if !keep.contains(id) && plugin_id(id) {
+            let _ = std::fs::remove_dir_all(share.dir.join("plugins").join(id));
+        }
+    }
+    if let Some(parent) = record.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(record, serde_json::to_vec(&keep).unwrap()).map_err(|e| e.to_string())
+}
+
+fn read_ids(file: &Path) -> BTreeSet<String> {
+    std::fs::read(file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+
+fn mirror(plugin: &crate::commands::EnabledPlugin, dest: &Path) -> Result<(), String> {
+    if is_symlink(dest) {
+        return Ok(());
+    }
+    copy_tree(&plugin.path, dest, &plugin.id, Path::new(""))?;
+    let marker = dest.join(".pinned-plugin.json");
+    let body = serde_json::to_vec(&serde_json::json!({ "version": plugin.version, "gitCommitSha": plugin.git_commit_sha })).unwrap();
+    if std::fs::read(&marker).ok().as_deref() == Some(body.as_slice()) {
+        return Ok(());
+    }
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(marker, body).map_err(|e| e.to_string())
+}
+
+fn copy_tree(src: &Path, dest: &Path, id: &str, rel: &Path) -> Result<(), String> {
+    if is_symlink(src) || is_symlink(dest) {
+        return Ok(());
+    }
+    let Ok(entries) = std::fs::read_dir(src) else { return Ok(()) };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
+        if blocked(&name) {
+            continue;
+        }
+        let rel = rel.join(&name);
+        let src_path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&src_path) else { continue };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            copy_tree(&src_path, dest, id, &rel)?;
+        } else if meta.is_file() {
+            let Some(hub_path) = hub_join(&format!("plugins/{id}"), &rel) else { continue };
+            if accepts(PLUGINS_KEY, &hub_path) {
+                copy_newer(&src_path, &dest.join(&rel), &meta)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn copy_newer(src: &Path, dest: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
+    if is_symlink(dest) {
+        return Ok(());
+    }
+    let copy = match std::fs::metadata(dest) {
+        Err(_) => true,
+        Ok(have) => match (meta.modified().ok(), have.modified().ok()) {
+            (Some(src_mod), Some(dest_mod)) if src_mod > dest_mod => true,
+            (Some(_), Some(_)) => false,
+            _ => meta.len() != have.len(),
+        },
+    };
+    if !copy {
+        return Ok(());
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::copy(src, dest).map_err(|e| e.to_string())?;
+    if let Ok(modified) = meta.modified() {
+        let _ = std::fs::File::options().write(true).open(dest).and_then(|file| file.set_modified(modified));
+    }
+    Ok(())
+}
+
+fn plugin_files(share: &PluginShare) -> Vec<(String, PathBuf)> {
+    let mut files = vec![];
+    walk_shared(&share.dir.join("plugins"), "plugins", false, &mut files);
+    walk_shared(&share.claude_home.join("skills"), "user-skills", true, &mut files);
+    files
+}
+
+fn walk_shared(dir: &Path, prefix: &str, skills: bool, files: &mut Vec<(String, PathBuf)>) {
+    if is_symlink(dir) {
+        return;
+    }
+    fn rec(dir: &Path, prefix: &str, rel: &Path, skills: bool, files: &mut Vec<(String, PathBuf)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
+            if blocked(&name) {
+                continue;
+            }
+            if skills && rel.as_os_str().is_empty() && name.eq_ignore_ascii_case("synced") {
+                continue;
+            }
+            let rel = rel.join(&name);
+            let Some(hub_path) = hub_join(prefix, &rel) else { continue };
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                rec(&path, prefix, &rel, skills, files);
+            } else if meta.is_file() && accepts(PLUGINS_KEY, &hub_path) {
+                files.push((hub_path, path));
+            }
+        }
+    }
+    rec(dir, prefix, Path::new(""), skills, files);
+}
+
+fn hub_join(prefix: &str, rel: &Path) -> Option<String> {
+    let mut parts = vec![prefix.to_owned()];
+    for component in rel.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            _ => return None,
+        }
+    }
+    Some(parts.join("/"))
+}
+
+fn plugin_local(share: &PluginShare, path: &str) -> Option<PathBuf> {
+    if !accepts(PLUGINS_KEY, path) {
+        return None;
+    }
+    if let Some(rest) = path.strip_prefix("plugins/") {
+        return placed(&share.dir.join("plugins"), rest);
+    }
+    placed(&share.claude_home.join("skills"), path.strip_prefix("user-skills/")?)
+}
+
+fn placed(root: &Path, rest: &str) -> Option<PathBuf> {
+    let rel = rel_path(rest)?;
+    if is_symlink(root) {
+        return None;
+    }
+    let mut cur = root.to_path_buf();
+    for component in rel.components() {
+        cur.push(component);
+        if is_symlink(&cur) {
+            return None;
+        }
+    }
+    Some(cur)
+}
+
+fn rel_path(rest: &str) -> Option<PathBuf> {
+    let rel = Path::new(rest);
+    if rest.is_empty() || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+        return None;
+    }
+    Some(rel.to_path_buf())
 }
 
 /// Whether `path` names a file a project shares, before any machine maps it to a folder.
@@ -587,5 +879,413 @@ mod tests {
         }
         assert_eq!(roots.local("claude/memory/a/b.md"), Some(side.claude("memory/a/b.md")));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn enable(home: &Path, id: &str, path: &Path, version: &str, sha: &str) {
+        put(&home.join(".claude/settings.json"), &format!(r#"{{"enabledPlugins":{{"{id}":true,"off@demo":false,"market@place":true}}}}"#));
+        let installed = serde_json::json!({ "plugins": {
+            id: [
+                { "installPath": home.join("plugins/old"), "version": "0.1.0" },
+                { "installPath": path, "version": version, "gitCommitSha": sha },
+            ],
+            "off@demo": [{ "installPath": home.join("plugins/off"), "version": "1" }],
+            "market@place": [{ "installPath": home.join("plugins/marketplaces/place/market"), "version": "9" }],
+        }});
+        put(&home.join(".claude/plugins/installed_plugins.json"), &installed.to_string());
+    }
+
+    #[test]
+    fn a_plugin_enabled_on_one_machine_is_a_plugin_dir_on_the_other() {
+        let root = root("plugins");
+        let hub = MemHub::default();
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        let install = mac_home.join("plugins/toy");
+        put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#);
+        put(&install.join("skills/greet/SKILL.md"), "---\nname: greet\ndescription: Say hello\n---\n");
+        put(&install.join("agents/helper.md"), "helps");
+        put(&install.join("settings.json"), "token=1");
+        put(&install.join(".env"), "SECRET=1");
+        put(&install.join(".claude.json"), "{}");
+        put(&install.join("secrets/key.pem"), "pem");
+        put(&install.join("node_modules/pkg/index.js"), "nope");
+        put(&mac_home.join("plugins/old/skills/old/SKILL.md"), "---\nname: old\n---\n");
+        put(&mac_home.join("plugins/off/skills/hidden/SKILL.md"), "---\nname: hidden\n---\n");
+        put(&mac_home.join("plugins/marketplaces/place/market/skills/src/SKILL.md"), "---\nname: src\n---\n");
+        put(&mac_home.join(".claude/skills/ship/SKILL.md"), "---\nname: ship\ndescription: Ship the branch\n---\n");
+        put(&mac_home.join(".claude/skills/synced/org/stale/SKILL.md"), "---\nname: stale\n---\n");
+        enable(&mac_home, "toy@demo", &install, "1.2.3", "abc123");
+        let (mac, mini) = (
+            PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") },
+        );
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut State::default(), &mac, now).unwrap();
+        sync_plugins(&hub, &mut State::default(), &mini, now).unwrap();
+        let mut paths: Vec<_> = hub.0.borrow().keys().cloned().collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "plugins/toy@demo/.claude-plugin/plugin.json",
+                "plugins/toy@demo/.pinned-plugin.json",
+                "plugins/toy@demo/agents/helper.md",
+                "plugins/toy@demo/skills/greet/SKILL.md",
+                "user-skills/ship/SKILL.md",
+            ]
+        );
+        let skill = mini_home.join(".claude/skills/ship/SKILL.md");
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), "---\nname: ship\ndescription: Ship the branch\n---\n");
+        let dirs = plugin_dirs(&mini.claude_home, &mini.dir);
+        assert_eq!(dirs, vec![mini.dir.join("plugins/toy@demo")]);
+        assert_eq!(plugin_dirs(&mac.claude_home, &mac.dir), Vec::<PathBuf>::new(), "the machine that already enables the plugin does not load the copy");
+        let listed: Vec<_> = crate::commands::list(&mini.claude_home, &mini_home, &dirs)
+            .into_iter()
+            .filter(|c| c.source != "builtin")
+            .map(|c| (c.name, c.description, c.source, c.skill))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("ship".into(), "Ship the branch".into(), "user", true),
+                ("toy:greet".into(), "Say hello".into(), "plugin", true),
+            ]
+        );
+        let marker: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(mini.dir.join("plugins/toy@demo/.pinned-plugin.json")).unwrap()).unwrap();
+        assert_eq!(marker, serde_json::json!({"version": "1.2.3", "gitCommitSha": "abc123"}));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disabling_a_plugin_removes_it_from_the_other_machine() {
+        let root = root("disable");
+        let hub = MemHub::default();
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        let install = mac_home.join("plugins/toy");
+        put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#);
+        put(&install.join("skills/greet/SKILL.md"), "---\nname: greet\ndescription: Say hello\n---\n");
+        enable(&mac_home, "toy@demo", &install, "1.2.3", "abc123");
+        let (mac, mini) = (
+            PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") },
+        );
+        let now = SystemTime::now();
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert!(mini.dir.join("plugins/toy@demo/skills/greet/SKILL.md").is_file());
+        put(&mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"toy@demo":false}}"#);
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert!(!mini.dir.join("plugins/toy@demo/skills/greet/SKILL.md").exists());
+        assert_eq!(plugin_dirs(&mini.claude_home, &mini.dir), Vec::<PathBuf>::new());
+        assert!(hub.0.borrow()["plugins/toy@demo/skills/greet/SKILL.md"].data.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_old_hub_that_rejects_plugins_leaves_the_local_copy_to_launch() {
+        let root = root("oldhub");
+        let home = root.join("mac/.claude");
+        let dir = root.join("synced");
+        let plugin = dir.join("plugins/toy@demo");
+        put(&plugin.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#);
+        put(&plugin.join("skills/greet/SKILL.md"), "---\nname: greet\ndescription: Say hello\n---\n");
+        let share = PluginShare { claude_home: home, dir: dir.clone() };
+        let err = sync_plugins(&OldHub, &mut State::default(), &share, SystemTime::now()).unwrap_err();
+        assert_eq!((old_hub(&err), plugin_dirs(&share.claude_home, &share.dir)), (true, vec![plugin]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn texts(hub: &MemHub) -> BTreeMap<String, String> {
+        hub.0
+            .borrow()
+            .iter()
+            .map(|(path, file)| {
+                let text = file.data.as_ref().and_then(|data| unpack(data).ok()).and_then(|bytes| String::from_utf8(bytes).ok()).unwrap_or_default();
+                (path.clone(), text)
+            })
+            .collect()
+    }
+
+    fn stamp(path: &Path, when: SystemTime) {
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(when).unwrap();
+    }
+
+    #[test]
+    fn secret_files_and_outside_symlinks_stay_on_the_machine() {
+        let root = root("secrets");
+        let hub = MemHub::default();
+        let mac_home = root.join("mac");
+        let outside = root.join("outside");
+        put(&outside.join("id_rsa"), "PRIVATE-KEY");
+        put(&outside.join("SKILL.md"), "STOLEN-SKILL");
+        put(&outside.join("notes.md"), "STOLEN-NOTES");
+        let install = mac_home.join("plugins/toy");
+        put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#);
+        put(&install.join("skills/greet/SKILL.md"), "---\nname: greet\ndescription: Say hello\n---\n");
+        for (rel, body) in [
+            ("Settings.json", "CASE-SETTINGS"),
+            (".ENV", "CASE-ENV"),
+            (".env.local", "ENV-LOCAL"),
+            ("Credentials.JSON", "CASE-CREDENTIALS"),
+            (".Claude.json", "CASE-CLAUDE"),
+            ("Installed_Plugins.json", "CASE-INSTALLED"),
+            ("settings.local.json", "LOCAL-SETTINGS"),
+            ("cert.PEM", "CASE-PEM"),
+            ("id.KEY", "CASE-KEY"),
+            ("Secrets/token.txt", "DIR-SECRETS"),
+            (".SECRETS/note.txt", "DIR-DOT-SECRETS"),
+            ("target/release/toy", "TREE-TARGET"),
+            ("dist/app.js", "TREE-DIST"),
+            ("build/out.js", "TREE-BUILD"),
+            ("vendor/lib.js", "TREE-VENDOR"),
+        ] {
+            put(&install.join(rel), body);
+        }
+        std::os::unix::fs::symlink(&outside, install.join("skills/escape")).unwrap();
+        std::fs::create_dir_all(install.join("agents")).unwrap();
+        std::os::unix::fs::symlink(outside.join("id_rsa"), install.join("agents/helper.md")).unwrap();
+        let linked_real = root.join("linked-real");
+        put(&linked_real.join(".claude-plugin/plugin.json"), r#"{"name":"linked"}"#);
+        put(&linked_real.join("readme.txt"), "LINKED-SECRET");
+        std::os::unix::fs::symlink(&linked_real, mac_home.join("plugins/linked")).unwrap();
+        put(&mac_home.join(".claude/skills/ship/SKILL.md"), "---\nname: ship\ndescription: Ship the branch\n---\n");
+        std::os::unix::fs::symlink(&outside, mac_home.join(".claude/skills/stolen")).unwrap();
+        let installed = serde_json::json!({ "plugins": {
+            "toy@demo": [{ "installPath": install, "version": "1.2.3", "gitCommitSha": "abc123" }],
+            "linked@demo": [{ "installPath": mac_home.join("plugins/linked"), "version": "1", "gitCommitSha": "def" }],
+        }});
+        put(&mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"toy@demo":true,"linked@demo":true}}"#);
+        put(&mac_home.join(".claude/plugins/installed_plugins.json"), &installed.to_string());
+        let ssh = root.join("ssh");
+        put(&ssh.join("id_rsa"), "ROOT-PRIVATE");
+        put(&ssh.join("config"), "ROOT-CONFIG");
+        let rooted = root.join("rooted");
+        std::fs::create_dir_all(rooted.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(&ssh, rooted.join(".claude/skills")).unwrap();
+        let mac = PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") };
+        let rooted_share = PluginShare { claude_home: rooted.join(".claude"), dir: root.join("rooted-synced") };
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut State::default(), &mac, now).unwrap();
+        sync_plugins(&hub, &mut State::default(), &rooted_share, now).unwrap();
+        let stored = texts(&hub);
+        let markers = [
+            "CASE-SETTINGS",
+            "CASE-ENV",
+            "ENV-LOCAL",
+            "CASE-CREDENTIALS",
+            "CASE-CLAUDE",
+            "CASE-INSTALLED",
+            "LOCAL-SETTINGS",
+            "CASE-PEM",
+            "CASE-KEY",
+            "DIR-SECRETS",
+            "DIR-DOT-SECRETS",
+            "TREE-TARGET",
+            "TREE-DIST",
+            "TREE-BUILD",
+            "TREE-VENDOR",
+            "PRIVATE-KEY",
+            "STOLEN-SKILL",
+            "STOLEN-NOTES",
+            "LINKED-SECRET",
+            "ROOT-PRIVATE",
+            "ROOT-CONFIG",
+        ];
+        let leaked: Vec<String> = stored
+            .iter()
+            .flat_map(|(path, text)| markers.iter().filter(move |marker| text.contains(**marker)).map(move |marker| format!("{path} contains {marker}")))
+            .collect();
+        assert_eq!(leaked, Vec::<String>::new(), "a secret left the machine");
+        assert_eq!(stored["plugins/toy@demo/skills/greet/SKILL.md"], "---\nname: greet\ndescription: Say hello\n---\n");
+        assert_eq!(stored["user-skills/ship/SKILL.md"], "---\nname: ship\ndescription: Ship the branch\n---\n");
+        assert_eq!(std::fs::read_to_string(ssh.join("id_rsa")).unwrap(), "ROOT-PRIVATE");
+        assert!(!ssh.join("ship").exists(), "a pulled skill was written through the skills symlink");
+        assert_eq!(std::fs::read_to_string(outside.join("id_rsa")).unwrap(), "PRIVATE-KEY");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_hub_refuses_secret_names_and_paths_that_leave_the_tree() {
+        let refused = [
+            "plugins/toy@demo/Settings.json",
+            "plugins/toy@demo/.ENV",
+            "plugins/toy@demo/.env.local",
+            "plugins/toy@demo/Credentials.JSON",
+            "plugins/toy@demo/.Claude.json",
+            "plugins/toy@demo/Installed_Plugins.json",
+            "plugins/toy@demo/settings.local.json",
+            "plugins/toy@demo/cert.PEM",
+            "plugins/toy@demo/id.KEY",
+            "plugins/toy@demo/Secrets/token.txt",
+            "plugins/toy@demo/.SECRETS/note.txt",
+            "plugins/toy@demo/../../.ssh/id_rsa",
+            "plugins/../.ssh/id_rsa",
+            "/etc/passwd",
+            "user-skills/../../.ssh/id_rsa",
+            "user-skills/stolen/../../../.ssh/id_rsa",
+            "plugins/toy@demo/target/release/toy",
+            "plugins/toy@demo/dist/app.js",
+            "plugins/toy@demo/build/out.js",
+            "plugins/toy@demo/vendor/lib.js",
+            "plugins/toy@demo/node_modules/pkg/index.js",
+            "user-skills/synced/org/SKILL.md",
+            "claude/settings.json",
+        ];
+        let accepted: Vec<_> = refused.into_iter().filter(|path| accepts(PLUGINS_KEY, path)).collect();
+        assert_eq!(accepted, Vec::<&str>::new());
+        assert!(accepts(PLUGINS_KEY, "plugins/toy@demo/skills/greet/SKILL.md"));
+        assert!(accepts(PLUGINS_KEY, "user-skills/ship/SKILL.md"));
+        assert!(!accepts("github.com/acme/app", "plugins/toy@demo/skills/greet/SKILL.md"));
+    }
+
+    #[test]
+    fn a_skill_this_machine_wrote_is_not_replaced_or_removed() {
+        let root = root("local-skill");
+        let hub = MemHub::default();
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        let (mac, mini) = (
+            PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") },
+        );
+        let older = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let newer = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        put(&mini_home.join(".claude/skills/notes/SKILL.md"), "from mini");
+        stamp(&mini_home.join(".claude/skills/notes/SKILL.md"), older);
+        put(&mac_home.join(".claude/skills/notes/SKILL.md"), "from mac");
+        stamp(&mac_home.join(".claude/skills/notes/SKILL.md"), newer);
+        put(&mac_home.join(".claude/skills/ship/SKILL.md"), "ship v1");
+        stamp(&mac_home.join(".claude/skills/ship/SKILL.md"), older);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/notes/SKILL.md")).unwrap(), "from mini");
+        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/ship/SKILL.md")).unwrap(), "ship v1");
+        put(&mac_home.join(".claude/skills/ship/SKILL.md"), "ship v2");
+        stamp(&mac_home.join(".claude/skills/ship/SKILL.md"), newer);
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/ship/SKILL.md")).unwrap(), "ship v2");
+        std::fs::remove_file(mac_home.join(".claude/skills/notes/SKILL.md")).unwrap();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/notes/SKILL.md")).unwrap(), "from mini");
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        assert!(!mac_home.join(".claude/skills/notes/SKILL.md").exists(), "a skill mac deleted came back from mini");
+        std::fs::remove_file(mac_home.join(".claude/skills/ship/SKILL.md")).unwrap();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert!(!mini_home.join(".claude/skills/ship/SKILL.md").exists(), "a skill mini did not write is removed when mac deletes it");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disabling_a_plugin_does_not_delete_outside_the_synced_copy() {
+        let root = root("keep");
+        let hub = MemHub::default();
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        let install = mac_home.join("plugins/toy");
+        put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#);
+        put(&install.join("skills/greet/SKILL.md"), "---\nname: greet\ndescription: Say hello\n---\n");
+        enable(&mac_home, "toy@demo", &install, "1.2.3", "abc123");
+        put(&mini_home.join("plugins/toy/skills/greet/SKILL.md"), "hand installed");
+        put(&mini_home.join("keep.txt"), "keep");
+        put(&mini_home.join(".claude/skills/hand/SKILL.md"), "hand skill");
+        let (mac, mini) = (
+            PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") },
+        );
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let outside = root.join("precious");
+        put(&outside.join("precious.txt"), "precious");
+        std::fs::remove_dir_all(mac.dir.join("plugins/toy@demo")).unwrap();
+        std::os::unix::fs::symlink(&outside, mac.dir.join("plugins/toy@demo")).unwrap();
+        put(&mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"toy@demo":false}}"#);
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(std::fs::read_to_string(outside.join("precious.txt")).unwrap(), "precious");
+        assert_eq!(std::fs::read_to_string(mini_home.join("plugins/toy/skills/greet/SKILL.md")).unwrap(), "hand installed");
+        assert_eq!(std::fs::read_to_string(mini_home.join("keep.txt")).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(mini_home.join(".claude/skills/hand/SKILL.md")).unwrap(), "hand skill");
+        assert!(!mini.dir.join("plugins/toy@demo/skills/greet/SKILL.md").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn two_enabled_copies_with_the_same_mtime_do_not_trade_edits() {
+        let root = root("pong");
+        let hub = MemHub::default();
+        let when = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        for (home, body) in [(&mac_home, "mac-body-aaaa"), (&mini_home, "mini-body-bbbb-longer")] {
+            let install = home.join("plugins/toy");
+            put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#);
+            put(&install.join("skills/greet/SKILL.md"), body);
+            stamp(&install.join(".claude-plugin/plugin.json"), when);
+            stamp(&install.join("skills/greet/SKILL.md"), when);
+            enable(home, "toy@demo", &install, "1.2.3", "abc123");
+        }
+        let (mac, mini) = (
+            PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") },
+        );
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let again = sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        assert_eq!(again.pushed, Vec::<String>::new(), "the machines kept publishing the same file");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_file_past_the_limit_is_not_pushed() {
+        let root = root("limit");
+        let hub = MemHub::default();
+        let home = root.join("mac");
+        let install = home.join("plugins/toy");
+        put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#);
+        put(&install.join("skills/greet/SKILL.md"), "small");
+        let mut blob = vec![0u8; FILE_LIMIT as usize + (1 << 20)];
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        for byte in &mut blob {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            *byte = seed as u8;
+        }
+        std::fs::write(install.join("skills/greet/blob.bin"), &blob).unwrap();
+        enable(&home, "toy@demo", &install, "1.2.3", "abc123");
+        let share = PluginShare { claude_home: home.join(".claude"), dir: root.join("synced") };
+        let synced = sync_plugins(&hub, &mut State::default(), &share, SystemTime::now()).unwrap();
+        assert!(synced.pushed.iter().any(|path| path.ends_with("SKILL.md")));
+        assert!(synced.pushed.iter().all(|path| !path.contains("blob.bin")), "a file over the limit left the machine");
+        assert!(hub.0.borrow().keys().all(|path| !path.contains("blob.bin")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    struct OldHub;
+
+    impl Hub for OldHub {
+        fn list(&self, _: &str) -> Result<Vec<Entry>, String> {
+            Ok(vec![])
+        }
+        fn push(&self, _: &str, files: Vec<File>) -> Result<(), String> {
+            let path = files.first().map(|f| f.entry.path.clone()).unwrap_or_else(|| "plugins/toy@demo/skills/greet/SKILL.md".into());
+            Err(format!("{path} is not a file a project shares"))
+        }
+        fn pull(&self, _: &str, _: Vec<String>) -> Result<Vec<File>, String> {
+            Ok(vec![])
+        }
     }
 }
