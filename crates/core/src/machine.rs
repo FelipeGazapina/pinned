@@ -2574,6 +2574,7 @@ mod tests {
         let m = machine();
         let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec!["--resume".into(), "s1".into()], env: vec![], token: None, account: None };
         let id = m.open_run(&run).unwrap();
+        assert_eq!(m.tab(&id, |t| t.launch.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone())).unwrap(), Some("s1".into()));
         assert_eq!(m.tab(&id, |t| t.claude_session.clone()).unwrap().as_deref(), Some("s1"));
         assert_eq!(m.thread(&id, 0).unwrap().session.as_deref(), Some("s1"));
         assert_eq!(m.view(&id).unwrap().session.as_deref(), Some("s1"), "the tab's view lacks the session clients key it by");
@@ -2581,6 +2582,40 @@ mod tests {
         assert_eq!(m.tab(&fresh, |t| t.claude_session.clone()).unwrap(), None);
         assert_eq!(m.view(&fresh).unwrap().session, None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stop_hook_leaves_tab_done_with_claude_session_on_tabs_event() {
+        let env = vec![(CONNECTOR_ENV.to_owned(), "c1".into())];
+        let tabs_seen = Arc::new(Mutex::new(vec![]));
+        let seen = tabs_seen.clone();
+        let m = Machine::new(launch(), None, Some("/repo".into()), move |event| {
+            if let MachineEvent::Tabs { tabs } = event {
+                seen.lock().unwrap().extend(tabs);
+            }
+        });
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env, false, None);
+        let working = AgentEvent {
+            status: AgentStatus::Working,
+            cwd: Some("/repo".into()),
+            message: None,
+            tab: Some(tab.clone()),
+            session: Some("claude-s1".into()),
+            title: None,
+            resume_at: None,
+            prompt: Some("fix the bug".into()),
+            snapshot: None,
+        };
+        m.record_event(working.clone());
+        m.record_event(AgentEvent { status: AgentStatus::Done, prompt: None, snapshot: None, ..working });
+        let view = m.view(&tab).unwrap();
+        assert_eq!(view.status, Some(AgentStatus::Done));
+        assert_eq!(view.session.as_deref(), Some("claude-s1"));
+        assert_eq!(view.connector.as_deref(), Some("c1"));
+        let last = tabs_seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(last.id, tab);
+        assert_eq!(last.status, Some(AgentStatus::Done));
+        assert_eq!(last.session.as_deref(), Some("claude-s1"));
     }
 
     #[test]
