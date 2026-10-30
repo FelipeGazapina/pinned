@@ -28,6 +28,9 @@ pub struct Saved {
     /// The model picked for this conversation alone, passed as `claude --model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Claude's permission mode from the last hook that reported one. `plan` is read-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
 }
 
 /// What the harness types to a session that has work left.
@@ -80,7 +83,7 @@ mod tests {
 
     #[test]
     fn interrupted_sessions_continue_once_no_limit_blocks_them() {
-        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, held: false, account: "claude".into(), model: None };
+        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, held: false, account: "claude".into(), model: None, permission_mode: None };
         let resumed = vec!["--resume".to_owned(), "s1".to_owned()];
         let continued = [resumed.clone(), vec![CONTINUE_PROMPT.to_owned()]].concat();
         let claude = crate::accounts::Provider::Claude;
@@ -108,6 +111,7 @@ mod tests {
             held: true,
             account: "work".into(),
             model: Some("claude-opus-4-8".into()),
+            permission_mode: Some("plan".into()),
         }];
         save(&file, &saved);
         assert_eq!(load(&file), saved);

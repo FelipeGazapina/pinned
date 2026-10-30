@@ -236,6 +236,8 @@ struct Tab {
     draft_len: usize,
     /// Claude's permission mode from the latest hook that reported one. `plan` is read-only.
     permission_mode: Option<String>,
+    /// Shift+Tab changed the mode and no hook has reported the new one. A child stays read-only.
+    permission_unknown: bool,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
     screen: Arc<Mutex<Screen>>,
@@ -258,7 +260,18 @@ impl Tab {
             held: self.held_at_limit,
             account: self.account.id.clone(),
             model: self.model.clone(),
+            permission_mode: self.permission_mode.clone().filter(|_| !self.permission_unknown),
         })
+    }
+
+    /// What a child of this tab may do. Shift+Tab leaves the mode unknown until a hook reports it,
+    /// and an unknown mode is read-only.
+    fn child_access(&self) -> crate::delegate::Access {
+        if self.permission_unknown || self.permission_mode.as_deref() == Some("plan") {
+            crate::delegate::Access::ReadOnly
+        } else {
+            crate::delegate::Access::derive(self.bypass, false)
+        }
     }
 
     fn view(&self, id: &str) -> TabView {
@@ -1089,16 +1102,23 @@ impl Machine {
         if Shells::owns(tab) {
             return self.shells.write(tab, data);
         }
-        let submitted = self.tab(tab, |t| {
+        let (submitted, mode_unknown) = self.tab(tab, |t| {
             let submitted = note_draft(&mut t.draft_len, data);
             if submitted {
                 t.note_submit();
             }
+            let mode_unknown = !t.permission_unknown && data.windows(3).any(|window| window == b"\x1b[Z");
+            if mode_unknown {
+                t.permission_unknown = true;
+            }
             if let Some(s) = t.session.as_mut() {
                 s.write(data).map_err(|e| e.to_string())?;
             }
-            Ok::<_, String>(submitted)
+            Ok::<_, String>((submitted, mode_unknown))
         })??;
+        if mode_unknown {
+            self.save_sessions();
+        }
         if submitted {
             self.arm_notices();
         }
@@ -1341,7 +1361,7 @@ impl Machine {
                 let account = self.account_for(Some(&s.account), &s.cwd).ok()?;
                 let (launch, resume_at) = s.reopen(now, account.provider);
                 let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session));
-                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model) = (s.interrupted, resume_at, s.held, s.model));
+                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode) = (s.interrupted, resume_at, s.held, s.model, s.permission_mode));
                 Some(id)
             })
             .collect();
@@ -1475,7 +1495,7 @@ impl Machine {
             Parent::Task(caller.task.clone().unwrap_or_default())
         };
         let (account_id, inherited_model, parent_provider, mut cwd, ceiling) = if let Some(tab) = caller.tab.as_deref() {
-            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.cwd.clone(), Access::derive(t.bypass, t.permission_mode.as_deref() == Some("plan"))))?
+            self.tab(tab, |t| (Some(t.account.id.clone()), t.model.clone(), t.account.provider, t.cwd.clone(), t.child_access()))?
         } else if let Some(task) = caller.task.as_deref().and_then(|id| self.delegates.lineage(id)) {
             (Some(task.account), task.model, task.provider, task.cwd, task.access)
         } else {
@@ -1660,7 +1680,7 @@ impl Machine {
     fn capabilities(&self, tab: Option<&str>, task: Option<&str>, search: &str) -> Result<String, String> {
         use crate::delegate::{capabilities, codex_constraints, cursor_models, provider_models, Access, Inherited, ListedAccount};
         let (account, model, access) = if let Some(tab) = tab.filter(|tab| !tab.is_empty()) {
-            self.tab(tab, |t| (t.account.clone(), t.model.clone(), Access::derive(t.bypass, t.permission_mode.as_deref() == Some("plan")))).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
+            self.tab(tab, |t| (t.account.clone(), t.model.clone(), t.child_access())).unwrap_or_else(|_| (Account::builtin(Provider::Claude), None, Access::Auto))
         } else if let Some(lineage) = task.filter(|task| !task.is_empty()).and_then(|id| self.delegates.lineage(id)) {
             let account = self.accounts.get(&lineage.account).unwrap_or_else(|| Account::builtin(lineage.provider));
             (account, lineage.model, lineage.access)
@@ -1763,6 +1783,7 @@ impl Machine {
             turn_pending: None,
             draft_len: 0,
             permission_mode: None,
+            permission_unknown: false,
             screen: Arc::default(),
         };
         self.tabs.lock().unwrap().insert(id.clone(), tab);
@@ -1889,10 +1910,12 @@ impl Machine {
                 t.title = event.title.clone();
             }
             t.message = event.message.clone().filter(|_| event.status == AgentStatus::NeedsInput);
+            let mode_before = (t.permission_unknown, t.permission_mode.clone());
             if event.permission_mode.is_some() {
                 t.permission_mode = event.permission_mode.clone();
+                t.permission_unknown = false;
             }
-            before != (t.interrupted, t.resume_at, t.held_at_limit)
+            before != (t.interrupted, t.resume_at, t.held_at_limit) || mode_before != (t.permission_unknown, t.permission_mode.clone())
         });
         if changed == Ok(true) {
             self.save_sessions();
@@ -3673,6 +3696,79 @@ echo '{"type":"result","result":"ok"}'
         wait_for("plan argv", || std::fs::read(&argv).is_ok_and(|b| !b.is_empty()));
         let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
         assert_eq!(lines, vec!["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    fn argv_of(m: &Machine, tab: &str, argv: &Path) -> Vec<String> {
+        let _ = std::fs::remove_file(argv);
+        let request = crate::delegate::parse_request(&json!({ "task": "look", "mode": "async" })).unwrap();
+        m.start_delegate(Some(tab.to_owned()), None, None, request).unwrap();
+        wait_for("child argv", || std::fs::read(argv).is_ok_and(|bytes| !bytes.is_empty()));
+        String::from_utf8(std::fs::read(argv).unwrap()).unwrap().lines().map(str::to_owned).collect()
+    }
+
+    #[cfg(unix)]
+    fn claude_recording_argv(root: &Path) -> PathBuf {
+        let argv = root.join("argv");
+        let claude = root.join("claude");
+        let body = r#"#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ]; then echo '{"loggedIn":true,"email":"ana@acme.dev"}'; exit 0; fi
+printf '%s\n' "$@" > "ARGV"
+echo '{"type":"result","result":"ok"}'
+"#
+        .replace("ARGV", &argv.display().to_string());
+        std::fs::write(&claude, body).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shift_tab_makes_the_child_read_only_until_a_hook_reports_the_mode() {
+        let root = temp("shift-tab-mode");
+        let claude = claude_recording_argv(&root);
+        let argv = root.join("argv");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
+        let full = ["-p", "look", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"].map(str::to_owned).to_vec();
+        let plan = ["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"].map(str::to_owned).to_vec();
+        m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
+        assert_eq!(argv_of(&m, &tab, &argv), full);
+        m.write_input(&tab, b"\x1b[Z").unwrap();
+        assert_eq!(argv_of(&m, &tab, &argv), plan);
+        m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
+        assert_eq!(argv_of(&m, &tab, &argv), full);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_restored_plan_session_starts_its_child_read_only() {
+        let root = temp("restored-plan");
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let claude = claude_recording_argv(&root);
+        let argv = root.join("argv");
+        sessions::save(
+            &root.join("sessions.json"),
+            &[sessions::Saved {
+                cwd: repo.clone(),
+                session: "s1".into(),
+                env: vec![],
+                bypass: true,
+                interrupted: false,
+                resume_at: None,
+                held: false,
+                account: "claude".into(),
+                model: None,
+                permission_mode: Some("plan".into()),
+            }],
+        );
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.clone()), Some(repo), |_| {});
+        let tab = m.restore_tabs().pop().expect("the plan session restored");
+        let plan = ["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"].map(str::to_owned).to_vec();
+        assert_eq!(argv_of(&m, &tab, &argv), plan);
         let _ = std::fs::remove_dir_all(root);
     }
 
