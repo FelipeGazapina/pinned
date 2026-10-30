@@ -929,7 +929,7 @@ grok-4.7-high - Grok 4.7  High
         std::fs::create_dir_all(&dir).unwrap();
         let bin = script(&dir, "sleeper", "sleep 30");
         let spawn_sleeper = || {
-            let mut cmd = std::process::Command::new(&bin);
+            let mut cmd = crate::process::command(&bin);
             cmd.process_group(0);
             let child = cmd.spawn().unwrap();
             let pid = child.id();
@@ -979,13 +979,13 @@ grok-4.7-high - Grok 4.7  High
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let git = |dir: &Path, args: &[&str]| {
-            let status = std::process::Command::new("git").args(args).current_dir(dir).status().unwrap();
+            let status = crate::process::command("git").args(args).current_dir(dir).status().unwrap();
             assert!(status.success(), "git {args:?} in {} failed", dir.display());
         };
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
         let dir = crate::branches::new_worktree(&root, None).unwrap();
-        let real = String::from_utf8(std::process::Command::new("/bin/sh").arg("-c").arg("command -v git").output().unwrap().stdout).unwrap();
+        let real = String::from_utf8(crate::process::command("/bin/sh").arg("-c").arg("command -v git").output().unwrap().stdout).unwrap();
         let real = real.trim();
         assert!(!real.is_empty(), "git is not on PATH");
         let marker = root.join("removing");

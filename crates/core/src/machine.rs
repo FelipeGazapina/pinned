@@ -3598,7 +3598,7 @@ echo '{"type":"result","result":"ok"}'
 
     #[cfg(unix)]
     fn blocking_git(dir: &Path, started: &Path, go: &Path) -> String {
-        let real = String::from_utf8(std::process::Command::new("/bin/sh").args(["-c", "command -v git"]).output().unwrap().stdout)
+        let real = String::from_utf8(crate::process::command("/bin/sh").args(["-c", "command -v git"]).output().unwrap().stdout)
             .unwrap()
             .trim()
             .to_owned();
