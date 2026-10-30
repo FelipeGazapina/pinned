@@ -1448,6 +1448,21 @@ impl Machine {
         self.delegates.cancel(&caller, id, reason, self.launch.path_env.as_deref()).map(|value| value.to_string())
     }
 
+    /// The parent tab must still be open. A task claimed for a tab that closed is cancelled, so
+    /// the catalog wait cannot leave a child whose parent is already gone.
+    fn ensure_parent(&self, tab: Option<&str>, task: Option<&str>) -> Result<(), String> {
+        let Some(tab) = tab.filter(|id| !id.is_empty()) else { return Ok(()) };
+        if self.tabs.lock().unwrap().contains_key(tab) {
+            return Ok(());
+        }
+        if let Some(id) = task {
+            if !self.delegates.is_terminal(id) {
+                let _ = self.delegates.cancel_tree(id, "the parent tab closed", self.launch.path_env.as_deref());
+            }
+        }
+        Err(format!("no tab {tab}"))
+    }
+
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         use crate::delegate::{driver_args, resolve_access, spawn, Access, ChildSpec, Claim, Isolation, NewTask, Parent, SpawnSpec};
         let caller = Self::require_caller(tab, parent_task)?;
@@ -1480,13 +1495,7 @@ impl Machine {
         let access = resolve_access(ceiling, &request)?;
         let mut model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
         let mut effort = request.target.effort.clone().filter(|effort| !effort.is_empty());
-        if account.provider == Provider::Cursor {
-            if let Some(name) = model.clone() {
-                let ids = self.delegates.cursor_ids(&bin, self.launch.path_env.as_deref());
-                model = Some(crate::delegate::map_cursor_model(&ids, &name, effort.as_deref()));
-            }
-            effort = None;
-        }
+        self.ensure_parent(caller.tab.as_deref(), None)?;
         let isolated = request.isolation == Isolation::Worktree;
         let task = match self.delegates.claim(NewTask {
             parent,
@@ -1506,6 +1515,16 @@ impl Machine {
             Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
             Claim::Fresh(task) => *task,
         };
+        self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
+        if account.provider == Provider::Cursor {
+            if let Some(name) = model.clone() {
+                let ids = self.delegates.cursor_ids(&bin, self.launch.path_env.as_deref());
+                model = Some(crate::delegate::map_cursor_model(&ids, &name, effort.as_deref()));
+                self.delegates.set_model(&task.id, model.clone());
+            }
+            effort = None;
+        }
+        self.ensure_parent(caller.tab.as_deref(), Some(&task.id))?;
         if isolated {
             match branches::new_worktree(&cwd, self.launch.path_env.as_deref()) {
                 Ok(dir) => {
@@ -3505,6 +3524,49 @@ echo '{"type":"result","result":"ok"}'
         wait_for("mapped argv", || std::fs::read(&argv).is_ok_and(|b| String::from_utf8_lossy(&b).contains("composer-2.5-high")));
         let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
         assert_eq!(lines, vec!["-p", "--output-format", "stream-json", "--trust", "--model", "composer-2.5-high", "look"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_parent_tab_that_closes_during_startup_does_not_start_the_child() {
+        let root = temp("parent-gone");
+        let argv = root.join("argv");
+        let listing = root.join("listing");
+        let cursor = root.join("cursor-agent");
+        let body = r#"#!/bin/sh
+if [ "$1" = status ]; then echo 'Logged in as ana@acme.dev'; exit 0; fi
+if [ "$1" = "--list-models" ]; then touch "LISTING"; sleep 0.4; printf '%s\n' 'composer-2.5 - Composer'; exit 0; fi
+printf '%s\n' "$@" > "ARGV"
+echo '{"type":"result","result":"ok"}'
+"#
+        .replace("LISTING", &listing.display().to_string())
+        .replace("ARGV", &argv.display().to_string());
+        std::fs::write(&cursor, body).unwrap();
+        std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        m.close_tab(&tab);
+        let gone = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "mode": "async" })).unwrap();
+        let err = m.start_delegate(Some(tab), None, None, gone).unwrap_err();
+        assert!(err.contains("no tab"), "{err}");
+
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let mapped = crate::delegate::parse_request(&json!({
+            "task": "look",
+            "target": { "providerInstanceId": "cursor", "model": "composer-2.5" },
+            "mode": "async",
+        }))
+        .unwrap();
+        let started = m.clone();
+        let parent = tab.clone();
+        let handle = std::thread::spawn(move || started.start_delegate(Some(parent), None, None, mapped));
+        wait_for("the model list", || listing.is_file());
+        assert!(m.close_tab(&tab));
+        let err = handle.join().unwrap().unwrap_err();
+        assert!(err.contains("no tab"), "{err}");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!argv.exists(), "the child started after its parent tab closed");
         let _ = std::fs::remove_dir_all(root);
     }
 

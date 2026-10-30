@@ -76,6 +76,12 @@ impl Delegates {
         }
     }
 
+    pub fn set_model(&self, id: &str, model: Option<String>) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.model = model;
+        }
+    }
+
     /// Records `pid` for a task that is still working. A task that already finished is killed now,
     /// so a cancel during startup cannot leave the child running.
     pub fn remember_pid(&self, id: &str, pid: u32) {
