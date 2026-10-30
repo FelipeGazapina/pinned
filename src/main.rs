@@ -414,6 +414,23 @@ tauri_nspanel::tauri_panel! {
     })
 }
 
+// An open panel, such as the one a file input shows, opens at the modal panel level, below the
+// status level the panel floats at, so it would open under the panel and out of reach.
+#[cfg(target_os = "macos")]
+fn raise_open_panels() {
+    use objc2_app_kit::{NSSavePanel, NSStatusWindowLevel, NSWindowDidBecomeKeyNotification};
+    use objc2_foundation::{NSNotification, NSNotificationCenter};
+    let raise = block2::RcBlock::new(|note: std::ptr::NonNull<NSNotification>| {
+        if let Some(panel) = unsafe { note.as_ref() }.object().and_then(|o| o.downcast::<NSSavePanel>().ok()) {
+            panel.setLevel(NSStatusWindowLevel + 1);
+        }
+    });
+    let observer = unsafe {
+        NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(Some(NSWindowDidBecomeKeyNotification), None, None, &raise)
+    };
+    std::mem::forget(observer);
+}
+
 // Only a nonactivating NSPanel may enter another app's fullscreen Space; a plain NSWindow
 // stays on the regular desktop no matter its level or collection behavior.
 #[cfg(target_os = "macos")]
@@ -421,6 +438,7 @@ fn pin_above_fullscreen(window: &WebviewWindow) -> tauri::Result<()> {
     use tauri_nspanel::{CollectionBehavior, PanelLevel, StyleMask, WebviewWindowExt};
     let panel = window.to_panel::<PinnedPanel>()?;
     panel.set_level(PanelLevel::Status.value());
+    raise_open_panels();
     panel
         .add_style_mask(StyleMask::empty().nonactivating_panel().value())
         .expect("nonactivating style mask rejected");

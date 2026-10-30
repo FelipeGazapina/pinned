@@ -4275,6 +4275,17 @@
                 "description": "The account its sessions run under; empty runs them under their project's.",
                 "type": "string",
                 "default": ""
+              },
+              "graph": {
+                "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Graph"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -4660,6 +4671,487 @@
               "small",
               "medium",
               "large"
+            ]
+          },
+          "Graph": {
+            "description": "Invariants, checked by `Graph::validate` at save:\n- exactly one node is a trigger, and no edge enters it;\n- every edge's `from` and `to` exist, and its `port` is one of `ports(from)`;\n- node ids are unique; names are labels, not keys;\n- `call` targets form no cycle across the connectors that hold graphs.",
+            "type": "object",
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Node"
+                }
+              },
+              "edges": {
+                "description": "Order matters: a port's edges run in this order, each branch to its end before the next.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Edge"
+                }
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ]
+          },
+          "Node": {
+            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "position": {
+                "description": "Canvas pixels of the node's center. The editor owns them.",
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "position"
+            ],
+            "oneOf": [
+              {
+                "description": "What starts a run. The walk begins at its outgoing edges.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "trigger"
+                  },
+                  "watch": {
+                    "$ref": "#/$defs/Watch"
+                  }
+                },
+                "required": [
+                  "type",
+                  "watch"
+                ]
+              },
+              {
+                "description": "One Vercel AI Gateway call that answers every question, and branches on one of them.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "classify"
+                  }
+                },
+                "$ref": "#/$defs/Classify",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "talk"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "prompt"
+                ]
+              },
+              {
+                "description": "Pings a Slack user group, by handle or id, in the run's thread.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "page"
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "group"
+                ]
+              },
+              {
+                "description": "Moves the Linear issue to the connector's `picked` column, as opening a session does today.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Walks another connector's graph inside this run, with this run's session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "call"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "Ends this branch on purpose. A port with no edge also ends its branch.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            ]
+          },
+          "Watch": {
+            "description": "The trigger kinds, without the routing a fixed-pipeline `SlackMessage` carried in `Decide`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-label"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-mention"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "description": "Runs only when another graph `call`s it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Question2": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The key the answer goes under in the run's context.",
+                "type": "string"
+              },
+              "ask": {
+                "type": "string"
+              },
+              "choices": {
+                "description": "The answers the model must pick from; empty takes free text and cannot be branched on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Choice"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "name",
+              "ask",
+              "choices"
+            ]
+          },
+          "Choice": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this choice from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "description"
+            ]
+          },
+          "PortId": {
+            "description": "A choice's stable id, or one of the fixed ports below. Reordering or renaming choices keeps edges.",
+            "type": "string"
+          },
+          "Gate": {
+            "oneOf": [
+              {
+                "description": "The port is the model's choice.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "direct"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Today's `Decide::pick`: below `unsure_below` the fallback takes it, and below `page_at` a\nchoice whose branch pages a group gives way to the likeliest quiet one, or to `nowhere`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "decide"
+                  },
+                  "unsureBelow": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "pageAt": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unsureBelow",
+                  "pageAt"
+                ]
+              }
+            ]
+          },
+          "Fallback": {
+            "oneOf": [
+              {
+                "description": "An unsure answer keeps the model's guess.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "An unsure answer takes this existing choice's port, as a `Decide` fallback category does.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "existing"
+                  },
+                  "port": {
+                    "$ref": "#/$defs/PortId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "port"
+                ]
+              },
+              {
+                "description": "An unsure answer takes an extra `fallback` port.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "extra"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Classify": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A gateway model id, as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Question2"
+                }
+              },
+              "branchOn": {
+                "description": "The name of the question whose choices are the ports. None leaves one `out` port.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "gate": {
+                "$ref": "#/$defs/Gate",
+                "default": {
+                  "kind": "direct"
+                }
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback",
+                "default": {
+                  "kind": "none"
+                }
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "questions",
+              "branchOn",
+              "gate",
+              "fallback"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
+            ]
+          },
+          "Edge": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "port": {
+                "$ref": "#/$defs/PortId"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "port",
+              "to"
             ]
           },
           "Stage": {
@@ -8911,6 +9403,17 @@
                 "description": "The account its sessions run under; empty runs them under their project's.",
                 "type": "string",
                 "default": ""
+              },
+              "graph": {
+                "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Graph"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -9275,6 +9778,482 @@
               "small",
               "medium",
               "large"
+            ]
+          },
+          "Graph": {
+            "description": "Invariants, checked by `Graph::validate` at save:\n- exactly one node is a trigger, and no edge enters it;\n- every edge's `from` and `to` exist, and its `port` is one of `ports(from)`;\n- node ids are unique; names are labels, not keys;\n- `call` targets form no cycle across the connectors that hold graphs.",
+            "type": "object",
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Node"
+                }
+              },
+              "edges": {
+                "description": "Order matters: a port's edges run in this order, each branch to its end before the next.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Edge"
+                }
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ]
+          },
+          "Node": {
+            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "position": {
+                "description": "Canvas pixels of the node's center. The editor owns them.",
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "position"
+            ],
+            "oneOf": [
+              {
+                "description": "What starts a run. The walk begins at its outgoing edges.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "trigger"
+                  },
+                  "watch": {
+                    "$ref": "#/$defs/Watch"
+                  }
+                },
+                "required": [
+                  "type",
+                  "watch"
+                ]
+              },
+              {
+                "description": "One Vercel AI Gateway call that answers every question, and branches on one of them.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "classify"
+                  }
+                },
+                "$ref": "#/$defs/Classify",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "talk"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "prompt"
+                ]
+              },
+              {
+                "description": "Pings a Slack user group, by handle or id, in the run's thread.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "page"
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "group"
+                ]
+              },
+              {
+                "description": "Moves the Linear issue to the connector's `picked` column, as opening a session does today.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Walks another connector's graph inside this run, with this run's session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "call"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "Ends this branch on purpose. A port with no edge also ends its branch.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            ]
+          },
+          "Watch": {
+            "description": "The trigger kinds, without the routing a fixed-pipeline `SlackMessage` carried in `Decide`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-label"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-mention"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "description": "Runs only when another graph `call`s it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Question2": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The key the answer goes under in the run's context.",
+                "type": "string"
+              },
+              "ask": {
+                "type": "string"
+              },
+              "choices": {
+                "description": "The answers the model must pick from; empty takes free text and cannot be branched on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Choice"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "name",
+              "ask"
+            ]
+          },
+          "Choice": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this choice from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ]
+          },
+          "PortId": {
+            "description": "A choice's stable id, or one of the fixed ports below. Reordering or renaming choices keeps edges.",
+            "type": "string"
+          },
+          "Gate": {
+            "oneOf": [
+              {
+                "description": "The port is the model's choice.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "direct"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Today's `Decide::pick`: below `unsure_below` the fallback takes it, and below `page_at` a\nchoice whose branch pages a group gives way to the likeliest quiet one, or to `nowhere`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "decide"
+                  },
+                  "unsureBelow": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "pageAt": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unsureBelow",
+                  "pageAt"
+                ]
+              }
+            ]
+          },
+          "Fallback": {
+            "oneOf": [
+              {
+                "description": "An unsure answer keeps the model's guess.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "An unsure answer takes this existing choice's port, as a `Decide` fallback category does.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "existing"
+                  },
+                  "port": {
+                    "$ref": "#/$defs/PortId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "port"
+                ]
+              },
+              {
+                "description": "An unsure answer takes an extra `fallback` port.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "extra"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Classify": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A gateway model id, as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Question2"
+                }
+              },
+              "branchOn": {
+                "description": "The name of the question whose choices are the ports. None leaves one `out` port.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "gate": {
+                "$ref": "#/$defs/Gate",
+                "default": {
+                  "kind": "direct"
+                }
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback",
+                "default": {
+                  "kind": "none"
+                }
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "questions"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
+            ]
+          },
+          "Edge": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "port": {
+                "$ref": "#/$defs/PortId"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "port",
+              "to"
             ]
           },
           "Stage": {
@@ -10752,6 +11731,17 @@
                 "description": "The account its sessions run under; empty runs them under their project's.",
                 "type": "string",
                 "default": ""
+              },
+              "graph": {
+                "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Graph"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -11137,6 +12127,487 @@
               "small",
               "medium",
               "large"
+            ]
+          },
+          "Graph": {
+            "description": "Invariants, checked by `Graph::validate` at save:\n- exactly one node is a trigger, and no edge enters it;\n- every edge's `from` and `to` exist, and its `port` is one of `ports(from)`;\n- node ids are unique; names are labels, not keys;\n- `call` targets form no cycle across the connectors that hold graphs.",
+            "type": "object",
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Node"
+                }
+              },
+              "edges": {
+                "description": "Order matters: a port's edges run in this order, each branch to its end before the next.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Edge"
+                }
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ]
+          },
+          "Node": {
+            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "position": {
+                "description": "Canvas pixels of the node's center. The editor owns them.",
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "position"
+            ],
+            "oneOf": [
+              {
+                "description": "What starts a run. The walk begins at its outgoing edges.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "trigger"
+                  },
+                  "watch": {
+                    "$ref": "#/$defs/Watch"
+                  }
+                },
+                "required": [
+                  "type",
+                  "watch"
+                ]
+              },
+              {
+                "description": "One Vercel AI Gateway call that answers every question, and branches on one of them.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "classify"
+                  }
+                },
+                "$ref": "#/$defs/Classify",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "talk"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "prompt"
+                ]
+              },
+              {
+                "description": "Pings a Slack user group, by handle or id, in the run's thread.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "page"
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "group"
+                ]
+              },
+              {
+                "description": "Moves the Linear issue to the connector's `picked` column, as opening a session does today.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Walks another connector's graph inside this run, with this run's session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "call"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "Ends this branch on purpose. A port with no edge also ends its branch.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            ]
+          },
+          "Watch": {
+            "description": "The trigger kinds, without the routing a fixed-pipeline `SlackMessage` carried in `Decide`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-label"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-mention"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "description": "Runs only when another graph `call`s it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Question2": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The key the answer goes under in the run's context.",
+                "type": "string"
+              },
+              "ask": {
+                "type": "string"
+              },
+              "choices": {
+                "description": "The answers the model must pick from; empty takes free text and cannot be branched on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Choice"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "name",
+              "ask",
+              "choices"
+            ]
+          },
+          "Choice": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this choice from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "description"
+            ]
+          },
+          "PortId": {
+            "description": "A choice's stable id, or one of the fixed ports below. Reordering or renaming choices keeps edges.",
+            "type": "string"
+          },
+          "Gate": {
+            "oneOf": [
+              {
+                "description": "The port is the model's choice.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "direct"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Today's `Decide::pick`: below `unsure_below` the fallback takes it, and below `page_at` a\nchoice whose branch pages a group gives way to the likeliest quiet one, or to `nowhere`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "decide"
+                  },
+                  "unsureBelow": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "pageAt": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unsureBelow",
+                  "pageAt"
+                ]
+              }
+            ]
+          },
+          "Fallback": {
+            "oneOf": [
+              {
+                "description": "An unsure answer keeps the model's guess.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "An unsure answer takes this existing choice's port, as a `Decide` fallback category does.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "existing"
+                  },
+                  "port": {
+                    "$ref": "#/$defs/PortId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "port"
+                ]
+              },
+              {
+                "description": "An unsure answer takes an extra `fallback` port.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "extra"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Classify": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A gateway model id, as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Question2"
+                }
+              },
+              "branchOn": {
+                "description": "The name of the question whose choices are the ports. None leaves one `out` port.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "gate": {
+                "$ref": "#/$defs/Gate",
+                "default": {
+                  "kind": "direct"
+                }
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback",
+                "default": {
+                  "kind": "none"
+                }
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "questions",
+              "branchOn",
+              "gate",
+              "fallback"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
+            ]
+          },
+          "Edge": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "port": {
+                "$ref": "#/$defs/PortId"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "port",
+              "to"
             ]
           },
           "Stage": {
@@ -12574,6 +14045,17 @@
                 "description": "The account its sessions run under; empty runs them under their project's.",
                 "type": "string",
                 "default": ""
+              },
+              "graph": {
+                "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Graph"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -12940,6 +14422,482 @@
               "large"
             ]
           },
+          "Graph": {
+            "description": "Invariants, checked by `Graph::validate` at save:\n- exactly one node is a trigger, and no edge enters it;\n- every edge's `from` and `to` exist, and its `port` is one of `ports(from)`;\n- node ids are unique; names are labels, not keys;\n- `call` targets form no cycle across the connectors that hold graphs.",
+            "type": "object",
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Node"
+                }
+              },
+              "edges": {
+                "description": "Order matters: a port's edges run in this order, each branch to its end before the next.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Edge"
+                }
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ]
+          },
+          "Node": {
+            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "position": {
+                "description": "Canvas pixels of the node's center. The editor owns them.",
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "position"
+            ],
+            "oneOf": [
+              {
+                "description": "What starts a run. The walk begins at its outgoing edges.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "trigger"
+                  },
+                  "watch": {
+                    "$ref": "#/$defs/Watch"
+                  }
+                },
+                "required": [
+                  "type",
+                  "watch"
+                ]
+              },
+              {
+                "description": "One Vercel AI Gateway call that answers every question, and branches on one of them.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "classify"
+                  }
+                },
+                "$ref": "#/$defs/Classify",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "talk"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "prompt"
+                ]
+              },
+              {
+                "description": "Pings a Slack user group, by handle or id, in the run's thread.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "page"
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "group"
+                ]
+              },
+              {
+                "description": "Moves the Linear issue to the connector's `picked` column, as opening a session does today.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Walks another connector's graph inside this run, with this run's session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "call"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "Ends this branch on purpose. A port with no edge also ends its branch.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            ]
+          },
+          "Watch": {
+            "description": "The trigger kinds, without the routing a fixed-pipeline `SlackMessage` carried in `Decide`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-label"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-mention"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "description": "Runs only when another graph `call`s it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Question2": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The key the answer goes under in the run's context.",
+                "type": "string"
+              },
+              "ask": {
+                "type": "string"
+              },
+              "choices": {
+                "description": "The answers the model must pick from; empty takes free text and cannot be branched on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Choice"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "name",
+              "ask"
+            ]
+          },
+          "Choice": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this choice from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ]
+          },
+          "PortId": {
+            "description": "A choice's stable id, or one of the fixed ports below. Reordering or renaming choices keeps edges.",
+            "type": "string"
+          },
+          "Gate": {
+            "oneOf": [
+              {
+                "description": "The port is the model's choice.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "direct"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Today's `Decide::pick`: below `unsure_below` the fallback takes it, and below `page_at` a\nchoice whose branch pages a group gives way to the likeliest quiet one, or to `nowhere`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "decide"
+                  },
+                  "unsureBelow": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "pageAt": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unsureBelow",
+                  "pageAt"
+                ]
+              }
+            ]
+          },
+          "Fallback": {
+            "oneOf": [
+              {
+                "description": "An unsure answer keeps the model's guess.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "An unsure answer takes this existing choice's port, as a `Decide` fallback category does.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "existing"
+                  },
+                  "port": {
+                    "$ref": "#/$defs/PortId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "port"
+                ]
+              },
+              {
+                "description": "An unsure answer takes an extra `fallback` port.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "extra"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Classify": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A gateway model id, as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Question2"
+                }
+              },
+              "branchOn": {
+                "description": "The name of the question whose choices are the ports. None leaves one `out` port.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "gate": {
+                "$ref": "#/$defs/Gate",
+                "default": {
+                  "kind": "direct"
+                }
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback",
+                "default": {
+                  "kind": "none"
+                }
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "questions"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
+            ]
+          },
+          "Edge": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "port": {
+                "$ref": "#/$defs/PortId"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "port",
+              "to"
+            ]
+          },
           "Stage": {
             "description": "Where a connector's session is in its work on an issue. Each stage maps to a Linear column.",
             "oneOf": [
@@ -13287,6 +15245,17 @@
             "description": "The account its sessions run under; empty runs them under their project's.",
             "type": "string",
             "default": ""
+          },
+          "graph": {
+            "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Graph"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -13673,6 +15642,487 @@
               "medium",
               "large"
             ]
+          },
+          "Graph": {
+            "description": "Invariants, checked by `Graph::validate` at save:\n- exactly one node is a trigger, and no edge enters it;\n- every edge's `from` and `to` exist, and its `port` is one of `ports(from)`;\n- node ids are unique; names are labels, not keys;\n- `call` targets form no cycle across the connectors that hold graphs.",
+            "type": "object",
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Node"
+                }
+              },
+              "edges": {
+                "description": "Order matters: a port's edges run in this order, each branch to its end before the next.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Edge"
+                }
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ]
+          },
+          "Node": {
+            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "position": {
+                "description": "Canvas pixels of the node's center. The editor owns them.",
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "position"
+            ],
+            "oneOf": [
+              {
+                "description": "What starts a run. The walk begins at its outgoing edges.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "trigger"
+                  },
+                  "watch": {
+                    "$ref": "#/$defs/Watch"
+                  }
+                },
+                "required": [
+                  "type",
+                  "watch"
+                ]
+              },
+              {
+                "description": "One Vercel AI Gateway call that answers every question, and branches on one of them.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "classify"
+                  }
+                },
+                "$ref": "#/$defs/Classify",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "talk"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "prompt"
+                ]
+              },
+              {
+                "description": "Pings a Slack user group, by handle or id, in the run's thread.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "page"
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "group"
+                ]
+              },
+              {
+                "description": "Moves the Linear issue to the connector's `picked` column, as opening a session does today.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Walks another connector's graph inside this run, with this run's session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "call"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "Ends this branch on purpose. A port with no edge also ends its branch.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            ]
+          },
+          "Watch": {
+            "description": "The trigger kinds, without the routing a fixed-pipeline `SlackMessage` carried in `Decide`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-label"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-mention"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "description": "Runs only when another graph `call`s it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Question2": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The key the answer goes under in the run's context.",
+                "type": "string"
+              },
+              "ask": {
+                "type": "string"
+              },
+              "choices": {
+                "description": "The answers the model must pick from; empty takes free text and cannot be branched on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Choice"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "name",
+              "ask",
+              "choices"
+            ]
+          },
+          "Choice": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this choice from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "description"
+            ]
+          },
+          "PortId": {
+            "description": "A choice's stable id, or one of the fixed ports below. Reordering or renaming choices keeps edges.",
+            "type": "string"
+          },
+          "Gate": {
+            "oneOf": [
+              {
+                "description": "The port is the model's choice.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "direct"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Today's `Decide::pick`: below `unsure_below` the fallback takes it, and below `page_at` a\nchoice whose branch pages a group gives way to the likeliest quiet one, or to `nowhere`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "decide"
+                  },
+                  "unsureBelow": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "pageAt": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unsureBelow",
+                  "pageAt"
+                ]
+              }
+            ]
+          },
+          "Fallback": {
+            "oneOf": [
+              {
+                "description": "An unsure answer keeps the model's guess.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "An unsure answer takes this existing choice's port, as a `Decide` fallback category does.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "existing"
+                  },
+                  "port": {
+                    "$ref": "#/$defs/PortId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "port"
+                ]
+              },
+              {
+                "description": "An unsure answer takes an extra `fallback` port.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "extra"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Classify": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A gateway model id, as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Question2"
+                }
+              },
+              "branchOn": {
+                "description": "The name of the question whose choices are the ports. None leaves one `out` port.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "gate": {
+                "$ref": "#/$defs/Gate",
+                "default": {
+                  "kind": "direct"
+                }
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback",
+                "default": {
+                  "kind": "none"
+                }
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "questions",
+              "branchOn",
+              "gate",
+              "fallback"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
+            ]
+          },
+          "Edge": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "port": {
+                "$ref": "#/$defs/PortId"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "port",
+              "to"
+            ]
           }
         }
       },
@@ -13801,6 +16251,17 @@
             "description": "The account its sessions run under; empty runs them under their project's.",
             "type": "string",
             "default": ""
+          },
+          "graph": {
+            "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Graph"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -14165,6 +16626,482 @@
               "small",
               "medium",
               "large"
+            ]
+          },
+          "Graph": {
+            "description": "Invariants, checked by `Graph::validate` at save:\n- exactly one node is a trigger, and no edge enters it;\n- every edge's `from` and `to` exist, and its `port` is one of `ports(from)`;\n- node ids are unique; names are labels, not keys;\n- `call` targets form no cycle across the connectors that hold graphs.",
+            "type": "object",
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Node"
+                }
+              },
+              "edges": {
+                "description": "Order matters: a port's edges run in this order, each branch to its end before the next.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Edge"
+                }
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ]
+          },
+          "Node": {
+            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "position": {
+                "description": "Canvas pixels of the node's center. The editor owns them.",
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "position"
+            ],
+            "oneOf": [
+              {
+                "description": "What starts a run. The walk begins at its outgoing edges.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "trigger"
+                  },
+                  "watch": {
+                    "$ref": "#/$defs/Watch"
+                  }
+                },
+                "required": [
+                  "type",
+                  "watch"
+                ]
+              },
+              {
+                "description": "One Vercel AI Gateway call that answers every question, and branches on one of them.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "classify"
+                  }
+                },
+                "$ref": "#/$defs/Classify",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "talk"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "prompt"
+                ]
+              },
+              {
+                "description": "Pings a Slack user group, by handle or id, in the run's thread.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "page"
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "group"
+                ]
+              },
+              {
+                "description": "Moves the Linear issue to the connector's `picked` column, as opening a session does today.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Walks another connector's graph inside this run, with this run's session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "call"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "Ends this branch on purpose. A port with no edge also ends its branch.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            ]
+          },
+          "Watch": {
+            "description": "The trigger kinds, without the routing a fixed-pipeline `SlackMessage` carried in `Decide`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-label"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-mention"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "description": "Runs only when another graph `call`s it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Question2": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The key the answer goes under in the run's context.",
+                "type": "string"
+              },
+              "ask": {
+                "type": "string"
+              },
+              "choices": {
+                "description": "The answers the model must pick from; empty takes free text and cannot be branched on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Choice"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "name",
+              "ask"
+            ]
+          },
+          "Choice": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this choice from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ]
+          },
+          "PortId": {
+            "description": "A choice's stable id, or one of the fixed ports below. Reordering or renaming choices keeps edges.",
+            "type": "string"
+          },
+          "Gate": {
+            "oneOf": [
+              {
+                "description": "The port is the model's choice.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "direct"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Today's `Decide::pick`: below `unsure_below` the fallback takes it, and below `page_at` a\nchoice whose branch pages a group gives way to the likeliest quiet one, or to `nowhere`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "decide"
+                  },
+                  "unsureBelow": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "pageAt": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unsureBelow",
+                  "pageAt"
+                ]
+              }
+            ]
+          },
+          "Fallback": {
+            "oneOf": [
+              {
+                "description": "An unsure answer keeps the model's guess.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "An unsure answer takes this existing choice's port, as a `Decide` fallback category does.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "existing"
+                  },
+                  "port": {
+                    "$ref": "#/$defs/PortId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "port"
+                ]
+              },
+              {
+                "description": "An unsure answer takes an extra `fallback` port.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "extra"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Classify": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A gateway model id, as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Question2"
+                }
+              },
+              "branchOn": {
+                "description": "The name of the question whose choices are the ports. None leaves one `out` port.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "gate": {
+                "$ref": "#/$defs/Gate",
+                "default": {
+                  "kind": "direct"
+                }
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback",
+                "default": {
+                  "kind": "none"
+                }
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "questions"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
+            ]
+          },
+          "Edge": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "port": {
+                "$ref": "#/$defs/PortId"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "port",
+              "to"
             ]
           }
         }
@@ -15295,6 +18232,17 @@
                 "description": "The account its sessions run under; empty runs them under their project's.",
                 "type": "string",
                 "default": ""
+              },
+              "graph": {
+                "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Graph"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -15682,6 +18630,487 @@
               "large"
             ]
           },
+          "Graph": {
+            "description": "Invariants, checked by `Graph::validate` at save:\n- exactly one node is a trigger, and no edge enters it;\n- every edge's `from` and `to` exist, and its `port` is one of `ports(from)`;\n- node ids are unique; names are labels, not keys;\n- `call` targets form no cycle across the connectors that hold graphs.",
+            "type": "object",
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Node"
+                }
+              },
+              "edges": {
+                "description": "Order matters: a port's edges run in this order, each branch to its end before the next.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Edge"
+                }
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ]
+          },
+          "Node": {
+            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "position": {
+                "description": "Canvas pixels of the node's center. The editor owns them.",
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "position"
+            ],
+            "oneOf": [
+              {
+                "description": "What starts a run. The walk begins at its outgoing edges.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "trigger"
+                  },
+                  "watch": {
+                    "$ref": "#/$defs/Watch"
+                  }
+                },
+                "required": [
+                  "type",
+                  "watch"
+                ]
+              },
+              {
+                "description": "One Vercel AI Gateway call that answers every question, and branches on one of them.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "classify"
+                  }
+                },
+                "$ref": "#/$defs/Classify",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "talk"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "prompt"
+                ]
+              },
+              {
+                "description": "Pings a Slack user group, by handle or id, in the run's thread.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "page"
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "group"
+                ]
+              },
+              {
+                "description": "Moves the Linear issue to the connector's `picked` column, as opening a session does today.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Walks another connector's graph inside this run, with this run's session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "call"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "Ends this branch on purpose. A port with no edge also ends its branch.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            ]
+          },
+          "Watch": {
+            "description": "The trigger kinds, without the routing a fixed-pipeline `SlackMessage` carried in `Decide`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-label"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-mention"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "description": "Runs only when another graph `call`s it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Question2": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The key the answer goes under in the run's context.",
+                "type": "string"
+              },
+              "ask": {
+                "type": "string"
+              },
+              "choices": {
+                "description": "The answers the model must pick from; empty takes free text and cannot be branched on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Choice"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "name",
+              "ask",
+              "choices"
+            ]
+          },
+          "Choice": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this choice from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "description"
+            ]
+          },
+          "PortId": {
+            "description": "A choice's stable id, or one of the fixed ports below. Reordering or renaming choices keeps edges.",
+            "type": "string"
+          },
+          "Gate": {
+            "oneOf": [
+              {
+                "description": "The port is the model's choice.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "direct"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Today's `Decide::pick`: below `unsure_below` the fallback takes it, and below `page_at` a\nchoice whose branch pages a group gives way to the likeliest quiet one, or to `nowhere`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "decide"
+                  },
+                  "unsureBelow": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "pageAt": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unsureBelow",
+                  "pageAt"
+                ]
+              }
+            ]
+          },
+          "Fallback": {
+            "oneOf": [
+              {
+                "description": "An unsure answer keeps the model's guess.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "An unsure answer takes this existing choice's port, as a `Decide` fallback category does.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "existing"
+                  },
+                  "port": {
+                    "$ref": "#/$defs/PortId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "port"
+                ]
+              },
+              {
+                "description": "An unsure answer takes an extra `fallback` port.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "extra"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Classify": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A gateway model id, as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Question2"
+                }
+              },
+              "branchOn": {
+                "description": "The name of the question whose choices are the ports. None leaves one `out` port.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "gate": {
+                "$ref": "#/$defs/Gate",
+                "default": {
+                  "kind": "direct"
+                }
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback",
+                "default": {
+                  "kind": "none"
+                }
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "questions",
+              "branchOn",
+              "gate",
+              "fallback"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
+            ]
+          },
+          "Edge": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "port": {
+                "$ref": "#/$defs/PortId"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "port",
+              "to"
+            ]
+          },
           "Check": {
             "type": "object",
             "properties": {
@@ -15988,6 +19417,17 @@
                 "description": "The account its sessions run under; empty runs them under their project's.",
                 "type": "string",
                 "default": ""
+              },
+              "graph": {
+                "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Graph"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -16352,6 +19792,482 @@
               "small",
               "medium",
               "large"
+            ]
+          },
+          "Graph": {
+            "description": "Invariants, checked by `Graph::validate` at save:\n- exactly one node is a trigger, and no edge enters it;\n- every edge's `from` and `to` exist, and its `port` is one of `ports(from)`;\n- node ids are unique; names are labels, not keys;\n- `call` targets form no cycle across the connectors that hold graphs.",
+            "type": "object",
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Node"
+                }
+              },
+              "edges": {
+                "description": "Order matters: a port's edges run in this order, each branch to its end before the next.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Edge"
+                }
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ]
+          },
+          "Node": {
+            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "position": {
+                "description": "Canvas pixels of the node's center. The editor owns them.",
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "position"
+            ],
+            "oneOf": [
+              {
+                "description": "What starts a run. The walk begins at its outgoing edges.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "trigger"
+                  },
+                  "watch": {
+                    "$ref": "#/$defs/Watch"
+                  }
+                },
+                "required": [
+                  "type",
+                  "watch"
+                ]
+              },
+              {
+                "description": "One Vercel AI Gateway call that answers every question, and branches on one of them.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "classify"
+                  }
+                },
+                "$ref": "#/$defs/Classify",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "talk"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "prompt"
+                ]
+              },
+              {
+                "description": "Pings a Slack user group, by handle or id, in the run's thread.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "page"
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "group"
+                ]
+              },
+              {
+                "description": "Moves the Linear issue to the connector's `picked` column, as opening a session does today.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Walks another connector's graph inside this run, with this run's session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "call"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "Ends this branch on purpose. A port with no edge also ends its branch.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            ]
+          },
+          "Watch": {
+            "description": "The trigger kinds, without the routing a fixed-pipeline `SlackMessage` carried in `Decide`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-label"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-mention"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "description": "Runs only when another graph `call`s it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Question2": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The key the answer goes under in the run's context.",
+                "type": "string"
+              },
+              "ask": {
+                "type": "string"
+              },
+              "choices": {
+                "description": "The answers the model must pick from; empty takes free text and cannot be branched on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Choice"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "name",
+              "ask"
+            ]
+          },
+          "Choice": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this choice from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ]
+          },
+          "PortId": {
+            "description": "A choice's stable id, or one of the fixed ports below. Reordering or renaming choices keeps edges.",
+            "type": "string"
+          },
+          "Gate": {
+            "oneOf": [
+              {
+                "description": "The port is the model's choice.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "direct"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Today's `Decide::pick`: below `unsure_below` the fallback takes it, and below `page_at` a\nchoice whose branch pages a group gives way to the likeliest quiet one, or to `nowhere`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "decide"
+                  },
+                  "unsureBelow": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "pageAt": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unsureBelow",
+                  "pageAt"
+                ]
+              }
+            ]
+          },
+          "Fallback": {
+            "oneOf": [
+              {
+                "description": "An unsure answer keeps the model's guess.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "An unsure answer takes this existing choice's port, as a `Decide` fallback category does.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "existing"
+                  },
+                  "port": {
+                    "$ref": "#/$defs/PortId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "port"
+                ]
+              },
+              {
+                "description": "An unsure answer takes an extra `fallback` port.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "extra"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Classify": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A gateway model id, as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Question2"
+                }
+              },
+              "branchOn": {
+                "description": "The name of the question whose choices are the ports. None leaves one `out` port.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "gate": {
+                "$ref": "#/$defs/Gate",
+                "default": {
+                  "kind": "direct"
+                }
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback",
+                "default": {
+                  "kind": "none"
+                }
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "questions"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
+            ]
+          },
+          "Edge": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "port": {
+                "$ref": "#/$defs/PortId"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "port",
+              "to"
             ]
           },
           "Check": {
@@ -18132,6 +22048,17 @@
                 "description": "The account its sessions run under; empty runs them under their project's.",
                 "type": "string",
                 "default": ""
+              },
+              "graph": {
+                "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Graph"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -18517,6 +22444,487 @@
               "small",
               "medium",
               "large"
+            ]
+          },
+          "Graph": {
+            "description": "Invariants, checked by `Graph::validate` at save:\n- exactly one node is a trigger, and no edge enters it;\n- every edge's `from` and `to` exist, and its `port` is one of `ports(from)`;\n- node ids are unique; names are labels, not keys;\n- `call` targets form no cycle across the connectors that hold graphs.",
+            "type": "object",
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Node"
+                }
+              },
+              "edges": {
+                "description": "Order matters: a port's edges run in this order, each branch to its end before the next.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Edge"
+                }
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ]
+          },
+          "Node": {
+            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "position": {
+                "description": "Canvas pixels of the node's center. The editor owns them.",
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "position"
+            ],
+            "oneOf": [
+              {
+                "description": "What starts a run. The walk begins at its outgoing edges.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "trigger"
+                  },
+                  "watch": {
+                    "$ref": "#/$defs/Watch"
+                  }
+                },
+                "required": [
+                  "type",
+                  "watch"
+                ]
+              },
+              {
+                "description": "One Vercel AI Gateway call that answers every question, and branches on one of them.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "classify"
+                  }
+                },
+                "$ref": "#/$defs/Classify",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "talk"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "prompt"
+                ]
+              },
+              {
+                "description": "Pings a Slack user group, by handle or id, in the run's thread.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "page"
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "group"
+                ]
+              },
+              {
+                "description": "Moves the Linear issue to the connector's `picked` column, as opening a session does today.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Walks another connector's graph inside this run, with this run's session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "call"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "Ends this branch on purpose. A port with no edge also ends its branch.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            ]
+          },
+          "Watch": {
+            "description": "The trigger kinds, without the routing a fixed-pipeline `SlackMessage` carried in `Decide`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-label"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-mention"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "description": "Runs only when another graph `call`s it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Question2": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The key the answer goes under in the run's context.",
+                "type": "string"
+              },
+              "ask": {
+                "type": "string"
+              },
+              "choices": {
+                "description": "The answers the model must pick from; empty takes free text and cannot be branched on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Choice"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "name",
+              "ask",
+              "choices"
+            ]
+          },
+          "Choice": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this choice from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "description"
+            ]
+          },
+          "PortId": {
+            "description": "A choice's stable id, or one of the fixed ports below. Reordering or renaming choices keeps edges.",
+            "type": "string"
+          },
+          "Gate": {
+            "oneOf": [
+              {
+                "description": "The port is the model's choice.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "direct"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Today's `Decide::pick`: below `unsure_below` the fallback takes it, and below `page_at` a\nchoice whose branch pages a group gives way to the likeliest quiet one, or to `nowhere`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "decide"
+                  },
+                  "unsureBelow": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "pageAt": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unsureBelow",
+                  "pageAt"
+                ]
+              }
+            ]
+          },
+          "Fallback": {
+            "oneOf": [
+              {
+                "description": "An unsure answer keeps the model's guess.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "An unsure answer takes this existing choice's port, as a `Decide` fallback category does.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "existing"
+                  },
+                  "port": {
+                    "$ref": "#/$defs/PortId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "port"
+                ]
+              },
+              {
+                "description": "An unsure answer takes an extra `fallback` port.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "extra"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Classify": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A gateway model id, as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Question2"
+                }
+              },
+              "branchOn": {
+                "description": "The name of the question whose choices are the ports. None leaves one `out` port.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "gate": {
+                "$ref": "#/$defs/Gate",
+                "default": {
+                  "kind": "direct"
+                }
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback",
+                "default": {
+                  "kind": "none"
+                }
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "questions",
+              "branchOn",
+              "gate",
+              "fallback"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
+            ]
+          },
+          "Edge": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "port": {
+                "$ref": "#/$defs/PortId"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "port",
+              "to"
             ]
           },
           "Check": {
@@ -19480,6 +23888,17 @@
                 "description": "The account its sessions run under; empty runs them under their project's.",
                 "type": "string",
                 "default": ""
+              },
+              "graph": {
+                "description": "The workflow drawn as a graph. None runs the fixed pipeline the fields above describe.\nOlder apps neither send nor read it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Graph"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -19844,6 +24263,482 @@
               "small",
               "medium",
               "large"
+            ]
+          },
+          "Graph": {
+            "description": "Invariants, checked by `Graph::validate` at save:\n- exactly one node is a trigger, and no edge enters it;\n- every edge's `from` and `to` exist, and its `port` is one of `ports(from)`;\n- node ids are unique; names are labels, not keys;\n- `call` targets form no cycle across the connectors that hold graphs.",
+            "type": "object",
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Node"
+                }
+              },
+              "edges": {
+                "description": "Order matters: a port's edges run in this order, each branch to its end before the next.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Edge"
+                }
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ]
+          },
+          "Node": {
+            "description": "Everything a node can be. Coding and review moves, the Slack reply, filing a Linear issue and the\nproof video are not nodes: the session does them through `pinned` callbacks, and the connector's\n`columns`, `fix` and `proof` still describe them, so nothing else writes the same state.\n\nSlack follow-ups in the thread are not a node either. While the run's session is open, new\nthread messages are typed into it, as today.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "position": {
+                "description": "Canvas pixels of the node's center. The editor owns them.",
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "position"
+            ],
+            "oneOf": [
+              {
+                "description": "What starts a run. The walk begins at its outgoing edges.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "trigger"
+                  },
+                  "watch": {
+                    "$ref": "#/$defs/Watch"
+                  }
+                },
+                "required": [
+                  "type",
+                  "watch"
+                ]
+              },
+              {
+                "description": "One Vercel AI Gateway call that answers every question, and branches on one of them.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "classify"
+                  }
+                },
+                "$ref": "#/$defs/Classify",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Branches on an answer an earlier classify already gave. No model call.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "switch"
+                  }
+                },
+                "$ref": "#/$defs/Switch",
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Tells the run's one Claude session something. The first `talk` of a run opens the session\nwith the session owner's settings; every later one, on any branch, types into it.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "talk"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "prompt"
+                ]
+              },
+              {
+                "description": "Pings a Slack user group, by handle or id, in the run's thread.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "page"
+                  },
+                  "group": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "group"
+                ]
+              },
+              {
+                "description": "Moves the Linear issue to the connector's `picked` column, as opening a session does today.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stage-picked"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              {
+                "description": "Walks another connector's graph inside this run, with this run's session.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "call"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "Ends this branch on purpose. A port with no edge also ends its branch.",
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              }
+            ]
+          },
+          "Watch": {
+            "description": "The trigger kinds, without the routing a fixed-pipeline `SlackMessage` carried in `Decide`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-label"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-mention"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "slack-message"
+                  },
+                  "channel": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channel"
+                ]
+              },
+              {
+                "description": "Runs only when another graph `call`s it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Question2": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The key the answer goes under in the run's context.",
+                "type": "string"
+              },
+              "ask": {
+                "type": "string"
+              },
+              "choices": {
+                "description": "The answers the model must pick from; empty takes free text and cannot be branched on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Choice"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "name",
+              "ask"
+            ]
+          },
+          "Choice": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this choice from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ]
+          },
+          "PortId": {
+            "description": "A choice's stable id, or one of the fixed ports below. Reordering or renaming choices keeps edges.",
+            "type": "string"
+          },
+          "Gate": {
+            "oneOf": [
+              {
+                "description": "The port is the model's choice.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "direct"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Today's `Decide::pick`: below `unsure_below` the fallback takes it, and below `page_at` a\nchoice whose branch pages a group gives way to the likeliest quiet one, or to `nowhere`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "decide"
+                  },
+                  "unsureBelow": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "pageAt": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unsureBelow",
+                  "pageAt"
+                ]
+              }
+            ]
+          },
+          "Fallback": {
+            "oneOf": [
+              {
+                "description": "An unsure answer keeps the model's guess.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "An unsure answer takes this existing choice's port, as a `Decide` fallback category does.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "existing"
+                  },
+                  "port": {
+                    "$ref": "#/$defs/PortId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "port"
+                ]
+              },
+              {
+                "description": "An unsure answer takes an extra `fallback` port.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "extra"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Classify": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A gateway model id, as `typesafe-ai/jev`.",
+                "type": "string"
+              },
+              "instructions": {
+                "type": "string"
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Question2"
+                }
+              },
+              "branchOn": {
+                "description": "The name of the question whose choices are the ports. None leaves one `out` port.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "gate": {
+                "$ref": "#/$defs/Gate",
+                "default": {
+                  "kind": "direct"
+                }
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback",
+                "default": {
+                  "kind": "none"
+                }
+              }
+            },
+            "required": [
+              "model",
+              "instructions",
+              "questions"
+            ]
+          },
+          "Case": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PortId"
+              },
+              "equals": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "equals"
+            ]
+          },
+          "Switch": {
+            "description": "Reads one answer from `classify` and takes the first case that matches, ignoring ASCII case.",
+            "type": "object",
+            "properties": {
+              "classify": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              },
+              "cases": {
+                "description": "In order. The first `equals` that matches the answer wins.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Case"
+                }
+              }
+            },
+            "required": [
+              "classify",
+              "question",
+              "cases"
+            ]
+          },
+          "Edge": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "port": {
+                "$ref": "#/$defs/PortId"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "port",
+              "to"
             ]
           },
           "Check": {

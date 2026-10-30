@@ -11,6 +11,7 @@ pub mod evidence;
 pub mod favicon;
 pub mod files;
 pub mod github;
+pub mod graph;
 pub mod history;
 pub mod hooks;
 pub mod ipc;
