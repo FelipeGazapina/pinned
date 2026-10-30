@@ -1448,6 +1448,22 @@ impl Machine {
         self.delegates.cancel(&caller, id, reason, self.launch.path_env.as_deref()).map(|value| value.to_string())
     }
 
+    /// A cancel or a quit landed while startup still had no child process. `unplaced` is a worktree
+    /// directory that is not on the task yet, so cancelling the task would not remove it.
+    fn startup_stopped(&self, id: &str, unplaced: Option<&Path>) -> bool {
+        let stop = self.quitting.load(Ordering::SeqCst) || self.delegates.is_terminal(id);
+        if !stop {
+            return false;
+        }
+        if let Some(dir) = unplaced {
+            branches::drop_worktree(dir, self.launch.path_env.as_deref());
+        }
+        if !self.delegates.is_terminal(id) {
+            let _ = self.delegates.cancel_tree(id, "pinned is shutting down", self.launch.path_env.as_deref());
+        }
+        true
+    }
+
     /// The parent tab must still be open. A task claimed for a tab that closed is cancelled, so
     /// the catalog wait cannot leave a child whose parent is already gone.
     fn ensure_parent(&self, tab: Option<&str>, task: Option<&str>) -> Result<(), String> {
@@ -1528,8 +1544,7 @@ impl Machine {
         if isolated {
             match branches::new_worktree(&cwd, self.launch.path_env.as_deref()) {
                 Ok(dir) => {
-                    if self.delegates.is_terminal(&task.id) {
-                        branches::drop_worktree(&dir, self.launch.path_env.as_deref());
+                    if self.startup_stopped(&task.id, Some(&dir)) {
                         return self.delegates.started_json(&task.id).map(|value| value.to_string());
                     }
                     cwd = dir;
@@ -1541,7 +1556,7 @@ impl Machine {
                 }
             }
         }
-        if self.quitting.load(Ordering::SeqCst) || self.delegates.is_terminal(&task.id) {
+        if self.startup_stopped(&task.id, None) {
             return self.delegates.started_json(&task.id).map(|value| value.to_string());
         }
         let argv = driver_args(
@@ -3568,6 +3583,95 @@ echo '{"type":"result","result":"ok"}'
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(!argv.exists(), "the child started after its parent tab closed");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    fn blocking_git(dir: &Path, started: &Path, go: &Path) -> String {
+        let real = String::from_utf8(std::process::Command::new("/bin/sh").args(["-c", "command -v git"]).output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let bin = dir.join("git-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let body = format!(
+            "#!/bin/sh\nexport PATH=\"/usr/bin:/bin:/opt/homebrew/bin\"\nif [ \"$1\" = worktree ] && [ \"$2\" = add ]; then\n  /usr/bin/touch \"{}\"\n  while [ ! -f \"{}\" ]; do /bin/sleep 0.02; done\nfi\nexec \"{}\" \"$@\"\n",
+            started.display(),
+            go.display(),
+            real
+        );
+        std::fs::write(bin.join("git"), body).unwrap();
+        std::fs::set_permissions(bin.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        bin.display().to_string()
+    }
+
+    #[cfg(unix)]
+    fn worktree_left_during_setup(quit: bool) {
+        let root = temp(if quit { "wt-quit" } else { "wt-cancel" });
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let started = root.join("adding");
+        let go = root.join("go");
+        let argv = root.join("argv");
+        let claude = root.join("claude");
+        let body = r#"#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ]; then echo '{"loggedIn":true,"email":"ana@acme.dev"}'; exit 0; fi
+printf '%s\n' "$@" > "ARGV"
+echo '{"type":"result","result":"ok"}'
+"#
+        .replace("ARGV", &argv.display().to_string());
+        std::fs::write(&claude, body).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path = blocking_git(&root, &started, &go);
+        let m = Machine::new(
+            Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), path_env: Some(path), ..launch() },
+            None,
+            Some(repo.clone()),
+            |_| {},
+        );
+        let tab = m.add_tab(repo.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let request = crate::delegate::parse_request(&json!({ "task": "look", "isolation": "worktree", "mode": "async" })).unwrap();
+        let worker = m.clone();
+        let parent = tab.clone();
+        let handle = std::thread::spawn(move || worker.start_delegate(Some(parent), None, None, request));
+        let began = Instant::now();
+        while !started.is_file() {
+            if handle.is_finished() {
+                panic!("startup ended before worktree add: {:?}", handle.join().unwrap());
+            }
+            assert!(began.elapsed() < Duration::from_secs(5), "timed out waiting for worktree add");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if quit {
+            m.quit();
+        } else {
+            let id = m.delegates.running().into_iter().next().expect("the task was claimed");
+            m.delegates
+                .cancel(&crate::delegate::Caller { tab: Some(tab), task: None }, &id, "stop", m.launch().path_env.as_deref())
+                .unwrap();
+        }
+        std::fs::write(&go, "").unwrap();
+        let body = handle.join().unwrap().expect("startup returned an error");
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["workState"], "cancelled");
+        let trees = repo.join(".claude/worktrees");
+        let left = std::fs::read_dir(&trees).map(|entries| entries.count()).unwrap_or(0);
+        assert_eq!(left, 0, "a worktree was left behind");
+        assert!(!argv.is_file(), "the child started after startup was abandoned");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_cancel_during_worktree_setup_drops_the_directory_and_cancels_the_task() {
+        worktree_left_during_setup(false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_quit_during_worktree_setup_drops_the_directory_and_cancels_the_task() {
+        worktree_left_during_setup(true);
     }
 
     #[test]
