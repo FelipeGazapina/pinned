@@ -14,7 +14,7 @@ A machine that already has those bytes, and cannot execute them while the hub ca
 
 An old hub omits `executable`. A new client then sends no repair. An old client still sends a full file push when it wants to repair the mode, and a new hub stores that push as a content write. A new client and a new hub use the repair call.
 
-`chmod` on the install reaches the other machines even when it does not change the modification time. The mirror copies that mode change. The receiver adds owner execute only. It does not add group or other execute.
+`chmod` on the install reaches the other machines even when it does not change the modification time. The mirror copies that mode change. The owner bit is what counts. A mode with group or other execute, and without owner execute, gains the owner bit before it is published. The receiver adds owner execute only. It does not add group or other execute.
 
 Sessions, memory, project skills, and history do not carry the bit. They are not hook scripts. Windows does not read or apply the bit.
 
