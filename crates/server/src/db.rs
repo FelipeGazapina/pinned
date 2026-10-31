@@ -341,7 +341,6 @@ impl Db {
         Ok((view, token.text))
     }
 
-    /// The machine a token belongs to, recording that it just connected from `os` on `version`.
     pub async fn machine_connected(&self, token: &str, os: &str, version: &str) -> Result<Option<MachineRow>, String> {
         let row = self
             .client().await?

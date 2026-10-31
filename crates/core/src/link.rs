@@ -57,7 +57,6 @@ impl Shared {
         out.is_some_and(|out| out.send(Outgoing { text: serde_json::to_string(frame).unwrap(), wrote: None }).is_ok())
     }
 
-    /// Blocks until the socket loop has written `frame`, or five seconds. False when offline or on timeout.
     fn send_flushed(&self, frame: &MachineFrame) -> bool {
         let Some(out) = self.out.lock().unwrap().clone() else { return false };
         let (wrote, written) = mpsc::channel();
@@ -336,7 +335,6 @@ fn finish_call(shared: &Shared, machine: &Machine, id: u64, call: Call) {
     let result = machine.call(call);
     let frame = MachineFrame::Reply(Reply::new(id, result));
     if machine.restart_pending() {
-        // A timeout still restarts: the alternative is a swapped binary that never comes back.
         let _ = shared.send_flushed(&frame);
         machine.restart_now();
     } else {

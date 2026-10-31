@@ -395,7 +395,6 @@ impl Default for Gate {
     }
 }
 
-/// Clears the gate unless a restart was already reported, so a panic can be pressed again and a committed restart cannot.
 struct Busy<'a> {
     machine: &'a Machine,
 }
@@ -488,7 +487,6 @@ impl Machine {
         self.listeners.lock().unwrap().retain(|(l, _)| *l != id);
     }
 
-    /// The `Arc` this machine was created as. An installer that hops to another thread needs it.
     pub fn arc(&self) -> Arc<Machine> {
         self.me.upgrade().unwrap()
     }
@@ -497,8 +495,6 @@ impl Machine {
         self.gate.lock().unwrap().installer = Some(installer);
     }
 
-    /// The link sets this so `report` blocks until the socket write finishes.
-    /// A connect snapshot must not use it: that send runs on the socket loop.
     pub fn set_flusher(&self, flush: Arc<dyn Fn(&MachineEvent) -> bool + Send + Sync>) {
         self.gate.lock().unwrap().flusher = Some(flush);
     }
@@ -519,7 +515,6 @@ impl Machine {
         installer.install(self)
     }
 
-    /// The flusher when the link installed one, otherwise `emit`. False means the socket did not take it.
     pub fn report(&self, status: UpdateStatus) -> bool {
         let event = MachineEvent::Update { status: Some(status.clone()) };
         let flusher = {
@@ -550,7 +545,6 @@ impl Machine {
         }
     }
 
-    /// Some only while an install is in progress.
     pub fn update_snapshot(&self) -> Option<UpdateStatus> {
         let gate = self.gate.lock().unwrap();
         gate.busy.then(|| gate.phase.clone().unwrap_or(UpdateStatus::Updating { to: String::new() }))

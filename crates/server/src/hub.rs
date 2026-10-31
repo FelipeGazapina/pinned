@@ -85,7 +85,6 @@ pub struct Account {
     live: Mutex<Live>,
     connectors: OnceCell<Arc<Connectors>>,
     watching: AtomicBool,
-    /// Last phase each machine reported. Kept out of `Live` so a row can be offline and restarting.
     updates: Mutex<HashMap<MachineId, UpdateStatus>>,
 }
 
@@ -505,7 +504,6 @@ impl Account {
         self.live.lock().unwrap().machines.get(machine).is_some_and(|online| online.dedicated)
     }
 
-    /// The only writer of the phase map. Drops `live` before `updates`.
     pub fn note_update(&self, machine: &str, snapshot: Option<UpdateStatus>) {
         let version = self.live.lock().unwrap().machines.get(machine).map(|online| online.version.clone()).unwrap_or_default();
         let mut updates = self.updates.lock().unwrap();
@@ -589,8 +587,6 @@ impl Account {
         Some((m.name.clone(), answered))
     }
 
-    /// Answers the waiting caller. When the call was `UpdateSelf`, also records the phase and
-    /// returns whether the machine list should be pushed.
     pub fn answered(&self, machine: &str, socket: u64, reply: Reply) -> bool {
         let status = {
             let mut live = self.live.lock().unwrap();

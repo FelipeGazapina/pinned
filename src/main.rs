@@ -189,7 +189,6 @@ async fn download_pending(panel: &Panel) -> Result<(), String> {
     update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())
 }
 
-/// The six-hour hint. It does not download.
 #[tauri::command]
 async fn check_update(app: AppHandle, panel: State<'_, Panel>) -> Result<Option<String>, String> {
     let update = find_update(&app).await?;

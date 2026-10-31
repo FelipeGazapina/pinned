@@ -9,7 +9,6 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where a production node downloads the musl release.
 pub const RELEASE_BASE: &str = "https://github.com/FelipeGazapina/pinned/releases/latest/download";
 
 /// The minisign public key in `tauri.conf.json`, base64 of the public key file.
@@ -29,7 +28,6 @@ impl NodeUpdate {
     }
 }
 
-/// What a successful stage would exec. Tests assert this instead of replacing the process.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Plan {
     pub program: PathBuf,
@@ -64,7 +62,6 @@ impl SelfUpdate for NodeUpdate {
         let reporting = restarting.clone();
         let dest = dest.clone();
         restarting.schedule_restart(Box::new(move || {
-            // exec returns only when it failed. The new file is already in place, so put the old one back.
             let reason = reexec(&plan);
             let _ = restore(&dest);
             reporting.report(UpdateStatus::Failed { to, reason });
@@ -84,8 +81,6 @@ pub(crate) fn release_target(os: &str, arch: &str) -> Result<&'static str, Updat
 }
 
 impl NodeUpdate {
-    /// Downloads `triple`, and when the signature and checksum match, replaces `dest`.
-    /// `Some` is the re-exec plan. The process is not replaced here.
     pub(crate) fn prepare(&self, triple: &str, dest: &Path, pubkey: &str, report: &dyn Fn(UpdateStatus)) -> (UpdateStatus, Option<Plan>) {
         let base = self.base.trim_end_matches('/');
         let latest = match download(&format!("{base}/latest.json")) {
