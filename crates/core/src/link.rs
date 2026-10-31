@@ -553,6 +553,23 @@ mod tests {
     }
 
     #[test]
+    fn an_old_sync_loop_that_ends_late_leaves_the_new_loops_state_held() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("overlap");
+        let mut old = Syncer::default();
+        old.cycle(&shared, &machine, &file);
+        let mut new = Syncer::default();
+        new.cycle(&shared, &machine, &file);
+        std::fs::write(&file, b"").unwrap();
+        let (_stop, stopped) = watch::channel(true);
+        old.run(&shared, &machine, &file, &stopped);
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
+        new.run(&shared, &machine, &file, &stopped);
+        let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_state_file_restored_by_hand_reads_as_syncing_before_the_next_cycle() {
         let (dir, file, machine, shared, _frames) = stopped_sync_fixture("restored");
         std::fs::write(&file, b"").unwrap();
