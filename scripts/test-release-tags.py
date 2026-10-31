@@ -70,7 +70,7 @@ class Remote:
 
     def refs(self):
         listed = self.git(self.root, "ls-remote", str(self.bare))
-        return dict(reversed(line.split("\t")) for line in listed.splitlines())
+        return {ref: sha for sha, ref in (line.split("\t") for line in listed.splitlines())}
 
 
 class ReleaseSandbox(Remote):
@@ -120,7 +120,6 @@ class ReleaseSandbox(Remote):
         )
 
     def observed(self):
-        self.git(self.other, "fetch", "-q", "origin")
         remote = {ref: self.label(sha) for ref, sha in self.refs().items() if ref != "HEAD"}
         tags = self.git(self.work, "tag", "--list").split()
         return {

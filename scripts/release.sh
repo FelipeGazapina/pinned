@@ -22,11 +22,10 @@ start=$(git rev-parse HEAD)
 sed -i.bak "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
 rm Cargo.toml.bak
 cargo update -p pinned --quiet
-# Hub deploy skips a suffixed tag, so a release candidate gets no snapshot that every later hub must honor.
-if [[ "$version" != *-* ]]; then
-  # Copies current.json and fails when that file does not match the code.
+if [[ "$version" == *-* ]]; then
+  echo "v$version is a release candidate. Hub deploy skips it, so it gets no wire snapshot."
+else
   cargo run -q -p pinned-server --bin wire-contract -- snapshot "$version"
-  # `git commit -am` leaves a new file out.
   git add "crates/core/wire-contract/${version}.json"
 fi
 git commit -am "Release v$version"

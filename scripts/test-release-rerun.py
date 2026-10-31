@@ -700,7 +700,6 @@ class Replay:
             early = [need for need in needs_of(self.jobs[name]) if need in job_names[index + 1 :]]
             if early:
                 raise SystemExit(f"a scenario runs {name} before {early[0]}, which it needs")
-        self.assembled = None
         failed = set()
         code = 0
         stderr = []
@@ -713,7 +712,8 @@ class Replay:
             if job_code:
                 failed.add(name)
                 code = code or job_code
-        return code, "".join(stderr), self.load_state(), self.assembled
+        assembled = next((path.read_bytes() for path in work.glob("*/node-release/latest.json")), None)
+        return code, "".join(stderr), self.load_state(), assembled
 
     def run_script(self, script, state, extra_env, tag):
         self.save_state(state)
@@ -735,9 +735,6 @@ class Replay:
             leg_work.mkdir()
             leg_code, err = self.leg(name, job, matrix, env, extra_env, tag, leg_work)
             stderr.append(err)
-            assembled = leg_work / "node-release" / "latest.json"
-            if assembled.exists():
-                self.assembled = assembled.read_bytes()
             code = code or leg_code
             if leg_code and fail_fast:
                 break
@@ -854,7 +851,7 @@ class Replay:
             (staged / "latest.json").write_text(json.dumps({"version": version, "pub_date": "tauri"}))
             uploads.append(staged / "latest.json")
         action_env = {**env, "GH_REPO": REPO}
-        code, err = 0, ""
+        err = ""
         for upload in uploads:
             step_code, step_err = self.shell(
                 ["bash", "-e"], f'gh release upload "$GITHUB_REF_NAME" "{upload}" --clobber\n', action_env, work
@@ -865,7 +862,7 @@ class Replay:
         state = self.load_state()
         state["builds"] = build
         self.save_state(state)
-        return code, err, {"artifactPaths": json.dumps([str(bundle), str(signature)]), "appVersion": version}
+        return 0, err, {"artifactPaths": json.dumps([str(bundle), str(signature)]), "appVersion": version}
 
 
 def unchanged(before, after):

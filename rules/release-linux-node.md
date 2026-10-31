@@ -71,12 +71,12 @@ The private key is the existing `TAURI_SIGNING_PRIVATE_KEY` secret, with an empt
 
 GitHub re-runs one job without the jobs it needs, so each uploading job drafts the release itself before it writes. The concurrency group `release-<tag>` has `cancel-in-progress` false, so two runs of one tag do not overlap.
 
-`publish` also has the job-level group `release-publish`, so the `publish` jobs of two tags run one at a time. The second reads the latest release after the first sets it, and an older tag cannot end up latest. A group keeps one pending job. If three tags reach `publish` together, GitHub cancels the pending one when the third arrives, and that tag stays a draft until someone re-runs its `publish`. The `queue: max` option keeps every pending job, but actionlint 1.7.12 rejects the key.
-
 - If the signer fails, `sign-node` has uploaded nothing. A public release keeps its files and stays latest.
 - A full run that fails before `publish` leaves a new tag as a draft, so `releases/latest` stays on the previous release.
 - `gh release upload --clobber` deletes each asset right before it uploads that file, in five parallel workers. A cancelled upload can leave any mix of new, old, and missing files. `publish` checks content, not order, so it refuses every such mix.
 - A `build` re-run after `sign-node` replaces a bundle that `latest.json` signed. `publish` refuses until `sign-node` runs again.
+
+`publish` also has the job-level group `release-publish`, so the `publish` jobs of two tags run one at a time. The second reads the latest release after the first sets it, and an older tag cannot end up latest. A group keeps one pending job. If three tags reach `publish` together, GitHub cancels the pending one when the third arrives, and that tag stays a draft until someone re-runs its `publish`. The `queue: max` option keeps every pending job, but actionlint 1.7.12 rejects the key.
 
 ## Replay
 
