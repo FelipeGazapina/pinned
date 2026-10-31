@@ -1279,6 +1279,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    fn mode_bits(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn executable_hook(root: &Path) -> (PathBuf, PluginShare, PluginShare) {
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        let install = mac_home.join("plugins/pstack");
+        put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"pstack"}"#);
+        let hook = install.join("hooks/session-start.sh");
+        put(&hook, "#!/bin/sh\necho session-start\n");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        enable(&mac_home, "pstack@local", &install, "0.9.82", "abc123");
+        let mac = PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") };
+        let mini = PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") };
+        (hook, mac, mini)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_executable_hook_stays_executable_on_the_other_machine() {
+        let root = root("hook-mode");
+        let hub = MemHub::default();
+        let (_, mac, mini) = executable_hook(&root);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let source = mac.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        let dest = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(mode_bits(&source) & 0o111, 0o111, "source mirror mode is {:o}", mode_bits(&source));
+        assert_eq!(mode_bits(&dest) & 0o111, 0o111, "receiver hook mode is {:o}", mode_bits(&dest));
+        let plain = mini.dir.join("plugins/pstack@local/.claude-plugin/plugin.json");
+        assert_eq!(mode_bits(&plain) & 0o111, 0, "plain file mode is {:o}", mode_bits(&plain));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hook_already_synced_as_plain_text_becomes_executable_when_the_bytes_match() {
+        let root = root("hook-heal");
+        let hub = MemHub::default();
+        let (_, mac, mini) = executable_hook(&root);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        let source = mac.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        let dest = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        put(&dest, "#!/bin/sh\necho session-start\n");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
+        std::fs::File::options().write(true).open(&dest).unwrap().set_modified(modified).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), std::fs::read(&source).unwrap());
+        assert_eq!(mode_bits(&dest), 0o644);
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(mode_bits(&dest) & 0o111, 0o111, "resync left the hook at {:o}", mode_bits(&dest));
+        let again = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(again.pushed, Vec::<String>::new());
+        assert_eq!(again.pulled, Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     struct OldHub;
 
     impl Hub for OldHub {
