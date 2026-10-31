@@ -408,15 +408,16 @@ fn a_restarted_node_does_not_reuse_tab_ids_and_the_client_gets_that_list() {
         "the id from before the restart drove the new tab"
     );
     client.pump();
-    let online = client
-        .frames
-        .iter()
-        .rev()
-        .find(|f| f["type"] == "machines" && f["machines"].as_array().is_some_and(|list| list.iter().any(|m| m["name"] == "box" && m["online"] == true)))
-        .unwrap();
-    assert!(online.get("tabs").is_some_and(|tabs| tabs.is_object()), "the reconnect update carried no tab snapshot");
-    let listed = online["tabs"][&id].as_array().unwrap();
-    assert!(listed.iter().all(|tab| tab["id"] != first_id), "the snapshot still listed {first_id}");
+    for frame in &client.frames {
+        if frame["type"] != "machines" {
+            continue;
+        }
+        let Some(listed) = frame["tabs"][&id].as_array() else { continue };
+        assert!(listed.iter().all(|tab| tab["id"] != first_id), "the snapshot still listed {first_id}: {frame}");
+    }
+    let ended = ended_tabs(&client.frames, &id);
+    assert!(ended.iter().all(|tab| tab["id"] != first_id), "the client still had {first_id}: {ended:?}");
+    assert!(ended.iter().any(|tab| tab["id"] == second_id), "the client never got {second_id}: {ended:?}");
 }
 
 /// The last tab list a client was given for `machine`: a tabs event, or a machines

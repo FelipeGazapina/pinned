@@ -91,7 +91,8 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     let (stop, stopped) = watch::channel(false);
     let (syncing, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
     std::thread::spawn(move || sync_projects(&syncing, &synced_machine, &sync_stopped));
-    // Subscribe before returning. The node restores sessions after spawn, and that emit is lost if nobody is listening yet.
+    // Listen before the loop so an emit after the socket exists is sent.
+    // Shared::send drops events until then. The tabs frame after hello is the list the hub stores.
     let events = shared.clone();
     let listener = machine.subscribe(Box::new(move |event| {
         events.send(&MachineFrame::Event { event: event.clone() });

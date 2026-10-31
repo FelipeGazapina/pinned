@@ -29,11 +29,21 @@ let active = null;
 const keyOf = (machine, id) => `${machine}:${id}`;
 const tabByKey = (key) => tabs.find((t) => t.key === key);
 const missingTabId = (error) => /^no tab (\S+)/.exec(String(error))?.[1] ?? null;
+const tabRefresh = new Map();
 const callOn = async (machine, call) => {
   try {
     return await machines.get(machine).transport.call(call);
   } catch (error) {
-    if (missingTabId(error) && call.cmd !== "tabs") await refreshTabs(machine).catch(() => {});
+    if (missingTabId(error) && call.tab != null) {
+      let pending = tabRefresh.get(machine);
+      if (!pending) {
+        pending = refreshTabs(machine).finally(() => {
+          if (tabRefresh.get(machine) === pending) tabRefresh.delete(machine);
+        });
+        tabRefresh.set(machine, pending);
+      }
+      await pending.catch(() => {});
+    }
     throw error;
   }
 };
@@ -504,11 +514,10 @@ async function startClaude(tab) {
     const restored = !kept && tab.view.session ? tabs.find((t) => t.machine === tab.machine && t.view.session === tab.view.session) : null;
     if (restored) {
       activate(restored);
-      if (!restored.view.running) return startTab(restored);
       return;
     }
     const text = kept ? `could not start claude: ${e}` : "That session ended when the machine restarted. Open it again to continue.";
-    if (typeof showComposerNote === "function" && typeof guiOn === "function" && guiOn()) showComposerNote(text, true);
+    if (guiOn()) showComposerNote(text, true);
     if (kept) tab.term.write(`\r\n\x1b[31m[${text}]\x1b[0m\r\n`);
   }
 }
@@ -1265,7 +1274,7 @@ function showMachines(list, tabsByMachine) {
     if (known) known.view = view;
     else machines.set(view.id, { view, tabs: [], transport: hub.transport(view.id), usage: {} });
     if (!view.online) setTabs(view.id, [], { forget: false });
-    else if (tabsByMachine != null) setTabs(view.id, tabsByMachine[view.id] ?? []);
+    else if (tabsByMachine != null && Object.hasOwn(tabsByMachine, view.id)) setTabs(view.id, tabsByMachine[view.id]);
     else if (!wasOnline) refreshTabs(view.id).catch(console.warn);
     if (view.online && !wasOnline) retryUploadImages();
   }

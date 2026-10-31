@@ -216,6 +216,8 @@ struct Tab {
     account: Account,
     program: Program,
     session: Option<pty::Session>,
+    /// A start has taken the launch args and has not installed a session yet.
+    starting: bool,
     /// When the running claude started, so a subagent an earlier claude left mid-step reads as stopped.
     started: Option<SystemTime>,
     /// Extra `claude` arguments for the first start only, so a restart doesn't redo the task.
@@ -713,7 +715,7 @@ impl Machine {
             t.launch = new.iter().flat_map(|id| ["--resume".to_owned(), id.clone()]).collect();
             t.claude_session = new.clone();
         })?;
-        self.start_claude(tab, cols, rows)
+        self.relaunch(tab, cols, rows)
     }
 
     /// The working tree as the prompt `before` began, from the first turn pinned saved from then on;
@@ -998,10 +1000,24 @@ impl Machine {
         Ok(id)
     }
 
-    /// Starts the tab's program, replacing a session already running there, and returns its
-    /// folder. Viewers stay attached and see the new session from its first byte.
+    /// Starts the tab's program and returns its folder. A second call while that start is in
+    /// flight, or while the session is already running and nothing new was queued, returns the
+    /// folder and leaves the conversation alone. Viewers stay attached.
     pub fn start_claude(&self, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
-        let (cwd, account, program, args, env, bypass) = self.tab(tab, |t| {
+        self.launch_tab(tab, cols, rows, false)
+    }
+
+    /// Starts the tab's program again, including over a session that is already running.
+    fn relaunch(&self, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
+        self.launch_tab(tab, cols, rows, true)
+    }
+
+    fn launch_tab(&self, tab: &str, cols: u16, rows: u16, replace: bool) -> Result<String, String> {
+        let prepared = self.tab(tab, |t| {
+            if !replace && (t.session.is_some() || t.starting) && t.launch.is_empty() {
+                return None;
+            }
+            t.starting = true;
             // Without launch arguments this is a fresh conversation, not the one recorded before.
             if t.launch.is_empty() {
                 t.claude_session = None;
@@ -1011,8 +1027,11 @@ impl Machine {
             if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
                 args.extend(["--model".to_owned(), model]);
             }
-            (t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass)
+            Some((t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass))
         })?;
+        let Some((cwd, account, program, args, env, bypass)) = prepared else {
+            return self.tab(tab, |t| t.cwd.display().to_string());
+        };
         let mut args = args;
         let mut prompt = vec![];
         if self.device_agents.as_ref().is_some_and(|f| f.exists()) {
@@ -1033,7 +1052,10 @@ impl Machine {
         let env = [self.accounts.env(&account), env].concat();
         let plugin_dirs = self.shared_plugin_dirs(&account);
         let cmd = self.launch.command(program, account.provider, tab, &cwd, bypass, args, &env, &plugin_dirs);
-        self.spawn(tab, cmd, pty::size(cols, rows))?;
+        if let Err(error) = self.spawn(tab, cmd, pty::size(cols, rows)) {
+            let _ = self.tab(tab, |t| t.starting = false);
+            return Err(error);
+        }
         self.continue_when_limit_lifts(tab);
         self.emit_tabs();
         Ok(cwd.display().to_string())
@@ -1076,7 +1098,7 @@ impl Machine {
                 (t.launch, t.resume_at) = saved.reopen(unix_now(), t.account.provider);
             }
         })?;
-        self.start_claude(tab, cols, rows)
+        self.relaunch(tab, cols, rows)
     }
 
     /// Turns the tab's permission skipping on or off and returns its folder. Claude reads the flag
@@ -1146,7 +1168,7 @@ impl Machine {
         if let Some(made) = left {
             branches::drop_worktree(&made, path);
         }
-        self.start_claude(tab, cols, rows)
+        self.relaunch(tab, cols, rows)
     }
 
     /// Restarts the tab's claude on its conversation with `model`, for this conversation alone, and
@@ -1161,7 +1183,7 @@ impl Machine {
                 (t.launch, t.resume_at) = saved.reopen(unix_now(), t.account.provider);
             }
         })?;
-        self.start_claude(tab, cols, rows)
+        self.relaunch(tab, cols, rows)
     }
 
     /// Starts claude again on the tab's conversation and returns its folder; a tab with no
@@ -1172,7 +1194,7 @@ impl Machine {
                 (t.launch, t.resume_at) = saved.reopen(unix_now(), t.account.provider);
             }
         })?;
-        self.start_claude(tab, cols, rows)
+        self.relaunch(tab, cols, rows)
     }
 
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
@@ -1198,6 +1220,7 @@ impl Machine {
         )?;
         self.tab(tab, |t| {
             t.session = Some(pty);
+            t.starting = false;
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
             t.turn_pending = None;
@@ -2145,6 +2168,7 @@ impl Machine {
             account,
             program: Program::Agent,
             session: None,
+            starting: false,
             started: None,
             launch,
             env,

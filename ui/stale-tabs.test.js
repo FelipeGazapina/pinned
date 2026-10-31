@@ -206,11 +206,14 @@ test("overlapping no-tab errors refresh a machine once", async () => {
   const first = context.callOn("box", { cmd: "start_claude", tab: "tab-9" });
   const second = context.callOn("box", { cmd: "write_input", tab: "tab-9", data: "x" });
   const third = context.callOn("box", { cmd: "list_accounts" });
+  const settled = Promise.allSettled([first, second, third]);
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.deepEqual(context.refreshed, ["box"]);
   release();
-  await assert.rejects(first, (error) => error === "no tab tab-9");
-  await assert.rejects(second, (error) => error === "no tab tab-9");
-  await assert.rejects(third, (error) => error === "no tab tab-9");
+  const results = await settled;
+  assert.deepEqual(
+    results.map((result) => (result.status === "rejected" ? result.reason : result.value)),
+    ["no tab tab-9", "no tab tab-9", "no tab tab-9"],
+  );
   assert.deepEqual(context.refreshed, ["box"]);
 });
