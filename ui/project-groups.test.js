@@ -171,3 +171,47 @@ test("grouping off keeps each machine's checkout of one repository", () => {
     ["desk", "studio"],
   );
 });
+
+test("with no open thread an online checkout starts ahead of an offline cache", () => {
+  const here = sessionOn(
+    [
+      { machine: "vps", path: "/srv/app", thread: false },
+      { machine: "local", path: "/Users/me/app", thread: false },
+    ],
+    { localId: "local", localName: "This Mac", names: { local: "This Mac", vps: "studio" }, online: { vps: false, local: true } },
+  );
+  assert.equal(here.machine, "local");
+  assert.equal(here.path, "/Users/me/app");
+  assert.equal(here.label, "This Mac +1");
+  assert.equal(here.offline, false);
+  assert.deepEqual(here.also, ["studio"]);
+});
+
+test("two machines with one display name keep a short id in the label", () => {
+  const directory = {
+    localId: "local",
+    localName: "This Mac",
+    names: {
+      "1111aaaa-1111-4111-8111-111111111111": "office",
+      "2222bbbb-2222-4222-8222-222222222222": "office",
+    },
+    online: {
+      "1111aaaa-1111-4111-8111-111111111111": true,
+      "2222bbbb-2222-4222-8222-222222222222": true,
+    },
+  };
+  const here = sessionOn(
+    [
+      { machine: "1111aaaa-1111-4111-8111-111111111111", path: "/srv/a" },
+      { machine: "2222bbbb-2222-4222-8222-222222222222", path: "/srv/b" },
+    ],
+    directory,
+  );
+  assert.equal(here.machine, "1111aaaa-1111-4111-8111-111111111111");
+  assert.equal(here.label, "office · 1111 +1");
+  assert.deepEqual(here.also, ["office · 2222"]);
+  const alone = sessionOn([{ machine: "2222bbbb-2222-4222-8222-222222222222", path: "/srv/b" }], directory);
+  assert.equal(alone.machine, "2222bbbb-2222-4222-8222-222222222222");
+  assert.equal(alone.label, "office · 2222");
+  assert.deepEqual(alone.also, []);
+});
