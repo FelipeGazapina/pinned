@@ -72,18 +72,18 @@ try {
 const STASH_MAX = 20;
 /** T3 Code's send shortcut setting: Enter, ⌘Enter once the prompt has a second line, or ⌘Enter always. */
 let sendShortcut = load("gui-send-shortcut") ?? (load("gui-send-mod") === "true" ? "mod-enter" : "enter");
-const needsMod = (text) => sendShortcut === "mod-enter" || (sendShortcut === "mod-enter-multiline" && /\n/.test(text));
-/** Touch-first device without a trackpad or mouse: Enter adds a line; Send is the round button. */
+function enterNeedsMod(shortcut, text) {
+  return shortcut === "mod-enter" || (shortcut === "mod-enter-multiline" && /\n/.test(text));
+}
+const needsMod = (text) => enterNeedsMod(sendShortcut, text);
 function touchComposer(mq = matchMedia) {
   return mq("(pointer: coarse)").matches && !mq("(any-pointer: fine)").matches;
 }
-/** What plain Enter in the prompt should do before menu-specific handlers run. */
 function composerEnterIntent(e, { promptText, shortcut, touch, isMac }) {
   if (e.key !== "Enter" || e.shiftKey || e.isComposing) return "none";
-  if (touch) return "newline";
   const mod = isMac ? e.metaKey : e.ctrlKey;
-  const needs = shortcut === "mod-enter" || (shortcut === "mod-enter-multiline" && /\n/.test(promptText));
-  return !needs || mod ? "send" : "newline";
+  if (touch && !mod) return "newline";
+  return !enterNeedsMod(shortcut, promptText) || mod ? "send" : "newline";
 }
 const SEND_MOD = IS_MAC ? "⌘" : "Ctrl";
 const sendShortcutHtml = () => touchComposer()
@@ -145,7 +145,7 @@ function placeholderFor(tab, t) {
   if (menu) return freeOption(menu) ? "Type your own answer, or leave this blank to use the selected option" : "Choose an option above";
   if (composer.dataset.collapsed === "true") return "Ask anything...";
   if (machines.get(tab.machine)?.view.online === false) return "Ask for changes, send follow-ups, or attach images";
-  if (!tab.view.running) return "claude isn't running. Press Enter to start it.";
+  if (!tab.view.running) return touchComposer() ? "claude isn't running. Use the send button to start it." : "claude isn't running. Press Enter to start it.";
   return "Ask anything, @tag files/folders, $use skills, or / for commands";
 }
 
@@ -1937,8 +1937,8 @@ function triggerKey(e) {
   const at = rows.findIndex((r) => r.classList.contains("highlight"));
   if (e.key === "Escape") composerMenu.hidden = true;
   else if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
-    // A command typed in full, or none matching, goes out as typed.
-    if (rows[at] && prompt.value !== rows[at].dataset.pick) pickTrigger(rows[at].dataset.pick, rows[at].dataset.url);
+    const typed = rows[at] && prompt.value === rows[at].dataset.pick;
+    if (rows[at] && (!typed || (e.key === "Enter" && touchComposer()))) pickTrigger(rows[at].dataset.pick, rows[at].dataset.url);
     else if (e.key === "Enter") return !(composerMenu.hidden = true);
   } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     const next = rows[(at + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length];
@@ -2155,7 +2155,7 @@ async function openHeroProjects(anchor) {
     const shown = projects.filter((p) => p.name.toLowerCase().includes(needle));
     const rows = shown.map((p) => {
       const here = PinnedProjects.sessionOn([{ machine: tab.machine, path: p.path }], directory);
-      return `<button type="button" data-path="${esc(here.path)}">${projectIcon(p.name)}<span class="row"><span class="label">${esc(p.name)}</span><span class="where">${esc(here.label)}</span></span>${here.path === current ? icon("check", "check") : ""}</button>`;
+      return `<button type="button" data-path="${esc(here.path)}">${projectIcon(p.name)}<span class="row"><span class="label">${esc(p.name)}</span><span class="where" title="${esc(here.label)}">${esc(here.label)}</span></span>${here.path === current ? icon("check", "check") : ""}</button>`;
     });
     if (!needle) rows.push(`<button type="button" data-add>${icon("folder-plus", "lead")}<span class="label">Add project</span></button>`);
     composerMenu.querySelector(".list").innerHTML = rows.join("") || `<p class="none">No matching projects.</p>`;

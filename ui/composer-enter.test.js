@@ -11,7 +11,7 @@ function mq(coarse, fine) {
 
 function loadComposerEnter() {
   const src = readFileSync(new URL("./gui-composer.js", import.meta.url), "utf8");
-  const start = src.indexOf("function touchComposer");
+  const start = src.indexOf("function enterNeedsMod");
   const end = src.indexOf("const SEND_MOD = IS_MAC");
   const context = { matchMedia: mq(false, true) };
   vm.createContext(context);
@@ -100,9 +100,7 @@ function highlighted(pick) {
 
 function loadPromptKey({ promptValue, coarse, fine, isMac = true, rows = [], menuHidden = true, shortcut = "enter" }) {
   const src = readFileSync(new URL("./gui-composer.js", import.meta.url), "utf8");
-  const helperAt = src.indexOf("function enterNeedsMod");
-  const helperStart = helperAt === -1 ? src.indexOf("function touchComposer") : helperAt;
-  const helpers = src.slice(helperStart, src.indexOf("const SEND_MOD"));
+  const helpers = src.slice(src.indexOf("function enterNeedsMod"), src.indexOf("const SEND_MOD"));
   const trigger = src.slice(src.indexOf("function triggerKey"), src.indexOf('document.getElementById("stash").insertAdjacentHTML'));
   const listenerRaw = src.slice(src.indexOf('prompt.addEventListener("keydown", (e) => {'), src.indexOf('document.getElementById("send").onclick'));
   const listener = listenerRaw
