@@ -878,11 +878,13 @@ impl Task {
             StreamEvent::TurnEnd { text, error } => {
                 self.run.last_error = error.clone();
                 let reply = Some(text).filter(|text| !text.is_empty()).or_else(|| self.assistant.clone());
+                self.run.open_turns = self.run.open_turns.saturating_sub(1);
                 if reply.is_some() {
                     self.summary = reply.clone();
-                    self.assistant = reply.clone();
+                    if self.run.open_turns == 0 {
+                        self.assistant = reply.clone();
+                    }
                 }
-                self.run.open_turns = self.run.open_turns.saturating_sub(1);
                 if self.run.open_turns > 0 || !self.run.background.is_empty() {
                     return None;
                 }
