@@ -11266,11 +11266,13 @@
                     "const": "updating"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
-                  "state"
+                  "state",
+                  "to"
                 ]
               },
               {
@@ -11297,7 +11299,8 @@
                     "const": "failed"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   },
                   "reason": {
                     "type": "string"
@@ -11305,6 +11308,7 @@
                 },
                 "required": [
                   "state",
+                  "to",
                   "reason"
                 ]
               },
@@ -13835,7 +13839,8 @@
                     "const": "updating"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
@@ -13866,7 +13871,8 @@
                     "const": "failed"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   },
                   "reason": {
                     "type": "string"
@@ -18135,11 +18141,13 @@
                     "const": "updating"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
-                  "state"
+                  "state",
+                  "to"
                 ]
               },
               {
@@ -18166,7 +18174,8 @@
                     "const": "failed"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   },
                   "reason": {
                     "type": "string"
@@ -18174,6 +18183,7 @@
                 },
                 "required": [
                   "state",
+                  "to",
                   "reason"
                 ]
               },
@@ -18277,7 +18287,8 @@
                     "const": "updating"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
@@ -18308,7 +18319,8 @@
                     "const": "failed"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   },
                   "reason": {
                     "type": "string"
@@ -18663,11 +18675,13 @@
                     "const": "updating"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
-                  "state"
+                  "state",
+                  "to"
                 ]
               },
               {
@@ -18694,7 +18708,8 @@
                     "const": "failed"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   },
                   "reason": {
                     "type": "string"
@@ -18702,6 +18717,7 @@
                 },
                 "required": [
                   "state",
+                  "to",
                   "reason"
                 ]
               },
@@ -18829,7 +18845,8 @@
                     "const": "updating"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
@@ -18860,7 +18877,8 @@
                     "const": "failed"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   },
                   "reason": {
                     "type": "string"
@@ -19049,11 +19067,13 @@
                     "const": "updating"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
-                  "state"
+                  "state",
+                  "to"
                 ]
               },
               {
@@ -19080,7 +19100,8 @@
                     "const": "failed"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   },
                   "reason": {
                     "type": "string"
@@ -19088,6 +19109,7 @@
                 },
                 "required": [
                   "state",
+                  "to",
                   "reason"
                 ]
               },
@@ -19206,7 +19228,8 @@
                     "const": "updating"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
@@ -19237,7 +19260,8 @@
                     "const": "failed"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   },
                   "reason": {
                     "type": "string"
@@ -23004,11 +23028,13 @@
                     "const": "updating"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
-                  "state"
+                  "state",
+                  "to"
                 ]
               },
               {
@@ -23035,7 +23061,8 @@
                     "const": "failed"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   },
                   "reason": {
                     "type": "string"
@@ -23043,6 +23070,7 @@
                 },
                 "required": [
                   "state",
+                  "to",
                   "reason"
                 ]
               },
@@ -25124,7 +25152,8 @@
                     "const": "updating"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
@@ -25155,7 +25184,8 @@
                     "const": "failed"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   },
                   "reason": {
                     "type": "string"
@@ -27162,11 +27192,13 @@
                     "const": "updating"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
-                  "state"
+                  "state",
+                  "to"
                 ]
               },
               {
@@ -27193,7 +27225,8 @@
                     "const": "failed"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   },
                   "reason": {
                     "type": "string"
@@ -27201,6 +27234,7 @@
                 },
                 "required": [
                   "state",
+                  "to",
                   "reason"
                 ]
               },
@@ -30799,7 +30833,8 @@
                     "const": "updating"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
@@ -30830,7 +30865,8 @@
                     "const": "failed"
                   },
                   "to": {
-                    "type": "string"
+                    "type": "string",
+                    "default": ""
                   },
                   "reason": {
                     "type": "string"

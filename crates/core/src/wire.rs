@@ -584,12 +584,12 @@ impl Call {
 pub enum UpdateStatus {
     UpToDate { version: String },
     Updating {
-        #[serde(default, skip_serializing_if = "String::is_empty")]
+        #[serde(default)]
         to: String,
     },
     Restarting { to: String },
     Failed {
-        #[serde(default, skip_serializing_if = "String::is_empty")]
+        #[serde(default)]
         to: String,
         reason: String,
     },
