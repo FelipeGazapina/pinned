@@ -111,13 +111,58 @@ function setTabs(machine, views, { forget = true } = {}) {
     refreshProjects(machine);
   }
   render();
+  noteTabs(machine);
 }
 
 const refreshTabs = async (machine) => setTabs(machine, await callOn(machine, { cmd: "tabs" }));
 
+const tabListed = [];
+const TAB_LIST_WAIT_MS = 2000;
+function noteTabs(machine) {
+  const pending = tabListed.splice(0);
+  const again = [];
+  for (const waiter of pending) if (!waiter(machine)) again.push(waiter);
+  tabListed.push(...again);
+}
+function whenListed(machine, id) {
+  if (tabByKey(keyOf(machine, id))) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const drop = () => {
+      const at = tabListed.indexOf(waiter);
+      if (at >= 0) tabListed.splice(at, 1);
+    };
+    const timer = setTimeout(() => {
+      drop();
+      refreshTabs(machine).then(() => {
+        if (settled) return;
+        settled = true;
+        if (tabByKey(keyOf(machine, id))) resolve();
+        else reject(new Error("that tab is not on this machine"));
+      }, (err) => {
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+      });
+    }, TAB_LIST_WAIT_MS);
+    function waiter(arrived) {
+      if (arrived !== machine || !tabByKey(keyOf(machine, id))) return false;
+      if (settled) return true;
+      settled = true;
+      clearTimeout(timer);
+      drop();
+      resolve();
+      return true;
+    }
+    tabListed.push(waiter);
+    if (tabByKey(keyOf(machine, id))) waiter(machine);
+  });
+}
+
 /** Shows a tab the machine just opened, once its tab list has it. */
 async function revealTab(machine, id) {
-  await refreshTabs(machine);
+  await whenListed(machine, id);
   const tab = tabByKey(keyOf(machine, id));
   activate(tab);
   return tab;
@@ -474,14 +519,24 @@ async function pickLocalFolder() {
   if (path) pickFolder(path);
 }
 
-// A remote machine opens any path it is given, so the folder is checked by moving a fresh tab there.
+const releaseNumber = (version) => {
+  const [, major, minor, patch] = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version ?? "") ?? [, 0, 0, 0];
+  return Number(major) * 1e6 + Number(minor) * 1e3 + Number(patch);
+};
+const NEWEST_RELEASE_THAT_OPENS_ANY_PATH = releaseNumber("0.16.0");
+
 async function openRemote(machine, path, bypass) {
-  const id = await callOn(machine, { cmd: "open_tab", path: null, bypass });
-  try {
-    await callOn(machine, { cmd: "set_folder", tab: id, path });
-  } catch (e) {
-    callOn(machine, { cmd: "close_tab", tab: id });
-    throw e;
+  let id;
+  if (releaseNumber(machines.get(machine)?.view.version) > NEWEST_RELEASE_THAT_OPENS_ANY_PATH) {
+    id = await callOn(machine, { cmd: "open_tab", path, bypass });
+  } else {
+    id = await callOn(machine, { cmd: "open_tab", path: null, bypass });
+    try {
+      await callOn(machine, { cmd: "set_folder", tab: id, path });
+    } catch (e) {
+      callOn(machine, { cmd: "close_tab", tab: id });
+      throw e;
+    }
   }
   const tab = await revealTab(machine, id);
   await startTab(tab);
@@ -1035,6 +1090,7 @@ document.addEventListener("paste", (e) => {
 function onMachineEvent(machine, event) {
   if (!machines.has(machine)) return;
   if (event.kind === "tabs") return setTabs(machine, event.tabs);
+  if (event.kind === "thread") return onThreadEvent(machine, event);
   if (event.kind === "usage") {
     machines.get(machine).usage[event.account ?? DEFAULT_ACCOUNT] = event.usage;
     return renderUsage();
@@ -1306,6 +1362,7 @@ function connectHub(signedIn) {
   account = signedIn;
   hub = new Hub(signedIn.hub, signedIn.user_token, {
     hello(frame) {
+      forgetThreadWatch();
       account.email = frame.account.email;
       showMachines(frame.machines, frame.tabs);
       hub.hub({ cmd: "get_settings" }).then(onHubSettings, console.warn);

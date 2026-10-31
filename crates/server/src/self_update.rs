@@ -848,6 +848,84 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_hand_over_keeps_nudging_the_tabs_it_reopens() {
+        use pinned_core::accounts::Provider;
+        use pinned_core::machine::{Event, Launch};
+        use pinned_core::wire::Call;
+        let dir = std::env::temp_dir().join(format!("pinned-hand-over-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let claude = dir.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
+        std::fs::set_permissions(&claude, Permissions::from_mode(0o755)).unwrap();
+        let launch = Launch {
+            exe: "/opt/pinned/bin/pinned-server".into(),
+            bins: std::collections::BTreeMap::from([(Provider::Claude, claude)]),
+            path_env: None,
+            settings: dir.join("settings.json"),
+            mcp_config: None,
+            reminders: false,
+            plugin_dir: dir.join("plugin"),
+            tutorial_helper: dir.join("plugin/tutorial.mjs"),
+            sock: dir.join("sock"),
+            vector_search: false,
+        };
+        let (nudge, nudges) = std::sync::mpsc::channel();
+        let nudge = Mutex::new(nudge);
+        let machine = Machine::new(launch, Some(dir.clone()), Some(dir.clone()), move |event| {
+            if let Event::Thread { tab } = event {
+                let _ = nudge.lock().unwrap().send(tab);
+            }
+        });
+        machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let projects = dir.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&projects).unwrap();
+        let saved = |session: &str| {
+            std::fs::write(projects.join(format!("{session}.jsonl")), "{\"type\":\"user\"}\n").unwrap();
+            pinned_core::sessions::Saved {
+                cwd: dir.join("app"),
+                session: session.into(),
+                env: vec![],
+                bypass: false,
+                interrupted: false,
+                resume_at: None,
+                held: false,
+                account: "work".into(),
+                model: None,
+                permission_mode: None,
+            }
+        };
+        pinned_core::sessions::save(&dir.join("sessions.json"), &(1..=8).map(|n| saved(&format!("s{n}"))).collect::<Vec<_>>());
+        let before = machine.restore_tabs();
+        for tab in &before {
+            machine.start_claude(tab, 80, 24).unwrap();
+        }
+        machine.watch_threads();
+        machine.call(Call::WatchThreads { tabs: before.clone() }).unwrap();
+        let mut first: Vec<String> = (0..before.len()).map(|_| nudges.recv_timeout(Duration::from_secs(2)).unwrap()).collect();
+        first.sort();
+        assert_eq!(first, before, "the first look");
+
+        let dest = dir.join("bin/pinned-server");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, b"not-a-binary").unwrap();
+        std::fs::set_permissions(&dest, Permissions::from_mode(0o644)).unwrap();
+        let plan = Plan { program: dest.clone(), args: vec![], cwd: std::env::current_dir().unwrap(), proof: String::new() };
+        let failed = hand_over(&machine, &plan, &dest, "9.9.9").unwrap_err();
+        assert!(failed.starts_with("could not replace this process"), "{failed}");
+
+        let s1 = machine.tabs().into_iter().find(|tab| tab.session.as_deref() == Some("s1")).expect("s1 did not reopen").id;
+        assert!(!before.contains(&s1), "the reopened tab {s1} has a new id");
+        while nudges.try_recv().is_ok() {}
+        machine.call(Call::WatchThreads { tabs: vec![s1.clone()] }).unwrap();
+        assert_eq!(nudges.recv_timeout(Duration::from_secs(2)), Ok(s1.clone()), "the reopened tab is looked at once it is watched");
+        std::fs::OpenOptions::new().append(true).open(projects.join("s1.jsonl")).unwrap().write_all(b"{\"type\":\"user\"}\n").unwrap();
+        assert_eq!(nudges.recv_timeout(Duration::from_secs(2)), Ok(s1), "a line appended after the failed hand-over nudges");
+        machine.quit();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_release_of_this_version_does_not_replace_the_binary() {
         let (base, pubkey, dest) = release("current", env!("CARGO_PKG_VERSION"), None, false);
         let (status, plan) = NodeUpdate::at(&base).prepare("x86_64-unknown-linux-musl", &dest, &pubkey, &|_| {});
