@@ -116,6 +116,10 @@ test("a phase already on the row does not count as acceptance", async () => {
   page.machines.get("a").view.update = { state: "restarting", to: "1" };
   for (const listen of page.viewListeners.slice()) listen();
   await tick();
+  assert.deepEqual(page.calls, ["a"]);
+  page.machines.get("a").view.update = { state: "up_to_date", version: "1" };
+  for (const listen of page.viewListeners.slice()) listen();
+  await tick();
   assert.deepEqual(page.calls, ["a", "self"]);
   page.release(["self"]);
   await done;
@@ -163,6 +167,21 @@ test("a machine that never reports a final phase does not hold this one", async 
   const done = page.updateEveryMachine();
   assert.deepEqual(page.calls, ["a"]);
   await done;
+  assert.equal(page.machines.get("a").view.update.state, "failed");
+  assert.equal(page.machines.get("a").view.update.reason, "the update timed out");
+  assert.deepEqual(page.calls, ["a", "self"]);
+});
+
+test("a restart that never finishes is a failed row", async () => {
+  const page = open({ machine_id: "self" });
+  page.updateEveryMachine.phaseWait = 20;
+  page.machines.set("a", { view: { id: "a", online: true, update: { state: "restarting", to: "9.9.9" } } });
+  page.machines.set("local", { hubView: { id: "self", online: true } });
+  const done = page.updateEveryMachine();
+  await done;
+  assert.equal(page.machines.get("a").view.update.state, "failed");
+  assert.equal(page.machines.get("a").view.update.to, "9.9.9");
+  assert.equal(page.machines.get("a").view.update.reason, "the update timed out");
   assert.deepEqual(page.calls, ["a", "self"]);
 });
 

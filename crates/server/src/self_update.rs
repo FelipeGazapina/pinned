@@ -604,13 +604,7 @@ mod tests {
     fn an_older_release_does_not_replace_the_binary() {
         let (base, pubkey, dest) = release("older", "0.0.1", Some(b"new-binary"), false);
         let (status, plan) = NodeUpdate::at(&base).prepare("x86_64-unknown-linux-musl", &dest, &pubkey, &|_| {});
-        assert_eq!(
-            status,
-            UpdateStatus::Failed {
-                to: "0.0.1".into(),
-                reason: format!("the published release 0.0.1 is older than {}", env!("CARGO_PKG_VERSION")),
-            },
-        );
+        assert_eq!(status, UpdateStatus::UpToDate { version: env!("CARGO_PKG_VERSION").into() });
         assert_eq!(plan, None);
         assert_eq!(std::fs::read(&dest).unwrap(), b"old-binary");
         let _ = std::fs::remove_dir_all(dest.parent().unwrap());
@@ -704,6 +698,20 @@ mod tests {
         path.push("pinned-server");
         assert!(path.is_file(), "missing {}", path.display());
         path
+    }
+
+    #[test]
+    fn a_staged_binary_records_zero_boots() {
+        let dir = std::env::temp_dir().join(format!("pinned-marker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("pinned-server");
+        std::fs::write(&dest, b"old-binary").unwrap();
+        stage(&dest, b"new-binary").unwrap();
+        assert_eq!(std::fs::read(dir.join("pinned-server.unproven")).unwrap(), b"0");
+        assert_eq!(std::fs::read(dir.join("pinned-server.bak")).unwrap(), b"old-binary");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new-binary");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

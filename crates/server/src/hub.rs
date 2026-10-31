@@ -960,7 +960,10 @@ mod tests {
         let cannot = UpdateStatus::Cannot { reason: "update by hand".into() };
         assert_eq!(reconcile(Some(cannot.clone()), "1.2.0", None), Some(cannot));
         let empty = UpdateStatus::Updating { to: String::new() };
-        assert_eq!(reconcile(Some(empty.clone()), "1.2.0", None), Some(empty));
+        assert_eq!(
+            reconcile(Some(empty), "1.2.0", None),
+            Some(UpdateStatus::Failed { to: String::new(), reason: "came back on 1.2.0".into() }),
+        );
         assert_eq!(reconcile(None, "1.2.0", None), None);
     }
 }
