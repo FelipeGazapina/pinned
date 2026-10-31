@@ -66,6 +66,7 @@ const sandbox = {
   Promise,
   Uint8Array,
   account: { email: "", machine_id: "phone" },
+  machines: { has: () => true },
   tabs: [],
   active: null,
   watches: [],
@@ -86,7 +87,7 @@ sandbox.callOn = (id, call) => {
 vm.createContext(sandbox);
 vm.runInContext(`${fs.readFileSync(`${repo}/ui/hub.js`, "utf8")}\nthis.Hub = Hub;\n`, sandbox);
 const gui = fs.readFileSync(`${repo}/ui/gui.js`, "utf8");
-const guiStart = gui.indexOf("let watchedSignature");
+const guiStart = gui.indexOf("const followed =");
 const guiEnd = gui.indexOf("setInterval(() => {", guiStart);
 vm.runInContext(gui.slice(guiStart, guiEnd), sandbox);
 const mainSrc = fs.readFileSync(`${repo}/ui/main.js`, "utf8");

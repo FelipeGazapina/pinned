@@ -262,55 +262,45 @@ function renderGui() {
   publishThreadWatch();
 }
 
-let watchedSignature = "";
+/** The tabs the page keeps current: the shown one, terminals, and any whose turn or agents still run. */
+const followed = (tab) =>
+  !(terminalOnly(tab) && tab.view.program === "sign-in") && (tab === active || turnLive(tab) || phaseOf(tab) === "delegating" || terminalOnly(tab));
+
+/** The tabs each machine was last asked to watch, sorted and joined. */
+const watching = new Map();
 let watchGeneration = 0;
-const watchedMachines = new Set();
 
 function publishThreadWatch() {
   const wanted = new Map();
   if (guiOn() && !document.hidden) {
-    for (const tab of tabs) {
-      if (terminalOnly(tab) && tab.view.program === "sign-in") continue;
-      if (tab !== active && !turnLive(tab) && phaseOf(tab) !== "delegating" && !terminalOnly(tab)) continue;
-      const ids = wanted.get(tab.machine) ?? [];
-      ids.push(tab.view.id);
-      wanted.set(tab.machine, ids);
-    }
+    for (const tab of tabs) if (followed(tab)) wanted.set(tab.machine, [...(wanted.get(tab.machine) ?? []), tab.view.id]);
   }
-  const signature = [...wanted.entries()].map(([machine, ids]) => `${machine}=${[...ids].sort().join(",")}`).sort().join("|");
-  if (signature === watchedSignature) return;
-  const previousSignature = watchedSignature;
-  const previousMachines = new Set(watchedMachines);
-  const generation = ++watchGeneration;
-  watchedSignature = signature;
-  const jobs = [];
-  const next = new Set(wanted.keys());
-  for (const machine of watchedMachines) {
-    if (!next.has(machine)) jobs.push(callOn(machine, { cmd: "watch_threads", tabs: [] }));
+  for (const machine of watching.keys()) if (!machines.has(machine)) watching.delete(machine);
+  const generation = watchGeneration;
+  for (const machine of new Set([...watching.keys(), ...wanted.keys()])) {
+    const ids = wanted.get(machine) ?? [];
+    const key = [...ids].sort().join(",");
+    const before = watching.get(machine);
+    if ((before ?? "") === key) continue;
+    if (key) watching.set(machine, key);
+    else watching.delete(machine);
+    callOn(machine, { cmd: "watch_threads", tabs: ids }).catch(() => {
+      if (watchGeneration !== generation || watching.get(machine) !== (key || undefined)) return;
+      if (before === undefined) watching.delete(machine);
+      else watching.set(machine, before);
+    });
   }
-  for (const [machine, ids] of wanted) jobs.push(callOn(machine, { cmd: "watch_threads", tabs: ids }));
-  watchedMachines.clear();
-  for (const machine of next) watchedMachines.add(machine);
-  Promise.all(jobs).catch(() => {
-    if (watchGeneration !== generation) return;
-    watchedSignature = previousSignature;
-    watchedMachines.clear();
-    for (const machine of previousMachines) watchedMachines.add(machine);
-  });
 }
 
 function forgetThreadWatch() {
-  watchedSignature = "";
+  watching.clear();
   watchGeneration++;
 }
 
 setInterval(() => {
   publishThreadWatch();
   if (!guiOn() || document.hidden) return;
-  for (const tab of tabs) {
-    if (terminalOnly(tab) && tab.view.program === "sign-in") continue;
-    if (tab === active || turnLive(tab) || phaseOf(tab) === "delegating" || terminalOnly(tab)) fetchThread(tab);
-  }
+  for (const tab of tabs) if (followed(tab)) fetchThread(tab);
 }, POLL_MS);
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
 document.addEventListener("visibilitychange", () => {

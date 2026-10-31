@@ -127,8 +127,8 @@ ${between(gui, "function hookPhase", "async function fetchWorkspace")}
 ${between(composer, "let tasksOpen = false;", "tasksTab.addEventListener")}
 ${between(composer, "function branchBanner", "composerBanners.addEventListener")}
 ${between(composer, "const formatTokens", "const contextCard")}
-${between(gui, "const statusBeforeRender", "let watchedSignature")}
-${between(gui, "let watchedSignature", "setInterval(() => {\n  publishThreadWatch")}
+${between(gui, "const statusBeforeRender", "const followed =")}
+${between(gui, "const followed =", "setInterval(() => {\n  publishThreadWatch")}
 ${between(main, "function onMachineEvent", 'listen("machine"')}
 `,
   sandbox,

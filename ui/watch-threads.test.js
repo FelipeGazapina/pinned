@@ -5,12 +5,13 @@ import vm from "node:vm";
 
 function publishThreadWatch() {
   const src = readFileSync(new URL("./gui.js", import.meta.url), "utf8");
-  const start = src.indexOf("let watchedSignature");
+  const start = src.indexOf("const followed =");
   const end = src.indexOf("setInterval(() => {", start);
   const calls = [];
   const state = { gui: true, hidden: false, tabs: [], active: null };
   const sandbox = {
     calls,
+    machines: new Map([["m", {}]]),
     guiOn: () => state.gui,
     terminalOnly: (tab) => !!tab.terminalOnly,
     turnLive: (tab) => !!tab.live,
@@ -198,7 +199,7 @@ const callOn = (machine, call) => {
 };
 ${slice(main, "function setTabs", "/** The machine's accounts")}
 ${slice(main, "function showMachines", "async function bootApp")}
-${slice(gui, "let watchedSignature", "setInterval(() => guiOn() && renderSidebar()")}
+${slice(gui, "const followed =", "setInterval(() => guiOn() && renderSidebar()")}
 globalThis.showMachines = showMachines;
 globalThis.disconnectHub = disconnectHub;
 globalThis.setTabs = setTabs;`,
