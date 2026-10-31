@@ -7,11 +7,16 @@ pub const MARKER_ENV: &str = "PINNED_UNPROVEN";
 pub const VERSION_ENV: &str = "PINNED_VERSION";
 pub const WAIT_ENV: &str = "PINNED_PROOF_WAIT";
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Debug, PartialEq, Eq)]
+pub enum AfterHello {
+    Serve,
+    Leaving,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
     Starting,
     Running,
-    /// The hub accepted this proof boot after it was ready, so nothing restores the old bytes.
     Proven,
     Leaving,
 }
@@ -69,29 +74,28 @@ impl Boot {
         true
     }
 
-    async fn commit_when_ready(&self, proof: &Proof) {
+    async fn commit_when_ready(&self, proof: &Proof) -> AfterHello {
         loop {
             let ready = self.ready.notified();
             {
                 let mut step = self.step();
                 match *step {
-                    Step::Leaving => break,
-                    Step::Proven => return,
-                    _ if !proof.holds() => return,
+                    Step::Leaving => return AfterHello::Leaving,
+                    Step::Proven => return AfterHello::Serve,
+                    _ if !proof.holds() => return AfterHello::Serve,
                     Step::Starting => {}
                     Step::Running => {
-                        let Some(path) = &proof.marker else { return };
+                        let Some(path) = &proof.marker else { return AfterHello::Serve };
                         match std::fs::remove_file(path) {
                             Ok(()) => *step = Step::Proven,
                             Err(error) => eprintln!("pinned: could not remove {}, the next sign in tries again: {error}", path.display()),
                         }
-                        return;
+                        return AfterHello::Serve;
                     }
                 }
             }
             ready.await;
         }
-        std::future::pending::<()>().await
     }
 
     fn refuse(&self, proof: &Proof) {
@@ -135,9 +139,7 @@ pub fn leave_if_running() -> bool {
     BOOT.leave_from(Step::Running)
 }
 
-/// The hub accepted this machine. A proof boot commits once it is ready. While it is leaving
-/// this never returns, so the link starts nothing that the exec would orphan.
-pub async fn commit_when_ready() {
+pub async fn commit_when_ready() -> AfterHello {
     BOOT.commit_when_ready(&Proof::of_this_process()).await
 }
 
@@ -193,7 +195,7 @@ mod tests {
         assert_eq!(hello.as_mut().now_or_never(), None, "a hello before ready did not wait for ready");
         assert!(marker_kept(&staged), "a hello before ready committed");
         assert!(boot.ready());
-        assert_eq!(hello.as_mut().now_or_never(), Some(()), "the hello was still waiting once the boot was ready");
+        assert_eq!(hello.as_mut().now_or_never(), Some(AfterHello::Serve), "the hello was still waiting once the boot was ready");
         assert!(!marker_kept(&staged), "the hello did not commit once the boot was ready");
     }
 
@@ -213,7 +215,7 @@ mod tests {
         let (boot, staged) = (Boot::new(), staged("late-refusal", CHECKSUM));
         assert!(boot.ready());
         boot.refuse(&staged.proof);
-        assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(()), "a hello after ready waited");
+        assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(AfterHello::Serve), "a hello after ready waited");
         assert!(!marker_kept(&staged), "a hello after ready did not commit");
         assert_eq!(pin!(boot.refused.notified()).now_or_never(), Some(()), "the refusal was not queued");
         assert!(!boot.leave_from(Step::Running), "a refusal queued before the hub accepted the boot rolled it back");
@@ -232,14 +234,14 @@ mod tests {
         let (boot, staged) = (Boot::new(), staged("deadline-then-ready", CHECKSUM));
         assert!(boot.leave_from(Step::Starting));
         assert!(!boot.ready(), "the main thread went on to resume sessions during a rollback");
-        assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), None, "a hello during the rollback went on to serve the hub");
+        assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(AfterHello::Leaving), "a hello during the rollback went on to serve the hub");
         assert!(marker_kept(&staged), "a hello during the rollback removed the marker");
     }
 
     #[test]
     fn a_process_with_nothing_to_prove_signs_in_without_ready_and_never_queues_a_refusal() {
         let (boot, staged) = (Boot::new(), staged("no-proof", ""));
-        assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(()), "a process with nothing to prove waited for ready");
+        assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(AfterHello::Serve), "a process with nothing to prove waited for ready");
         assert!(marker_kept(&staged), "a process with nothing to prove removed the marker");
         boot.refuse(&staged.proof);
         assert_eq!(pin!(boot.refused.notified()).now_or_never(), None, "a process with nothing to prove queued a refusal");
