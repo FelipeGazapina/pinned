@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
@@ -28,6 +29,7 @@ NEW_LATEST = b'{"version":"0.17.0","pub_date":"2026-10-31T18:00:00.000Z","notes"
 ARM = b"arm-old"
 X86 = b"x86-old"
 SUM_NAMES = ("latest.json", ARM_NAME, X86_NAME)
+STAMP_EPOCH = 1700000000
 
 GH_SOURCE = r'''#!/usr/bin/env python3
 import base64, hashlib, json, os, pathlib, sys
@@ -98,6 +100,12 @@ def split_tag(args):
         return args[0], args[1:]
     return None, args
 
+def next_stamp(state):
+    import datetime
+    state["clock"] = int(state.get("clock") or 0) + 1
+    moment = datetime.datetime.fromtimestamp(1700000000 + state["clock"], datetime.timezone.utc)
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
 def main():
     argv = sys.argv[1:]
     if len(argv) < 2 or argv[0] != "release":
@@ -135,6 +143,15 @@ def main():
             sys.stderr.write("release not found\n")
             return 1
         if "--json" in flags:
+            fields = (flags.get("--json") or [""])[0]
+            if "assets" in [item.strip() for item in fields.split(",")]:
+                updated = state.get("updated") or {}
+                rows = [
+                    {"name": name, "updatedAt": updated.get(name, "")}
+                    for name in state["assets"]
+                ]
+                print(json.dumps({"assets": rows}))
+                return 0
             jq = (flags.get("--jq") or [None])[0]
             if jq == ".isDraft":
                 print("true" if state["draft"] else "false")
@@ -179,16 +196,21 @@ def main():
         if not positional:
             sys.stderr.write("no files to upload\n")
             return 1
+        prepared = []
         for raw in positional:
             path = pathlib.Path(raw)
             data = path.read_bytes()
             if not data:
                 sys.stderr.write(f"{raw} is empty\n")
                 return 1
-            name = path.name
+            prepared.append((path.name, data))
+        stamp = next_stamp(state)
+        state.setdefault("updated", {})
+        for name, data in prepared:
             if not state["draft"]:
                 state["violations"].append(f"upload {name} while the release is public")
             state["assets"][name] = base64.b64encode(data).decode()
+            state["updated"][name] = stamp
             state["uploads"].append({"name": name, "draft": bool(state["draft"])})
             gap = public_mismatch(state)
             if gap:
@@ -426,12 +448,18 @@ def asset_bytes(state, name):
     return base64.b64decode(raw)
 
 
+def asset_stamp(counter):
+    return datetime.fromtimestamp(STAMP_EPOCH + counter, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def empty_state():
     return {
         "exists": False,
         "draft": False,
         "latest": False,
         "assets": {},
+        "updated": {},
+        "clock": 0,
         "violations": [],
         "uploads": [],
         "calls": [],
@@ -451,6 +479,8 @@ def seeded_state(draft, latest_flag, latest, sums):
         ARM_NAME: b64(ARM),
         X86_NAME: b64(X86),
     }
+    state["clock"] = 0
+    state["updated"] = {name: asset_stamp(0) for name in state["assets"]}
     return state
 
 
@@ -785,6 +815,18 @@ def main():
             "consistent": False,
         },
     )
+    add(
+        "build re-run then publish without sign-node",
+        ["build", "publish"],
+        matching_public(),
+        False,
+        {
+            "draft": True,
+            "stderr_has": "sign-node did not run after the last build",
+            "consistent": True,
+            "unchanged_from": matching_public(),
+        },
+    )
     older_latest = matching_public()
     older_latest["remote_latest"] = "v0.18.0"
     add(
@@ -839,6 +881,8 @@ def main():
                     "draft": after["draft"],
                     "latest": after["latest"],
                     "assets": after["assets"],
+                    "updated": after.get("updated") or {},
+                    "clock": after.get("clock") or 0,
                     "violations": [],
                     "uploads": [],
                     "calls": [],

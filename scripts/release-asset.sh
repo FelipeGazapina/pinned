@@ -119,6 +119,20 @@ case "$cmd" in
       echo "the release checksum does not match" >&2
       exit 1
     }
+    assets=$(gh release view "$tag" --json assets)
+    RELEASE_ASSETS="$assets" python3 - <<'PY'
+import json, os, sys
+payload = json.loads(os.environ["RELEASE_ASSETS"])
+rows = {item["name"]: item.get("updatedAt") or "" for item in payload["assets"]}
+latest = rows.get("latest.json")
+if not latest:
+    sys.stderr.write("latest.json is missing\n")
+    sys.exit(1)
+newer = sorted(name for name, stamp in rows.items() if name != "latest.json" and stamp > latest)
+if newer:
+    sys.stderr.write("sign-node did not run after the last build: " + ", ".join(newer) + "\n")
+    sys.exit(1)
+PY
     edit_args=(--draft=false)
     if tag_is_latest "$tag"; then
       edit_args+=(--latest)
