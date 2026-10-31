@@ -1,0 +1,13 @@
+name: queue probe max
+on:
+  push:
+    branches: [fix/release-script-guards]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: queue-probe-max
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - run: echo "job-level queue max accepted"

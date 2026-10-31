@@ -1,0 +1,13 @@
+name: queue probe bogus
+on:
+  push:
+    branches: [fix/release-script-guards]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: queue-probe-bogus
+      cancel-in-progress: false
+      queue: bogus
+    steps:
+      - run: echo "job-level queue bogus accepted"
