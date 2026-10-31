@@ -435,7 +435,7 @@ impl Hub {
 
     pub async fn push_machines(&self, account: &Account) {
         match self.machines(account).await {
-            Ok(machines) => account.broadcast(&ToClient::Machines { machines }),
+            Ok(machines) => account.broadcast(&ToClient::Machines { machines, tabs: Some(account.tab_snapshot()) }),
             Err(e) => eprintln!("pinned-server: could not list account {}'s machines: {e}", account.id),
         }
     }
@@ -492,6 +492,11 @@ impl Account {
         for m in machines {
             m.online = live.machines.contains_key(&m.id);
         }
+    }
+
+    /// Tabs of the machines that are online now. A client uses this to drop ids from a process that exited.
+    fn tab_snapshot(&self) -> BTreeMap<MachineId, Vec<TabView>> {
+        self.live.lock().unwrap().machines.iter().map(|(id, m)| (id.clone(), m.tabs.clone())).collect()
     }
 
     /// The online machine and tab already working on the connector's `subject`.

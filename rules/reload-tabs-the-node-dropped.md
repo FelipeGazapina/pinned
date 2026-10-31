@@ -1,15 +1,13 @@
-# Reload tabs the node dropped
+# A tab id belongs to one process
 
-The composer shows "claude isn't running. Press Enter to start it." while `tab.view.running` is false. Enter calls `start_claude`. The model button stays on "Default" until a thread loads, and a thread loads only after that call succeeds.
+A tab id names one tab of one process. The next process draws new ids, so a client that still holds the old ones cannot type into or close a different session. The conversation is `TabView.session`, which is what a restart restores. `sessions.json` does not store the tab id.
 
-## What went wrong
+## What an id is
 
-The hub answered those calls with `no tab <id>`. The node did not have the id the client sent, so Enter did not start Claude. The client asked for a fresh tab list only when a machine changed from offline to online. An update that arrived while the client already treated the machine as online left the old ids in place. A later `no tab` error was written to the hidden terminal and the tab stayed.
+`tab-<boot>-<n>`. `boot` is chosen when the process starts and is not stored. `n` is the order the tab opened in that process, and it is the part after the last `-`. `tab-1` from an older node still orders as 1. Session order and the project's orchestrator read that number.
 
-On the railway box, Claude started with the same arguments pinned builds, including the synced plugin directories, and stayed up. It answered a prompt. The missing tab id is what blocked the composer.
+## What clients hear
 
-## What the client does now
+`quit` sends an empty tab list before it drops the tabs, while the hub socket is still up. A machines frame includes `tabs` for the machines that are online. An older hub leaves the field out, and an older client ignores it. A client applies `tabs` when it is present, including when it already thought the machine was online. It asks for the list only when a machine comes online and the frame has no `tabs`.
 
-`tabListAction` returns `refresh` for an online machine when the update has no tab snapshot. `callOn` reloads that machine's tabs when a call fails with `no tab <id>`, then `startClaude` writes the error only if the tab is still open.
-
-The hub serves `ui/main.js`. This fix ships with the hub.
+A `start_claude` that answers `no tab` reloads that machine's tabs. Enter starts the restored tab when the same session is open under a new id. Otherwise the composer says the session ended.

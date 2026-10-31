@@ -20,11 +20,7 @@ function showMachinesContext() {
   const applied = [];
   const refreshed = [];
   const retried = [];
-  const preludeStart = src.indexOf("function tabListAction");
-  const showStart = src.indexOf("function showMachines");
-  const prelude = preludeStart >= 0 && preludeStart < showStart ? src.slice(preludeStart, showStart) : "";
-  const context = runSlice("function showMachines", "function disconnectHub", "");
-  vm.runInContext(prelude, context);
+  const context = runSlice("function showMachines", "function disconnectHub");
   context.account = { machine_id: "this-mac" };
   context.page = "";
   context.machinesUi = { renaming: false };
@@ -90,6 +86,15 @@ function startClaudeContext() {
   return context;
 }
 
+test("a machine that just came online uses the snapshot instead of asking", () => {
+  const { context, applied, refreshed, retried } = showMachinesContext();
+  context.machines.get("box").view.online = false;
+  context.showMachines([{ id: "box", name: "railway", online: true }], { box: [{ id: "tab-new" }] });
+  assert.deepEqual(snapshot(applied), [{ machine: "box", ids: ["tab-new"] }]);
+  assert.deepEqual(snapshot(refreshed), []);
+  assert.deepEqual(snapshot(retried), ["retry"]);
+});
+
 test("Enter starts the restored session when the old tab id is gone", async () => {
   const context = startClaudeContext();
   const old = { key: "box:tab-old", machine: "box", view: { id: "tab-old", session: "conv-1", running: false }, attached: Promise.resolve(), term: { cols: 80, rows: 24, write() {} } };
@@ -108,6 +113,22 @@ test("Enter says the session ended when the machine has no tab for it", async ()
   await context.startClaude(old);
   assert.deepEqual(snapshot(context.notes), [{ text: "That session ended when the machine restarted. Open it again to continue.", error: true }]);
   assert.deepEqual(snapshot(context.writes), []);
+});
+
+test("Enter reports a start error on a tab the machine still has", async () => {
+  const context = startClaudeContext();
+  const tab = {
+    key: "box:tab-old",
+    machine: "box",
+    view: { id: "tab-old", running: false },
+    attached: Promise.resolve(),
+    term: { cols: 80, rows: 24, write(text) { context.writes.push(text); } },
+  };
+  context.tabs = [tab];
+  context.guiOn = () => false;
+  await context.startClaude(tab);
+  assert.equal(context.writes.length, 1);
+  assert.match(context.writes[0], /could not start claude: no tab tab-old/);
 });
 
 test("a no-tab error reloads that machine's tabs and is still reported", async () => {

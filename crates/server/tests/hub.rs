@@ -321,31 +321,30 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
     assert_eq!(names, [("node-a", true), ("node-b", true)]);
     let b = creds_b.machine_id.as_str();
 
-    let tab = client.call(b, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap();
-    assert_eq!(tab, "tab-1");
-    let cwd = client.call(b, json!({ "cmd": "start_claude", "tab": "tab-1", "cols": 80, "rows": 24 })).unwrap();
+    let tab_id = client.call(b, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    let cwd = client.call(b, json!({ "cmd": "start_claude", "tab": &tab_id, "cols": 80, "rows": 24 })).unwrap();
     assert_eq!(cwd, dir_b.display().to_string());
     client.wait("node-b's running tab", |f| {
         f["type"] == "event" && f["machine"] == b && f["event"]["kind"] == "tabs" && f["event"]["tabs"][0]["running"] == true
     });
-    client.send(json!({ "type": "attach", "machine": b, "tab": "tab-1" }));
+    client.send(json!({ "type": "attach", "machine": b, "tab": &tab_id }));
     let typed: String = (0..300).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
     for key in typed.chars().chain(['\r']) {
-        client.send(json!({ "type": "call", "id": 1000, "machine": b, "call": { "cmd": "write_input", "tab": "tab-1", "data": key.to_string() } }));
+        client.send(json!({ "type": "call", "id": 1000, "machine": b, "call": { "cmd": "write_input", "tab": &tab_id, "data": key.to_string() } }));
     }
     let screen = format!("{typed}\r\n{typed}\r\n");
-    let echoed = client.wait_output(b, "tab-1", "\r\n");
+    let echoed = client.wait_output(b, &tab_id, "\r\n");
     assert_eq!(echoed.get(..typed.len()), Some(typed.as_str()), "keys echo in the order they were typed");
-    assert_eq!(client.wait_output(b, "tab-1", &screen), screen);
+    assert_eq!(client.wait_output(b, &tab_id, &screen), screen);
 
     let mut late = Client::connect(&url, &token);
     let hello = late.wait("hello", |f| f["type"] == "hello");
-    assert_eq!(hello["tabs"][b][0]["id"], "tab-1");
-    late.send(json!({ "type": "attach", "machine": b, "tab": "tab-1" }));
-    assert_eq!(late.wait_output(b, "tab-1", &screen), screen, "a late client gets the screen");
-    client.call(b, json!({ "cmd": "write_input", "tab": "tab-1", "data": "again\r" })).unwrap();
-    late.wait_output(b, "tab-1", "again\r\nagain\r\n");
-    assert_eq!(client.wait_output(b, "tab-1", "again\r\nagain\r\n"), format!("{screen}again\r\nagain\r\n"), "the first client never sees the screen twice");
+    assert_eq!(hello["tabs"][b][0]["id"], tab_id);
+    late.send(json!({ "type": "attach", "machine": b, "tab": &tab_id }));
+    assert_eq!(late.wait_output(b, &tab_id, &screen), screen, "a late client gets the screen");
+    client.call(b, json!({ "cmd": "write_input", "tab": &tab_id, "data": "again\r" })).unwrap();
+    late.wait_output(b, &tab_id, "again\r\nagain\r\n");
+    assert_eq!(client.wait_output(b, &tab_id, "again\r\nagain\r\n"), format!("{screen}again\r\nagain\r\n"), "the first client never sees the screen twice");
 
     let refused = client.call(b, json!({ "cmd": "format_disk" })).unwrap_err();
     let says = format!("this hub runs pinned {}, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`", env!("CARGO_PKG_VERSION"));
@@ -353,7 +352,7 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
     assert!(client.hub(json!({ "cmd": "self_destruct" })).unwrap_err().contains("unknown variant `self_destruct`"));
     assert_eq!(client.call("not-a-machine", json!({ "cmd": "tabs" })), Err("this account has no machine not-a-machine".into()));
 
-    client.call(b, json!({ "cmd": "close_tab", "tab": "tab-1" })).unwrap();
+    client.call(b, json!({ "cmd": "close_tab", "tab": &tab_id })).unwrap();
     client.wait("node-b without tabs", |f| f["type"] == "event" && f["machine"] == b && f["event"] == json!({ "kind": "tabs", "tabs": [] }));
 
     node_b.kill();
@@ -508,7 +507,8 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     let issue = Subject::LinearIssue { issue: "uuid-1".into() };
     assert_eq!(open(run(issue.clone())), Ok(()), "a run a session already works on counts as taken");
     let Work::Run(again) = run(Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() }) else { unreachable!() };
-    assert_eq!(node_a.machine.run(&again.spec()), Ok("tab-1".into()), "a machine answers a run sent again with the session it started");
+    let started = node_a.machine.tabs().into_iter().find(|t| t.connector.as_deref() == Some(id.as_str())).unwrap().id;
+    assert_eq!(node_a.machine.run(&again.spec()), Ok(started.clone()), "a machine answers a run sent again with the session it started");
     assert_eq!((connector_tabs(&node_a), connector_tabs(&node_b)), (1, 1));
 
     let forward = |node: &Node, subject: Subject| node.link.as_ref().unwrap().forward(agent::Message::Stage { connector: id.clone(), subject, stage: Stage::Coding });
@@ -528,7 +528,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     };
     let seen = Arc::new(Mutex::new(vec![]));
     let sink = seen.clone();
-    node_a.machine.attach("tab-1", "test".into(), Box::new(move |b: &[u8]| sink.lock().unwrap().extend_from_slice(b))).unwrap();
+    node_a.machine.attach(&started, "test".into(), Box::new(move |b: &[u8]| sink.lock().unwrap().extend_from_slice(b))).unwrap();
     assert_eq!(open(delivery("1792400050.000200")), Ok(()), "the thread's live session takes its new messages");
     wait_for("the delivered prompt", || String::from_utf8_lossy(&seen.lock().unwrap()).contains("yes, file it"));
     assert_eq!(open(delivery("1792499999.000100")), Err("no session answers that thread".into()));
@@ -1195,7 +1195,7 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
     assert_eq!(open(ana.box_run(issue("uuid-1"))), Ok(()), "a run its box already works on counts as taken");
     assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 1);
 
-    ana.client.call(&machine, json!({ "cmd": "close_tab", "tab": "tab-1" })).unwrap();
+    ana.client.call(&machine, json!({ "cmd": "close_tab", "tab": &tabs[0].id })).unwrap();
     wait_for("the box to be deleted", || hub.boxes.live().is_empty());
     ana.client.wait_machines(&[]);
     wait_for("the row to go", || ana.rows(&hub) == 0);
@@ -1452,7 +1452,8 @@ fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
         })
     };
     stage(Stage::Review).unwrap();
-    ana.client.call(&machine, json!({ "cmd": "close_tab", "tab": "tab-1" })).unwrap();
+    let tab = hub.boxes.with_node(|node| node.machine.tabs().into_iter().next().unwrap().id);
+    ana.client.call(&machine, json!({ "cmd": "close_tab", "tab": tab })).unwrap();
     let start = Instant::now();
     while start.elapsed() < Duration::from_millis(1500) {
         assert_eq!(hub.boxes.live().len(), 1, "fixed box reaped");

@@ -500,8 +500,16 @@ async function startClaude(tab) {
     tab.view = { ...tab.view, running: true };
     render();
   } catch (e) {
-    if (!tabs.includes(tab)) return;
-    tab.term.write(`\r\n\x1b[31m[could not start claude: ${e}]\x1b[0m\r\n`);
+    const kept = tabs.includes(tab);
+    const restored = !kept && tab.view.session ? tabs.find((t) => t.machine === tab.machine && t.view.session === tab.view.session) : null;
+    if (restored) {
+      activate(restored);
+      if (!restored.view.running) return startTab(restored);
+      return;
+    }
+    const text = kept ? `could not start claude: ${e}` : "That session ended when the machine restarted. Open it again to continue.";
+    if (typeof showComposerNote === "function" && typeof guiOn === "function" && guiOn()) showComposerNote(text, true);
+    if (kept) tab.term.write(`\r\n\x1b[31m[${text}]\x1b[0m\r\n`);
   }
 }
 
@@ -1233,7 +1241,7 @@ function connectHub(signedIn) {
       showMachines(frame.machines, frame.tabs);
       hub.hub({ cmd: "get_settings" }).then(onHubSettings, console.warn);
     },
-    machines: (list) => showMachines(list),
+    machines: (list, tabs) => showMachines(list, tabs),
     // This Mac's own events come over Tauri, not back through the hub.
     event: (machine, event) => machine !== account.machine_id && onMachineEvent(machine, event),
     settings: (latest) => onHubSettings(latest),
@@ -1246,12 +1254,6 @@ function connectHub(signedIn) {
   });
 }
 
-function tabListAction(online, hasSnapshot) {
-  if (!online) return "clear";
-  if (hasSnapshot) return "apply";
-  return "refresh";
-}
-
 function showMachines(list, tabsByMachine) {
   for (const view of list) {
     if (view.id === account.machine_id) {
@@ -1262,13 +1264,10 @@ function showMachines(list, tabsByMachine) {
     const wasOnline = known?.view.online;
     if (known) known.view = view;
     else machines.set(view.id, { view, tabs: [], transport: hub.transport(view.id), usage: {} });
-    const action = tabListAction(!!view.online, tabsByMachine != null);
-    if (action === "clear") setTabs(view.id, [], { forget: false });
-    else if (action === "apply") setTabs(view.id, tabsByMachine[view.id] ?? []);
-    else {
-      refreshTabs(view.id).catch(console.warn);
-      if (!wasOnline) retryUploadImages();
-    }
+    if (!view.online) setTabs(view.id, [], { forget: false });
+    else if (tabsByMachine != null) setTabs(view.id, tabsByMachine[view.id] ?? []);
+    else if (!wasOnline) refreshTabs(view.id).catch(console.warn);
+    if (view.online && !wasOnline) retryUploadImages();
   }
   for (const id of [...machines.keys()]) {
     if (id === LOCAL || list.some((v) => v.id === id)) continue;
