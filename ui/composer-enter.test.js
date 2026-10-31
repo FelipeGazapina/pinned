@@ -21,6 +21,7 @@ function loadComposerEnter() {
 
 function loadTriggerKey() {
   const src = readFileSync(new URL("./gui-composer.js", import.meta.url), "utf8");
+  const helpers = src.slice(src.indexOf("function enterNeedsMod"), src.indexOf("const SEND_MOD"));
   const start = src.indexOf("function triggerKey");
   const end = src.indexOf('document.getElementById("stash").insertAdjacentHTML');
   const picks = [];
@@ -30,12 +31,15 @@ function loadTriggerKey() {
   rows[0].classList.contains = (c) => c === "highlight";
   const composerMenu = { hidden: false, querySelectorAll: () => rows };
   const context = {
+    matchMedia: mq(false, true),
+    sendShortcut: "enter",
+    IS_MAC: true,
     composerMenu,
     prompt: { value: "/he" },
     pickTrigger: (pick) => picks.push(pick),
   };
   vm.createContext(context);
-  vm.runInContext(`${src.slice(start, end)}\nglobalThis.triggerKey = triggerKey;`, context);
+  vm.runInContext(`${helpers}\n${src.slice(start, end)}\nglobalThis.triggerKey = triggerKey;`, context);
   return { triggerKey: context.triggerKey, picks, composerMenu };
 }
 

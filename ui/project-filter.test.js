@@ -33,7 +33,7 @@ function labelMarks(html) {
 test("the project filter label keeps the full name as its title", () => {
   const start = sidebarSrc.indexOf("function renderSidebar");
   const end = sidebarSrc.indexOf("function shelfRows");
-  const whereStart = sidebarSrc.indexOf("function projectWhere");
+  const whereStart = sidebarSrc.indexOf("function projectNameMark");
   const whereEnd = sidebarSrc.indexOf("const projectFilter = document.getElementById");
   const projectFilter = { innerHTML: "", setAttribute() {} };
   const context = {
@@ -79,7 +79,7 @@ test("the project filter label keeps the full name as its title", () => {
 });
 
 test("a project menu row keeps the full name and the machine as titles", () => {
-  const start = sidebarSrc.indexOf("function projectWhere");
+  const start = sidebarSrc.indexOf("function projectNameMark");
   const end = sidebarSrc.indexOf("function closeProjectMenu");
   const projectFilter = { setAttribute() {} };
   const projectMenu = {
