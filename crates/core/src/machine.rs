@@ -366,8 +366,7 @@ pub struct Machine {
     pr_watches: crate::prwatch::Watches,
     clones: PathBuf,
     quitting: AtomicBool,
-    /// Set once the thread that enforces task limits and wakes quiet parents runs, for the life of the machine.
-    delegate_pass: AtomicBool,
+    delegate_pass_armed: AtomicBool,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
@@ -478,7 +477,7 @@ impl Machine {
             pr_watches: Default::default(),
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
-            delegate_pass: AtomicBool::new(false),
+            delegate_pass_armed: AtomicBool::new(false),
             usage: Mutex::default(),
             agents: Mutex::default(),
             delegates,
@@ -2216,7 +2215,7 @@ impl Machine {
     }
 
     fn arm_delegate_pass(&self) {
-        if self.delegate_pass.swap(true, Ordering::Relaxed) {
+        if self.delegate_pass_armed.swap(true, Ordering::Relaxed) {
             return;
         }
         let me = self.me.clone();

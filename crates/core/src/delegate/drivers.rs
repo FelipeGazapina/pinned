@@ -744,29 +744,26 @@ pub fn kill_tree(pid: u32) {
     signal(&targets);
 }
 
-/// Stops every process under the live agent `pid`, and leaves the agent itself running.
 #[cfg(unix)]
 pub fn kill_descendants(pid: u32) {
     signal(&signal_targets_under(pid));
 }
 
-/// A process seen under a live agent. The start time tells it apart from a later process given the same pid.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Seen {
+pub struct Process {
     pid: i32,
-    start: String,
+    started: String,
 }
 
-/// What ran under the live agent `pid` now, plus what in `before` still runs. A shell the agent
-/// started in a session of its own is reparented when the agent exits, and only this list still names it.
-pub fn seen_under(pid: u32, before: &[Seen]) -> Vec<Seen> {
+/// A shell the agent started in a session of its own is reparented when the agent exits, and only this list still names it.
+pub fn seen_under(pid: u32, before: &[Process]) -> Vec<Process> {
     #[cfg(unix)]
     {
         let under: Vec<i32> = signal_targets_under(pid).into_iter().filter(|target| *target > 0).collect();
         let mut ask: Vec<i32> = under.iter().copied().chain(before.iter().map(|seen| seen.pid)).collect();
         ask.sort_unstable();
         ask.dedup();
-        running(&ask).into_iter().map(|(seen, _)| seen).filter(|seen| under.contains(&seen.pid) || before.contains(seen)).collect()
+        running(&ask).into_iter().map(|now| now.process).filter(|now| under.contains(&now.pid) || before.contains(now)).collect()
     }
     #[cfg(not(unix))]
     {
@@ -775,14 +772,14 @@ pub fn seen_under(pid: u32, before: &[Seen]) -> Vec<Seen> {
     }
 }
 
-/// Stops each process in `seen` that still runs, and the group it leads.
-pub fn kill_seen(seen: &[Seen]) {
+pub fn kill_seen(seen: &[Process]) {
     #[cfg(unix)]
     {
         let pids: Vec<i32> = seen.iter().map(|seen| seen.pid).collect();
-        for (now, pgid) in running(&pids) {
-            if seen.contains(&now) {
-                signal(&if pgid == now.pid { vec![-now.pid, now.pid] } else { vec![now.pid] });
+        for now in running(&pids) {
+            let pid = now.process.pid;
+            if seen.contains(&now.process) {
+                signal(&if now.pgid == pid { vec![-pid, pid] } else { vec![pid] });
             }
         }
     }
@@ -815,21 +812,32 @@ fn ps(args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-/// `[pid, ppid, pgid]` for every process.
 #[cfg(unix)]
-fn process_table() -> Vec<[u32; 3]> {
+struct Row {
+    pid: u32,
+    ppid: u32,
+    pgid: u32,
+}
+
+#[cfg(unix)]
+fn process_table() -> Vec<Row> {
     ps(&["-A", "-o", "pid=,ppid=,pgid="])
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace().map(|field| field.parse().ok());
-            Some([fields.next()??, fields.next()??, fields.next()??])
+            Some(Row { pid: fields.next()??, ppid: fields.next()??, pgid: fields.next()?? })
         })
         .collect()
 }
 
-/// Each of `pids` that still runs, with its process group.
 #[cfg(unix)]
-fn running(pids: &[i32]) -> Vec<(Seen, i32)> {
+struct Running {
+    process: Process,
+    pgid: i32,
+}
+
+#[cfg(unix)]
+fn running(pids: &[i32]) -> Vec<Running> {
     if pids.is_empty() {
         return vec![];
     }
@@ -840,18 +848,18 @@ fn running(pids: &[i32]) -> Vec<(Seen, i32)> {
             let mut fields = line.split_whitespace();
             let pid = fields.next()?.parse().ok()?;
             let pgid = fields.next()?.parse().ok()?;
-            Some((Seen { pid, start: fields.collect::<Vec<_>>().join(" ") }, pgid))
+            Some(Running { process: Process { pid, started: fields.collect::<Vec<_>>().join(" ") }, pgid })
         })
         .collect()
 }
 
 #[cfg(unix)]
-fn targets_under(rows: &[[u32; 3]], root: u32) -> Vec<i32> {
+fn targets_under(rows: &[Row], root: u32) -> Vec<i32> {
     let mut below = vec![];
     let mut parents = vec![root];
     let mut targets = vec![];
     while let Some(parent) = parents.pop() {
-        for &[pid, ppid, pgid] in rows {
+        for &Row { pid, ppid, pgid } in rows {
             if pid > 1 && ppid == parent && pid != root && !below.contains(&pid) {
                 below.push(pid);
                 parents.push(pid);
@@ -872,7 +880,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn the_walk_never_targets_pid_0_or_1() {
-        let rows = [[0, 500, 0], [1, 500, 1], [501, 500, 501], [502, 501, 501]];
+        let rows = [(0, 500, 0), (1, 500, 1), (501, 500, 501), (502, 501, 501)].map(|(pid, ppid, pgid)| super::Row { pid, ppid, pgid });
         assert_eq!(super::targets_under(&rows, 500), vec![-501, 501, 502]);
     }
 

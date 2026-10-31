@@ -28,10 +28,9 @@ struct Report {
     task: Option<String>,
 }
 
-/// A running child, and what ran under it.
 struct Agent {
     pid: u32,
-    seen: Vec<Seen>,
+    seen: Vec<Process>,
 }
 
 impl Agent {
@@ -44,7 +43,7 @@ impl Agent {
 enum Stop {
     Exited(Agent),
     Answered(u32),
-    Watch(u32, Vec<Seen>),
+    Watch(u32, Vec<Process>),
 }
 
 impl Default for Delegates {
@@ -319,7 +318,7 @@ impl Delegates {
                 kill(agent.pid);
                 kill_seen(&agent.seen);
             }
-            Some(Stop::Answered(pid)) => self.after_answer(id, pid),
+            Some(Stop::Answered(pid)) => self.stop_with_grace(id, pid),
             Some(Stop::Watch(pid, before)) => {
                 let seen = seen_under(pid, &before);
                 if let Some(agent) = self.agents.lock().unwrap().get_mut(id) {
@@ -338,9 +337,7 @@ impl Delegates {
         ready
     }
 
-    /// Stops what the agent left running at once, and the agent only if it is still running after
-    /// `EXIT_GRACE`, so its own shutdown runs before a resume reopens the conversation.
-    fn after_answer(&self, id: &str, pid: u32) {
+    fn stop_with_grace(&self, id: &str, pid: u32) {
         #[cfg(unix)]
         {
             kill_descendants(pid);
