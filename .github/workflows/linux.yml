@@ -16,5 +16,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
       - run: bash scripts/test-assemble-latest-json.sh
+      - run: python3 scripts/test-release-rerun.py
       - run: npm ci
       - run: cargo test -p pinned-server --lib
