@@ -57,6 +57,18 @@ test("an already-online machine applies a tab snapshot without asking again", ()
   assert.deepEqual(snapshot(refreshed), []);
 });
 
+test("this machine asks once whether its sync stopped when the hub first lists it", () => {
+  const { context, asked } = showMachinesContext();
+  context.machines.set("local", {});
+  const list = [
+    { id: "this-mac", name: "mac", online: true },
+    { id: "box", name: "railway", online: true },
+  ];
+  context.showMachines(list);
+  context.showMachines(list);
+  assert.deepEqual(snapshot(asked), ["local"]);
+});
+
 test("a machine going offline drops its tabs", () => {
   const { context, applied } = showMachinesContext();
   context.showMachines([{ id: "box", name: "railway", online: false }]);
