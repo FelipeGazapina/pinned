@@ -206,7 +206,7 @@ impl Syncer {
                 Ok(loaded) => self.state = Some(loaded),
                 Err(e) => {
                     if !self.reported_unreadable {
-                        eprintln!("pinned: could not sync: {e}");
+                        eprintln!("pinned: could not sync: {e}. Start sync over from Settings, Machines in the app.");
                         self.reported_unreadable = true;
                     }
                     return;
@@ -437,7 +437,7 @@ mod tests {
 
         syncer.cycle(&shared, &machine, &file);
         assert_eq!(std::fs::read(&file).unwrap(), b"", "a stopped sync leaves the file as it was");
-        let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0); restore or remove it to sync again", file.display());
+        let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
 
         assert_eq!(machine.call(Call::ResetSync), Ok(Value::Null));

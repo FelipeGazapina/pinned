@@ -112,7 +112,7 @@ struct Hashed {
 
 fn read(file: &Path) -> Result<State, String> {
     match std::fs::read(file) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("the sync state {} is corrupt ({e}); restore or remove it to sync again", file.display())),
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("the sync state {} is corrupt ({e})", file.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
         Err(e) => Err(format!("could not read the sync state {}: {e}", file.display())),
     }
@@ -2446,7 +2446,7 @@ mod tests {
         let synced = State::load(&file, &root.join("legacy")).and_then(|mut state| sync(&hub, &mut state, &mac.checkout, SystemTime::now()));
         assert_eq!(texts(&hub).get("claude/memory/MEMORY.md").map(String::as_str), Some("two two\n"));
         assert_eq!(std::fs::read_to_string(&memory).unwrap(), "one\n");
-        assert_eq!(synced, Err(format!("the sync state {} is corrupt (EOF while parsing a string at line 1 column 12); restore or remove it to sync again", file.display())));
+        assert_eq!(synced, Err(format!("the sync state {} is corrupt (EOF while parsing a string at line 1 column 12)", file.display())));
         let _ = std::fs::remove_dir_all(root);
     }
 
