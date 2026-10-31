@@ -5305,6 +5305,7 @@ mod tests {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         served += 1;
+                        stream.set_nonblocking(false).unwrap();
                         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
                         let mut buf = Vec::new();
                         let mut tmp = [0u8; 1024];
