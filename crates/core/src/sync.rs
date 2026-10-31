@@ -337,28 +337,23 @@ fn exchange(
     let mut wanted: Vec<String> = vec![];
     let mut size = 0;
     let fetch = |wanted: Vec<String>, agreed: &mut BTreeMap<String, String>, synced: &mut Synced, state: &mut State| -> Result<(), String> {
+        let mut applied = vec![];
+        let mut result = Ok(());
         for file in hub.pull(key, wanted)? {
             let Some(target) = resolve(&file.entry.path) else { continue };
-            let update = match &file.data {
-                None => {
-                    match std::fs::remove_file(&target) {
-                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("could not delete {}: {e}", target.display())),
-                        _ => None,
-                    }
+            match apply(state, key, &file, &target) {
+                Ok(update) => {
+                    synced.pulled.push(file.entry.path.clone());
+                    applied.push((file.entry.path, update));
                 }
-                Some(data) => {
-                    let bytes = unpack(data)?;
-                    let mode = if key == PLUGINS_KEY { file.entry.executable } else { None };
-                    write(&target, &bytes, Some(file.entry.modified), mode)?;
-                    state.hash(&target);
-                    Some(file.entry.sha.clone())
+                Err(e) => {
+                    result = Err(e);
+                    break;
                 }
-            };
-            let path = file.entry.path.clone();
-            synced.pulled.push(path.clone());
-            commit_agreed(state, agreed_key, agreed, &[(path, update)])?;
+            }
         }
-        Ok(())
+        let committed = commit_agreed(state, agreed_key, agreed, &applied);
+        result.and(committed)
     };
     for path in pull {
         if !remote.contains_key(&path) {
@@ -487,6 +482,20 @@ pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now:
     state.agreed.insert(agreed_key, agreed);
     state.persist()?;
     Ok(synced)
+}
+
+/// Puts a pulled file in place, or deletes it for a tombstone. Answers the sha now agreed on.
+fn apply(state: &mut State, key: &str, file: &File, target: &Path) -> Result<Option<String>, String> {
+    let Some(data) = &file.data else {
+        return match std::fs::remove_file(target) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("could not delete {}: {e}", target.display())),
+            _ => Ok(None),
+        };
+    };
+    let mode = if key == PLUGINS_KEY { file.entry.executable } else { None };
+    write(target, &unpack(data)?, Some(file.entry.modified), mode)?;
+    state.hash(target);
+    Ok(Some(file.entry.sha.clone()))
 }
 
 fn commit_agreed(state: &mut State, agreed_key: &str, agreed: &mut BTreeMap<String, String>, updates: &[(String, Option<String>)]) -> Result<(), String> {
