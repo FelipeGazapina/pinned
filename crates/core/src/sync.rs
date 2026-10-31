@@ -138,7 +138,7 @@ impl State {
     /// Renames a complete copy over the file, so a crash leaves the previous state or this one.
     fn persist(&self) -> Result<(), String> {
         let Some(file) = &self.loaded_from else { return Ok(()) };
-        let dir = file.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let dir = file.parent().unwrap_or(Path::new("."));
         let failed = |e: std::io::Error| format!("could not save {}: {e}", file.display());
         let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(failed)?;
         write_state(temp.as_file_mut(), &serde_json::to_vec(self).unwrap()).map_err(failed)?;
