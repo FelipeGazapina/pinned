@@ -476,6 +476,8 @@ impl Machine {
             }
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
+            Call::SyncStopped => Ok(Value::Null),
+            Call::ResetSync => Ok(Value::Null),
             Call::ProjectHistory { path, session } => {
                 let mut turns = self.project_history(&path);
                 if let Some(session) = session {
@@ -2783,7 +2785,7 @@ fn save_file(cwd: &Path, path: &str, text: &str) -> Result<String, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::agent::{session_env, Subject};
@@ -2792,7 +2794,7 @@ mod tests {
     use serde_json::json;
     use std::time::{Duration, Instant};
 
-    fn launch() -> Launch {
+    pub(crate) fn launch() -> Launch {
         Launch {
             exe: "/opt/pinned/bin/pinned".into(),
             bins: BTreeMap::new(),

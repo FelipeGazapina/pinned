@@ -135,6 +135,8 @@ impl State {
 
     fn persist(&self) -> Result<(), String> {
         let Some(file) = &self.loaded_from else { return Ok(()) };
+        #[cfg(test)]
+        SAVES.with(|saves| saves.set(saves.get() + 1));
         let dir = file.parent().unwrap_or(Path::new("."));
         let failed = |e: std::io::Error| format!("could not save {}: {e}", file.display());
         let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(failed)?;
@@ -161,6 +163,7 @@ impl State {
 #[cfg(test)]
 thread_local! {
     static CRASH_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static SAVES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn write_state(out: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
@@ -2455,6 +2458,110 @@ mod tests {
         let mut loaded = State::load(&file, &root.join("legacy")).unwrap();
         assert_eq!(sync(&hub, &mut loaded, &mac.checkout, now), Ok(Synced::default()));
         assert_eq!(texts(&hub).get("claude/memory/MEMORY.md").map(String::as_str), Some("two two\n"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn saves() -> usize {
+        super::SAVES.with(Cell::get)
+    }
+
+    fn notes(side: &Side, count: usize, text: &str, when: SystemTime) {
+        for i in 0..count {
+            let note = side.claude(&format!("memory/note-{i:04}.md"));
+            put(&note, text);
+            stamp(&note, when);
+        }
+    }
+
+    #[test]
+    fn a_first_pull_saves_the_state_once_per_fetch_batch() {
+        let root = root("pull-saves");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        notes(&mac, 50, "one\n", SystemTime::now());
+        mac.sync(&hub);
+        mini.state.save(&root.join("sync.json")).unwrap();
+        let before = saves();
+        let pulled = mini.sync(&hub).pulled.len();
+        assert_eq!((pulled, saves() - before), (50, 2), "one save for the fetch batch and one when the sync ends");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_pull_cut_short_before_its_save_keeps_every_pulled_file() {
+        let root = root("pull-crash");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        let at = |secs: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + secs);
+        notes(&mac, 3, "one\n", at(0));
+        mac.sync(&hub);
+        let file = root.join("sync.json");
+        mini.state.save(&file).unwrap();
+        mini.sync(&hub);
+        notes(&mac, 3, "two two\n", at(100));
+        mac.sync(&hub);
+        let cut = {
+            let _crash = CrashAfter::arm(12);
+            sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now())
+        };
+        assert_eq!(cut, Err(format!("could not save {}: the disk stopped after 12 bytes", file.display())));
+        let first = mac.claude("memory/note-0000.md");
+        put(&first, "three three three\n");
+        stamp(&first, at(200));
+        mac.sync(&hub);
+        let mut restarted = State::load(&file, &root.join("legacy")).unwrap();
+        sync(&hub, &mut restarted, &mini.checkout, SystemTime::now()).unwrap();
+        let on_mini: Vec<String> = (0..3).map(|i| std::fs::read_to_string(mini.claude(&format!("memory/note-{i:04}.md"))).unwrap()).collect();
+        assert_eq!(on_mini, ["three three three\n", "two two\n", "two two\n"]);
+        let on_hub: Vec<String> = (0..3).map(|i| texts(&hub)[&format!("claude/memory/note-{i:04}.md")].clone()).collect();
+        assert_eq!(on_hub, ["three three three\n", "two two\n", "two two\n"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_pulled_before_one_that_fails_keep_their_agreement_on_disk() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = root("pull-fails");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        notes(&mac, 2, "one\n", SystemTime::now());
+        mac.sync(&hub);
+        let file = root.join("sync.json");
+        mini.state.save(&file).unwrap();
+        mini.sync(&hub);
+        put(&mac.claude("memory/note-0000.md"), "two two\n");
+        std::fs::remove_file(mac.claude("memory/note-0001.md")).unwrap();
+        mac.sync(&hub);
+        let folder = mini.claude("memory");
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let blocked = sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now());
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(blocked, Err(format!("could not delete {}: Permission denied (os error 13)", mini.claude("memory/note-0001.md").display())));
+        let saved = State::load(&file, &root.join("legacy")).unwrap();
+        let agreed = &saved.agreed[&format!("github.com/acme/app {}", mini.checkout.path.display())];
+        assert_eq!(agreed.get("claude/memory/note-0000.md"), Some(&sha(b"two two\n")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `cargo test -p pinned-core --lib first_pull_bench -- --ignored --nocapture`, with
+    /// `PINNED_BENCH_FILES` to change the 1000 files pulled.
+    #[test]
+    #[ignore]
+    fn first_pull_bench() {
+        let count = std::env::var("PINNED_BENCH_FILES").ok().and_then(|n| n.parse().ok()).unwrap_or(1000);
+        let root = root("pull-bench");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        notes(&mac, count, "a note the first pull brings down\n", SystemTime::now());
+        mac.sync(&hub);
+        mini.state.save(&root.join("sync.json")).unwrap();
+        let before = saves();
+        let started = std::time::Instant::now();
+        let pulled = mini.sync(&hub).pulled.len();
+        let took = started.elapsed();
+        assert_eq!(pulled, count);
+        println!("BENCH files={count} pulled={pulled} saves={} ms={}", saves() - before, took.as_millis());
         let _ = std::fs::remove_dir_all(root);
     }
 

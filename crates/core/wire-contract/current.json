@@ -2518,6 +2518,32 @@
                   "tab",
                   "task"
                 ]
+              },
+              {
+                "description": "Why the machine stopped syncing projects and plugins, or `null` while it syncs.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_stopped"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`null`. Sets an unreadable sync state aside, so the next sync starts over as on a new\nmachine. A readable one is left alone.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reset_sync"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -7854,6 +7880,32 @@
                   "cmd",
                   "tab",
                   "task"
+                ]
+              },
+              {
+                "description": "Why the machine stopped syncing projects and plugins, or `null` while it syncs.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_stopped"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`null`. Sets an unreadable sync state aside, so the next sync starts over as on a new\nmachine. A readable one is left alone.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reset_sync"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               }
             ]
@@ -28648,6 +28700,32 @@
                   "tab",
                   "task"
                 ]
+              },
+              {
+                "description": "Why the machine stopped syncing projects and plugins, or `null` while it syncs.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_stopped"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`null`. Sets an unreadable sync state aside, so the next sync starts over as on a new\nmachine. A readable one is left alone.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reset_sync"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -32149,6 +32227,32 @@
                   "cmd",
                   "tab",
                   "task"
+                ]
+              },
+              {
+                "description": "Why the machine stopped syncing projects and plugins, or `null` while it syncs.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_stopped"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`null`. Sets an unreadable sync state aside, so the next sync starts over as on a new\nmachine. A readable one is left alone.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reset_sync"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               }
             ]

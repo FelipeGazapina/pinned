@@ -174,10 +174,7 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
 /// Keeps the machine's projects in step with the account's while the link runs.
 fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<bool>) {
     let Some(file) = machine.sync_file().map(Path::to_path_buf) else { return };
-    let mut state = None;
-    let mut reported_unreadable = false;
-    let mut shared_projects = HashSet::new();
-    let mut reported_old_hub = false;
+    let mut syncer = Syncer::default();
     let mut wait = SYNC_FIRST;
     loop {
         let until = Instant::now() + wait;
@@ -188,26 +185,39 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
             std::thread::sleep(Duration::from_millis(500));
         }
         wait = SYNC_EVERY;
-        if !shared.online() {
-            continue;
+        if shared.online() {
+            syncer.cycle(shared, machine, &file);
         }
-        if state.is_none() {
-            match sync::State::load(&file, &crate::machine::home().join(".claude")) {
-                Ok(loaded) => state = Some(loaded),
+    }
+}
+
+#[derive(Default)]
+struct Syncer {
+    state: Option<sync::State>,
+    reported_unreadable: bool,
+    shared_projects: HashSet<String>,
+    reported_old_hub: bool,
+}
+
+impl Syncer {
+    fn cycle(&mut self, shared: &Shared, machine: &Machine, file: &Path) {
+        if self.state.is_none() {
+            match sync::State::load(file, &crate::machine::home().join(".claude")) {
+                Ok(loaded) => self.state = Some(loaded),
                 Err(e) => {
-                    if !reported_unreadable {
+                    if !self.reported_unreadable {
                         eprintln!("pinned: could not sync: {e}");
-                        reported_unreadable = true;
+                        self.reported_unreadable = true;
                     }
-                    continue;
+                    return;
                 }
             }
         }
-        let Some(state) = state.as_mut() else { continue };
+        let Some(state) = self.state.as_mut() else { return };
         for checkout in machine.checkouts() {
             let key = checkout.project.key.clone();
-            if !shared_projects.contains(&key) && shared.call(HubCall::ShareProject { project: checkout.project.clone() }).is_ok() {
-                shared_projects.insert(key.clone());
+            if !self.shared_projects.contains(&key) && shared.call(HubCall::ShareProject { project: checkout.project.clone() }).is_ok() {
+                self.shared_projects.insert(key.clone());
             }
             match sync::sync(shared, state, &checkout, SystemTime::now()) {
                 Ok(done) if !done.pushed.is_empty() || !done.pulled.is_empty() => {
@@ -220,21 +230,21 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
         for share in machine.plugin_shares() {
             match sync::sync_plugins(shared, state, &share, SystemTime::now()) {
                 Ok(done) if !done.pushed.is_empty() || !done.pulled.is_empty() => {
-                    reported_old_hub = false;
+                    self.reported_old_hub = false;
                     eprintln!("pinned: synced plugins: {} up, {} down", done.pushed.len(), done.pulled.len());
                 }
-                Ok(_) => reported_old_hub = false,
+                Ok(_) => self.reported_old_hub = false,
                 Err(e) if sync::old_hub(&e) => {
-                    if !reported_old_hub {
+                    if !self.reported_old_hub {
                         eprintln!("pinned: this hub does not share plugins yet: {e}");
-                        reported_old_hub = true;
+                        self.reported_old_hub = true;
                     }
                     break;
                 }
                 Err(e) => eprintln!("pinned: could not sync plugins: {e}"),
             }
         }
-        if let Err(e) = state.save(&file) {
+        if let Err(e) = state.save(file) {
             eprintln!("pinned: {e}");
         }
     }
@@ -410,6 +420,48 @@ mod tests {
         assert_eq!(ws_url("https://pinned.example.com/").as_deref(), Ok("wss://pinned.example.com/ws/machine"));
         assert_eq!(ws_url("http://127.0.0.1:8787").as_deref(), Ok("ws://127.0.0.1:8787/ws/machine"));
         assert!(ws_url("pinned.example.com").is_err());
+    }
+
+    #[test]
+    fn an_empty_state_file_stops_sync_until_the_machine_resets_it() {
+        let dir = std::env::temp_dir().join(format!("pinned-link-{}-reset", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sync.json");
+        std::fs::write(&file, b"").unwrap();
+        let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
+        let shared = Shared::default();
+        let (out, _frames) = channel::unbounded_channel();
+        *shared.out.lock().unwrap() = Some(out);
+        let mut syncer = Syncer::default();
+
+        syncer.cycle(&shared, &machine, &file);
+        assert_eq!(std::fs::read(&file).unwrap(), b"", "a stopped sync leaves the file as it was");
+        let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0); restore or remove it to sync again", file.display());
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
+
+        assert_eq!(machine.call(Call::ResetSync), Ok(Value::Null));
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
+        syncer.cycle(&shared, &machine, &file);
+        let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(saved, serde_json::json!({ "hashes": {}, "agreed": {}, "claude_homes": {} }));
+        assert_eq!(std::fs::read(dir.join("sync.json.damaged")).unwrap(), b"");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_reset_leaves_a_readable_state_file_alone() {
+        let dir = std::env::temp_dir().join(format!("pinned-link-{}-keep", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sync.json");
+        let saved = r#"{"hashes":{},"agreed":{"github.com/acme/app /work/app":{"skills/a.md":"abc"}},"claude_homes":{}}"#;
+        std::fs::write(&file, saved).unwrap();
+        let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
+        assert_eq!(machine.call(Call::ResetSync), Ok(Value::Null));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), saved);
+        assert_eq!(dir.join("sync.json.damaged").exists(), false);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The paused clock jumps to the next timer whenever the dial waits on the socket, so

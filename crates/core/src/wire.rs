@@ -496,6 +496,11 @@ pub enum Call {
     CancelTask { tab: TabId, task: String },
     /// `null`. Types that finished task's notice into the tab now. The tab must own the task.
     DeliverTask { tab: TabId, task: String },
+    /// Why the machine stopped syncing projects and plugins, or `null` while it syncs.
+    SyncStopped,
+    /// `null`. Sets an unreadable sync state aside, so the next sync starts over as on a new
+    /// machine. A readable one is left alone.
+    ResetSync,
 }
 
 fn pulls_limit() -> usize {
