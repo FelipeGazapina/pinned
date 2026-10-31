@@ -322,7 +322,9 @@ body.resizing-rows { cursor: row-resize; user-select: none; }
 #composer-menu[data-kind="projects"] .search { width: 100%; height: 36px; padding: 0 12px; border: 0; border-bottom: 1px solid var(--g-border); background: none; outline: none; color: var(--g-fg); font: inherit; font-size: 13px; }
 #composer-menu[data-kind="projects"] .list { max-height: 260px; overflow: auto; padding: 4px; }
 #composer-menu[data-kind="projects"] button { flex-direction: row; align-items: center; gap: 8px; font-size: 14px; }
+#composer-menu[data-kind="projects"] button .row { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 #composer-menu[data-kind="projects"] button .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#composer-menu[data-kind="projects"] button .where { flex: none; white-space: nowrap; color: var(--g-muted); }
 #composer-menu[data-kind="projects"] .monogram, #composer-menu[data-kind="projects"] .favicon { width: 16px; height: 16px; flex: none; }
 
 
