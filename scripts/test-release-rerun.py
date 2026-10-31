@@ -12,20 +12,32 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 TAG = "v0.17.0"
+RC_TAG = "v0.17.0-rc.1"
 REPO = "FelipeGazapina/pinned"
-NOTES = (
-    "On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. "
-    "Or click the update button in a running pinned."
-)
+LEG = "aarch64-apple-darwin"
 ARM_NAME = "pinned-server-aarch64-unknown-linux-musl"
 X86_NAME = "pinned-server-x86_64-unknown-linux-musl"
 BUNDLE = "pinned_aarch64.app.tar.gz"
-BUNDLE_URL = f"https://github.com/{REPO}/releases/download/{TAG}/{BUNDLE}"
+EARLIER_ATTEMPT_ARTIFACTS = [f"updater-{LEG}", "linux-node-binaries"]
+VERSION_ORDER = (
+    ("v0.17.0", "v0.17.0-rc.1", True),
+    ("v0.17.0-rc.1", "v0.17.0", False),
+    ("v0.17.0-rc.2", "v0.17.0-rc.1", True),
+    ("v0.17.0-rc.1", "v0.17.0-rc.2", False),
+    ("v0.17.0-rc.10", "v0.17.0-rc.9", True),
+    ("v0.17.0-rc.9", "v0.17.0-rc.10", False),
+    ("v0.17.0-rc.1", "v0.17.0-rc", True),
+    ("v0.17.0-rc.1", "v0.17.0-beta.2", True),
+    ("v0.17.0-rc.1", "v0.16.9", True),
+    ("v0.16.10", "v0.16.9", True),
+    ("v1.0.0", "v0.99.0", True),
+    ("v0.17.0", "v0.17.0", False),
+    ("v0.17.0", "windows-preview", True),
+)
 PLATFORMS = (
     "darwin-aarch64",
     "darwin-aarch64-app",
@@ -37,7 +49,6 @@ PLATFORMS = (
 ARM = b"arm-old " * 2048
 X86 = b"x86-old " * 2048
 SUM_NAMES = ("latest.json", ARM_NAME, X86_NAME)
-STAMP_EPOCH = 1700000000
 FULL_RUN = ["draft", "build", "linux-node", "sign-node", "publish"]
 VERIFIER = ROOT / "scripts" / "minisign-verify.mjs"
 CRATE_KEY = "untrusted comment: minisign public key\nRWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3\n"
@@ -53,6 +64,8 @@ CRATE_LEGACY = (
     "trusted comment: timestamp:1555779966\tfile:test\n"
     "QtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfNQUaOAA==\n"
 )
+CRATE_STRAY_SIGNATURE = CRATE_PREHASHED.replace("RUQf6LRCGA9i559r", "RUQf6LRCGA9i559r!")
+CRATE_STRAY_GLOBAL = CRATE_PREHASHED.replace("y/rUw2y8", "y/rUw2y8!")
 
 GH_SOURCE = r'''#!/usr/bin/env python3
 import base64, hashlib, json, os, pathlib, sys
@@ -138,20 +151,36 @@ def split_tag(args):
         return args[0], args[1:]
     return None, args
 
-def next_stamp(state):
-    import datetime
-    state["clock"] = int(state.get("clock") or 0) + 1
-    moment = datetime.datetime.fromtimestamp(1700000000 + state["clock"], datetime.timezone.utc)
-    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
-
 def record(state, gap):
     if gap:
         state["violations"].append(gap)
+
+def resolved_repo():
+    if os.environ.get("GH_REPO"):
+        return os.environ["GH_REPO"]
+    root = pathlib.Path(os.environ["REPLAY_ROOT"]).resolve()
+    here = pathlib.Path.cwd().resolve()
+    for folder in (here, *here.parents):
+        if (folder / ".git").exists():
+            return os.environ["REPLAY_REPO"]
+        if folder == root:
+            break
+    return None
 
 def main():
     argv = sys.argv[1:]
     if len(argv) < 2 or argv[0] != "release":
         sys.stderr.write("fake gh: " + " ".join(sys.argv) + "\n")
+        return 2
+    if not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")):
+        sys.stderr.write("gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable.\n")
+        return 4
+    repo = resolved_repo()
+    if repo is None:
+        sys.stderr.write("failed to run git: fatal: not a git repository (or any of the parent directories): .git\n")
+        return 1
+    if repo != os.environ["REPLAY_REPO"]:
+        sys.stderr.write(f"fake gh: {repo} is not the release repository\n")
         return 2
     sub = argv[1]
     tag, rest = split_tag(argv[2:])
@@ -169,6 +198,9 @@ def main():
 
     if sub == "view":
         if tag is None:
+            if os.environ.get("REPLAY_LATEST_ERROR"):
+                sys.stderr.write(os.environ["REPLAY_LATEST_ERROR"] + "\n")
+                return 1
             name = state.get("remote_latest") or None
             if not name and state["exists"] and state["latest"] and not state["draft"]:
                 name = os.environ.get("GITHUB_REF_NAME")
@@ -185,15 +217,6 @@ def main():
             sys.stderr.write("release not found\n")
             return 1
         if "--json" in flags:
-            fields = (flags.get("--json") or [""])[0]
-            if "assets" in [item.strip() for item in fields.split(",")]:
-                updated = state.get("updated") or {}
-                rows = [
-                    {"name": name, "updatedAt": updated.get(name, "")}
-                    for name in state["assets"]
-                ]
-                print(json.dumps({"assets": rows}))
-                return 0
             jq = (flags.get("--jq") or [None])[0]
             if jq == ".isDraft":
                 print("true" if state["draft"] else "false")
@@ -211,6 +234,7 @@ def main():
             return 1
         state["exists"] = True
         state["draft"] = flag_bool(flags, "--draft") is not False
+        state["prerelease"] = flag_bool(flags, "--prerelease") is True
         state["latest"] = False
         save(state)
         return 0
@@ -221,11 +245,16 @@ def main():
             return 1
         was_draft = state["draft"]
         draft = flag_bool(flags, "--draft")
-        if draft is not None:
+        if draft is not None and not (draft and os.environ.get("REPLAY_DRAFT_IGNORED")):
             state["draft"] = draft
+        prerelease = flag_bool(flags, "--prerelease")
+        if prerelease is not None:
+            state["prerelease"] = prerelease
         latest = flag_bool(flags, "--latest")
         if latest is None and was_draft and not state["draft"]:
             latest = True
+        if state["prerelease"]:
+            latest = False
         if latest is True:
             state["latest"] = True
             state["remote_latest"] = os.environ.get("GITHUB_REF_NAME")
@@ -250,29 +279,32 @@ def main():
                 sys.stderr.write(f"{raw} is empty\n")
                 return 1
             prepared.append((path.name, data))
-        state.setdefault("updated", {})
-        if "--clobber" in flags:
-            for name, _data in prepared:
-                if name not in state["assets"]:
-                    continue
+        clobber = "--clobber" in flags
+        for name, _data in prepared:
+            if name in state["assets"] and not clobber:
+                sys.stderr.write(f"asset under the same name already exists: [{name}]\n")
+                return 1
+        cancel = os.environ.get("REPLAY_UPLOAD_CANCEL")
+        fates = json.loads(cancel) if cancel else {}
+        for name, data in prepared:
+            fate = fates.get(name, "old") if cancel else "new"
+            if fate == "old":
+                continue
+            if name in state["assets"]:
                 if not state["draft"]:
                     state["violations"].append(f"delete {name} while the release is public")
                 del state["assets"][name]
-                state["updated"].pop(name, None)
                 record(state, public_mismatch(state))
                 save(state)
-        lands = os.environ.get("REPLAY_UPLOAD_LANDS")
-        for name, data in sorted(prepared, key=lambda item: len(item[1])):
-            if lands is not None and name not in lands.split(","):
+            if fate == "missing":
                 continue
             if not state["draft"]:
                 state["violations"].append(f"upload {name} while the release is public")
             state["assets"][name] = base64.b64encode(data).decode()
-            state["updated"][name] = next_stamp(state)
             state["uploads"].append({"name": name, "draft": bool(state["draft"])})
             record(state, public_mismatch(state))
             save(state)
-        if lands is not None:
+        if cancel:
             sys.stderr.write("upload cancelled\n")
             return 1
         return 0
@@ -410,6 +442,30 @@ def shell_problems(workflow_shell, jobs):
     return problems
 
 
+def indent_of(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def read_map(lines, i, parent_indent):
+    values = {}
+    key_indent = None
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip() or line.lstrip().startswith("#"):
+            i += 1
+            continue
+        indent = indent_of(line)
+        if indent <= parent_indent:
+            break
+        if key_indent is None:
+            key_indent = indent
+        if indent == key_indent:
+            key, _, value = line.strip().partition(":")
+            values[key.strip()] = value.strip().strip("'\"")
+        i += 1
+    return values, i
+
+
 def parse_workflow(text):
     lines = text.splitlines()
     jobs = {}
@@ -418,6 +474,7 @@ def parse_workflow(text):
     in_steps = False
     step = None
     workflow_shell = None
+    workflow_env = {}
     seeing_defaults = False
     i = 0
     while i < len(lines):
@@ -428,6 +485,9 @@ def parse_workflow(text):
             continue
         if not in_jobs:
             stripped = line.strip()
+            if line.rstrip() == "env:":
+                workflow_env, i = read_map(lines, i + 1, 0)
+                continue
             if line.startswith("defaults:"):
                 seeing_defaults = True
             elif seeing_defaults and stripped.startswith("shell:"):
@@ -440,7 +500,7 @@ def parse_workflow(text):
             break
         if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
             name = line.strip()[:-1]
-            current = {"steps": [], "runs_on": [], "shell": None}
+            current = {"steps": [], "runs_on": [], "shell": None, "env": {}}
             jobs[name] = current
             in_steps = False
             step = None
@@ -452,6 +512,9 @@ def parse_workflow(text):
             continue
         if current is not None and not in_steps:
             stripped = line.strip()
+            if stripped == "env:":
+                current["env"], i = read_map(lines, i + 1, indent_of(line))
+                continue
             if stripped.startswith("runs-on:"):
                 value = stripped.split(":", 1)[1].strip().strip("'\"")
                 if "${{" not in value:
@@ -467,7 +530,7 @@ def parse_workflow(text):
                 i += 1
                 continue
         if in_steps and line.startswith("      - "):
-            step = {"uses": None, "run": None, "includeUpdaterJson": None, "shell": None}
+            step = {"uses": None, "run": None, "shell": None, "env": {}, "with": {}}
             current["steps"].append(step)
             rest = line.strip()[2:]
             if rest.startswith("uses:"):
@@ -478,6 +541,9 @@ def parse_workflow(text):
             i += 1
             continue
         stripped = line.strip()
+        if stripped in ("env:", "with:"):
+            step[stripped[:-1]], i = read_map(lines, i + 1, indent_of(line))
+            continue
         if stripped.startswith("uses:"):
             step["uses"] = stripped.split(":", 1)[1].strip()
             i += 1
@@ -486,14 +552,10 @@ def parse_workflow(text):
             step["shell"] = stripped.split(":", 1)[1].strip().strip("'\"")
             i += 1
             continue
-        if stripped.startswith("includeUpdaterJson:"):
-            step["includeUpdaterJson"] = stripped.split(":", 1)[1].strip().strip("'\"")
-            i += 1
-            continue
         if stripped.startswith("run:"):
             value = stripped.split(":", 1)[1].strip()
             if value in {"|", "|-", ">", ">-"}:
-                run_indent = len(line) - len(line.lstrip(" "))
+                run_indent = indent_of(line)
                 body = []
                 content_indent = None
                 i += 1
@@ -503,7 +565,7 @@ def parse_workflow(text):
                         body.append("")
                         i += 1
                         continue
-                    indent = len(nxt) - len(nxt.lstrip(" "))
+                    indent = indent_of(nxt)
                     if indent <= run_indent:
                         break
                     if content_indent is None:
@@ -516,7 +578,7 @@ def parse_workflow(text):
             i += 1
             continue
         i += 1
-    return workflow_shell, jobs
+    return workflow_shell, workflow_env, jobs
 
 
 def release_step(step):
@@ -533,6 +595,44 @@ def release_step(step):
             "scripts/release-asset.sh",
         )
     )
+
+
+def is_checkout(step):
+    return (step.get("uses") or "").startswith("actions/checkout@")
+
+
+def is_artifact_upload(step):
+    return (step.get("uses") or "").startswith("actions/upload-artifact@")
+
+
+def replayed(step):
+    return is_artifact_upload(step) or release_step(step)
+
+
+def expand(value, tag):
+    known = {"github.repository": REPO, "github.ref_name": tag, "matrix.target": LEG}
+
+    def one(match):
+        expr = match.group(1)
+        if expr in known:
+            return known[expr]
+        if expr.startswith("secrets."):
+            return "replay"
+        raise SystemExit(f"the replay cannot expand ${{{{ {expr} }}}}")
+
+    return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", one, value)
+
+
+def expanded(values, tag):
+    return {key: expand(value, tag) for key, value in values.items()}
+
+
+def runner_env():
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("GH_", "GITHUB_", "PINNED_", "TAURI_", "REPLAY_")) and key != "RELEASE_NOTES"
+    }
 
 
 def sums_for(latest, arm, x86, names=SUM_NAMES):
@@ -552,25 +652,22 @@ def asset_bytes(state, name):
     return base64.b64decode(raw)
 
 
-def asset_stamp(counter):
-    return datetime.fromtimestamp(STAMP_EPOCH + counter, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def bundle_bytes(build):
     return f"desktop bundle {build}\n".encode() * 2048
 
 
-def fragment(signature):
-    platforms = {key: {"signature": signature, "url": BUNDLE_URL} for key in PLATFORMS}
-    return {"version": TAG[1:], "platforms": platforms}
+def fragment(signature, tag):
+    url = f"https://github.com/{REPO}/releases/download/{tag}/{BUNDLE}"
+    platforms = {key: {"signature": signature, "url": url} for key in PLATFORMS}
+    return {"version": tag[1:], "platforms": platforms}
 
 
-def manifest(signature, notes):
+def manifest(signature, notes, tag):
     body = {
-        "version": TAG[1:],
+        "version": tag[1:],
         "notes": notes,
         "pub_date": "2026-10-30T00:00:00.000Z",
-        "platforms": fragment(signature)["platforms"],
+        "platforms": fragment(signature, tag)["platforms"],
     }
     return json.dumps(body, indent=2).encode()
 
@@ -579,16 +676,16 @@ def empty_state():
     return {
         "exists": False,
         "draft": False,
+        "prerelease": False,
         "latest": False,
         "assets": {},
-        "updated": {},
-        "clock": 0,
         "violations": [],
         "uploads": [],
         "calls": [],
         "remote_latest": None,
         "builds": 0,
         "fragment": None,
+        "artifacts": [],
     }
 
 
@@ -600,27 +697,12 @@ def seeded_state(release, draft, replace=None):
     state["draft"] = draft
     state["fragment"] = built
     state["assets"] = {name: b64(data) for name, data in files.items()}
-    state["updated"] = {name: asset_stamp(0) for name in files}
+    state["artifacts"] = list(EARLIER_ATTEMPT_ARTIFACTS)
     return state
 
 
-def rewrite(run):
-    replaced = []
-    for line in run.splitlines(keepends=True):
-        stripped = line.lstrip()
-        indent = line[: len(line) - len(stripped)]
-        if stripped.startswith("bash scripts/"):
-            rest = stripped[len("bash scripts/") :]
-            name, _, tail = rest.partition(" ")
-            line = f'{indent}bash "{ROOT / "scripts" / name}" {tail}'
-            if not line.endswith("\n"):
-                line += "\n"
-        replaced.append(line)
-    return "".join(replaced)
-
-
 def write_fragment(work, built):
-    path = work / "updater-fragments" / "updater-aarch64-apple-darwin" / "updater-fragment.json"
+    path = work / "updater-fragments" / f"updater-{LEG}" / "updater-fragment.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(built))
 
@@ -635,7 +717,8 @@ def prepare_work(work, state):
 
 
 class Replay:
-    def __init__(self, jobs, root):
+    def __init__(self, workflow_env, jobs, root):
+        self.workflow_env = workflow_env
         self.jobs = jobs
         self.root = pathlib.Path(root)
         self.bin = self.root / "bin"
@@ -647,10 +730,13 @@ class Replay:
         self.signer = self.root / "signer.mjs"
         self.signer.write_text(SIGNER_SOURCE)
         self.key = self.root / "key.json"
-        subprocess.run(["node", str(self.signer), "generate", str(self.key)], check=True)
+        self.forger = self.root / "forger.json"
+        for key in (self.key, self.forger):
+            subprocess.run(["node", str(self.signer), "generate", str(key)], check=True)
         self.pubkey = json.loads(self.key.read_text())["pubkey"]
+        self.forged_pubkey = json.loads(self.forger.read_text())["pubkey"]
 
-    def minisig(self, data, name):
+    def minisig(self, data, name, key=None):
         scratch = self.root / "to-sign"
         if scratch.exists():
             shutil.rmtree(scratch)
@@ -658,19 +744,19 @@ class Replay:
         path = scratch / name
         path.write_bytes(data)
         proc = subprocess.run(
-            ["node", str(self.signer), "minisig", str(self.key), str(path)],
+            ["node", str(self.signer), "minisig", str(key or self.key), str(path)],
             check=True,
             capture_output=True,
         )
         return proc.stdout
 
-    def tauri_signature(self, data, name):
-        return b64(self.minisig(data, name))
+    def tauri_signature(self, data, name, key=None):
+        return b64(self.minisig(data, name, key))
 
-    def release(self, build=0, notes="old"):
+    def release(self, build=0, notes="old", tag=TAG, key=None):
         bundle = bundle_bytes(build)
-        signature = self.tauri_signature(bundle, BUNDLE)
-        latest = manifest(signature, notes)
+        signature = self.tauri_signature(bundle, BUNDLE, key)
+        latest = manifest(signature, notes, tag)
         sums = sums_for(latest, ARM, X86)
         files = {
             BUNDLE: bundle,
@@ -679,11 +765,11 @@ class Replay:
             ARM_NAME: ARM,
             X86_NAME: X86,
             "SHA256SUMS": sums,
-            "SHA256SUMS.minisig": self.minisig(sums, "SHA256SUMS"),
+            "SHA256SUMS.minisig": self.minisig(sums, "SHA256SUMS", key),
         }
-        return files, fragment(signature)
+        return files, fragment(signature, tag)
 
-    def run(self, job_names, state, extra_env):
+    def run(self, job_names, state, extra_env, tag):
         state_path = self.root / "state.json"
         state_path.write_text(json.dumps(state))
         work = self.root / "work"
@@ -691,41 +777,62 @@ class Replay:
             shutil.rmtree(work)
         work.mkdir()
         prepare_work(work, state)
-        env = os.environ.copy()
+        env = runner_env()
         env["PATH"] = str(self.bin) + os.pathsep + env.get("PATH", "")
-        env["GITHUB_REF_NAME"] = TAG
+        env["GITHUB_REF_NAME"] = tag
         env["GITHUB_REPOSITORY"] = REPO
-        env["RELEASE_NOTES"] = NOTES
-        env["GH_TOKEN"] = "replay"
+        env["REPLAY_ROOT"] = str(self.root)
+        env["REPLAY_REPO"] = REPO
         env["REPLAY_STATE"] = str(state_path)
         env["REPLAY_SIGNER"] = str(self.signer)
         env["REPLAY_KEY"] = str(self.key)
-        env["PINNED_RELEASE_PUBKEY"] = self.pubkey
-        env["TAURI_SIGNING_PRIVATE_KEY"] = "replay"
-        env.update(extra_env)
+        env.update(expanded(self.workflow_env, tag))
         stderr = []
         code = 0
-        for name in job_names:
-            code, err = self.job(name, env, work)
-            if err.strip():
+        if isinstance(job_names, str):
+            self.checkout(work, True)
+            code, err = self.shell(job_names, {**env, **extra_env}, work)
+            stderr.append(err)
+        else:
+            for name in job_names:
+                code, err = self.job(name, env, extra_env, work, tag)
                 stderr.append(err)
-            if code != 0:
-                break
+                if code != 0:
+                    break
         state = json.loads(state_path.read_text())
         assembled = work / "node-release" / "latest.json"
         return code, "".join(stderr), state, assembled.read_bytes() if assembled.exists() else None
 
-    def job(self, name, env, work):
+    def checkout(self, work, present):
+        for name in (".git", "scripts", "tauri.conf.json"):
+            path = work / name
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+        if not present:
+            return
+        (work / ".git").mkdir()
+        shutil.copytree(ROOT / "scripts", work / "scripts")
+        conf = {"plugins": {"updater": {"pubkey": self.pubkey}}}
+        (work / "tauri.conf.json").write_text(json.dumps(conf))
+
+    def job(self, name, runner, extra_env, work, tag):
+        job = self.jobs[name]
+        self.checkout(work, any(is_checkout(step) for step in job["steps"]))
+        job_env = {**runner, **expanded(job["env"], tag)}
         stderr = []
-        for step in self.jobs[name]["steps"]:
-            if not release_step(step):
+        for step in job["steps"]:
+            if not replayed(step):
                 continue
-            if step.get("uses") and "tauri-action" in step["uses"]:
-                code, err = self.tauri(step, env, work)
+            env = {**job_env, **expanded(step["env"], tag), **extra_env}
+            if is_artifact_upload(step):
+                code, err = self.upload_artifact(step, env, tag)
+            elif "tauri-action" in (step.get("uses") or ""):
+                code, err = self.tauri(step, env, work, tag)
             else:
-                code, err = self.shell(rewrite(step["run"]), env, work)
-            if err.strip():
-                stderr.append(err)
+                code, err = self.shell(step["run"], env, work)
+            stderr.append(err)
             if code != 0:
                 return code, "".join(stderr)
         return 0, "".join(stderr)
@@ -742,7 +849,21 @@ class Replay:
         )
         return proc.returncode, proc.stderr
 
-    def tauri(self, step, env, work):
+    def upload_artifact(self, step, env, tag):
+        state_path = pathlib.Path(env["REPLAY_STATE"])
+        state = json.loads(state_path.read_text())
+        name = expand(step["with"]["name"], tag)
+        if name in state["artifacts"] and step["with"].get("overwrite") != "true":
+            return 1, (
+                "Failed to CreateArtifact: Received non-retryable error: Failed request: (409) Conflict: "
+                f"an artifact with this name already exists on the workflow run: {name}\n"
+            )
+        if name not in state["artifacts"]:
+            state["artifacts"].append(name)
+        state_path.write_text(json.dumps(state))
+        return 0, ""
+
+    def tauri(self, step, env, work, tag):
         state_path = pathlib.Path(env["REPLAY_STATE"])
         build = json.loads(state_path.read_text())["builds"] + 1
         out = work / "tauri-out"
@@ -751,26 +872,27 @@ class Replay:
         bundle.write_bytes(bundle_bytes(build))
         signature = self.tauri_signature(bundle.read_bytes(), BUNDLE)
         (out / f"{BUNDLE}.sig").write_text(signature)
+        action_env = {**env, "GH_REPO": REPO}
         code, err = self.shell(
             f'gh release upload "$GITHUB_REF_NAME" "{bundle}" "{bundle}.sig" --clobber\n',
-            env,
+            action_env,
             work,
         )
         if code != 0:
             return code, err
         state = json.loads(state_path.read_text())
         state["builds"] = build
-        state["fragment"] = fragment(signature)
+        state["fragment"] = fragment(signature, tag)
         state_path.write_text(json.dumps(state))
         write_fragment(work, state["fragment"])
-        flag = (step.get("includeUpdaterJson") or "true").lower()
+        flag = (step["with"].get("includeUpdaterJson") or "true").lower()
         if flag == "false":
             return code, err
         latest = out / "latest.json"
-        latest.write_bytes(b'{"version":"0.17.0","pub_date":"tauri"}\n')
+        latest.write_bytes(json.dumps({"version": tag[1:], "pub_date": "tauri"}).encode())
         code2, err2 = self.shell(
             f'gh release upload "$GITHUB_REF_NAME" "{latest}" --clobber\n',
-            env,
+            action_env,
             work,
         )
         return code2, err + err2
@@ -779,11 +901,11 @@ class Replay:
 def step_labels(job):
     labels = []
     for step in job["steps"]:
-        if not release_step(step):
+        if not replayed(step):
             continue
         if step.get("uses"):
-            flag = step.get("includeUpdaterJson")
-            extra = f" includeUpdaterJson={flag}" if flag else ""
+            shown = ("includeUpdaterJson", "name", "overwrite")
+            extra = "".join(f" {key}={step['with'][key]}" for key in shown if key in step["with"])
             labels.append(step["uses"] + extra)
             continue
         line = next((item.strip() for item in step["run"].splitlines() if item.strip()), "")
@@ -820,12 +942,15 @@ def scenario_errors(code, stderr, state, assembled, expect):
         elif key == "draft":
             if bool(state["draft"]) != value:
                 errors.append(f"draft={state['draft']}, want {value}")
+        elif key == "prerelease":
+            if bool(state["prerelease"]) != value:
+                errors.append(f"prerelease={state['prerelease']}, want {value}")
         elif key == "latest_flag":
             if bool(state["latest"]) != value:
                 errors.append(f"latest={state['latest']}, want {value}")
         elif key == "unchanged_from":
             if not unchanged(value, state):
-                errors.append("signer failure replaced latest.json or SHA256SUMS")
+                errors.append("latest.json or SHA256SUMS changed on the release")
         elif key == "latest_assembled":
             if assembled is None or asset_bytes(state, "latest.json") != assembled:
                 errors.append("latest.json on the release is not the manifest sign-node assembled")
@@ -851,9 +976,12 @@ def crate_vector_errors(root):
         ("prehashed", b"test", CRATE_PREHASHED, 0),
         ("tampered", b"tesT", CRATE_PREHASHED, 1),
         ("legacy", b"test", CRATE_LEGACY, 1),
+        ("stray byte in the signature line", b"test", CRATE_STRAY_SIGNATURE, 1),
+        ("stray byte in the trusted comment signature", b"test", CRATE_STRAY_GLOBAL, 1),
     ):
-        message_path = root / f"vector-{label}"
-        signature_path = root / f"vector-{label}.minisig"
+        slug = re.sub(r"\W+", "-", label)
+        message_path = root / f"vector-{slug}"
+        signature_path = root / f"vector-{slug}.minisig"
         message_path.write_bytes(message)
         signature_path.write_text(signature)
         proc = subprocess.run(
@@ -866,47 +994,85 @@ def crate_vector_errors(root):
     return errors
 
 
-def public_clobber_errors(replay):
-    state = seeded_state(replay.release(), draft=False)
-    state_path = replay.root / "clobber-state.json"
-    state_path.write_text(json.dumps(state))
-    work = replay.root / "clobber-work"
-    work.mkdir()
-    newer, _ = replay.release(notes="new")
-    latest = work / "latest.json"
-    sums = work / "SHA256SUMS"
-    latest.write_bytes(newer["latest.json"])
-    sums.write_bytes(newer["SHA256SUMS"])
-    env = os.environ.copy()
-    env["REPLAY_STATE"] = str(state_path)
-    env["GITHUB_REF_NAME"] = TAG
-    proc = subprocess.run(
-        [str(replay.bin / "gh"), "release", "upload", TAG, str(latest), str(sums), "--clobber"],
-        env=env,
-        text=True,
-        capture_output=True,
-    )
-    after = json.loads(state_path.read_text())
+def version_order_errors():
+    source = (ROOT / "scripts" / "release-asset.sh").read_text()
+    match = re.search(r"^version_is_newer\(\) \{\n.*?^\}\n", source, re.S | re.M)
+    if match is None:
+        return ["scripts/release-asset.sh has no version_is_newer"]
     errors = []
-    if proc.returncode != 0:
-        errors.append(f"clobber upload exit {proc.returncode}: {proc.stderr.strip()}")
-    if not any("while the release is public" in item for item in after["violations"]):
-        errors.append(f"public clobber recorded no violation: {after['violations']}")
-    if asset_bytes(after, "latest.json") != newer["latest.json"]:
-        errors.append("clobber did not replace latest.json")
-    names = [item["name"] for item in after["uploads"]]
-    if names != ["SHA256SUMS", "latest.json"]:
-        errors.append(f"clobber upload landed {names}, want the smaller SHA256SUMS first")
-    stamps = [after["updated"][name] for name in ("SHA256SUMS", "latest.json")]
-    if stamps[0] >= stamps[1]:
-        errors.append(f"clobber upload stamps {stamps} do not follow completion order")
-    if not consistent(after):
-        errors.append("clobber did not finish consistent")
+    for left, right, want in VERSION_ORDER:
+        proc = subprocess.run(
+            ["bash", "-c", match.group(0) + 'version_is_newer "$1" "$2"', "order", left, right],
+            text=True,
+            capture_output=True,
+        )
+        if proc.stderr.strip() or (proc.returncode == 0) != want:
+            errors.append(f"{left} newer than {right}: exit {proc.returncode}, want {want} {proc.stderr.strip()}")
     return errors
 
 
+def public_clobber_errors(replay):
+    old, _ = replay.release()
+    newer, _ = replay.release(notes="new")
+    state = seeded_state((old, None), draft=False)
+    state_path = replay.root / "clobber-state.json"
+    work = replay.root / "clobber-work"
+    work.mkdir()
+    for name in ("latest.json", "SHA256SUMS", "SHA256SUMS.minisig"):
+        (work / name).write_bytes(newer[name])
+    env = runner_env()
+    env.update(
+        {
+            "REPLAY_STATE": str(state_path),
+            "REPLAY_ROOT": str(replay.root),
+            "REPLAY_REPO": REPO,
+            "GH_REPO": REPO,
+            "GH_TOKEN": "replay",
+            "GITHUB_REF_NAME": TAG,
+        }
+    )
+    errors = []
+    for cancel, want in (
+        (None, {"latest.json": "new", "SHA256SUMS": "new", "SHA256SUMS.minisig": "new"}),
+        (
+            {"latest.json": "new", "SHA256SUMS": "missing"},
+            {"latest.json": "new", "SHA256SUMS": "missing", "SHA256SUMS.minisig": "old"},
+        ),
+    ):
+        state_path.write_text(json.dumps(state))
+        run_env = {**env, "REPLAY_UPLOAD_CANCEL": json.dumps(cancel)} if cancel else env
+        proc = subprocess.run(
+            [str(replay.bin / "gh"), "release", "upload", TAG, "latest.json", "SHA256SUMS", "SHA256SUMS.minisig", "--clobber"],
+            cwd=work,
+            env=run_env,
+            text=True,
+            capture_output=True,
+        )
+        after = json.loads(state_path.read_text())
+        if proc.returncode != (1 if cancel else 0):
+            errors.append(f"clobber upload exit {proc.returncode}: {proc.stderr.strip()}")
+        if "delete latest.json while the release is public" not in after["violations"]:
+            errors.append(f"public clobber recorded no delete: {after['violations']}")
+        for name, fate in want.items():
+            got = asset_bytes(after, name)
+            seen = "missing" if got is None else "new" if got == newer[name] else "old" if got == old[name] else "other"
+            if seen != fate:
+                errors.append(f"cancel {cancel}: {name} is {seen}, want {fate}")
+    return errors
+
+
+def report(label, errors):
+    if errors:
+        print(f"FAIL {label}")
+        for error in errors:
+            print(f"  {error}")
+        return 1
+    print(f"ok: {label}")
+    return 0
+
+
 def main():
-    workflow_shell, jobs = parse_workflow(WORKFLOW.read_text())
+    workflow_shell, workflow_env, jobs = parse_workflow(WORKFLOW.read_text())
     shell_failed = 0
     problems = shell_problems(workflow_shell, jobs)
     if problems:
@@ -927,28 +1093,15 @@ def main():
     for name in FULL_RUN:
         print(f"  {name}: {' | '.join(step_labels(jobs[name])) or '(no release write)'}")
 
-    failed = 0
+    failed = report("version order", version_order_errors())
     with tempfile.TemporaryDirectory(prefix="release-replay-") as tmp:
-        replay = Replay(jobs, tmp)
-        vector_errors = crate_vector_errors(replay.root)
-        if vector_errors:
-            failed += 1
-            print("FAIL minisign-verify crate vectors")
-            for error in vector_errors:
-                print(f"  {error}")
-        else:
-            print("ok: minisign-verify crate vectors")
-        clobber_errors = public_clobber_errors(replay)
-        if clobber_errors:
-            failed += 1
-            print("FAIL public clobber")
-            for error in clobber_errors:
-                print(f"  {error}")
-        else:
-            print("ok: public clobber")
+        replay = Replay(workflow_env, jobs, tmp)
+        failed += report("minisign-verify crate vectors", crate_vector_errors(replay.root))
+        failed += report("public clobber", public_clobber_errors(replay))
 
         current = replay.release()
         newer = replay.release(notes="new")
+        candidate = replay.release(tag=RC_TAG)
 
         def public():
             return seeded_state(current, draft=False)
@@ -960,14 +1113,27 @@ def main():
 
         cases = []
 
-        def add(title, runs, state, expect):
-            cases.append((title, runs, state, expect))
+        def add(title, runs, state, expect, tag=TAG):
+            cases.append((title, runs, state, expect, tag))
 
         add(
-            "full run, then the same run again",
+            "full run on a new tag",
+            [(FULL_RUN, {})],
+            empty_state(),
+            {"code": 0, "draft": False, "prerelease": False, "latest_flag": True, "consistent": True, "latest_assembled": True},
+        )
+        add(
+            "full run, then re-run all jobs",
             [(FULL_RUN, {}), (FULL_RUN, {})],
             empty_state(),
             {"code": 0, "draft": False, "consistent": True, "latest_assembled": True},
+        )
+        add(
+            "full run of a release candidate",
+            [(FULL_RUN, {})],
+            empty_state(),
+            {"code": 0, "draft": False, "prerelease": True, "latest_flag": False, "consistent": True},
+            tag=RC_TAG,
         )
         add(
             "sign-node re-run, signer fails",
@@ -984,6 +1150,17 @@ def main():
             [(["sign-node"], {})],
             public(),
             {"code": 0, "draft": True, "consistent": True, "latest_assembled": True},
+        )
+        add(
+            "sign-node re-run when gh leaves the release public",
+            [(["sign-node"], {"REPLAY_DRAFT_IGNORED": "1"})],
+            public(),
+            {
+                "draft": False,
+                "stderr_has": f"gh release edit --draft=true left {TAG} public",
+                "unchanged_from": public(),
+                "consistent": True,
+            },
         )
         add(
             "sign-node re-run then publish",
@@ -1067,6 +1244,12 @@ def main():
             },
         )
         add(
+            "publish when the latest release cannot be read",
+            [(["publish"], {"REPLAY_LATEST_ERROR": f"HTTP 503: Service Unavailable (https://api.github.com/repos/{REPO}/releases/latest)"})],
+            drafted(),
+            {"draft": True, "latest_flag": False, "stderr_has": "HTTP 503: Service Unavailable"},
+        )
+        add(
             "linux-node re-run",
             [(["linux-node"], {})],
             public(),
@@ -1080,25 +1263,43 @@ def main():
         add(
             "publish the final tag after its release candidate takes latest",
             [(["publish"], {})],
-            drafted(remote_latest="v0.17.0-rc.1"),
-            {"code": 0, "draft": False, "latest_flag": True, "consistent": True},
+            drafted(remote_latest=RC_TAG),
+            {"code": 0, "draft": False, "prerelease": False, "latest_flag": True, "consistent": True},
         )
-        for landed, missing in (
-            ([], "SHA256SUMS"),
-            (["SHA256SUMS"], "SHA256SUMS.minisig"),
-            (["SHA256SUMS", "SHA256SUMS.minisig"], "latest.json"),
-            (["SHA256SUMS", "SHA256SUMS.minisig", "latest.json"], ARM_NAME),
-            (["SHA256SUMS", "SHA256SUMS.minisig", "latest.json", X86_NAME], ARM_NAME),
+        add(
+            "publish a release candidate after its final tag",
+            [(["publish"], {})],
+            drafted(remote_latest=TAG, release=candidate),
+            {"code": 0, "draft": False, "prerelease": True, "latest_flag": False, "consistent": True},
+            tag=RC_TAG,
+        )
+        add(
+            "publish a release candidate newer than latest",
+            [(["publish"], {})],
+            drafted(remote_latest="v0.16.0", release=candidate),
+            {"code": 0, "draft": False, "prerelease": True, "latest_flag": False, "consistent": True},
+            tag=RC_TAG,
+        )
+        new, old, missing = "new", "old", "missing"
+        for fates, refusal in (
+            ({"SHA256SUMS": missing}, "SHA256SUMS is missing from the release"),
+            ({"SHA256SUMS": new, "latest.json": new}, "SHA256SUMS.minisig does not verify SHA256SUMS"),
+            ({"SHA256SUMS": new, "SHA256SUMS.minisig": missing, "latest.json": new}, "SHA256SUMS.minisig is missing from the release"),
+            ({"latest.json": new, ARM_NAME: missing}, "latest.json does not match SHA256SUMS"),
+            ({"SHA256SUMS": new, "SHA256SUMS.minisig": new}, "latest.json does not match SHA256SUMS"),
+            ({"SHA256SUMS": new, "SHA256SUMS.minisig": new, "latest.json": missing}, "latest.json is missing from the release"),
+            ({"SHA256SUMS": new, "SHA256SUMS.minisig": new, "latest.json": new, X86_NAME: missing}, f"{X86_NAME} is missing from the release"),
         ):
+            shown = ", ".join(f"{name} {fate}" for name, fate in fates.items())
             add(
-                f"sign-node cancelled after {len(landed)} of 5 files land, then publish",
-                [(["sign-node"], {"REPLAY_UPLOAD_LANDS": ",".join(landed)}), (["publish"], {})],
+                f"sign-node cancelled with {shown}, the rest {old}, then publish",
+                [(["sign-node"], {"REPLAY_UPLOAD_CANCEL": json.dumps(fates)}), (["publish"], {})],
                 public(),
-                {"draft": True, "stderr_has": f"{missing} is missing from the release"},
+                {"draft": True, "stderr_has": refusal},
             )
         add(
-            "build re-run cancelled before the bundle lands, then publish",
-            [(["build"], {"REPLAY_UPLOAD_LANDS": ""}), (["publish"], {})],
+            "build re-run cancelled after the old bundle is deleted, then publish",
+            [(["build"], {"REPLAY_UPLOAD_CANCEL": json.dumps({BUNDLE: missing})}), (["publish"], {})],
             public(),
             {"draft": True, "stderr_has": f"{BUNDLE} is missing from the release"},
         )
@@ -1121,24 +1322,44 @@ def main():
             drafted(replace={"SHA256SUMS": partial, "SHA256SUMS.minisig": replay.minisig(partial, "SHA256SUMS")}),
             {"draft": True, "stderr_has": f"SHA256SUMS does not list {ARM_NAME}"},
         )
+        add(
+            "publish ignores PINNED_RELEASE_PUBKEY",
+            [(["publish"], {"PINNED_RELEASE_PUBKEY": replay.forged_pubkey})],
+            drafted(release=replay.release(notes="forged", key=replay.forger)),
+            {"draft": True, "stderr_has": "SHA256SUMS.minisig does not verify SHA256SUMS"},
+        )
+        stray_latest = "printf '{\"version\":\"0.17.0\"}\\n' > node-release/latest.json\n"
+        add(
+            "upload latest.json without SHA256SUMS",
+            [(
+                stray_latest + f'bash scripts/release-asset.sh upload "$GITHUB_REF_NAME" node-release/latest.json node-release/{ARM_NAME}\n',
+                {"GH_TOKEN": "replay"},
+            )],
+            public(),
+            {"draft": False, "stderr_has": "SHA256SUMS is missing from the upload", "unchanged_from": public()},
+        )
+        add(
+            "upload latest.json with SHA256SUMS that does not list it",
+            [(
+                stray_latest
+                + "printf '%064d  latest.json\\n' 0 > node-release/SHA256SUMS\n"
+                + 'bash scripts/release-asset.sh upload "$GITHUB_REF_NAME" node-release/SHA256SUMS node-release/latest.json\n',
+                {"GH_TOKEN": "replay"},
+            )],
+            public(),
+            {"draft": False, "stderr_has": "SHA256SUMS does not list this latest.json", "unchanged_from": public()},
+        )
 
-        for title, runs, state, expect in cases:
+        for title, runs, state, expect, tag in cases:
             code, stderr, after, assembled = 0, "", state, None
             for job_names, extra_env in runs:
                 carried = {**after, "violations": [], "uploads": [], "calls": []}
-                code, stderr, after, assembled = replay.run(job_names, carried, extra_env)
+                code, stderr, after, assembled = replay.run(job_names, carried, extra_env, tag)
                 if after["violations"]:
                     break
-            errors = scenario_errors(code, stderr, after, assembled, expect)
-            if errors:
-                failed += 1
-                print(f"FAIL {title}")
-                for error in errors:
-                    print(f"  {error}")
-            else:
-                print(f"ok: {title}")
+            failed += report(title, scenario_errors(code, stderr, after, assembled, expect))
     if failed:
-        print(f"{failed} scenario(s) failed")
+        print(f"{failed} check(s) failed")
     else:
         print(f"ok: {len(cases)} scenarios")
     if failed or shell_failed:
