@@ -310,6 +310,11 @@ fn in_order(machine: Arc<Machine>, out: channel::UnboundedSender<String>) -> mps
     calls
 }
 
+/// The refusal `answer` sends when this binary does not know the command.
+pub fn is_unknown_command(err: &str) -> bool {
+    err.contains("can't answer that")
+}
+
 fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSender<String>, calls: &mpsc::Sender<(u64, Call)>, frame: &str, version: &str) {
     match serde_json::from_str::<ToMachine>(frame) {
         Ok(ToMachine::Call { id, call }) if call.may_wait() => {

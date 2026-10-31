@@ -28,7 +28,8 @@ create table if not exists logins (token_hash bytea primary key, account uuid no
   created_at timestamptz not null default now(), last_used timestamptz);
 create table if not exists machines (id uuid primary key, account uuid not null references accounts on delete cascade,
   name text not null, os text not null, token_hash bytea unique not null,
-  created_at timestamptz not null default now(), last_seen timestamptz);
+  created_at timestamptz not null default now(), last_seen timestamptz, version text not null default '');
+alter table machines add column if not exists version text not null default '';
 create table if not exists pair_codes (code text primary key, account uuid not null references accounts on delete cascade,
   expires_at timestamptz not null);
 create table if not exists project_files (account uuid not null references accounts on delete cascade, project text not null,
@@ -340,14 +341,14 @@ impl Db {
         Ok((view, token.text))
     }
 
-    /// The machine a token belongs to, recording that it just connected from `os`.
-    pub async fn machine_connected(&self, token: &str, os: &str) -> Result<Option<MachineRow>, String> {
+    /// The machine a token belongs to, recording that it just connected from `os` on `version`.
+    pub async fn machine_connected(&self, token: &str, os: &str, version: &str) -> Result<Option<MachineRow>, String> {
         let row = self
             .client().await?
             .query_opt(
-                "update machines set os = $2, last_seen = now() where token_hash = $1
+                "update machines set os = $2, last_seen = now(), version = $3 where token_hash = $1
                  returning id, account, name, exists (select 1 from boxes where boxes.machine = machines.id)",
-                &[&hash(token), &os],
+                &[&hash(token), &os, &version],
             )
             .await
             .map_err(err)?;
@@ -363,7 +364,7 @@ impl Db {
         let rows = self
             .client().await?
             .query(
-                "select m.id, m.name, m.os, extract(epoch from coalesce(m.last_seen, m.created_at))::bigint, b.upstash from machines m
+                "select m.id, m.name, m.os, extract(epoch from coalesce(m.last_seen, m.created_at))::bigint, b.upstash, m.version from machines m
                  left join boxes b on b.machine = m.id where m.account = $1 order by m.created_at, m.id",
                 &[&account],
             )
@@ -371,7 +372,7 @@ impl Db {
             .map_err(err)?;
         Ok(rows
             .iter()
-            .map(|r| MachineView { id: r.get::<_, Uuid>(0).to_string(), name: r.get(1), os: r.get(2), online: false, last_seen: r.get(3), upstash_box: r.get(4), version: String::new(), update: None })
+            .map(|r| MachineView { id: r.get::<_, Uuid>(0).to_string(), name: r.get(1), os: r.get(2), online: false, last_seen: r.get(3), upstash_box: r.get(4), version: r.get(5), update: None })
             .collect())
     }
 

@@ -85,6 +85,8 @@ pub struct Account {
     live: Mutex<Live>,
     connectors: OnceCell<Arc<Connectors>>,
     watching: AtomicBool,
+    /// Last phase each machine reported. Kept out of `Live` so a row can be offline and restarting.
+    updates: Mutex<HashMap<MachineId, UpdateStatus>>,
 }
 
 #[derive(Default)]
@@ -93,17 +95,23 @@ struct Live {
     clients: HashMap<u64, Client>,
 }
 
+struct Pending {
+    answer: oneshot::Sender<Result<Value, String>>,
+    update: bool,
+}
+
 struct Online {
     socket: u64,
     name: String,
     out: Outbox,
-    pending: HashMap<u64, oneshot::Sender<Result<Value, String>>>,
+    pending: HashMap<u64, Pending>,
     next_call: u64,
     tabs: Vec<TabView>,
     /// The last usage the machine reported for each account, for clients that connect after it.
     usage: BTreeMap<AccountId, Usage>,
     /// It runs in one of the account's boxes, so no other run goes to it.
     dedicated: bool,
+    version: String,
 }
 
 struct Client {
@@ -152,7 +160,7 @@ impl Hub {
             return Ok(account.clone());
         }
         let email = self.db.email(id).await?.ok_or("the account was deleted")?;
-        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false) });
+        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default() });
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
@@ -429,7 +437,7 @@ impl Hub {
 
     pub async fn machines(&self, account: &Account) -> Result<Vec<MachineView>, String> {
         let mut machines = self.db.machines(account.id).await?;
-        account.mark_online(&mut machines);
+        account.overlay(&mut machines);
         Ok(machines)
     }
 
@@ -459,8 +467,8 @@ impl Hub {
 
 impl Account {
     /// Registers a machine's connection. An older one must have gone offline first.
-    pub fn came_online(&self, machine: &str, socket: u64, name: String, dedicated: bool, out: Outbox) {
-        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: vec![], usage: BTreeMap::new(), dedicated };
+    pub fn came_online(&self, machine: &str, socket: u64, name: String, dedicated: bool, version: String, out: Outbox) {
+        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: vec![], usage: BTreeMap::new(), dedicated, version };
         self.live.lock().unwrap().machines.insert(machine.to_owned(), online);
     }
 
@@ -473,7 +481,7 @@ impl Account {
         }
         let Some(gone) = live.machines.remove(machine) else { return false };
         for (_, waiting) in gone.pending {
-            let _ = waiting.send(Err(format!("{} went offline", gone.name)));
+            let _ = waiting.answer.send(Err(format!("{} went offline", gone.name)));
         }
         for client in live.clients.values_mut() {
             client.attached.retain(|t| t.machine != machine);
@@ -487,10 +495,27 @@ impl Account {
         }
     }
 
-    fn mark_online(&self, machines: &mut [MachineView]) {
+    fn overlay(&self, machines: &mut [MachineView]) {
         let live = self.live.lock().unwrap();
-        for m in machines {
-            m.online = live.machines.contains_key(&m.id);
+        let updates = self.updates.lock().unwrap();
+        apply_overlay(&live, &updates, machines);
+    }
+
+    pub fn dedicated(&self, machine: &str) -> bool {
+        self.live.lock().unwrap().machines.get(machine).is_some_and(|online| online.dedicated)
+    }
+
+    /// The only writer of the phase map. Drops `live` before `updates`.
+    pub fn note_update(&self, machine: &str, snapshot: Option<UpdateStatus>) {
+        let version = self.live.lock().unwrap().machines.get(machine).map(|online| online.version.clone()).unwrap_or_default();
+        let mut updates = self.updates.lock().unwrap();
+        match reconcile(updates.get(machine).cloned(), &version, snapshot) {
+            Some(status) => {
+                updates.insert(machine.to_owned(), status);
+            }
+            None => {
+                updates.remove(machine);
+            }
         }
     }
 
@@ -556,19 +581,29 @@ impl Account {
         let id = m.next_call;
         m.next_call += 1;
         // Calls whose callers stopped waiting, as after a timeout, would otherwise stay until the machine disconnects.
-        m.pending.retain(|_, waiting| !waiting.is_closed());
+        m.pending.retain(|_, waiting| !waiting.answer.is_closed());
         let (answer, answered) = oneshot::channel();
-        m.pending.insert(id, answer);
+        let update = matches!(call, Call::UpdateSelf);
+        m.pending.insert(id, Pending { answer, update });
         let _ = m.out.send(frame(&ToMachine::Call { id, call }));
         Some((m.name.clone(), answered))
     }
 
-    pub fn answered(&self, machine: &str, socket: u64, reply: Reply) {
-        let mut live = self.live.lock().unwrap();
-        let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return };
-        if let Some(waiting) = m.pending.remove(&reply.id) {
-            let _ = waiting.send(reply.result());
-        }
+    /// Answers the waiting caller. When the call was `UpdateSelf`, also records the phase and
+    /// returns whether the machine list should be pushed.
+    pub fn answered(&self, machine: &str, socket: u64, reply: Reply) -> bool {
+        let status = {
+            let mut live = self.live.lock().unwrap();
+            let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return false };
+            let Some(pending) = m.pending.remove(&reply.id) else { return false };
+            let result = reply.result();
+            let status = pending.update.then(|| status_of_update(&result)).flatten();
+            let _ = pending.answer.send(result);
+            status
+        };
+        let Some(status) = status else { return false };
+        self.note_update(machine, Some(status));
+        true
     }
 
     /// Passes a machine's event to the clients, keeping its tabs and usage for those that connect later.
@@ -609,8 +644,9 @@ impl Account {
     /// so no event falls between the snapshot and the stream.
     pub fn client_connected(&self, id: u64, login: Vec<u8>, out: Outbox, mut machines: Vec<MachineView>) {
         let mut live = self.live.lock().unwrap();
-        for m in &mut machines {
-            m.online = live.machines.contains_key(&m.id);
+        {
+            let updates = self.updates.lock().unwrap();
+            apply_overlay(&live, &updates, &mut machines);
         }
         let tabs: BTreeMap<MachineId, Vec<TabView>> = live.machines.iter().map(|(id, m)| (id.clone(), m.tabs.clone())).collect();
         let account = pinned_core::wire::AccountView { id: self.id.to_string(), email: self.email.clone() };
@@ -680,6 +716,24 @@ struct PgStorage {
     state: Mutex<Stored>,
     keys: Mutex<BTreeMap<String, String>>,
     writes: mpsc::UnboundedSender<Write>,
+}
+
+fn apply_overlay(live: &Live, updates: &HashMap<MachineId, UpdateStatus>, machines: &mut [MachineView]) {
+    for machine in machines {
+        machine.online = live.machines.contains_key(&machine.id);
+        machine.update = updates.get(&machine.id).cloned();
+        if let Some(version) = live.machines.get(&machine.id).map(|online| online.version.clone()).filter(|version| !version.is_empty()) {
+            machine.version = version;
+        }
+    }
+}
+
+fn status_of_update(result: &Result<Value, String>) -> Option<UpdateStatus> {
+    match result {
+        Ok(value) => serde_json::from_value(value.clone()).ok(),
+        Err(text) if pinned_core::link::is_unknown_command(text) => Some(UpdateStatus::Cannot { reason: "update by hand".into() }),
+        Err(_) => None,
+    }
 }
 
 /// An idle connect after Updating or Restarting settles against the version Auth just wrote.
