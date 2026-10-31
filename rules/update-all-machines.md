@@ -48,7 +48,7 @@ This Mac answers `Cannot` with "no release binary for macos aarch64" and does no
 
 An app older than this change cannot run `update_self`. The hub turns that refusal into "update by hand". That machine has to be updated once by someone at the keyboard.
 
-The GitHub release workflow does not yet publish the Linux musl binaries or `SHA256SUMS`. Until that ships, a Linux node that tries the public release fails the download and keeps the binary it is running. The stacked release change has to publish the files in the contract below. This client does not change how a minisign signature is decoded.
+The release workflow publishes the Linux musl binaries, `SHA256SUMS`, and `SHA256SUMS.minisig`. `latest.json` is assembled once from the desktop updater fragments. `SHA256SUMS` lists that file and both musl binaries, and the signature covers those exact bytes. The upload drafts the release. `publish` clears the draft only when the signature, every file in the sums, and every desktop bundle signature verify. This client does not change how a minisign signature is decoded.
 
 ## Release files
 
