@@ -24,7 +24,7 @@ pub struct NodeUpdate {
 
 impl NodeUpdate {
     pub fn production() -> Self {
-        Self { base: RELEASE_BASE.to_owned() }
+        Self { base: release_base() }
     }
 
     pub fn at(base: impl Into<String>) -> Self {
@@ -41,7 +41,7 @@ pub(crate) struct Plan {
 
 impl SelfUpdate for NodeUpdate {
     fn install(&self, machine: &Machine) -> UpdateStatus {
-        let triple = match release_target(std::env::consts::OS, std::env::consts::ARCH) {
+        let triple = match install_triple() {
             Ok(triple) => triple,
             Err(status) => {
                 machine.report(status.clone());
@@ -56,7 +56,7 @@ impl SelfUpdate for NodeUpdate {
                 return status;
             }
         };
-        let (status, plan) = self.prepare(triple, &dest, RELEASE_PUBKEY, &|status| {
+        let (status, plan) = self.prepare(&triple, &dest, &release_pubkey(), &|status| {
             machine.report(status);
         });
         let UpdateStatus::Restarting { ref to } = status else { return status };
@@ -77,6 +77,23 @@ impl SelfUpdate for NodeUpdate {
         machine.report(status.clone());
         status
     }
+}
+
+fn release_base() -> String {
+    std::env::var("PINNED_RELEASE_BASE").unwrap_or_else(|_| RELEASE_BASE.to_owned())
+}
+
+fn release_pubkey() -> String {
+    std::env::var("PINNED_RELEASE_PUBKEY").unwrap_or_else(|_| RELEASE_PUBKEY.to_owned())
+}
+
+fn install_triple() -> Result<String, UpdateStatus> {
+    if let Ok(triple) = std::env::var("PINNED_RELEASE_TRIPLE") {
+        if !triple.is_empty() {
+            return Ok(triple);
+        }
+    }
+    release_target(std::env::consts::OS, std::env::consts::ARCH).map(str::to_owned)
 }
 
 pub(crate) fn release_target(os: &str, arch: &str) -> Result<&'static str, UpdateStatus> {
@@ -573,6 +590,49 @@ mod tests {
         let err = download_within(&format!("http://{address}/pinned-server"), std::time::Duration::from_millis(200)).unwrap_err();
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "{err} after {:?}", started.elapsed());
         assert!(err.contains("timed out"), "{err}");
+    }
+
+    fn server_binary() -> PathBuf {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        path.pop();
+        path.push("pinned-server");
+        assert!(path.is_file(), "missing {}", path.display());
+        path
+    }
+
+    #[test]
+    fn a_second_stage_does_not_replace_a_good_backup_with_unproven_bytes() {
+        let dir = std::env::temp_dir().join(format!("pinned-restage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("pinned-server");
+        std::fs::write(&dest, b"running").unwrap();
+        stage(&dest, b"unproven").unwrap();
+        assert_eq!(std::fs::read(dir.join("pinned-server.bak")).unwrap(), b"running");
+        stage(&dest, b"newer").unwrap();
+        assert_eq!(std::fs::read(dir.join("pinned-server.bak")).unwrap(), b"running");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"newer");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_binary_that_cannot_start_puts_the_old_bytes_back() {
+        let dir = std::env::temp_dir().join(format!("pinned-spawn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("pinned-server");
+        std::fs::copy(server_binary(), &dest).unwrap();
+        std::fs::write(dir.join("pinned-server.bak"), b"old-binary").unwrap();
+        let mut perms = std::fs::metadata(&dest).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&dest, perms).unwrap();
+        let plan = Plan { program: dest.clone(), args: vec!["--version".into()], cwd: dir.clone() };
+        let err = watch_new_binary(&plan, &dest, Duration::from_secs(2)).unwrap_err();
+        assert!(err.contains("could not start"), "{err}");
+        let got = std::fs::read(&dest).unwrap();
+        assert!(got == b"old-binary", "dest kept {} bytes starting {:02x?}", got.len(), &got[..got.len().min(8)]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

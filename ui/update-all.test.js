@@ -39,6 +39,10 @@ function open(account) {
     settle() {
       for (const item of pending.splice(0)) item.resolve(null);
     },
+    fail(message) {
+      const item = pending.shift();
+      item.reject(new Error(message));
+    },
   };
 }
 
@@ -103,6 +107,39 @@ test("a phase already on the row does not count as acceptance", async () => {
   for (const listen of page.viewListeners.slice()) listen();
   await tick();
   assert.deepEqual(page.calls, ["a", "self"]);
+  page.settle();
+  await done;
+});
+
+test("a rejected call is shown on that machine", async () => {
+  const page = open({ machine_id: "self" });
+  page.machines.set("a", { view: { id: "a", online: true, name: "vps" } });
+  page.machines.set("local", { hubView: { id: "self", online: true, name: "this mac" } });
+  const done = page.updateEveryMachine();
+  page.fail("vps did not answer");
+  await tick();
+  assert.equal(page.machines.get("a").view.update.state, "failed");
+  assert.equal(page.machines.get("a").view.update.reason, "vps did not answer");
+  await tick();
+  assert.deepEqual(page.calls, ["a", "self"]);
+  page.settle();
+  await done;
+});
+
+test("an updating phase does not start this machine", async () => {
+  const page = open({ machine_id: "self" });
+  page.machines.set("a", { view: { id: "a", online: true } });
+  page.machines.set("local", { hubView: { id: "self", online: true } });
+  const done = page.updateEveryMachine();
+  page.machines.get("a").view.update = { state: "updating", to: "9.9.9" };
+  for (const listen of page.viewListeners.slice()) listen();
+  page.settle();
+  await tick();
+  await tick();
+  assert.deepEqual(page.calls, ["a"]);
+  page.machines.get("a").view.update = { state: "failed", to: "9.9.9", reason: "the hub did not answer the sign in" };
+  for (const listen of page.viewListeners.slice()) listen();
+  await tick();
   page.settle();
   await done;
 });
