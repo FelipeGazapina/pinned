@@ -1260,7 +1260,6 @@ function showMachines(list, tabsByMachine) {
     setTabs(id, [], { forget: false });
     machines.delete(id);
   }
-  // A listener removes itself.
   for (const listen of [...viewListeners]) listen();
   render();
   if (settingsOpen() && page === "account") showAccount();
