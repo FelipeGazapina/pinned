@@ -454,15 +454,9 @@ async function pickLocalFolder() {
   if (path) pickFolder(path);
 }
 
-// A remote machine opens any path it is given, so the folder is checked by moving a fresh tab there.
+// open_tab rejects a path that is not a folder, so a bad one never becomes a tab.
 async function openRemote(machine, path, bypass) {
-  const id = await callOn(machine, { cmd: "open_tab", path: null, bypass });
-  try {
-    await callOn(machine, { cmd: "set_folder", tab: id, path });
-  } catch (e) {
-    callOn(machine, { cmd: "close_tab", tab: id });
-    throw e;
-  }
+  const id = await callOn(machine, { cmd: "open_tab", path, bypass });
   const tab = await revealTab(machine, id);
   await startTab(tab);
   return tab;

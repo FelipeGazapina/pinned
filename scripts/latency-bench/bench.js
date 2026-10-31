@@ -610,9 +610,8 @@ async function main() {
     let id = null;
     const sample = await measure(async () => {
       const t0 = Date.now();
-      const opened = client.call({ cmd: "open_tab", path: null, bypass: false });
+      const opened = client.call({ cmd: "open_tab", path: work, bypass: false });
       id = await opened.promise;
-      await client.call({ cmd: "set_folder", tab: id, path: work }).promise;
       await whenListed(client, id);
       const started = client.call({ cmd: "start_claude", tab: id, cols: 80, rows: 24 });
       const stamp = await stampAfter(readyFile(), t0);

@@ -67,6 +67,41 @@ test("a tab push that arrives after the open answers is still not a second fetch
   assert.deepEqual(app.calls, []);
 });
 
+test("opening a remote folder asks the machine to open that folder, then shows it and starts it", async () => {
+  const src = readFileSync(new URL("./main.js", import.meta.url), "utf8");
+  const start = src.indexOf("async function openRemote");
+  const end = src.indexOf("async function moveTab");
+  const calls = [];
+  const sandbox = {
+    calls,
+    callOn: async (_machine, call) => {
+      calls.push(call);
+      if (call.cmd !== "open_tab") throw new Error(`unexpected ${call.cmd}`);
+      return "tab-3";
+    },
+    revealTab: async (_machine, id) => {
+      calls.push({ reveal: id });
+      return { view: { id } };
+    },
+    startTab: async (tab) => {
+      calls.push({ start: tab.view.id });
+    },
+    setTimeout,
+    clearTimeout,
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(`${src.slice(start, end)}\nglobalThis.openRemote = openRemote;`, sandbox);
+  const tab = await sandbox.openRemote("remote", "/work", true);
+  assert.equal(tab.view.id, "tab-3");
+  assert.equal(calls[0].cmd, "open_tab");
+  assert.equal(calls[0].path, "/work");
+  assert.equal(calls[0].bypass, true);
+  assert.equal(calls[1].reveal, "tab-3");
+  assert.equal(calls[2].start, "tab-3");
+  assert.equal(calls.length, 3);
+});
+
 test("a node that never pushes the tab falls back to one tabs fetch", async () => {
   const app = load((call) => {
     assert.equal(call.cmd, "tabs");

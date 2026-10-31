@@ -777,6 +777,7 @@ impl Machine {
     pub fn open_tab(&self, path: Option<String>, bypass: bool) -> Result<TabId, String> {
         let cwd = match path {
             Some(path) if Path::new(&path) == self.scratch => self.scratch.clone(),
+            Some(path) if !Path::new(&path).is_dir() => return Err(format!("{path} is not a folder on this machine")),
             Some(path) => self.open_project(path.into()),
             None => self.default_cwd.clone(),
         };
@@ -3032,6 +3033,14 @@ mod tests {
         assert_eq!(find_bin("claude", Some(&path)), npm.join("claude.cmd"));
         assert_eq!(find_bin("claude", None), PathBuf::from(std::env::var("USERPROFILE").unwrap()).join(r".local\bin\claude.exe"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn open_tab_rejects_a_path_that_is_not_a_folder() {
+        let m = machine();
+        let err = m.open_tab(Some("/no/such/pinned-folder".into()), false).unwrap_err();
+        assert_eq!(err, "/no/such/pinned-folder is not a folder on this machine");
+        assert!(m.tabs().is_empty());
     }
 
     #[test]
