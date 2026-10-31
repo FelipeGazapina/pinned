@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 TAG = "v0.17.0"
+REPO = "FelipeGazapina/pinned"
 NOTES = (
     "On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. "
     "Or click the update button in a running pinned."
@@ -24,17 +25,30 @@ NOTES = (
 ARM_NAME = "pinned-server-aarch64-unknown-linux-musl"
 X86_NAME = "pinned-server-x86_64-unknown-linux-musl"
 BUNDLE = "pinned_aarch64.app.tar.gz"
-OLD_LATEST = b'{"version":"0.17.0","pub_date":"2026-10-30T00:00:00.000Z","notes":"old"}\n'
-NEW_LATEST = b'{"version":"0.17.0","pub_date":"2026-10-31T18:00:00.000Z","notes":"replay"}\n'
-ARM = b"arm-old"
-X86 = b"x86-old"
+BUNDLE_URL = f"https://github.com/{REPO}/releases/download/{TAG}/{BUNDLE}"
+PLATFORMS = (
+    "darwin-aarch64",
+    "darwin-aarch64-app",
+    "darwin-x86_64",
+    "darwin-x86_64-app",
+    "windows-x86_64",
+    "windows-x86_64-nsis",
+)
+ARM = b"arm-old " * 2048
+X86 = b"x86-old " * 2048
 SUM_NAMES = ("latest.json", ARM_NAME, X86_NAME)
 STAMP_EPOCH = 1700000000
+FULL_RUN = ["draft", "build", "linux-node", "sign-node", "publish"]
 
 GH_SOURCE = r'''#!/usr/bin/env python3
 import base64, hashlib, json, os, pathlib, sys
 
 STATE = pathlib.Path(os.environ["REPLAY_STATE"])
+NODE_FILES = (
+    "latest.json",
+    "pinned-server-aarch64-unknown-linux-musl",
+    "pinned-server-x86_64-unknown-linux-musl",
+)
 
 def load():
     return json.loads(STATE.read_text())
@@ -53,11 +67,21 @@ def public_mismatch(state):
     latest = base64.b64decode(assets["latest.json"])
     digest = hashlib.sha256(latest).hexdigest()
     sums = base64.b64decode(assets["SHA256SUMS"]).decode() if "SHA256SUMS" in assets else ""
+    listed = {}
     for line in sums.splitlines():
         parts = line.split()
-        if len(parts) >= 2 and parts[0] == digest and parts[-1].lstrip("*") == "latest.json":
-            return None
-    return f"public latest.json {digest} missing from SHA256SUMS"
+        if len(parts) >= 2:
+            listed.setdefault(parts[1].lstrip("*"), parts[0])
+    if listed.get("latest.json") != digest:
+        return f"public latest.json {digest} missing from SHA256SUMS"
+    for name in NODE_FILES:
+        if name not in listed:
+            return f"public SHA256SUMS does not list {name}"
+        if name not in assets:
+            return f"public {name} is missing"
+        if hashlib.sha256(base64.b64decode(assets[name])).hexdigest() != listed[name]:
+            return f"public {name} does not match SHA256SUMS"
+    return None
 
 def flag_map(args):
     flags = {}
@@ -105,6 +129,10 @@ def next_stamp(state):
     state["clock"] = int(state.get("clock") or 0) + 1
     moment = datetime.datetime.fromtimestamp(1700000000 + state["clock"], datetime.timezone.utc)
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def record(state, gap):
+    if gap:
+        state["violations"].append(gap)
 
 def main():
     argv = sys.argv[1:]
@@ -177,15 +205,19 @@ def main():
         if not state["exists"]:
             sys.stderr.write("release not found\n")
             return 1
+        was_draft = state["draft"]
         draft = flag_bool(flags, "--draft")
         if draft is not None:
             state["draft"] = draft
-        if flag_bool(flags, "--latest") is True:
+        latest = flag_bool(flags, "--latest")
+        if latest is None and was_draft and not state["draft"]:
+            latest = True
+        if latest is True:
             state["latest"] = True
             state["remote_latest"] = os.environ.get("GITHUB_REF_NAME")
-        gap = public_mismatch(state)
-        if gap:
-            state["violations"].append(gap)
+        elif latest is False:
+            state["latest"] = False
+        record(state, public_mismatch(state))
         save(state)
         return 0
 
@@ -213,22 +245,22 @@ def main():
                     state["violations"].append(f"delete {name} while the release is public")
                 del state["assets"][name]
                 state["updated"].pop(name, None)
-                gap = public_mismatch(state)
-                if gap:
-                    state["violations"].append(gap)
+                record(state, public_mismatch(state))
                 save(state)
-            prepared = list(reversed(prepared))
-        stamp = next_stamp(state)
-        for name, data in prepared:
+        lands = os.environ.get("REPLAY_UPLOAD_LANDS")
+        for name, data in sorted(prepared, key=lambda item: len(item[1])):
+            if lands is not None and name not in lands.split(","):
+                continue
             if not state["draft"]:
                 state["violations"].append(f"upload {name} while the release is public")
             state["assets"][name] = base64.b64encode(data).decode()
-            state["updated"][name] = stamp
+            state["updated"][name] = next_stamp(state)
             state["uploads"].append({"name": name, "draft": bool(state["draft"])})
-            gap = public_mismatch(state)
-            if gap:
-                state["violations"].append(gap)
+            record(state, public_mismatch(state))
             save(state)
+        if lands is not None:
+            sys.stderr.write("upload cancelled\n")
+            return 1
         return 0
 
     if sub == "download":
@@ -237,15 +269,17 @@ def main():
             return 1
         dest = pathlib.Path((flags.get("-D") or flags.get("--dir") or ["."])[0])
         patterns = (flags.get("-p") or []) + (flags.get("--pattern") or [])
-        dest.mkdir(parents=True, exist_ok=True)
         import fnmatch
-        for pattern in patterns:
-            hits = [name for name in state["assets"] if fnmatch.fnmatch(name, pattern)]
-            if not hits:
-                sys.stderr.write(f"no asset matches {pattern}\n")
-                return 1
-            for name in hits:
-                (dest / name).write_bytes(base64.b64decode(state["assets"][name]))
+        hits = [
+            name for name in state["assets"]
+            if not patterns or any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+        ]
+        if not hits:
+            sys.stderr.write("no assets match the file pattern\n" if state["assets"] else "no assets to download\n")
+            return 1
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in hits:
+            (dest / name).write_bytes(base64.b64decode(state["assets"][name]))
         return 0
 
     sys.stderr.write("fake gh: unsupported " + " ".join(sys.argv) + "\n")
@@ -253,6 +287,52 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+'''
+
+NPX_SOURCE = r'''#!/bin/bash
+set -euo pipefail
+[[ "$*" == *"tauri signer sign "* ]] || {
+  echo "fake npx: $*" >&2
+  exit 2
+}
+if [[ "${REPLAY_SIGN_FAIL:-0}" == 1 ]]; then
+  echo "tauri signer sign failed" >&2
+  exit 1
+fi
+file="${!#}"
+node "$REPLAY_SIGNER" tauri "$REPLAY_KEY" "$file" > "$file.sig"
+'''
+
+SIGNER_SOURCE = r'''import { createHash, createPrivateKey, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { basename } from "node:path";
+
+const [command, keyFile, file] = process.argv.slice(2);
+if (command === "generate") {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const keyId = randomBytes(8);
+  const raw = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url");
+  const text = `untrusted comment: minisign public key: replay\n${Buffer.concat([Buffer.from("Ed"), keyId, raw]).toString("base64")}\n`;
+  writeFileSync(keyFile, JSON.stringify({
+    keyId: keyId.toString("hex"),
+    secret: privateKey.export({ format: "pem", type: "pkcs8" }),
+    pubkey: Buffer.from(text).toString("base64"),
+  }));
+} else {
+  const key = JSON.parse(readFileSync(keyFile, "utf8"));
+  const secret = createPrivateKey(key.secret);
+  const body = sign(null, createHash("blake2b512").update(readFileSync(file)).digest(), secret);
+  const trusted = `timestamp:1700000000\tfile:${basename(file)}\tprehashed`;
+  const global = sign(null, Buffer.concat([body, Buffer.from(trusted)]), secret);
+  const text = [
+    "untrusted comment: signature from replay secret key",
+    Buffer.concat([Buffer.from("ED"), Buffer.from(key.keyId, "hex"), body]).toString("base64"),
+    `trusted comment: ${trusted}`,
+    global.toString("base64"),
+    "",
+  ].join("\n");
+  process.stdout.write(command === "tauri" ? Buffer.from(text).toString("base64") : text);
+}
 '''
 
 
@@ -441,12 +521,9 @@ def release_step(step):
     )
 
 
-def sums_for(latest, arm, x86):
+def sums_for(latest, arm, x86, names=SUM_NAMES):
     files = {"latest.json": latest, ARM_NAME: arm, X86_NAME: x86}
-    lines = []
-    for name in SUM_NAMES:
-        digest = hashlib.sha256(files[name]).hexdigest()
-        lines.append(f"{digest}  {name}")
+    lines = [f"{hashlib.sha256(files[name]).hexdigest()}  {name}" for name in names]
     return ("\n".join(lines) + "\n").encode()
 
 
@@ -465,6 +542,25 @@ def asset_stamp(counter):
     return datetime.fromtimestamp(STAMP_EPOCH + counter, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def bundle_bytes(build):
+    return f"desktop bundle {build}\n".encode() * 2048
+
+
+def fragment(signature):
+    platforms = {key: {"signature": signature, "url": BUNDLE_URL} for key in PLATFORMS}
+    return {"version": TAG[1:], "platforms": platforms}
+
+
+def manifest(signature, notes):
+    body = {
+        "version": TAG[1:],
+        "notes": notes,
+        "pub_date": "2026-10-30T00:00:00.000Z",
+        "platforms": fragment(signature)["platforms"],
+    }
+    return json.dumps(body, indent=2).encode()
+
+
 def empty_state():
     return {
         "exists": False,
@@ -477,68 +573,24 @@ def empty_state():
         "uploads": [],
         "calls": [],
         "remote_latest": None,
+        "builds": 0,
+        "fragment": None,
     }
 
 
-def seeded_state(draft, latest_flag, latest, sums):
+def seeded_state(release, draft, replace=None):
+    files, built = release
+    files = {**files, **(replace or {})}
     state = empty_state()
     state["exists"] = True
     state["draft"] = draft
-    state["latest"] = latest_flag
-    state["assets"] = {
-        "latest.json": b64(latest),
-        "SHA256SUMS": b64(sums),
-        "SHA256SUMS.minisig": b64(b"untrusted comment: old\nRUQold\n"),
-        ARM_NAME: b64(ARM),
-        X86_NAME: b64(X86),
-    }
-    state["clock"] = 0
-    state["updated"] = {name: asset_stamp(0) for name in state["assets"]}
+    state["fragment"] = built
+    state["assets"] = {name: b64(data) for name, data in files.items()}
+    state["updated"] = {name: asset_stamp(0) for name in files}
     return state
 
 
-def write_stubs(directory):
-    assemble = directory / "assemble.sh"
-    assemble.write_text(
-        "#!/bin/bash\n"
-        "out=\n"
-        "prev=\n"
-        'for arg in "$@"; do\n'
-        '  if [[ "$prev" == "--out" ]]; then out="$arg"; fi\n'
-        '  prev="$arg"\n'
-        "done\n"
-        'test -n "$out"\n'
-        "printf '%s' '" + NEW_LATEST.decode() + "' > \"$out\"\n"
-    )
-    sign = directory / "sign.sh"
-    sign.write_text(
-        "#!/bin/bash\n"
-        "set -euo pipefail\n"
-        'dir="${1:?}"\n'
-        'if [[ "${REPLAY_SIGN_FAIL:-0}" == 1 ]]; then\n'
-        '  echo "tauri signer sign failed" >&2\n'
-        "  exit 1\n"
-        "fi\n"
-        'python3 - "$dir" << \'PY\'\n'
-        "import hashlib, pathlib, sys\n"
-        "d = pathlib.Path(sys.argv[1])\n"
-        f"names = {list(SUM_NAMES)!r}\n"
-        "lines = []\n"
-        "for name in names:\n"
-        "    digest = hashlib.sha256((d / name).read_bytes()).hexdigest()\n"
-        "    lines.append(f'{digest}  {name}')\n"
-        "(d / 'SHA256SUMS').write_text('\\n'.join(lines) + '\\n')\n"
-        "(d / 'SHA256SUMS.minisig').write_text('untrusted comment: replay\\nRUQreplay\\n')\n"
-        "PY\n"
-    )
-    assemble.chmod(0o755)
-    sign.chmod(0o755)
-    return assemble, sign
-
-
-def rewrite(run, assemble, sign):
-    run = run.replace("bash scripts/assemble-latest-json.sh", f'bash "{assemble}"')
-    run = run.replace("bash scripts/sign-node-sums.sh", f'bash "{sign}"')
+def rewrite(run):
     replaced = []
     for line in run.splitlines(keepends=True):
         stripped = line.lstrip()
@@ -553,11 +605,19 @@ def rewrite(run, assemble, sign):
     return "".join(replaced)
 
 
-def prepare_work(work):
+def write_fragment(work, built):
+    path = work / "updater-fragments" / "updater-aarch64-apple-darwin" / "updater-fragment.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(built))
+
+
+def prepare_work(work, state):
     node = work / "node-release"
     node.mkdir(parents=True)
     (node / ARM_NAME).write_bytes(ARM)
     (node / X86_NAME).write_bytes(X86)
+    if state.get("fragment"):
+        write_fragment(work, state["fragment"])
 
 
 class Replay:
@@ -565,31 +625,70 @@ class Replay:
         self.jobs = jobs
         self.root = pathlib.Path(root)
         self.bin = self.root / "bin"
-        self.stubs = self.root / "stubs"
         self.bin.mkdir()
-        self.stubs.mkdir()
-        gh = self.bin / "gh"
-        gh.write_text(GH_SOURCE)
-        gh.chmod(0o755)
-        self.assemble, self.sign = write_stubs(self.stubs)
+        for name, source in (("gh", GH_SOURCE), ("npx", NPX_SOURCE)):
+            path = self.bin / name
+            path.write_text(source)
+            path.chmod(0o755)
+        self.signer = self.root / "signer.mjs"
+        self.signer.write_text(SIGNER_SOURCE)
+        self.key = self.root / "key.json"
+        subprocess.run(["node", str(self.signer), "generate", str(self.key)], check=True)
+        self.pubkey = json.loads(self.key.read_text())["pubkey"]
 
-    def run(self, job_names, state, sign_fail):
+    def minisig(self, data, name):
+        scratch = self.root / "to-sign"
+        if scratch.exists():
+            shutil.rmtree(scratch)
+        scratch.mkdir()
+        path = scratch / name
+        path.write_bytes(data)
+        proc = subprocess.run(
+            ["node", str(self.signer), "minisig", str(self.key), str(path)],
+            check=True,
+            capture_output=True,
+        )
+        return proc.stdout
+
+    def tauri_signature(self, data, name):
+        return b64(self.minisig(data, name))
+
+    def release(self, build=0, notes="old"):
+        bundle = bundle_bytes(build)
+        signature = self.tauri_signature(bundle, BUNDLE)
+        latest = manifest(signature, notes)
+        sums = sums_for(latest, ARM, X86)
+        files = {
+            BUNDLE: bundle,
+            f"{BUNDLE}.sig": signature.encode(),
+            "latest.json": latest,
+            ARM_NAME: ARM,
+            X86_NAME: X86,
+            "SHA256SUMS": sums,
+            "SHA256SUMS.minisig": self.minisig(sums, "SHA256SUMS"),
+        }
+        return files, fragment(signature)
+
+    def run(self, job_names, state, extra_env):
         state_path = self.root / "state.json"
         state_path.write_text(json.dumps(state))
         work = self.root / "work"
         if work.exists():
             shutil.rmtree(work)
         work.mkdir()
-        prepare_work(work)
+        prepare_work(work, state)
         env = os.environ.copy()
         env["PATH"] = str(self.bin) + os.pathsep + env.get("PATH", "")
         env["GITHUB_REF_NAME"] = TAG
-        env["GITHUB_REPOSITORY"] = "FelipeGazapina/pinned"
+        env["GITHUB_REPOSITORY"] = REPO
         env["RELEASE_NOTES"] = NOTES
         env["GH_TOKEN"] = "replay"
         env["REPLAY_STATE"] = str(state_path)
-        env["REPLAY_SIGN_FAIL"] = "1" if sign_fail else "0"
+        env["REPLAY_SIGNER"] = str(self.signer)
+        env["REPLAY_KEY"] = str(self.key)
+        env["PINNED_RELEASE_PUBKEY"] = self.pubkey
         env["TAURI_SIGNING_PRIVATE_KEY"] = "replay"
+        env.update(extra_env)
         stderr = []
         code = 0
         for name in job_names:
@@ -599,7 +698,8 @@ class Replay:
             if code != 0:
                 break
         state = json.loads(state_path.read_text())
-        return code, "".join(stderr), state
+        assembled = work / "node-release" / "latest.json"
+        return code, "".join(stderr), state, assembled.read_bytes() if assembled.exists() else None
 
     def job(self, name, env, work):
         stderr = []
@@ -609,8 +709,7 @@ class Replay:
             if step.get("uses") and "tauri-action" in step["uses"]:
                 code, err = self.tauri(step, env, work)
             else:
-                script = rewrite(step["run"], self.assemble, self.sign)
-                code, err = self.shell(script, env, work)
+                code, err = self.shell(rewrite(step["run"]), env, work)
             if err.strip():
                 stderr.append(err)
             if code != 0:
@@ -630,17 +729,28 @@ class Replay:
         return proc.returncode, proc.stderr
 
     def tauri(self, step, env, work):
+        state_path = pathlib.Path(env["REPLAY_STATE"])
+        build = int(json.loads(state_path.read_text()).get("builds") or 0) + 1
         out = work / "tauri-out"
         out.mkdir(exist_ok=True)
         bundle = out / BUNDLE
-        bundle.write_bytes(b"desktop-bundle")
+        bundle.write_bytes(bundle_bytes(build))
+        signature = self.tauri_signature(bundle.read_bytes(), BUNDLE)
+        (out / f"{BUNDLE}.sig").write_text(signature)
         code, err = self.shell(
-            f'gh release upload "$GITHUB_REF_NAME" "{bundle}" --clobber\n',
+            f'gh release upload "$GITHUB_REF_NAME" "{bundle}" "{bundle}.sig" --clobber\n',
             env,
             work,
         )
+        if code != 0:
+            return code, err
+        state = json.loads(state_path.read_text())
+        state["builds"] = build
+        state["fragment"] = fragment(signature)
+        state_path.write_text(json.dumps(state))
+        write_fragment(work, state["fragment"])
         flag = (step.get("includeUpdaterJson") or "true").lower()
-        if code != 0 or flag == "false":
+        if flag == "false":
             return code, err
         latest = out / "latest.json"
         latest.write_bytes(b'{"version":"0.17.0","pub_date":"tauri"}\n')
@@ -687,7 +797,7 @@ def consistent(state):
     return False
 
 
-def scenario_errors(code, stderr, state, expect):
+def scenario_errors(code, stderr, state, assembled, expect):
     errors = list(state["violations"])
     for key, value in expect.items():
         if key == "code":
@@ -702,9 +812,9 @@ def scenario_errors(code, stderr, state, expect):
         elif key == "unchanged_from":
             if not unchanged(value, state):
                 errors.append("signer failure replaced latest.json or SHA256SUMS")
-        elif key == "latest_bytes":
-            if asset_bytes(state, "latest.json") != value:
-                errors.append("latest.json bytes are not the assembled manifest")
+        elif key == "latest_assembled":
+            if assembled is None or asset_bytes(state, "latest.json") != assembled:
+                errors.append("latest.json on the release is not the manifest sign-node assembled")
         elif key == "consistent":
             if consistent(state) != value:
                 errors.append(f"consistent={consistent(state)}, want {value}")
@@ -720,25 +830,22 @@ def scenario_errors(code, stderr, state, expect):
     return errors
 
 
-def matching_public():
-    return seeded_state(False, False, OLD_LATEST, sums_for(OLD_LATEST, ARM, X86))
-
-
-def public_clobber_errors(gh, root):
-    state = matching_public()
-    state_path = root / "clobber-state.json"
+def public_clobber_errors(replay):
+    state = seeded_state(replay.release(), draft=False)
+    state_path = replay.root / "clobber-state.json"
     state_path.write_text(json.dumps(state))
-    work = root / "clobber-work"
+    work = replay.root / "clobber-work"
     work.mkdir()
+    newer, _ = replay.release(notes="new")
     latest = work / "latest.json"
     sums = work / "SHA256SUMS"
-    latest.write_bytes(NEW_LATEST)
-    sums.write_bytes(sums_for(NEW_LATEST, ARM, X86))
+    latest.write_bytes(newer["latest.json"])
+    sums.write_bytes(newer["SHA256SUMS"])
     env = os.environ.copy()
     env["REPLAY_STATE"] = str(state_path)
     env["GITHUB_REF_NAME"] = TAG
     proc = subprocess.run(
-        [str(gh), "release", "upload", TAG, str(sums), str(latest), "--clobber"],
+        [str(replay.bin / "gh"), "release", "upload", TAG, str(latest), str(sums), "--clobber"],
         env=env,
         text=True,
         capture_output=True,
@@ -749,11 +856,14 @@ def public_clobber_errors(gh, root):
         errors.append(f"clobber upload exit {proc.returncode}: {proc.stderr.strip()}")
     if not any("while the release is public" in item for item in after["violations"]):
         errors.append(f"public clobber recorded no violation: {after['violations']}")
-    if asset_bytes(after, "latest.json") != NEW_LATEST:
+    if asset_bytes(after, "latest.json") != newer["latest.json"]:
         errors.append("clobber did not replace latest.json")
     names = [item["name"] for item in after["uploads"]]
-    if names != ["latest.json", "SHA256SUMS"]:
-        errors.append(f"clobber upload order {names}")
+    if names != ["SHA256SUMS", "latest.json"]:
+        errors.append(f"clobber upload landed {names}, want the smaller SHA256SUMS first")
+    stamps = [after["updated"][name] for name in ("SHA256SUMS", "latest.json")]
+    if stamps[0] >= stamps[1]:
+        errors.append(f"clobber upload stamps {stamps} do not follow completion order")
     if not consistent(after):
         errors.append("clobber did not finish consistent")
     return errors
@@ -769,7 +879,7 @@ def main():
             print(f"FAIL shell: {problem}")
     else:
         print("ok: shells")
-    for name in ("draft", "build", "linux-node", "sign-node", "publish"):
+    for name in FULL_RUN:
         if name not in jobs:
             sys.exit(f"release.yml has no {name} job")
         if name != "linux-node" and not any(release_step(step) for step in jobs[name]["steps"]):
@@ -778,150 +888,13 @@ def main():
         ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True
     ).strip()
     print(f"replay at {sha}")
-    for name in ("draft", "build", "linux-node", "sign-node", "publish"):
+    for name in FULL_RUN:
         print(f"  {name}: {' | '.join(step_labels(jobs[name])) or '(no release write)'}")
-
-    cases = []
-
-    def add(title, job_names, state, sign_fail, expect, repeat=1):
-        cases.append((title, job_names, state, sign_fail, expect, repeat))
-
-    add(
-        "full run, then the same run again",
-        ["draft", "build", "linux-node", "sign-node", "publish"],
-        empty_state(),
-        False,
-        {"code": 0, "draft": False, "consistent": True, "latest_bytes": NEW_LATEST},
-        repeat=2,
-    )
-    add(
-        "sign-node re-run, signer fails",
-        ["sign-node"],
-        matching_public(),
-        True,
-        {
-            "stderr_has": "tauri signer sign failed",
-            "unchanged_from": matching_public(),
-            "consistent": True,
-        },
-    )
-    add(
-        "sign-node re-run, signer succeeds",
-        ["sign-node"],
-        matching_public(),
-        False,
-        {"code": 0, "draft": True, "consistent": True, "latest_bytes": NEW_LATEST},
-    )
-    add(
-        "sign-node re-run then publish",
-        ["sign-node", "publish"],
-        matching_public(),
-        False,
-        {
-            "code": 0,
-            "draft": False,
-            "latest_flag": True,
-            "consistent": True,
-            "latest_bytes": NEW_LATEST,
-        },
-    )
-    add(
-        "build re-run",
-        ["build"],
-        matching_public(),
-        False,
-        {
-            "code": 0,
-            "draft": True,
-            "uploaded": BUNDLE,
-            "unchanged_from": matching_public(),
-            "consistent": True,
-        },
-    )
-    add(
-        "publish re-run",
-        ["publish"],
-        matching_public(),
-        False,
-        {
-            "code": 0,
-            "draft": False,
-            "latest_flag": True,
-            "consistent": True,
-            "unchanged_from": matching_public(),
-        },
-    )
-    mismatched = seeded_state(True, False, NEW_LATEST, sums_for(OLD_LATEST, ARM, X86))
-    add(
-        "publish re-run on a draft whose latest.json hash is not in SHA256SUMS",
-        ["publish"],
-        mismatched,
-        False,
-        {
-            "draft": True,
-            "stderr_has": "the release checksum does not match",
-            "consistent": False,
-        },
-    )
-    add(
-        "build re-run then publish without sign-node",
-        ["build", "publish"],
-        matching_public(),
-        False,
-        {
-            "draft": True,
-            "stderr_has": "sign-node did not run after the last build",
-            "consistent": True,
-            "unchanged_from": matching_public(),
-        },
-    )
-    older_latest = matching_public()
-    older_latest["remote_latest"] = "v0.18.0"
-    add(
-        "publish an older tag does not take latest",
-        ["publish"],
-        older_latest,
-        False,
-        {
-            "code": 0,
-            "draft": False,
-            "latest_flag": False,
-            "consistent": True,
-            "unchanged_from": matching_public(),
-        },
-    )
-    newer_latest = matching_public()
-    newer_latest["remote_latest"] = "v0.16.0"
-    add(
-        "publish a newer tag takes latest",
-        ["publish"],
-        newer_latest,
-        False,
-        {
-            "code": 0,
-            "draft": False,
-            "latest_flag": True,
-            "consistent": True,
-            "unchanged_from": matching_public(),
-        },
-    )
-    add(
-        "linux-node re-run",
-        ["linux-node"],
-        matching_public(),
-        False,
-        {
-            "code": 0,
-            "draft": False,
-            "consistent": True,
-            "unchanged_from": matching_public(),
-        },
-    )
 
     failed = 0
     with tempfile.TemporaryDirectory(prefix="release-replay-") as tmp:
         replay = Replay(jobs, tmp)
-        clobber_errors = public_clobber_errors(replay.bin / "gh", replay.root)
+        clobber_errors = public_clobber_errors(replay)
         if clobber_errors:
             failed += 1
             print("FAIL public clobber")
@@ -929,25 +902,180 @@ def main():
                 print(f"  {error}")
         else:
             print("ok: public clobber")
-        for title, job_names, state, sign_fail, expect, repeat in cases:
-            code, stderr, after = 0, "", state
-            for _ in range(repeat):
-                carried = {
-                    "exists": after["exists"],
-                    "draft": after["draft"],
-                    "latest": after["latest"],
-                    "assets": after["assets"],
-                    "updated": after.get("updated") or {},
-                    "clock": after.get("clock") or 0,
-                    "violations": [],
-                    "uploads": [],
-                    "calls": [],
-                    "remote_latest": after.get("remote_latest"),
-                }
-                code, stderr, after = replay.run(job_names, carried, sign_fail)
+
+        current = replay.release()
+        newer = replay.release(notes="new")
+
+        def public():
+            return seeded_state(current, draft=False)
+
+        def drafted(remote_latest=None, replace=None, release=current):
+            state = seeded_state(release, draft=True, replace=replace)
+            state["remote_latest"] = remote_latest
+            return state
+
+        cases = []
+
+        def add(title, runs, state, expect):
+            cases.append((title, runs, state, expect))
+
+        add(
+            "full run, then the same run again",
+            [(FULL_RUN, {}), (FULL_RUN, {})],
+            empty_state(),
+            {"code": 0, "draft": False, "consistent": True, "latest_assembled": True},
+        )
+        add(
+            "sign-node re-run, signer fails",
+            [(["sign-node"], {"REPLAY_SIGN_FAIL": "1"})],
+            public(),
+            {
+                "stderr_has": "tauri signer sign failed",
+                "unchanged_from": public(),
+                "consistent": True,
+            },
+        )
+        add(
+            "sign-node re-run, signer succeeds",
+            [(["sign-node"], {})],
+            public(),
+            {"code": 0, "draft": True, "consistent": True, "latest_assembled": True},
+        )
+        add(
+            "sign-node re-run then publish",
+            [(["sign-node", "publish"], {})],
+            public(),
+            {
+                "code": 0,
+                "draft": False,
+                "latest_flag": True,
+                "consistent": True,
+                "latest_assembled": True,
+            },
+        )
+        add(
+            "build re-run",
+            [(["build"], {})],
+            public(),
+            {
+                "code": 0,
+                "draft": True,
+                "uploaded": BUNDLE,
+                "unchanged_from": public(),
+                "consistent": True,
+            },
+        )
+        add(
+            "publish re-run",
+            [(["publish"], {})],
+            public(),
+            {
+                "code": 0,
+                "draft": False,
+                "latest_flag": True,
+                "consistent": True,
+                "unchanged_from": public(),
+            },
+        )
+        add(
+            "publish re-run on a draft whose latest.json hash is not in SHA256SUMS",
+            [(["publish"], {})],
+            drafted(replace={"latest.json": newer[0]["latest.json"]}),
+            {
+                "draft": True,
+                "stderr_has": "the release checksum does not match",
+                "consistent": False,
+            },
+        )
+        add(
+            "build re-run then publish without sign-node",
+            [(["build", "publish"], {})],
+            public(),
+            {
+                "draft": True,
+                "stderr_has": "sign-node did not run after the last build",
+                "consistent": True,
+                "unchanged_from": public(),
+            },
+        )
+        add(
+            "publish an older tag does not take latest",
+            [(["publish"], {})],
+            drafted(remote_latest="v0.18.0"),
+            {
+                "code": 0,
+                "draft": False,
+                "latest_flag": False,
+                "consistent": True,
+                "unchanged_from": public(),
+            },
+        )
+        add(
+            "publish a newer tag takes latest",
+            [(["publish"], {})],
+            drafted(remote_latest="v0.16.0"),
+            {
+                "code": 0,
+                "draft": False,
+                "latest_flag": True,
+                "consistent": True,
+                "unchanged_from": public(),
+            },
+        )
+        add(
+            "linux-node re-run",
+            [(["linux-node"], {})],
+            public(),
+            {
+                "code": 0,
+                "draft": False,
+                "consistent": True,
+                "unchanged_from": public(),
+            },
+        )
+        add(
+            "publish the final tag after its release candidate takes latest",
+            [(["publish"], {})],
+            drafted(remote_latest="v0.17.0-rc.1"),
+            {"code": 0, "draft": False, "latest_flag": True, "consistent": True},
+        )
+        add(
+            "sign-node cancelled after the small files land, then publish",
+            [
+                (["sign-node"], {"REPLAY_UPLOAD_LANDS": "SHA256SUMS,SHA256SUMS.minisig,latest.json"}),
+                (["publish"], {}),
+            ],
+            public(),
+            {"draft": True, "stderr_has": f"{ARM_NAME} is missing from the release"},
+        )
+        add(
+            "publish re-run on a draft whose SHA256SUMS.minisig signs older sums",
+            [(["publish"], {})],
+            drafted(release=newer, replace={"SHA256SUMS.minisig": current[0]["SHA256SUMS.minisig"]}),
+            {"draft": True, "stderr_has": "SHA256SUMS.minisig does not verify SHA256SUMS"},
+        )
+        add(
+            "publish re-run on a draft whose binary does not match SHA256SUMS",
+            [(["publish"], {})],
+            drafted(replace={ARM_NAME: b"arm-new " * 2048}),
+            {"draft": True, "stderr_has": f"{ARM_NAME} does not match SHA256SUMS"},
+        )
+        partial = sums_for(current[0]["latest.json"], ARM, X86, names=("latest.json", X86_NAME))
+        add(
+            "publish re-run on a draft whose SHA256SUMS does not list a binary",
+            [(["publish"], {})],
+            drafted(replace={"SHA256SUMS": partial, "SHA256SUMS.minisig": replay.minisig(partial, "SHA256SUMS")}),
+            {"draft": True, "stderr_has": f"SHA256SUMS does not list {ARM_NAME}"},
+        )
+
+        for title, runs, state, expect in cases:
+            code, stderr, after, assembled = 0, "", state, None
+            for job_names, extra_env in runs:
+                carried = {**after, "violations": [], "uploads": [], "calls": []}
+                code, stderr, after, assembled = replay.run(job_names, carried, extra_env)
                 if after["violations"]:
                     break
-            errors = scenario_errors(code, stderr, after, expect)
+            errors = scenario_errors(code, stderr, after, assembled, expect)
             if errors:
                 failed += 1
                 print(f"FAIL {title}")
