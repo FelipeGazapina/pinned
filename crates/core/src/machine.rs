@@ -341,8 +341,6 @@ pub struct Machine {
     /// The folder threads started without a project run in.
     scratch: PathBuf,
     tabs: Mutex<HashMap<TabId, Tab>>,
-    /// Sessions taken out of `tabs` and killed after the lock opens. `quit` waits for them, or the
-    /// exec after an update would land mid-kill and leave claude stopped or unreaped.
     kills: Kills,
     /// Chosen when this process starts. Tab ids include it, so the next process cannot hand out an id this one used.
     boot: u64,
@@ -418,10 +416,9 @@ struct Kills {
 }
 
 impl Kills {
-    /// Taken under the `tabs` lock, so a `quit` that clears the tabs after it waits for this kill.
-    fn begin(&self) -> Kill<'_> {
+    fn take(&self, _locked: &HashMap<TabId, Tab>, session: Option<pty::Session>) -> Kill<'_> {
         *self.running.lock().unwrap() += 1;
-        Kill(self)
+        Kill { session, kills: self }
     }
 
     fn wait(&self) {
@@ -430,12 +427,16 @@ impl Kills {
     }
 }
 
-struct Kill<'a>(&'a Kills);
+struct Kill<'a> {
+    session: Option<pty::Session>,
+    kills: &'a Kills,
+}
 
 impl Drop for Kill<'_> {
     fn drop(&mut self) {
-        *self.0.running.lock().unwrap() -= 1;
-        self.0.done.notify_all();
+        drop(self.session.take());
+        *self.kills.running.lock().unwrap() -= 1;
+        self.kills.done.notify_all();
     }
 }
 
@@ -1376,15 +1377,17 @@ impl Machine {
     }
 
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
-        let (old, screen, kill) = self.tab(tab, |t| {
+        let (old, screen) = {
+            let mut tabs = self.tabs.lock().unwrap();
+            let t = tabs.get_mut(tab).ok_or_else(|| format!("no tab {tab}"))?;
             t.held.clear();
-            (t.session.take(), t.screen.clone(), self.kills.begin())
-        })?;
+            let (session, screen) = (t.session.take(), t.screen.clone());
+            (self.kills.take(&tabs, session), screen)
+        };
         let session = screen.lock().unwrap().restart();
         // Only once the screen has moved on: dropping a session echoes the EOF it sends as "^D", which
         // would otherwise reach the viewers. It kills it silently, so its exit can't be mistaken for the new one's.
         drop(old);
-        drop(kill);
         let started = SystemTime::now();
         let (me, exited) = (self.me.clone(), tab.to_owned());
         let pty = pty::Session::spawn(
@@ -1508,17 +1511,16 @@ impl Machine {
         for id in self.delegates.running_under(tab) {
             let _ = self.delegates.cancel_tree(&id, "the parent tab closed", path.as_deref());
         }
-        let (closed, owned, last, kill) = {
+        let (closed, owned, last) = {
             let mut tabs = self.tabs.lock().unwrap();
-            let closed = tabs.remove(tab);
+            let closed = tabs.remove(tab).map(|t| (self.kills.take(&tabs, t.session), t.made));
             let owned: Vec<PathBuf> = tabs.values().filter_map(|t| t.made.clone()).collect();
-            (closed, owned, tabs.is_empty(), self.kills.begin())
+            (closed, owned, tabs.is_empty())
         };
-        let made = closed.as_ref().and_then(|t| t.made.clone());
-        drop(closed);
+        let (kill, made) = closed.unzip();
         drop(kill);
         self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
-        if let Some(made) = made {
+        if let Some(made) = made.flatten() {
             if !owned.iter().any(|dir| dir == &made) {
                 branches::drop_worktree(&made, path.as_deref());
             }
@@ -3058,8 +3060,6 @@ pub(crate) mod tests {
         String::from_utf8_lossy(&ps.stdout).trim().to_owned()
     }
 
-    /// Runs `end` on its own thread and holds the session it drops between the kill and the reap,
-    /// quits meanwhile, and returns the `ps` state `pid` had as `quit` returned.
     #[cfg(unix)]
     fn state_as_quit_returns_during_a_kill(m: &Arc<Machine>, pid: u32, end: impl FnOnce(&Machine) + Send + 'static) -> String {
         let (killed, held) = std::sync::mpsc::channel();
@@ -3083,7 +3083,6 @@ pub(crate) mod tests {
                 quit.send(ps_state(pid)).unwrap();
             })
         };
-        // A quit that waits for the kill cannot return before the reap, so the timeout only ends that wait.
         let early = returned.recv_timeout(Duration::from_secs(1)).ok();
         reap.send(()).unwrap();
         let state = early.unwrap_or_else(|| returned.recv_timeout(Duration::from_secs(10)).expect("quit never returned after the reap"));

@@ -139,7 +139,6 @@ impl Session {
 
 #[cfg(test)]
 thread_local! {
-    /// Runs once, on this thread, between the kill and the reap of the next session dropped here.
     pub(crate) static BEFORE_REAP: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
 }
 
