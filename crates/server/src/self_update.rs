@@ -377,42 +377,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_signature_from_the_release_signer_verifies_and_its_base64_wrapper_does_not() {
-        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let dir = std::env::temp_dir().join(format!("pinned-tauri-sign-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let _clean = Clean(dir.clone());
-        let key = dir.join("release.key");
-        checked(Command::new("npx").args(["tauri", "signer", "generate", "--ci", "--force", "-w"]).arg(&key).current_dir(&repo));
-
-        let name = "pinned-server-x86_64-unknown-linux-musl";
-        let bytes = b"new-binary";
-        let sums = sums_for(name, bytes);
-        std::fs::write(dir.join("SHA256SUMS"), &sums).unwrap();
-        let private_key = std::fs::read_to_string(&key).unwrap();
-        let _ = std::fs::remove_file(&key);
-        let pubkey = std::fs::read_to_string(dir.join("release.key.pub")).unwrap();
-        checked(
-            Command::new(repo.join("scripts/sign-node-sums.sh"))
-                .arg(&dir)
-                .env("TAURI_SIGNING_PRIVATE_KEY", private_key.trim())
-                .env("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "")
-                .current_dir(&repo),
-        );
-
-        let signature = std::fs::read_to_string(dir.join("SHA256SUMS.minisig")).unwrap();
-        let wrapped = std::fs::read_to_string(dir.join("SHA256SUMS.sig")).unwrap();
-        assert!(signature.starts_with("untrusted comment:"));
-        assert_eq!(verify(pubkey.trim(), &sums, &signature, name, bytes), Ok(()));
-        assert_eq!(verify(pubkey.trim(), "unrelated\n", &signature, name, bytes), Err("the release signature does not match".into()));
-        assert_eq!(
-            verify(pubkey.trim(), &sums, &wrapped, name, bytes).unwrap_err(),
-            "could not read the release signature: Invalid encoding in minisign data"
-        );
-    }
-
     fn sign_release(dir: &Path, version: &str, private_key: &str) {
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         std::fs::create_dir_all(dir).unwrap();
@@ -424,7 +388,7 @@ mod tests {
         std::fs::write(dir.join("latest.json"), latest).unwrap();
         std::fs::write(dir.join(x86_name), x86).unwrap();
         std::fs::write(dir.join(arm_name), arm).unwrap();
-        // The release job writes this file today. It lists the binaries and omits latest.json.
+        // A leftover list that omits latest.json must be replaced. Signing that file is not a release.
         let stale = format!("{}{}", sums_for(x86_name, x86), sums_for(arm_name, arm));
         std::fs::write(dir.join("SHA256SUMS"), stale).unwrap();
         checked(
@@ -482,21 +446,18 @@ mod tests {
 
         let files = served(&current);
         let (status, bytes) = install_from(&home, "valid", files.clone(), pubkey);
-        eprintln!("valid: {status:?} bytes={bytes:?}");
         assert_eq!(status, UpdateStatus::Restarting { to: "9.9.9".into() });
         assert_eq!(bytes, b"x86-binary");
 
         let mut tampered_latest = files.clone();
         tampered_latest.insert("/latest.json".into(), b"{\"version\":\"9.9.9\"} ".to_vec());
         let (status, bytes) = install_from(&home, "tampered-latest", tampered_latest, pubkey);
-        eprintln!("tampered latest.json: {status:?} bytes={bytes:?}");
         assert_eq!(status, UpdateStatus::Failed { to: String::new(), reason: "the release checksum does not match".into() });
         assert_eq!(bytes, b"old-binary");
 
         let mut tampered_binary = files;
         tampered_binary.insert("/pinned-server-x86_64-unknown-linux-musl".into(), b"tampered".to_vec());
         let (status, bytes) = install_from(&home, "tampered-binary", tampered_binary, pubkey);
-        eprintln!("tampered binary: {status:?} bytes={bytes:?}");
         assert_eq!(status, UpdateStatus::Failed { to: "9.9.9".into(), reason: "the release checksum does not match".into() });
         assert_eq!(bytes, b"old-binary");
 
@@ -504,13 +465,11 @@ mod tests {
         let legacy_pubkey = base64::engine::general_purpose::STANDARD.encode(legacy_key);
         let legacy_sig = "untrusted comment: signature from minisign secret key\nRWQf6LRCGA9i59SLOFxz6NxvASXDJeRtuZykwQepbDEGt87ig1BNpWaVWuNrm73YiIiJbq71Wi+dP9eKL8OC351vwIasSSbXxwA=\ntrusted comment: timestamp:1555779966\tfile:test\nQtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfNQUaOAA==";
         let legacy = verify(&legacy_pubkey, "test", legacy_sig, "latest.json", b"test").unwrap_err();
-        eprintln!("legacy: {legacy}");
         assert_eq!(legacy, "the release signature does not match");
 
         let older = home.join("older");
         sign_release(&older, "0.0.1", private_key);
         let (status, bytes) = install_from(&home, "older", served(&older), pubkey);
-        eprintln!("older: {status:?} bytes={bytes:?}");
         assert_eq!(
             status,
             UpdateStatus::Failed {

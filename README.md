@@ -654,9 +654,10 @@ scripts/release.sh 0.2.0
 
 The script bumps the version in `Cargo.toml`, tags `v0.2.0` and pushes. The `release`
 workflow builds both Mac architectures, the Windows installer, and the Linux musl node
-binaries. It signs the desktop bundles and `SHA256SUMS`, then publishes the release with
-`latest.json` only after the desktop builds and the node files are uploaded. Running copies
-then offer the update. A Linux node downloads `pinned-server-<target>` from that release.
+binaries. The desktop jobs upload `latest.json`. The sign job then hashes that file and
+the musl binaries, signs those exact bytes, and uploads the checksums. The release stays
+a draft until the desktop builds and that upload succeed. Running copies then offer the
+update. A Linux node downloads `pinned-server-<target>` from that release.
 
 Update signing needs the `TAURI_SIGNING_PRIVATE_KEY` repository secret. Its public half is
 `plugins.updater.pubkey` in `tauri.conf.json`. The same secret signs `SHA256SUMS`. If the

@@ -67,11 +67,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
       - name: Free disk for the musl image
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
       - name: Build the musl binaries the hub image builds
@@ -84,22 +79,39 @@ jobs:
           docker cp "$id:/downloads/." node-release
           test -s node-release/pinned-server-x86_64-unknown-linux-musl
           test -s node-release/pinned-server-aarch64-unknown-linux-musl
-      - name: Sign the checksums
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-node-binaries
+          path: |
+            node-release/pinned-server-x86_64-unknown-linux-musl
+            node-release/pinned-server-aarch64-unknown-linux-musl
+          if-no-files-found: error
+
+  sign-node:
+    needs: [build, linux-node]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-node-binaries
+          path: node-release
+      - name: Download the latest.json the desktop jobs uploaded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --pattern latest.json --dir node-release --clobber
+          test -s node-release/latest.json
+      - name: Sign checksums of those exact bytes
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        run: |
-          (
-            cd node-release
-            sha256sum \
-              pinned-server-x86_64-unknown-linux-musl \
-              pinned-server-aarch64-unknown-linux-musl \
-              > SHA256SUMS
-            grep -E -q '^[[:xdigit:]]{64}  pinned-server-x86_64-unknown-linux-musl$' SHA256SUMS
-            grep -E -q '^[[:xdigit:]]{64}  pinned-server-aarch64-unknown-linux-musl$' SHA256SUMS
-            test "$(wc -l < SHA256SUMS)" -eq 2
-          )
-          bash scripts/sign-node-sums.sh node-release
+        run: bash scripts/sign-node-sums.sh node-release
       - name: Upload the node files
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -112,7 +124,7 @@ jobs:
             --clobber
 
   publish:
-    needs: [build, linux-node]
+    needs: [build, sign-node]
     runs-on: ubuntu-latest
     steps:
       - name: Publish the release
