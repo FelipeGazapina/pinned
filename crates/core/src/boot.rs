@@ -11,11 +11,14 @@ pub const WAIT_ENV: &str = "PINNED_PROOF_WAIT";
 enum Step {
     Starting,
     Running,
+    /// The hub accepted this proof boot after it was ready, so nothing restores the old bytes.
+    Proven,
     Leaving,
 }
 
 struct Boot {
     step: Mutex<Step>,
+    ready: Notify,
     refused: Notify,
 }
 
@@ -40,7 +43,7 @@ impl Proof {
 
 impl Boot {
     const fn new() -> Boot {
-        Boot { step: Mutex::new(Step::Starting), refused: Notify::const_new() }
+        Boot { step: Mutex::new(Step::Starting), ready: Notify::const_new(), refused: Notify::const_new() }
     }
 
     fn step(&self) -> MutexGuard<'_, Step> {
@@ -53,12 +56,13 @@ impl Boot {
             return false;
         }
         *step = Step::Running;
+        self.ready.notify_waiters();
         true
     }
 
-    fn leave_from(&self, from: Step, proof: &Proof) -> bool {
+    fn leave_from(&self, from: Step) -> bool {
         let mut step = self.step();
-        if *step != from || !proof.holds() {
+        if *step != from {
             return false;
         }
         *step = Step::Leaving;
@@ -66,14 +70,28 @@ impl Boot {
     }
 
     async fn commit_when_ready(&self, proof: &Proof) {
-        let step = self.step();
-        if *step == Step::Leaving || !proof.holds() {
-            return;
+        loop {
+            let ready = self.ready.notified();
+            {
+                let mut step = self.step();
+                match *step {
+                    Step::Leaving => break,
+                    Step::Proven => return,
+                    _ if !proof.holds() => return,
+                    Step::Starting => {}
+                    Step::Running => {
+                        let Some(path) = &proof.marker else { return };
+                        match std::fs::remove_file(path) {
+                            Ok(()) => *step = Step::Proven,
+                            Err(error) => eprintln!("pinned: could not remove {}, the next sign in tries again: {error}", path.display()),
+                        }
+                        return;
+                    }
+                }
+            }
+            ready.await;
         }
-        let Some(path) = &proof.marker else { return };
-        if let Err(error) = std::fs::remove_file(path) {
-            eprintln!("pinned: could not remove {}, the next sign in tries again: {error}", path.display());
-        }
+        std::future::pending::<()>().await
     }
 
     fn refuse(&self, proof: &Proof) {
@@ -110,13 +128,15 @@ pub fn ready() {
 }
 
 pub fn leave_if_starting() -> bool {
-    BOOT.leave_from(Step::Starting, &Proof::of_this_process())
+    BOOT.leave_from(Step::Starting)
 }
 
 pub fn leave_if_running() -> bool {
-    BOOT.leave_from(Step::Running, &Proof::of_this_process())
+    BOOT.leave_from(Step::Running)
 }
 
+/// The hub accepted this machine. A proof boot commits once it is ready. While it is leaving
+/// this never returns, so the link starts nothing that the exec would orphan.
 pub async fn commit_when_ready() {
     BOOT.commit_when_ready(&Proof::of_this_process()).await
 }
@@ -182,7 +202,7 @@ mod tests {
         let (boot, staged) = (Boot::new(), staged("hang-after-hello", CHECKSUM));
         let mut hello = pin!(boot.commit_when_ready(&staged.proof));
         assert_eq!(hello.as_mut().now_or_never(), None, "a hello before ready did not wait for ready");
-        assert!(boot.leave_from(Step::Starting, &staged.proof), "the deadline kept a boot that never became ready");
+        assert!(boot.leave_from(Step::Starting), "the deadline kept a boot that never became ready");
         assert!(!boot.ready(), "the main thread went on after the deadline chose to leave");
         assert_eq!(hello.as_mut().now_or_never(), None, "the link went on to serve the hub while the boot was leaving");
         assert!(marker_kept(&staged), "the marker went away before the rollback");
@@ -196,21 +216,21 @@ mod tests {
         assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(()), "a hello after ready waited");
         assert!(!marker_kept(&staged), "a hello after ready did not commit");
         assert_eq!(pin!(boot.refused.notified()).now_or_never(), Some(()), "the refusal was not queued");
-        assert!(!boot.leave_from(Step::Running, &staged.proof), "a refusal queued before the hub accepted the boot rolled it back");
+        assert!(!boot.leave_from(Step::Running), "a refusal queued before the hub accepted the boot rolled it back");
     }
 
     #[test]
     fn a_ready_boot_is_past_the_deadline() {
         let (boot, staged) = (Boot::new(), staged("ready-then-deadline", CHECKSUM));
         assert!(boot.ready());
-        assert!(!boot.leave_from(Step::Starting, &staged.proof), "the deadline rolled back a boot that was ready");
+        assert!(!boot.leave_from(Step::Starting), "the deadline rolled back a boot that was ready");
         assert!(marker_kept(&staged));
     }
 
     #[test]
     fn a_boot_the_deadline_left_neither_becomes_ready_nor_serves_the_hub() {
         let (boot, staged) = (Boot::new(), staged("deadline-then-ready", CHECKSUM));
-        assert!(boot.leave_from(Step::Starting, &staged.proof));
+        assert!(boot.leave_from(Step::Starting));
         assert!(!boot.ready(), "the main thread went on to resume sessions during a rollback");
         assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), None, "a hello during the rollback went on to serve the hub");
         assert!(marker_kept(&staged), "a hello during the rollback removed the marker");
