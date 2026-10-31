@@ -140,6 +140,12 @@ function lastSeen(unix) {
   return `seen ${new Date(unix * 1000).toLocaleDateString()}`;
 }
 
+/** A file fixed or broken by hand changes a machine's sync answer without a reconnect, so opening the page asks again. */
+function openMachinesPage() {
+  showMachinesPage();
+  for (const [id, m] of machines) if (id === LOCAL ? m.hubView : m.view.online) refreshSyncStopped(id);
+}
+
 function showMachinesPage() {
   if (!account) {
     settingsPage.innerHTML = `<h2>Machines</h2>

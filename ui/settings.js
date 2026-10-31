@@ -2169,7 +2169,7 @@ settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show:
 settingsSection({ page: "projects", label: "Projects", icon: "folder", show: () => showProjectsPage(), search: [{ title: "Projects", terms: ["history turns changed files"] }] });
 settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show: () => redraw(), search: [{ title: "Workflows", terms: ["linear label slack mention automation trigger"] }] });
 settingsSection({ page: "account", label: "Account", icon: "circle-user", show: () => showAccount(), search: [{ title: "Password", terms: ["account change sign in out email"] }] });
-settingsSection({ page: "machines", label: "Machines", icon: "server", show: () => showMachinesPage(), search: [{ title: "Machines", terms: ["pair rename remove server node computer"] }] });
+settingsSection({ page: "machines", label: "Machines", icon: "server", show: () => openMachinesPage(), search: [{ title: "Machines", terms: ["pair rename remove server node computer"] }] });
 settingsSection({ page: "archive", label: "Archive", icon: "archive", show: () => showArchive(), search: [{ title: "Archive", terms: ["archived threads unarchive delete restore"] }] });
 document.getElementById("settings-toggle").onclick = toggleSettings;
 document.getElementById("settings-back").onclick = toggleSettings;

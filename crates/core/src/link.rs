@@ -192,11 +192,11 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
     let Some(file) = machine.sync_file().map(Path::to_path_buf) else { return };
     let mut syncer = Syncer::default();
     let mut wait = SYNC_FIRST;
-    loop {
+    'run: loop {
         let until = Instant::now() + wait;
         while Instant::now() < until {
             if *stopped.borrow() {
-                return;
+                break 'run;
             }
             std::thread::sleep(Duration::from_millis(500));
         }
@@ -205,6 +205,7 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
             syncer.cycle(shared, machine, &file);
         }
     }
+    machine.hold_sync_state(false);
 }
 
 #[derive(Default)]
@@ -219,7 +220,10 @@ impl Syncer {
     fn cycle(&mut self, shared: &Shared, machine: &Machine, file: &Path) {
         if self.state.is_none() {
             match sync::State::load(file, &crate::machine::home().join(".claude")) {
-                Ok(loaded) => self.state = Some(loaded),
+                Ok(loaded) => {
+                    self.state = Some(loaded);
+                    machine.hold_sync_state(true);
+                }
                 Err(e) => {
                     if !self.reported_unreadable {
                         eprintln!("pinned: could not sync: {e}. Start sync over from Settings, Machines in the app.");
