@@ -7,7 +7,8 @@ use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::sync;
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
-use pinned_core::wire::HubCall;
+use pinned_core::sessions::Saved;
+use pinned_core::wire::{Call, HubCall};
 use pinned_server::boxes::{BoxApi, Policy};
 use serde_json::{json, Value};
 use std::net::TcpStream;
@@ -1528,5 +1529,83 @@ fn an_unknown_event_keeps_the_machine_socket_and_a_thread_reaches_only_its_watch
     assert!(other.pump());
     assert!(watcher.frames.iter().all(|frame| frame["event"]["items"][0]["text"] != "hidden"));
     assert!(other.frames.iter().all(|frame| frame["event"]["kind"] != "thread"));
+}
+
+fn assistant_line(text: &str) -> String {
+    format!(
+        "{{\"type\":\"assistant\",\"uuid\":\"{text}\",\"timestamp\":\"2020-01-01T00:00:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n"
+    )
+}
+
+fn thread_texts(client: &Client) -> Vec<String> {
+    client
+        .frames
+        .iter()
+        .filter(|frame| frame["type"] == "event" && frame["event"]["kind"] == "thread")
+        .map(|frame| frame["event"]["items"][0]["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_watched_line_is_pushed_once_and_again_after_the_machine_reconnects() {
+    let hub = TestHub::start("watch_push");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |frame| frame["type"] == "hello");
+    let dir = temp("watch-push-node");
+    let creds = pair(&url, &mut client, "watch-node", &dir);
+    let machine = creds.machine_id.clone();
+    let mut node = Node::start(&dir, creds);
+    client.wait_machines(&[("watch-node", true)]);
+
+    node.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+    let app = dir.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    let projects = dir.join("accounts/work/projects/demo");
+    std::fs::create_dir_all(&projects).unwrap();
+    let file = projects.join("s1.jsonl");
+    std::fs::write(&file, assistant_line("ready")).unwrap();
+    pinned_core::sessions::save(
+        &dir.join("sessions.json"),
+        &[Saved {
+            cwd: app,
+            session: "s1".into(),
+            env: vec![],
+            bypass: false,
+            interrupted: false,
+            resume_at: None,
+            held: false,
+            account: "work".into(),
+            model: None,
+            permission_mode: None,
+        }],
+    );
+    assert_eq!(node.machine.restore_tabs(), vec!["tab-1".to_string()]);
+    assert_eq!(client.call(&machine, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] })), Ok(Value::Null));
+    std::thread::sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
+    client.wait("the pushed line", |frame| frame["event"]["kind"] == "thread" && frame["event"]["items"][0]["text"] == "visible");
+    assert!(started.elapsed() < Duration::from_millis(800), "the line took {:?}, the poll is 1200 ms", started.elapsed());
+    std::thread::sleep(Duration::from_millis(200));
+    client.pump();
+    assert_eq!(thread_texts(&client), vec!["visible".to_string()]);
+
+    node.kill();
+    client.wait_machines(&[("watch-node", false)]);
+    let creds = Credentials::load(&dir).unwrap();
+    let mut node = Node::start(&dir, creds);
+    client.wait_machines(&[("watch-node", true)]);
+    assert_eq!(node.machine.restore_tabs(), vec!["tab-1".to_string()]);
+    std::thread::sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    std::fs::write(&file, format!("{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("again"))).unwrap();
+    client.wait("the line after the machine reconnects", |frame| frame["event"]["items"][0]["text"] == "again");
+    assert!(started.elapsed() < Duration::from_millis(800), "after reconnect the line took {:?}, the poll is 1200 ms", started.elapsed());
+    std::thread::sleep(Duration::from_millis(200));
+    client.pump();
+    assert_eq!(thread_texts(&client).iter().filter(|text| text.as_str() == "again").count(), 1);
+    node.kill();
 }
 

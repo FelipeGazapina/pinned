@@ -42,3 +42,29 @@ test("a background tab is not watched, and a hidden page watches nothing", () =>
   sandbox.publishThreadWatch();
   assert.equal(calls.length, 2);
 });
+
+test("a hub hello sends the current watch again", () => {
+  const { sandbox, state, calls } = publishThreadWatch();
+  const active = { machine: "m", view: { id: "tab-1", program: "agent" }, phase: "idle" };
+  state.tabs.push(active);
+  state.active = active;
+  sandbox.account = { email: "" };
+  sandbox.showMachines = () => sandbox.publishThreadWatch();
+  sandbox.hub = { hub: () => Promise.resolve() };
+  sandbox.onHubSettings = () => {};
+  const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");
+  const start = main.indexOf("    hello(frame) {");
+  const end = main.indexOf("    machines:", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  vm.runInContext(`function connectHello(){ return {\n${main.slice(start, end)}\n}; }`, sandbox);
+  const hello = sandbox.connectHello().hello;
+  const frame = { account: { email: "a@b.c" }, machines: [], tabs: {} };
+  hello(frame);
+  assert.deepEqual(calls, [{ machine: "m", tabs: ["tab-1"] }]);
+  hello(frame);
+  assert.deepEqual(calls, [
+    { machine: "m", tabs: ["tab-1"] },
+    { machine: "m", tabs: ["tab-1"] },
+  ]);
+});

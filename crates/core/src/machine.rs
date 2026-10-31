@@ -3238,6 +3238,143 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    fn assistant_line(text: &str) -> String {
+        format!(
+            "{{\"type\":\"assistant\",\"uuid\":\"{text}\",\"timestamp\":\"2020-01-01T00:00:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n"
+        )
+    }
+
+    fn thread_events(heard: &Mutex<Vec<Value>>) -> Vec<Value> {
+        heard.lock().unwrap().iter().filter(|event| event["kind"] == "thread").cloned().collect()
+    }
+
+    #[test]
+    fn the_watcher_pushes_a_new_line_once() {
+        let root = temp("thread-loop");
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        let m = Machine::new(launch(), Some(root.join("config")), None, move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap()));
+        m.watch_threads();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
+        let dir = root.join("config/accounts/work/projects/demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s1.jsonl");
+        std::fs::write(&file, assistant_line("ready")).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(thread_events(&heard).is_empty(), "the first look must not resend the history");
+        let started = Instant::now();
+        std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
+        wait_for("the pushed line", || thread_events(&heard).iter().any(|event| event["items"][0]["text"] == "visible"));
+        assert!(started.elapsed() < Duration::from_millis(500), "the line took {:?}, the poll is 1200 ms", started.elapsed());
+        std::thread::sleep(Duration::from_millis(150));
+        let pushed = thread_events(&heard);
+        assert_eq!(pushed.len(), 1, "one appended line, one event");
+        assert_eq!(pushed[0]["tab"], json!(tab));
+        assert_eq!(pushed[0]["items"][0]["text"], "visible");
+        m.quit();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_shorter_transcript_pushes_a_reset() {
+        let root = temp("thread-shrink");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
+        let dir = root.join("config/accounts/work/projects/demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s1.jsonl");
+        std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("gone"))).unwrap();
+        let mut cursors = HashMap::new();
+        m.push_transcript_lines(&mut cursors);
+        assert!(thread_events(&heard).is_empty(), "the first look must not resend the history");
+        std::fs::write(&file, assistant_line("ready")).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        let pushed = thread_events(&heard);
+        assert_eq!(pushed.len(), 1, "a shorter file is a new transcript");
+        assert_eq!(pushed[0]["tab"], json!(tab));
+        assert_eq!(pushed[0]["reset"], true);
+        assert_eq!(pushed[0]["items"][0]["text"], "ready");
+        assert!(pushed[0]["items"].as_array().unwrap().iter().all(|item| item["text"] != "gone"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_cached_transcript_is_not_scanned_again() {
+        let root = temp("thread-cache");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
+        let projects = root.join("config/accounts/work/projects");
+        for i in 0..300 {
+            std::fs::create_dir_all(projects.join(format!("p{i:03}"))).unwrap();
+        }
+        let file = projects.join("p001/s1.jsonl");
+        std::fs::write(&file, assistant_line("ready")).unwrap();
+        let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
+        let before = scans();
+        let mut cursors = HashMap::new();
+        m.push_transcript_lines(&mut cursors);
+        assert_eq!(scans(), before + 1, "the first look searches the project directories");
+        assert!(thread_events(&heard).is_empty(), "the first look must not resend the history");
+        std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        assert_eq!(scans(), before + 1, "a file that is still there is not searched again");
+        let pushed = thread_events(&heard);
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(pushed[0]["items"][0]["text"], "visible");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_switched_account_is_read_from_its_new_home() {
+        let root = temp("thread-switch");
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        let m = Machine::new(
+            Launch { bins: fake_bins(&root.join("bin")), ..launch() },
+            Some(root.join("config")),
+            None,
+            move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap()),
+        );
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Personal".into() }).unwrap();
+        std::fs::write(root.join("config/accounts/personal/signed-in"), "").unwrap();
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
+        let from = root.join("config/accounts/work/projects/demo");
+        std::fs::create_dir_all(&from).unwrap();
+        let original = from.join("s1.jsonl");
+        std::fs::write(&original, assistant_line("ready")).unwrap();
+        let mut cursors = HashMap::new();
+        m.push_transcript_lines(&mut cursors);
+        assert!(thread_events(&heard).is_empty(), "the first look must not resend the history");
+        m.switch_account(&tab, "personal", 80, 24).unwrap();
+        let copied = root.join("config/accounts/personal/projects/demo/s1.jsonl");
+        assert!(original.is_file(), "the switch leaves the old transcript");
+        assert!(copied.is_file(), "the switch copies the transcript");
+        std::fs::write(&copied, format!("{}{}", assistant_line("ready"), assistant_line("moved"))).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        let pushed = thread_events(&heard);
+        assert_eq!(pushed.len(), 1, "a line written in the new home is pushed");
+        assert_eq!(pushed[0]["tab"], json!(tab));
+        assert_eq!(pushed[0]["items"][0]["text"], "moved");
+        m.close_tab(&tab);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn open_tab_rejects_a_path_that_is_not_a_folder() {
         let m = machine();

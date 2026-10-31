@@ -100,10 +100,17 @@ pub struct Context {
     pub at: String,
 }
 
+/// Project directories `find` has listed. Tests count scans of one home so a cache hit is visible
+/// while other tests run beside it.
+#[cfg(test)]
+pub static PROJECT_SCANS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 pub fn find(projects: &Path, session: &str) -> Option<PathBuf> {
     if session.is_empty() || !session.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
         return None;
     }
+    #[cfg(test)]
+    PROJECT_SCANS.lock().unwrap().push(projects.to_path_buf());
     let name = format!("{session}.jsonl");
     std::fs::read_dir(projects).ok()?.flatten().map(|dir| dir.path().join(&name)).find(|path| path.is_file())
 }
