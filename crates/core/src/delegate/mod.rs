@@ -20,6 +20,8 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 pub const DEFAULT_BUDGET_MS: u64 = 2 * 60 * 60 * 1000;
 pub const DEFAULT_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
 const QUIET_AFTER_REPLY_MS: u64 = 30 * 60 * 1000;
+#[cfg(unix)]
+const EXIT_GRACE: Duration = Duration::from_secs(5);
 const MODEL_CACHE: Duration = Duration::from_secs(10 * 60);
 const MODEL_MISS: Duration = Duration::from_secs(15);
 const CATALOG_WAIT: Duration = Duration::from_secs(2);
@@ -302,6 +304,7 @@ pub struct Run {
     pub told_late: bool,
     pub told_pending: bool,
     pub open_turns: u32,
+    pub last_error: Option<String>,
     pub background: Vec<Background>,
 }
 
@@ -315,6 +318,7 @@ impl Default for Run {
             told_late: false,
             told_pending: false,
             open_turns: 0,
+            last_error: None,
             background: vec![],
         }
     }
@@ -1138,7 +1142,8 @@ grok-4.7-high - Grok 4.7  High
 
     #[test]
     fn a_cancelled_task_keeps_the_reply_so_far() {
-        let file = scratch("cancel-keeps").join("delegates.json");
+        let dir = scratch("cancel-keeps");
+        let file = dir.join("delegates.json");
         let mut seen = vec![];
         for how in ["task_cancel", "limit", "quit", "crash"] {
             let delegates = Delegates::load(Some(file.clone()));
@@ -1176,6 +1181,7 @@ grok-4.7-high - Grok 4.7  High
                 json!(["crash", "cancelled", "PR opened", "stopped by restart"]),
             ]
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1194,7 +1200,8 @@ grok-4.7-high - Grok 4.7  High
 
     #[test]
     fn a_reload_keeps_how_a_task_ended_and_its_limits() {
-        let file = scratch("reload-ended").join("delegates.json");
+        let dir = scratch("reload-ended");
+        let file = dir.join("delegates.json");
         let delegates = Delegates::load(Some(file.clone()));
         let task = new_on(&delegates, Provider::Claude);
         delegates.set_limits(&task.id, 3_000_000, 3_600_000);
@@ -1209,11 +1216,13 @@ grok-4.7-high - Grok 4.7  High
             json!(["result_available", "pinned ended it after 30 min with no activity and stopped the 1 shell it left running", 3000, 3600]),
             "{status}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_saved_file_from_before_the_limits_loads_with_the_defaults() {
-        let file = scratch("old-file").join("delegates.json");
+        let dir = scratch("old-file");
+        let file = dir.join("delegates.json");
         let old = r#"{"tasks":[{"id":"task-0ld0","parent_kind":"tab","parent_id":"tab-1","title":"Old","account":"claude","provider":"claude","cwd":"/tmp","access":"auto","started":1000,"ended":2000,"state":"result_available","summary":"done","mode":"async","caller_key":"tab:tab-1"}]}"#;
         std::fs::write(&file, old).unwrap();
         let status = Delegates::load(Some(file)).status(&parent(), "task-0ld0").unwrap();
@@ -1222,6 +1231,7 @@ grok-4.7-high - Grok 4.7  High
             json!(["result_available", "done", null, 7200, 28800]),
             "{status}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

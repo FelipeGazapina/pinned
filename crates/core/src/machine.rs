@@ -366,7 +366,7 @@ pub struct Machine {
     pr_watches: crate::prwatch::Watches,
     clones: PathBuf,
     quitting: AtomicBool,
-    /// Wakes parents whose pty has gone quiet, once, for the life of the machine.
+    /// Set once the thread that enforces task limits and wakes quiet parents runs, for the life of the machine.
     delegate_pass: AtomicBool,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     agents: Mutex<subagents::Cache>,
@@ -2226,11 +2226,13 @@ impl Machine {
             if machine.quitting.load(Ordering::Relaxed) {
                 return;
             }
-            machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
-            let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
-            for tab in tabs {
-                machine.maybe_deliver(&tab);
-            }
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
+                for tab in tabs {
+                    machine.maybe_deliver(&tab);
+                }
+            }));
         });
     }
 

@@ -65,7 +65,7 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
     let budget_ms = match millis("budgetMs")? {
         Some(ms) if ms >= limit_ms => return Err(format!("budgetMs must be below limitMs, which is {limit_ms} ms; pass a larger limitMs")),
         Some(ms) => ms,
-        None => DEFAULT_BUDGET_MS.min(limit_ms),
+        None => DEFAULT_BUDGET_MS.min(limit_ms / 2),
     };
     let interaction = match args["interactionMode"].as_str() {
         None | Some("inherit") => Interaction::Inherit,

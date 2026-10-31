@@ -741,7 +741,58 @@ pub fn kill_tree(pid: u32) {
     let targets = signal_targets_under(pid);
     kill(pid);
     #[cfg(unix)]
-    for target in targets {
+    signal(&targets);
+}
+
+/// Stops every process under the live agent `pid`, and leaves the agent itself running.
+#[cfg(unix)]
+pub fn kill_descendants(pid: u32) {
+    signal(&signal_targets_under(pid));
+}
+
+/// A process seen under a live agent. The start time tells it apart from a later process given the same pid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Seen {
+    pid: i32,
+    start: String,
+}
+
+/// What ran under the live agent `pid` now, plus what in `before` still runs. A shell the agent
+/// started in a session of its own is reparented when the agent exits, and only this list still names it.
+pub fn seen_under(pid: u32, before: &[Seen]) -> Vec<Seen> {
+    #[cfg(unix)]
+    {
+        let under: Vec<i32> = signal_targets_under(pid).into_iter().filter(|target| *target > 0).collect();
+        let mut ask: Vec<i32> = under.iter().copied().chain(before.iter().map(|seen| seen.pid)).collect();
+        ask.sort_unstable();
+        ask.dedup();
+        running(&ask).into_iter().map(|(seen, _)| seen).filter(|seen| under.contains(&seen.pid) || before.contains(seen)).collect()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        before.to_vec()
+    }
+}
+
+/// Stops each process in `seen` that still runs, and the group it leads.
+pub fn kill_seen(seen: &[Seen]) {
+    #[cfg(unix)]
+    {
+        let pids: Vec<i32> = seen.iter().map(|seen| seen.pid).collect();
+        for (now, pgid) in running(&pids) {
+            if seen.contains(&now) {
+                signal(&if pgid == now.pid { vec![-now.pid, now.pid] } else { vec![now.pid] });
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = seen;
+}
+
+#[cfg(unix)]
+fn signal(targets: &[i32]) {
+    for &target in targets {
         unsafe {
             libc::kill(target, libc::SIGKILL);
         }
@@ -753,22 +804,43 @@ fn signal_targets_under(root: u32) -> Vec<i32> {
     targets_under(&process_table(), root)
 }
 
-/// `[pid, ppid, pgid]` for every process.
 #[cfg(unix)]
-fn process_table() -> Vec<[u32; 3]> {
-    let Ok(output) = crate::process::command("ps")
-        .args(["-A", "-o", "pid=,ppid=,pgid="])
+fn ps(args: &[&str]) -> String {
+    crate::process::command("/bin/ps")
+        .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
-    else {
-        return vec![];
-    };
-    String::from_utf8_lossy(&output.stdout)
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// `[pid, ppid, pgid]` for every process.
+#[cfg(unix)]
+fn process_table() -> Vec<[u32; 3]> {
+    ps(&["-A", "-o", "pid=,ppid=,pgid="])
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace().map(|field| field.parse().ok());
             Some([fields.next()??, fields.next()??, fields.next()??])
+        })
+        .collect()
+}
+
+/// Each of `pids` that still runs, with its process group.
+#[cfg(unix)]
+fn running(pids: &[i32]) -> Vec<(Seen, i32)> {
+    if pids.is_empty() {
+        return vec![];
+    }
+    let list = pids.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+    ps(&["-o", "pid=,pgid=,lstart=", "-p", &list])
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let pgid = fields.next()?.parse().ok()?;
+            Some((Seen { pid, start: fields.collect::<Vec<_>>().join(" ") }, pgid))
         })
         .collect()
 }
@@ -780,7 +852,7 @@ fn targets_under(rows: &[[u32; 3]], root: u32) -> Vec<i32> {
     let mut targets = vec![];
     while let Some(parent) = parents.pop() {
         for &[pid, ppid, pgid] in rows {
-            if ppid == parent && pid != root && !below.contains(&pid) {
+            if pid > 1 && ppid == parent && pid != root && !below.contains(&pid) {
                 below.push(pid);
                 parents.push(pid);
                 if pid == pgid {
