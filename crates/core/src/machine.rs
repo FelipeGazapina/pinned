@@ -346,7 +346,6 @@ pub struct Machine {
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
     sync_file: Option<PathBuf>,
-    /// The id of the current `SyncHold`, or 0 when no sync loop holds its state.
     sync_state_holder: AtomicU64,
     next_sync_hold: AtomicU64,
     projects: Mutex<Vec<projects::Project>>,
@@ -428,7 +427,8 @@ impl Drop for Busy<'_> {
     }
 }
 
-/// Each hold replaces the last, so a sync loop that outlives `Link::stop` cannot release the next loop's hold.
+const NO_SYNC_HOLD: u64 = 0;
+
 pub(crate) struct SyncHold<'a> {
     machine: &'a Machine,
     id: u64,
@@ -436,7 +436,7 @@ pub(crate) struct SyncHold<'a> {
 
 impl Drop for SyncHold<'_> {
     fn drop(&mut self) {
-        let _ = self.machine.sync_state_holder.compare_exchange(self.id, 0, Ordering::SeqCst, Ordering::SeqCst);
+        let _ = self.machine.sync_state_holder.compare_exchange(self.id, NO_SYNC_HOLD, Ordering::SeqCst, Ordering::SeqCst);
     }
 }
 
@@ -477,8 +477,8 @@ impl Machine {
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
-            sync_state_holder: AtomicU64::new(0),
-            next_sync_hold: AtomicU64::new(1),
+            sync_state_holder: AtomicU64::new(NO_SYNC_HOLD),
+            next_sync_hold: AtomicU64::new(NO_SYNC_HOLD + 1),
             projects: Mutex::new(projects),
             projects_file,
             accounts: Accounts::load(dir.as_deref(), home.clone()),
@@ -1750,7 +1750,7 @@ impl Machine {
     }
 
     fn sync_stopped(&self) -> Option<String> {
-        if self.sync_state_holder.load(Ordering::SeqCst) != 0 {
+        if self.sync_state_holder.load(Ordering::SeqCst) != NO_SYNC_HOLD {
             return None;
         }
         self.sync_file.as_deref().and_then(sync::unreadable)
