@@ -359,6 +359,60 @@ mod tests {
         assert_eq!(verify(&pubkey, &wrong, &signature, name, bytes), Err("the release checksum does not match".into()));
     }
 
+    struct Clean(PathBuf);
+
+    impl Drop for Clean {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn checked(cmd: &mut Command) {
+        let output = cmd.stdin(std::process::Stdio::null()).output().unwrap_or_else(|error| panic!("could not run {cmd:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "command failed: {cmd:?}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn a_signature_from_the_release_signer_verifies_and_its_base64_wrapper_does_not() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dir = std::env::temp_dir().join(format!("pinned-tauri-sign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _clean = Clean(dir.clone());
+        let key = dir.join("release.key");
+        checked(Command::new("npx").args(["tauri", "signer", "generate", "--ci", "--force", "-w"]).arg(&key).current_dir(&repo));
+
+        let name = "pinned-server-x86_64-unknown-linux-musl";
+        let bytes = b"new-binary";
+        let sums = sums_for(name, bytes);
+        std::fs::write(dir.join("SHA256SUMS"), &sums).unwrap();
+        let private_key = std::fs::read_to_string(&key).unwrap();
+        let _ = std::fs::remove_file(&key);
+        let pubkey = std::fs::read_to_string(dir.join("release.key.pub")).unwrap();
+        checked(
+            Command::new(repo.join("scripts/sign-node-sums.sh"))
+                .arg(&dir)
+                .env("TAURI_SIGNING_PRIVATE_KEY", private_key.trim())
+                .env("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "")
+                .current_dir(&repo),
+        );
+
+        let signature = std::fs::read_to_string(dir.join("SHA256SUMS.minisig")).unwrap();
+        let wrapped = std::fs::read_to_string(dir.join("SHA256SUMS.sig")).unwrap();
+        assert!(signature.starts_with("untrusted comment:"));
+        assert_eq!(verify(pubkey.trim(), &sums, &signature, name, bytes), Ok(()));
+        assert_eq!(verify(pubkey.trim(), "unrelated\n", &signature, name, bytes), Err("the release signature does not match".into()));
+        assert_eq!(
+            verify(pubkey.trim(), &sums, &wrapped, name, bytes).unwrap_err(),
+            "could not read the release signature: Invalid encoding in minisign data"
+        );
+    }
+
     #[test]
     fn a_bad_checksum_leaves_the_binary_and_a_good_one_keeps_the_old_bytes_beside_it() {
         let dir = std::env::temp_dir().join(format!("pinned-stage-{}", std::process::id()));
