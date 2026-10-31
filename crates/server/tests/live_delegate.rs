@@ -50,7 +50,7 @@ fn live_claude_task_waits_for_its_background_shell_then_ends_on_its_last_reply()
     machine.listen(|_| Err("not a connector callback".into())).unwrap();
     let sock = machine.launch().sock.clone();
     let tab = machine.open_tab(Some(dir.display().to_string()), false).unwrap();
-    let marker = format!("pinned_live_tick_{}", std::process::id());
+    let pidfile = dir.join("loop.pid");
 
     let finite = start(&exe, &sock, &tab, "Use the Bash tool with run_in_background set to true to run exactly: sleep 20 && echo bgdone. Do not wait for it. Reply right away with exactly the word WAITING. Later, when you are notified that the background command finished, reply with FINAL-REPORT followed by its output.");
     let first = wait_until(&exe, &sock, &tab, &finite, |status| status["summary"].is_string());
@@ -62,17 +62,19 @@ fn live_claude_task_waits_for_its_background_shell_then_ends_on_its_last_reply()
     assert_eq!(last["workState"], "result_available", "{last}");
     assert!(last["summary"].as_str().unwrap_or("").contains("FINAL-REPORT") && last["summary"].as_str().unwrap_or("").contains("bgdone"), "{last}");
 
-    let server = start(&exe, &sock, &tab, &format!("Use the Bash tool with run_in_background set to true to run exactly: sh -c 'while true; do echo {marker}; sleep 2; done'. Do not wait for it, do not stop it, and do not read its output. Then reply with exactly the word SERVER-UP."));
+    let server = start(&exe, &sock, &tab, &format!("Use the Bash tool with run_in_background set to true to run exactly: sh -c 'echo $$ > {}; while true; do sleep 2; done'. Do not wait for it, do not stop it, and do not read its output. Then reply with exactly the word SERVER-UP.", pidfile.display()));
     wait_until(&exe, &sock, &tab, &server, |status| status["summary"].is_string());
     std::thread::sleep(Duration::from_secs(3));
     let up = mcp(&exe, &sock, &tab, json!({ "name": "task_status", "arguments": { "taskId": server } }));
     eprintln!("LIVE server reply: {up}");
     assert_eq!(up["workState"], "working", "{up}");
-    assert!(!pgrep(&marker).is_empty(), "pinned stopped the pending shell");
+    let shell: i32 = std::fs::read_to_string(&pidfile).unwrap_or_default().trim().parse().unwrap_or_else(|_| panic!("the shell never wrote {}", pidfile.display()));
+    eprintln!("LIVE shell pid {shell}");
+    assert!(alive(shell), "pinned stopped the pending shell {shell}");
     let cancelled = mcp(&exe, &sock, &tab, json!({ "name": "task_cancel", "arguments": { "taskId": server } }));
     assert_eq!(cancelled["workState"], "cancelled", "{cancelled}");
     std::thread::sleep(Duration::from_secs(1));
-    assert_eq!(pgrep(&marker), "", "the shell outlived task_cancel");
+    assert!(!alive(shell), "the shell {shell} outlived task_cancel");
     machine.quit();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -104,9 +106,10 @@ fn wait_until(exe: &Path, sock: &Path, tab: &str, id: &str, done: impl Fn(&Value
     }
 }
 
-fn pgrep(marker: &str) -> String {
-    let found = pinned_core::process::command("pgrep").args(["-fl", marker]).output().unwrap();
-    String::from_utf8_lossy(&found.stdout).trim().to_owned()
+fn alive(pid: i32) -> bool {
+    let out = pinned_core::process::command("/bin/ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    !stat.is_empty() && !stat.starts_with('Z')
 }
 
 fn server_bin() -> std::path::PathBuf {
