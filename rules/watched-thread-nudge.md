@@ -13,3 +13,7 @@ A read repaints when `drawnOf` changes. It holds every thread field the screen d
 ## Tab list wait
 
 `whenListed` in `ui/main.js` waits up to 2 seconds for the tab list after `open_tab`. Every release since v0.8.2 emits that list inside `open_tab` before it answers, so the timer runs only when the event is lost. Asking at once would fetch a list the push already covered, which `ui/reveal-tab.test.js` forbids.
+
+## Evidence
+
+Three alternating runs per side of `ITERATIONS=40 RTT_MS=150 scripts/latency-bench/run.sh`, errors 0. `thread_message` p50 476 ms (475 to 483) on the nudge against 883 ms (882 to 884) on `origin/main` at `85ef28b`, 1.86x. p95 507 ms against 1288 ms. The nudge costs one more round trip than the earlier page push, which measured 171 to 179 ms. `wire-contract check --base origin/main` reported no new breaks.
