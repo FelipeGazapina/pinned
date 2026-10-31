@@ -510,8 +510,26 @@ async function pickLocalFolder() {
   if (path) pickFolder(path);
 }
 
+const releaseNumber = (version) => {
+  const [, major, minor, patch] = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version ?? "") ?? [, 0, 0, 0];
+  return Number(major) * 1e6 + Number(minor) * 1e3 + Number(patch);
+};
+/** The newest release whose open_tab takes any path. A node that names no version counts as one of these. */
+const OPENS_ANY_PATH_THROUGH = releaseNumber("0.16.0");
+
 async function openRemote(machine, path, bypass) {
-  const id = await callOn(machine, { cmd: "open_tab", path, bypass });
+  let id;
+  if (releaseNumber(machines.get(machine)?.view.version) > OPENS_ANY_PATH_THROUGH) {
+    id = await callOn(machine, { cmd: "open_tab", path, bypass });
+  } else {
+    id = await callOn(machine, { cmd: "open_tab", path: null, bypass });
+    try {
+      await callOn(machine, { cmd: "set_folder", tab: id, path });
+    } catch (e) {
+      callOn(machine, { cmd: "close_tab", tab: id });
+      throw e;
+    }
+  }
   const tab = await revealTab(machine, id);
   await startTab(tab);
   return tab;
