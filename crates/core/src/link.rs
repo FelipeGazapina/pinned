@@ -505,6 +505,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    type Fixture = (std::path::PathBuf, std::path::PathBuf, Arc<Machine>, Shared, channel::UnboundedReceiver<Outgoing>);
+
+    fn stopped_sync_fixture(name: &str) -> Fixture {
+        let dir = std::env::temp_dir().join(format!("pinned-link-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sync.json");
+        let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
+        let shared = Shared::default();
+        let (out, frames) = channel::unbounded_channel();
+        *shared.out.lock().unwrap() = Some(out);
+        (dir, file, machine, shared, frames)
+    }
+
+    #[test]
+    fn a_state_file_that_breaks_while_the_loop_holds_its_state_still_reads_as_syncing() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("held");
+        let mut syncer = Syncer::default();
+        syncer.cycle(&shared, &machine, &file);
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
+        syncer.cycle(&shared, &machine, &file);
+        let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(saved, serde_json::json!({ "hashes": {}, "agreed": {}, "claude_homes": {} }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn once_the_sync_loop_ends_the_state_file_decides_again() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("ended");
+        Syncer::default().cycle(&shared, &machine, &file);
+        std::fs::write(&file, b"").unwrap();
+        let (_stop, stopped) = watch::channel(true);
+        sync_projects(&shared, &machine, &stopped);
+        let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_state_file_restored_by_hand_reads_as_syncing_before_the_next_cycle() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("restored");
+        std::fs::write(&file, b"").unwrap();
+        Syncer::default().cycle(&shared, &machine, &file);
+        assert!(matches!(machine.call(Call::SyncStopped), Ok(Value::String(_))));
+        std::fs::write(&file, br#"{"hashes":{},"agreed":{},"claude_homes":{}}"#).unwrap();
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_reset_leaves_a_readable_state_file_alone() {
         let dir = std::env::temp_dir().join(format!("pinned-link-{}-keep", std::process::id()));
