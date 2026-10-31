@@ -109,11 +109,28 @@ def main():
     state = load()
     state.setdefault("calls", []).append(sys.argv[1:])
     save(state)
-    if tag != os.environ.get("GITHUB_REF_NAME"):
+    if tag is None:
+        if sub != "view":
+            sys.stderr.write("fake gh: missing tag\n")
+            return 2
+    elif tag != os.environ.get("GITHUB_REF_NAME"):
         sys.stderr.write(f"fake gh: unexpected tag {tag}\n")
         return 2
 
     if sub == "view":
+        if tag is None:
+            name = state.get("remote_latest") or None
+            if not name and state["exists"] and state["latest"] and not state["draft"]:
+                name = os.environ.get("GITHUB_REF_NAME")
+            if not name:
+                sys.stderr.write("release not found\n")
+                return 1
+            jq = (flags.get("--jq") or [None])[0]
+            if jq == ".tagName":
+                print(name)
+                return 0
+            print(json.dumps({"tagName": name}))
+            return 0
         if not state["exists"]:
             sys.stderr.write("release not found\n")
             return 1
@@ -148,6 +165,7 @@ def main():
             state["draft"] = draft
         if flag_bool(flags, "--latest") is True:
             state["latest"] = True
+            state["remote_latest"] = os.environ.get("GITHUB_REF_NAME")
         gap = public_mismatch(state)
         if gap:
             state["violations"].append(gap)
@@ -417,6 +435,7 @@ def empty_state():
         "violations": [],
         "uploads": [],
         "calls": [],
+        "remote_latest": None,
     }
 
 
@@ -766,6 +785,36 @@ def main():
             "consistent": False,
         },
     )
+    older_latest = matching_public()
+    older_latest["remote_latest"] = "v0.18.0"
+    add(
+        "publish an older tag does not take latest",
+        ["publish"],
+        older_latest,
+        False,
+        {
+            "code": 0,
+            "draft": False,
+            "latest_flag": False,
+            "consistent": True,
+            "unchanged_from": matching_public(),
+        },
+    )
+    newer_latest = matching_public()
+    newer_latest["remote_latest"] = "v0.16.0"
+    add(
+        "publish a newer tag takes latest",
+        ["publish"],
+        newer_latest,
+        False,
+        {
+            "code": 0,
+            "draft": False,
+            "latest_flag": True,
+            "consistent": True,
+            "unchanged_from": matching_public(),
+        },
+    )
     add(
         "linux-node re-run",
         ["linux-node"],
@@ -793,6 +842,7 @@ def main():
                     "violations": [],
                     "uploads": [],
                     "calls": [],
+                    "remote_latest": after.get("remote_latest"),
                 }
                 code, stderr, after = replay.run(job_names, carried, sign_fail)
                 if after["violations"]:

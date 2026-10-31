@@ -27,6 +27,43 @@ hash_line() {
   printf '%s  %s\n' "$digest" "$(basename "$file")"
 }
 
+version_is_newer() {
+  local left="${1#v}"
+  local right="${2#v}"
+  local IFS=.
+  local -a left_parts right_parts
+  local i left_n right_n
+  read -r -a left_parts <<< "$left"
+  read -r -a right_parts <<< "$right"
+  for i in 0 1 2; do
+    left_n="${left_parts[$i]:-0}"
+    right_n="${right_parts[$i]:-0}"
+    left_n="${left_n%%[^0-9]*}"
+    right_n="${right_n%%[^0-9]*}"
+    left_n="${left_n:-0}"
+    right_n="${right_n:-0}"
+    if ((10#$left_n > 10#$right_n)); then
+      return 0
+    fi
+    if ((10#$left_n < 10#$right_n)); then
+      return 1
+    fi
+  done
+  return 1
+}
+
+tag_is_latest() {
+  local tag="$1"
+  local current
+  if ! current=$(gh release view --json tagName --jq .tagName 2>/dev/null); then
+    return 0
+  fi
+  if [[ -z "$current" || "$current" == "$tag" ]]; then
+    return 0
+  fi
+  version_is_newer "$tag" "$current"
+}
+
 case "$cmd" in
   draft)
     [[ "$#" -eq 0 ]] || usage
@@ -82,7 +119,11 @@ case "$cmd" in
       echo "the release checksum does not match" >&2
       exit 1
     }
-    gh release edit "$tag" --draft=false --latest
+    edit_args=(--draft=false)
+    if tag_is_latest "$tag"; then
+      edit_args+=(--latest)
+    fi
+    gh release edit "$tag" "${edit_args[@]}"
     ;;
   *)
     usage
