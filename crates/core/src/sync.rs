@@ -864,7 +864,7 @@ fn heal_owner_execute(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let Some(mode) = std::fs::symlink_metadata(path).ok().filter(|meta| meta.is_file()).map(|meta| meta.permissions().mode()) else { return Ok(()) };
+        let Some(mode) = std::fs::metadata(path).ok().map(|meta| meta.permissions().mode()) else { return Ok(()) };
         if mode & 0o111 != 0 && mode & 0o100 == 0 {
             set_owner_execute(path)?;
         }
