@@ -371,6 +371,17 @@ impl Hub {
                 }
                 return json(self.db.sync_push(account.id, &project, kept).await?);
             }
+            HubCall::SyncMarkExecutable { project, repairs } => {
+                if project != sync::PLUGINS_KEY {
+                    return Err("only a plugin file carries an executable bit".into());
+                }
+                for repair in &repairs {
+                    if !sync::accepts(&project, &repair.path) {
+                        return Err(format!("{} is not a file a project shares", repair.path));
+                    }
+                }
+                return json(self.db.sync_mark_executable(account.id, &project, &repairs).await?);
+            }
             HubCall::SyncPull { project, paths } => {
                 let files = self.db.sync_pull(account.id, &project, &paths).await?;
                 let files: Vec<sync::File> = files

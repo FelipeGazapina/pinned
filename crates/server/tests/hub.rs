@@ -559,6 +559,9 @@ impl sync::Hub for Through<'_> {
     fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
         Ok(serde_json::from_value(self.0.call_hub(HubCall::SyncPull { project: project.into(), paths })?).unwrap())
     }
+    fn mark_executable(&self, project: &str, repairs: Vec<sync::ModeRepair>) -> Result<(), String> {
+        self.0.call_hub(HubCall::SyncMarkExecutable { project: project.into(), repairs }).map(drop)
+    }
 }
 
 #[test]

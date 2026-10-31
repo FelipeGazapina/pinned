@@ -54,6 +54,14 @@ pub struct File {
     pub data: Option<String>,
 }
 
+/// Sets the executable bit on a file the hub already stores, without sending bytes.
+/// The hub applies it only while that file's sha is still `sha`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct ModeRepair {
+    pub path: String,
+    pub sha: String,
+}
+
 /// A project of the account, offered on machines that don't have it yet.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Project {
@@ -133,6 +141,7 @@ pub trait Hub {
     fn list(&self, project: &str) -> Result<Vec<Entry>, String>;
     fn push(&self, project: &str, files: Vec<File>) -> Result<(), String>;
     fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<File>, String>;
+    fn mark_executable(&self, project: &str, repairs: Vec<ModeRepair>) -> Result<(), String>;
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -185,6 +194,8 @@ fn exchange(
     // neither fetched nor taken for deleted.
     let paths: BTreeSet<String> = local.keys().chain(remote.keys()).chain(agreed.keys()).filter(|p| resolve(p).is_some()).cloned().collect();
     let (mut push, mut pull, mut merge) = (vec![], vec![], vec![]);
+    #[cfg(unix)]
+    let mut repairs: Vec<ModeRepair> = Vec::new();
     for path in &paths {
         let mine = local.get(path).map(|(sha, _)| sha.clone());
         let theirs = remote.get(path).map(|e| e.sha.clone()).filter(|sha| !sha.is_empty());
@@ -192,13 +203,19 @@ fn exchange(
         if mine == theirs {
             match mine {
                 Some(sha) => {
-                    agreed.insert(path.clone(), sha);
+                    agreed.insert(path.clone(), sha.clone());
+                    #[cfg(not(unix))]
+                    drop(sha);
                     #[cfg(unix)]
                     if key == PLUGINS_KEY {
                         if let Some(fix) = unix_mode_fix(path, &remote, resolve) {
                             match fix {
-                                ModeFix::Push => push.push(path.clone()),
-                                ModeFix::Pull => pull.push(path.clone()),
+                                ModeFix::Mark => repairs.push(ModeRepair { path: path.clone(), sha }),
+                                ModeFix::Chmod => {
+                                    if let Some(target) = resolve(path) {
+                                        set_owner_execute(&target)?;
+                                    }
+                                }
                             }
                         }
                     }
@@ -221,6 +238,11 @@ fn exchange(
         } else {
             pull.push(path.clone());
         }
+    }
+    #[cfg(unix)]
+    if !repairs.is_empty() {
+        // A content push would write these bytes and their mtime over whatever landed since list.
+        hub.mark_executable(key, repairs)?;
     }
     let mut synced = Synced::default();
     for path in merge {
@@ -725,16 +747,16 @@ fn merge_history(mine: &[u8], theirs: &[u8]) -> Vec<u8> {
 #[cfg(unix)]
 fn mode_fix(local: Option<bool>, remote: Option<bool>) -> Option<ModeFix> {
     match (local, remote) {
-        (Some(true), Some(false)) => Some(ModeFix::Push),
-        (Some(false), Some(true)) => Some(ModeFix::Pull),
+        (Some(true), Some(false)) => Some(ModeFix::Mark),
+        (Some(false), Some(true)) => Some(ModeFix::Chmod),
         _ => None,
     }
 }
 
 #[cfg(unix)]
 enum ModeFix {
-    Push,
-    Pull,
+    Mark,
+    Chmod,
 }
 
 #[cfg(unix)]
@@ -779,6 +801,14 @@ fn write(target: &Path, bytes: &[u8], modified: Option<u64>, executable: Option<
         let _ = file.set_modified(UNIX_EPOCH + Duration::from_millis(ms));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner_execute(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path).map_err(|e| e.to_string())?.permissions();
+    perms.set_mode(perms.mode() | 0o100);
+    std::fs::set_permissions(path, perms).map_err(|e| e.to_string())
 }
 
 fn apply_executable(file: &std::fs::File, executable: bool) -> Result<(), String> {
@@ -839,6 +869,17 @@ mod tests {
         }
         fn pull(&self, _: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
             Ok(paths.iter().filter_map(|p| self.0.borrow().get(p).cloned()).collect())
+        }
+        fn mark_executable(&self, _: &str, repairs: Vec<ModeRepair>) -> Result<(), String> {
+            let mut files = self.0.borrow_mut();
+            for repair in repairs {
+                if let Some(file) = files.get_mut(&repair.path) {
+                    if file.entry.sha == repair.sha {
+                        file.entry.executable = Some(true);
+                    }
+                }
+            }
+            Ok(())
         }
     }
 
@@ -1439,6 +1480,22 @@ mod tests {
         fn pull(&self, _: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
             Ok(paths.iter().filter_map(|path| self.files.borrow().get(path).cloned()).collect())
         }
+        fn mark_executable(&self, _: &str, repairs: Vec<ModeRepair>) -> Result<(), String> {
+            if repairs.iter().any(|repair| repair.path == HOOK) {
+                if let Some(newer) = self.ahead.borrow_mut().take() {
+                    self.files.borrow_mut().insert(HOOK.into(), newer);
+                }
+            }
+            let mut files = self.files.borrow_mut();
+            for repair in repairs {
+                if let Some(file) = files.get_mut(&repair.path) {
+                    if file.entry.sha == repair.sha {
+                        file.entry.executable = Some(true);
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 
     #[cfg(unix)]
@@ -1576,6 +1633,9 @@ mod tests {
         fn pull(&self, _: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
             let files: Vec<File> = paths.iter().filter_map(|path| self.0.borrow().get(path).cloned()).collect();
             Ok(round_trip_without_executable(files))
+        }
+        fn mark_executable(&self, _: &str, _: Vec<ModeRepair>) -> Result<(), String> {
+            Err("this hub does not share executable bits".into())
         }
     }
 
@@ -1759,7 +1819,8 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
         assert_eq!(mode_bits(&dest), 0o544, "healed hook mode is {:o}", mode_bits(&dest));
         assert_eq!(std::fs::metadata(&dest).unwrap().modified().unwrap(), stamped);
-        assert_eq!((healed.pushed.as_slice(), healed.pulled.as_slice()), (&[][..], &[][..]));
+        assert!(!healed.pulled.iter().any(|path| path == HOOK), "a mode heal does not fetch the hook");
+        assert!(!healed.pushed.iter().any(|path| path == HOOK), "a mode heal does not send the hook");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1828,6 +1889,9 @@ mod tests {
         }
         fn pull(&self, _: &str, _: Vec<String>) -> Result<Vec<File>, String> {
             Ok(vec![])
+        }
+        fn mark_executable(&self, _: &str, _: Vec<ModeRepair>) -> Result<(), String> {
+            Ok(())
         }
     }
 }

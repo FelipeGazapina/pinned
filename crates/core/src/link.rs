@@ -143,6 +143,9 @@ impl sync::Hub for Shared {
     fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
         decode(self.call(HubCall::SyncPull { project: project.into(), paths })?)
     }
+    fn mark_executable(&self, project: &str, repairs: Vec<sync::ModeRepair>) -> Result<(), String> {
+        self.call(HubCall::SyncMarkExecutable { project: project.into(), repairs }).map(drop)
+    }
 }
 
 fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {

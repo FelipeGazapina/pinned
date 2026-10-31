@@ -273,6 +273,22 @@ impl Db {
         Ok(())
     }
 
+    /// Sets the executable bit only while the row still has `sha`. Leaves the bytes and modified time alone.
+    pub async fn sync_mark_executable(&self, account: Uuid, project: &str, repairs: &[sync::ModeRepair]) -> Result<(), String> {
+        let client = self.client().await?;
+        for repair in repairs {
+            // A content upsert would store the caller's bytes and mtime, and erase an edit that landed after list.
+            client
+                .execute(
+                    "update project_files set executable = true where account = $1 and project = $2 and path = $3 and sha = $4",
+                    &[&account, &project, &repair.path, &repair.sha],
+                )
+                .await
+                .map_err(err)?;
+        }
+        Ok(())
+    }
+
     pub async fn sync_pull(&self, account: Uuid, project: &str, paths: &[String]) -> Result<Vec<(sync::Entry, Vec<u8>)>, String> {
         let rows = self
             .client().await?

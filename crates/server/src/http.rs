@@ -524,7 +524,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                     // and every machine keeps its projects' files in step with the account's.
                     None if matches!(
                         call,
-                        HubCall::Import { .. } | HubCall::ShareProject { .. } | HubCall::SyncList { .. } | HubCall::SyncPush { .. } | HubCall::SyncPull { .. }
+                        HubCall::Import { .. } | HubCall::ShareProject { .. } | HubCall::SyncList { .. } | HubCall::SyncPush { .. } | HubCall::SyncPull { .. } | HubCall::SyncMarkExecutable { .. }
                     ) =>
                     {
                         hub.hub_call(&account, call).await
