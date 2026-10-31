@@ -4273,9 +4273,11 @@
                 "default": 0
               },
               "executable": {
-                "description": "Executable on the machine that sent it.",
-                "type": "boolean",
-                "default": false
+                "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
@@ -4289,8 +4291,7 @@
               "path",
               "sha",
               "modified",
-              "size",
-              "executable"
+              "size"
             ]
           },
           "Connector": {
@@ -9537,9 +9538,11 @@
                 "default": 0
               },
               "executable": {
-                "description": "Executable on the machine that sent it.",
-                "type": "boolean",
-                "default": false
+                "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
@@ -12009,9 +12012,11 @@
                 "default": 0
               },
               "executable": {
-                "description": "Executable on the machine that sent it.",
-                "type": "boolean",
-                "default": false
+                "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
@@ -12025,8 +12030,7 @@
               "path",
               "sha",
               "modified",
-              "size",
-              "executable"
+              "size"
             ]
           },
           "Connector": {
@@ -14463,9 +14467,11 @@
                 "default": 0
               },
               "executable": {
-                "description": "Executable on the machine that sent it.",
-                "type": "boolean",
-                "default": false
+                "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
@@ -21300,17 +21306,18 @@
             "default": 0
           },
           "executable": {
-            "description": "Executable on the machine that sent it.",
-            "type": "boolean",
-            "default": false
+            "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
           "path",
           "sha",
           "modified",
-          "size",
-          "executable"
+          "size"
         ]
       },
       "accept": {
@@ -21339,9 +21346,11 @@
             "default": 0
           },
           "executable": {
-            "description": "Executable on the machine that sent it.",
-            "type": "boolean",
-            "default": false
+            "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -21378,9 +21387,11 @@
             "default": 0
           },
           "executable": {
-            "description": "Executable on the machine that sent it.",
-            "type": "boolean",
-            "default": false
+            "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "data": {
             "description": "The contents gzipped, in base64; none for a deleted file.",
@@ -21394,8 +21405,7 @@
           "path",
           "sha",
           "modified",
-          "size",
-          "executable"
+          "size"
         ]
       },
       "accept": {
@@ -21424,9 +21434,11 @@
             "default": 0
           },
           "executable": {
-            "description": "Executable on the machine that sent it.",
-            "type": "boolean",
-            "default": false
+            "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "data": {
             "description": "The contents gzipped, in base64; none for a deleted file.",

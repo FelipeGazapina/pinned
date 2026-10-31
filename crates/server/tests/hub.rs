@@ -591,7 +591,7 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
     assert_eq!(pulled, vec!["claude/memory/MEMORY.md"]);
     assert_eq!(std::fs::read_to_string(memory(&on_mini)).unwrap(), "- deploys go through the VPS");
 
-    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: false }, data: Some("eA==".into()) };
+    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()) };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: project.key.clone(), files: vec![outside] }),
         Err("../.ssh/authorized_keys is not a file a project shares".into())
@@ -654,7 +654,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     pulled.sort();
     assert_eq!(pulled, stored);
     assert_eq!(std::fs::read_to_string(mini_home.join("synced-plugins/plugins/toy@demo/skills/greet/SKILL.md")).unwrap(), skill);
-    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: false }, data: Some("eA==".into()) };
+    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()) };
     for path in [
         "plugins/toy@demo/settings.json",
         "plugins/toy@demo/.claude.json",
@@ -675,7 +675,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     }
     let raw = vec![7u8; sync::FILE_LIMIT as usize + 1];
     let oversized = sync::File {
-        entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64, executable: false },
+        entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64, executable: None },
         data: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
     };
     assert_eq!(
@@ -725,13 +725,13 @@ fn an_executable_hook_stays_executable_through_the_hub() {
     let plain = mini_home.join("synced-plugins/plugins/pstack@local/.claude-plugin/plugin.json");
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
     assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
-    assert_eq!(mode(&dest) & 0o111, 0o111, "receiver hook mode is {:o}", mode(&dest));
+    assert_eq!(mode(&dest) & 0o111, 0o100, "receiver hook mode is {:o}", mode(&dest));
     assert_eq!(mode(&plain) & 0o111, 0, "plain file mode is {:o}", mode(&plain));
     std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(mode(&dest), 0o644);
     sync::sync_plugins(&Through(mac_link), &mut mac_state, &share(&mac_home), now).unwrap();
     sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
-    assert_eq!(mode(&dest) & 0o111, 0o111, "resync left the hook at {:o}", mode(&dest));
+    assert_eq!(mode(&dest) & 0o111, 0o100, "resync left the hook at {:o}", mode(&dest));
     let again = sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
     assert_eq!(again.pushed, Vec::<String>::new());
     assert_eq!(again.pulled, Vec::<String>::new());

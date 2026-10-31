@@ -40,9 +40,9 @@ pub struct Entry {
     /// Compressed bytes.
     #[serde(default)]
     pub size: u64,
-    /// Executable on the machine that sent it.
-    #[serde(default)]
-    pub executable: bool,
+    /// Unix mode when the sender read one. Absent when the sender does not know the mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -194,10 +194,12 @@ fn exchange(
                 Some(sha) => {
                     agreed.insert(path.clone(), sha);
                     #[cfg(unix)]
-                    if let Some(fix) = unix_mode_fix(path, local, &remote, resolve) {
-                        match fix {
-                            ModeFix::Push => push.push(path.clone()),
-                            ModeFix::Pull => pull.push(path.clone()),
+                    if key == PLUGINS_KEY {
+                        if let Some(fix) = unix_mode_fix(path, &remote, resolve) {
+                            match fix {
+                                ModeFix::Push => push.push(path.clone()),
+                                ModeFix::Pull => pull.push(path.clone()),
+                            }
                         }
                     }
                 }
@@ -225,7 +227,7 @@ fn exchange(
         let theirs = hub.pull(key, vec![path.clone()])?.into_iter().next().and_then(|f| f.data).map(|d| unpack(&d)).transpose()?.unwrap_or_default();
         let target = resolve(&path).ok_or("no history here")?;
         let mine = std::fs::read(&target).unwrap_or_default();
-        write(&target, &merge_history(&mine, &theirs), None, false)?;
+        write(&target, &merge_history(&mine, &theirs), None, None)?;
         push.push(path);
     }
 
@@ -233,7 +235,7 @@ fn exchange(
     let mut size = 0;
     for path in push {
         let file = match resolve(&path).filter(|f| f.is_file()) {
-            None => File { entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0, executable: false }, data: None },
+            None => File { entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0, executable: None }, data: None },
             Some(target) => {
                 let Some((sha, modified)) = state.hash(&target) else { continue };
                 let data = pack(&std::fs::read(&target).map_err(|e| e.to_string())?);
@@ -241,7 +243,7 @@ fn exchange(
                     continue;
                 }
                 File {
-                    entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: executable(&target) },
+                    entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: if key == PLUGINS_KEY { executable(&target) } else { None } },
                     data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
                 }
             }
@@ -274,7 +276,8 @@ fn exchange(
                 }
                 Some(data) => {
                     let bytes = unpack(data)?;
-                    write(&target, &bytes, Some(file.entry.modified), file.entry.executable)?;
+                    let mode = if key == PLUGINS_KEY { file.entry.executable } else { None };
+                    write(&target, &bytes, Some(file.entry.modified), mode)?;
                     state.hash(&target);
                     agreed.insert(file.entry.path.clone(), file.entry.sha.clone());
                 }
@@ -532,17 +535,32 @@ fn copy_newer(src: &Path, dest: &Path, meta: &std::fs::Metadata) -> Result<(), S
     if is_symlink(dest) {
         return Ok(());
     }
-    let copy = match std::fs::metadata(dest) {
-        Err(_) => true,
-        Ok(have) => match (meta.modified().ok(), have.modified().ok()) {
-            (Some(src_mod), Some(dest_mod)) if src_mod > dest_mod => true,
-            (Some(_), Some(_)) => false,
-            _ => meta.len() != have.len(),
-        },
+    let Some(have) = std::fs::metadata(dest).ok() else {
+        return copy_file(src, dest, meta);
     };
-    if !copy {
-        return Ok(());
+    let src_exec = is_exec(meta);
+    let dest_exec = is_exec(&have);
+    match (meta.modified().ok(), have.modified().ok()) {
+        (Some(src_mod), Some(dest_mod)) if src_mod > dest_mod => {
+            if same_contents(src, dest, have.len()) {
+                if src_exec && !dest_exec {
+                    copy_mode(dest, meta)?;
+                }
+                let _ = std::fs::File::options().write(true).open(dest).and_then(|file| file.set_modified(src_mod));
+            } else {
+                copy_file(src, dest, meta)?;
+            }
+        }
+        // chmod does not bump mtime. Same bytes stay executable once any copy is.
+        (Some(_), Some(_)) if src_exec && !dest_exec && same_contents(src, dest, have.len()) => copy_mode(dest, meta)?,
+        (Some(_), Some(_)) => {}
+        _ if meta.len() != have.len() => copy_file(src, dest, meta)?,
+        _ => {}
     }
+    Ok(())
+}
+
+fn copy_file(src: &Path, dest: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -551,6 +569,37 @@ fn copy_newer(src: &Path, dest: &Path, meta: &std::fs::Metadata) -> Result<(), S
         let _ = std::fs::File::options().write(true).open(dest).and_then(|file| file.set_modified(modified));
     }
     Ok(())
+}
+
+fn copy_mode(dest: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (dest, meta);
+    }
+    Ok(())
+}
+
+fn is_exec(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
+fn same_contents(src: &Path, dest: &Path, dest_len: u64) -> bool {
+    std::fs::metadata(src).is_ok_and(|meta| meta.len() == dest_len) && std::fs::read(src).ok() == std::fs::read(dest).ok()
 }
 
 fn plugin_files(share: &PluginShare) -> Vec<(String, PathBuf)> {
@@ -674,16 +723,11 @@ fn merge_history(mine: &[u8], theirs: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(unix)]
-fn reconcile_executable_bit(local_exec: bool, remote_exec: bool, local_mtime: u64, remote_mtime: u64) -> Option<ModeFix> {
-    if local_exec == remote_exec {
-        return None;
-    }
-    let local_is_newer = local_mtime > remote_mtime;
-    let same_time_and_local_is_executable = local_mtime == remote_mtime && local_exec;
-    if local_is_newer || same_time_and_local_is_executable {
-        Some(ModeFix::Push)
-    } else {
-        Some(ModeFix::Pull)
+fn mode_fix(local: Option<bool>, remote: Option<bool>) -> Option<ModeFix> {
+    match (local, remote) {
+        (Some(true), Some(false)) => Some(ModeFix::Push),
+        (Some(false), Some(true)) => Some(ModeFix::Pull),
+        _ => None,
     }
 }
 
@@ -694,37 +738,43 @@ enum ModeFix {
 }
 
 #[cfg(unix)]
-fn unix_mode_fix(path: &str, local: &BTreeMap<String, (String, u64)>, remote: &BTreeMap<String, Entry>, resolve: &dyn Fn(&str) -> Option<PathBuf>) -> Option<ModeFix> {
+fn unix_mode_fix(path: &str, remote: &BTreeMap<String, Entry>, resolve: &dyn Fn(&str) -> Option<PathBuf>) -> Option<ModeFix> {
     let remote_exec = remote.get(path)?.executable;
     let file = resolve(path)?;
     if !file.is_file() {
         return None;
     }
-    let local_mtime = local.get(path).map(|(_, modified)| *modified).unwrap_or(0);
-    let remote_mtime = remote.get(path).map(|entry| entry.modified).unwrap_or(0);
-    reconcile_executable_bit(executable(&file), remote_exec, local_mtime, remote_mtime)
+    mode_fix(executable(&file), remote_exec)
 }
 
-fn executable(path: &Path) -> bool {
+fn executable(path: &Path) -> Option<bool> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0);
+        return std::fs::metadata(path).ok().map(|meta| meta.permissions().mode() & 0o111 != 0);
     }
     #[cfg(not(unix))]
     {
         let _ = path;
-        false
+        None
     }
 }
 
-fn write(target: &Path, bytes: &[u8], modified: Option<u64>, executable: bool) -> Result<(), String> {
+fn write(target: &Path, bytes: &[u8], modified: Option<u64>, executable: Option<bool>) -> Result<(), String> {
+    let previous = executable.is_none().then(|| std::fs::metadata(target).ok()).flatten().map(|meta| meta.permissions());
     if let Some(dir) = target.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let file = std::fs::File::create(target).map_err(|e| format!("could not write {}: {e}", target.display()))?;
     (&file).write_all(bytes).map_err(|e| e.to_string())?;
-    apply_executable(&file, executable)?;
+    match executable {
+        Some(bit) => apply_executable(&file, bit)?,
+        None => {
+            if let Some(perms) = previous {
+                file.set_permissions(perms).map_err(|e| e.to_string())?;
+            }
+        }
+    }
     if let Some(ms) = modified {
         let _ = file.set_modified(UNIX_EPOCH + Duration::from_millis(ms));
     }
@@ -737,7 +787,8 @@ fn apply_executable(file: &std::fs::File, executable: bool) -> Result<(), String
         use std::os::unix::fs::PermissionsExt;
         let mut perms = file.metadata().map_err(|e| e.to_string())?.permissions();
         let mode = perms.mode();
-        perms.set_mode(if executable { mode | 0o111 } else { mode & !0o111 });
+        // The owner runs the hook. 0o111 would turn mode 600 into 711.
+        perms.set_mode(if executable { mode | 0o100 } else { mode & !0o111 });
         file.set_permissions(perms).map_err(|e| e.to_string())?;
     }
     #[cfg(not(unix))]
@@ -1394,7 +1445,7 @@ mod tests {
         let dest = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
         assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
         assert_eq!(mode_bits(&source) & 0o111, 0o111, "source mirror mode is {:o}", mode_bits(&source));
-        assert_eq!(mode_bits(&dest) & 0o111, 0o111, "receiver hook mode is {:o}", mode_bits(&dest));
+        assert_eq!(mode_bits(&dest) & 0o111, 0o100, "receiver hook mode is {:o}", mode_bits(&dest));
         let plain = mini.dir.join("plugins/pstack@local/.claude-plugin/plugin.json");
         assert_eq!(mode_bits(&plain) & 0o111, 0, "plain file mode is {:o}", mode_bits(&plain));
         let _ = std::fs::remove_dir_all(root);
@@ -1423,7 +1474,7 @@ mod tests {
         assert_eq!(mode_bits(&dest), 0o644);
         sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
         sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
-        assert_eq!(mode_bits(&dest) & 0o111, 0o111, "resync left the hook at {:o}", mode_bits(&dest));
+        assert_eq!(mode_bits(&dest) & 0o111, 0o100, "resync left the hook at {:o}", mode_bits(&dest));
         let again = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
         assert_eq!(again.pushed, Vec::<String>::new());
         assert_eq!(again.pulled, Vec::<String>::new());
@@ -1550,6 +1601,32 @@ mod tests {
         let mini_again = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
         assert_eq!((mac_again.pushed.as_slice(), mac_again.pulled.as_slice()), (&[][..], &[][..]));
         assert_eq!((mini_again.pushed.as_slice(), mini_again.pulled.as_slice()), (&[][..], &[][..]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_changed_hook_can_drop_the_executable_bit() {
+        let root = root("hook-clear");
+        let hub = MemHub::default();
+        let (hook, mac, mini) = executable_hook(&root);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let dest = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        assert_eq!(mode_bits(&dest) & 0o100, 0o100, "receiver hook mode is {:o}", mode_bits(&dest));
+        std::fs::write(&hook, "#!/bin/sh\necho changed\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+        stamp(&hook, SystemTime::UNIX_EPOCH + Duration::from_secs(1_900_000_000));
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho changed\n");
+        assert_eq!(mode_bits(&dest) & 0o111, 0, "changed hook mode is {:o}", mode_bits(&dest));
+        let stored = serde_json::to_value(&hub.0.borrow()["plugins/pstack@local/hooks/session-start.sh"].entry).unwrap();
+        assert_eq!(stored["executable"], serde_json::json!(false));
         let _ = std::fs::remove_dir_all(root);
     }
 

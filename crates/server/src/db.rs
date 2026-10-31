@@ -233,7 +233,7 @@ impl Db {
             .map_err(err)?;
         Ok(rows
             .iter()
-            .map(|r| sync::Entry { path: r.get(0), sha: r.get(1), modified: r.get::<_, i64>(2) as u64, size: r.get::<_, i32>(3) as u64, executable: r.get(4) })
+            .map(|r| sync::Entry { path: r.get(0), sha: r.get(1), modified: r.get::<_, i64>(2) as u64, size: r.get::<_, i32>(3) as u64, executable: Some(r.get(4)) })
             .collect())
     }
 
@@ -257,11 +257,15 @@ impl Db {
             return Err(format!("the account's synced projects would pass {} MB; delete old sessions to sync more", SYNC_QUOTA >> 20));
         }
         for (entry, data) in &files {
+            // `known` is false when the sender omitted the mode, so a stored true survives. A null column would be omitted on the way out, and a unix machine would never send the bit.
+            let known = entry.executable.is_some();
+            let bit = entry.executable.unwrap_or(false);
             client
                 .execute(
                     "insert into project_files (account, project, path, sha, modified, data, executable) values ($1, $2, $3, $4, $5, $6, $7) \
-                     on conflict (account, project, path) do update set sha = excluded.sha, modified = excluded.modified, data = excluded.data, executable = excluded.executable",
-                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data, &entry.executable],
+                     on conflict (account, project, path) do update set sha = excluded.sha, modified = excluded.modified, data = excluded.data, \
+                     executable = case when $8 then excluded.executable else project_files.executable end",
+                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data, &bit, &known],
                 )
                 .await
                 .map_err(err)?;
@@ -279,7 +283,7 @@ impl Db {
             .iter()
             .map(|r| {
                 let data: Vec<u8> = r.get(3);
-                (sync::Entry { path: r.get(0), sha: r.get(1), modified: r.get::<_, i64>(2) as u64, size: data.len() as u64, executable: r.get(4) }, data)
+                (sync::Entry { path: r.get(0), sha: r.get(1), modified: r.get::<_, i64>(2) as u64, size: data.len() as u64, executable: Some(r.get(4)) }, data)
             })
             .collect())
     }
