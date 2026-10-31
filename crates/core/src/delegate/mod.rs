@@ -279,7 +279,7 @@ pub struct Task {
     pub error: Option<String>,
     pub conversation: Option<String>,
     pub steps: Vec<Item>,
-    /// The full latest assistant message, kept after the step ring drops it.
+    /// The newest text the agent wrote, a message or a turn's reply, kept after the step ring drops it.
     pub assistant: Option<String>,
     pub mode: Mode,
     pub delivered: bool,

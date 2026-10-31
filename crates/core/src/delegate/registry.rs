@@ -473,7 +473,7 @@ impl Delegates {
                 return;
             }
             task.state = WorkState::Cancelled;
-            task.summary = task.summary.take().or_else(|| task.assistant.clone());
+            task.summary = task.assistant.clone().or_else(|| task.summary.take());
             task.error = Some(reason.to_owned());
             task.ended = Some(unix_millis());
             let dir = isolated_cwd(task);
@@ -636,7 +636,7 @@ impl Delegates {
                 continue;
             }
             task.state = WorkState::Cancelled;
-            task.summary = task.summary.take().or_else(|| task.assistant.clone());
+            task.summary = task.assistant.clone().or_else(|| task.summary.take());
             task.error = Some("stopped by restart".into());
             task.ended = Some(unix_millis());
             task.delivered = false;
@@ -880,6 +880,7 @@ impl Task {
                 let reply = Some(text).filter(|text| !text.is_empty()).or_else(|| self.assistant.clone());
                 if reply.is_some() {
                     self.summary = reply.clone();
+                    self.assistant = reply.clone();
                 }
                 self.run.open_turns = self.run.open_turns.saturating_sub(1);
                 if self.run.open_turns > 0 || !self.run.background.is_empty() {
