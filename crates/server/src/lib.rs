@@ -2,6 +2,7 @@ pub mod boxes;
 pub mod db;
 pub mod http;
 pub mod hub;
+pub mod self_update;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

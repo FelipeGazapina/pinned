@@ -148,6 +148,7 @@ fn node(args: &[String]) -> Result<(), String> {
         reminders::write_mcp_config(config, &exe, false).map_err(|e| format!("could not write claude's MCP config: {e}"))?;
     }
     let machine = Machine::new(launch, Some(dir), None, |_| {});
+    machine.set_installer(Arc::new(pinned_server::self_update::NodeUpdate::production()));
     let link = Arc::new(link::spawn(creds, machine.clone(), VERSION));
     let forward = link.clone();
     machine.listen(move |message| forward.forward(message)).map_err(|e| format!("could not listen for claude's hooks: {e}"))?;
