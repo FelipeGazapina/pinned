@@ -73,11 +73,27 @@ const STASH_MAX = 20;
 /** T3 Code's send shortcut setting: Enter, ⌘Enter once the prompt has a second line, or ⌘Enter always. */
 let sendShortcut = load("gui-send-shortcut") ?? (load("gui-send-mod") === "true" ? "mod-enter" : "enter");
 const needsMod = (text) => sendShortcut === "mod-enter" || (sendShortcut === "mod-enter-multiline" && /\n/.test(text));
+/** Touch-first device without a trackpad or mouse: Enter adds a line; Send is the round button. */
+function touchComposer(mq = matchMedia) {
+  return mq("(pointer: coarse)").matches && !mq("(any-pointer: fine)").matches;
+}
+/** What plain Enter in the prompt should do before menu-specific handlers run. */
+function composerEnterIntent(e, { promptText, shortcut, touch, isMac }) {
+  if (e.key !== "Enter" || e.shiftKey || e.isComposing) return "none";
+  if (touch) return "newline";
+  const mod = isMac ? e.metaKey : e.ctrlKey;
+  const needs = shortcut === "mod-enter" || (shortcut === "mod-enter-multiline" && /\n/.test(promptText));
+  return !needs || mod ? "send" : "newline";
+}
 const SEND_MOD = IS_MAC ? "⌘" : "Ctrl";
-const sendShortcutHtml = () => `<div class="look"><label for="send-shortcut">Send shortcut</label><p class="meta">Choose when Enter sends a prompt or inserts a new line</p>
+const sendShortcutHtml = () => touchComposer()
+  ? `<div class="look"><label>Send shortcut</label><p class="meta">Enter adds a new line here. Use the send button to submit.</p></div>`
+  : `<div class="look"><label for="send-shortcut">Send shortcut</label><p class="meta">Choose when Enter sends a prompt or inserts a new line</p>
   <select id="send-shortcut">${[["enter", "Enter"], ["mod-enter-multiline", `${SEND_MOD} + Enter for multiline prompts`], ["mod-enter", `${SEND_MOD} + Enter always`]].map(([v, l]) => `<option value="${v}"${sendShortcut === v ? " selected" : ""}>${l}</option>`).join("")}</select></div>`;
 function bindSendShortcut() {
-  settingsPage.querySelector("#send-shortcut").onchange = (e) => {
+  const select = settingsPage.querySelector("#send-shortcut");
+  if (!select) return;
+  select.onchange = (e) => {
     sendShortcut = e.target.value;
     save("gui-send-shortcut", sendShortcut);
     if (active) renderComposer(active);
@@ -149,9 +165,12 @@ function renderComposer(tab) {
   setHtml(send, icon(spinning ? "loader-circle" : working && !empty ? "list-plus" : "arrow-up"));
   composer.dataset.spinning = spinning;
   send.disabled = !!blocked;
-  const keys = needsMod(prompt.value) ? `${SEND_MOD}Enter` : "Enter";
+  const touch = touchComposer();
+  const keys = touch ? "" : needsMod(prompt.value) ? `${SEND_MOD}Enter` : "Enter";
   const compacting = tab && compactOffer(tab) && !t.keepHistory;
-  send.title = blocked || (composer.dataset.sending === "true" ? "Submitting message" : compacting ? `Summarize ${formatTokens(compactOffer(tab))} tokens of history, then send` : working ? `Queue message (${keys})` : `Send (${keys})`);
+  const keyHint = keys ? ` (${keys})` : "";
+  send.title = blocked || (composer.dataset.sending === "true" ? "Submitting message" : compacting ? `Summarize ${formatTokens(compactOffer(tab))} tokens of history, then send` : working ? `Queue message${keyHint}` : `Send${keyHint}`);
+  prompt.enterKeyHint = touch ? "enter" : "send";
   send.setAttribute("aria-label", send.title);
   renderApproval(tab);
   renderBanners(tab);
@@ -781,7 +800,8 @@ prompt.addEventListener("keydown", (e) => {
     e.preventDefault();
     return sendAndNewThread();
   }
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && (!needsMod(prompt.value) || (IS_MAC ? e.metaKey : e.ctrlKey))) {
+  const enter = composerEnterIntent(e, { promptText: prompt.value, shortcut: sendShortcut, touch: touchComposer(), isMac: IS_MAC });
+  if (enter === "send") {
     e.preventDefault();
     send();
   } else if (e.key === "Escape" && active && phaseOf(active) === "working" && !prompt.value) {

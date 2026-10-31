@@ -153,6 +153,7 @@ body.resizing-rows { cursor: row-resize; user-select: none; }
   #composer .pick .name { display: none; }
 }
 @media (pointer: coarse) {
+  #composer .send.round { width: 40px; height: 40px; min-width: 40px; min-height: 40px; }
   #git-action > button { min-height: 40px; min-width: 40px; }
   #attachments .file .remove { width: 40px; height: 40px; }
   #attachments .tile .remove { width: 28px; height: 28px; }
@@ -516,6 +517,9 @@ html[data-appearance="light"] #composer-footer { box-shadow: 0 12px 28px -18px r
 #composer[data-collapsed="true"] .tools { padding: 0; gap: 0; order: 2; }
 #composer[data-collapsed="true"] .tools > :not(#send, #stop, #pill-actions) { display: none !important; }
 #composer[data-collapsed="true"] .send { width: 32px; height: 32px; margin-left: 8px; }
+@media (pointer: coarse) {
+  #composer[data-collapsed="true"] .send { width: 40px; height: 40px; }
+}
 #composer[data-collapsed="true"] #attachments { order: 1; flex-direction: row; padding: 0; }
 #composer[data-collapsed="true"] #attachments .rows, #composer[data-collapsed="true"] #attachments .tile .remove { display: none; }
 #composer[data-collapsed="true"] #attachments .tile { width: 32px; height: 32px; border-radius: 6px; }
