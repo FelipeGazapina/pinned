@@ -2133,56 +2133,6 @@ fn a_fresh_permission_stops_at_the_accounts_box_limit() {
     assert_eq!(created(&hub), 1);
 }
 
-struct RawMachine {
-    ws: WebSocket<MaybeTlsStream<TcpStream>>,
-}
-
-impl RawMachine {
-    fn connect(hub: &str, token: &str) -> RawMachine {
-        let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", hub.replace("http://", "ws://"))).unwrap();
-        if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
-            stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
-        }
-        ws.send(Message::text(
-            json!({ "type": "auth", "token": token, "name": "raw", "os": "linux", "version": "9.9.9" }).to_string(),
-        ))
-        .unwrap();
-        let hello = loop {
-            match ws.read() {
-                Ok(Message::Text(text)) => break text,
-                Ok(_) => {}
-                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
-                Err(e) => panic!("machine hello failed: {e}"),
-            }
-        };
-        assert!(serde_json::from_str::<Value>(&hello).unwrap()["type"] == "hello");
-        RawMachine { ws }
-    }
-
-    fn send(&mut self, frame: Value) {
-        self.ws.send(Message::text(frame.to_string())).unwrap();
-    }
-
-    fn wait(&mut self, pred: impl Fn(&Value) -> bool) -> Value {
-        let start = Instant::now();
-        loop {
-            match self.ws.read() {
-                Ok(Message::Text(text)) => {
-                    let value: Value = serde_json::from_str(&text).unwrap();
-                    if pred(&value) {
-                        return value;
-                    }
-                }
-                Ok(Message::Close(close)) => panic!("the machine socket closed: {close:?}"),
-                Ok(_) => {}
-                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
-                Err(e) => panic!("the machine socket failed: {e}"),
-            }
-            assert!(start.elapsed() < WAIT, "timed out waiting on the machine socket");
-        }
-    }
-}
-
 #[test]
 fn an_unknown_event_keeps_the_machine_socket_and_a_thread_reaches_only_its_watcher() {
     let hub = TestHub::start("watch");
@@ -2192,7 +2142,7 @@ fn an_unknown_event_keeps_the_machine_socket_and_a_thread_reaches_only_its_watch
     watcher.wait("hello", |f| f["type"] == "hello");
     let dir = temp("watch-node");
     let creds = pair(&url, &mut watcher, "watch-node", &dir);
-    let mut machine = RawMachine::connect(&url, &creds.machine_token);
+    let mut machine = MachineSock::connect(&url, &creds.machine_token, "9.9.9");
     watcher.wait_machines(&[("watch-node", true)]);
     let mut other = Client::connect(&url, &token);
     other.wait("hello", |f| f["type"] == "hello" && f["machines"][0]["online"] == true);
@@ -2203,7 +2153,7 @@ fn an_unknown_event_keeps_the_machine_socket_and_a_thread_reaches_only_its_watch
     assert!(other.wait("tabs for the other client", |f| f["type"] == "event" && f["event"]["kind"] == "tabs")["event"]["tabs"].as_array().unwrap().is_empty());
 
     assert_eq!(watcher.call(&creds.machine_id, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] })), Ok(Value::Null));
-    let told = machine.wait(|frame| frame["type"] == "watch_threads");
+    let told = std::iter::repeat_with(|| machine.read_json()).find(|frame| frame["type"] == "watch_threads").unwrap();
     assert_eq!(told["tabs"], json!(["tab-1"]));
     assert!(told["viewer"].as_str().unwrap().starts_with("client-"));
 
