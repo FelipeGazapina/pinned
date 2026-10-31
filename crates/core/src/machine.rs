@@ -366,7 +366,7 @@ pub struct Machine {
     clones: PathBuf,
     quitting: AtomicBool,
     /// Wakes parents whose pty has gone quiet, once, for the life of the machine.
-    notice_loop: AtomicBool,
+    delegate_pass: AtomicBool,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
@@ -476,7 +476,7 @@ impl Machine {
             pr_watches: Default::default(),
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
-            notice_loop: AtomicBool::new(false),
+            delegate_pass: AtomicBool::new(false),
             usage: Mutex::default(),
             agents: Mutex::default(),
             delegates,
@@ -1393,7 +1393,7 @@ impl Machine {
             });
             let (done, wrote) = done.unwrap_or((true, false));
             if wrote {
-                machine.arm_notices();
+                machine.arm_delegate_pass();
             }
             if done {
                 return;
@@ -1444,7 +1444,7 @@ impl Machine {
             self.save_sessions();
         }
         if submitted {
-            self.arm_notices();
+            self.arm_delegate_pass();
         }
         self.maybe_deliver(tab);
         Ok(())
@@ -1685,7 +1685,7 @@ impl Machine {
         if blocked {
             let session = self.tab(&orchestrator, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.queue_report(&orchestrator, session, line);
-            self.arm_notices();
+            self.arm_delegate_pass();
             return;
         }
         let _ = self.type_prompt(&orchestrator, &line);
@@ -1841,7 +1841,7 @@ impl Machine {
             None => Err(format!("tab {tab} has no running session")),
         })??;
         if wrote {
-            self.arm_notices();
+            self.arm_delegate_pass();
         }
         Ok(())
     }
@@ -1876,7 +1876,7 @@ impl Machine {
             .collect();
         self.delegates.rebind(&sessions);
         if self.delegates.has_pending() {
-            self.arm_notices();
+            self.arm_delegate_pass();
         }
         ids
     }
@@ -2069,7 +2069,7 @@ impl Machine {
             Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
             Claim::Fresh(task) => *task,
         };
-        self.delegates.set_budget(&task.id, request.budget_ms);
+        self.delegates.set_limits(&task.id, request.budget_ms, request.limit_ms);
         if let Some(tab) = caller.tab.as_deref() {
             let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.note_parent(&task.id, session);
@@ -2141,7 +2141,7 @@ impl Machine {
         if self.quitting.load(Ordering::SeqCst) {
             self.delegates.kill_remembered();
         }
-        self.arm_notices();
+        self.arm_delegate_pass();
         self.delegates.started_json(&task.id).map(|value| value.to_string())
     }
 
@@ -2195,8 +2195,8 @@ impl Machine {
         })?
     }
 
-    fn arm_notices(&self) {
-        if self.notice_loop.swap(true, Ordering::Relaxed) {
+    fn arm_delegate_pass(&self) {
+        if self.delegate_pass.swap(true, Ordering::Relaxed) {
             return;
         }
         let me = self.me.clone();
@@ -2206,7 +2206,7 @@ impl Machine {
             if machine.quitting.load(Ordering::Relaxed) {
                 return;
             }
-            machine.delegates.enforce_budgets(crate::delegate::unix_millis(), machine.launch.path_env.as_deref());
+            machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
             let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
             for tab in tabs {
                 machine.maybe_deliver(&tab);
@@ -4347,11 +4347,11 @@ echo '{"type":"result","result":"ok"}'
         std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
-        let request = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "budgetMs": 90000 })).unwrap();
+        let request = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "budgetMs": 90000, "limitMs": 600000 })).unwrap();
         let started: Value = serde_json::from_str(&m.start_delegate(Some(tab.clone()), None, None, request).unwrap()).unwrap();
         let id = started["taskId"].as_str().unwrap().to_owned();
         let status: Value = serde_json::from_str(&m.task_status(Some(tab), None, &id).unwrap()).unwrap();
-        assert_eq!(status["budgetSecs"], 90, "{status}");
+        assert_eq!((status["budgetSecs"].as_u64(), status["limitSecs"].as_u64()), (Some(90), Some(600)), "{status}");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5558,7 +5558,7 @@ while True:
 
     #[test]
     #[cfg(unix)]
-    fn the_notice_loop_stops_a_task_past_its_hard_limit() {
+    fn the_delegate_pass_stops_a_task_past_its_hard_limit() {
         use std::os::unix::process::CommandExt;
         let m = Machine::new(launch(), None, None, |_| {});
         let task = m.delegates.begin(crate::delegate::NewTask {
@@ -5576,13 +5576,13 @@ while True:
             client_request_id: None,
             role: None,
         });
-        m.delegates.set_budget(&task.id, 1);
+        m.delegates.set_limits(&task.id, 1, 2);
         let mut sleeper = crate::process::command("sleep");
         sleeper.arg("20").process_group(0);
         let child = std::sync::Mutex::new(sleeper.spawn().unwrap());
         let pid = child.lock().unwrap().id();
         m.delegates.remember_pid(&task.id, pid);
-        m.arm_notices();
+        m.arm_delegate_pass();
         wait_for("the hard limit", || m.delegates.is_terminal(&task.id));
         wait_for("the runaway child to stop", || child.lock().unwrap().try_wait().unwrap().is_some());
         let status = m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
@@ -5608,7 +5608,7 @@ while True:
             role: None,
         });
         m.delegates.backdate(&task.id, Duration::from_secs(9 * 60 * 60));
-        m.arm_notices();
+        m.arm_delegate_pass();
         std::thread::sleep(Duration::from_millis(1500));
         let status = m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
         assert_eq!(status["workState"], "working", "{status}");

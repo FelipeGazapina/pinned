@@ -57,12 +57,15 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
             .filter(|ms| *ms > 0)
             .ok_or("timeoutMs must be a number of milliseconds above 0")?,
     };
-    let budget_ms = match args.get("budgetMs") {
-        None | Some(Value::Null) => DEFAULT_BUDGET_MS,
-        Some(value) => value
-            .as_u64()
-            .filter(|ms| *ms > 0)
-            .ok_or("budgetMs must be a number of milliseconds above 0")?,
+    let millis = |key: &str| match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_u64().filter(|ms| *ms > 0).map(Some).ok_or(format!("{key} must be a number of milliseconds above 0")),
+    };
+    let limit_ms = millis("limitMs")?.unwrap_or(DEFAULT_LIMIT_MS);
+    let budget_ms = match millis("budgetMs")? {
+        Some(ms) if ms >= limit_ms => return Err(format!("budgetMs must be below limitMs, which is {limit_ms} ms; pass a larger limitMs")),
+        Some(ms) => ms,
+        None => DEFAULT_BUDGET_MS.min(limit_ms),
     };
     let interaction = match args["interactionMode"].as_str() {
         None | Some("inherit") => Interaction::Inherit,
@@ -99,6 +102,7 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         mode,
         timeout_ms,
         budget_ms,
+        limit_ms,
         interaction,
         runtime,
         role,

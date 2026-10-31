@@ -39,7 +39,7 @@ fn live_cursor_and_claude_through_pinned_mcp() {
 
 #[test]
 #[ignore]
-fn live_claude_task_ends_on_its_reply_and_its_background_shell_stops() {
+fn live_claude_task_waits_for_its_background_shell_then_ends_on_its_last_reply() {
     let exe = server_bin();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = std::env::temp_dir().join(format!("pinned-live-background-{}", std::process::id()));
@@ -51,15 +51,37 @@ fn live_claude_task_ends_on_its_reply_and_its_background_shell_stops() {
     let sock = machine.launch().sock.clone();
     let tab = machine.open_tab(Some(dir.display().to_string()), false).unwrap();
     let marker = format!("pinned_live_tick_{}", std::process::id());
-    let ran = dir.join("shell-ran");
-    let task = format!(
-        "Use the Bash tool with run_in_background set to true to run exactly: sh -c 'touch {}; while true; do echo {marker}; sleep 1; done'. Do not wait for it, do not stop it, and do not read its output. Then reply with exactly the word PINEAPPLE.",
-        ran.display()
-    );
+
+    let finite = start(&exe, &sock, &tab, "Use the Bash tool with run_in_background set to true to run exactly: sleep 20 && echo bgdone. Do not wait for it. Reply right away with exactly the word WAITING. Later, when you are notified that the background command finished, reply with FINAL-REPORT followed by its output.");
+    let first = wait_until(&exe, &sock, &tab, &finite, |status| status["summary"].is_string());
+    eprintln!("LIVE first reply: {first}");
+    assert_eq!(first["workState"], "working", "{first}");
+    assert_eq!(first["background"].as_array().map(Vec::len), Some(1), "{first}");
+    let last = wait_until(&exe, &sock, &tab, &finite, |status| status["workState"] != "working");
+    eprintln!("LIVE last reply: {last}");
+    assert_eq!(last["workState"], "result_available", "{last}");
+    assert!(last["summary"].as_str().unwrap_or("").contains("FINAL-REPORT") && last["summary"].as_str().unwrap_or("").contains("bgdone"), "{last}");
+
+    let server = start(&exe, &sock, &tab, &format!("Use the Bash tool with run_in_background set to true to run exactly: sh -c 'while true; do echo {marker}; sleep 2; done'. Do not wait for it, do not stop it, and do not read its output. Then reply with exactly the word SERVER-UP."));
+    wait_until(&exe, &sock, &tab, &server, |status| status["summary"].is_string());
+    std::thread::sleep(Duration::from_secs(3));
+    let up = mcp(&exe, &sock, &tab, json!({ "name": "task_status", "arguments": { "taskId": server } }));
+    eprintln!("LIVE server reply: {up}");
+    assert_eq!(up["workState"], "working", "{up}");
+    assert!(!pgrep(&marker).is_empty(), "pinned stopped the pending shell");
+    let cancelled = mcp(&exe, &sock, &tab, json!({ "name": "task_cancel", "arguments": { "taskId": server } }));
+    assert_eq!(cancelled["workState"], "cancelled", "{cancelled}");
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(pgrep(&marker), "", "the shell outlived task_cancel");
+    machine.quit();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn start(exe: &Path, sock: &Path, tab: &str, task: &str) -> String {
     let started = mcp(
-        &exe,
-        &sock,
-        &tab,
+        exe,
+        sock,
+        tab,
         json!({
             "name": "delegate_task",
             "arguments": { "task": task, "target": { "providerInstanceId": "claude", "model": "claude-haiku-5-5" }, "mode": "async" }
@@ -67,36 +89,24 @@ fn live_claude_task_ends_on_its_reply_and_its_background_shell_stops() {
     );
     let id = started["taskId"].as_str().unwrap_or("").to_owned();
     assert!(!id.is_empty(), "delegate_task returned {started}");
+    id
+}
+
+fn wait_until(exe: &Path, sock: &Path, tab: &str, id: &str, done: impl Fn(&Value) -> bool) -> Value {
     let begun = Instant::now();
-    let status = loop {
-        let status = mcp(&exe, &sock, &tab, json!({ "name": "task_status", "arguments": { "taskId": id } }));
-        if status["workState"] != "working" {
-            break status;
+    loop {
+        let status = mcp(exe, sock, tab, json!({ "name": "task_status", "arguments": { "taskId": id } }));
+        if done(&status) {
+            return status;
         }
-        assert!(begun.elapsed() < Duration::from_secs(180), "the task never finished: {status}");
-        std::thread::sleep(Duration::from_secs(2));
-    };
-    eprintln!("LIVE claude background shell: {status} after {:?}", begun.elapsed());
-    assert_eq!(status["workState"], "result_available", "{status}");
-    assert!(status["summary"].as_str().unwrap_or("").contains("PINEAPPLE"), "{status}");
-    assert!(ran.is_file(), "the child never started its background shell");
-    std::thread::sleep(Duration::from_secs(1));
-    let left = pinned_core::process::command("pgrep").args(["-fl", &marker]).output().unwrap();
-    let left = String::from_utf8_lossy(&left.stdout).into_owned();
-    assert!(left.trim().is_empty(), "the background shell kept running: {left}");
-    let conversation = status["conversationId"].as_str().unwrap_or("");
-    let home = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap()).join(".claude"));
-    let transcript = std::fs::read_dir(home.join("projects"))
-        .unwrap()
-        .filter_map(Result::ok)
-        .map(|project| project.path().join(format!("{conversation}.jsonl")))
-        .find(|path| path.is_file())
-        .expect("the stopped child left no transcript");
-    let text = std::fs::read_to_string(&transcript).unwrap();
-    assert!(text.contains("PINEAPPLE"), "the transcript lost the reply: {}", transcript.display());
-    eprintln!("LIVE transcript kept the reply: {}", transcript.display());
-    machine.quit();
-    let _ = std::fs::remove_dir_all(&dir);
+        assert!(begun.elapsed() < Duration::from_secs(180), "gave up waiting: {status}");
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn pgrep(marker: &str) -> String {
+    let found = pinned_core::process::command("pgrep").args(["-fl", marker]).output().unwrap();
+    String::from_utf8_lossy(&found.stdout).trim().to_owned()
 }
 
 fn server_bin() -> std::path::PathBuf {

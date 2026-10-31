@@ -24,6 +24,8 @@ struct Report {
     text: String,
     #[serde(default)]
     claimed: bool,
+    #[serde(default)]
+    task: Option<String>,
 }
 
 impl Default for Delegates {
@@ -113,43 +115,71 @@ impl Delegates {
         self.persist();
     }
 
-    pub fn set_budget(&self, id: &str, ms: u64) {
+    pub fn set_limits(&self, id: &str, budget_ms: u64, limit_ms: u64) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
-            task.budget_ms = ms;
+            task.run.budget_ms = budget_ms;
+            task.run.limit_ms = limit_ms;
         }
     }
 
-    pub fn enforce_budgets(&self, now: u64, path: Option<&str>) {
-        let (late, over) = {
+    pub fn enforce_limits(&self, now: Instant, path: Option<&str>) {
+        let (late, over, quiet) = {
             let mut tasks = self.tasks.lock().unwrap();
             let mut late = vec![];
             let mut over = vec![];
+            let mut quiet = vec![];
             for task in tasks.iter_mut().filter(|task| !task.state.terminal()) {
-                let ran = now.saturating_sub(task.started);
-                let limit = task.budget_ms.saturating_mul(HARD_LIMIT_BUDGETS);
-                if ran >= limit {
-                    over.push((task.id.clone(), format!("pinned stopped it after {}, past its limit of {} ({HARD_LIMIT_BUDGETS} times its budget)", span(ran), span(limit))));
-                } else if ran >= task.budget_ms && !task.told_over_budget {
-                    task.told_over_budget = true;
+                let ran = millis(now.saturating_duration_since(task.run.begun));
+                if ran >= task.run.limit_ms {
+                    over.push((task.id.clone(), format!("pinned stopped it after {}, its limit", span(ran))));
+                } else if task.quiet_after_reply(now) {
+                    quiet.push(task.id.clone());
+                } else if ran >= task.run.budget_ms && !task.run.told_late {
+                    task.run.told_late = true;
                     if let Parent::Tab(tab) = &task.parent {
-                        late.push((tab.clone(), task.parent_session.clone(), late_line(task, ran)));
+                        late.push(Report { tab: tab.clone(), session: task.parent_session.clone(), text: late_line(task, ran), claimed: false, task: Some(task.id.clone()) });
                     }
                 }
             }
-            (late, over)
+            (late, over, quiet)
         };
-        for (tab, session, line) in late {
-            self.queue_report(&tab, session, line);
+        for report in late {
+            self.push_report(report);
         }
         for (id, reason) in &over {
             self.stop_tree(id, reason, path);
         }
-        if !over.is_empty() {
+        for id in &quiet {
+            self.end_quiet(id, path);
+        }
+        if !over.is_empty() || !quiet.is_empty() {
             self.persist();
         }
     }
 
-    /// Moves the wall-clock start back by `by`, as a laptop sleep of that length does.
+    fn end_quiet(&self, id: &str, path: Option<&str>) {
+        let (pid, dirs) = {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(index) = tasks.iter().position(|task| task.id == id && task.state == WorkState::Working) else { return };
+            let task = &mut tasks[index];
+            let left: Vec<&str> = task.run.background.iter().map(|work| work.description.as_str()).collect();
+            let mut note = format!("pinned ended it after {} with no activity", span(QUIET_AFTER_REPLY_MS));
+            if !left.is_empty() {
+                note.push_str(&format!(" and stopped the shells it left running: {}", left.join("; ")));
+            }
+            task.ended_by = Some(note);
+            let held = HeldExit { summary: task.summary.clone(), error: None, failed: false };
+            let dirs = close(&mut tasks, index, held);
+            (self.pids.lock().unwrap().remove(id), dirs)
+        };
+        if let Some(pid) = pid {
+            kill_tree(pid);
+        }
+        for dir in dirs {
+            crate::branches::drop_worktree(&dir, path);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn backdate(&self, id: &str, by: Duration) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
@@ -225,16 +255,16 @@ impl Delegates {
 
     /// Applies one child event. Returns the parent tab when a task just became deliverable.
     pub fn apply(&self, id: &str, event: ChildEvent, path: Option<&str>) -> Option<String> {
-        let (ready, dirs, stop) = {
+        let (ready, dirs, stop, pending) = {
             let mut tasks = self.tasks.lock().unwrap();
             let index = tasks.iter().position(|task| task.id == id)?;
             let (held, reaped) = match event {
                 ChildEvent::Line(line) => {
-                    let provider = tasks[index].provider;
-                    let events = (driver(provider).parse)(&line);
+                    let task = &mut tasks[index];
+                    task.run.last_line = Instant::now();
                     let mut held = None;
-                    for event in events {
-                        if let Some(next) = tasks[index].note(event) {
+                    for event in (driver(task.provider).parse)(&line) {
+                        if let Some(next) = task.note(event) {
                             held = Some(next);
                         }
                     }
@@ -243,27 +273,27 @@ impl Delegates {
                 ChildEvent::Exited { code, stderr } => (tasks[index].exited(code, stderr), true),
             };
             let stop = if reaped || held.is_some() { self.pids.lock().unwrap().remove(id) } else { None };
-            if let Some(held) = held {
-                settle(&mut tasks, index, held);
-            }
-            let mut dirs = release(&mut tasks);
-            if let Some(dir) = isolated_cwd(&tasks[index]) {
-                if !dirs.contains(&dir) {
-                    dirs.push(dir);
-                }
-            }
+            let dirs = match held {
+                Some(held) => close(&mut tasks, index, held),
+                None => close_released(&mut tasks, index),
+            };
+            let pending = pending_report(&mut tasks[index]);
             let id = tasks[index].id.clone();
             let ready = chain_ready(&tasks, &id).then(|| root_tab(&tasks, tasks[index].parent.clone())).flatten();
-            (ready, dirs, stop.map(|pid| (pid, reaped)))
+            (ready, dirs, stop.map(|pid| (pid, reaped)), pending)
         };
         match stop {
-            // A reaped pid can already name another process. Its group cannot, while a member lives.
-            Some((pid, true)) => kill(pid),
             Some((pid, false)) => kill_tree(pid),
-            None => {}
+            // A reaped pid can already name another process. On Unix its group cannot, while a member lives.
+            #[cfg(unix)]
+            Some((pid, true)) => kill(pid),
+            _ => {}
         }
         for dir in dirs {
             crate::branches::drop_worktree(&dir, path);
+        }
+        if let Some(report) = pending {
+            self.push_report(report);
         }
         self.persist();
         ready
@@ -401,6 +431,7 @@ impl Delegates {
     /// The caller puts the ids back with `release_notice` when the bytes were not written.
     pub fn claim_notice(&self, tab: &str) -> Option<(String, Vec<String>)> {
         let mut tasks = self.tasks.lock().unwrap();
+        self.reports.lock().unwrap().retain(|report| report.claimed || !stale(report, &tasks));
         let ready: Vec<usize> = tasks
             .iter()
             .enumerate()
@@ -468,7 +499,12 @@ impl Delegates {
     }
 
     pub fn queue_report(&self, tab: &str, session: Option<String>, text: String) {
-        self.reports.lock().unwrap().push(Report { tab: tab.to_owned(), session: session.filter(|session| !session.is_empty()), text, claimed: false });
+        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, task: None });
+    }
+
+    fn push_report(&self, report: Report) {
+        let session = report.session.filter(|session| !session.is_empty());
+        self.reports.lock().unwrap().push(Report { session, ..report });
         self.persist();
     }
 
@@ -525,9 +561,10 @@ impl Delegates {
     }
 
     pub fn has_pending(&self) -> bool {
-        let tasks = self.tasks.lock().unwrap().iter().any(|task| !task.delivered && task.state.terminal() && matches!(task.parent, Parent::Tab(_)));
-        let reports = self.reports.lock().unwrap().iter().any(|report| !report.claimed);
-        tasks || reports
+        let tasks = self.tasks.lock().unwrap();
+        let finished = tasks.iter().any(|task| !task.delivered && task.state.terminal() && matches!(task.parent, Parent::Tab(_)));
+        let reports = self.reports.lock().unwrap().iter().any(|report| !report.claimed && !stale(report, &tasks));
+        finished || reports
     }
 
     fn adopt_restart(&self) -> bool {
@@ -758,6 +795,14 @@ impl Task {
                 self.conversation = Some(id);
                 None
             }
+            StreamEvent::TurnStart => {
+                self.run.open_turns += 1;
+                None
+            }
+            StreamEvent::Background(pending) => {
+                self.run.background = pending;
+                None
+            }
             StreamEvent::Step(item) => {
                 if let Item::Text { text, .. } = &item {
                     if !text.is_empty() {
@@ -767,12 +812,25 @@ impl Task {
                 push_step(&mut self.steps, item);
                 None
             }
-            StreamEvent::Final { text, error } => Some(HeldExit {
-                failed: error.is_some(),
-                summary: Some(text).filter(|text| !text.is_empty()).or_else(|| self.assistant.clone()),
-                error,
-            }),
+            StreamEvent::TurnEnd { text, error } => {
+                let reply = Some(text).filter(|text| !text.is_empty()).or_else(|| self.assistant.clone());
+                if reply.is_some() {
+                    self.summary = reply.clone();
+                }
+                self.run.open_turns = self.run.open_turns.saturating_sub(1);
+                if self.run.open_turns > 0 || !self.run.background.is_empty() {
+                    return None;
+                }
+                Some(HeldExit { failed: error.is_some(), summary: reply, error })
+            }
         }
+    }
+
+    fn quiet_after_reply(&self, now: Instant) -> bool {
+        self.state == WorkState::Working
+            && self.summary.is_some()
+            && self.run.background.iter().all(|work| work.kind == SHELL_TASK)
+            && millis(now.saturating_duration_since(self.run.last_line)) >= QUIET_AFTER_REPLY_MS
     }
 
     fn exited(&mut self, code: Option<i32>, stderr: String) -> Option<HeldExit> {
@@ -831,17 +889,27 @@ fn status_json(task: &Task) -> Value {
         "error": task.error,
         "recentSteps": task.steps,
         "elapsedSecs": end.saturating_sub(task.started) / 1000,
-        "budgetSecs": task.budget_ms / 1000,
+        "budgetSecs": task.run.budget_ms / 1000,
+        "limitSecs": task.run.limit_ms / 1000,
+        "background": task.run.background.iter().map(|work| work.description.as_str()).collect::<Vec<_>>(),
+        "endedBy": task.ended_by,
         "conversationId": task.conversation,
         "cwd": task.cwd.display().to_string(),
     });
     body["next"] = if task.state.terminal() {
         json!(result_next(task))
-    } else if task.told_over_budget {
+    } else if task.summary.is_some() && !task.run.background.is_empty() {
         json!(format!(
-            "it is past its budget of {}, and pinned cancels it after {}; if recentSteps show it is done or stuck, call task_cancel with taskId \"{}\"; otherwise {}",
-            span(task.budget_ms),
-            span(task.budget_ms.saturating_mul(HARD_LIMIT_BUDGETS)),
+            "it replied, and summary holds the reply so far; it still runs the work listed in background; pinned ends it when that work finishes and it replies again, or, when only shells are left, after {} with no activity; to stop it now, call task_cancel with taskId \"{}\"; otherwise {}",
+            span(QUIET_AFTER_REPLY_MS),
+            task.id,
+            working_next(task)
+        ))
+    } else if task.run.told_late {
+        json!(format!(
+            "it is past its budget of {}, and pinned cancels it at its limit of {}; if recentSteps show it is done or stuck, call task_cancel with taskId \"{}\"; otherwise {}",
+            span(task.run.budget_ms),
+            span(task.run.limit_ms),
             task.id,
             working_next(task)
         ))
@@ -862,16 +930,50 @@ fn late_line(task: &Task, ran: u64) -> String {
     let steps: Vec<String> = task.steps.iter().filter_map(step_line).collect();
     let recent = steps[steps.len().saturating_sub(3)..].join(" | ");
     format!(
-        "[pinned] Delegated task {} \"{}\" ({}) is still working after {}, past its budget of {}. Last steps: {}. pinned cancels it after {}. Call task_status with taskId \"{}\" to read it, or task_cancel to stop it.",
+        "[pinned] Delegated task {} \"{}\" ({}) is still working after {}, past its budget of {}. Last steps: {}. pinned cancels it at its limit of {}. Call task_status with taskId \"{}\" to read it, or task_cancel to stop it.",
         task.id,
         task.title,
         who(task),
         span(ran),
-        span(task.budget_ms),
+        span(task.run.budget_ms),
         if recent.is_empty() { "none" } else { &recent },
-        span(task.budget_ms.saturating_mul(HARD_LIMIT_BUDGETS)),
+        span(task.run.limit_ms),
         task.id
     )
+}
+
+fn pending_report(task: &mut Task) -> Option<Report> {
+    if task.state != WorkState::Working || task.summary.is_none() || task.run.background.is_empty() || task.run.told_pending {
+        return None;
+    }
+    task.run.told_pending = true;
+    let Parent::Tab(tab) = &task.parent else { return None };
+    let left: Vec<&str> = task.run.background.iter().map(|work| work.description.as_str()).collect();
+    let count = match left.len() {
+        1 => "1 background task".to_owned(),
+        n => format!("{n} background tasks"),
+    };
+    let text = format!(
+        "[pinned] Delegated task {} \"{}\" ({}) replied, and it still runs {count}: {}. Its reply: {}. pinned ends the task when that work finishes and the agent replies again, or, when only shells are left, after {} with no activity, and then stops what is still running. Call task_cancel with taskId \"{}\" to stop it now.",
+        task.id,
+        task.title,
+        who(task),
+        left.join("; "),
+        thread::clip(task.summary.as_deref().unwrap_or(""), 300),
+        span(QUIET_AFTER_REPLY_MS),
+        task.id
+    );
+    Some(Report { tab: tab.clone(), session: task.parent_session.clone(), text, claimed: false, task: Some(task.id.clone()) })
+}
+
+const SHELL_TASK: &str = "local_bash";
+
+fn stale(report: &Report, tasks: &[Task]) -> bool {
+    report.task.as_ref().is_some_and(|id| tasks.iter().any(|task| &task.id == id && task.state.terminal()))
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn step_line(item: &Item) -> Option<String> {
@@ -902,7 +1004,8 @@ fn notice_line(task: &Task) -> String {
         WorkState::Cancelled => format!("cancelled: {}", task.error.as_deref().unwrap_or("cancelled")),
         _ => "result available".into(),
     };
-    format!("[pinned] Delegated task {} \"{}\" ({who}) finished: {outcome}. Call task_status with taskId \"{}\".", task.id, task.title, task.id)
+    let note = task.ended_by.as_deref().map(|how| format!(" {how}.")).unwrap_or_default();
+    format!("[pinned] Delegated task {} \"{}\" ({who}) finished: {outcome}.{note} Call task_status with taskId \"{}\".", task.id, task.title, task.id)
 }
 
 fn card_state(state: WorkState) -> subagents::State {
@@ -1008,8 +1111,8 @@ fn fresh(new: NewTask) -> Task {
         role: new.role,
         held: None,
         parent_session: None,
-        budget_ms: DEFAULT_BUDGET_MS,
-        told_over_budget: false,
+        ended_by: None,
+        run: Run::default(),
     }
 }
 
@@ -1122,8 +1225,8 @@ impl SavedTask {
             role: self.role,
             held: None,
             parent_session: self.parent_session,
-            budget_ms: DEFAULT_BUDGET_MS,
-            told_over_budget: false,
+            ended_by: None,
+            run: Run::default(),
         }
     }
 }
@@ -1144,6 +1247,21 @@ fn state_from(state: &str) -> WorkState {
         "cancelled" => WorkState::Cancelled,
         _ => WorkState::ResultAvailable,
     }
+}
+
+fn close(tasks: &mut [Task], index: usize, held: HeldExit) -> Vec<PathBuf> {
+    settle(tasks, index, held);
+    close_released(tasks, index)
+}
+
+fn close_released(tasks: &mut [Task], index: usize) -> Vec<PathBuf> {
+    let mut dirs = release(tasks);
+    if let Some(dir) = isolated_cwd(&tasks[index]) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
 }
 
 fn settle(tasks: &mut [Task], index: usize, held: HeldExit) {
@@ -1266,7 +1384,7 @@ fn isolated_cwd(task: &Task) -> Option<PathBuf> {
     (task.isolated && task.conversation.is_none() && task.state.terminal()).then(|| task.cwd.clone())
 }
 
-pub fn unix_millis() -> u64 {
+fn unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))

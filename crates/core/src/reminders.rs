@@ -235,7 +235,7 @@ fn delegation_tools() -> Vec<Value> {
         }),
         json!({
             "name": DELEGATE_TOOL,
-            "description": "Run a child agent on a signed-in account. The child receives only task, with no parent history. mode \"async\" (the default) returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. mode \"wait\" blocks until the child finishes and returns the task_status body, including summary and error. A wait that times out does not cancel the child.",
+            "description": "Run a child agent on a signed-in account. The child receives only task, with no parent history. mode \"async\" (the default) returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. mode \"wait\" blocks until the child finishes and returns the task_status body, including summary and error. A wait that times out does not cancel the child. A reply while the child still runs background work is not its answer: the task keeps working, and this session gets one notice with the reply so far. When the task ends, pinned stops every process the child started, including a server the task asked it to leave running, so start a long-lived server yourself.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -276,7 +276,8 @@ fn delegation_tools() -> Vec<Value> {
                     "isolation": { "type": "string", "enum": ["shared", "worktree"], "description": "shared runs in this checkout. worktree makes a separate checkout and runs the child there." },
                     "mode": { "type": "string", "enum": ["async", "wait"], "default": "async", "description": "async returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. wait blocks until the result is in this call." },
                     "timeoutMs": { "type": "number", "description": "How long wait blocks, in milliseconds. The child keeps running after a timeout." },
-                    "budgetMs": { "type": "number", "description": "How long the child may work, in milliseconds. The default is 3600000, one hour. Past it, pinned tells this session the elapsed time and the child's last steps. At four times it, pinned cancels the child." },
+                    "budgetMs": { "type": "number", "description": "How long the child may work before pinned tells this session the elapsed time and the child's last steps, in milliseconds. The default is 7200000, two hours. It must be below limitMs. Time counts only while the machine is awake." },
+                    "limitMs": { "type": "number", "description": "When pinned cancels the child, in milliseconds. The default is 28800000, eight hours, whatever budgetMs is. Time counts only while the machine is awake." },
                     "interactionMode": { "type": "string", "enum": ["inherit", "default", "plan"], "description": "plan is read-only. inherit and default leave this session's mode as it is." },
                     "runtimeMode": { "type": "string", "enum": ["inherit", "full-access", "auto"], "description": "How wide the child may act. inherit, or omitting it, keeps this session's mode. Anything wider than this session is rejected. A bypassed session can hand the child auto." },
                     "role": { "type": "string", "description": "A label for the child, such as explore. The child does not see it." },
@@ -673,6 +674,7 @@ mod tests {
                 "clientRequestId".into(),
                 "interactionMode".into(),
                 "isolation".into(),
+                "limitMs".into(),
                 "mode".into(),
                 "role".into(),
                 "runtimeMode".into(),

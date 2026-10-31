@@ -17,8 +17,9 @@ use std::time::{Duration, Instant, SystemTime};
 const STEP_KEEP: usize = 8;
 const STEP_CHARS: usize = 400;
 pub const DEFAULT_TIMEOUT_MS: u64 = 10 * 60 * 1000;
-pub const DEFAULT_BUDGET_MS: u64 = 60 * 60 * 1000;
-const HARD_LIMIT_BUDGETS: u64 = 4;
+pub const DEFAULT_BUDGET_MS: u64 = 2 * 60 * 60 * 1000;
+pub const DEFAULT_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
+const QUIET_AFTER_REPLY_MS: u64 = 30 * 60 * 1000;
 const MODEL_CACHE: Duration = Duration::from_secs(10 * 60);
 const MODEL_MISS: Duration = Duration::from_secs(15);
 const CATALOG_WAIT: Duration = Duration::from_secs(2);
@@ -178,6 +179,8 @@ pub struct Request {
     pub timeout_ms: u64,
     #[serde(default = "default_budget")]
     pub budget_ms: u64,
+    #[serde(default = "default_limit")]
+    pub limit_ms: u64,
     #[serde(default)]
     pub interaction: Interaction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,6 +219,10 @@ impl WorkState {
 
 fn default_budget() -> u64 {
     DEFAULT_BUDGET_MS
+}
+
+fn default_limit() -> u64 {
+    DEFAULT_LIMIT_MS
 }
 
 /// Who is calling. A tab session sends `PINNED_TAB`. A child sends `PINNED_TASK`.
@@ -282,8 +289,41 @@ pub struct Task {
     pub role: Option<String>,
     pub held: Option<HeldExit>,
     pub parent_session: Option<String>,
+    pub ended_by: Option<String>,
+    pub run: Run,
+}
+
+#[derive(Clone, Debug)]
+pub struct Run {
+    pub begun: Instant,
+    pub last_line: Instant,
     pub budget_ms: u64,
-    pub told_over_budget: bool,
+    pub limit_ms: u64,
+    pub told_late: bool,
+    pub told_pending: bool,
+    pub open_turns: u32,
+    pub background: Vec<Background>,
+}
+
+impl Default for Run {
+    fn default() -> Self {
+        Self {
+            begun: Instant::now(),
+            last_line: Instant::now(),
+            budget_ms: DEFAULT_BUDGET_MS,
+            limit_ms: DEFAULT_LIMIT_MS,
+            told_late: false,
+            told_pending: false,
+            open_turns: 0,
+            background: vec![],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Background {
+    pub kind: String,
+    pub description: String,
 }
 
 #[derive(Clone, Debug)]
@@ -306,8 +346,11 @@ pub enum ChildEvent {
 #[derive(Debug)]
 pub enum StreamEvent {
     Conversation(String),
+    /// Claude writes `system/init` at the start of every turn, including one that answers a background notification.
+    TurnStart,
     Step(Item),
-    Final { text: String, error: Option<String> },
+    Background(Vec<Background>),
+    TurnEnd { text: String, error: Option<String> },
 }
 
 /// Headless argv for one provider. The binary is not included.
@@ -537,6 +580,7 @@ mod tests {
             "mode": "wait",
             "timeoutMs": 5000,
             "budgetMs": 90000,
+            "limitMs": 600000,
             "interactionMode": "plan"
         });
         assert_eq!(
@@ -554,6 +598,7 @@ mod tests {
                 mode: Mode::Wait,
                 timeout_ms: 5000,
                 budget_ms: 90_000,
+                limit_ms: 600_000,
                 interaction: Interaction::Plan,
                 runtime: None,
                 role: None,
@@ -598,7 +643,8 @@ mod tests {
                 isolation: Isolation::Shared,
                 mode: Mode::Async,
                 timeout_ms: DEFAULT_TIMEOUT_MS,
-                budget_ms: DEFAULT_BUDGET_MS,
+                budget_ms: 7_200_000,
+                limit_ms: 28_800_000,
                 interaction: Interaction::Inherit,
                 runtime: None,
                 role: None,
@@ -609,6 +655,12 @@ mod tests {
             parse_request(&json!({"task": "x", "budgetMs": 0})).unwrap_err(),
             "budgetMs must be a number of milliseconds above 0"
         );
+        assert_eq!(
+            parse_request(&json!({"task": "x", "budgetMs": 36_000_000})).unwrap_err(),
+            "budgetMs must be below limitMs, which is 28800000 ms; pass a larger limitMs"
+        );
+        let long = parse_request(&json!({"task": "x", "budgetMs": 36_000_000, "limitMs": 72_000_000})).unwrap();
+        assert_eq!((long.budget_ms, long.limit_ms), (36_000_000, 72_000_000));
         assert_eq!(parse_request(&json!({})).unwrap_err(), "task is required");
         assert_eq!(
             parse_request(&json!({"task": "x", "mode": "soon"})).unwrap_err(),
@@ -814,7 +866,7 @@ grok-4.7-high - Grok 4.7  High
             r#"{"type":"turn.failed","error":{"message":"rate limit"}}"#,
         );
         match failed.as_slice() {
-            [StreamEvent::Final { text, error }] => {
+            [StreamEvent::TurnEnd { text, error }] => {
                 assert_eq!((text.as_str(), error.as_deref()), ("", Some("rate limit")))
             }
             other => panic!("expected a failure, got {other:?}"),
@@ -1022,6 +1074,34 @@ grok-4.7-high - Grok 4.7  High
         );
     }
 
+    #[test]
+    fn a_quiet_reply_waiting_on_a_subagent_is_left_to_the_budget() {
+        let delegates = Delegates::default();
+        let task = new_on(&delegates, Provider::Claude);
+        let recording = fixture("claude-background-agent.jsonl");
+        let lines = [r#""subtype":"init""#, r#""subtype":"background_tasks_changed""#, r#""type":"result""#]
+            .map(|marker| recording.lines().find(|line| line.contains(marker)).unwrap().to_owned());
+        for line in lines {
+            delegates.apply(&task.id, ChildEvent::Line(line), None);
+        }
+        later(&delegates, Duration::from_secs(31 * 60));
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        assert_eq!((status["workState"].as_str(), status["background"][0].as_str()), (Some("working"), Some("Run sleep 15 and reply")), "{status}");
+    }
+
+    #[test]
+    fn a_reply_with_background_work_pending_is_reported_once() {
+        let delegates = Delegates::default();
+        let task = new_on(&delegates, Provider::Claude);
+        let recording = fixture("claude-background-shell.jsonl");
+        let first: Vec<&str> = recording.lines().take_while(|line| !line.contains("task_updated")).collect();
+        for line in first.iter().chain(first.last()) {
+            delegates.apply(&task.id, ChildEvent::Line((*line).to_owned()), None);
+        }
+        let notice = delegates.claim_notice("tab-1").map(|(text, _)| text).unwrap_or_default();
+        assert_eq!(notice.matches("still runs 1 background task").count(), 1, "{notice}");
+    }
+
     #[cfg(unix)]
     fn alive(pid: i32) -> bool {
         let out = crate::process::command("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
@@ -1029,7 +1109,9 @@ grok-4.7-high - Grok 4.7  High
         !stat.is_empty() && !stat.starts_with('Z')
     }
 
-    /// Plays the recorded shell run up to its first result, then holds there with a live background shell.
+    #[cfg(unix)]
+    const LATE_FIRST_LINE: Duration = Duration::from_millis(1500);
+
     #[cfg(unix)]
     fn pending_shell_worker(dir: &Path, leftover: &Leftover) -> PathBuf {
         let recording = fixture("claude-background-shell.jsonl");
@@ -1037,9 +1119,10 @@ grok-4.7-high - Grok 4.7  High
         std::fs::write(dir.join("first.jsonl"), &recording[..split]).unwrap();
         std::fs::write(dir.join("rest.jsonl"), &recording[split..]).unwrap();
         let body = format!(
-            "perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV' sh -c 'echo $$ > \"$0\"; while :; do sleep 1; done' '{}' &\nwhile [ ! -s '{}' ]; do sleep 0.05; done\ncat first.jsonl\nwhile [ ! -e go ]; do sleep 0.05; done\ncat rest.jsonl\nsleep 30",
+            "perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV' sh -c 'echo $$ > \"$0\"; while :; do sleep 1; done' '{}' &\nwhile [ ! -s '{}' ]; do sleep 0.05; done\nsleep {}\ncat first.jsonl\nwhile [ ! -e go ]; do sleep 0.05; done\ncat rest.jsonl\nsleep 30",
             leftover.0.display(),
             leftover.0.display(),
+            LATE_FIRST_LINE.as_secs_f64(),
         );
         script(dir, "claude", &body)
     }
@@ -1054,8 +1137,7 @@ grok-4.7-high - Grok 4.7  High
     }
 
     fn later(delegates: &Delegates, by: Duration) {
-        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
-        delegates.enforce_budgets(now + by.as_millis() as u64, None);
+        delegates.enforce_limits(Instant::now() + by, None);
     }
 
     #[test]
@@ -1072,6 +1154,8 @@ grok-4.7-high - Grok 4.7  High
         std::thread::sleep(Duration::from_millis(300));
         let status = delegates.status(&parent(), &task.id).unwrap();
         assert_eq!(status["workState"], "working", "{status}");
+        assert_eq!(status["background"], json!(["Run sleep 20 then echo bgdone in background"]), "{status}");
+        assert!(status["next"].as_str().unwrap_or("").contains("still runs the work listed in background"), "{status}");
         assert!(alive(shell), "pinned stopped the pending background shell {shell}");
         assert!(alive(agent as i32), "pinned stopped the agent while its shell was pending");
         let notice = delegates.claim_notice("tab-1").map(|(text, _)| text).unwrap_or_default();
@@ -1098,13 +1182,11 @@ grok-4.7-high - Grok 4.7  High
         let shell = leftover.pid();
         wait_for_summary(&delegates, &task.id, INTERIM);
 
-        later(&delegates, Duration::from_secs(29 * 60));
-        assert_eq!(delegates.status(&parent(), &task.id).unwrap()["workState"], "working");
+        later(&delegates, Duration::from_millis(QUIET_AFTER_REPLY_MS) - LATE_FIRST_LINE / 2);
+        assert_eq!(delegates.status(&parent(), &task.id).unwrap()["workState"], "working", "the quiet clock started before the last line");
         assert!(alive(shell), "pinned stopped the shell before the task was quiet for 30 min");
-        later(&delegates, Duration::from_secs(30 * 60));
+        later(&delegates, Duration::from_millis(QUIET_AFTER_REPLY_MS));
         assert_eq!(told.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("tab-1"));
-        let status = delegates.status(&parent(), &task.id).unwrap();
-        assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some(INTERIM)), "{status}");
         let notice = delegates.claim_notice("tab-1").map(|(text, _)| text).unwrap_or_default();
         assert!(
             notice.contains("finished: result available")
@@ -1113,6 +1195,9 @@ grok-4.7-high - Grok 4.7  High
                 && !notice.contains("still runs"),
             "{notice}"
         );
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some(INTERIM)), "{status}");
+        assert!(status["endedBy"].as_str().unwrap_or("").contains("after 30 min with no activity"), "{status}");
         assert!(stopped(shell), "the shell {shell} outlived the quiet task");
         assert!(stopped(agent as i32), "the agent {agent} outlived the quiet task");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1126,7 +1211,7 @@ grok-4.7-high - Grok 4.7  High
         let bin = script(&dir, "cursor-agent", &detached_loop_worker(&[INIT, REPLY], &leftover.0));
         let delegates = Arc::new(Delegates::default());
         let task = new_on(&delegates, Provider::Cursor);
-        delegates.set_budget(&task.id, 60_000);
+        delegates.set_limits(&task.id, 60_000, 240_000);
         let (agent, _) = run(&delegates, &task, &bin, &dir);
         let background = leftover.pid();
         let start = Instant::now();
@@ -1134,26 +1219,25 @@ grok-4.7-high - Grok 4.7  High
             assert!(start.elapsed() < Duration::from_secs(5), "the reply never arrived");
             std::thread::sleep(Duration::from_millis(20));
         }
-        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
         let notice = |delegates: &Delegates| delegates.claim_notice("tab-1").map(|(text, _)| text);
 
-        delegates.enforce_budgets(now + 30_000, None);
+        later(&delegates, Duration::from_secs(30));
         assert_eq!(notice(&delegates), None, "a task inside its budget was reported");
-        delegates.enforce_budgets(now + 60_000, None);
+        later(&delegates, Duration::from_secs(60));
         let late = notice(&delegates).unwrap_or_default();
-        assert!(late.contains(&task.id) && late.contains("still working after 1 min") && late.contains("PR opened"), "{late}");
+        assert!(late.contains(&task.id) && late.contains("still working after 1 min") && late.contains("PR opened") && late.contains("at its limit of 4 min"), "{late}");
         let status = delegates.status(&parent(), &task.id).unwrap();
         assert_eq!(status["workState"], "working");
         assert!(status["next"].as_str().unwrap_or("").contains("past its budget of 1 min"), "{status}");
-        delegates.enforce_budgets(now + 120_000, None);
+        later(&delegates, Duration::from_secs(120));
         assert_eq!(notice(&delegates), None, "the budget notice was sent twice");
 
-        delegates.enforce_budgets(now + 240_000, None);
+        later(&delegates, Duration::from_secs(240));
         let finished = notice(&delegates).unwrap_or_default();
         assert!(finished.contains("finished: cancelled"), "{finished}");
         let status = delegates.status(&parent(), &task.id).unwrap();
         assert_eq!(status["workState"], "cancelled", "{status}");
-        assert!(status["error"].as_str().unwrap_or("").contains("past its limit of 4 min"), "{status}");
+        assert!(status["error"].as_str().unwrap_or("").contains("after 4 min, its limit"), "{status}");
         assert!(stopped(background), "the background loop {background} kept running");
         assert!(stopped(agent as i32), "the agent {agent} kept running");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1687,7 +1771,7 @@ exec '{real}' "$@"
         delegates.apply(&parent.id, ChildEvent::Line(json!({"type":"result","result":"PARENT"}).to_string()), None);
         let waiting = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &parent.id).unwrap();
         assert_eq!(waiting["workState"], "waiting_for_children");
-        assert_eq!(waiting["summary"], Value::Null);
+        assert_eq!(waiting["summary"], "PARENT", "the reply so far shows before the task ends");
         delegates.apply(&child.id, ChildEvent::Line(json!({"type":"result","result":"CHILD"}).to_string()), None);
         let done = delegates.status(&Caller { tab: Some("tab-1".into()), task: None }, &parent.id).unwrap();
         assert_eq!(done["workState"], "result_available");

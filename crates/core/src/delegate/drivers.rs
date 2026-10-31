@@ -297,11 +297,24 @@ fn parse_claude(line: &str) -> Vec<StreamEvent> {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return vec![];
     };
-    if let Some(event) = conversation_or_final(&value) {
-        return vec![event];
+    let edges = turn_edges(&value);
+    if !edges.is_empty() {
+        return edges;
     }
     if value["type"] == "system" {
-        return vec![];
+        if value["subtype"] != "background_tasks_changed" {
+            return vec![];
+        }
+        let pending = value["tasks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|task| Background {
+                kind: task["task_type"].as_str().unwrap_or("").to_owned(),
+                description: task["description"].as_str().unwrap_or("").to_owned(),
+            })
+            .collect();
+        return vec![StreamEvent::Background(pending)];
     }
     thread::items_of(&value)
         .into_iter()
@@ -313,8 +326,9 @@ fn parse_cursor(line: &str) -> Vec<StreamEvent> {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return vec![];
     };
-    if let Some(event) = conversation_or_final(&value) {
-        return vec![event];
+    let edges = turn_edges(&value);
+    if !edges.is_empty() {
+        return edges;
     }
     match value["type"].as_str() {
         Some("thinking") if value["subtype"] == "delta" => {
@@ -415,7 +429,7 @@ fn parse_codex(line: &str) -> Vec<StreamEvent> {
             .unwrap_or_default(),
         Some("item.started") => codex_item(&value["item"], false),
         Some("item.completed") => codex_item(&value["item"], true),
-        Some("turn.completed") => vec![StreamEvent::Final {
+        Some("turn.completed") => vec![StreamEvent::TurnEnd {
             text: String::new(),
             error: None,
         }],
@@ -424,14 +438,14 @@ fn parse_codex(line: &str) -> Vec<StreamEvent> {
                 .as_str()
                 .or(value["error"].as_str())
                 .unwrap_or("the agent failed");
-            vec![StreamEvent::Final {
+            vec![StreamEvent::TurnEnd {
                 text: String::new(),
                 error: Some(message.to_owned()),
             }]
         }
         Some("error") => {
             let message = value["message"].as_str().unwrap_or("the agent failed");
-            vec![StreamEvent::Final {
+            vec![StreamEvent::TurnEnd {
                 text: String::new(),
                 error: Some(message.to_owned()),
             }]
@@ -510,7 +524,7 @@ fn text_step(id: &str, text: &str, thinking: bool) -> Vec<StreamEvent> {
     vec![StreamEvent::Step(item)]
 }
 
-fn conversation_or_final(value: &Value) -> Option<StreamEvent> {
+fn turn_edges(value: &Value) -> Vec<StreamEvent> {
     if value["type"] == "result" {
         let text = value["result"].as_str().unwrap_or("").to_owned();
         let error = (value["is_error"].as_bool() == Some(true)).then(|| {
@@ -520,14 +534,13 @@ fn conversation_or_final(value: &Value) -> Option<StreamEvent> {
                 text.clone()
             }
         });
-        return Some(StreamEvent::Final { text, error });
+        return vec![StreamEvent::TurnEnd { text, error }];
     }
     if value["type"] == "system" && value["subtype"] == "init" {
-        return value["session_id"]
-            .as_str()
-            .map(|id| StreamEvent::Conversation(id.to_owned()));
+        let conversation = value["session_id"].as_str().map(|id| StreamEvent::Conversation(id.to_owned()));
+        return conversation.into_iter().chain([StreamEvent::TurnStart]).collect();
     }
-    None
+    vec![]
 }
 
 #[cfg(test)]
@@ -560,13 +573,14 @@ pub(crate) fn replay(provider: Provider, lines: &str) -> Outcome {
                     }
                     push_step(&mut outcome.steps, item);
                 }
-                StreamEvent::Final { text, error } => {
+                StreamEvent::TurnEnd { text, error } => {
                     if !text.is_empty() {
                         outcome.text = Some(text);
                     }
                     outcome.error = error;
                     outcome.done = true;
                 }
+                StreamEvent::TurnStart | StreamEvent::Background(_) => {}
             }
         }
     }
