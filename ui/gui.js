@@ -303,6 +303,10 @@ function publishThreadWatch() {
   for (const machine of next) watchedMachines.add(machine);
 }
 
+function forgetThreadWatch() {
+  watchedSignature = "";
+}
+
 setInterval(() => {
   publishThreadWatch();
   if (!guiOn() || document.hidden) return;

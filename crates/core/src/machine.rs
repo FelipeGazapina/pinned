@@ -690,6 +690,12 @@ impl Machine {
         }
     }
 
+    /// Remote viewers belong to the hub link. The next connection is sent the live set, so a client
+    /// that left while the link was down is not kept.
+    pub fn drop_remote_thread_watchers(&self) {
+        self.thread_watchers.lock().unwrap().retain(|viewer, _| viewer == LOCAL_VIEWER);
+    }
+
     /// The tab's transcript file, in the home of the account it runs under.
     fn transcript(&self, tab: &str) -> Result<PathBuf, String> {
         let (session, account) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone()))?;
@@ -767,9 +773,12 @@ impl Machine {
         thread::find(&self.accounts.home(account).join("projects"), session)
     }
 
-    /// The transcript at `cached` when that file is still there. A deleted or moved one is searched for again.
+    /// The transcript at `cached` when that file is still in this account's home. A deleted or moved
+    /// one is searched for again. Switching accounts copies the transcript and leaves the old file,
+    /// so a path outside this home is a miss even while that file remains.
     fn locate_transcript(&self, account: &Account, session: &str, cached: Option<&Path>) -> Option<PathBuf> {
-        if let Some(path) = cached.filter(|path| path.is_file()) {
+        let home = self.accounts.home(account);
+        if let Some(path) = cached.filter(|path| path.starts_with(&home) && path.is_file()) {
             return Some(path.to_path_buf());
         }
         self.find_transcript(account, session)
@@ -837,11 +846,12 @@ impl Machine {
                 seen.remove(&id);
                 continue;
             };
-            // A new path keeps the old offset, so a line written as the file moves is still delivered.
+            // Same length on the same path has nothing new. A move keeps the old offset. A shorter
+            // file is past that offset, so `read` sets reset instead of snapping the cursor forward.
             let from = match &remembered {
-                Some((byte, path)) if path == &file && len > *byte => Some(*byte),
-                Some((byte, path)) if path != &file => Some(*byte),
-                _ => None,
+                Some((byte, path)) if path == &file && len == *byte => None,
+                Some((byte, _)) => Some(*byte),
+                None => None,
             };
             let Some(from) = from else {
                 seen.insert(id, TranscriptCursor { session, byte: len, path: file });

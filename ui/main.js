@@ -1261,6 +1261,8 @@ function connectHub(signedIn) {
   account = signedIn;
   hub = new Hub(signedIn.hub, signedIn.user_token, {
     hello(frame) {
+      // The hub forgot this socket's watches when the old one dropped, the same way it forgot attach.
+      forgetThreadWatch();
       account.email = frame.account.email;
       showMachines(frame.machines, frame.tabs);
       hub.hub({ cmd: "get_settings" }).then(onHubSettings, console.warn);

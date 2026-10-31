@@ -1592,7 +1592,18 @@ fn a_watched_line_is_pushed_once_and_again_after_the_machine_reconnects() {
     client.pump();
     assert_eq!(thread_texts(&client), vec!["visible".to_string()]);
 
-    node.kill();
+    let quiet = Arc::new(Mutex::new(0u32));
+    let counted = quiet.clone();
+    node.machine.subscribe(Box::new(move |event| {
+        if serde_json::to_value(event).unwrap()["kind"] == "thread" {
+            *counted.lock().unwrap() += 1;
+        }
+    }));
+    node.link.take().unwrap().stop();
+    std::fs::write(&file, format!("{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("quiet"))).unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(*quiet.lock().unwrap(), 0, "a dropped link forgets remote watches");
+    node.machine.quit();
     client.wait_machines(&[("watch-node", false)]);
     let creds = Credentials::load(&dir).unwrap();
     let mut node = Node::start(&dir, creds);
@@ -1600,7 +1611,7 @@ fn a_watched_line_is_pushed_once_and_again_after_the_machine_reconnects() {
     assert_eq!(node.machine.restore_tabs(), vec!["tab-1".to_string()]);
     std::thread::sleep(Duration::from_millis(300));
     let started = Instant::now();
-    std::fs::write(&file, format!("{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("again"))).unwrap();
+    std::fs::write(&file, format!("{}{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("quiet"), assistant_line("again"))).unwrap();
     client.wait("the line after the machine reconnects", |frame| frame["event"]["items"][0]["text"] == "again");
     assert!(started.elapsed() < Duration::from_millis(800), "after reconnect the line took {:?}, the poll is 1200 ms", started.elapsed());
     std::thread::sleep(Duration::from_millis(200));

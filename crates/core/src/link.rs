@@ -81,6 +81,7 @@ impl Shared {
         for (tab, viewer) in self.subscribed.lock().unwrap().drain() {
             machine.detach(&tab, &viewer);
         }
+        machine.drop_remote_thread_watchers();
     }
 }
 
