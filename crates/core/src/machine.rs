@@ -346,7 +346,9 @@ pub struct Machine {
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
     sync_file: Option<PathBuf>,
-    sync_loop_holds_state: AtomicBool,
+    /// The id of the current `SyncHold`, or 0 when no sync loop holds its state.
+    sync_state_holder: AtomicU64,
+    next_sync_hold: AtomicU64,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
@@ -426,6 +428,18 @@ impl Drop for Busy<'_> {
     }
 }
 
+/// Each hold replaces the last, so a sync loop that outlives `Link::stop` cannot release the next loop's hold.
+pub(crate) struct SyncHold<'a> {
+    machine: &'a Machine,
+    id: u64,
+}
+
+impl Drop for SyncHold<'_> {
+    fn drop(&mut self) {
+        let _ = self.machine.sync_state_holder.compare_exchange(self.id, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
 impl Machine {
     /// A machine that keeps its sessions, projects and history in `dir`, or nothing without one,
     /// and opens new tabs on `open`, else the most recent project. Everything it reports goes to `events`.
@@ -463,7 +477,8 @@ impl Machine {
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
-            sync_loop_holds_state: AtomicBool::new(false),
+            sync_state_holder: AtomicU64::new(0),
+            next_sync_hold: AtomicU64::new(1),
             projects: Mutex::new(projects),
             projects_file,
             accounts: Accounts::load(dir.as_deref(), home.clone()),
@@ -1728,12 +1743,14 @@ impl Machine {
         self.sync_file.as_deref()
     }
 
-    pub(crate) fn hold_sync_state(&self, held: bool) {
-        self.sync_loop_holds_state.store(held, Ordering::SeqCst);
+    pub(crate) fn hold_sync_state(&self) -> SyncHold<'_> {
+        let id = self.next_sync_hold.fetch_add(1, Ordering::SeqCst);
+        self.sync_state_holder.store(id, Ordering::SeqCst);
+        SyncHold { machine: self, id }
     }
 
     fn sync_stopped(&self) -> Option<String> {
-        if self.sync_loop_holds_state.load(Ordering::SeqCst) {
+        if self.sync_state_holder.load(Ordering::SeqCst) != 0 {
             return None;
         }
         self.sync_file.as_deref().and_then(sync::unreadable)
