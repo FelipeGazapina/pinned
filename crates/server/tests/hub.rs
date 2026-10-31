@@ -599,11 +599,11 @@ fn quitting_through_the_hub_sends_an_empty_tab_list_before_disconnect() {
     let mut node = Node::start(&dir, creds);
     client.wait_machines(&[("box", true)]);
     let tab_id = client.call(&id, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap().as_str().unwrap().to_owned();
-    client.wait("the open tab", |frame| {
+    let opened_at = wait_frame(&mut client, 0, "the open tab", |frame| {
         frame["type"] == "event" && frame["machine"] == id && frame["event"]["kind"] == "tabs" && frame["event"]["tabs"].as_array().is_some_and(|tabs| tabs.iter().any(|tab| tab["id"] == tab_id))
     });
     node.machine.quit();
-    let empty_at = wait_frame(&mut client, 0, "the empty tab list", |frame| {
+    let empty_at = wait_frame(&mut client, opened_at + 1, "the empty tab list", |frame| {
         frame["type"] == "event" && frame["machine"] == id && frame["event"] == json!({ "kind": "tabs", "tabs": [] })
     });
     node.link.take().unwrap().stop();
