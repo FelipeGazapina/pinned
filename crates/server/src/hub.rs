@@ -7,7 +7,7 @@ use pinned_core::upstash;
 use base64::Engine;
 use pinned_core::{github, sync};
 use pinned_core::wire::{
-    Call, HubCall, MachineEvent, MachineId, MachineView, PairCode, Reply, TabId, TabView, Target, ToClient, ToMachine, EXE_PLACEHOLDER,
+    Call, HubCall, MachineEvent, MachineId, MachineView, PairCode, Reply, TabId, TabView, Target, ToClient, ToMachine, UpdateStatus, EXE_PLACEHOLDER,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -682,6 +682,24 @@ struct PgStorage {
     writes: mpsc::UnboundedSender<Write>,
 }
 
+/// An idle connect after Updating or Restarting settles against the version Auth just wrote.
+/// A snapshot from the running process replaces whatever the hub remembered.
+pub fn reconcile(previous: Option<UpdateStatus>, version: &str, snapshot: Option<UpdateStatus>) -> Option<UpdateStatus> {
+    if snapshot.is_some() {
+        return snapshot;
+    }
+    match previous {
+        Some(UpdateStatus::Updating { to }) | Some(UpdateStatus::Restarting { to }) if !to.is_empty() => {
+            if version == to {
+                Some(UpdateStatus::UpToDate { version: version.to_owned() })
+            } else {
+                Some(UpdateStatus::Failed { to, reason: format!("came back on {version}") })
+            }
+        }
+        other => other,
+    }
+}
+
 /// A graph prompt treats a lost machine as not delivered. The cursor stays and the next check retries.
 fn prompt_outcome(answer: Result<Value, Unanswered>) -> Result<bool, String> {
     match answer {
@@ -807,5 +825,48 @@ mod tests {
         assert_eq!(prompt_outcome(Ok(serde_json::Value::Bool(true))), Ok(true));
         assert_eq!(prompt_outcome(Ok(serde_json::Value::Bool(false))), Ok(false));
         assert_eq!(prompt_outcome(Err(Unanswered::Refused("no".into()))), Ok(false));
+    }
+
+    #[test]
+    fn a_live_snapshot_replaces_the_stored_phase() {
+        let live = UpdateStatus::Updating { to: "2.0.0".into() };
+        assert_eq!(reconcile(Some(UpdateStatus::Restarting { to: "1.0.0".into() }), "0.9.0", Some(live.clone())), Some(live));
+    }
+
+    #[test]
+    fn an_idle_connect_on_the_target_version_is_up_to_date() {
+        assert_eq!(
+            reconcile(Some(UpdateStatus::Updating { to: "1.2.0".into() }), "1.2.0", None),
+            Some(UpdateStatus::UpToDate { version: "1.2.0".into() }),
+        );
+        assert_eq!(
+            reconcile(Some(UpdateStatus::Restarting { to: "1.2.0".into() }), "1.2.0", None),
+            Some(UpdateStatus::UpToDate { version: "1.2.0".into() }),
+        );
+    }
+
+    #[test]
+    fn an_idle_connect_on_another_version_failed() {
+        assert_eq!(
+            reconcile(Some(UpdateStatus::Restarting { to: "1.2.0".into() }), "1.1.0", None),
+            Some(UpdateStatus::Failed { to: "1.2.0".into(), reason: "came back on 1.1.0".into() }),
+        );
+        assert_eq!(
+            reconcile(Some(UpdateStatus::Updating { to: "1.2.0".into() }), "1.0.0", None),
+            Some(UpdateStatus::Failed { to: "1.2.0".into(), reason: "came back on 1.0.0".into() }),
+        );
+    }
+
+    #[test]
+    fn a_finished_phase_stays_when_the_connect_is_idle() {
+        let failed = UpdateStatus::Failed { to: "1.2.0".into(), reason: "checksum mismatch".into() };
+        assert_eq!(reconcile(Some(failed.clone()), "1.2.0", None), Some(failed));
+        let current = UpdateStatus::UpToDate { version: "1.2.0".into() };
+        assert_eq!(reconcile(Some(current.clone()), "0.1.0", None), Some(current));
+        let cannot = UpdateStatus::Cannot { reason: "update by hand".into() };
+        assert_eq!(reconcile(Some(cannot.clone()), "1.2.0", None), Some(cannot));
+        let empty = UpdateStatus::Updating { to: String::new() };
+        assert_eq!(reconcile(Some(empty.clone()), "1.2.0", None), Some(empty));
+        assert_eq!(reconcile(None, "1.2.0", None), None);
     }
 }

@@ -496,6 +496,8 @@ pub enum Call {
     CancelTask { tab: TabId, task: String },
     /// `null`. Types that finished task's notice into the tab now. The tab must own the task.
     DeliverTask { tab: TabId, task: String },
+    /// The machine's `UpdateStatus`.
+    UpdateSelf,
 }
 
 fn pulls_limit() -> usize {
@@ -571,8 +573,27 @@ impl Call {
                 | Call::MemorySave { .. }
                 | Call::MemoryForget { .. }
                 | Call::MemoryStatus { .. }
+                | Call::UpdateSelf
         )
     }
+}
+
+/// What a machine reports about replacing itself. `to` is the release it is moving to.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UpdateStatus {
+    UpToDate { version: String },
+    Updating {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        to: String,
+    },
+    Restarting { to: String },
+    Failed {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        to: String,
+        reason: String,
+    },
+    Cannot { reason: String },
 }
 
 /// A tab whose conversation holds what a `SearchThreads` asked for.
@@ -642,6 +663,8 @@ pub enum MachineEvent {
         #[serde(default = "accounts::default_account")]
         account: AccountId,
     },
+    /// Some while this process is installing a release, None when it connects with nothing in progress.
+    Update { status: Option<UpdateStatus> },
 }
 
 /// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
@@ -749,6 +772,12 @@ pub struct MachineView {
     /// The Upstash Box the machine runs in, which pinned deletes with it once its session ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstash_box: Option<String>,
+    /// The build the machine last signed in with. Empty until it has.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
+    /// The phase the machine last reported. Absent until it reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<UpdateStatus>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -1134,7 +1163,7 @@ mod tests {
             ToClient::Event { machine: "m1".into(), event: MachineEvent::Exit { tab: "tab-1".into() } },
             json!({ "type": "event", "machine": "m1", "event": { "kind": "exit", "tab": "tab-1" } }),
         );
-        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000, upstash_box: None };
+        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000, upstash_box: None, version: String::new(), update: None };
         round_trip(
             ToClient::Hello {
                 account: AccountView { id: "a1".into(), email: "ana@acme.dev".into() },
@@ -1182,8 +1211,113 @@ mod tests {
             json!({ "type": "call", "id": 3, "call": { "cmd": "resize_pty", "tab": "tab-2", "cols": 80, "rows": 24 } }),
         );
         round_trip(
-            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None } },
+            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None, version: String::new(), update: None } },
             json!({ "type": "hello", "machine": { "id": "m2", "name": "vps", "os": "linux", "online": true, "last_seen": 0 } }),
         );
+    }
+
+    #[test]
+    fn an_update_status_round_trips_and_an_old_machine_view_still_reads() {
+        round_trip(Call::UpdateSelf, json!({ "cmd": "update_self" }));
+        assert!(Call::UpdateSelf.may_wait());
+        round_trip(UpdateStatus::UpToDate { version: "0.16.0".into() }, json!({ "state": "up_to_date", "version": "0.16.0" }));
+        round_trip(UpdateStatus::Updating { to: String::new() }, json!({ "state": "updating" }));
+        round_trip(UpdateStatus::Updating { to: "0.16.0".into() }, json!({ "state": "updating", "to": "0.16.0" }));
+        round_trip(UpdateStatus::Restarting { to: "0.16.0".into() }, json!({ "state": "restarting", "to": "0.16.0" }));
+        round_trip(UpdateStatus::Failed { to: String::new(), reason: "checksum mismatch".into() }, json!({ "state": "failed", "reason": "checksum mismatch" }));
+        round_trip(
+            UpdateStatus::Failed { to: "0.16.0".into(), reason: "checksum mismatch".into() },
+            json!({ "state": "failed", "to": "0.16.0", "reason": "checksum mismatch" }),
+        );
+        round_trip(UpdateStatus::Cannot { reason: "this build cannot install a release".into() }, json!({ "state": "cannot", "reason": "this build cannot install a release" }));
+        round_trip(MachineEvent::Update { status: None }, json!({ "kind": "update", "status": null }));
+        round_trip(
+            MachineEvent::Update { status: Some(UpdateStatus::Restarting { to: "0.16.0".into() }) },
+            json!({ "kind": "update", "status": { "state": "restarting", "to": "0.16.0" } }),
+        );
+        let old: MachineView = serde_json::from_value(json!({ "id": "m1", "name": "mac-mini", "os": "macos", "online": true, "last_seen": 1 })).unwrap();
+        assert_eq!(old.version, "");
+        assert_eq!(old.update, None);
+        round_trip(
+            MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1, upstash_box: None, version: "0.16.0".into(), update: Some(UpdateStatus::UpToDate { version: "0.16.0".into() }) },
+            json!({ "id": "m1", "name": "mac-mini", "os": "macos", "online": true, "last_seen": 1, "version": "0.16.0", "update": { "state": "up_to_date", "version": "0.16.0" } }),
+        );
+    }
+
+    #[test]
+    fn every_waiting_call_may_wait() {
+        let js = include_str!("../../../ui/transport.js");
+        let start = js.find("const WAITING_CALLS = new Set([").expect("WAITING_CALLS");
+        let body = &js[start..];
+        let end = body.find("]);").expect("end of WAITING_CALLS");
+        let names: Vec<&str> = body[..end].split('"').skip(1).step_by(2).collect();
+        assert!(names.contains(&"update_self"));
+        let tab: TabId = "tab-1".into();
+        for name in names {
+            let call = match name {
+                "run" => Call::Run { run: RunSpec { folder: "/r".into(), repo: None, args: vec![], env: vec![], token: None, account: None } },
+                "pull_request" => Call::PullRequest { tab: tab.clone(), pr: "1".into() },
+                "pr_status" => Call::PrStatus { tab: tab.clone(), pr: "1".into() },
+                "favicon" => Call::Favicon { tab: tab.clone() },
+                "regenerate_title" => Call::RegenerateTitle { tab: tab.clone(), previous: String::new(), thread: String::new() },
+                "pr_action" => Call::PrAction { tab: tab.clone(), pr: "1".into(), action: PrAction::Merge },
+                "thread" => Call::Thread { tab: tab.clone(), from: 0 },
+                "workspace" => Call::Workspace { tab: tab.clone() },
+                "project_history" => Call::ProjectHistory { path: "/r".into(), session: None },
+                "diff" => Call::Diff { tab: tab.clone(), scope: DiffScope::Uncommitted, ignore_whitespace: false, base: None },
+                "ports" => Call::Ports { tab: tab.clone() },
+                "editors" => Call::Editors,
+                "open_in" => Call::OpenIn { tab: tab.clone(), editor: "default".into(), path: None, folder: false, reveal: false },
+                "commands" => Call::Commands { tab: tab.clone() },
+                "files" => Call::Files { tab: tab.clone() },
+                "branches" => Call::Branches { tab: tab.clone() },
+                "checkout" => Call::Checkout { tab: tab.clone(), branch: "main".into(), create: false, from: None },
+                "token_usage" => Call::TokenUsage { since: 0 },
+                "pull_requests" => Call::PullRequests { paths: vec![], state: pulls::ListState::Open, involvement: pulls::Involvement::All, query: String::new(), filters: pulls::Filters::default(), limit: 1 },
+                "page_meta" => Call::PageMeta { url: "https://example.com".into() },
+                "refs" => Call::Refs { tab: tab.clone() },
+                "read_file" => Call::ReadFile { tab: tab.clone(), path: "a".into(), root: false, rev: None },
+                "write_file" => Call::WriteFile { tab: tab.clone(), path: "a".into(), root: false, text: String::new(), since: None },
+                "search" => Call::Search { tab: tab.clone(), query: "a".into(), case: false, regex: false },
+                "pr_edit" => Call::PrEdit { tab: tab.clone(), pr: "1".into(), title: None, body: None },
+                "pr_comment" => Call::PrComment { tab: tab.clone(), pr: "1".into(), body: String::new(), reply_to: None },
+                "pr_review" => Call::PrReview { tab: tab.clone(), pr: "1".into(), event: ReviewEvent::Comment, body: String::new(), comments: vec![] },
+                "pr_rerun" => Call::PrRerun { tab: tab.clone(), check: "c".into() },
+                "pr_guide" => Call::PrGuide { tab: tab.clone(), pr: "1".into(), write: false },
+                "pr_change" => Call::PrChange { tab: tab.clone(), pr: "1".into(), change: PrChange::Label { name: "bug".into(), on: true } },
+                "pr_candidates" => Call::PrCandidates { tab: tab.clone(), pr: "1".into(), of: Candidates::Reviewers },
+                "pr_stack" => Call::PrStack { tab: tab.clone(), pr: "1".into(), action: StackAction::Merge, method: None, heads: vec![] },
+                "device_hub" => Call::DeviceHub { embed: None },
+                "subagent" => Call::Subagent { tab: tab.clone(), tool: "t".into() },
+                "rewind" => Call::Rewind { tab: tab.clone(), before: "u".into(), files: false, cols: 1, rows: 1 },
+                "fork" => Call::Fork { tab: tab.clone(), through: "u".into() },
+                "save_file" => Call::SaveFile { tab: tab.clone(), path: "a".into(), text: String::new() },
+                "pr_list" => Call::PrList { tab: tab.clone() },
+                "checkout_pr" => Call::CheckoutPr { tab: tab.clone(), pr: "1".into() },
+                "set_workspace" => Call::SetWorkspace { tab: tab.clone(), worktree: None, cols: 1, rows: 1 },
+                "git" => Call::Git { tab: tab.clone(), step: GitStep::Push },
+                "create_project" => Call::CreateProject { name: "App".into() },
+                "publish_project" => Call::PublishProject { path: "/r".into() },
+                "pull_request_stack" => Call::PullRequestStack { repo: "o/r".into(), number: 1 },
+                "usage_limits" => Call::UsageLimits,
+                "busy_shells" => Call::BusyShells { shells: vec![] },
+                "search_threads" => Call::SearchThreads { query: "a".into() },
+                "pull_request_filter_options" => Call::PullRequestFilterOptions { paths: vec![], kind: pulls::OptionKind::Authors, query: String::new() },
+                "pull_request_files" => Call::PullRequestFiles { host: "github.com".into(), repo: "o/r".into(), number: 1 },
+                "file_url" => Call::FileUrl { tab: tab.clone(), path: "a".into(), root: false },
+                "watch_pr" => Call::WatchPr { tab: tab.clone(), pr: None, watching: false },
+                "device" => Call::Device { op: crate::device::DeviceOp::List },
+                "device_agents" => Call::DeviceAgents { allow: None },
+                "list_accounts" => Call::ListAccounts,
+                "add_account" => Call::AddAccount { provider: Provider::Claude, name: "A".into() },
+                "sign_in" => Call::SignIn { account: "a".into() },
+                "switch_account" => Call::SwitchAccount { tab: tab.clone(), account: "a".into(), cols: 1, rows: 1 },
+                "update_self" => Call::UpdateSelf,
+                other => panic!("{other} is in WAITING_CALLS and has no call here"),
+            };
+            let parsed: Call = serde_json::from_value(serde_json::to_value(&call).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(&parsed).unwrap()["cmd"], name);
+            assert!(parsed.may_wait(), "{name}");
+        }
     }
 }

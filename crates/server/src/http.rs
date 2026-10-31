@@ -436,7 +436,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     };
     let (machine, socket_id) = (row.id.to_string(), hub.next_socket());
     let (out, mut outbox, overflowed) = Outbox::new();
-    let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None };
+    let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None, version: version.clone(), update: None };
     let _ = out.send(serde_json::to_string(&ToMachine::Hello { machine: view }).unwrap());
     // A machine that reconnects before its old socket timed out goes offline and back, so clients attach again.
     if account.went_offline(&machine, None) {
