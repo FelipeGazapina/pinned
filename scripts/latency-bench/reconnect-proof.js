@@ -101,7 +101,12 @@ sandbox.showMachines = (list, tabsByMachine) => {
   for (const view of list) {
     if (view.id !== machine) continue;
     sandbox.nodeOnline = !!view.online;
-    if (view.online && tabsByMachine && tabsByMachine[view.id]) sandbox.setTabs(view.id, tabsByMachine[view.id]);
+    if (!view.online) {
+      sandbox.tabs = [];
+      sandbox.active = null;
+    } else if (tabsByMachine && Object.prototype.hasOwnProperty.call(tabsByMachine, view.id)) {
+      sandbox.setTabs(view.id, tabsByMachine[view.id]);
+    }
   }
   sandbox.publishThreadWatch();
 };
@@ -115,9 +120,8 @@ sandbox.hub = new sandbox.Hub(hubWs.replace(/^ws/, "http").replace(/\/ws\/client
   hello(frame) {
     hello(frame);
   },
-  machines(list) {
-    const view = list.find((item) => item.id === machine);
-    if (view) sandbox.nodeOnline = !!view.online;
+  machines(list, tabs) {
+    sandbox.showMachines(list, tabs);
   },
   event(id, event) {
     if (id === sandbox.account.machine_id) return;
@@ -159,7 +163,6 @@ async function main() {
   await resent.pending;
   await sleep(400);
   const second = await push(`again-phone-${Date.now()}`, transcriptPath());
-  const watchesAfterPhone = sandbox.watches.length;
   phase("restart");
 
   await waitFor("node offline", () => !sandbox.nodeOnline, 20000);
@@ -174,10 +177,14 @@ async function main() {
       return false;
     }
   }, 20000);
+  await waitFor("restored tab", () => {
+    const id = sandbox.tabs[0] && sandbox.tabs[0].view.id;
+    return !!id && id !== opened;
+  }, 20000);
+  const restored = sandbox.tabs[0].view.id;
+  await waitFor("watch of the restored tab", () => sandbox.watches.some((row) => row.tabs.includes(restored)), 15000);
+  await sandbox.watches.find((row) => row.tabs.includes(restored)).pending;
   await sleep(500);
-  if (sandbox.watches.length !== watchesAfterPhone) {
-    throw new Error(`client sent another watch on machine restart (${sandbox.watches.length - watchesAfterPhone})`);
-  }
   const third = await push(`again-machine-${Date.now()}`, transcriptPath());
   const report = {
     rtt_ms: rtt,
