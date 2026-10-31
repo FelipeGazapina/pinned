@@ -785,6 +785,9 @@ pub fn seen_under(pid: u32, before: &[Process]) -> Vec<Process> {
 
 #[cfg(unix)]
 fn recorded(under: &[i32], before: &[Process], now: Vec<Running>) -> Vec<Process> {
+    if now.is_empty() {
+        return before.to_vec();
+    }
     now.into_iter().map(|now| now.process).filter(|now| under.contains(&now.pid) || before.contains(now)).collect()
 }
 
