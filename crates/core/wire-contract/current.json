@@ -3843,6 +3843,30 @@
                 ]
               },
               {
+                "description": "From a machine: `null`. Sets the executable bit when the hub still stores each sha. Sends no bytes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_mark_executable"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "repairs": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/ModeRepair"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "project",
+                  "repairs"
+                ]
+              },
+              {
                 "description": "The connector as stored.",
                 "type": "object",
                 "properties": {
@@ -4272,6 +4296,13 @@
                 "minimum": 0,
                 "default": 0
               },
+              "executable": {
+                "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
                 "type": [
@@ -4285,6 +4316,22 @@
               "sha",
               "modified",
               "size"
+            ]
+          },
+          "ModeRepair": {
+            "description": "Sets the executable bit on a file the hub already stores, without sending bytes.\nThe hub applies it only while that file's sha is still `sha`.",
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "sha"
             ]
           },
           "Connector": {
@@ -9112,6 +9159,30 @@
                 ]
               },
               {
+                "description": "From a machine: `null`. Sets the executable bit when the hub still stores each sha. Sends no bytes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_mark_executable"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "repairs": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/ModeRepair"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "project",
+                  "repairs"
+                ]
+              },
+              {
                 "description": "The connector as stored.",
                 "type": "object",
                 "properties": {
@@ -9530,6 +9601,13 @@
                 "minimum": 0,
                 "default": 0
               },
+              "executable": {
+                "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
                 "type": [
@@ -9542,6 +9620,22 @@
               "path",
               "sha",
               "modified"
+            ]
+          },
+          "ModeRepair": {
+            "description": "Sets the executable bit on a file the hub already stores, without sending bytes.\nThe hub applies it only while that file's sha is still `sha`.",
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "sha"
             ]
           },
           "Connector": {
@@ -11568,6 +11662,30 @@
                 ]
               },
               {
+                "description": "From a machine: `null`. Sets the executable bit when the hub still stores each sha. Sends no bytes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_mark_executable"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "repairs": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/ModeRepair"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "project",
+                  "repairs"
+                ]
+              },
+              {
                 "description": "The connector as stored.",
                 "type": "object",
                 "properties": {
@@ -11997,6 +12115,13 @@
                 "minimum": 0,
                 "default": 0
               },
+              "executable": {
+                "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
                 "type": [
@@ -12010,6 +12135,22 @@
               "sha",
               "modified",
               "size"
+            ]
+          },
+          "ModeRepair": {
+            "description": "Sets the executable bit on a file the hub already stores, without sending bytes.\nThe hub applies it only while that file's sha is still `sha`.",
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "sha"
             ]
           },
           "Connector": {
@@ -14027,6 +14168,30 @@
                 ]
               },
               {
+                "description": "From a machine: `null`. Sets the executable bit when the hub still stores each sha. Sends no bytes.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_mark_executable"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "repairs": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/ModeRepair"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "project",
+                  "repairs"
+                ]
+              },
+              {
                 "description": "The connector as stored.",
                 "type": "object",
                 "properties": {
@@ -14445,6 +14610,13 @@
                 "minimum": 0,
                 "default": 0
               },
+              "executable": {
+                "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
                 "type": [
@@ -14457,6 +14629,22 @@
               "path",
               "sha",
               "modified"
+            ]
+          },
+          "ModeRepair": {
+            "description": "Sets the executable bit on a file the hub already stores, without sending bytes.\nThe hub applies it only while that file's sha is still `sha`.",
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "sha"
             ]
           },
           "Connector": {
@@ -21276,6 +21464,13 @@
             "format": "uint64",
             "minimum": 0,
             "default": 0
+          },
+          "executable": {
+            "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -21309,6 +21504,13 @@
             "format": "uint64",
             "minimum": 0,
             "default": 0
+          },
+          "executable": {
+            "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -21343,6 +21545,13 @@
             "format": "uint64",
             "minimum": 0,
             "default": 0
+          },
+          "executable": {
+            "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "data": {
             "description": "The contents gzipped, in base64; none for a deleted file.",
@@ -21383,6 +21592,13 @@
             "format": "uint64",
             "minimum": 0,
             "default": 0
+          },
+          "executable": {
+            "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "data": {
             "description": "The contents gzipped, in base64; none for a deleted file.",

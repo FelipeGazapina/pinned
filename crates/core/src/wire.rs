@@ -700,6 +700,8 @@ pub enum HubCall {
     SyncPush { project: String, files: Vec<sync::File> },
     /// From a machine: `Vec<sync::File>`.
     SyncPull { project: String, paths: Vec<String> },
+    /// From a machine: `null`. Sets the executable bit when the hub still stores each sha. Sends no bytes.
+    SyncMarkExecutable { project: String, repairs: Vec<sync::ModeRepair> },
     /// The connector as stored.
     SaveConnector { connector: Connector },
     DeleteConnector { id: String },
