@@ -3405,6 +3405,132 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// What `takeThreadPage` leaves on a thread after `steps`, each `{from, page}`.
+    fn phone_state(steps: &[Value]) -> Value {
+        let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).unwrap().join("ui");
+        let script = r#"
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+const ui = process.env.PINNED_UI;
+const gui = readFileSync(`${ui}/gui.js`, "utf8");
+const agents = readFileSync(`${ui}/gui-agents.js`, "utf8");
+const pageStart = gui.indexOf("function takeThreadPage");
+const pageEnd = gui.indexOf("async function fetchThread");
+const agentStart = agents.indexOf("function takeAgents");
+const agentEnd = agents.indexOf("const spawnOf");
+if (pageStart < 0 || pageEnd < 0 || agentStart < 0 || agentEnd < 0) {
+  console.error("could not find takeThreadPage");
+  process.exit(2);
+}
+const sandbox = { threadOf: (tab) => tab.thread, guiOn: () => false, active: null };
+vm.createContext(sandbox);
+vm.runInContext(`${agents.slice(agentStart, agentEnd)}\n${gui.slice(pageStart, pageEnd)}`, sandbox);
+const steps = JSON.parse(process.env.PINNED_STEPS);
+const tab = { thread: { session: null, next: 0, items: [], loaded: false, history: null } };
+for (const step of steps) sandbox.takeThreadPage(tab, step.page, step.from);
+const t = tab.thread;
+process.stdout.write(JSON.stringify({
+  session: t.session ?? null,
+  next: t.next,
+  items: t.items.map((item) => ({ kind: item.kind, text: item.text ?? null })),
+  todos: t.todos ?? null,
+  context: t.context ?? null,
+  branch: t.branch ?? null,
+}));
+"#;
+        let out = std::process::Command::new("node")
+            .arg("--input-type=module")
+            .arg("-e")
+            .arg(script)
+            .env("PINNED_UI", &ui)
+            .env("PINNED_STEPS", serde_json::to_string(steps).unwrap())
+            .output()
+            .expect("node");
+        assert!(out.status.success(), "takeThreadPage failed: {}", String::from_utf8_lossy(&out.stderr));
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    #[test]
+    fn a_watched_tab_matches_the_poll_for_todos_context_and_branch() {
+        let root = temp("thread-page");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
+        let dir = root.join("config/accounts/work/projects/demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s1.jsonl");
+        let line = |body: &str| format!("{body}\n");
+        let seed = line(r#"{"type":"user","uuid":"u0","timestamp":"t0","gitBranch":"main","message":{"content":"start"}}"#);
+        std::fs::write(&file, &seed).unwrap();
+        let mut cursors = HashMap::new();
+        m.push_transcript_lines(&mut cursors);
+        assert!(thread_events(&heard).is_empty(), "the first look must not resend the history");
+        let seed_page = m.call(Call::Thread { tab: tab.clone(), from: 0 }).unwrap();
+        let todos = line(r#"{"type":"assistant","uuid":"a1","timestamp":"t1","message":{"content":[{"type":"tool_use","id":"w1","name":"TodoWrite","input":{"todos":[{"content":"Ship the fix","status":"in_progress"}]}}]}}"#);
+        let context = line(r#"{"type":"assistant","uuid":"a2","timestamp":"t2","message":{"usage":{"input_tokens":100,"output_tokens":20},"content":[{"type":"text","text":"done"}]}}"#);
+        let branch = line(r#"{"type":"user","uuid":"u3","timestamp":"t3","gitBranch":"feature","message":{"content":"switch"}}"#);
+        std::fs::write(&file, format!("{seed}{todos}")).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        std::fs::write(&file, format!("{seed}{todos}{context}")).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        std::fs::write(&file, format!("{seed}{todos}{context}{branch}")).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        let pushed = thread_events(&heard);
+        let seed_at = seed_page["next"].as_u64().unwrap();
+        let polled = m.call(Call::Thread { tab: tab.clone(), from: seed_at }).unwrap();
+        let mut push_steps = vec![json!({ "from": 0, "page": seed_page })];
+        push_steps.extend(pushed.iter().map(|event| json!({ "from": event["from"], "page": event })));
+        let poll_steps = vec![json!({ "from": 0, "page": seed_page }), json!({ "from": seed_at, "page": polled })];
+        let expected = json!({
+            "session": "s1",
+            "next": std::fs::metadata(&file).unwrap().len(),
+            "items": [
+                { "kind": "user", "text": "start" },
+                { "kind": "text", "text": "done" },
+                { "kind": "user", "text": "switch" }
+            ],
+            "todos": { "at": "t1", "steps": [{ "step": "Ship the fix", "status": "in_progress" }] },
+            "context": { "tokens": 120, "at": "t2" },
+            "branch": "feature"
+        });
+        let poll_phone = phone_state(&poll_steps);
+        let push_phone = phone_state(&push_steps);
+        assert_eq!(poll_phone, expected, "the poll page is the phone state for these lines");
+        assert_eq!(push_phone, poll_phone, "a watched tab must reach that same state from the pushes");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_transcript_missing_for_one_tick_still_pushes_the_next_line() {
+        let root = temp("thread-miss");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
+        let dir = root.join("config/accounts/work/projects/demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s1.jsonl");
+        std::fs::write(&file, assistant_line("ready")).unwrap();
+        let mut cursors = HashMap::new();
+        m.push_transcript_lines(&mut cursors);
+        std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        std::fs::remove_file(&file).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        std::fs::write(&file, format!("{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("after"))).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        let texts: Vec<_> = thread_events(&heard).iter().map(|event| event["items"][0]["text"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(texts, vec!["visible".to_string(), "after".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn a_cached_transcript_is_not_scanned_again() {
         let root = temp("thread-cache");

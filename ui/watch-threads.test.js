@@ -68,3 +68,21 @@ test("a hub hello sends the current watch again", () => {
     { machine: "m", tabs: ["tab-1"] },
   ]);
 });
+
+test("a watch the hub rejects is sent again", async () => {
+  const { sandbox, state, calls } = publishThreadWatch();
+  sandbox.callOn = (machine, call) => {
+    calls.push({ machine, tabs: [...call.tabs] });
+    return Promise.reject(new Error("unknown variant `watch_threads`"));
+  };
+  const active = { machine: "m", view: { id: "tab-1", program: "agent" }, phase: "idle" };
+  state.tabs.push(active);
+  state.active = active;
+  sandbox.publishThreadWatch();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  sandbox.publishThreadWatch();
+  assert.deepEqual(calls, [
+    { machine: "m", tabs: ["tab-1"] },
+    { machine: "m", tabs: ["tab-1"] },
+  ]);
+});
