@@ -1495,6 +1495,37 @@ grok-4.7-high - Grok 4.7  High
         );
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn a_cancel_stops_the_agent_before_it_removes_the_worktree() {
+        let dir = scratch("kill-then-drop");
+        let (tree, tools) = (dir.join("tree"), dir.join("tools"));
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&tools).unwrap();
+        let (pidfile, witness) = (dir.join("agent.pid"), dir.join("witness"));
+        script(
+            &tools,
+            "git",
+            &format!(
+                "case \"$(ps -o stat= -p \"$(cat '{}')\")\" in ''|Z*) agent=stopped ;; *) agent=running ;; esac\necho \"$1 $agent\" >> '{}'",
+                pidfile.display(),
+                witness.display()
+            ),
+        );
+        let bin = script(&dir, "claude", "exec sleep 30");
+        let delegates = Arc::new(Delegates::default());
+        let task = new_on(&delegates, Provider::Claude);
+        delegates.place(&task.id, tree.clone(), true);
+        let (agent, _) = run(&delegates, &task, &bin, &dir);
+        std::fs::write(&pidfile, agent.to_string()).unwrap();
+        let path = format!("{}:/bin:/usr/bin", tools.display());
+        delegates.cancel(&parent(), &task.id, "the parent asked", Some(&path)).unwrap();
+        let seen = std::fs::read_to_string(&witness).unwrap_or_default();
+        assert!(stopped(agent as i32), "the agent {agent} outlived the cancel");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(seen, "symbolic-ref stopped\nworktree stopped\n", "the state of the agent at each git call that removes its worktree");
+    }
+
     #[cfg(unix)]
     const RESULT: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"PR opened"}"#;
 
