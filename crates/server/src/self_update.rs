@@ -683,6 +683,20 @@ mod tests {
     }
 
     #[test]
+    fn a_restore_without_a_backup_keeps_the_bytes_that_are_there() {
+        let dir = std::env::temp_dir().join(format!("pinned-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("pinned-server");
+        std::fs::write(&dest, b"new-binary").unwrap();
+        std::fs::write(dir.join("pinned-server.unproven"), b"1\nabc\n").unwrap();
+        assert_eq!(restore(&dest), Ok(()));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new-binary");
+        assert!(!dir.join("pinned-server.unproven").exists(), "the marker stayed after a restore that had no backup");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_staged_binary_records_zero_boots() {
         let dir = std::env::temp_dir().join(format!("pinned-marker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

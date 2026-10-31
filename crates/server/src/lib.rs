@@ -48,3 +48,14 @@ pub async fn start(config: Config) -> Result<Running, String> {
     eprintln!("pinned-server: hub listening on {addr} as {}", hub.public_url);
     Ok(Running { hub, addr, server })
 }
+
+/// Serves `hub` on `listen` again. The account state already on `hub` stays.
+pub async fn serve(hub: Arc<hub::Hub>, listen: SocketAddr, ui: PathBuf, downloads: PathBuf, open_signup: bool) -> Result<tokio::task::JoinHandle<()>, String> {
+    let listener = tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("could not listen on {listen}: {e}"))?;
+    let app = http::router(hub, ui, downloads, open_signup).into_make_service_with_connect_info::<SocketAddr>();
+    Ok(tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            eprintln!("pinned-server: the hub stopped: {e}");
+        }
+    }))
+}

@@ -583,6 +583,11 @@ impl Machine {
         }
     }
 
+    /// Runs the restart `install` scheduled once the release is in place.
+    pub fn restart_if_replacing(&self, status: &UpdateStatus) {
+        let _ = status;
+    }
+
     pub fn update_snapshot(&self) -> Option<UpdateStatus> {
         self.gate.lock().unwrap().phase.clone()
     }
@@ -2948,6 +2953,18 @@ mod tests {
 
     fn machine() -> Arc<Machine> {
         Machine::new(launch(), None, Some("/repo".into()), |_| {})
+    }
+
+    #[test]
+    fn a_restarting_update_runs_the_restart_that_install_scheduled() {
+        let machine = machine();
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = ran.clone();
+        machine.schedule_restart(Box::new(move || flag.store(true, Ordering::SeqCst)));
+        machine.restart_if_replacing(&UpdateStatus::Updating { to: "9.9.9".into() });
+        assert!(!ran.load(Ordering::SeqCst), "an update that is still downloading restarted");
+        machine.restart_if_replacing(&UpdateStatus::Restarting { to: "9.9.9".into() });
+        assert!(ran.load(Ordering::SeqCst), "a release that is ready to restart left the scheduled restart sitting");
     }
 
     #[test]

@@ -41,6 +41,7 @@ struct Hub {
     runtime: tokio::runtime::Runtime,
     server: Option<tokio::task::JoinHandle<()>>,
     addr: std::net::SocketAddr,
+    inner: Option<Arc<pinned_server::hub::Hub>>,
 }
 
 impl Hub {
@@ -61,6 +62,7 @@ impl Hub {
             runtime: tokio::runtime::Runtime::new().unwrap(),
             server: None,
             addr: "127.0.0.1:0".parse().unwrap(),
+            inner: None,
         };
         hub.listen("127.0.0.1:0");
         hub
@@ -90,7 +92,24 @@ impl Hub {
         };
         self.addr = running.addr;
         self.url = format!("http://{}", running.addr);
+        self.inner = Some(running.hub);
         self.server = Some(running.server);
+    }
+
+    fn resume(&mut self) {
+        let hub = self.inner.clone().expect("the hub");
+        let ui = self.dir.join("ui");
+        let downloads = self.dir.join("downloads");
+        let addr = self.addr;
+        self.server = Some(self.runtime.block_on(pinned_server::serve(hub, addr, ui, downloads, true)).unwrap());
+    }
+
+    fn reject_version(&self, version: &str, after: Duration) {
+        self.inner.as_ref().expect("the hub").reject_version(version, after);
+    }
+
+    fn drop_machine_links(&self) {
+        self.inner.as_ref().expect("the hub").drop_machine_links();
     }
 
     fn stop_listener(&mut self) {
@@ -324,9 +343,40 @@ fn machines(client: &Client) -> Vec<Value> {
     client.frames.iter().filter(|frame| frame["type"] == "machines" || frame["type"] == "hello").cloned().collect()
 }
 
+fn updates_of(frames: &[Value], id: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for frame in frames {
+        if frame["type"] != "machines" && frame["type"] != "hello" {
+            continue;
+        }
+        let Some(list) = frame["machines"].as_array() else { continue };
+        let Some(machine) = list.iter().find(|machine| machine["id"] == id) else { continue };
+        if let Some(update) = machine.get("update").filter(|update| !update.is_null()) {
+            if out.last() != Some(update) {
+                out.push(update.clone());
+            }
+        }
+    }
+    out
+}
+
+fn recorded_pids(path: &Path) -> Vec<u32> {
+    std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|line| line.trim().parse().ok()).collect()
+}
+
+fn alive_pids(path: &Path) -> Vec<u32> {
+    recorded_pids(path)
+        .into_iter()
+        .filter(|pid| Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|status| status.success()))
+        .collect()
+}
+
 fn signed_script(real: &Path) -> (String, String, String) {
-    let script = format!("#!/bin/sh\nexport PINNED_VERSION=9.9.9\nexec {} \"$@\"\n", real.display());
-    let asset = script.clone().into_bytes();
+    signed_release(&format!("#!/bin/sh\nexport PINNED_VERSION=9.9.9\nexec {} \"$@\"\n", real.display()))
+}
+
+fn signed_release(script: &str) -> (String, String, String) {
+    let asset = script.as_bytes().to_vec();
     let latest = json!({ "version": "9.9.9" }).to_string().into_bytes();
     let sums = format!("{}  latest.json\n{}  pinned-server-test-host\n", sha256(&latest), sha256(&asset));
     let minisign::KeyPair { pk, sk } = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
@@ -360,7 +410,7 @@ fn signed_script(real: &Path) -> (String, String, String) {
             let _ = socket.write_all(body);
         }
     });
-    (format!("http://{address}"), pubkey, script)
+    (format!("http://{address}"), pubkey, script.to_owned())
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -422,6 +472,9 @@ fn a_good_update_keeps_one_offline_gap_and_reports_the_new_version() {
     assert!(node.alive(), "the node pid {} exited\n{}", node.pid(), node.output());
     assert_eq!(std::fs::read(&dest).unwrap(), script.as_bytes(), "the staged bytes were not the release that connected");
     assert!(!marker(&dest).exists(), "the new process left the unproven marker");
+    let updates = updates_of(&client.frames, &id);
+    assert!(updates.iter().any(|update| update["state"] == "updating"), "the client never saw the update start: {updates:?}");
+    assert_eq!(updates.last(), Some(&json!({ "state": "up_to_date", "version": "9.9.9" })), "the client saw {updates:?}");
     let _ = dir;
 }
 
@@ -446,48 +499,70 @@ fn a_restart_after_stage_puts_the_old_bytes_back_online() {
     let version = client.frames.iter().rev().find_map(|frame| machine_version(frame, &id)).unwrap_or_default();
     assert_eq!(version, VERSION, "the restarted node reported {version}\n{}", node.output());
     assert!(node.alive(), "the old binary did not stay up\n{}", node.output());
+    assert_eq!(updates_of(&client.frames, &id), Vec::<Value>::new(), "a restart that was not an update reported a phase");
 }
 
 #[test]
-fn a_proof_that_never_says_hello_puts_the_old_bytes_back() {
-    let hub = Hub::start("hang");
+fn a_hub_that_is_down_past_the_deadline_keeps_the_new_version() {
+    let real = PathBuf::from(BIN);
+    let mut hub = Hub::start("outage");
     let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
     let mut client = Client::connect(&hub.url, &token);
-    let dir = std::env::temp_dir().join(format!("pinned-live-hang-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("pinned-live-outage-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let creds = pair(&hub.url, &mut client, "box", &dir);
     let id = creds.machine_id.clone();
     let dest = install_copy(&dir);
-    backup(&dest);
-    let marker_path = marker(&dest);
-    std::fs::write(&marker_path, b"0").unwrap();
-    let addr = hub.addr;
-    // The proof boot must not be able to finish Hello. The same address comes back afterwards.
-    drop(client);
-    // Hub is dropped at the end. Stop only the listener.
-    let mut hub = hub;
-    hub.stop_listener();
-    let marker_env = marker_path.display().to_string();
+    let script = format!("#!/bin/sh\nsleep 5\nexport PINNED_VERSION=9.9.9\nexec {} \"$@\"\n", real.display());
+    let (base, pubkey, script) = signed_release(&script);
     let mut node = Node::spawn(
         &dest,
         &dir,
-        &[("PINNED_PROOF_BOOT", "1"), ("PINNED_PROOF_WAIT", "2"), ("PINNED_UNPROVEN", marker_env.as_str())],
+        &[
+            ("PINNED_RELEASE_BASE", base.as_str()),
+            ("PINNED_RELEASE_PUBKEY", pubkey.as_str()),
+            ("PINNED_RELEASE_TRIPLE", "test-host"),
+            ("PINNED_PROOF_WAIT", "2"),
+        ],
     );
-    let started = Instant::now();
-    while marker_path.exists() {
-        assert!(started.elapsed() < Duration::from_secs(12), "the marker is still there after a missed Hello\n{}", node.output());
-        assert!(node.alive(), "the proof boot exited instead of restoring\n{}", node.output());
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let bak = dest.with_file_name("pinned-server.bak");
-    assert!(!bak.exists(), "the backup is still beside the binary\n{}", node.output());
-    hub.listen(&addr.to_string());
-    let mut client = Client::connect(&hub.url, &token);
     wait_online(&mut client, &id, Duration::from_secs(20));
-    let version = client.frames.iter().rev().find_map(|frame| machine_version(frame, &id)).unwrap_or_default();
-    assert_eq!(version, VERSION, "came back as {version}\n{}", node.output());
-    assert!(node.alive(), "the restored process exited\n{}", node.output());
+    client.call(&id, json!({ "cmd": "update_self" })).unwrap_or_else(|error| panic!("{error}\n{}", node.output()));
+    let marker_path = marker(&dest);
+    let started = Instant::now();
+    while !marker_path.exists() {
+        client.pump();
+        assert!(node.alive(), "the node exited before the release was staged\n{}", node.output());
+        assert!(started.elapsed() < Duration::from_secs(30), "the release was never staged\n{}", node.output());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    client.pump();
+    let during = updates_of(&client.frames, &id);
+    assert!(during.iter().any(|update| update["state"] == "updating"), "the client never saw the update start: {during:?}");
+    hub.stop_listener();
+    std::thread::sleep(Duration::from_secs(12));
+    assert!(marker_path.exists(), "a hub outage rolled the new bytes back\n{}", node.output());
+    assert_eq!(std::fs::read(&dest).unwrap(), script.as_bytes(), "a hub outage put the old bytes back\n{}", node.output());
+    assert!(node.alive(), "the proof boot exited while the hub was down\n{}", node.output());
+    hub.resume();
+    let mut client = Client::connect(&hub.url, &token);
+    let started = Instant::now();
+    loop {
+        client.pump();
+        let version = client.frames.iter().rev().find_map(|frame| machine_version(frame, &id)).unwrap_or_default();
+        let online = client.frames.iter().rev().find_map(|frame| machine_online(frame, &id));
+        let updates = updates_of(&client.frames, &id);
+        if version == "9.9.9" && online == Some(true) && updates.last().is_some_and(|update| update["state"] == "up_to_date") {
+            assert_eq!(updates.last(), Some(&json!({ "state": "up_to_date", "version": "9.9.9" })));
+            assert!(!updates.iter().any(|update| update["state"] == "failed"), "the client was told the update failed: {updates:?}");
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(30), "the client never saw 9.9.9 up to date (last {version}) {updates:?}\n{}", node.output());
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(!marker_path.exists(), "the new process left the unproven marker\n{}", node.output());
+    assert_eq!(std::fs::read(&dest).unwrap(), script.as_bytes(), "the bytes after the hub returned were not the release");
+    assert!(node.alive(), "the new process exited\n{}", node.output());
 }
 
 #[test]
@@ -533,4 +608,168 @@ fn a_proof_that_exits_is_rolled_back_by_the_next_start() {
     assert!(!dest.with_file_name("pinned-server.bak").exists(), "the next start left the backup\n{}", node.output());
     let version = client.frames.iter().rev().find_map(|frame| machine_version(frame, &id)).unwrap_or_default();
     assert_eq!(version, VERSION, "came back as {version}\n{}", node.output());
+    assert_eq!(updates_of(&client.frames, &id), Vec::<Value>::new(), "the next start reported an update");
+}
+
+#[test]
+fn a_version_the_hub_refuses_rolls_back_and_keeps_one_session() {
+    let real = PathBuf::from(BIN);
+    let hub = Hub::start("reject");
+    hub.reject_version("9.9.9", Duration::from_secs(4));
+    let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&hub.url, &token);
+    let dir = std::env::temp_dir().join(format!("pinned-live-reject-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let creds = pair(&hub.url, &mut client, "box", &dir);
+    let id = creds.machine_id.clone();
+    let dest = install_copy(&dir);
+    let old = std::fs::read(&dest).unwrap();
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\necho $$ >> \"$HOME/claude.pids\"\nexec sleep 300\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let saved = json!([{ "cwd": dir, "session": "s1", "env": [], "bypass": false, "interrupted": false, "account": "claude" }]);
+    std::fs::write(dir.join("sessions.json"), serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
+    let script = format!("#!/bin/sh\nexport PINNED_VERSION=9.9.9\nexec {} \"$@\"\n", real.display());
+    let (base, pubkey, _) = signed_release(&script);
+    let fake = bin.display().to_string();
+    let mut node = Node::spawn(
+        &dest,
+        &dir,
+        &[
+            ("PINNED_RELEASE_BASE", base.as_str()),
+            ("PINNED_RELEASE_PUBKEY", pubkey.as_str()),
+            ("PINNED_RELEASE_TRIPLE", "test-host"),
+            ("PINNED_PROOF_WAIT", "60"),
+            ("FAKE_BIN", fake.as_str()),
+        ],
+    );
+    wait_online(&mut client, &id, Duration::from_secs(20));
+    let pids = dir.join("claude.pids");
+    let started = Instant::now();
+    while alive_pids(&pids).len() != 1 {
+        assert!(node.alive(), "the node exited before claude started\n{}", node.output());
+        assert!(started.elapsed() < Duration::from_secs(20), "claude did not start: {:?}\n{}", recorded_pids(&pids), node.output());
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    client.call(&id, json!({ "cmd": "update_self" })).unwrap_or_else(|error| panic!("{error}\n{}", node.output()));
+    let started = Instant::now();
+    loop {
+        client.pump();
+        let version = client.frames.iter().rev().find_map(|frame| machine_version(frame, &id)).unwrap_or_default();
+        let online = client.frames.iter().rev().find_map(|frame| machine_online(frame, &id));
+        let updates = updates_of(&client.frames, &id);
+        if std::fs::read(&dest).unwrap() == old && online == Some(true) && version == VERSION && updates.last().is_some_and(|update| update["state"] == "failed") {
+            assert_eq!(updates.last(), Some(&json!({ "state": "failed", "to": "9.9.9", "reason": format!("came back on {VERSION}") })));
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "a refused hello left the new bytes in place (version {version}) {updates:?}\n{}",
+            node.output()
+        );
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(updates_of(&client.frames, &id).iter().any(|update| update["state"] == "updating"), "the client never saw the update start");
+    assert!(recorded_pids(&pids).len() >= 2, "the proof boot never started a session: {:?}", recorded_pids(&pids));
+    let alive = alive_pids(&pids);
+    assert_eq!(alive.len(), 1, "rollback left {} claude processes {alive:?}, recorded {:?}", alive.len(), recorded_pids(&pids));
+    assert!(!marker(&dest).exists(), "the rollback left the marker\n{}", node.output());
+    assert!(node.alive(), "the restored process exited\n{}", node.output());
+}
+
+#[test]
+fn a_binary_that_exits_before_it_is_ready_is_replaced_by_the_old_one() {
+    let real = PathBuf::from(BIN);
+    let hub = Hub::start("crash");
+    let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&hub.url, &token);
+    let dir = std::env::temp_dir().join(format!("pinned-live-crash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let creds = pair(&hub.url, &mut client, "box", &dir);
+    let id = creds.machine_id.clone();
+    let dest = install_copy(&dir);
+    let old = std::fs::read(&dest).unwrap();
+    let script = format!("#!/bin/sh\nexport PINNED_VERSION=9.9.9\nexport PINNED_CRASH_BEFORE_READY=1\nexec {} \"$@\"\n", real.display());
+    let (base, pubkey, _) = signed_release(&script);
+    let mut node = Node::spawn(
+        &dest,
+        &dir,
+        &[
+            ("PINNED_RELEASE_BASE", base.as_str()),
+            ("PINNED_RELEASE_PUBKEY", pubkey.as_str()),
+            ("PINNED_RELEASE_TRIPLE", "test-host"),
+        ],
+    );
+    wait_online(&mut client, &id, Duration::from_secs(20));
+    client.call(&id, json!({ "cmd": "update_self" })).unwrap_or_else(|error| panic!("{error}\n{}", node.output()));
+    let started = Instant::now();
+    while node.alive() {
+        client.pump();
+        assert!(started.elapsed() < Duration::from_secs(30), "the new binary stayed up past readiness\n{}", node.output());
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    drop(node);
+    let mut node = Node::spawn(&dest, &dir, &[]);
+    wait_online(&mut client, &id, Duration::from_secs(20));
+    let version = client.frames.iter().rev().find_map(|frame| machine_version(frame, &id)).unwrap_or_default();
+    assert_eq!(version, VERSION, "came back as {version}\n{}", node.output());
+    assert_eq!(std::fs::read(&dest).unwrap(), old, "the crashed bytes stayed on disk");
+    assert!(!marker(&dest).exists(), "the next start left the marker\n{}", node.output());
+    let updates = updates_of(&client.frames, &id);
+    assert!(updates.iter().any(|update| update["state"] == "updating"), "the client never saw the update start: {updates:?}");
+    assert_eq!(updates.last(), Some(&json!({ "state": "failed", "to": "9.9.9", "reason": format!("came back on {VERSION}") })), "{updates:?}");
+    assert!(node.alive(), "the restored process exited\n{}", node.output());
+}
+
+#[test]
+fn a_reconnect_while_the_marker_is_unproven_leaves_it_in_place() {
+    let hub = Hub::start("marker");
+    let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&hub.url, &token);
+    let dir = std::env::temp_dir().join(format!("pinned-live-marker-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let creds = pair(&hub.url, &mut client, "box", &dir);
+    let id = creds.machine_id.clone();
+    let dest = install_copy(&dir);
+    let bytes = std::fs::read(&dest).unwrap();
+    let mut node = Node::spawn(&dest, &dir, &[]);
+    wait_online(&mut client, &id, Duration::from_secs(20));
+    let marker_path = marker(&dest);
+    std::fs::write(&marker_path, b"0\nabc\n").unwrap();
+    let mark = client.frames.len();
+    hub.drop_machine_links();
+    let started = Instant::now();
+    loop {
+        client.pump();
+        let mut online = true;
+        let mut dropped = false;
+        let mut back = false;
+        for frame in &client.frames[mark..] {
+            let Some(now) = machine_online(frame, &id) else { continue };
+            if online && !now {
+                dropped = true;
+            }
+            if dropped && now {
+                back = true;
+            }
+            online = now;
+        }
+        if back {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(20), "the machine did not reconnect after the marker was written\n{}\n{:?}", node.output(), machines(&client));
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(marker_path.exists(), "the running process removed the marker on hello\n{}", node.output());
+    assert_eq!(std::fs::read(&marker_path).unwrap(), b"0\nabc\n");
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes, "the reconnect replaced the bytes");
+    let version = client.frames.iter().rev().find_map(|frame| machine_version(frame, &id)).unwrap_or_default();
+    assert_eq!(version, VERSION, "came back as {version}\n{}", node.output());
+    assert_eq!(updates_of(&client.frames, &id), Vec::<Value>::new(), "a reconnect reported an update");
+    assert!(node.alive(), "the node exited\n{}", node.output());
 }
