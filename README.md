@@ -660,8 +660,9 @@ binaries. Each desktop job uploads its own updater fragment and does not upload
 `gh release upload`. `gh` sends those files in parallel, so they land in no fixed order.
 The upload drafts the release first. `publish` downloads the release and clears the draft only when
 `SHA256SUMS.minisig` verifies `SHA256SUMS`, each file in the sums matches, and each desktop
-bundle matches its signature in `latest.json`. It marks the tag latest when the tag is not
-older than the current latest, and passes `--latest=false` otherwise. A re-run of one
+bundle matches its signature in `latest.json`. A tag with a suffix such as `-rc.1` publishes
+as a prerelease and never takes latest. Any other tag takes latest when it is not older than
+the current latest, and gets `--latest=false` otherwise. A re-run of one
 uploading job drafts the release before it writes a file. Running copies then offer the
 update. A Linux node downloads `pinned-server-<target>` from that release.
 
