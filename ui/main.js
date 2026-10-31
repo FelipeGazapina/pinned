@@ -28,7 +28,15 @@ let active = null;
 
 const keyOf = (machine, id) => `${machine}:${id}`;
 const tabByKey = (key) => tabs.find((t) => t.key === key);
-const callOn = (machine, call) => machines.get(machine).transport.call(call);
+const missingTabId = (error) => /^no tab (\S+)/.exec(String(error))?.[1] ?? null;
+const callOn = async (machine, call) => {
+  try {
+    return await machines.get(machine).transport.call(call);
+  } catch (error) {
+    if (missingTabId(error) && call.cmd !== "tabs") await refreshTabs(machine).catch(() => {});
+    throw error;
+  }
+};
 const IS_MAC = /Mac/.test(navigator.platform);
 const COMPUTER = IS_MAC ? "Mac" : "PC";
 const statusOf = (tab) => tab.view.status ?? "idle";
@@ -492,6 +500,7 @@ async function startClaude(tab) {
     tab.view = { ...tab.view, running: true };
     render();
   } catch (e) {
+    if (!tabs.includes(tab)) return;
     tab.term.write(`\r\n\x1b[31m[could not start claude: ${e}]\x1b[0m\r\n`);
   }
 }
@@ -1237,11 +1246,10 @@ function connectHub(signedIn) {
   });
 }
 
-function tabListAction(wasOnline, online, hasSnapshot) {
+function tabListAction(online, hasSnapshot) {
   if (!online) return "clear";
   if (hasSnapshot) return "apply";
-  if (!wasOnline) return "refresh";
-  return "keep";
+  return "refresh";
 }
 
 function showMachines(list, tabsByMachine) {
@@ -1254,11 +1262,12 @@ function showMachines(list, tabsByMachine) {
     const wasOnline = known?.view.online;
     if (known) known.view = view;
     else machines.set(view.id, { view, tabs: [], transport: hub.transport(view.id), usage: {} });
-    if (!view.online) setTabs(view.id, [], { forget: false });
-    else if (tabsByMachine) setTabs(view.id, tabsByMachine[view.id] ?? []);
-    else if (!wasOnline) {
+    const action = tabListAction(!!view.online, tabsByMachine != null);
+    if (action === "clear") setTabs(view.id, [], { forget: false });
+    else if (action === "apply") setTabs(view.id, tabsByMachine[view.id] ?? []);
+    else {
       refreshTabs(view.id).catch(console.warn);
-      retryUploadImages();
+      if (!wasOnline) retryUploadImages();
     }
   }
   for (const id of [...machines.keys()]) {
