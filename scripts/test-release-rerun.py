@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Replay release.yml against a fake gh.
-
-A public release must not hold a latest.json whose hash is missing from
-SHA256SUMS. Uploading while the release is public is a failure. A signer
-failure must leave those two files as they were.
-"""
 
 from __future__ import annotations
 
@@ -288,16 +282,20 @@ def parse_workflow(text):
     return jobs
 
 
-def relevant(step):
+def release_step(step):
     uses = step.get("uses") or ""
     if "tauri-action" in uses:
         return True
     run = step.get("run") or ""
-    if "gh release" in run:
-        return True
-    if "scripts/" in run and "updater-fragment.sh" not in run:
-        return True
-    return False
+    return any(
+        needle in run
+        for needle in (
+            "gh release",
+            "scripts/assemble-latest-json.sh",
+            "scripts/sign-node-sums.sh",
+            "scripts/release-asset.sh",
+        )
+    )
 
 
 def sums_for(latest, arm, x86):
@@ -454,7 +452,7 @@ class Replay:
     def job(self, name, env, work):
         stderr = []
         for step in self.jobs[name]["steps"]:
-            if not relevant(step):
+            if not release_step(step):
                 continue
             if step.get("uses") and "tauri-action" in step["uses"]:
                 code, err = self.tauri(step, env, work)
@@ -505,7 +503,7 @@ class Replay:
 def step_labels(job):
     labels = []
     for step in job["steps"]:
-        if not relevant(step):
+        if not release_step(step):
             continue
         if step.get("uses"):
             flag = step.get("includeUpdaterJson")
@@ -579,7 +577,7 @@ def main():
     for name in ("draft", "build", "linux-node", "sign-node", "publish"):
         if name not in jobs:
             sys.exit(f"release.yml has no {name} job")
-        if name != "linux-node" and not any(relevant(step) for step in jobs[name]["steps"]):
+        if name != "linux-node" and not any(release_step(step) for step in jobs[name]["steps"]):
             sys.exit(f"{name} has no release steps")
     sha = subprocess.check_output(
         ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True
