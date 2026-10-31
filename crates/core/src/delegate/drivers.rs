@@ -876,6 +876,72 @@ fn targets_under(rows: &[Row], root: u32) -> Vec<i32> {
 #[cfg(test)]
 mod tests {
     use super::{codex_notify_flag, codex_user_notify};
+    #[cfg(unix)]
+    use crate::delegate::tests::{scratch, script, stopped};
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    fn within(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+        let start = Instant::now();
+        while !done() {
+            if start.elapsed() > limit {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_recorded_pid_is_killed_only_while_it_names_the_same_process() {
+        let mut child = crate::process::command("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        super::kill_seen(&[super::Process { pid, started: "Thu Jan 1 00:00:00 1970".into() }]);
+        let reused = !within(Duration::from_millis(500), || child.try_wait().unwrap().is_some());
+        let seen: Vec<super::Process> = super::running(&[pid]).into_iter().map(|now| now.process).collect();
+        super::kill_seen(&seen);
+        let same = within(Duration::from_secs(3), || child.try_wait().unwrap().is_some());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!((reused, same), (true, true), "(survived a record with another start time, killed with its own start time)");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_shell_recorded_before_it_was_reparented_is_still_killed() {
+        use std::os::unix::process::CommandExt;
+        let dir = scratch("reparented");
+        let (pidfile, release) = (dir.join("shell.pid"), dir.join("release"));
+        let middle = script(
+            &dir,
+            "middle",
+            &format!(
+                "perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV' sleep 30 &\necho $! > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.05; done",
+                pidfile.display(),
+                release.display()
+            ),
+        );
+        let agent = script(&dir, "agent", &format!("'{}' &\nexec sleep 30", middle.display()));
+        let mut agent = crate::process::command(&agent).process_group(0).spawn().unwrap();
+        let root = agent.id();
+        assert!(within(Duration::from_secs(5), || std::fs::read_to_string(&pidfile).is_ok_and(|text| text.ends_with('\n'))), "the shell never started");
+        let shell: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        let first = super::seen_under(root, &[]);
+        std::fs::write(&release, "").unwrap();
+        let reparented = within(Duration::from_secs(5), || !super::targets_under(&super::process_table(), root).contains(&shell));
+        let second = super::seen_under(root, &first);
+        super::kill_seen(&second);
+        let killed = stopped(shell);
+        unsafe {
+            libc::kill(-(root as i32), libc::SIGKILL);
+            libc::kill(shell, libc::SIGKILL);
+        }
+        let _ = agent.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((reparented, killed), (true, true), "(the shell left the agent's tree, kill_seen stopped it)");
+    }
 
     #[test]
     #[cfg(unix)]

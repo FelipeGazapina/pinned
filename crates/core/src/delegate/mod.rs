@@ -903,7 +903,7 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[cfg(unix)]
-    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    pub(super) fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
@@ -963,7 +963,7 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[cfg(unix)]
-    fn stopped(pid: i32) -> bool {
+    pub(super) fn stopped(pid: i32) -> bool {
         let start = Instant::now();
         while unsafe { libc::kill(pid, 0) } == 0 {
             if start.elapsed() > Duration::from_secs(3) {
@@ -1002,7 +1002,7 @@ grok-4.7-high - Grok 4.7  High
         (pid, rx)
     }
 
-    fn scratch(name: &str) -> PathBuf {
+    pub(super) fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pinned-delegate-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
