@@ -346,8 +346,7 @@ pub struct Machine {
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
     sync_file: Option<PathBuf>,
-    /// Whether a running sync loop holds a loaded state, so it syncs whatever the file now holds.
-    sync_held: AtomicBool,
+    sync_loop_holds_state: AtomicBool,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
@@ -464,7 +463,7 @@ impl Machine {
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
-            sync_held: AtomicBool::new(false),
+            sync_loop_holds_state: AtomicBool::new(false),
             projects: Mutex::new(projects),
             projects_file,
             accounts: Accounts::load(dir.as_deref(), home.clone()),
@@ -1730,12 +1729,11 @@ impl Machine {
     }
 
     pub(crate) fn hold_sync_state(&self, held: bool) {
-        self.sync_held.store(held, Ordering::SeqCst);
+        self.sync_loop_holds_state.store(held, Ordering::SeqCst);
     }
 
-    /// A loop without a state loads the file on its next cycle, so the file answers for it.
     fn sync_stopped(&self) -> Option<String> {
-        if self.sync_held.load(Ordering::SeqCst) {
+        if self.sync_loop_holds_state.load(Ordering::SeqCst) {
             return None;
         }
         self.sync_file.as_deref().and_then(sync::unreadable)

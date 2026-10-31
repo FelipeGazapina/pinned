@@ -116,7 +116,7 @@ test("opening the Machines page asks every online machine again", () => {
   const asked = [];
   const drawn = [];
   const sections = [];
-  run(`${fn(accountSrc, "openMachinesPage")}\n${line(settingsSrc, 'settingsSection({ page: "machines"')}`, {
+  run(`${fn(accountSrc, "showMachinesAndRecheckSync")}\n${line(settingsSrc, 'settingsSection({ page: "machines"')}`, {
     LOCAL: "local",
     machines: new Map([
       ["local", { hubView: { id: "this-mac", online: true } }],
