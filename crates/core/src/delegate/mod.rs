@@ -1463,6 +1463,37 @@ grok-4.7-high - Grok 4.7  High
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_whose_stderr_outlives_it_finishes_when_it_exits() {
+        let dir = scratch("stderr-held");
+        let mut seen = vec![];
+        for (name, end) in [("reply", format!("echo '{REPLY}'\nexit 0")), ("crash", "echo boom >&2\nexit 1".to_owned())] {
+            let leftover = Leftover(dir.join(format!("{name}.pid")));
+            let body = format!(
+                "perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV' sh -c 'echo $$ > \"$0\"; exec sleep 30' '{pidfile}' >/dev/null &\nwhile [ ! -s '{pidfile}' ]; do sleep 0.05; done\necho '{INIT}'\n{end}",
+                pidfile = leftover.0.display(),
+            );
+            let bin = script(&dir, &format!("agent-{name}"), &body);
+            let delegates = Arc::new(Delegates::default());
+            let task = new_on(&delegates, Provider::Cursor);
+            let (_, told) = run(&delegates, &task, &bin, &dir);
+            let holder = leftover.pid();
+            let finished = told.recv_timeout(Duration::from_secs(5)).is_ok();
+            let status = delegates.status(&parent(), &task.id).unwrap();
+            seen.push(json!([name, finished, alive(holder), delegates.remembered(&task.id), status["workState"], status["summary"], status["error"]]));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            seen,
+            vec![
+                json!(["reply", true, true, null, "result_available", "PR opened", null]),
+                json!(["crash", true, true, null, "failed", null, "boom"]),
+            ],
+            "[case, finished, the stderr holder still runs, remembered pid, workState, summary, error]"
+        );
+    }
+
     #[cfg(unix)]
     const RESULT: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"PR opened"}"#;
 
