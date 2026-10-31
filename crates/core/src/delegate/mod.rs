@@ -1195,11 +1195,13 @@ grok-4.7-high - Grok 4.7  High
         let before_the_final_result: Vec<&str> = recording.lines().take(17).collect();
         let shell = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_type":"local_bash","description":"npm run dev"}]}"#;
         let result = r#"{"type":"result","subtype":"success","is_error":false,"result":"PR opened and CI is green"}"#;
+        let subagent = fixture("claude-background-agent.jsonl");
+        let held_first_result: Vec<&str> = subagent.lines().take(22).collect();
         let summaries = |name: &str, lines: &[&str]| after_each_stop(name, Provider::Claude, lines).into_iter().map(|row| row[2].clone()).collect::<Vec<_>>();
         assert_eq!(
-            [summaries("newest-text", &before_the_final_result), summaries("newest-result", &[INIT, shell, REPLY, result])],
-            [vec![json!("FINAL-REPORT\nbgdone\n\n[exited with code 0]"); 4], vec![json!("PR opened and CI is green"); 4]],
-            "a text written after the last turn end is newer than the summary that turn left, and a later result is newer than both"
+            [summaries("newest-text", &before_the_final_result), summaries("newest-result", &[INIT, shell, REPLY, result]), summaries("held-result", &held_first_result)],
+            [vec![json!("FINAL-REPORT\nbgdone\n\n[exited with code 0]"); 4], vec![json!("PR opened and CI is green"); 4], vec![json!("FINAL-REPORT\nDONE-SUB"); 4]],
+            "a text written after the last turn end is newer than the summary that turn left, a later result is newer than both, and the first turn's result held past the second turn's text is not"
         );
     }
 
