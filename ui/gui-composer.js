@@ -80,14 +80,14 @@ function touchComposer(mq = matchMedia) {
   return mq("(pointer: coarse)").matches && !mq("(any-pointer: fine)").matches;
 }
 function composerEnterIntent(e, { promptText, shortcut, touch, isMac }) {
-  if (e.key !== "Enter" || e.shiftKey || e.isComposing) return "none";
+  if (e.key !== "Enter" || e.shiftKey || e.isComposing || e.keyCode === 229) return "none";
   const mod = isMac ? e.metaKey : e.ctrlKey;
   if (touch && !mod) return "newline";
   return !enterNeedsMod(shortcut, promptText) || mod ? "send" : "newline";
 }
 const SEND_MOD = IS_MAC ? "⌘" : "Ctrl";
 const sendShortcutHtml = () => touchComposer()
-  ? `<div class="look"><label>Send shortcut</label><p class="meta">Enter adds a new line here. Use the send button to submit.</p></div>`
+  ? `<div class="look"><label>Send shortcut</label><p class="meta">Enter adds a new line here. ${SEND_MOD} + Enter on a hardware keyboard sends, and the send button does too.</p></div>`
   : `<div class="look"><label for="send-shortcut">Send shortcut</label><p class="meta">Choose when Enter sends a prompt or inserts a new line</p>
   <select id="send-shortcut">${[["enter", "Enter"], ["mod-enter-multiline", `${SEND_MOD} + Enter for multiline prompts`], ["mod-enter", `${SEND_MOD} + Enter always`]].map(([v, l]) => `<option value="${v}"${sendShortcut === v ? " selected" : ""}>${l}</option>`).join("")}</select></div>`;
 function bindSendShortcut() {
@@ -166,7 +166,7 @@ function renderComposer(tab) {
   composer.dataset.spinning = spinning;
   send.disabled = !!blocked;
   const touch = touchComposer();
-  const keys = touch ? "" : needsMod(prompt.value) ? `${SEND_MOD}Enter` : "Enter";
+  const keys = touch || needsMod(prompt.value) ? `${SEND_MOD}Enter` : "Enter";
   const compacting = tab && compactOffer(tab) && !t.keepHistory;
   const keyHint = keys ? ` (${keys})` : "";
   send.title = blocked || (composer.dataset.sending === "true" ? "Submitting message" : compacting ? `Summarize ${formatTokens(compactOffer(tab))} tokens of history, then send` : working ? `Queue message${keyHint}` : `Send${keyHint}`);
@@ -1933,6 +1933,10 @@ function deleteChip(e) {
 }
 
 function triggerKey(e) {
+  if (e.key === "Enter" && !e.shiftKey && (e.metaKey || e.ctrlKey || e.altKey || e.isComposing)) {
+    if (!e.isComposing) composerMenu.hidden = true;
+    return false;
+  }
   const rows = [...composerMenu.querySelectorAll("[data-pick]")];
   const at = rows.findIndex((r) => r.classList.contains("highlight"));
   if (e.key === "Escape") composerMenu.hidden = true;

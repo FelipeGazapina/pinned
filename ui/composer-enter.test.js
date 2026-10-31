@@ -289,6 +289,17 @@ test("touch Alt+Cmd+Enter with a menu open sends and opens a new thread", () => 
   assert.equal(chord.defaultPrevented, true);
 });
 
+test("Shift+Cmd+Enter with a menu open stays a newline", () => {
+  const phone = openSlash("/help", { coarse: true, fine: false });
+  const enter = keydown({ shiftKey: true, metaKey: true });
+  phone.element.dispatch(enter);
+  assert.deepEqual(phone.picks, []);
+  assert.deepEqual(phone.sent, []);
+  assert.equal(phone.prompt.value, "/help");
+  assert.equal(phone.composerMenu.hidden, false);
+  assert.equal(enter.defaultPrevented, false);
+});
+
 test("a composing Enter with an open menu does not pick", () => {
   const phone = openSlash("/help", { coarse: true, fine: false, isMac: true });
   const enter = keydown({ isComposing: true });

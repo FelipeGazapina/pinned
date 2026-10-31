@@ -12,6 +12,6 @@ With no open thread, the first online checkout starts. An open thread still wins
 
 ## Verification
 
-`node --test ui/*.test.js`. 63 tests passed and 0 failed.
+`node --test ui/*.test.js`. 71 tests passed and 0 failed.
 
 Playwright 1.64.1 at a 390px viewport, with `#project-menu` set to 288px the way the menu script does. The project label was 62.41px wide. Both gears sat inside the menu (right edges 252 and 284, menu right 296). The machine label client width was 106px against a scroll width of 284px.
