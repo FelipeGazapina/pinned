@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -202,6 +203,66 @@ if __name__ == "__main__":
 '''
 
 
+PWSH = {"pwsh", "powershell", "pwsh.exe", "powershell.exe"}
+BASH_SYNTAX = re.compile(r"\$\{?[A-Za-z_]|\$(?=\()|\[\[")
+
+
+def is_bash_syntax(script):
+    without_pwsh_env = re.sub(r"\$env:[A-Za-z_][A-Za-z0-9_]*", "", script)
+    return BASH_SYNTAX.search(without_pwsh_env) is not None
+
+
+def shell_token(value):
+    return value.strip().split()[0]
+
+
+def runner_shell(label):
+    lowered = label.lower()
+    if "windows" in lowered:
+        return "pwsh"
+    if "ubuntu" in lowered or "macos" in lowered or "linux" in lowered:
+        return "bash"
+    return None
+
+
+def effective_shells(workflow_shell, job, step):
+    if step.get("shell"):
+        return [shell_token(step["shell"])]
+    if job.get("shell"):
+        return [shell_token(job["shell"])]
+    if workflow_shell:
+        return [shell_token(workflow_shell)]
+    shells = []
+    for label in job.get("runs_on") or []:
+        if "${{" in label:
+            shells.append(None)
+        else:
+            shells.append(runner_shell(label))
+    return shells or [None]
+
+
+def shell_problems(workflow_shell, jobs):
+    problems = []
+    for name, job in jobs.items():
+        for index, step in enumerate(job["steps"], start=1):
+            script = step.get("run") or ""
+            if not script.strip() or not is_bash_syntax(script):
+                continue
+            bad = []
+            for shell in effective_shells(workflow_shell, job, step):
+                if shell in PWSH or shell is None:
+                    shown = shell or "unresolved"
+                    if shown not in bad:
+                        bad.append(shown)
+            if not bad:
+                continue
+            first = next((item.strip() for item in script.splitlines() if item.strip()), "")
+            problems.append(
+                f"{name} step {index} runs bash syntax under {', '.join(bad)}: {first}"
+            )
+    return problems
+
+
 def parse_workflow(text):
     lines = text.splitlines()
     jobs = {}
@@ -209,6 +270,8 @@ def parse_workflow(text):
     in_jobs = False
     in_steps = False
     step = None
+    workflow_shell = None
+    seeing_defaults = False
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -217,13 +280,20 @@ def parse_workflow(text):
             i += 1
             continue
         if not in_jobs:
+            stripped = line.strip()
+            if line.startswith("defaults:"):
+                seeing_defaults = True
+            elif seeing_defaults and stripped.startswith("shell:"):
+                workflow_shell = stripped.split(":", 1)[1].strip().strip("'\"")
+            elif line and not line.startswith(" ") and not line.startswith("#"):
+                seeing_defaults = False
             i += 1
             continue
         if line and not line.startswith(" ") and not line.startswith("#"):
             break
         if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
             name = line.strip()[:-1]
-            current = {"steps": []}
+            current = {"steps": [], "runs_on": [], "shell": None}
             jobs[name] = current
             in_steps = False
             step = None
@@ -233,8 +303,24 @@ def parse_workflow(text):
             in_steps = True
             i += 1
             continue
+        if current is not None and not in_steps:
+            stripped = line.strip()
+            if stripped.startswith("runs-on:"):
+                value = stripped.split(":", 1)[1].strip().strip("'\"")
+                if "${{" not in value:
+                    current["runs_on"] = [value]
+                i += 1
+                continue
+            if stripped.startswith("os:") or stripped.startswith("- os:"):
+                current["runs_on"].append(stripped.split(":", 1)[1].strip().strip("'\""))
+                i += 1
+                continue
+            if stripped.startswith("shell:"):
+                current["shell"] = stripped.split(":", 1)[1].strip().strip("'\"")
+                i += 1
+                continue
         if in_steps and line.startswith("      - "):
-            step = {"uses": None, "run": None, "includeUpdaterJson": None}
+            step = {"uses": None, "run": None, "includeUpdaterJson": None, "shell": None}
             current["steps"].append(step)
             rest = line.strip()[2:]
             if rest.startswith("uses:"):
@@ -247,6 +333,10 @@ def parse_workflow(text):
         stripped = line.strip()
         if stripped.startswith("uses:"):
             step["uses"] = stripped.split(":", 1)[1].strip()
+            i += 1
+            continue
+        if stripped.startswith("shell:"):
+            step["shell"] = stripped.split(":", 1)[1].strip().strip("'\"")
             i += 1
             continue
         if stripped.startswith("includeUpdaterJson:"):
@@ -279,7 +369,7 @@ def parse_workflow(text):
             i += 1
             continue
         i += 1
-    return jobs
+    return workflow_shell, jobs
 
 
 def release_step(step):
@@ -573,7 +663,15 @@ def matching_public():
 
 
 def main():
-    jobs = parse_workflow(WORKFLOW.read_text())
+    workflow_shell, jobs = parse_workflow(WORKFLOW.read_text())
+    shell_failed = 0
+    problems = shell_problems(workflow_shell, jobs)
+    if problems:
+        shell_failed = len(problems)
+        for problem in problems:
+            print(f"FAIL shell: {problem}")
+    else:
+        print("ok: shells")
     for name in ("draft", "build", "linux-node", "sign-node", "publish"):
         if name not in jobs:
             sys.exit(f"release.yml has no {name} job")
@@ -709,8 +807,10 @@ def main():
                 print(f"ok: {title}")
     if failed:
         print(f"{failed} scenario(s) failed")
+    else:
+        print(f"ok: {len(cases)} scenarios")
+    if failed or shell_failed:
         return 1
-    print(f"ok: {len(cases)} scenarios")
     return 0
 
 
