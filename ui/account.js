@@ -151,6 +151,7 @@ function showMachinesPage() {
   const pair = machinesUi.pair;
   settingsPage.innerHTML = `<h2>Machines</h2>
     <p class="hint">Every machine signed into ${esc(account.email || "this account")}. Sessions on the ones online show up as tabs here.</p>
+    <div class="actions start"><button class="secondary" data-action="update-all">Update every machine</button></div>
     <div class="machine-list">${rows}</div>
     <p class="error">${esc(machinesUi.error)}</p>
     <div class="card">
@@ -172,6 +173,8 @@ function machineEntryHtml(id, view) {
   if (!view) return "";
   const local = id === LOCAL;
   const where = [view.os, local && (TAURI ? `this ${COMPUTER}` : null), !view.online && lastSeen(view.last_seen)].filter(Boolean).join(" · ");
+  const status = rowUpdate(view);
+  const updateId = local ? account?.machine_id : view.id;
   const name =
     machinesUi.renaming === id
       ? `<input class="rename" value="${esc(view.name)}" spellcheck="false" autocomplete="off">`
@@ -194,7 +197,8 @@ function machineEntryHtml(id, view) {
     : "";
   return `<div class="machine-row" data-machine="${esc(id)}">
       <span class="dot" data-online="${view.online}"></span>
-      <div class="who">${name}<span class="hint">${esc(where)}</span></div>
+      <div class="who">${name}<span class="hint">${esc(where)}</span>${status ? `<span class="hint">${esc(status)}</span>` : ""}</div>
+      ${updateId && machinesUi.renaming !== id ? `<button class="secondary" data-action="update-machine">Update</button>` : ""}
       ${machinesUi.renaming === id ? "" : `<button class="secondary" data-action="rename-machine">Rename</button>`}
       ${local ? "" : `<button class="secondary danger" data-action="remove-machine">Remove</button>`}
     </div>${sync}${confirm}`;
@@ -226,6 +230,24 @@ async function renameMachine(field) {
 }
 
 Object.assign(actions, {
+  "update-all": () => {
+    updateEveryMachine().catch((e) => {
+      machinesUi.error = String(e);
+      showMachinesPage();
+    });
+  },
+  async "update-machine"(button) {
+    const row = rowMachine(button);
+    const id = row === LOCAL ? account?.machine_id : row;
+    if (!id) return;
+    machinesUi.error = "";
+    try {
+      await hub.call(id, { cmd: "update_self" });
+    } catch (e) {
+      machinesUi.error = String(e);
+    }
+    showMachinesPage();
+  },
   "go-account": () => showPage("account"),
   "rename-machine"(button) {
     machinesUi.renaming = rowMachine(button);
