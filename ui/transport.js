@@ -29,3 +29,4 @@ const localTransport = {
   },
   detach: (tab) => invoke("detach_tab", { tab }),
 };
+globalThis.localTransport = localTransport;

@@ -1175,7 +1175,9 @@ async function checkUpdate() {
   }
 }
 function headerUpdateResult(status) {
-  return "wait";
+  if (status?.state === "restarting" || status?.state === "updating") return "wait";
+  if (status?.state === "failed" || status?.state === "cannot") return "error";
+  return "refresh";
 }
 async function installUpdate() {
   for (const b of document.querySelectorAll(".update")) {
@@ -1183,7 +1185,14 @@ async function installUpdate() {
     b.textContent = "updating…";
   }
   try {
-    await invoke("install_update");
+    const status = await invoke("install_update");
+    const outcome = headerUpdateResult(status);
+    if (outcome === "error") {
+      active?.term.write(`\r\n\x1b[31m[update failed: ${status.reason}]\x1b[0m\r\n`);
+      checkUpdate();
+    } else if (outcome === "refresh") {
+      checkUpdate();
+    }
   } catch (e) {
     active?.term.write(`\r\n\x1b[31m[update failed: ${e}]\x1b[0m\r\n`);
     checkUpdate();

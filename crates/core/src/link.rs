@@ -31,6 +31,8 @@ const SYNC_FIRST: Duration = Duration::from_secs(5);
 const SYNC_EVERY: Duration = Duration::from_secs(20);
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
 pub const UNAUTHORIZED: u16 = 4001;
+pub const POST_UPDATE_ENV: &str = "PINNED_POST_UPDATE";
+pub const UPDATE_READY_ENV: &str = "PINNED_UPDATE_READY";
 
 pub struct Link {
     shared: Arc<Shared>,
@@ -277,6 +279,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
         shared.send(&MachineFrame::Event { event: MachineEvent::Usage { usage, account } });
     }
     shared.send(&MachineFrame::Event { event: MachineEvent::Update { status: machine.update_snapshot() } });
+    signal_update_ready();
 
     let mut ping = tokio::time::interval(PING);
     let mut heard = Instant::now();
@@ -331,10 +334,18 @@ fn in_order(shared: Arc<Shared>, machine: Arc<Machine>) -> mpsc::Sender<(u64, Ca
     calls
 }
 
+fn signal_update_ready() {
+    let Ok(path) = std::env::var(UPDATE_READY_ENV) else { return };
+    if path.is_empty() {
+        return;
+    }
+    let _ = std::fs::write(path, b"");
+}
+
 fn finish_call(shared: &Shared, machine: &Machine, id: u64, call: Call) {
-    let result = machine.call(call);
+    let (result, armed) = machine.finish_for_restart(call);
     let frame = MachineFrame::Reply(Reply::new(id, result));
-    if machine.restart_pending() {
+    if armed {
         let _ = shared.send_flushed(&frame);
         machine.restart_now();
     } else {

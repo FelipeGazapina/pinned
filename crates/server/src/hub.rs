@@ -740,7 +740,7 @@ pub fn reconcile(previous: Option<UpdateStatus>, version: &str, snapshot: Option
     }
     match previous {
         Some(UpdateStatus::Updating { to }) | Some(UpdateStatus::Restarting { to }) if !to.is_empty() => {
-            if version == to {
+            if crate::self_update::same_release(version, &to) {
                 Some(UpdateStatus::UpToDate { version: version.to_owned() })
             } else {
                 Some(UpdateStatus::Failed { to, reason: format!("came back on {version}") })

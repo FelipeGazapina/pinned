@@ -7,6 +7,7 @@ use crate::{branches, commands, favicon, files, github, history, hooks, memory, 
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -384,24 +385,34 @@ pub trait SelfUpdate: Send + Sync {
 struct Gate {
     installer: Option<Arc<dyn SelfUpdate>>,
     busy: bool,
+    busy_gen: u64,
     phase: Option<UpdateStatus>,
     restart: Option<Box<dyn FnOnce() + Send>>,
+    restart_gen: u64,
     flusher: Option<Arc<dyn Fn(&MachineEvent) -> bool + Send + Sync>>,
 }
 
 impl Default for Gate {
     fn default() -> Self {
-        Self { installer: None, busy: false, phase: None, restart: None, flusher: None }
+        Self { installer: None, busy: false, busy_gen: 0, phase: None, restart: None, restart_gen: 0, flusher: None }
     }
+}
+
+thread_local! {
+    static ARMED_RESTART: Cell<bool> = const { Cell::new(false) };
 }
 
 struct Busy<'a> {
     machine: &'a Machine,
+    generation: u64,
 }
 
 impl Drop for Busy<'_> {
     fn drop(&mut self) {
         let mut gate = self.machine.gate.lock().unwrap();
+        if gate.busy_gen != self.generation {
+            return;
+        }
         if !matches!(gate.phase, Some(UpdateStatus::Restarting { .. })) {
             gate.busy = false;
         }
@@ -500,7 +511,7 @@ impl Machine {
     }
 
     fn update_self(&self) -> UpdateStatus {
-        let installer = {
+        let (installer, generation, busy_gen) = {
             let mut gate = self.gate.lock().unwrap();
             if gate.busy {
                 return gate.phase.clone().unwrap_or(UpdateStatus::Updating { to: String::new() });
@@ -509,17 +520,33 @@ impl Machine {
                 return UpdateStatus::Cannot { reason: "this build cannot install a release".into() };
             };
             gate.busy = true;
-            installer
+            gate.busy_gen = gate.busy_gen.wrapping_add(1);
+            (installer, gate.restart_gen, gate.busy_gen)
         };
-        let _busy = Busy { machine: self };
-        installer.install(self)
+        let _busy = Busy { machine: self, generation: busy_gen };
+        let status = installer.install(self);
+        let armed = self.gate.lock().unwrap().restart_gen != generation;
+        ARMED_RESTART.with(|flag| flag.set(armed));
+        status
+    }
+
+    pub fn finish_for_restart(&self, call: Call) -> (Result<Value, String>, bool) {
+        ARMED_RESTART.with(|flag| flag.set(false));
+        let result = self.call(call);
+        let armed = ARMED_RESTART.with(|flag| flag.replace(false));
+        (result, armed)
     }
 
     pub fn report(&self, status: UpdateStatus) -> bool {
         let event = MachineEvent::Update { status: Some(status.clone()) };
+        let terminal = matches!(status, UpdateStatus::Failed { .. } | UpdateStatus::Cannot { .. } | UpdateStatus::UpToDate { .. });
         let flusher = {
             let mut gate = self.gate.lock().unwrap();
             gate.phase = Some(status);
+            if terminal {
+                gate.busy = false;
+                gate.busy_gen = gate.busy_gen.wrapping_add(1);
+            }
             gate.flusher.clone()
         };
         match flusher {
@@ -532,11 +559,9 @@ impl Machine {
     }
 
     pub fn schedule_restart(&self, restart: Box<dyn FnOnce() + Send>) {
-        self.gate.lock().unwrap().restart = Some(restart);
-    }
-
-    pub fn restart_pending(&self) -> bool {
-        self.gate.lock().unwrap().restart.is_some()
+        let mut gate = self.gate.lock().unwrap();
+        gate.restart = Some(restart);
+        gate.restart_gen = gate.restart_gen.wrapping_add(1);
     }
 
     pub fn restart_now(&self) {
@@ -546,8 +571,7 @@ impl Machine {
     }
 
     pub fn update_snapshot(&self) -> Option<UpdateStatus> {
-        let gate = self.gate.lock().unwrap();
-        gate.busy.then(|| gate.phase.clone().unwrap_or(UpdateStatus::Updating { to: String::new() }))
+        self.gate.lock().unwrap().phase.clone()
     }
 
     /// Answers every call a client may make, local or through the hub. `Run` may clone a
@@ -5538,9 +5562,10 @@ while True:
             other => panic!("{other:?}"),
         }
         release_tx.send(()).unwrap();
-        assert_eq!(running.join().unwrap().unwrap(), status(updating));
-        assert_eq!(m.update_snapshot(), None);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(running.join().unwrap().unwrap(), status(updating.clone()));
+        assert_eq!(m.update_snapshot(), Some(updating.clone()));
+        assert_eq!(m.call(Call::UpdateSelf).unwrap(), status(updating));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -5565,7 +5590,7 @@ while True:
         let m = machine();
         m.set_installer(Arc::new(PanicInstall(UpdateStatus::Updating { to: "9".into() })));
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.call(Call::UpdateSelf))).is_err());
-        assert_eq!(m.update_snapshot(), None);
+        assert_eq!(m.update_snapshot(), Some(UpdateStatus::Updating { to: "9".into() }));
         let current = UpdateStatus::UpToDate { version: "0.16.0".into() };
         m.set_installer(Arc::new(Fixed(current.clone())));
         assert_eq!(m.call(Call::UpdateSelf).unwrap(), status(current));
@@ -5597,6 +5622,29 @@ while True:
         m.report(failed);
         assert_eq!(m.call(Call::UpdateSelf).unwrap(), status(restarting));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_terminal_report_after_restarting_can_be_pressed_again() {
+        for terminal in [
+            UpdateStatus::Failed { to: "1.2.0".into(), reason: "checksum mismatch".into() },
+            UpdateStatus::Cannot { reason: "no release binary for macos aarch64".into() },
+            UpdateStatus::UpToDate { version: "0.16.0".into() },
+        ] {
+            let calls = Arc::new(AtomicU32::new(0));
+            let m = machine();
+            let restarting = UpdateStatus::Restarting { to: "1.2.0".into() };
+            m.set_installer(Arc::new(Counted {
+                calls: calls.clone(),
+                status: restarting.clone(),
+                started: Mutex::new(None),
+                release: Mutex::new(None),
+            }));
+            assert_eq!(m.call(Call::UpdateSelf).unwrap(), status(restarting.clone()));
+            m.report(terminal);
+            assert_eq!(m.call(Call::UpdateSelf).unwrap(), status(restarting));
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
     }
 
     #[test]

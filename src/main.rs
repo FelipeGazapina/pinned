@@ -56,8 +56,10 @@ async fn machine_call_slow(machine: State<'_, Arc<Machine>>, call: Call) -> Resu
 }
 
 fn finish_local(machine: &Machine, call: Call) -> Result<serde_json::Value, String> {
-    let result = machine.call(call);
-    machine.restart_now();
+    let (result, armed) = machine.finish_for_restart(call);
+    if armed {
+        machine.restart_now();
+    }
     result
 }
 
@@ -198,9 +200,9 @@ async fn check_update(app: AppHandle, panel: State<'_, Panel>) -> Result<Option<
 }
 
 #[tauri::command]
-async fn install_update(machine: State<'_, Arc<Machine>>) -> Result<(), String> {
+async fn install_update(machine: State<'_, Arc<Machine>>) -> Result<serde_json::Value, String> {
     let machine = machine.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || finish_local(&machine, Call::UpdateSelf)).await.map_err(|e| e.to_string())?.map(|_| ())
+    tauri::async_runtime::spawn_blocking(move || finish_local(&machine, Call::UpdateSelf)).await.map_err(|e| e.to_string())?
 }
 
 struct DesktopUpdate {

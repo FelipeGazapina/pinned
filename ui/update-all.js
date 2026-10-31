@@ -9,16 +9,19 @@ function accountMachines() {
 
 function land(id, call) {
   const before = JSON.stringify(accountMachines().find((view) => view.id === id)?.update ?? null);
+  let listen;
   const changed = new Promise((resolve) => {
-    const listen = () => {
+    listen = () => {
       const next = JSON.stringify(accountMachines().find((view) => view.id === id)?.update ?? null);
       if (next === before) return;
-      viewListeners.splice(viewListeners.indexOf(listen), 1);
       resolve();
     };
     viewListeners.push(listen);
   });
-  return Promise.race([changed, call.then(() => null, () => null)]);
+  return Promise.race([changed, call.then(() => null, () => null)]).finally(() => {
+    const at = viewListeners.indexOf(listen);
+    if (at >= 0) viewListeners.splice(at, 1);
+  });
 }
 
 async function updateEveryMachine() {

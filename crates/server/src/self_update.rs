@@ -5,14 +5,18 @@ use pinned_core::wire::UpdateStatus;
 use sha2::{Digest, Sha256};
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 pub const RELEASE_BASE: &str = "https://github.com/FelipeGazapina/pinned/releases/latest/download";
 
 /// The minisign public key in `tauri.conf.json`, base64 of the public key file.
 pub const RELEASE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIwQ0ZBQUFCNDgxNzI3NTIKUldSU0p4ZElxNnJQc0hENytBanJ6K25Xd0pOVmdEWlpwZzJRak9VemN3Rk1TcmNFUWdtOWNVOGoK";
+
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+const CONNECT_WAIT: Duration = Duration::from_secs(60);
+const ALLOW_LEGACY_SIGNATURES: bool = false;
 
 pub struct NodeUpdate {
     base: String,
@@ -62,9 +66,12 @@ impl SelfUpdate for NodeUpdate {
         let reporting = restarting.clone();
         let dest = dest.clone();
         restarting.schedule_restart(Box::new(move || {
-            let reason = reexec(&plan);
-            let _ = restore(&dest);
-            reporting.report(UpdateStatus::Failed { to, reason });
+            match watch_new_binary(&plan, &dest, CONNECT_WAIT) {
+                Ok(()) => std::process::exit(0),
+                Err(reason) => {
+                    reporting.report(UpdateStatus::Failed { to, reason });
+                }
+            }
         }));
         let status = status.clone();
         machine.report(status.clone());
@@ -87,14 +94,37 @@ impl NodeUpdate {
             Ok(body) => body,
             Err(reason) => return failed(report, "", reason),
         };
+        let sums = match download(&format!("{base}/SHA256SUMS")) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(reason) => return failed(report, "", reason),
+        };
+        let signature = match download(&format!("{base}/SHA256SUMS.minisig")) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(reason) => return failed(report, "", reason),
+        };
+        if let Err(reason) = verify(pubkey, &sums, &signature, "latest.json", &latest) {
+            return failed(report, "", reason);
+        }
         let version = match version_of(&latest) {
             Ok(version) => version,
             Err(reason) => return failed(report, "", reason),
         };
-        if version == env!("CARGO_PKG_VERSION") {
-            let status = UpdateStatus::UpToDate { version };
+        let published = match release_number(&version) {
+            Ok(published) => published,
+            Err(reason) => return failed(report, "", reason),
+        };
+        let current = env!("CARGO_PKG_VERSION");
+        let running = match release_number(current) {
+            Ok(running) => running,
+            Err(reason) => return failed(report, &version, reason),
+        };
+        if published == running {
+            let status = UpdateStatus::UpToDate { version: current.to_owned() };
             report(status.clone());
             return (status, None);
+        }
+        if published < running {
+            return failed(report, &version, format!("the published release {version} is older than {current}"));
         }
         report(UpdateStatus::Updating { to: version.clone() });
         let name = format!("pinned-server-{triple}");
@@ -102,18 +132,10 @@ impl NodeUpdate {
             Ok(bytes) => bytes,
             Err(reason) => return failed(report, &version, reason),
         };
-        let sums = match download(&format!("{base}/SHA256SUMS")) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(reason) => return failed(report, &version, reason),
-        };
-        let signature = match download(&format!("{base}/SHA256SUMS.minisig")) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(reason) => return failed(report, &version, reason),
-        };
-        if let Err(reason) = apply(dest, &name, &bytes, &sums, &signature, pubkey) {
+        if let Err(reason) = verify(pubkey, &sums, &signature, &name, &bytes) {
             return failed(report, &version, reason);
         }
-        match plan_for(dest) {
+        match stage_planned(dest, &bytes, plan_for(dest)) {
             Ok(plan) => (UpdateStatus::Restarting { to: version }, Some(plan)),
             Err(reason) => failed(report, &version, reason),
         }
@@ -123,7 +145,7 @@ impl NodeUpdate {
 pub(crate) fn verify(pubkey: &str, sums: &str, signature: &str, file_name: &str, bytes: &[u8]) -> Result<(), String> {
     let key = public_key(pubkey)?;
     let signature = Signature::decode(signature).map_err(|error| format!("could not read the release signature: {error}"))?;
-    key.verify(sums.as_bytes(), &signature, false).map_err(|_| "the release signature does not match".to_owned())?;
+    key.verify(sums.as_bytes(), &signature, ALLOW_LEGACY_SIGNATURES).map_err(|_| "the release signature does not match".to_owned())?;
     let want = sha256(bytes);
     match listed(sums, file_name) {
         Some(hash) if hash.eq_ignore_ascii_case(&want) => Ok(()),
@@ -165,12 +187,42 @@ fn version_of(body: &[u8]) -> Result<String, String> {
     value["version"].as_str().map(str::to_owned).ok_or_else(|| "latest.json has no version".into())
 }
 
+pub(crate) fn release_number(raw: &str) -> Result<semver::Version, String> {
+    let trimmed = raw.trim();
+    let bare = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    semver::Version::parse(bare).map_err(|error| format!("latest.json version is not a release number: {error}"))
+}
+
+pub(crate) fn same_release(left: &str, right: &str) -> bool {
+    match (release_number(left), release_number(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => {
+            let left = left.trim();
+            let right = right.trim();
+            left.strip_prefix('v').unwrap_or(left) == right.strip_prefix('v').unwrap_or(right)
+        }
+    }
+}
+
 fn download(url: &str) -> Result<Vec<u8>, String> {
-    let response = reqwest::blocking::get(url).map_err(|error| format!("could not download {url}: {error}"))?;
+    download_within(url, DOWNLOAD_TIMEOUT)
+}
+
+fn download_within(url: &str, timeout: Duration) -> Result<Vec<u8>, String> {
+    let client = reqwest::blocking::Client::builder().timeout(timeout).build().map_err(|error| format!("could not download {url}: {error}"))?;
+    let response = client.get(url).send().map_err(|error| download_error(url, error))?;
     if !response.status().is_success() {
         return Err(format!("could not download {url}: {}", response.status()));
     }
-    response.bytes().map(|bytes| bytes.to_vec()).map_err(|error| format!("could not download {url}: {error}"))
+    response.bytes().map(|bytes| bytes.to_vec()).map_err(|error| download_error(url, error))
+}
+
+fn download_error(url: &str, error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        format!("could not download {url}: timed out")
+    } else {
+        format!("could not download {url}: {error}")
+    }
 }
 
 fn public_key(pubkey: &str) -> Result<PublicKey, String> {
@@ -184,6 +236,7 @@ fn listed<'a>(sums: &'a str, file_name: &str) -> Option<&'a str> {
         let mut parts = line.split_whitespace();
         let hash = parts.next()?;
         let name = parts.next()?;
+        let name = name.strip_prefix('*').unwrap_or(name);
         (name == file_name).then_some(hash)
     })
 }
@@ -193,28 +246,55 @@ fn sha256(bytes: &[u8]) -> String {
 }
 
 fn stage_planned(dest: &Path, bytes: &[u8], plan: Result<Plan, String>) -> Result<Plan, String> {
+    let plan = plan?;
     stage(dest, bytes)?;
-    plan
+    Ok(plan)
 }
 
-pub(crate) fn watch_new_binary(plan: &Plan, dest: &Path, wait: std::time::Duration) -> Result<(), String> {
-    let _ = dest;
+fn ready_path(dest: &Path) -> PathBuf {
+    let name = dest.file_name().unwrap_or_default().to_string_lossy();
+    dest.with_file_name(format!("{name}.ready"))
+}
+
+pub(crate) fn watch_new_binary(plan: &Plan, dest: &Path, wait: Duration) -> Result<(), String> {
+    let ready = ready_path(dest);
+    let _ = std::fs::remove_file(&ready);
     let mut child = Command::new(&plan.program)
         .args(&plan.args)
         .current_dir(&plan.cwd)
+        .env(pinned_core::link::POST_UPDATE_ENV, "1")
+        .env(pinned_core::link::UPDATE_READY_ENV, &ready)
         .spawn()
         .map_err(|error| format!("could not start {}: {error}", plan.program.display()))?;
     let started = std::time::Instant::now();
     loop {
-        if let Some(status) = child.try_wait().map_err(|error| format!("could not watch {}: {error}", plan.program.display()))? {
-            return Err(format!("the new binary exited before it connected ({status})"));
+        if ready.is_file() {
+            let _ = child.try_wait();
+            return Ok(());
         }
-        if started.elapsed() >= wait {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("the new binary did not connect within {}s", wait.as_secs()));
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if ready.is_file() {
+                    return Ok(());
+                }
+                restore(dest)?;
+                return Err(format!("the new binary exited before it connected ({status})"));
+            }
+            Ok(None) if started.elapsed() >= wait => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if ready.is_file() {
+                    return Ok(());
+                }
+                restore(dest)?;
+                return Err(format!("the new binary did not connect within {}s", wait.as_secs()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => {
+                restore(dest)?;
+                return Err(format!("could not watch {}: {error}", plan.program.display()));
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
@@ -224,11 +304,6 @@ fn plan_for(dest: &Path) -> Result<Plan, String> {
         args: std::env::args_os().skip(1).collect(),
         cwd: std::env::current_dir().map_err(|error| format!("could not read the working directory: {error}"))?,
     })
-}
-
-fn reexec(plan: &Plan) -> String {
-    let error = Command::new(&plan.program).args(&plan.args).current_dir(&plan.cwd).exec();
-    format!("could not restart into {}: {error}", plan.program.display())
 }
 
 fn restore(dest: &Path) -> Result<(), String> {
@@ -465,9 +540,44 @@ mod tests {
     }
 
     #[test]
+    fn a_new_binary_that_signals_ready_stays_in_place() {
+        let dir = std::env::temp_dir().join(format!("pinned-ready-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("pinned-server");
+        std::fs::write(&dest, b"new-binary").unwrap();
+        std::fs::write(dir.join("pinned-server.bak"), b"old-binary").unwrap();
+        let script = format!("touch \"${}\"", pinned_core::link::UPDATE_READY_ENV);
+        let plan = Plan { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], cwd: dir.clone() };
+        watch_new_binary(&plan, &dest, std::time::Duration::from_secs(2)).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new-binary");
+        assert_eq!(std::fs::read(dir.join("pinned-server.bak")).unwrap(), b"old-binary");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_download_that_stalls_ends_before_the_body_arrives() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(mut socket) = incoming else { continue };
+                let mut buf = [0; 1024];
+                let _ = socket.read(&mut buf);
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+        });
+        let started = std::time::Instant::now();
+        let err = download_within(&format!("http://{address}/pinned-server"), std::time::Duration::from_millis(200)).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{err} after {:?}", started.elapsed());
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[test]
     fn a_release_of_this_version_does_not_replace_the_binary() {
-        let (base, _, dest) = release("current", env!("CARGO_PKG_VERSION"), None, false);
-        let (status, plan) = NodeUpdate::at(&base).prepare("x86_64-unknown-linux-musl", &dest, RELEASE_PUBKEY, &|_| {});
+        let (base, pubkey, dest) = release("current", env!("CARGO_PKG_VERSION"), None, false);
+        let (status, plan) = NodeUpdate::at(&base).prepare("x86_64-unknown-linux-musl", &dest, &pubkey, &|_| {});
         assert_eq!(status, UpdateStatus::UpToDate { version: env!("CARGO_PKG_VERSION").into() });
         assert_eq!(plan, None);
         assert_eq!(std::fs::read(&dest).unwrap(), b"old-binary");
