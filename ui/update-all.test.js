@@ -69,6 +69,16 @@ test("other online machines are asked before this one, and a box is left out", a
   await again;
 });
 
+test("a call that finishes before the row changes drops its listener", async () => {
+  const page = open({ machine_id: "self" });
+  page.machines.set("a", { view: { id: "a", online: true } });
+  const done = page.updateEveryMachine();
+  assert.equal(page.viewListeners.length, 1);
+  page.settle();
+  await done;
+  assert.equal(page.viewListeners.length, 0);
+});
+
 test("a page with no machine id does not update itself", async () => {
   const page = open({ machine_id: null });
   page.machines.set("a", { view: { id: "a", online: true } });

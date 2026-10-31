@@ -1174,6 +1174,9 @@ async function checkUpdate() {
     console.warn("update check failed", e);
   }
 }
+function headerUpdateResult(status) {
+  return "wait";
+}
 async function installUpdate() {
   for (const b of document.querySelectorAll(".update")) {
     b.disabled = true;

@@ -5582,6 +5582,32 @@ while True:
     }
 
     #[test]
+    fn a_failed_restart_can_be_pressed_again() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let m = machine();
+        let restarting = UpdateStatus::Restarting { to: "1.2.0".into() };
+        m.set_installer(Arc::new(Counted {
+            calls: calls.clone(),
+            status: restarting.clone(),
+            started: Mutex::new(None),
+            release: Mutex::new(None),
+        }));
+        assert_eq!(m.call(Call::UpdateSelf).unwrap(), status(restarting.clone()));
+        let failed = UpdateStatus::Failed { to: "1.2.0".into(), reason: "the new binary exited before it connected".into() };
+        m.report(failed);
+        assert_eq!(m.call(Call::UpdateSelf).unwrap(), status(restarting));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_finished_failure_is_still_the_phase_a_reconnect_reports() {
+        let m = machine();
+        let failed = UpdateStatus::Failed { to: "1.2.0".into(), reason: "checksum mismatch".into() };
+        m.report(failed.clone());
+        assert_eq!(m.update_snapshot(), Some(failed));
+    }
+
+    #[test]
     fn a_report_uses_the_link_flusher_when_one_is_installed() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let m = Machine::new(launch(), None, None, {

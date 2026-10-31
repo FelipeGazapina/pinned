@@ -408,6 +408,7 @@ fn ws_url(hub: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn the_machine_socket_follows_the_hubs_scheme() {
@@ -492,5 +493,91 @@ mod tests {
         assert!(restarted.load(Ordering::SeqCst));
         assert_eq!(frame["id"], 7);
         assert_eq!(frame["ok"], serde_json::json!({ "state": "restarting", "to": "1.2.0" }));
+    }
+
+    struct HoldRestart {
+        started: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        restarted: Arc<AtomicBool>,
+    }
+
+    impl crate::machine::SelfUpdate for HoldRestart {
+        fn install(&self, machine: &Machine) -> crate::wire::UpdateStatus {
+            let restarted = self.restarted.clone();
+            machine.schedule_restart(Box::new(move || restarted.store(true, Ordering::SeqCst)));
+            machine.report(crate::wire::UpdateStatus::Restarting { to: "1.2.0".into() });
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            if let Some(release) = self.release.lock().unwrap().take() {
+                let _ = release.recv();
+            }
+            crate::wire::UpdateStatus::Restarting { to: "1.2.0".into() }
+        }
+    }
+
+    struct LetGo(Option<std::sync::mpsc::Sender<()>>);
+
+    impl Drop for LetGo {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[test]
+    fn a_different_call_does_not_restart_an_update() {
+        use crate::machine::Launch;
+        use std::collections::BTreeMap;
+        use std::sync::atomic::AtomicBool;
+
+        let restarted = Arc::new(AtomicBool::new(false));
+        let machine = Machine::new(
+            Launch {
+                exe: "pinned".into(),
+                bins: BTreeMap::new(),
+                path_env: None,
+                settings: "settings".into(),
+                mcp_config: None,
+                reminders: false,
+                plugin_dir: "plugin".into(),
+                tutorial_helper: "tutorial".into(),
+                sock: "sock".into(),
+                vector_search: false,
+            },
+            None,
+            None,
+            |_| {},
+        );
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let _let_go = LetGo(Some(release_tx));
+        machine.set_installer(Arc::new(HoldRestart {
+            started: Mutex::new(Some(started_tx)),
+            release: Mutex::new(Some(release_rx)),
+            restarted: restarted.clone(),
+        }));
+        let shared = Arc::new(Shared::default());
+        let (out, mut incoming) = channel::unbounded_channel();
+        *shared.out.lock().unwrap() = Some(out);
+        let writer = std::thread::spawn(move || {
+            while let Some(outgoing) = incoming.blocking_recv() {
+                if let Some(wrote) = outgoing.wrote {
+                    let _ = wrote.send(());
+                }
+            }
+        });
+        let updating = machine.clone();
+        let shared_update = shared.clone();
+        let update = std::thread::spawn(move || finish_call(&shared_update, &updating, 7, Call::UpdateSelf));
+        started_rx.recv().unwrap();
+        finish_call(&shared, &machine, 8, Call::Tabs);
+        assert!(!restarted.load(Ordering::SeqCst), "tabs restarted the update");
+        drop(_let_go);
+        update.join().unwrap();
+        assert!(restarted.load(Ordering::SeqCst), "the update call did not restart");
+        drop(shared);
+        writer.join().unwrap();
     }
 }

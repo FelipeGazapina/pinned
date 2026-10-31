@@ -192,6 +192,32 @@ fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn stage_planned(dest: &Path, bytes: &[u8], plan: Result<Plan, String>) -> Result<Plan, String> {
+    stage(dest, bytes)?;
+    plan
+}
+
+pub(crate) fn watch_new_binary(plan: &Plan, dest: &Path, wait: std::time::Duration) -> Result<(), String> {
+    let _ = dest;
+    let mut child = Command::new(&plan.program)
+        .args(&plan.args)
+        .current_dir(&plan.cwd)
+        .spawn()
+        .map_err(|error| format!("could not start {}: {error}", plan.program.display()))?;
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| format!("could not watch {}: {error}", plan.program.display()))? {
+            return Err(format!("the new binary exited before it connected ({status})"));
+        }
+        if started.elapsed() >= wait {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("the new binary did not connect within {}s", wait.as_secs()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn plan_for(dest: &Path) -> Result<Plan, String> {
     Ok(Plan {
         program: dest.to_path_buf(),
@@ -305,6 +331,10 @@ mod tests {
     }
 
     fn release(label: &str, version: &str, asset: Option<&[u8]>, corrupt: bool) -> (String, String, std::path::PathBuf) {
+        release_at(label, version, asset, corrupt, true)
+    }
+
+    fn release_at(label: &str, version: &str, asset: Option<&[u8]>, corrupt: bool, list_latest: bool) -> (String, String, std::path::PathBuf) {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let dir = std::env::temp_dir().join(format!("pinned-node-update-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -312,18 +342,26 @@ mod tests {
         let dest = dir.join("pinned-server");
         std::fs::write(&dest, b"old-binary").unwrap();
         let name = "pinned-server-x86_64-unknown-linux-musl";
+        let latest = json!({ "version": version }).to_string().into_bytes();
         let mut files = HashMap::new();
-        files.insert("/latest.json".into(), json!({ "version": version }).to_string().into_bytes());
+        files.insert("/latest.json".into(), latest.clone());
+        let mut entries: Vec<(&str, &[u8])> = Vec::new();
+        if list_latest {
+            entries.push(("latest.json", latest.as_slice()));
+        }
         if let Some(asset) = asset {
             let listed = if corrupt { b"other-bytes".as_slice() } else { asset };
-            let sums = sums_for(name, listed);
-            let (pubkey, signature) = sign(&sums);
+            entries.push((name, listed));
             files.insert(format!("/{name}"), asset.to_vec());
-            files.insert("/SHA256SUMS".into(), sums.into_bytes());
-            files.insert("/SHA256SUMS.minisig".into(), signature.into_bytes());
-            return (serve(files), pubkey, dest);
         }
-        (serve(files), String::new(), dest)
+        if entries.is_empty() {
+            return (serve(files), String::new(), dest);
+        }
+        let sums: String = entries.iter().map(|(entry, bytes)| sums_for(entry, bytes)).collect();
+        let (pubkey, signature) = sign(&sums);
+        files.insert("/SHA256SUMS".into(), sums.into_bytes());
+        files.insert("/SHA256SUMS.minisig".into(), signature.into_bytes());
+        (serve(files), pubkey, dest)
     }
 
     #[test]
@@ -352,6 +390,78 @@ mod tests {
         assert_eq!(plan, None);
         assert_eq!(std::fs::read(&dest).unwrap(), b"old-binary");
         let _ = std::fs::remove_dir_all(dest.parent().unwrap());
+    }
+
+    #[test]
+    fn a_checksum_line_may_mark_the_name_as_binary() {
+        assert_eq!(listed("abc  pinned-server\n", "pinned-server"), Some("abc"));
+        assert_eq!(listed("abc *pinned-server\n", "pinned-server"), Some("abc"));
+    }
+
+    #[test]
+    fn a_release_whose_version_is_not_in_the_signed_checksums_is_not_installed() {
+        let (base, pubkey, dest) = release_at("unlisted", "9.9.9", Some(b"new-binary"), false, false);
+        let (status, plan) = NodeUpdate::at(&base).prepare("x86_64-unknown-linux-musl", &dest, &pubkey, &|_| {});
+        assert_eq!(status, UpdateStatus::Failed { to: String::new(), reason: "SHA256SUMS has no latest.json".into() });
+        assert_eq!(plan, None);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old-binary");
+        let _ = std::fs::remove_dir_all(dest.parent().unwrap());
+    }
+
+    #[test]
+    fn an_older_release_does_not_replace_the_binary() {
+        let (base, pubkey, dest) = release("older", "0.0.1", Some(b"new-binary"), false);
+        let (status, plan) = NodeUpdate::at(&base).prepare("x86_64-unknown-linux-musl", &dest, &pubkey, &|_| {});
+        assert_eq!(
+            status,
+            UpdateStatus::Failed {
+                to: "0.0.1".into(),
+                reason: format!("the published release 0.0.1 is older than {}", env!("CARGO_PKG_VERSION")),
+            },
+        );
+        assert_eq!(plan, None);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old-binary");
+        let _ = std::fs::remove_dir_all(dest.parent().unwrap());
+    }
+
+    #[test]
+    fn a_release_tagged_with_v_for_this_version_does_not_replace_the_binary() {
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let (base, pubkey, dest) = release("vcurrent", &version, None, false);
+        let (status, plan) = NodeUpdate::at(&base).prepare("x86_64-unknown-linux-musl", &dest, &pubkey, &|_| {});
+        assert_eq!(status, UpdateStatus::UpToDate { version: env!("CARGO_PKG_VERSION").into() });
+        assert_eq!(plan, None);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old-binary");
+        let _ = std::fs::remove_dir_all(dest.parent().unwrap());
+    }
+
+    #[test]
+    fn a_plan_that_cannot_be_made_leaves_the_binary() {
+        let dir = std::env::temp_dir().join(format!("pinned-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("pinned-server");
+        std::fs::write(&dest, b"old-binary").unwrap();
+        let err = stage_planned(&dest, b"new-binary", Err("could not read the working directory".into())).unwrap_err();
+        assert_eq!(err, "could not read the working directory");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old-binary");
+        assert!(!dir.join("pinned-server.bak").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_binary_that_exits_immediately_puts_the_old_one_back() {
+        let dir = std::env::temp_dir().join(format!("pinned-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("pinned-server");
+        std::fs::write(&dest, b"new-binary").unwrap();
+        std::fs::write(dir.join("pinned-server.bak"), b"old-binary").unwrap();
+        let plan = Plan { program: "/bin/sh".into(), args: vec!["-c".into(), "exit 7".into()], cwd: dir.clone() };
+        let err = watch_new_binary(&plan, &dest, std::time::Duration::from_secs(2)).unwrap_err();
+        assert!(err.contains("exited"), "{err}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old-binary");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -884,6 +884,18 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_connect_treats_a_v_prefix_as_the_same_release() {
+        assert_eq!(
+            reconcile(Some(UpdateStatus::Restarting { to: "v1.2.0".into() }), "1.2.0", None),
+            Some(UpdateStatus::UpToDate { version: "1.2.0".into() }),
+        );
+        assert_eq!(
+            reconcile(Some(UpdateStatus::Updating { to: "1.2.0".into() }), "v1.2.0", None),
+            Some(UpdateStatus::UpToDate { version: "v1.2.0".into() }),
+        );
+    }
+
+    #[test]
     fn an_idle_connect_on_the_target_version_is_up_to_date() {
         assert_eq!(
             reconcile(Some(UpdateStatus::Updating { to: "1.2.0".into() }), "1.2.0", None),
