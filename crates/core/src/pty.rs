@@ -145,10 +145,14 @@ impl Drop for Session {
         #[cfg(unix)]
         if let Some(pid) = child.process_id() {
             kill_tree(pid);
+            // portable-pty's kill would send SIGHUP and poll for 50 ms first.
+            // SAFETY: the child is not reaped yet, so `pid` still names it.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
         }
-        // portable-pty's kill gives SIGHUP 200ms before SIGKILL. Wait here. A thread spawned
-        // for the wait is gone when this process execs, and the child stays a zombie.
+        #[cfg(not(unix))]
         let _ = child.kill();
+        // Reaped on this thread: a thread spawned for the wait is gone when this process execs,
+        // and the child stays a zombie.
         let _ = child.wait();
     }
 }
