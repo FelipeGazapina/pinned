@@ -112,7 +112,7 @@ struct Hashed {
 
 impl State {
     /// A state saved before accounts names no Claude home; its files were in `legacy_claude_home`.
-    pub fn load(file: &Path, legacy_claude_home: &Path) -> State {
+    pub fn load(file: &Path, legacy_claude_home: &Path) -> Result<State, String> {
         let mut state: State = std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         for key in state.agreed.keys() {
             if key.starts_with(PLUGINS_KEY) {
@@ -121,7 +121,7 @@ impl State {
             state.claude_homes.entry(key.clone()).or_insert_with(|| legacy_claude_home.to_owned());
         }
         state.loaded_from = Some(file.to_owned());
-        state
+        Ok(state)
     }
 
     pub fn save(&mut self, file: &Path) {
@@ -131,7 +131,7 @@ impl State {
 
     fn persist(&self) {
         if let Some(file) = &self.loaded_from {
-            let _ = std::fs::write(file, serde_json::to_vec(self).unwrap());
+            let _ = std::fs::File::create(file).and_then(|mut out| write_state(&mut out, &serde_json::to_vec(self).unwrap()));
         }
     }
 
@@ -145,6 +145,20 @@ impl State {
         self.hashes.insert(file.to_owned(), Hashed { size: meta.len(), modified, sha: sha.clone() });
         Some((sha, modified))
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CRASH_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+fn write_state(out: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(n) = CRASH_AFTER.with(|cut| cut.get()) {
+        out.write_all(&bytes[..n.min(bytes.len())])?;
+        return Err(std::io::Error::other(format!("the disk stopped after {n} bytes")));
+    }
+    out.write_all(bytes)
 }
 
 /// What a sync of one checkout does through the hub.
@@ -1096,7 +1110,7 @@ mod tests {
             let mut saved = serde_json::to_value(&side.state).unwrap();
             saved.as_object_mut().unwrap().remove("claude_homes");
             std::fs::write(&file, saved.to_string()).unwrap();
-            State::load(&file, &side.home.join(".claude"))
+            State::load(&file, &side.home.join(".claude")).unwrap()
         };
         std::fs::remove_file(mac.claude("s1.jsonl")).unwrap();
         mac.state = legacy(&mac);
@@ -2056,7 +2070,7 @@ mod tests {
     #[cfg(unix)]
     fn saved_agreed(state: &mut State, share: &PluginShare, file: &Path) -> BTreeMap<String, String> {
         state.save(file);
-        let loaded = State::load(file, &file.with_extension("legacy"));
+        let loaded = State::load(file, &file.with_extension("legacy")).unwrap();
         let key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
         loaded.agreed.get(&key).cloned().unwrap_or_default()
     }
@@ -2248,7 +2262,7 @@ mod tests {
         let failed = sync_plugins(&hub, &mut mac_state, &mac, now);
         assert_eq!(failed, Err("the hub did not answer within 60 seconds".into()));
         hub.fail_pull.set(false);
-        let mut mac_state = State::load(&file, &file.with_extension("legacy"));
+        let mut mac_state = State::load(&file, &file.with_extension("legacy")).unwrap();
         let mini_greet = mini.claude_home.join("skills/greet/SKILL.md");
         let took = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
         assert_eq!(took.pulled, vec![greet.to_string()]);
@@ -2285,7 +2299,7 @@ mod tests {
         assert_eq!(failed, Err("the hub did not answer within 60 seconds".into()));
         mac.state.save(&file);
         hub.fail_list.set(false);
-        let mut mac_state = State::load(&file, &file.with_extension("legacy"));
+        let mut mac_state = State::load(&file, &file.with_extension("legacy")).unwrap();
         let key = format!("{} {}", mac.checkout.project.key, mac.checkout.path.display());
         let kept = mac_state.agreed.get(&key).and_then(|map| map.get("claude/memory/MEMORY.md")).cloned();
         let next = sync(&hub, &mut mac_state, &mac.checkout, now).unwrap();
@@ -2325,7 +2339,7 @@ mod tests {
         let failed = sync(&hub, &mut mac.state, &mac.checkout, now);
         assert_eq!(failed, Err("the hub did not answer within 60 seconds".into()));
         hub.fail_pull.set(false);
-        let mut mac_state = State::load(&file, &file.with_extension("legacy"));
+        let mut mac_state = State::load(&file, &file.with_extension("legacy")).unwrap();
         let took = sync(&hub, &mut mini.state, &mini.checkout, now).unwrap();
         assert_eq!(took.pulled, vec!["claude/memory/MEMORY.md".to_string()]);
         let mini_memory = mini.claude("memory/MEMORY.md");
@@ -2340,6 +2354,124 @@ mod tests {
         assert_eq!(texts(&hub.inner).get("claude/memory/notes.md").map(String::as_str), Some("note-b\n"));
         assert_eq!(next.pushed, Vec::<String>::new());
         assert_eq!(next.pulled, vec!["claude/memory/MEMORY.md".to_string(), "claude/memory/notes.md".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_delete_this_machine_cannot_apply_keeps_the_baseline_and_is_not_undone() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = root("unlink-fail");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        let memory = mac.claude("memory/MEMORY.md");
+        put(&memory, "one\n");
+        mac.sync(&hub);
+        mini.sync(&hub);
+        std::fs::remove_file(mini.claude("memory/MEMORY.md")).unwrap();
+        assert_eq!(mini.sync(&hub).pushed, vec!["claude/memory/MEMORY.md"]);
+        let folder = mac.claude("memory");
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let blocked = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now());
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let next = mac.sync(&hub);
+        assert_eq!(hub.0.borrow()["claude/memory/MEMORY.md"].entry.sha, "", "the hub still holds the delete");
+        assert_eq!(next, Synced { pushed: vec![], pulled: vec!["claude/memory/MEMORY.md".into()] });
+        assert_eq!(memory.exists(), false);
+        assert_eq!(blocked, Err(format!("could not delete {}: Permission denied (os error 13)", memory.display())));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_install_heal_touches_only_files_the_sync_copies() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = root("heal-skips");
+        let hub = MemHub::default();
+        let (hook, mac, _) = executable_hook(&root);
+        let install = mac_install(&hook);
+        let outside = root.join("outside/tool.sh");
+        let skipped = [install.join("node_modules/dep/bin/run.sh"), install.join(".env"), install.join("hooks/server.pem"), outside.clone()];
+        for file in skipped.iter().chain([&hook]) {
+            put(file, "#!/bin/sh\n");
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o654)).unwrap();
+        }
+        std::os::unix::fs::symlink(&outside, install.join("hooks/linked.sh")).unwrap();
+        std::os::unix::fs::symlink(outside.parent().unwrap(), install.join("linked")).unwrap();
+        sync_plugins(&hub, &mut State::default(), &mac, SystemTime::now()).unwrap();
+        let modes: Vec<String> = [&hook].into_iter().chain(skipped.iter()).map(|file| format!("{:o}", mode_bits(file))).collect();
+        assert_eq!(modes, ["754", "654", "654", "654", "654"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    fn mac_install(hook: &Path) -> PathBuf {
+        hook.parent().and_then(Path::parent).unwrap().to_path_buf()
+    }
+
+    #[test]
+    fn a_torn_state_file_does_not_let_an_older_copy_replace_a_newer_edit() {
+        let root = root("torn-state");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        let memory = mac.claude("memory/MEMORY.md");
+        put(&memory, "one\n");
+        stamp(&memory, SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+        let file = root.join("sync.json");
+        mac.sync(&hub);
+        mac.state.save(&file);
+        mini.sync(&hub);
+        let mini_memory = mini.claude("memory/MEMORY.md");
+        put(&mini_memory, "two two\n");
+        stamp(&mini_memory, SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_100));
+        assert_eq!(mini.sync(&hub).pushed, vec!["claude/memory/MEMORY.md"]);
+        stamp(&memory, SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_200));
+        let saved = std::fs::read(&file).unwrap();
+        std::fs::write(&file, &saved[..12]).unwrap();
+        let synced = State::load(&file, &root.join("legacy")).and_then(|mut state| sync(&hub, &mut state, &mac.checkout, SystemTime::now()));
+        assert_eq!(texts(&hub).get("claude/memory/MEMORY.md").map(String::as_str), Some("two two\n"));
+        assert_eq!(std::fs::read_to_string(&memory).unwrap(), "one\n");
+        assert_eq!(synced, Err(format!("the sync state {} is corrupt (EOF while parsing a string at line 1 column 12); restore or remove it to sync again", file.display())));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    struct CrashAfter;
+
+    impl CrashAfter {
+        fn arm(bytes: usize) -> Self {
+            super::CRASH_AFTER.with(|cut| cut.set(Some(bytes)));
+            Self
+        }
+    }
+
+    impl Drop for CrashAfter {
+        fn drop(&mut self) {
+            super::CRASH_AFTER.with(|cut| cut.set(None));
+        }
+    }
+
+    #[test]
+    fn a_save_cut_short_leaves_the_previous_state_file_whole() {
+        let root = root("cut-save");
+        let hub = MemHub::default();
+        let mut mac = Side::new(&root, "mac", "app");
+        let memory = mac.claude("memory/MEMORY.md");
+        put(&memory, "one\n");
+        let file = root.join("sync.json");
+        mac.state.save(&file);
+        mac.sync(&hub);
+        let before = std::fs::read_to_string(&file).unwrap();
+        put(&memory, "two two\n");
+        let now = SystemTime::now();
+        let cut = {
+            let _crash = CrashAfter::arm(12);
+            sync(&hub, &mut mac.state, &mac.checkout, now)
+        };
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        assert_eq!(cut, Err(format!("could not save {}: the disk stopped after 12 bytes", file.display())));
+        let mut loaded = State::load(&file, &root.join("legacy")).unwrap();
+        assert_eq!(sync(&hub, &mut loaded, &mac.checkout, now), Ok(Synced::default()));
+        assert_eq!(texts(&hub).get("claude/memory/MEMORY.md").map(String::as_str), Some("two two\n"));
         let _ = std::fs::remove_dir_all(root);
     }
 
