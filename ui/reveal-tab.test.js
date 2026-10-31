@@ -67,17 +67,17 @@ test("a tab push that arrives after the open answers is still not a second fetch
   assert.deepEqual(app.calls, []);
 });
 
-test("opening a remote folder asks the machine to open that folder, then shows it and starts it", async () => {
+function openRemoteOn(version, answer) {
   const src = readFileSync(new URL("./main.js", import.meta.url), "utf8");
-  const start = src.indexOf("async function openRemote");
+  const start = src.indexOf("async function pickLocalFolder");
   const end = src.indexOf("async function moveTab");
   const calls = [];
   const sandbox = {
     calls,
+    machines: new Map([["remote", { view: { id: "remote", version } }]]),
     callOn: async (_machine, call) => {
       calls.push(call);
-      if (call.cmd !== "open_tab") throw new Error(`unexpected ${call.cmd}`);
-      return "tab-3";
+      return answer(call);
     },
     revealTab: async (_machine, id) => {
       calls.push({ reveal: id });
@@ -86,21 +86,35 @@ test("opening a remote folder asks the machine to open that folder, then shows i
     startTab: async (tab) => {
       calls.push({ start: tab.view.id });
     },
-    setTimeout,
-    clearTimeout,
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(`${src.slice(start, end)}\nglobalThis.openRemote = openRemote;`, sandbox);
-  const tab = await sandbox.openRemote("remote", "/work", true);
+  return sandbox;
+}
+
+test("a node newer than 0.16.0 opens the folder in the call that makes the tab", async () => {
+  const app = openRemoteOn("0.17.0", () => "tab-3");
+  const tab = await app.openRemote("remote", "/work", true);
   assert.equal(tab.view.id, "tab-3");
-  assert.equal(calls[0].cmd, "open_tab");
-  assert.equal(calls[0].path, "/work");
-  assert.equal(calls[0].bypass, true);
-  assert.equal(calls[1].reveal, "tab-3");
-  assert.equal(calls[2].start, "tab-3");
-  assert.equal(calls.length, 3);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.calls)), [{ cmd: "open_tab", path: "/work", bypass: true }, { reveal: "tab-3" }, { start: "tab-3" }]);
 });
+
+for (const version of ["0.16.0", "0.9.1", ""]) {
+  test(`a node at ${version || "an unknown version"} has the folder checked on a fresh tab, which closes when it is not one`, async () => {
+    const app = openRemoteOn(version, (call) => {
+      if (call.cmd === "open_tab") return "tab-4";
+      if (call.cmd === "set_folder") throw "/wrok is not a folder on this machine";
+      return null;
+    });
+    await assert.rejects(app.openRemote("remote", "/wrok", false), (error) => error === "/wrok is not a folder on this machine");
+    assert.deepEqual(JSON.parse(JSON.stringify(app.calls)), [
+      { cmd: "open_tab", path: null, bypass: false },
+      { cmd: "set_folder", tab: "tab-4", path: "/wrok" },
+      { cmd: "close_tab", tab: "tab-4" },
+    ]);
+  });
+}
 
 test("a node that never pushes the tab falls back to one tabs fetch", async () => {
   const app = load((call) => {

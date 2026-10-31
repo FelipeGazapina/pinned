@@ -46,6 +46,14 @@ const contextMeter = element();
 const composerBanners = element();
 const threadView = element();
 
+const clock = { now: 0, timers: [] };
+clock.advance = (ms) => {
+  clock.now += ms;
+  const due = clock.timers.filter((timer) => timer.at <= clock.now).sort((a, b) => a.at - b.at);
+  clock.timers = clock.timers.filter((timer) => timer.at > clock.now);
+  for (const timer of due) timer.run();
+};
+
 const sandbox = {
   tasksTab,
   contextMeter,
@@ -56,8 +64,13 @@ const sandbox = {
   composer: { dataset: {} },
   tabs: [],
   active: null,
+  machines: new Map([["box", {}]]),
+  ui: { sidebarOpen: true },
+  performance: { now: () => clock.now },
+  setTimeout: (run, ms) => clock.timers.push({ at: clock.now + ms, run }),
   document: {
     hidden: false,
+    body: { dataset: {} },
     getElementById(id) {
       if (id === "context-meter") return contextMeter;
       return element();
@@ -68,6 +81,7 @@ const sandbox = {
 vm.createContext(sandbox);
 
 const gui = read("./gui.js");
+const main = read("./main.js");
 const agents = read("./gui-agents.js");
 const composer = read("./gui-composer.js");
 vm.runInContext(
@@ -89,6 +103,14 @@ function markThreadSeen() {}
 function fetchHistory() {}
 function renderTerminalOnly() {}
 function renderUnsupported() {}
+function watchMenu() {}
+function terminalMenu() { return null; }
+function terminalDialog() { return null; }
+function fetchWorkspace() {}
+function noteVisit() {}
+function renderPanel() {}
+const threads = new Map();
+var THREAD_READ_GAP_MS = 0;
 const bannerDismissed = new Set();
 let restoringBranch = null;
 let bannersOpen = false;
@@ -105,7 +127,9 @@ ${between(gui, "function hookPhase", "async function fetchWorkspace")}
 ${between(composer, "let tasksOpen = false;", "tasksTab.addEventListener")}
 ${between(composer, "function branchBanner", "composerBanners.addEventListener")}
 ${between(composer, "const formatTokens", "const contextCard")}
+${between(gui, "const statusBeforeRender", "let watchedSignature")}
 ${between(gui, "let watchedSignature", "setInterval(() => {\n  publishThreadWatch")}
+${between(main, "function onMachineEvent", 'listen("machine"')}
 `,
   sandbox,
 );
@@ -157,16 +181,18 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
 function network(transcripts) {
   const queue = [];
   const watches = [];
+  const net = { reads: 0 };
   sandbox.callOn = (_machine, call) => {
     if (call.cmd === "watch_threads") {
       watches.push([...call.tabs].sort());
       return Promise.resolve(null);
     }
     assert.equal(call.cmd, "thread");
+    net.reads++;
     const page = transcripts[call.tab].page(call.from);
     return new Promise((resolve) => queue.push(() => resolve(page)));
   };
-  return {
+  return Object.assign(net, {
     queue,
     watches,
     nudge(tab) {
@@ -180,7 +206,7 @@ function network(transcripts) {
     async drain(pick = () => 0) {
       while (queue.length) await this.deliver(pick(queue.length));
     },
-  };
+  });
 }
 
 function tabFor(id, status = "working") {
@@ -275,6 +301,48 @@ test("a nudge reads the new line without waiting for the poll", async () => {
   net.nudge("tab-1");
   await net.drain();
   assert.deepEqual(painted().items, ["start", "visible"]);
+});
+
+test("a thread event from the hub reads the tab and paints the new line", async () => {
+  const { s, net } = await opened();
+  s.append({ item: text("pushed") });
+  sandbox.onMachineEvent("box", { kind: "thread", tab: "tab-1" });
+  await net.drain();
+  assert.deepEqual(painted().items, ["start", "pushed"]);
+});
+
+test("a render watches the shown thread at once, not on the next poll tick", async () => {
+  const { net } = await opened();
+  sandbox.forgetThreadWatch();
+  sandbox.renderGui();
+  await settle();
+  assert.deepEqual(net.watches, [["tab-1"]]);
+});
+
+test("a streaming tab reads at most once per gap, and the first nudge after a pause reads at once", async () => {
+  const { s, net } = await opened();
+  sandbox.THREAD_READ_GAP_MS = 100;
+  try {
+    clock.advance(1000);
+    s.append({ item: text("a") });
+    net.nudge("tab-1");
+    await net.drain();
+    assert.deepEqual(painted().items, ["start", "a"], "the first nudge after a pause waited");
+    for (const body of ["b", "c", "d"]) {
+      clock.advance(10);
+      s.append({ item: text(body) });
+      net.nudge("tab-1");
+      await net.drain();
+    }
+    assert.deepEqual(painted().items, ["start", "a"], "nudges 10 ms apart each read at once");
+    clock.advance(100);
+    await settle();
+    await net.drain();
+    assert.deepEqual(painted().items, ["start", "a", "b", "c", "d"]);
+    assert.equal(net.reads, 3, "the open, the first nudge, and one read for the three that followed");
+  } finally {
+    sandbox.THREAD_READ_GAP_MS = 0;
+  }
 });
 
 test("a nudge during a read reads again, so the new line and its agent card show", async () => {

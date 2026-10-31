@@ -2357,6 +2357,28 @@ fn a_dropped_machine_link_replays_the_watch_without_another_client_call() {
     node.kill();
 }
 
+#[test]
+fn a_client_that_disconnects_ends_its_watch_on_the_machine() {
+    let (_hub, mut client, machine, _dir, mut node, tab, file) = node_with_a_transcript("watch_gone");
+    watch(&mut client, &machine, &tab);
+    let nudges = Arc::new(Mutex::new(0u32));
+    let counted = nudges.clone();
+    node.machine.subscribe(Box::new(move |event| {
+        if serde_json::to_value(event).unwrap()["kind"] == "thread" {
+            *counted.lock().unwrap() += 1;
+        }
+    }));
+    append_line(&file, "watched");
+    client.wait("the nudge", |frame| frame["event"]["kind"] == "thread");
+    assert_eq!(*nudges.lock().unwrap(), 1);
+    drop(client);
+    std::thread::sleep(Duration::from_millis(300));
+    append_line(&file, "nobody");
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(*nudges.lock().unwrap(), 1, "the machine still looked at the tab for a client that left");
+    node.kill();
+}
+
 struct MachineSock {
     ws: WebSocket<MaybeTlsStream<TcpStream>>,
 }

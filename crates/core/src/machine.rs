@@ -3576,6 +3576,44 @@ mod tests {
     }
 
     #[test]
+    fn a_transcript_not_written_yet_is_searched_again_after_a_wait_or_a_new_status() {
+        let (root, m, heard, tab, _) = watching("thread-unwritten");
+        let projects = root.join("config/accounts/work/projects");
+        for i in 0..300 {
+            std::fs::create_dir_all(projects.join(format!("p{i:03}"))).unwrap();
+        }
+        let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
+        let before = scans();
+        let mut looks = HashMap::new();
+        for _ in 0..10 {
+            m.nudge_thread_watchers(&mut looks);
+        }
+        assert_eq!(scans(), before + 1, "ten ticks at the prompt searched every project folder each time");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Working)).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(scans(), before + 2, "a turn that starts searches at once");
+        std::fs::write(projects.join("p007/s1.jsonl"), assistant_line("first")).unwrap();
+        std::thread::sleep(THREAD_LOOK_EVERY * 2);
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })], "the transcript written after the turn started");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_dropped_hub_link_keeps_this_machines_own_watch() {
+        let (root, m, heard, local, dir) = watching("thread-local-viewer");
+        let remote = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s2".into()));
+        m.set_watched_threads("client-7", std::slice::from_ref(&remote));
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("local")).unwrap();
+        std::fs::write(dir.join("s2.jsonl"), assistant_line("remote")).unwrap();
+        m.drop_remote_thread_watchers();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": local })]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_switched_account_is_read_from_its_new_home() {
         let root = temp("thread-switch");
