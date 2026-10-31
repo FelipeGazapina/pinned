@@ -5,14 +5,37 @@ set -euo pipefail
 version="${1:?usage: scripts/release.sh <version>}"
 cd "$(dirname "$0")/.."
 
-[[ -z "$(git status --porcelain)" ]] || { echo "commit or stash your changes first" >&2; exit 1; }
-sed -i '' "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
+refuse() {
+  echo "$1" >&2
+  exit 1
+}
+
+semver='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+[[ "$version" =~ $semver ]] || refuse "the version is MAJOR.MINOR.PATCH with an optional -suffix, not $version"
+[[ -z "$(git status --porcelain)" ]] || refuse "commit or stash your changes first"
+branch=$(git symbolic-ref --short -q HEAD || true)
+[[ "$branch" == main ]] || refuse "run a release from main, not ${branch:-a detached HEAD}"
+git fetch -q origin main
+start=$(git rev-parse HEAD)
+[[ "$start" == "$(git rev-parse origin/main)" ]] || refuse "HEAD is not origin/main. Pull or push main, then run the release again."
+
+sed -i.bak "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
+rm Cargo.toml.bak
 cargo update -p pinned --quiet
-# Copies current.json and fails when that file does not match the code.
-cargo run -q -p pinned-server --bin wire-contract -- snapshot "$version"
-# `git commit -am` leaves a new file out.
-git add "crates/core/wire-contract/${version}.json"
+if [[ "$version" == *-* ]]; then
+  echo "v$version is a release candidate. Hub deploy skips it, so it gets no wire snapshot."
+else
+  cargo run -q -p pinned-server --bin wire-contract -- snapshot "$version"
+  git add "crates/core/wire-contract/${version}.json"
+fi
 git commit -am "Release v$version"
 git tag "v$version"
-git push origin HEAD "v$version"
+if ! git push --atomic origin HEAD:refs/heads/main "refs/tags/v$version"; then
+  pushed=$(git ls-remote origin "refs/tags/v$version") ||
+    refuse "git push failed and origin cannot be read, so main keeps the release commit and v$version. Check origin before you run the release again."
+  [[ -z "$pushed" ]] || refuse "git push failed, but origin has v$version, so the release went out. Fetch origin before you change anything."
+  git tag -d "v$version" > /dev/null
+  git reset -q --hard "$start"
+  refuse "the push was rejected, so origin has no new main and no v$version. Pull main, then run the release again."
+fi
 echo "Pushed v$version. Watch the build with: gh run watch"
