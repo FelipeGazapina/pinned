@@ -656,11 +656,14 @@ The script bumps the version in `Cargo.toml`, tags `v0.2.0` and pushes. The `rel
 workflow builds both Mac architectures, the Windows installer, and the Linux musl node
 binaries. Each desktop job uploads its own updater fragment and does not upload
 `latest.json`. One job assembles that file, signs it with the musl binaries, then uploads
-`SHA256SUMS` before `latest.json`. The upload drafts the release first. `publish` clears
-the draft only when that hash is in the sums and no asset is newer than `latest.json`.
-It marks the tag latest when the tag is not older than the current latest. A re-run of
-one uploading job drafts the release before it writes a file. Running copies then offer
-the update. A Linux node downloads `pinned-server-<target>` from that release.
+`SHA256SUMS`, `SHA256SUMS.minisig`, both binaries, and `latest.json` in one
+`gh release upload`. `gh` sends those files in parallel, so they land in no fixed order.
+The upload drafts the release first. `publish` downloads the release and clears the draft only when
+`SHA256SUMS.minisig` verifies `SHA256SUMS`, each file in the sums matches, and each desktop
+bundle matches its signature in `latest.json`. It marks the tag latest when the tag is not
+older than the current latest, and passes `--latest=false` otherwise. A re-run of one
+uploading job drafts the release before it writes a file. Running copies then offer the
+update. A Linux node downloads `pinned-server-<target>` from that release.
 
 Update signing needs the `TAURI_SIGNING_PRIVATE_KEY` repository secret. Its public half is
 `plugins.updater.pubkey` in `tauri.conf.json`. The same secret signs `SHA256SUMS`. If the

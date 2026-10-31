@@ -4,7 +4,7 @@ A Linux node updates from the public GitHub release. The release workflow builds
 
 ## What gets published
 
-A tag `v*` starts the workflow. The `draft` job opens a draft release, or sets an existing release back to draft. The `build` job drafts the release again, then uploads the Mac and Windows bundles. Each leg writes `updater-fragment.json` and uploads it as the Actions artifact `updater-<target>`. It does not upload that fragment or `latest.json` to the release. The `linux-node` job builds the musl binaries and does not upload a release asset. The `sign-node` job runs only after both of those jobs succeed. It assembles `latest.json` from the fragments, checks the version against the tag, signs that file with the two binaries, then uploads `SHA256SUMS` before `latest.json`. That upload drafts the release first. The desktop job runs its steps in bash, including on Windows.
+A tag `v*` starts the workflow. The `draft` job opens a draft release, or sets an existing release back to draft. The `build` job drafts the release again, then uploads the Mac and Windows bundles. Each leg writes `updater-fragment.json` and uploads it as the Actions artifact `updater-<target>`. It does not upload that fragment or `latest.json` to the release. The `linux-node` job builds the musl binaries and does not upload a release asset. The `sign-node` job runs only after both of those jobs succeed. It assembles `latest.json` from the fragments, checks the version against the tag, signs that file with the two binaries, then uploads the five files in one `gh release upload`. `gh` sends them in parallel, so they land in no fixed order. That upload drafts the release first. The desktop job runs its steps in bash, including on Windows.
 
 - `latest.json`
 - `pinned-server-x86_64-unknown-linux-musl`
@@ -12,7 +12,18 @@ A tag `v*` starts the workflow. The `draft` job opens a draft release, or sets a
 - `SHA256SUMS`
 - `SHA256SUMS.minisig`
 
-`sign-node` signs the bytes on disk, then uploads them. `publish` is the only job that clears the draft flag. It does that only when the hash of `latest.json` is a line in `SHA256SUMS` and no release asset is newer than `latest.json`. It passes `--latest` only when this tag is the same as the current latest or newer than it. Nothing after the signature writes `latest.json`.
+`sign-node` signs the bytes on disk, then uploads them. Nothing after the signature writes `latest.json`.
+
+`publish` is the only job that clears the draft flag. It downloads every asset, then exits and names the file unless all of these hold:
+
+- `SHA256SUMS.minisig` verifies `SHA256SUMS` with the updater public key.
+- Each file that `SHA256SUMS` lists is on the release with that sha256.
+- `SHA256SUMS` lists `latest.json` and both musl binaries.
+- Each desktop bundle that `latest.json` names verifies against its `signature`.
+
+`scripts/minisign-verify.mjs` checks the signatures with `node:crypto`. It accepts only the prehashed `ED` algorithm, the same as the node.
+
+`publish` passes `--latest=true` when this tag is not older than the current latest. Otherwise it passes `--latest=false`, because GitHub marks a newly published release latest when the flag is absent.
 
 `SHA256SUMS` has one line per file. The line is 64 hex digits, two spaces, then the file name. The files are `latest.json`, `pinned-server-aarch64-unknown-linux-musl`, and `pinned-server-x86_64-unknown-linux-musl`. The node splits each line on whitespace. One `*` before the name is the same name. The signature is over the exact bytes of `SHA256SUMS`.
 
@@ -34,7 +45,7 @@ The Linux job runs `docker build --target build`. That stage is the hub `Dockerf
 
 `hub-deploy.yml` and `railway-hub` are unchanged. The hub image still serves the first install at `GET /download/pinned-server-<target>`. A node that is already installed updates from GitHub, not from that route.
 
-If the signer fails, `sign-node` has not uploaded, and the draft flag is unchanged. A tag that is already the public latest stays the latest. If a desktop leg or the signed upload runs, that job drafts the release before it writes. A full run that fails before `publish` leaves a new tag as a draft, so `releases/latest` stays on the previous public release. `publish` exits and leaves the draft when the `latest.json` hash is missing from `SHA256SUMS`, or when a release asset is newer than `latest.json`. An older tag does not pass `--latest`. Two runs of the same tag do not overlap.
+If the signer fails, `sign-node` has not uploaded, and the draft flag is unchanged. A tag that is already the public latest stays the latest. If a desktop leg or the signed upload runs, that job drafts the release before it writes. A full run that fails before `publish` leaves a new tag as a draft, so `releases/latest` stays on the previous public release. `publish` exits and leaves the draft when a check above fails. The checks cover a `sign-node` upload that was cancelled partway and a `build` re-run after `sign-node`. An older tag gets `--latest=false`. Two runs of the same tag do not overlap.
 
 ## Proof limit
 

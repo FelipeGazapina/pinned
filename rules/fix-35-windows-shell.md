@@ -4,7 +4,7 @@ PR 35. The desktop `build` job includes `windows-latest` and had no `shell: bash
 
 The job now sets `defaults.run.shell` to bash, and the draft step sets `shell: bash`. The updater fragment step already set `shell: bash`. `scripts/test-release-rerun.py` reads each step's effective shell and fails when a bash-syntax script would run under pwsh.
 
-`publish` passes `--latest` only when this tag is the current latest or newer. It leaves the release a draft when any asset is newer than `latest.json`. The replay's fake `gh` deletes assets on `--clobber` before it writes them, in reverse argv order, and records a violation when the release is public. `tauri-action` is pinned to `84b9d35b5fc46c1e45415bdb6144030364f7ebc5`, the commit that still reads `includeUpdaterJson`.
+`publish` marks this tag latest only when it is not older than the current latest. `rules/fix-35-publish-content-check.md` replaces its upload-time check with a check of the signed files. The replay's fake `gh` deletes assets on `--clobber` before it writes them and records a violation when the release is public. `tauri-action` is pinned to `84b9d35b5fc46c1e45415bdb6144030364f7ebc5`, the commit that still reads `includeUpdaterJson`.
 
 The signer test expects `UpToDate` for release `0.0.1` and still refuses a tampered release. Production `prepare` was not edited.
 
