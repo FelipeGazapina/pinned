@@ -204,8 +204,21 @@ def main():
                 sys.stderr.write(f"{raw} is empty\n")
                 return 1
             prepared.append((path.name, data))
-        stamp = next_stamp(state)
         state.setdefault("updated", {})
+        if "--clobber" in flags:
+            for name, _data in prepared:
+                if name not in state["assets"]:
+                    continue
+                if not state["draft"]:
+                    state["violations"].append(f"delete {name} while the release is public")
+                del state["assets"][name]
+                state["updated"].pop(name, None)
+                gap = public_mismatch(state)
+                if gap:
+                    state["violations"].append(gap)
+                save(state)
+            prepared = list(reversed(prepared))
+        stamp = next_stamp(state)
         for name, data in prepared:
             if not state["draft"]:
                 state["violations"].append(f"upload {name} while the release is public")
@@ -711,6 +724,41 @@ def matching_public():
     return seeded_state(False, False, OLD_LATEST, sums_for(OLD_LATEST, ARM, X86))
 
 
+def public_clobber_errors(gh, root):
+    state = matching_public()
+    state_path = root / "clobber-state.json"
+    state_path.write_text(json.dumps(state))
+    work = root / "clobber-work"
+    work.mkdir()
+    latest = work / "latest.json"
+    sums = work / "SHA256SUMS"
+    latest.write_bytes(NEW_LATEST)
+    sums.write_bytes(sums_for(NEW_LATEST, ARM, X86))
+    env = os.environ.copy()
+    env["REPLAY_STATE"] = str(state_path)
+    env["GITHUB_REF_NAME"] = TAG
+    proc = subprocess.run(
+        [str(gh), "release", "upload", TAG, str(sums), str(latest), "--clobber"],
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    after = json.loads(state_path.read_text())
+    errors = []
+    if proc.returncode != 0:
+        errors.append(f"clobber upload exit {proc.returncode}: {proc.stderr.strip()}")
+    if not any("while the release is public" in item for item in after["violations"]):
+        errors.append(f"public clobber recorded no violation: {after['violations']}")
+    if asset_bytes(after, "latest.json") != NEW_LATEST:
+        errors.append("clobber did not replace latest.json")
+    names = [item["name"] for item in after["uploads"]]
+    if names != ["latest.json", "SHA256SUMS"]:
+        errors.append(f"clobber upload order {names}")
+    if not consistent(after):
+        errors.append("clobber did not finish consistent")
+    return errors
+
+
 def main():
     workflow_shell, jobs = parse_workflow(WORKFLOW.read_text())
     shell_failed = 0
@@ -873,6 +921,14 @@ def main():
     failed = 0
     with tempfile.TemporaryDirectory(prefix="release-replay-") as tmp:
         replay = Replay(jobs, tmp)
+        clobber_errors = public_clobber_errors(replay.bin / "gh", replay.root)
+        if clobber_errors:
+            failed += 1
+            print("FAIL public clobber")
+            for error in clobber_errors:
+                print(f"  {error}")
+        else:
+            print("ok: public clobber")
         for title, job_names, state, sign_fail, expect, repeat in cases:
             code, stderr, after = 0, "", state
             for _ in range(repeat):
