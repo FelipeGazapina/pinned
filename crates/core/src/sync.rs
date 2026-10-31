@@ -112,8 +112,14 @@ struct Hashed {
 
 impl State {
     /// A state saved before accounts names no Claude home; its files were in `legacy_claude_home`.
+    /// A missing file is a machine that never synced. A file that does not parse is an error, since
+    /// syncing without the agreed baseline lets an older copy replace a newer edit by mtime.
     pub fn load(file: &Path, legacy_claude_home: &Path) -> Result<State, String> {
-        let mut state: State = std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let mut state: State = match std::fs::read(file) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("the sync state {} is corrupt ({e}); restore or remove it to sync again", file.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
+            Err(e) => return Err(format!("could not read the sync state {}: {e}", file.display())),
+        };
         for key in state.agreed.keys() {
             if key.starts_with(PLUGINS_KEY) {
                 continue;
@@ -124,15 +130,23 @@ impl State {
         Ok(state)
     }
 
-    pub fn save(&mut self, file: &Path) {
+    pub fn save(&mut self, file: &Path) -> Result<(), String> {
         self.loaded_from = Some(file.to_owned());
-        self.persist();
+        self.persist()
     }
 
-    fn persist(&self) {
-        if let Some(file) = &self.loaded_from {
-            let _ = std::fs::File::create(file).and_then(|mut out| write_state(&mut out, &serde_json::to_vec(self).unwrap()));
-        }
+    /// Renames a complete copy over the file, so a crash leaves the previous state or this one.
+    fn persist(&self) -> Result<(), String> {
+        let Some(file) = &self.loaded_from else { return Ok(()) };
+        let dir = file.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let failed = |e: std::io::Error| format!("could not save {}: {e}", file.display());
+        let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(failed)?;
+        write_state(temp.as_file_mut(), &serde_json::to_vec(self).unwrap()).map_err(failed)?;
+        temp.as_file().sync_all().map_err(failed)?;
+        temp.persist(file).map_err(|e| failed(e.error))?;
+        #[cfg(unix)]
+        std::fs::File::open(dir).and_then(|dir| dir.sync_all()).map_err(failed)?;
+        Ok(())
     }
 
     fn hash(&mut self, file: &Path) -> Option<(String, u64)> {
@@ -200,12 +214,12 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
             if let Some(saved) = state.agreed.get_mut(&agreed_key) {
                 saved.retain(|path, _| !path.starts_with("claude/"));
             }
-            state.persist();
+            state.persist()?;
         }
     }
     let synced = exchange(hub, state, key, &agreed_key, &mut agreed, &local, &|path| roots.local(path), now, true)?;
     state.agreed.insert(agreed_key, agreed);
-    state.persist();
+    state.persist()?;
     Ok(synced)
 }
 
@@ -311,13 +325,13 @@ fn exchange(
         synced.pushed.push(path);
         if size >= BATCH {
             hub.push(key, std::mem::take(&mut batch))?;
-            commit_agreed(state, agreed_key, agreed, &std::mem::take(&mut pending));
+            commit_agreed(state, agreed_key, agreed, &std::mem::take(&mut pending))?;
             size = 0;
         }
     }
     if !batch.is_empty() {
         hub.push(key, std::mem::take(&mut batch))?;
-        commit_agreed(state, agreed_key, agreed, &std::mem::take(&mut pending));
+        commit_agreed(state, agreed_key, agreed, &std::mem::take(&mut pending))?;
     }
 
     let mut wanted: Vec<String> = vec![];
@@ -342,7 +356,7 @@ fn exchange(
             };
             let path = file.entry.path.clone();
             synced.pulled.push(path.clone());
-            commit_agreed(state, agreed_key, agreed, &[(path, update)]);
+            commit_agreed(state, agreed_key, agreed, &[(path, update)])?;
         }
         Ok(())
     };
@@ -471,13 +485,13 @@ pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now:
     let keep = conflicting_user_skills(&local, &agreed, &hub.list(PLUGINS_KEY)?);
     let synced = exchange(hub, state, PLUGINS_KEY, &agreed_key, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false)?;
     state.agreed.insert(agreed_key, agreed);
-    state.persist();
+    state.persist()?;
     Ok(synced)
 }
 
-fn commit_agreed(state: &mut State, agreed_key: &str, agreed: &mut BTreeMap<String, String>, updates: &[(String, Option<String>)]) {
+fn commit_agreed(state: &mut State, agreed_key: &str, agreed: &mut BTreeMap<String, String>, updates: &[(String, Option<String>)]) -> Result<(), String> {
     if updates.is_empty() {
-        return;
+        return Ok(());
     }
     {
         let saved = state.agreed.entry(agreed_key.to_owned()).or_default();
@@ -494,7 +508,7 @@ fn commit_agreed(state: &mut State, agreed_key: &str, agreed: &mut BTreeMap<Stri
             }
         }
     }
-    state.persist();
+    state.persist()
 }
 
 fn conflicting_user_skills(local: &BTreeMap<String, (String, u64)>, agreed: &BTreeMap<String, String>, remote: &[Entry]) -> BTreeSet<String> {
@@ -2041,7 +2055,7 @@ mod tests {
 
     #[cfg(unix)]
     fn saved_agreed(state: &mut State, share: &PluginShare, file: &Path) -> BTreeMap<String, String> {
-        state.save(file);
+        state.save(file).unwrap();
         let loaded = State::load(file, &file.with_extension("legacy")).unwrap();
         let key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
         loaded.agreed.get(&key).cloned().unwrap_or_default()
@@ -2223,7 +2237,7 @@ mod tests {
         let now = SystemTime::now();
         sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
         sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
-        mac_state.save(&file);
+        mac_state.save(&file).unwrap();
         put(&mac_greet, "two\n");
         stamp(&mac_greet, SystemTime::UNIX_EPOCH + Duration::from_millis(5_000));
         let mini_notes = mini.claude_home.join("skills/notes/SKILL.md");
@@ -2263,13 +2277,13 @@ mod tests {
         let file = root.join("state.json");
         let now = SystemTime::now();
         sync(&hub, &mut mac.state, &mac.checkout, now).unwrap();
-        mac.state.save(&file);
+        mac.state.save(&file).unwrap();
         put(&memory, "two\n");
         stamp(&memory, SystemTime::UNIX_EPOCH + Duration::from_secs(50));
         hub.fail_list.set(true);
         let failed = sync(&hub, &mut mac.state, &mac.checkout, now);
         assert_eq!(failed, Err("the hub did not answer within 60 seconds".into()));
-        mac.state.save(&file);
+        mac.state.save(&file).unwrap();
         hub.fail_list.set(false);
         let mut mac_state = State::load(&file, &file.with_extension("legacy")).unwrap();
         let key = format!("{} {}", mac.checkout.project.key, mac.checkout.path.display());
@@ -2300,7 +2314,7 @@ mod tests {
         let now = SystemTime::now();
         sync(&hub, &mut mac.state, &mac.checkout, now).unwrap();
         sync(&hub, &mut mini.state, &mini.checkout, now).unwrap();
-        mac.state.save(&file);
+        mac.state.save(&file).unwrap();
         put(&memory, "two\n");
         stamp(&memory, SystemTime::UNIX_EPOCH + Duration::from_millis(5_000));
         let mini_notes = mini.claude("memory/notes.md");
@@ -2391,7 +2405,7 @@ mod tests {
         stamp(&memory, SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000));
         let file = root.join("sync.json");
         mac.sync(&hub);
-        mac.state.save(&file);
+        mac.state.save(&file).unwrap();
         mini.sync(&hub);
         let mini_memory = mini.claude("memory/MEMORY.md");
         put(&mini_memory, "two two\n");
@@ -2430,7 +2444,7 @@ mod tests {
         let memory = mac.claude("memory/MEMORY.md");
         put(&memory, "one\n");
         let file = root.join("sync.json");
-        mac.state.save(&file);
+        mac.state.save(&file).unwrap();
         mac.sync(&hub);
         let before = std::fs::read_to_string(&file).unwrap();
         put(&memory, "two two\n");
