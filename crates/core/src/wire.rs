@@ -1221,14 +1221,18 @@ mod tests {
         round_trip(Call::UpdateSelf, json!({ "cmd": "update_self" }));
         assert!(Call::UpdateSelf.may_wait());
         round_trip(UpdateStatus::UpToDate { version: "0.16.0".into() }, json!({ "state": "up_to_date", "version": "0.16.0" }));
-        round_trip(UpdateStatus::Updating { to: String::new() }, json!({ "state": "updating" }));
+        round_trip(UpdateStatus::Updating { to: String::new() }, json!({ "state": "updating", "to": "" }));
         round_trip(UpdateStatus::Updating { to: "0.16.0".into() }, json!({ "state": "updating", "to": "0.16.0" }));
         round_trip(UpdateStatus::Restarting { to: "0.16.0".into() }, json!({ "state": "restarting", "to": "0.16.0" }));
-        round_trip(UpdateStatus::Failed { to: String::new(), reason: "checksum mismatch".into() }, json!({ "state": "failed", "reason": "checksum mismatch" }));
+        round_trip(UpdateStatus::Failed { to: String::new(), reason: "checksum mismatch".into() }, json!({ "state": "failed", "to": "", "reason": "checksum mismatch" }));
         round_trip(
             UpdateStatus::Failed { to: "0.16.0".into(), reason: "checksum mismatch".into() },
             json!({ "state": "failed", "to": "0.16.0", "reason": "checksum mismatch" }),
         );
+        let omitted: UpdateStatus = serde_json::from_value(json!({ "state": "updating" })).unwrap();
+        assert_eq!(omitted, UpdateStatus::Updating { to: String::new() });
+        let omitted_failure: UpdateStatus = serde_json::from_value(json!({ "state": "failed", "reason": "checksum mismatch" })).unwrap();
+        assert_eq!(omitted_failure, UpdateStatus::Failed { to: String::new(), reason: "checksum mismatch".into() });
         round_trip(UpdateStatus::Cannot { reason: "this build cannot install a release".into() }, json!({ "state": "cannot", "reason": "this build cannot install a release" }));
         round_trip(MachineEvent::Update { status: None }, json!({ "kind": "update", "status": null }));
         round_trip(
