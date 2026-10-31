@@ -1,0 +1,31 @@
+{
+  "version": "0.16.0",
+  "notes": "On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. Or click the update button in a running pinned.",
+  "pub_date": "2026-10-30T22:10:25.111Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU0p4ZElxNnJQc09BY2RJTGRDcW5FWTlwaGVIQm94M2U1M1Y0S29COWxDWmJzckpZNDhJa2Y5bkkwM25QNFpucEZRcUNYNmE2aE9rTitlSjZpc2FUMXZvTytxcGpKL0FZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzk3OTM4CWZpbGU6cGlubmVkLmFwcC50YXIuZ3oJdmVyc2lvbjowLjE2LjAKOVpGZnhRODJHdWtQN0pqZkt5V2Njcm9TdXdBQmZwY0tFc2QrckF0cUErbnd1QW5kNFlWWFc1YkJ3T2hEVjcrQndWTkpLOU9jejNNdkV6Yko3QjJOQ2c9PQo=",
+      "url": "https://github.com/FelipeGazapina/pinned/releases/download/v0.16.0/pinned_aarch64.app.tar.gz"
+    },
+    "darwin-aarch64-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU0p4ZElxNnJQc09BY2RJTGRDcW5FWTlwaGVIQm94M2U1M1Y0S29COWxDWmJzckpZNDhJa2Y5bkkwM25QNFpucEZRcUNYNmE2aE9rTitlSjZpc2FUMXZvTytxcGpKL0FZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzk3OTM4CWZpbGU6cGlubmVkLmFwcC50YXIuZ3oJdmVyc2lvbjowLjE2LjAKOVpGZnhRODJHdWtQN0pqZkt5V2Njcm9TdXdBQmZwY0tFc2QrckF0cUErbnd1QW5kNFlWWFc1YkJ3T2hEVjcrQndWTkpLOU9jejNNdkV6Yko3QjJOQ2c9PQo=",
+      "url": "https://github.com/FelipeGazapina/pinned/releases/download/v0.16.0/pinned_aarch64.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU0p4ZElxNnJQc0NTeENMclhkSXgxeEFoYy9peHBNMFJJdVZRTEhpa3hFV0NnQWxFaHFPQU5VbVZkYkFrQm9aQzBhSVlBb0RvWi9wa3lSWUxVS2EyaW1saEYyNHpJOGdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzk4MTY1CWZpbGU6cGlubmVkLmFwcC50YXIuZ3oJdmVyc2lvbjowLjE2LjAKd3VlZmVjVnMwQWJJU0FXN2xGYlc2OVdYemE3aDhPTDl5YlllTENrclg0aWhsQm1MVXp4WC9MbTIyTkdUNk5EK3RGdGRFUFFiaWE2R1E2YTJiYmZuQ3c9PQo=",
+      "url": "https://github.com/FelipeGazapina/pinned/releases/download/v0.16.0/pinned_x64.app.tar.gz"
+    },
+    "darwin-x86_64-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU0p4ZElxNnJQc0NTeENMclhkSXgxeEFoYy9peHBNMFJJdVZRTEhpa3hFV0NnQWxFaHFPQU5VbVZkYkFrQm9aQzBhSVlBb0RvWi9wa3lSWUxVS2EyaW1saEYyNHpJOGdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzk4MTY1CWZpbGU6cGlubmVkLmFwcC50YXIuZ3oJdmVyc2lvbjowLjE2LjAKd3VlZmVjVnMwQWJJU0FXN2xGYlc2OVdYemE3aDhPTDl5YlllTENrclg0aWhsQm1MVXp4WC9MbTIyTkdUNk5EK3RGdGRFUFFiaWE2R1E2YTJiYmZuQ3c9PQo=",
+      "url": "https://github.com/FelipeGazapina/pinned/releases/download/v0.16.0/pinned_x64.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU0p4ZElxNnJQc0tLTHNtVkRIWCtLSko5NWRsT2hacVhaeWZETHFTZEdZZnd1dmRjZTN1RVNhMjNVZld1SG15TmloekhWRXQzaFl5azE0NWRidS9UdkZJZzZyeHI3SUFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzk4MjIyCWZpbGU6cGlubmVkXzAuMTYuMF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC4xNi4wCjNOaVc3ZUdWSlliUlZzWFU5cENuc00zNVBJY3MyMmliRFVNVnR3dnVvaGJrYy9Dd01ZdmRFSERsUkU5S0ZkL2hNUDlaWkRFTytHYk1OS0pScEE0eENRPT0K",
+      "url": "https://github.com/FelipeGazapina/pinned/releases/download/v0.16.0/pinned_0.16.0_x64-setup.exe"
+    },
+    "windows-x86_64-nsis": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU0p4ZElxNnJQc0tLTHNtVkRIWCtLSko5NWRsT2hacVhaeWZETHFTZEdZZnd1dmRjZTN1RVNhMjNVZld1SG15TmloekhWRXQzaFl5azE0NWRidS9UdkZJZzZyeHI3SUFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzk4MjIyCWZpbGU6cGlubmVkXzAuMTYuMF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC4xNi4wCjNOaVc3ZUdWSlliUlZzWFU5cENuc00zNVBJY3MyMmliRFVNVnR3dnVvaGJrYy9Dd01ZdmRFSERsUkU5S0ZkL2hNUDlaWkRFTytHYk1OS0pScEE0eENRPT0K",
+      "url": "https://github.com/FelipeGazapina/pinned/releases/download/v0.16.0/pinned_0.16.0_x64-setup.exe"
+    }
+  }
+}

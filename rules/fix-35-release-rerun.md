@@ -2,11 +2,11 @@
 
 PR 35. A second run of a published tag left the release public. `tauri-action@v0` then replaced `latest.json` with a new `pub_date` and did not set the draft flag. If the musl build failed after that, nothing re-signed. Every Linux node failed with `the release checksum does not match`.
 
-The `draft` job now runs `gh release edit --draft=true` when the release exists, and `gh release create --draft` when it does not. `build` and `linux-node` need that job, so the draft flag is set before any upload. The workflow concurrency group is `release-<tag>` with `cancel-in-progress` false, so two runs of one tag do not overlap.
+The `draft` job now runs `gh release edit --draft=true` when the release exists, and `gh release create --draft` when it does not. `build` and `linux-node` need that job, so a full run sets the draft flag before any upload. A re-run of one job does not re-run `draft`. The uploading job drafts itself. The workflow concurrency group is `release-<tag>` with `cancel-in-progress` false, so two runs of one tag do not overlap.
 
-`tauri-action@v0` calls the switch `includeUpdaterJson`. It is false on the matrix. Each leg writes `updater-fragment.json` for its own platforms. `scripts/assemble-latest-json.sh` merges those files in one job. It requires `darwin-aarch64`, `darwin-aarch64-app`, `darwin-x86_64`, `darwin-x86_64-app`, `windows-x86_64`, and `windows-x86_64-nsis`. Those are the keys on the v0.16.0 release. Two fragments that set the same key to different bytes fail the job. The script strips one leading `v` from the tag and rejects a `.version` that is not the rest. `sign-node` uploads that `latest.json`, then `scripts/sign-node-sums.sh` hashes it with the two musl binaries. `publish` needs `build`, `linux-node`, and `sign-node`, and it is the step that clears the draft flag.
+`tauri-action@v0` calls the switch `includeUpdaterJson`. It is false on the matrix. Each leg writes `updater-fragment.json` for its own platforms. `scripts/assemble-latest-json.sh` merges those files in one job. It requires `darwin-aarch64`, `darwin-aarch64-app`, `darwin-x86_64`, `darwin-x86_64-app`, `windows-x86_64`, and `windows-x86_64-nsis`. Those are the keys on the v0.16.0 release. Two fragments that set the same key to different bytes fail the job. The script strips one leading `v` from the tag and rejects a `.version` that is not the rest. `sign-node` runs `scripts/sign-node-sums.sh` on that file and the two musl binaries, then uploads `SHA256SUMS` before `latest.json`. `publish` needs `build`, `linux-node`, and `sign-node`, and it is the step that clears the draft flag.
 
-A failed re-run leaves the tag as a draft. `releases/latest` stays on the previous public release until a later run publishes.
+A full run that fails before `publish` leaves the tag a draft. A `sign-node` re-run that fails in the signer uploads nothing, so a public release stays public. `releases/latest` stays on the previous public release until a later run publishes.
 
 ## Proof
 
@@ -28,4 +28,4 @@ The first two decoded signature bytes were `4544`, which is `ED`.
 
 ## What this does not change
 
-`crates/server/src/self_update.rs` is untouched. Hub deploy still does not wait for `publish`. No tag was pushed, no GitHub release was edited, and the workflow was not run. Docker was not started. The musl image was not built.
+`crates/server/src/self_update.rs` gained the signer test `a_signed_release_installs_a_newer_version_and_refuses_a_tampered_or_older_one`. The job-rerun round does not edit that file. Hub deploy still does not wait for `publish`. No tag was pushed, no GitHub release was edited, and the workflow was not run. Docker was not started. The musl image was not built.

@@ -8,7 +8,7 @@ Nothing here was released, tagged, merged, or pointed at the production hub. `ra
 
 `scripts/sign-node-sums.sh` hashes `latest.json`, `pinned-server-aarch64-unknown-linux-musl`, and `pinned-server-x86_64-unknown-linux-musl`, replacing any checksum file already in the directory. It signs that file with `tauri signer sign` and writes the decoded minisign text to `SHA256SUMS.minisig`. The script exits unless the signature algorithm bytes are `ED`.
 
-The `sign-node` job runs after the desktop `build` job and the `linux-node` job. It downloads the `latest.json` the desktop jobs already uploaded, runs the script, and uploads the two binaries, `SHA256SUMS`, and `SHA256SUMS.minisig`. It does not upload `latest.json` again. `publish` only clears the draft flag, and only after `build` and `sign-node` succeed.
+The `sign-node` job runs after the desktop `build` job and the `linux-node` job. Desktop jobs do not upload `latest.json` (`includeUpdaterJson` is false). `sign-node` assembles `latest.json` from their updater fragments, runs the script, and uploads `SHA256SUMS` before `latest.json`. `publish` clears the draft flag only after `build`, `linux-node`, and `sign-node` succeed.
 
 The node's verifier in `crates/server/src/self_update.rs` is the parent branch's. The new test calls `NodeUpdate::prepare` on files the script signed.
 
@@ -44,4 +44,4 @@ A throwaway `tauri signer sign` wrote algorithm bytes `ED` (`4544`), which is th
 
 ## Left open
 
-The musl image was not built here. `update_self` was not driven through a live hub. The desktop jobs can still race while they merge `latest.json`. The sign job starts after every desktop job has finished, and nothing after the hash writes that file.
+The musl image was not built here. `update_self` was not driven through a live hub. Desktop jobs write updater fragments, not `latest.json`. One job assembles that file. A later round drafts the release inside the job that uploads.
