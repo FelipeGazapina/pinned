@@ -411,6 +411,15 @@ impl Live {
     }
 }
 
+impl Drop for Live {
+    fn drop(&mut self) {
+        for pid in self.claudes().1 {
+            let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 fn pair(gate: &str, client: &mut Client, dir: &Path) -> Credentials {
     let code = client.hub(json!({ "cmd": "pair_code" })).unwrap();
     let text = code["code"].as_str().unwrap().to_lowercase();
