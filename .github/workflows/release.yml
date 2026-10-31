@@ -8,7 +8,23 @@ permissions:
   contents: write
 
 jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open a draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          notes="On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. Or click the update button in a running pinned."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists"
+          else
+            gh release create "$tag" --draft --title "pinned $tag" --notes "$notes"
+          fi
+
   build:
+    needs: draft
     strategy:
       fail-fast: false
       matrix:
@@ -43,5 +59,63 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: pinned ${{ github.ref_name }}
           releaseBody: On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. Or click the update button in a running pinned.
-          releaseDraft: false
+          releaseDraft: true
           args: ${{ matrix.args }}
+
+  linux-node:
+    needs: draft
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Free disk for the musl image
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+      - name: Build the musl binaries the hub image builds
+        run: docker build --target build -t pinned-node-release .
+      - name: Copy the binaries out
+        run: |
+          id=$(docker create pinned-node-release)
+          trap 'docker rm "$id"' EXIT
+          mkdir -p node-release
+          docker cp "$id:/downloads/." node-release
+          test -s node-release/pinned-server-x86_64-unknown-linux-musl
+          test -s node-release/pinned-server-aarch64-unknown-linux-musl
+      - name: Sign the checksums
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          (
+            cd node-release
+            sha256sum \
+              pinned-server-x86_64-unknown-linux-musl \
+              pinned-server-aarch64-unknown-linux-musl \
+              > SHA256SUMS
+            grep -E -q '^[[:xdigit:]]{64}  pinned-server-x86_64-unknown-linux-musl$' SHA256SUMS
+            grep -E -q '^[[:xdigit:]]{64}  pinned-server-aarch64-unknown-linux-musl$' SHA256SUMS
+            test "$(wc -l < SHA256SUMS)" -eq 2
+          )
+          bash scripts/sign-node-sums.sh node-release
+      - name: Upload the node files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            node-release/pinned-server-x86_64-unknown-linux-musl \
+            node-release/pinned-server-aarch64-unknown-linux-musl \
+            node-release/SHA256SUMS \
+            node-release/SHA256SUMS.minisig \
+            --clobber
+
+  publish:
+    needs: [build, linux-node]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
