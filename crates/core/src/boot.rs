@@ -13,14 +13,17 @@ pub enum AfterHello {
     Leaving,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+enum Hub {
+    Silent,
+    Refused,
+    Accepted(PathBuf),
+}
+
 #[derive(PartialEq, Eq)]
 enum Step {
-    /// `refused` once the hub turned down a sign in.
-    Starting { refused: bool },
-    /// The hub accepted a sign in before the boot was ready, and `ready` removes `marker`.
-    Accepted { marker: PathBuf },
-    /// `refused` once the hub turned down a sign in since it last accepted one.
-    Running { refused: bool },
+    Starting(Hub),
+    Running(Hub),
     Proven,
     Leaving,
 }
@@ -42,7 +45,6 @@ impl Proof {
         Proof { marker: marker_path(), checksum: std::env::var(PROOF_ENV).unwrap_or_default() }
     }
 
-    /// The marker, while it records this process's checksum.
     fn holds(&self) -> Option<&Path> {
         let path = self.marker.as_deref()?;
         proves(&std::fs::read(path).ok()?, &self.checksum).then_some(path)
@@ -51,7 +53,7 @@ impl Proof {
 
 impl Boot {
     const fn new() -> Boot {
-        Boot { step: Mutex::new(Step::Starting { refused: false }), changed: Notify::const_new() }
+        Boot { step: Mutex::new(Step::Starting(Hub::Silent)), changed: Notify::const_new() }
     }
 
     fn step(&self) -> MutexGuard<'_, Step> {
@@ -62,9 +64,9 @@ impl Boot {
         let mut step = self.step();
         let next = match &*step {
             Step::Leaving => return false,
-            Step::Starting { refused } => Step::Running { refused: *refused },
-            Step::Accepted { marker } => commit(marker),
-            Step::Running { .. } | Step::Proven => return true,
+            Step::Starting(Hub::Accepted(marker)) => commit(marker),
+            Step::Starting(hub) => Step::Running(hub.clone()),
+            Step::Running(_) | Step::Proven => return true,
         };
         *step = next;
         self.changed.notify_waiters();
@@ -81,42 +83,33 @@ impl Boot {
     }
 
     fn leave_if_starting(&self) -> bool {
-        self.leave_if(|step| matches!(step, Step::Starting { .. } | Step::Accepted { .. }))
+        self.leave_if(|step| matches!(step, Step::Starting(_)))
     }
 
     async fn leave_when_refused(&self) {
         loop {
             let changed = self.changed.notified();
-            if self.leave_if(|step| *step == Step::Running { refused: true }) {
+            if self.leave_if(|step| *step == Step::Running(Hub::Refused)) {
                 return;
             }
             changed.await;
         }
     }
 
-    /// What the link does once the hub accepted its sign in, or `None` while that waits for `ready`.
-    fn accepted(&self, proof: &Proof) -> Option<AfterHello> {
-        let mut step = self.step();
-        match (&*step, proof.holds()) {
-            (Step::Leaving, _) => Some(AfterHello::Leaving),
-            (Step::Accepted { .. }, _) => None,
-            (Step::Proven, _) | (_, None) => Some(AfterHello::Serve),
-            (Step::Starting { .. }, Some(marker)) => {
-                *step = Step::Accepted { marker: marker.to_owned() };
-                None
-            }
-            (Step::Running { .. }, Some(marker)) => {
-                *step = commit(marker);
-                Some(AfterHello::Serve)
-            }
-        }
-    }
-
     async fn commit_when_ready(&self, proof: &Proof) -> AfterHello {
         loop {
             let changed = self.changed.notified();
-            if let Some(after) = self.accepted(proof) {
-                return after;
+            {
+                let mut step = self.step();
+                match (&*step, proof.holds()) {
+                    (Step::Leaving, _) => return AfterHello::Leaving,
+                    (Step::Proven, _) | (_, None) => return AfterHello::Serve,
+                    (Step::Starting(_), Some(marker)) => *step = Step::Starting(Hub::Accepted(marker.to_owned())),
+                    (Step::Running(_), Some(marker)) => {
+                        *step = commit(marker);
+                        return AfterHello::Serve;
+                    }
+                }
             }
             changed.await;
         }
@@ -126,20 +119,19 @@ impl Boot {
         if proof.holds().is_none() {
             return;
         }
-        if let Step::Starting { refused } | Step::Running { refused } = &mut *self.step() {
-            *refused = true;
+        if let Step::Starting(hub) | Step::Running(hub) = &mut *self.step() {
+            *hub = Hub::Refused;
             self.changed.notify_waiters();
         }
     }
 }
 
-/// Removing the marker keeps this binary on the next start. A boot that can't stays unproven.
 fn commit(marker: &Path) -> Step {
     match std::fs::remove_file(marker) {
         Ok(()) => Step::Proven,
         Err(error) => {
             eprintln!("pinned: could not remove {}, the next sign in tries again: {error}", marker.display());
-            Step::Running { refused: false }
+            Step::Running(Hub::Accepted(marker.to_owned()))
         }
     }
 }
@@ -182,7 +174,6 @@ pub fn refuse() {
     BOOT.refuse(&Proof::of_this_process())
 }
 
-/// Returns once the hub refuses a sign in while this boot runs unproven, which leaves it.
 pub async fn leave_when_refused() {
     BOOT.leave_when_refused().await
 }
