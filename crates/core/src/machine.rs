@@ -2772,6 +2772,33 @@ mod tests {
         Machine::new(launch(), None, Some("/repo".into()), |_| {})
     }
 
+    #[test]
+    fn a_restarted_machine_does_not_reuse_tab_ids() {
+        let first = machine();
+        let old = first.open_tab(None, false).unwrap();
+        let second = machine();
+        let new_id = second.open_tab(None, false).unwrap();
+        let later = second.open_tab(None, false).unwrap();
+        assert_ne!(old, new_id, "the new process reused {old}");
+        assert_eq!(second.view(&old).unwrap_err(), format!("no tab {old}"));
+        assert_eq!((second.view(&new_id).unwrap().opened, second.view(&later).unwrap().opened), (1, 2));
+        assert_eq!((tab_number("tab-1"), tab_number("tab-abcdef-3")), (1, 3));
+    }
+
+    #[test]
+    fn quitting_announces_an_empty_tab_list() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events = seen.clone();
+        let m = Machine::new(launch(), None, Some("/repo".into()), move |event| {
+            if let Event::Tabs { tabs } = event {
+                events.lock().unwrap().push(tabs.len());
+            }
+        });
+        m.open_tab(None, false).unwrap();
+        m.quit();
+        assert_eq!(seen.lock().unwrap().last().copied(), Some(0));
+    }
+
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pinned-machine-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

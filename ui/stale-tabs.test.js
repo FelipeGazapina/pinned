@@ -3,50 +3,123 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-function loadActions() {
-  const src = readFileSync(new URL("./main.js", import.meta.url), "utf8");
-  const start = src.indexOf("function tabListAction");
-  const end = src.indexOf("function showMachines");
-  const context = {};
+const src = readFileSync(new URL("./main.js", import.meta.url), "utf8");
+
+const snapshot = (value) => JSON.parse(JSON.stringify(value));
+
+function runSlice(startAt, endAt, extra = "") {
+  const start = src.indexOf(startAt);
+  const end = src.indexOf(endAt);
+  const context = { console, LOCAL: "local" };
   vm.createContext(context);
-  vm.runInContext(`${src.slice(start, end)}\nglobalThis.tabListAction = tabListAction;`, context);
-  return context.tabListAction;
+  vm.runInContext(`${src.slice(start, end)}\n${extra}`, context);
+  return context;
 }
 
-test("a machine that is already online still reloads its tabs when the update has no snapshot", () => {
-  const tabListAction = loadActions();
-  assert.equal(tabListAction(true, false), "refresh");
-});
-
-test("offline clears tabs and a snapshot is applied as given", () => {
-  const tabListAction = loadActions();
-  assert.equal(tabListAction(false, false), "clear");
-  assert.equal(tabListAction(true, true), "apply");
-});
-
-function loadMissingTab() {
-  const src = readFileSync(new URL("./main.js", import.meta.url), "utf8");
-  const start = src.indexOf("const missingTabId");
-  const end = src.indexOf("const callOn");
-  const context = {};
-  vm.createContext(context);
-  vm.runInContext(`${src.slice(start, end)}\nglobalThis.missingTabId = missingTabId;`, context);
-  return context.missingTabId;
+function showMachinesContext() {
+  const applied = [];
+  const refreshed = [];
+  const retried = [];
+  const preludeStart = src.indexOf("function tabListAction");
+  const showStart = src.indexOf("function showMachines");
+  const prelude = preludeStart >= 0 && preludeStart < showStart ? src.slice(preludeStart, showStart) : "";
+  const context = runSlice("function showMachines", "function disconnectHub", "");
+  vm.runInContext(prelude, context);
+  context.account = { machine_id: "this-mac" };
+  context.page = "";
+  context.machinesUi = { renaming: false };
+  context.settingsOpen = () => false;
+  context.render = () => {};
+  context.hub = { transport: () => ({}) };
+  context.machines = new Map([
+    ["box", { view: { id: "box", name: "railway", online: true }, tabs: [{ id: "tab-old" }] }],
+  ]);
+  context.setTabs = (machine, views) => applied.push({ machine, ids: views.map((view) => view.id) });
+  context.refreshTabs = (machine) => {
+    refreshed.push(machine);
+    return Promise.resolve();
+  };
+  context.retryUploadImages = () => retried.push("retry");
+  return { context, applied, refreshed, retried };
 }
 
-test("a no-tab error names the id the node rejected", () => {
-  const missingTabId = loadMissingTab();
-  assert.equal(missingTabId("no tab tab-5"), "tab-5");
-  assert.equal(missingTabId("tab-5 has no running session"), null);
-  const src = readFileSync(new URL("./main.js", import.meta.url), "utf8");
-  const callOn = src.slice(src.indexOf("const callOn"), src.indexOf("const IS_MAC"));
-  assert.match(callOn, /missingTabId\(error\)/);
-  const start = src.slice(src.indexOf("async function startClaude"), src.indexOf("async function setBypass"));
-  assert.match(start, /tabs\.includes\(tab\)/);
+test("an already-online machine keeps its tabs when the update has no snapshot", () => {
+  const { context, applied, refreshed } = showMachinesContext();
+  context.showMachines([{ id: "box", name: "railway", online: true }]);
+  assert.deepEqual(snapshot(applied), []);
+  assert.deepEqual(snapshot(refreshed), []);
 });
 
-test("showMachines uses the tab list action", () => {
-  const src = readFileSync(new URL("./main.js", import.meta.url), "utf8");
-  const body = src.slice(src.indexOf("function showMachines"), src.indexOf("function disconnectHub"));
-  assert.match(body, /tabListAction\(/);
+test("an already-online machine applies a tab snapshot without asking again", () => {
+  const { context, applied, refreshed } = showMachinesContext();
+  context.showMachines([{ id: "box", name: "railway", online: true }], { box: [{ id: "tab-new" }] });
+  assert.deepEqual(snapshot(applied), [{ machine: "box", ids: ["tab-new"] }]);
+  assert.deepEqual(snapshot(refreshed), []);
+});
+
+test("a machine going offline drops its tabs", () => {
+  const { context, applied } = showMachinesContext();
+  context.showMachines([{ id: "box", name: "railway", online: false }]);
+  assert.deepEqual(snapshot(applied), [{ machine: "box", ids: [] }]);
+});
+
+test("a machine that just came online asks for its tabs when the hub sent none", () => {
+  const { context, refreshed, retried } = showMachinesContext();
+  context.machines.get("box").view.online = false;
+  context.showMachines([{ id: "box", name: "railway", online: true }]);
+  assert.deepEqual(snapshot(refreshed), ["box"]);
+  assert.deepEqual(snapshot(retried), ["retry"]);
+});
+
+function startClaudeContext() {
+  const context = runSlice("async function startClaude", "async function setBypass");
+  context.started = [];
+  context.notes = [];
+  context.writes = [];
+  context.guiOn = () => true;
+  context.refit = () => {};
+  context.render = () => {};
+  context.activate = (tab) => {
+    context.activated = tab.key;
+  };
+  context.showComposerNote = (text, error) => context.notes.push({ text, error });
+  context.startTab = (tab) => context.started.push(tab.view.id);
+  context.callOn = async () => {
+    throw "no tab tab-old";
+  };
+  return context;
+}
+
+test("Enter starts the restored session when the old tab id is gone", async () => {
+  const context = startClaudeContext();
+  const old = { key: "box:tab-old", machine: "box", view: { id: "tab-old", session: "conv-1", running: false }, attached: Promise.resolve(), term: { cols: 80, rows: 24, write() {} } };
+  const restored = { key: "box:tab-new", machine: "box", view: { id: "tab-new", session: "conv-1", running: true }, attached: Promise.resolve(), term: { cols: 80, rows: 24, write() {} } };
+  context.tabs = [restored];
+  await context.startClaude(old);
+  assert.deepEqual(snapshot(context.started), []);
+  assert.deepEqual(snapshot(context.notes), []);
+  assert.equal(context.activated, "box:tab-new");
+});
+
+test("Enter says the session ended when the machine has no tab for it", async () => {
+  const context = startClaudeContext();
+  const old = { key: "box:tab-old", machine: "box", view: { id: "tab-old", session: "conv-1", running: false }, attached: Promise.resolve(), term: { cols: 80, rows: 24, write(text) { context.writes.push(text); } } };
+  context.tabs = [];
+  await context.startClaude(old);
+  assert.deepEqual(snapshot(context.notes), [{ text: "That session ended when the machine restarted. Open it again to continue.", error: true }]);
+  assert.deepEqual(snapshot(context.writes), []);
+});
+
+test("a no-tab error reloads that machine's tabs and is still reported", async () => {
+  const context = runSlice("const missingTabId", "const IS_MAC", "globalThis.callOn = callOn;");
+  const calls = [];
+  context.machines = new Map([["box", { transport: { call: async (call) => { calls.push(call.cmd); throw "no tab tab-9"; } } }]]);
+  context.refreshed = [];
+  context.refreshTabs = async (machine) => context.refreshed.push(machine);
+  await assert.rejects(context.callOn("box", { cmd: "start_claude", tab: "tab-9" }), (error) => error === "no tab tab-9");
+  assert.deepEqual(context.refreshed, ["box"]);
+  context.refreshed.length = 0;
+  await assert.rejects(context.callOn("box", { cmd: "tabs" }), (error) => error === "no tab tab-9");
+  assert.deepEqual(context.refreshed, []);
+  assert.deepEqual(calls, ["start_claude", "tabs"]);
 });

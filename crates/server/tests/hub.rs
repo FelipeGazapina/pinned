@@ -366,6 +366,45 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
 }
 
 #[test]
+fn a_restarted_node_does_not_reuse_tab_ids_and_the_client_gets_that_list() {
+    let hub = TestHub::start("retab");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "Ana@Acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    let dir = temp("retab-node");
+    let creds = pair(&url, &mut client, "box", &dir);
+    let id = creds.machine_id.clone();
+    client.wait_machines(&[("box", false)]);
+    let mut node = Node::start(&dir, creds.clone());
+    client.wait_machines(&[("box", true)]);
+    let first = client.call(&id, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap();
+    let first_id = first.as_str().unwrap().to_owned();
+    node.kill();
+    client.wait_machines(&[("box", false)]);
+    drop(node);
+    let _node = Node::start(&dir, creds);
+    client.wait_machines(&[("box", true)]);
+    let second = client.call(&id, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap();
+    let second_id = second.as_str().unwrap().to_owned();
+    assert_ne!(first_id, second_id, "the new process reused {first_id}");
+    assert_eq!(
+        client.call(&id, json!({ "cmd": "start_claude", "tab": first_id, "cols": 80, "rows": 24 })),
+        Err(format!("no tab {first_id}")),
+        "the id from before the restart drove the new tab"
+    );
+    client.pump();
+    let online = client
+        .frames
+        .iter()
+        .rev()
+        .find(|f| f["type"] == "machines" && f["machines"].as_array().is_some_and(|list| list.iter().any(|m| m["name"] == "box" && m["online"] == true)))
+        .unwrap();
+    assert!(online.get("tabs").is_some_and(|tabs| tabs.is_object()), "the reconnect update carried no tab snapshot");
+    let listed = online["tabs"][&id].as_array().unwrap();
+    assert!(listed.iter().all(|tab| tab["id"] != first_id), "the snapshot still listed {first_id}");
+}
+
+#[test]
 fn a_remote_project_with_no_thread_is_still_in_list_projects() {
     let hub = TestHub::start("remote_projects");
     let url = hub.url.clone();
