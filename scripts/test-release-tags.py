@@ -48,6 +48,7 @@ class Remote:
         self.root = root
         self.env = git_env(root)
         self.bare = root / "remote.git"
+        self.hidden = root / "remote.git.hidden"
         self.git(root, "init", "-q", "--bare", "-b", "main", str(self.bare))
 
     def git(self, cwd, *args):
@@ -243,7 +244,36 @@ RELEASE_CASES = (
             "local": {"branch": "main", "HEAD": "start", "tags": [], "status": []},
         },
     ),
+    (
+        "connection drops after origin takes the release",
+        "0.16.1",
+        "dropped",
+        False,
+        {
+            "refused": "git push failed, but origin has v0.16.1, so the release went out",
+            "remote": {"refs/heads/main": released("0.16.1"), "refs/tags/v0.16.1": released("0.16.1")},
+            "local": {"branch": "main", "HEAD": released("0.16.1"), "tags": ["v0.16.1"], "status": []},
+        },
+    ),
+    (
+        "connection drops and origin cannot be read",
+        "0.16.1",
+        "unreadable",
+        False,
+        {
+            "refused": "git push failed and origin cannot be read",
+            "remote": {"refs/heads/main": released("0.16.1"), "refs/tags/v0.16.1": released("0.16.1")},
+            "local": {"branch": "main", "HEAD": released("0.16.1"), "tags": ["v0.16.1"], "status": []},
+        },
+    ),
 )
+
+DROP_HOOK = """#!/bin/bash
+if [[ "$1" == committed ]]; then
+  {hide}
+  kill -9 "$PPID"
+fi
+"""
 
 
 def prepare(sandbox, setup):
@@ -255,12 +285,20 @@ def prepare(sandbox, setup):
         sandbox.git(sandbox.work, "switch", "-q", "-c", "topic")
     elif setup == "dirty":
         (sandbox.work / "notes.txt").write_text("draft\n")
+    elif setup in ("dropped", "unreadable"):
+        hide = f'mv "{sandbox.bare}" "{sandbox.hidden}"' if setup == "unreadable" else ":"
+        hook = sandbox.bare / "hooks" / "reference-transaction"
+        hook.write_text(DROP_HOOK.format(hide=hide))
+        hook.chmod(0o755)
 
 
 def release_errors(root, version, setup, race, expect):
     sandbox = ReleaseSandbox(root)
     prepare(sandbox, setup)
     proc = sandbox.release(version, sandbox.parallel_push() if race else None)
+    if sandbox.hidden.exists():
+        sandbox.hidden.rename(sandbox.bare)
+    (sandbox.bare / "hooks" / "reference-transaction").unlink(missing_ok=True)
     seen = sandbox.observed()
     errors = []
     if "code" in expect and proc.returncode != expect["code"]:
