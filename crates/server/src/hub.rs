@@ -99,7 +99,6 @@ struct Online {
     out: Outbox,
     pending: HashMap<u64, oneshot::Sender<Result<Value, String>>>,
     next_call: u64,
-    /// None until this socket's first Tabs event. Some([]) is a node that reported no tabs.
     tabs: Option<Vec<TabView>>,
     /// The last usage the machine reported for each account, for clients that connect after it.
     usage: BTreeMap<AccountId, Usage>,
@@ -501,14 +500,10 @@ impl Account {
         }
     }
 
-    /// Tabs the online machines have reported on this socket. A machine that has not sent Tabs yet
-    /// is left out, so an empty list is a report and not the state before the first one.
     fn reported_tabs(machines: &HashMap<MachineId, Online>) -> BTreeMap<MachineId, Vec<TabView>> {
         machines.iter().filter_map(|(id, machine)| machine.tabs.clone().map(|tabs| (id.clone(), tabs))).collect()
     }
 
-    /// Builds the machines frame and queues it under the same lock `machine_event` uses, so a
-    /// snapshot cannot be queued after a newer Tabs event.
     fn publish_machines(&self, mut machines: Vec<MachineView>) {
         let live = self.live.lock().unwrap();
         for machine in &mut machines {

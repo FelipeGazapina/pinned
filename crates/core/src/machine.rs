@@ -216,7 +216,6 @@ struct Tab {
     account: Account,
     program: Program,
     session: Option<pty::Session>,
-    /// A start has taken the launch args and has not installed a session yet.
     starting: bool,
     /// When the running claude started, so a subagent an earlier claude left mid-step reads as stopped.
     started: Option<SystemTime>,
@@ -1007,7 +1006,6 @@ impl Machine {
         self.launch_tab(tab, cols, rows, false)
     }
 
-    /// Starts the tab's program again, including over a session that is already running.
     fn relaunch(&self, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
         self.launch_tab(tab, cols, rows, true)
     }
