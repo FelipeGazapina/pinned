@@ -2,6 +2,8 @@
 
 PR 33, branch `feat/update-all-machines`, lets one control update every machine of an account. An independent review said to fix the branch before stacking the Linux release job on it. This pass did that. The release-file contract the stacked job must follow is in `rules/update-all-machines.md`.
 
+A later pass replaced the handoff in which the child became the daemon. The current handoff is in `rules/update-all-machines.md` and `rules/fix-33-probe-handoff.md`.
+
 Nothing here was released, tagged, merged, or pointed at the production hub. `railway-hub` was not moved. The `hub-breaking-change` environment was not approved. No user machine, Railway sandbox, Mac mini, or installed app was touched.
 
 ## What changed

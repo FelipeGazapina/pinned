@@ -211,13 +211,18 @@ struct DesktopUpdate {
 
 impl SelfUpdate for DesktopUpdate {
     fn install(&self, machine: &Machine) -> UpdateStatus {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let status = UpdateStatus::Updating { to: String::new() };
+        machine.report(status.clone());
+        machine.keep_updating();
         let app = self.app.clone();
         let machine = machine.arc();
         tauri::async_runtime::spawn(async move {
-            let _ = tx.send(desktop_install(&app, &machine).await);
+            let status = desktop_install(&app, &machine).await;
+            if matches!(status, UpdateStatus::Restarting { .. }) {
+                machine.restart_now();
+            }
         });
-        rx.recv().unwrap_or(UpdateStatus::Failed { to: String::new(), reason: "the updater stopped".into() })
+        status
     }
 }
 

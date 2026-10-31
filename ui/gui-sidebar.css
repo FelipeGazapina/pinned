@@ -183,7 +183,7 @@ body[data-jump-hints] .thread-row[data-jump]::after { display: block; }
 @media (max-width: 639px) { #settings-page .side-setting select { width: 100%; flex: 1; } }
 
 #project-filter { text-align: left; }
-#project-filter .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#project-filter .label { flex: 1 1 auto; min-width: 3rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #project-filter :is(.i, .monogram, .favicon) { width: 16px; height: 16px; flex: none; }
 #project-menu { position: fixed; z-index: 60; display: flex; flex-direction: column; overflow: hidden; border-radius: 12px; border: 1px solid var(--g-border);
   background: rgb(var(--g-raised-rgb) / 0.96); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); box-shadow: 0 12px 28px -12px var(--g-shadow); color: var(--g-fg); }
@@ -191,13 +191,14 @@ body[data-jump-hints] .thread-row[data-jump]::after { display: block; }
 #project-menu input { height: 36px; padding: 0 12px; border: 0; border-bottom: 1px solid var(--g-border); background: none; color: var(--g-fg); font: inherit; font-size: 14px; outline: none; }
 #project-menu input::placeholder { color: var(--g-muted); }
 #project-menu .list { display: flex; flex-direction: column; gap: 1px; max-height: 320px; overflow-y: auto; padding: 4px; }
-#project-menu .item { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 8px; border-radius: 8px; font-size: 14px; cursor: pointer; }
+#project-menu .item { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 32px; padding: 0 8px; border-radius: 8px; font-size: 14px; cursor: pointer; }
 #project-menu .item.hit { background: var(--g-hover); }
 #project-menu .item :is(.i, .monogram, .favicon) { width: 16px; height: 16px; flex: none; }
 #project-menu .item > .i { color: var(--g-muted); }
-#project-menu .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#project-menu .where { flex: none; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-muted); }
-#project-menu .gear { display: grid; place-items: center; width: 24px; height: 24px; margin-left: auto; border-radius: 6px; color: var(--g-muted); }
+#project-menu .label { flex: 1 1 auto; min-width: 3rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#project-filter .where,
+#project-menu .where { flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-muted); }
+#project-menu .gear { display: grid; place-items: center; flex: none; width: 24px; height: 24px; margin-left: auto; border-radius: 6px; color: var(--g-muted); }
 #project-menu .gear:hover { background: var(--g-input); color: var(--g-fg); }
 #project-menu .gear .i { width: 14px; height: 14px; }
 #project-menu .empty { margin: 0; padding: 8px; font-size: 14px; color: var(--g-muted); }

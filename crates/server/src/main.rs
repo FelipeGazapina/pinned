@@ -136,7 +136,15 @@ fn login(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn running_version() -> String {
+    match std::env::var(pinned_core::boot::VERSION_ENV) {
+        Ok(version) if !version.is_empty() => version,
+        _ => VERSION.to_owned(),
+    }
+}
+
 fn node(args: &[String]) -> Result<(), String> {
+    pinned_server::self_update::enter();
     let args = Args::parse(args, &["config-dir"], 0)?;
     let dir = args.config_dir();
     let creds = Credentials::load(&dir).ok_or_else(|| format!("{} has no account.json: run `pinned-server pair <hub url> <code>` first", dir.display()))?;
@@ -149,7 +157,8 @@ fn node(args: &[String]) -> Result<(), String> {
     }
     let machine = Machine::new(launch, Some(dir), None, |_| {});
     machine.set_installer(Arc::new(pinned_server::self_update::NodeUpdate::production()));
-    let link = Arc::new(link::spawn(creds, machine.clone(), VERSION));
+    let version = running_version();
+    let link = Arc::new(link::spawn(creds, machine.clone(), &version));
     let forward = link.clone();
     machine.listen(move |message| forward.forward(message)).map_err(|e| format!("could not listen for claude's hooks: {e}"))?;
     for tab in machine.restore_tabs() {

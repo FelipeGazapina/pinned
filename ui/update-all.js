@@ -7,18 +7,43 @@ function accountMachines() {
   return rows;
 }
 
+const FINAL = new Set(["up_to_date", "failed", "cannot"]);
+const PHASE_WAIT = 4 * 5 * 60 * 1000 + 60 * 1000;
+
 function land(id, call) {
-  const before = JSON.stringify(accountMachines().find((view) => view.id === id)?.update ?? null);
+  const row = () => accountMachines().find((view) => view.id === id);
+  const before = JSON.stringify(row()?.update ?? null);
   let listen;
   const changed = new Promise((resolve) => {
     listen = () => {
-      const next = JSON.stringify(accountMachines().find((view) => view.id === id)?.update ?? null);
-      if (next === before) return;
+      const update = row()?.update;
+      if (JSON.stringify(update ?? null) === before) return;
+      if (!FINAL.has(update?.state)) return;
       resolve();
     };
     viewListeners.push(listen);
   });
-  return Promise.race([changed, call.then(() => null, () => null)]).finally(() => {
+  const finished = call.then(
+    (status) => (FINAL.has(status?.state) ? null : new Promise(() => {})),
+    (error) => {
+      const view = row();
+      const reason = error && error.message ? error.message : String(error);
+      if (view) view.update = { state: "failed", to: view.update?.to || "", reason };
+      for (const notify of viewListeners.slice()) notify();
+    },
+  );
+  const timed = new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      const view = row();
+      if (view && !FINAL.has(view.update?.state)) {
+        view.update = { state: "failed", to: view.update?.to || "", reason: "the update timed out" };
+        for (const notify of viewListeners.slice()) notify();
+      }
+      resolve();
+    }, updateEveryMachine.phaseWait ?? PHASE_WAIT);
+    if (typeof timer.unref === "function") timer.unref();
+  });
+  return Promise.race([changed, finished, timed]).finally(() => {
     const at = viewListeners.indexOf(listen);
     if (at >= 0) viewListeners.splice(at, 1);
   });

@@ -16,7 +16,7 @@ These names never go to the hub, including when they sit inside a plugin tree: `
 
 ## How a session loads them
 
-The files live under the reserved project key `pinned:plugins` in `project_files`. The same `SyncList`, `SyncPush`, and `SyncPull` calls are used. No wire type was added.
+The files live under the reserved project key `pinned:plugins` in `project_files`. `SyncList`, `SyncPush`, and `SyncPull` carry the file bytes. A repair that only sets the executable bit sends `sync_mark_executable`. A file entry may include `executable`. That field is only for this plugin share. See `rules/executable-plugin-hooks.md`. If a mode repair fails, the machine keeps the agreement from the last successful sync.
 
 Each machine keeps one folder per plugin id under its config `synced-plugins` directory. `Launch::command` adds one `--plugin-dir` for each folder whose plugin is not already enabled locally. `commands::list` reads those same folders. A running session picks the change up on restart.
 

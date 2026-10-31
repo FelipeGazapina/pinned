@@ -40,6 +40,9 @@ pub struct Entry {
     /// Compressed bytes.
     #[serde(default)]
     pub size: u64,
+    /// Unix mode when the sender read one. Absent when the sender does not know the mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -49,6 +52,14 @@ pub struct File {
     /// The contents gzipped, in base64; none for a deleted file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<String>,
+}
+
+/// Sets the executable bit on a file the hub already stores, without sending bytes.
+/// The hub applies it only while that file's sha is still `sha`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct ModeRepair {
+    pub path: String,
+    pub sha: String,
 }
 
 /// A project of the account, offered on machines that don't have it yet.
@@ -130,6 +141,7 @@ pub trait Hub {
     fn list(&self, project: &str) -> Result<Vec<Entry>, String>;
     fn push(&self, project: &str, files: Vec<File>) -> Result<(), String>;
     fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<File>, String>;
+    fn mark_executable(&self, project: &str, repairs: Vec<ModeRepair>) -> Result<(), String>;
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -182,14 +194,35 @@ fn exchange(
     // neither fetched nor taken for deleted.
     let paths: BTreeSet<String> = local.keys().chain(remote.keys()).chain(agreed.keys()).filter(|p| resolve(p).is_some()).cloned().collect();
     let (mut push, mut pull, mut merge) = (vec![], vec![], vec![]);
+    #[cfg(unix)]
+    let mut repairs: Vec<ModeRepair> = Vec::new();
     for path in &paths {
         let mine = local.get(path).map(|(sha, _)| sha.clone());
         let theirs = remote.get(path).map(|e| e.sha.clone()).filter(|sha| !sha.is_empty());
         let before = agreed.get(path).cloned();
         if mine == theirs {
             match mine {
-                Some(sha) => agreed.insert(path.clone(), sha),
-                None => agreed.remove(path),
+                Some(sha) => {
+                    agreed.insert(path.clone(), sha.clone());
+                    #[cfg(not(unix))]
+                    drop(sha);
+                    #[cfg(unix)]
+                    if key == PLUGINS_KEY {
+                        if let Some(fix) = unix_mode_fix(path, &remote, resolve)? {
+                            match fix {
+                                ModeFix::Mark => repairs.push(ModeRepair { path: path.clone(), sha }),
+                                ModeFix::Chmod => {
+                                    if let Some(target) = resolve(path) {
+                                        set_owner_execute(&target)?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None => {
+                    agreed.remove(path);
+                }
             };
         } else if mine == before {
             pull.push(path.clone());
@@ -206,12 +239,17 @@ fn exchange(
             pull.push(path.clone());
         }
     }
+    #[cfg(unix)]
+    if !repairs.is_empty() {
+        // A content push would write these bytes and their mtime over whatever landed since list.
+        hub.mark_executable(key, repairs)?;
+    }
     let mut synced = Synced::default();
     for path in merge {
         let theirs = hub.pull(key, vec![path.clone()])?.into_iter().next().and_then(|f| f.data).map(|d| unpack(&d)).transpose()?.unwrap_or_default();
         let target = resolve(&path).ok_or("no history here")?;
         let mine = std::fs::read(&target).unwrap_or_default();
-        write(&target, &merge_history(&mine, &theirs), None)?;
+        write(&target, &merge_history(&mine, &theirs), None, None)?;
         push.push(path);
     }
 
@@ -219,14 +257,17 @@ fn exchange(
     let mut size = 0;
     for path in push {
         let file = match resolve(&path).filter(|f| f.is_file()) {
-            None => File { entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0 }, data: None },
+            None => File { entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0, executable: None }, data: None },
             Some(target) => {
                 let Some((sha, modified)) = state.hash(&target) else { continue };
                 let data = pack(&std::fs::read(&target).map_err(|e| e.to_string())?);
                 if data.len() as u64 > FILE_LIMIT {
                     continue;
                 }
-                File { entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64 }, data: Some(base64::engine::general_purpose::STANDARD.encode(data)) }
+                File {
+                    entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: if key == PLUGINS_KEY { executable(&target)? } else { None } },
+                    data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
+                }
             }
         };
         size += file.entry.size;
@@ -257,7 +298,8 @@ fn exchange(
                 }
                 Some(data) => {
                     let bytes = unpack(data)?;
-                    write(&target, &bytes, Some(file.entry.modified))?;
+                    let mode = if key == PLUGINS_KEY { file.entry.executable } else { None };
+                    write(&target, &bytes, Some(file.entry.modified), mode)?;
                     state.hash(&target);
                     agreed.insert(file.entry.path.clone(), file.entry.sha.clone());
                 }
@@ -388,7 +430,7 @@ pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now:
         }
     }
     let agreed_key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
-    let mut agreed = state.agreed.remove(&agreed_key).unwrap_or_default();
+    let mut agreed = state.agreed.get(&agreed_key).cloned().unwrap_or_default();
     let keep = conflicting_user_skills(&local, &agreed, &hub.list(PLUGINS_KEY)?);
     let synced = exchange(hub, state, PLUGINS_KEY, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false)?;
     state.agreed.insert(agreed_key, agreed);
@@ -515,17 +557,32 @@ fn copy_newer(src: &Path, dest: &Path, meta: &std::fs::Metadata) -> Result<(), S
     if is_symlink(dest) {
         return Ok(());
     }
-    let copy = match std::fs::metadata(dest) {
-        Err(_) => true,
-        Ok(have) => match (meta.modified().ok(), have.modified().ok()) {
-            (Some(src_mod), Some(dest_mod)) if src_mod > dest_mod => true,
-            (Some(_), Some(_)) => false,
-            _ => meta.len() != have.len(),
-        },
+    let Some(have) = std::fs::metadata(dest).ok() else {
+        return copy_file(src, dest, meta);
     };
-    if !copy {
-        return Ok(());
+    let src_exec = is_exec(meta);
+    let dest_exec = is_exec(&have);
+    match (meta.modified().ok(), have.modified().ok()) {
+        (Some(src_mod), Some(dest_mod)) if src_mod > dest_mod => {
+            if same_contents(src, dest, have.len()) {
+                if src_exec && !dest_exec {
+                    copy_mode(dest, meta)?;
+                }
+                let _ = std::fs::File::options().write(true).open(dest).and_then(|file| file.set_modified(src_mod));
+            } else {
+                copy_file(src, dest, meta)?;
+            }
+        }
+        // chmod does not bump mtime. Same bytes stay executable once any copy is.
+        (Some(_), Some(_)) if src_exec && !dest_exec && same_contents(src, dest, have.len()) => copy_mode(dest, meta)?,
+        (Some(_), Some(_)) => {}
+        _ if meta.len() != have.len() => copy_file(src, dest, meta)?,
+        _ => {}
     }
+    Ok(())
+}
+
+fn copy_file(src: &Path, dest: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -534,6 +591,37 @@ fn copy_newer(src: &Path, dest: &Path, meta: &std::fs::Metadata) -> Result<(), S
         let _ = std::fs::File::options().write(true).open(dest).and_then(|file| file.set_modified(modified));
     }
     Ok(())
+}
+
+fn copy_mode(dest: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (dest, meta);
+    }
+    Ok(())
+}
+
+fn is_exec(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
+fn same_contents(src: &Path, dest: &Path, dest_len: u64) -> bool {
+    std::fs::metadata(src).is_ok_and(|meta| meta.len() == dest_len) && std::fs::read(src).ok() == std::fs::read(dest).ok()
 }
 
 fn plugin_files(share: &PluginShare) -> Vec<(String, PathBuf)> {
@@ -656,14 +744,104 @@ fn merge_history(mine: &[u8], theirs: &[u8]) -> Vec<u8> {
     lines.into_iter().flat_map(|(_, l)| [l.as_bytes(), b"\n"]).flatten().copied().collect()
 }
 
-fn write(target: &Path, bytes: &[u8], modified: Option<u64>) -> Result<(), String> {
+#[cfg(unix)]
+fn mode_fix(local: Option<bool>, remote: Option<bool>) -> Option<ModeFix> {
+    match (local, remote) {
+        (Some(true), Some(false)) => Some(ModeFix::Mark),
+        (Some(false), Some(true)) => Some(ModeFix::Chmod),
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+enum ModeFix {
+    Mark,
+    Chmod,
+}
+
+#[cfg(unix)]
+fn unix_mode_fix(path: &str, remote: &BTreeMap<String, Entry>, resolve: &dyn Fn(&str) -> Option<PathBuf>) -> Result<Option<ModeFix>, String> {
+    let Some(remote_exec) = remote.get(path).map(|entry| entry.executable) else { return Ok(None) };
+    let Some(file) = resolve(path) else { return Ok(None) };
+    if !file.is_file() {
+        return Ok(None);
+    }
+    Ok(mode_fix(executable(&file)?, remote_exec))
+}
+
+fn executable(path: &Path) -> Result<Option<bool>, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(mode) = std::fs::metadata(path).ok().map(|meta| meta.permissions().mode()) else { return Ok(None) };
+        // The owner runs the hook.
+        let owner = if mode & 0o111 != 0 && mode & 0o100 == 0 {
+            set_owner_execute(path)?;
+            true
+        } else {
+            mode & 0o100 != 0
+        };
+        return Ok(Some(owner));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(None)
+    }
+}
+
+fn write(target: &Path, bytes: &[u8], modified: Option<u64>, executable: Option<bool>) -> Result<(), String> {
+    let previous = executable.is_none().then(|| std::fs::metadata(target).ok()).flatten().map(|meta| meta.permissions());
     if let Some(dir) = target.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let file = std::fs::File::create(target).map_err(|e| format!("could not write {}: {e}", target.display()))?;
     (&file).write_all(bytes).map_err(|e| e.to_string())?;
+    match executable {
+        Some(bit) => apply_executable(&file, bit)?,
+        None => {
+            if let Some(perms) = previous {
+                file.set_permissions(perms).map_err(|e| e.to_string())?;
+            }
+        }
+    }
     if let Some(ms) = modified {
         let _ = file.set_modified(UNIX_EPOCH + Duration::from_millis(ms));
+    }
+    Ok(())
+}
+
+// A directory this process owns still allows chmod. Tests set this to stand in for EPERM.
+#[cfg(all(unix, test))]
+thread_local! {
+    static DENY_OWNER_EXECUTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(unix)]
+fn set_owner_execute(path: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if DENY_OWNER_EXECUTE.with(|deny| deny.get()) {
+        return Err("Operation not permitted (os error 1)".into());
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path).map_err(|e| e.to_string())?.permissions();
+    perms.set_mode(perms.mode() | 0o100);
+    std::fs::set_permissions(path, perms).map_err(|e| e.to_string())
+}
+
+fn apply_executable(file: &std::fs::File, executable: bool) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = file.metadata().map_err(|e| e.to_string())?.permissions();
+        let mode = perms.mode();
+        // The owner runs the hook. 0o111 would turn mode 600 into 711.
+        perms.set_mode(if executable { mode | 0o100 } else { mode & !0o111 });
+        file.set_permissions(perms).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, executable);
     }
     Ok(())
 }
@@ -709,6 +887,17 @@ mod tests {
         }
         fn pull(&self, _: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
             Ok(paths.iter().filter_map(|p| self.0.borrow().get(p).cloned()).collect())
+        }
+        fn mark_executable(&self, _: &str, repairs: Vec<ModeRepair>) -> Result<(), String> {
+            let mut files = self.0.borrow_mut();
+            for repair in repairs {
+                if let Some(file) = files.get_mut(&repair.path) {
+                    if file.entry.sha == repair.sha {
+                        file.entry.executable = Some(true);
+                    }
+                }
+            }
+            Ok(())
         }
     }
 
@@ -1279,6 +1468,601 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    const HOOK: &str = "plugins/pstack@local/hooks/session-start.sh";
+
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct RacingHub {
+        files: RefCell<BTreeMap<String, File>>,
+        /// Another machine stores this after list and before the repair is applied.
+        ahead: RefCell<Option<File>>,
+    }
+
+    #[cfg(unix)]
+    impl Hub for RacingHub {
+        fn list(&self, _: &str) -> Result<Vec<Entry>, String> {
+            Ok(self.files.borrow().values().map(|file| file.entry.clone()).collect())
+        }
+        fn push(&self, _: &str, files: Vec<File>) -> Result<(), String> {
+            for file in files {
+                if file.entry.path == HOOK {
+                    if let Some(newer) = self.ahead.borrow_mut().take() {
+                        self.files.borrow_mut().insert(HOOK.into(), newer);
+                    }
+                }
+                self.files.borrow_mut().insert(file.entry.path.clone(), file);
+            }
+            Ok(())
+        }
+        fn pull(&self, _: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
+            Ok(paths.iter().filter_map(|path| self.files.borrow().get(path).cloned()).collect())
+        }
+        fn mark_executable(&self, _: &str, repairs: Vec<ModeRepair>) -> Result<(), String> {
+            if repairs.iter().any(|repair| repair.path == HOOK) {
+                if let Some(newer) = self.ahead.borrow_mut().take() {
+                    self.files.borrow_mut().insert(HOOK.into(), newer);
+                }
+            }
+            let mut files = self.files.borrow_mut();
+            for repair in repairs {
+                if let Some(file) = files.get_mut(&repair.path) {
+                    if file.entry.sha == repair.sha {
+                        file.entry.executable = Some(true);
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn stored_hook(bytes: &[u8], modified: u64, executable: Option<bool>) -> File {
+        use base64::Engine;
+        let data = pack(bytes);
+        File {
+            entry: Entry { path: HOOK.into(), sha: sha(bytes), modified, size: data.len() as u64, executable },
+            data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
+        }
+    }
+
+    #[cfg(unix)]
+    fn mode_bits(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn executable_hook(root: &Path) -> (PathBuf, PluginShare, PluginShare) {
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        let install = mac_home.join("plugins/pstack");
+        put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"pstack"}"#);
+        let hook = install.join("hooks/session-start.sh");
+        put(&hook, "#!/bin/sh\necho session-start\n");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        enable(&mac_home, "pstack@local", &install, "0.9.82", "abc123");
+        let mac = PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") };
+        let mini = PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") };
+        (hook, mac, mini)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_executable_hook_stays_executable_on_the_other_machine() {
+        let root = root("hook-mode");
+        let hub = MemHub::default();
+        let (_, mac, mini) = executable_hook(&root);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let source = mac.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        let dest = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(mode_bits(&source) & 0o111, 0o111, "source mirror mode is {:o}", mode_bits(&source));
+        assert_eq!(mode_bits(&dest) & 0o111, 0o100, "receiver hook mode is {:o}", mode_bits(&dest));
+        let plain = mini.dir.join("plugins/pstack@local/.claude-plugin/plugin.json");
+        assert_eq!(mode_bits(&plain) & 0o111, 0, "plain file mode is {:o}", mode_bits(&plain));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hook_already_synced_as_plain_text_becomes_executable_when_the_bytes_match() {
+        let root = root("hook-heal");
+        let hub = MemHub::default();
+        let (_, mac, mini) = executable_hook(&root);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        let source = mac.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        let dest = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        put(&dest, "#!/bin/sh\necho session-start\n");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
+        std::fs::File::options().write(true).open(&dest).unwrap().set_modified(modified).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), std::fs::read(&source).unwrap());
+        assert_eq!(mode_bits(&dest), 0o644);
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(mode_bits(&dest) & 0o111, 0o100, "resync left the hook at {:o}", mode_bits(&dest));
+        let again = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(again.pushed, Vec::<String>::new());
+        assert_eq!(again.pulled, Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    fn publish_hook(home: &Path, mode: u32, when: SystemTime) {
+        let install = home.join("plugins/pstack");
+        put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"pstack"}"#);
+        let hook = install.join("hooks/session-start.sh");
+        put(&hook, "#!/bin/sh\necho session-start\n");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(mode)).unwrap();
+        stamp(&hook, when);
+        stamp(&install.join(".claude-plugin/plugin.json"), when);
+        enable(home, "pstack@local", &install, "0.9.82", "abc123");
+    }
+
+    fn omit_executable(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    omit_executable(item);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                map.remove("executable");
+                for item in map.values_mut() {
+                    omit_executable(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn round_trip_without_executable<T: serde::Serialize + serde::de::DeserializeOwned>(value: T) -> T {
+        let mut json = serde_json::to_value(&value).unwrap();
+        omit_executable(&mut json);
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[derive(Default)]
+    struct OmittingHub(RefCell<BTreeMap<String, File>>);
+
+    impl Hub for OmittingHub {
+        fn list(&self, _: &str) -> Result<Vec<Entry>, String> {
+            let entries: Vec<Entry> = self.0.borrow().values().map(|file| file.entry.clone()).collect();
+            Ok(round_trip_without_executable(entries))
+        }
+        fn push(&self, _: &str, files: Vec<File>) -> Result<(), String> {
+            for file in files {
+                self.0.borrow_mut().insert(file.entry.path.clone(), file);
+            }
+            Ok(())
+        }
+        fn pull(&self, _: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
+            let files: Vec<File> = paths.iter().filter_map(|path| self.0.borrow().get(path).cloned()).collect();
+            Ok(round_trip_without_executable(files))
+        }
+        fn mark_executable(&self, _: &str, _: Vec<ModeRepair>) -> Result<(), String> {
+            Err("this hub does not share executable bits".into())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_newer_plain_copy_with_the_same_bytes_does_not_clear_the_executable_hook() {
+        let root = root("hook-sticky");
+        let hub = MemHub::default();
+        let older = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let newer = older + Duration::from_secs(120);
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        publish_hook(&mac_home, 0o755, older);
+        publish_hook(&mini_home, 0o644, newer);
+        let (mac, mini) = (
+            PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") },
+        );
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let mac_hook = mac.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        let mini_hook = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        assert_eq!(std::fs::read(&mac_hook).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(std::fs::read(&mini_hook).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(mode_bits(&mac_hook) & 0o100, 0o100, "older executable copy is {:o}", mode_bits(&mac_hook));
+        assert_eq!(mode_bits(&mini_hook) & 0o100, 0o100, "newer plain copy is {:o}", mode_bits(&mini_hook));
+        let stored = serde_json::to_value(&hub.0.borrow()["plugins/pstack@local/hooks/session-start.sh"].entry).unwrap();
+        assert_eq!(stored["executable"], serde_json::json!(true));
+        let mac_again = sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        let mini_again = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!((mac_again.pushed.as_slice(), mac_again.pulled.as_slice()), (&[][..], &[][..]));
+        assert_eq!((mini_again.pushed.as_slice(), mini_again.pulled.as_slice()), (&[][..], &[][..]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chmod_on_the_install_reaches_the_receiver_without_a_new_mtime() {
+        let root = root("hook-chmod");
+        let hub = MemHub::default();
+        let (hook, mac, mini) = executable_hook(&root);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let source = mac.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        let dest = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        assert_eq!(mode_bits(&dest) & 0o111, 0, "receiver started at {:o}", mode_bits(&dest));
+        let mtime = std::fs::metadata(&hook).unwrap().modified().unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::File::options().write(true).open(&hook).unwrap().set_modified(mtime).unwrap();
+        assert_eq!(std::fs::metadata(&hook).unwrap().modified().unwrap(), mtime);
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        assert_eq!(mode_bits(&source) & 0o100, 0o100, "mirror after chmod is {:o}", mode_bits(&source));
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(mode_bits(&dest) & 0o100, 0o100, "receiver after chmod is {:o}", mode_bits(&dest));
+        let mac_again = sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        let mini_again = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!((mac_again.pushed.as_slice(), mac_again.pulled.as_slice()), (&[][..], &[][..]));
+        assert_eq!((mini_again.pushed.as_slice(), mini_again.pulled.as_slice()), (&[][..], &[][..]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_changed_hook_can_drop_the_executable_bit() {
+        let root = root("hook-clear");
+        let hub = MemHub::default();
+        let (hook, mac, mini) = executable_hook(&root);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let dest = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        assert_eq!(mode_bits(&dest) & 0o100, 0o100, "receiver hook mode is {:o}", mode_bits(&dest));
+        std::fs::write(&hook, "#!/bin/sh\necho changed\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+        stamp(&hook, SystemTime::UNIX_EPOCH + Duration::from_secs(1_900_000_000));
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho changed\n");
+        assert_eq!(mode_bits(&dest) & 0o111, 0, "changed hook mode is {:o}", mode_bits(&dest));
+        let stored = serde_json::to_value(&hub.0.borrow()["plugins/pstack@local/hooks/session-start.sh"].entry).unwrap();
+        assert_eq!(stored["executable"], serde_json::json!(false));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_old_hub_that_omits_the_executable_field_is_not_pushed_every_sync() {
+        let omit_root = root("old-hub-mode");
+        let hub = OmittingHub::default();
+        let (_, mac, _) = executable_hook(&omit_root);
+        let mut state = State::default();
+        let now = SystemTime::now();
+        let first = sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        assert!(first.pushed.iter().any(|path| path.ends_with("session-start.sh")));
+        let second = sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        assert_eq!((second.pushed.as_slice(), second.pulled.as_slice()), (&[][..], &[][..]));
+        let third = sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        assert_eq!((third.pushed.as_slice(), third.pulled.as_slice()), (&[][..], &[][..]));
+        let _ = std::fs::remove_dir_all(omit_root);
+
+        let repair_root = root("mode-repair-once");
+        let hub = MemHub::default();
+        let published = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let local = SystemTime::UNIX_EPOCH + Duration::from_secs(50);
+        let (mini_home, mac_home) = (repair_root.join("mini"), repair_root.join("mac"));
+        publish_hook(&mini_home, 0o644, published);
+        publish_hook(&mac_home, 0o755, local);
+        let mini = PluginShare { claude_home: mini_home.join(".claude"), dir: repair_root.join("mini-synced") };
+        let mac = PluginShare { claude_home: mac_home.join(".claude"), dir: repair_root.join("mac-synced") };
+        sync_plugins(&hub, &mut State::default(), &mini, now).unwrap();
+        let before = hub.0.borrow()[HOOK].clone();
+        assert_eq!(before.entry.executable, Some(false));
+        let repaired = sync_plugins(&hub, &mut State::default(), &mac, now).unwrap();
+        let stored = hub.0.borrow()[HOOK].clone();
+        assert!(!repaired.pushed.iter().any(|path| path == HOOK), "a mode repair sends no file bytes");
+        assert_eq!(stored.entry.modified, before.entry.modified);
+        assert_eq!(stored.entry.sha, before.entry.sha);
+        assert_eq!(stored.data, before.data);
+        assert_eq!(stored.entry.executable, Some(true));
+        let again = sync_plugins(&hub, &mut State::default(), &mac, now).unwrap();
+        let after = hub.0.borrow()[HOOK].clone();
+        assert_eq!((again.pushed.as_slice(), again.pulled.as_slice()), (&[][..], &[][..]));
+        assert_eq!(after, stored);
+        let _ = std::fs::remove_dir_all(repair_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mode_repair_does_not_replace_bytes_a_later_edit_already_published() {
+        let root = root("mode-repair-race");
+        let hub = RacingHub::default();
+        let published = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let local = SystemTime::UNIX_EPOCH + Duration::from_secs(50);
+        let (mini_home, mac_home) = (root.join("mini"), root.join("mac"));
+        publish_hook(&mini_home, 0o644, published);
+        publish_hook(&mac_home, 0o755, local);
+        let mini = PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") };
+        let mac = PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") };
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut State::default(), &mini, now).unwrap();
+        let newer = b"#!/bin/sh\necho edited\n";
+        *hub.ahead.borrow_mut() = Some(stored_hook(newer, 200, Some(false)));
+        sync_plugins(&hub, &mut State::default(), &mac, now).unwrap();
+        let stored = hub.files.borrow()[HOOK].clone();
+        assert_eq!(unpack(stored.data.as_deref().unwrap()).unwrap(), newer);
+        assert_eq!(stored.entry.sha, sha(newer));
+        assert_eq!(stored.entry.modified, 200);
+        assert_eq!(stored.entry.executable, Some(false));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mode_only_heal_chmods_the_existing_hook() {
+        let root = root("hook-chmod-only");
+        let hub = MemHub::default();
+        let (_, mac, mini) = executable_hook(&root);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        let dest = mini.dir.join(HOOK);
+        put(&dest, "#!/bin/sh\necho session-start\n");
+        let stamped = SystemTime::UNIX_EPOCH + Duration::from_secs(80);
+        stamp(&dest, stamped);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let healed = sync_plugins(&hub, &mut mini_state, &mini, now).expect("mode heal chmods a file that is not writable");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(mode_bits(&dest), 0o544, "healed hook mode is {:o}", mode_bits(&dest));
+        assert_eq!(std::fs::metadata(&dest).unwrap().modified().unwrap(), stamped);
+        assert!(!healed.pulled.iter().any(|path| path == HOOK), "a mode heal does not fetch the hook");
+        assert!(!healed.pushed.iter().any(|path| path == HOOK), "a mode heal does not send the hook");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_receiver_marks_the_hook_owner_executable_only() {
+        let root = root("hook-owner");
+        let hub = MemHub::default();
+        let (_, mac, mini) = executable_hook(&root);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let dest = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(mode_bits(&dest) & 0o111, 0o100, "receiver hook mode is {:o}", mode_bits(&dest));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_synced_project_file_does_not_gain_an_executable_bit() {
+        let root = root("project-mode");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        let memory = mac.claude("memory/MEMORY.md");
+        put(&memory, "- notes");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&memory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(mode_bits(&memory) & 0o111, 0o111, "source mode is {:o}", mode_bits(&memory));
+        mac.sync(&hub);
+        let path = "claude/memory/MEMORY.md";
+        assert_eq!(hub.0.borrow()[path].entry.executable, None, "a project push carries no mode");
+        mini.sync(&hub);
+        let dest = mini.claude("memory/MEMORY.md");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "- notes");
+        assert_eq!(mode_bits(&dest) & 0o111, 0, "project file mode is {:o}", mode_bits(&dest));
+        let next = b"- notes\nfrom the hub\n";
+        {
+            use base64::Engine;
+            let mut files = hub.0.borrow_mut();
+            let file = files.get_mut(path).unwrap();
+            let packed = pack(next);
+            file.data = Some(base64::engine::general_purpose::STANDARD.encode(&packed));
+            file.entry.sha = sha(next);
+            file.entry.size = packed.len() as u64;
+            file.entry.modified += 1;
+            file.entry.executable = Some(true);
+        }
+        mini.sync(&hub);
+        assert_eq!(std::fs::read(&dest).unwrap(), next);
+        assert_eq!(mode_bits(&dest) & 0o111, 0, "a project pull ignores a stored executable bit, mode is {:o}", mode_bits(&dest));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    const USER_SKILL: &str = "user-skills/greet/SKILL.md";
+
+    #[cfg(unix)]
+    struct MarkHub {
+        inner: MemHub,
+        fail: std::cell::Cell<bool>,
+    }
+
+    #[cfg(unix)]
+    impl Hub for MarkHub {
+        fn list(&self, project: &str) -> Result<Vec<Entry>, String> {
+            self.inner.list(project)
+        }
+        fn push(&self, project: &str, files: Vec<File>) -> Result<(), String> {
+            self.inner.push(project, files)
+        }
+        fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
+            self.inner.pull(project, paths)
+        }
+        fn mark_executable(&self, project: &str, repairs: Vec<ModeRepair>) -> Result<(), String> {
+            if self.fail.get() {
+                return Err("the hub did not answer within 60 seconds".into());
+            }
+            self.inner.mark_executable(project, repairs)
+        }
+    }
+
+    #[cfg(unix)]
+    struct DenyOwnerExecute;
+
+    #[cfg(unix)]
+    impl DenyOwnerExecute {
+        fn arm() -> Self {
+            super::DENY_OWNER_EXECUTE.with(|deny| deny.set(true));
+            Self
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for DenyOwnerExecute {
+        fn drop(&mut self) {
+            super::DENY_OWNER_EXECUTE.with(|deny| deny.set(false));
+        }
+    }
+
+    #[cfg(unix)]
+    fn saved_agreed(state: &State, share: &PluginShare, file: &Path) -> BTreeMap<String, String> {
+        state.save(file);
+        let loaded = State::load(file, &file.with_extension("legacy"));
+        let key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
+        loaded.agreed.get(&key).cloned().unwrap_or_default()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_group_executable_hook_becomes_owner_executable_locally_and_on_the_receiver() {
+        let root = root("hook-654");
+        let hub = MemHub::default();
+        let (hook, mac, mini) = executable_hook(&root);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let source = mac.dir.join(HOOK);
+        let dest = mini.dir.join(HOOK);
+        assert_eq!(mode_bits(&dest) & 0o100, 0, "receiver started at {:o}", mode_bits(&dest));
+        let mtime = std::fs::metadata(&hook).unwrap().modified().unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o654)).unwrap();
+        std::fs::File::options().write(true).open(&hook).unwrap().set_modified(mtime).unwrap();
+        let before = hub.0.borrow()[HOOK].clone();
+        let repaired = sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        assert!(!repaired.pushed.iter().any(|path| path == HOOK), "a mode repair sends no file bytes");
+        assert!(!repaired.pulled.iter().any(|path| path == HOOK), "a mode repair fetches no file bytes");
+        assert_eq!(mode_bits(&source) & 0o100, 0o100, "local hook mode is {:o}", mode_bits(&source));
+        let stored = hub.0.borrow()[HOOK].clone();
+        assert_eq!(stored.entry.executable, Some(true));
+        assert_eq!(stored.entry.sha, before.entry.sha);
+        assert_eq!(stored.data, before.data);
+        assert_eq!(stored.entry.modified, before.entry.modified);
+        assert_eq!(unpack(stored.data.as_deref().unwrap()).unwrap(), b"#!/bin/sh\necho session-start\n");
+        let healed = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert!(!healed.pulled.iter().any(|path| path == HOOK), "the receiver chmods the hook it has");
+        assert_eq!(mode_bits(&dest) & 0o100, 0o100, "receiver hook mode is {:o}", mode_bits(&dest));
+        assert_eq!(std::fs::read(&source).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_mark_keeps_the_agreed_baseline_and_the_next_sync_pushes_the_local_edit() {
+        let root = root("mark-fail");
+        let hub = MarkHub { inner: MemHub::default(), fail: std::cell::Cell::new(false) };
+        let (hook, mac, _) = executable_hook(&root);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let skill = mac.claude_home.join("skills/greet/SKILL.md");
+        put(&skill, "one\n");
+        let published = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        stamp(&skill, published);
+        stamp(&hook, published);
+        let mut state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        put(&skill, "two\n");
+        stamp(&skill, SystemTime::UNIX_EPOCH + Duration::from_secs(50));
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        hub.fail.set(true);
+        let failed = sync_plugins(&hub, &mut state, &mac, now);
+        assert_eq!(failed, Err("the hub did not answer within 60 seconds".into()));
+        let agreed = saved_agreed(&state, &mac, &root.join("state.json"));
+        assert_eq!(agreed.get(USER_SKILL).cloned(), Some(sha(b"one\n")));
+        assert_eq!(agreed.get(HOOK).cloned(), Some(sha(b"#!/bin/sh\necho session-start\n")));
+        assert_eq!(unpack(hub.inner.0.borrow()[USER_SKILL].data.as_deref().unwrap()).unwrap(), b"one\n");
+        hub.fail.set(false);
+        let next = sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        assert_eq!(next.pushed, vec![USER_SKILL.to_string()]);
+        assert_eq!(next.pulled, Vec::<String>::new());
+        assert_eq!(std::fs::read(&skill).unwrap(), b"two\n");
+        assert_eq!(unpack(hub.inner.0.borrow()[USER_SKILL].data.as_deref().unwrap()).unwrap(), b"two\n");
+        assert_eq!(hub.inner.0.borrow()[HOOK].entry.executable, Some(true));
+        assert_eq!(unpack(hub.inner.0.borrow()[HOOK].data.as_deref().unwrap()).unwrap(), b"#!/bin/sh\necho session-start\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_chmod_keeps_the_agreed_baseline_and_the_next_sync_pushes_the_local_edit() {
+        let root = root("chmod-fail");
+        let hub = MemHub::default();
+        let (hook, mac, mini) = executable_hook(&root);
+        let skill = mac.claude_home.join("skills/greet/SKILL.md");
+        put(&skill, "one\n");
+        let published = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        stamp(&skill, published);
+        stamp(&hook, published);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let dest = mini.dir.join(HOOK);
+        let mini_skill = mini.claude_home.join("skills/greet/SKILL.md");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+        put(&mini_skill, "two\n");
+        stamp(&mini_skill, SystemTime::UNIX_EPOCH + Duration::from_secs(50));
+        let deny = DenyOwnerExecute::arm();
+        let failed = sync_plugins(&hub, &mut mini_state, &mini, now);
+        assert_eq!(failed, Err("Operation not permitted (os error 1)".into()));
+        let agreed = saved_agreed(&mini_state, &mini, &root.join("state.json"));
+        assert_eq!(agreed.get(USER_SKILL).cloned(), Some(sha(b"one\n")));
+        assert_eq!(agreed.get(HOOK).cloned(), Some(sha(b"#!/bin/sh\necho session-start\n")));
+        drop(deny);
+        let next = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(next.pushed, vec![USER_SKILL.to_string()]);
+        assert_eq!(next.pulled, Vec::<String>::new());
+        assert_eq!(std::fs::read(&mini_skill).unwrap(), b"two\n");
+        assert_eq!(unpack(hub.0.borrow()[USER_SKILL].data.as_deref().unwrap()).unwrap(), b"two\n");
+        assert_eq!(mode_bits(&dest) & 0o100, 0o100, "healed hook mode is {:o}", mode_bits(&dest));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     struct OldHub;
 
     impl Hub for OldHub {
@@ -1291,6 +2075,9 @@ mod tests {
         }
         fn pull(&self, _: &str, _: Vec<String>) -> Result<Vec<File>, String> {
             Ok(vec![])
+        }
+        fn mark_executable(&self, _: &str, _: Vec<ModeRepair>) -> Result<(), String> {
+            Ok(())
         }
     }
 }

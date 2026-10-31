@@ -31,8 +31,6 @@ const SYNC_FIRST: Duration = Duration::from_secs(5);
 const SYNC_EVERY: Duration = Duration::from_secs(20);
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
 pub const UNAUTHORIZED: u16 = 4001;
-pub const POST_UPDATE_ENV: &str = "PINNED_POST_UPDATE";
-pub const UPDATE_READY_ENV: &str = "PINNED_UPDATE_READY";
 
 pub struct Link {
     shared: Arc<Shared>,
@@ -109,10 +107,14 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     let (stop, stopped) = watch::channel(false);
     let (syncing, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
     std::thread::spawn(move || sync_projects(&syncing, &synced_machine, &sync_stopped));
+    let events = shared.clone();
+    let listener = machine.subscribe(Box::new(move |event| {
+        events.send(&MachineFrame::Event { event: event.clone() });
+    }));
     let (link, version) = (shared.clone(), version.to_owned());
     let thread = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("could not start the hub link's runtime");
-        runtime.block_on(run(link, creds, machine, version, stopped));
+        runtime.block_on(run(link, creds, machine, version, stopped, listener));
     });
     Link { shared, stop, thread }
 }
@@ -160,6 +162,24 @@ impl sync::Hub for Shared {
     }
     fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
         decode(self.call(HubCall::SyncPull { project: project.into(), paths })?)
+    }
+    fn mark_executable(&self, project: &str, repairs: Vec<sync::ModeRepair>) -> Result<(), String> {
+        self.call(HubCall::SyncMarkExecutable { project: project.into(), repairs }).map(drop)
+    }
+}
+
+impl sync::Hub for Link {
+    fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
+        sync::Hub::list(self.shared.as_ref(), project)
+    }
+    fn push(&self, project: &str, files: Vec<sync::File>) -> Result<(), String> {
+        sync::Hub::push(self.shared.as_ref(), project, files)
+    }
+    fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
+        sync::Hub::pull(self.shared.as_ref(), project, paths)
+    }
+    fn mark_executable(&self, project: &str, repairs: Vec<sync::ModeRepair>) -> Result<(), String> {
+        sync::Hub::mark_executable(self.shared.as_ref(), project, repairs)
     }
 }
 
@@ -220,11 +240,7 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
     }
 }
 
-async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, version: String, mut stopped: watch::Receiver<bool>) {
-    let events = shared.clone();
-    let listener = machine.subscribe(Box::new(move |event| {
-        events.send(&MachineFrame::Event { event: event.clone() });
-    }));
+async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, version: String, mut stopped: watch::Receiver<bool>, listener: u64) {
     let mut backoff = BACKOFF_MIN;
     loop {
         let ended = tokio::select! {
@@ -262,13 +278,8 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     };
     sink.send(text(&auth)).await.map_err(|e| e.to_string())?;
     let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| "the hub did not answer the sign in".to_string())?;
-    match hello {
-        Some(Ok(Frame::Text(t))) if matches!(serde_json::from_str(&t), Ok(ToMachine::Hello { .. })) => {}
-        Some(Ok(Frame::Close(Some(close)))) if u16::from(close.code) == UNAUTHORIZED => {
-            return Err("the hub does not know this machine's token: pair it again".into())
-        }
-        other => return Err(format!("the hub answered the sign in with {other:?}")),
-    }
+    accept_hello(hello)?;
+    crate::boot::commit();
 
     let (out, mut incoming) = channel::unbounded_channel();
     *shared.out.lock().unwrap() = Some(out.clone());
@@ -279,7 +290,6 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
         shared.send(&MachineFrame::Event { event: MachineEvent::Usage { usage, account } });
     }
     shared.send(&MachineFrame::Event { event: MachineEvent::Update { status: machine.update_snapshot() } });
-    signal_update_ready();
 
     let mut ping = tokio::time::interval(PING);
     let mut heard = Instant::now();
@@ -334,12 +344,14 @@ fn in_order(shared: Arc<Shared>, machine: Arc<Machine>) -> mpsc::Sender<(u64, Ca
     calls
 }
 
-fn signal_update_ready() {
-    let Ok(path) = std::env::var(UPDATE_READY_ENV) else { return };
-    if path.is_empty() {
-        return;
+fn accept_hello(hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Error>>) -> Result<(), String> {
+    match hello {
+        Some(Ok(Frame::Text(t))) if matches!(serde_json::from_str::<ToMachine>(&t), Ok(ToMachine::Hello { .. })) => Ok(()),
+        Some(Ok(Frame::Close(Some(close)))) if u16::from(close.code) == UNAUTHORIZED => {
+            Err("the hub does not know this machine's token: pair it again".into())
+        }
+        other => Err(format!("the hub answered the sign in with {other:?}")),
     }
-    let _ = std::fs::write(path, b"");
 }
 
 fn finish_call(shared: &Shared, machine: &Machine, id: u64, call: Call) {
