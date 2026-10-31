@@ -967,10 +967,10 @@ mod tests {
     #[cfg(unix)]
     fn a_ps_that_prints_nothing_keeps_what_was_recorded() {
         let process = |pid, started: &str| super::Process { pid, started: started.into() };
-        let shell = process(4242, "Sat Oct 31 19:52:52 2026");
+        let before = [process(4242, "Sat Oct 31 19:52:52 2026")];
         let fresh = super::Running { process: process(4343, "Sat Oct 31 20:00:00 2026"), pgid: 4343 };
         assert_eq!(
-            [super::recorded(&[], &[shell.clone()], vec![]), super::recorded(&[4343], &[shell], vec![fresh])],
+            [super::recorded(&[], &before, vec![]), super::recorded(&[4343], &before, vec![fresh])],
             [vec![process(4242, "Sat Oct 31 19:52:52 2026")], vec![process(4343, "Sat Oct 31 20:00:00 2026")]],
             "an empty ps keeps the list, and a ps that answers drops the shell it no longer lists"
         );
