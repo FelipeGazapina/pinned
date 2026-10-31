@@ -83,13 +83,59 @@ function setTabs(machine, views, { forget = true } = {}) {
     refreshProjects(machine);
   }
   render();
+  noteTabs(machine);
 }
 
 const refreshTabs = async (machine) => setTabs(machine, await callOn(machine, { cmd: "tabs" }));
 
+// Open and folder changes push the tab list before they answer. Wait for that push.
+// Ask only if it never arrives, which is what an older node that pushed nothing leaves us.
+const tabListed = [];
+function noteTabs(machine) {
+  const pending = tabListed.splice(0);
+  const again = [];
+  for (const waiter of pending) if (!waiter(machine)) again.push(waiter);
+  tabListed.push(...again);
+}
+function whenListed(machine, id) {
+  if (tabByKey(keyOf(machine, id))) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const drop = () => {
+      const at = tabListed.indexOf(waiter);
+      if (at >= 0) tabListed.splice(at, 1);
+    };
+    const timer = setTimeout(() => {
+      drop();
+      refreshTabs(machine).then(() => {
+        if (settled) return;
+        settled = true;
+        if (tabByKey(keyOf(machine, id))) resolve();
+        else reject(new Error("that tab is not on this machine"));
+      }, (err) => {
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+      });
+    }, 2000);
+    function waiter(arrived) {
+      if (arrived !== machine || !tabByKey(keyOf(machine, id))) return false;
+      if (settled) return true;
+      settled = true;
+      clearTimeout(timer);
+      drop();
+      resolve();
+      return true;
+    }
+    tabListed.push(waiter);
+    if (tabByKey(keyOf(machine, id))) waiter(machine);
+  });
+}
+
 /** Shows a tab the machine just opened, once its tab list has it. */
 async function revealTab(machine, id) {
-  await refreshTabs(machine);
+  await whenListed(machine, id);
   const tab = tabByKey(keyOf(machine, id));
   activate(tab);
   return tab;

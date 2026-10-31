@@ -308,6 +308,15 @@ async function repeat(name, fn) {
   result.work[name] = samples.length;
 }
 
+async function whenListed(client, id) {
+  if ((client.state.tabs || []).some((tab) => tab.id === id)) return;
+  try {
+    await client.waitTabs((tabs) => tabs.some((tab) => tab.id === id), 2000);
+  } catch {
+    await client.call({ cmd: "tabs" }).promise;
+  }
+}
+
 async function startSession(client) {
   const t0 = Date.now();
   const opened = client.call({ cmd: "open_tab", path: null, bypass: false });
@@ -604,7 +613,7 @@ async function main() {
       const opened = client.call({ cmd: "open_tab", path: null, bypass: false });
       id = await opened.promise;
       await client.call({ cmd: "set_folder", tab: id, path: work }).promise;
-      await client.call({ cmd: "tabs" }).promise;
+      await whenListed(client, id);
       const started = client.call({ cmd: "start_claude", tab: id, cols: 80, rows: 24 });
       const stamp = await stampAfter(readyFile(), t0);
       await started.promise;
