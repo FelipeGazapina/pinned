@@ -174,7 +174,8 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
 /// Keeps the machine's projects in step with the account's while the link runs.
 fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<bool>) {
     let Some(file) = machine.sync_file().map(Path::to_path_buf) else { return };
-    let mut state = sync::State::load(&file, &crate::machine::home().join(".claude"));
+    let mut state = None;
+    let mut reported_unreadable = false;
     let mut shared_projects = HashSet::new();
     let mut reported_old_hub = false;
     let mut wait = SYNC_FIRST;
@@ -190,12 +191,25 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
         if !shared.online() {
             continue;
         }
+        if state.is_none() {
+            match sync::State::load(&file, &crate::machine::home().join(".claude")) {
+                Ok(loaded) => state = Some(loaded),
+                Err(e) => {
+                    if !reported_unreadable {
+                        eprintln!("pinned: could not sync: {e}");
+                        reported_unreadable = true;
+                    }
+                    continue;
+                }
+            }
+        }
+        let Some(state) = state.as_mut() else { continue };
         for checkout in machine.checkouts() {
             let key = checkout.project.key.clone();
             if !shared_projects.contains(&key) && shared.call(HubCall::ShareProject { project: checkout.project.clone() }).is_ok() {
                 shared_projects.insert(key.clone());
             }
-            match sync::sync(shared, &mut state, &checkout, SystemTime::now()) {
+            match sync::sync(shared, state, &checkout, SystemTime::now()) {
                 Ok(done) if !done.pushed.is_empty() || !done.pulled.is_empty() => {
                     eprintln!("pinned: synced {key}: {} up, {} down", done.pushed.len(), done.pulled.len())
                 }
@@ -204,7 +218,7 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
             }
         }
         for share in machine.plugin_shares() {
-            match sync::sync_plugins(shared, &mut state, &share, SystemTime::now()) {
+            match sync::sync_plugins(shared, state, &share, SystemTime::now()) {
                 Ok(done) if !done.pushed.is_empty() || !done.pulled.is_empty() => {
                     reported_old_hub = false;
                     eprintln!("pinned: synced plugins: {} up, {} down", done.pushed.len(), done.pulled.len());
@@ -220,7 +234,9 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
                 Err(e) => eprintln!("pinned: could not sync plugins: {e}"),
             }
         }
-        state.save(&file);
+        if let Err(e) = state.save(&file) {
+            eprintln!("pinned: {e}");
+        }
     }
 }
 
