@@ -9,7 +9,7 @@
 // the stand-in claude saw the keystrokes, or the new process wrote its ready
 // line, or the old process was hung up. (b) is the moment this client sees the
 // change: a tabs push, a thread push, or a thread poll on the same interval
-// as ui/gui.js. The node sends no thread push yet, so the poll is what arrives.
+// as ui/gui.js.
 
 const fs = require("fs");
 const net = require("net");

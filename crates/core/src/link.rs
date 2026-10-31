@@ -87,6 +87,7 @@ impl Shared {
 /// Connects `machine` to the hub `creds` names, and keeps it connected until `Link::stop`.
 /// `version` is the binary's, which the hub logs.
 pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
+    machine.watch_threads();
     let shared = Arc::new(Shared::default());
     let (stop, stopped) = watch::channel(false);
     let (syncing, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());

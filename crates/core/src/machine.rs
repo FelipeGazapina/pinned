@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
 pub const OUTPUT_KEEP: usize = 256 * 1024;
@@ -20,7 +20,8 @@ pub const OUTPUT_KEEP: usize = 256 * 1024;
 const LIMIT_MARGIN_SECS: u64 = 5;
 const UNWATCHED: (u16, u16) = (120, 32);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
-const TURN_LOG_WAIT: (u32, std::time::Duration) = (25, std::time::Duration::from_millis(200));
+const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
+const THREAD_PUSH_EVERY: Duration = Duration::from_millis(40);
 
 pub type Event = MachineEvent;
 /// Names a viewer of a tab, such as `local` for the app's own webview; attaching again replaces it.
@@ -363,6 +364,7 @@ pub struct Machine {
     quitting: AtomicBool,
     /// Wakes parents whose pty has gone quiet, once, for the life of the machine.
     notice_loop: AtomicBool,
+    threads_watched: AtomicBool,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
@@ -372,6 +374,11 @@ pub struct Machine {
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
     next_listener: AtomicU64,
     me: Weak<Machine>,
+}
+
+struct TranscriptCursor {
+    session: String,
+    byte: u64,
 }
 
 impl Machine {
@@ -425,6 +432,7 @@ impl Machine {
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
             notice_loop: AtomicBool::new(false),
+            threads_watched: AtomicBool::new(false),
             usage: Mutex::default(),
             agents: Mutex::default(),
             delegates,
@@ -759,6 +767,48 @@ impl Machine {
         let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
         agents.extend(self.delegates.cards(tab));
         Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
+    }
+
+    /// Tells connected clients when a transcript grows.
+    pub fn watch_threads(self: &Arc<Self>) {
+        if self.threads_watched.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            let mut seen = HashMap::new();
+            loop {
+                let Some(machine) = weak.upgrade() else { return };
+                if machine.quitting.load(Ordering::Relaxed) {
+                    return;
+                }
+                machine.push_transcript_lines(&mut seen);
+                drop(machine);
+                std::thread::sleep(THREAD_PUSH_EVERY);
+            }
+        });
+    }
+
+    fn push_transcript_lines(&self, seen: &mut HashMap<String, TranscriptCursor>) {
+        let open: Vec<(String, String, Account)> = {
+            let tabs = self.tabs.lock().unwrap();
+            tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.account.clone()))).collect()
+        };
+        seen.retain(|id, _| open.iter().any(|(open_id, _, _)| open_id == id));
+        for (id, session, account) in open {
+            let Some(file) = self.find_transcript(&account, &session) else { continue };
+            let Ok(len) = std::fs::metadata(&file).map(|meta| meta.len()) else { continue };
+            let Some(from) = seen.get(&id).and_then(|cursor| (cursor.session == session && len > cursor.byte).then_some(cursor.byte)) else {
+                seen.insert(id, TranscriptCursor { session, byte: len });
+                continue;
+            };
+            let Ok(page) = thread::read(&file, from) else { continue };
+            seen.insert(id.clone(), TranscriptCursor { session: session.clone(), byte: page.next });
+            if page.items.is_empty() && !page.reset {
+                continue;
+            }
+            self.emit(Event::Thread { tab: id, from, session: Some(session), items: page.items, next: page.next, reset: page.reset });
+        }
     }
 
     /// Every tab, in the order they opened.
@@ -3032,6 +3082,42 @@ mod tests {
         std::fs::remove_file(native.join("claude.exe")).unwrap();
         assert_eq!(find_bin("claude", Some(&path)), npm.join("claude.cmd"));
         assert_eq!(find_bin("claude", None), PathBuf::from(std::env::var("USERPROFILE").unwrap()).join(r".local\bin\claude.exe"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_new_transcript_line_is_pushed_without_a_poll() {
+        let root = temp("thread-push");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        let dir = root.join("config/accounts/work/projects/demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s1.jsonl");
+        let line = |text: &str| {
+            format!(
+                "{{\"type\":\"assistant\",\"uuid\":\"{text}\",\"timestamp\":\"2020-01-01T00:00:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n"
+            )
+        };
+        std::fs::write(&file, line("ready")).unwrap();
+        let mut cursors = HashMap::new();
+        m.push_transcript_lines(&mut cursors);
+        assert!(heard.lock().unwrap().iter().all(|event| event["kind"] != "thread"), "the first look must not resend the history");
+        std::fs::write(&file, format!("{}{}", line("ready"), line("visible"))).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        let pushed: Vec<_> = heard.lock().unwrap().iter().filter(|event| event["kind"] == "thread").cloned().collect();
+        assert_eq!(pushed.len(), 1, "one growth, one event");
+        assert_eq!(pushed[0]["tab"], json!(tab));
+        assert_eq!(pushed[0]["items"][0]["kind"], "text");
+        assert_eq!(pushed[0]["items"][0]["text"], "visible");
+        assert!(pushed[0]["from"].as_u64().unwrap() > 0);
+        let parsed: MachineEvent = serde_json::from_value(pushed[0].clone()).unwrap();
+        assert!(matches!(parsed, MachineEvent::Thread { next, .. } if next > pushed[0]["from"].as_u64().unwrap()));
+        m.push_transcript_lines(&mut cursors);
+        assert_eq!(heard.lock().unwrap().iter().filter(|event| event["kind"] == "thread").count(), 1, "an unchanged file is quiet");
         let _ = std::fs::remove_dir_all(root);
     }
 

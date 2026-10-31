@@ -10806,6 +10806,54 @@
                   "usage",
                   "account"
                 ]
+              },
+              {
+                "description": "Transcript lines read from byte `from`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "thread"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "session": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Item"
+                    }
+                  },
+                  "next": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "reset": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tab",
+                  "from",
+                  "session",
+                  "items",
+                  "next",
+                  "reset"
+                ]
               }
             ]
           },
@@ -11187,6 +11235,378 @@
             "required": [
               "used_percentage",
               "resets_at"
+            ]
+          },
+          "Item": {
+            "oneOf": [
+              {
+                "description": "What the user typed, or a slash command as `/name args`. `pictures` holds the `data:` URLs of\nthe attached images small enough to send; `images` counts them all.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "images": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  },
+                  "pictures": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text",
+                  "images"
+                ]
+              },
+              {
+                "description": "A prompt typed while claude worked, which it took into the turn in progress.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "steer"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "Markdown the assistant wrote.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "text"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "The assistant's reasoning before it answered or used a tool.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "thinking"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "A request to the model that failed, such as `API Error: 529 Overloaded`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "error"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "`args` holds the input of a tool T3 Code shows as a generic call, such as Grep or an MCP tool,\none `[key, value]` per field.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "tool"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "detail": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ],
+                      "minItems": 2,
+                      "maxItems": 2
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "name",
+                  "summary",
+                  "detail"
+                ]
+              },
+              {
+                "description": "The outcome of the `Tool` whose id is `tool`. `links` are a web search's results as `[title, url]`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "result"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "boolean"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "links": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ],
+                      "minItems": 2,
+                      "maxItems": 2
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tool",
+                  "at",
+                  "error",
+                  "text"
+                ]
+              },
+              {
+                "description": "Claude compacted the conversation, from `before` tokens to `after` when it says.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "compaction"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "before": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "after": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "before",
+                  "after"
+                ]
+              },
+              {
+                "description": "The conversation goes on from a copy of the session `source`, which pinned forked.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "fork"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "source"
+                ]
+              },
+              {
+                "description": "Output of a local command such as `/model`, which claude shows without a turn.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "note"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "A pull request the session opened or worked on, linked at `at`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pr"
+                  },
+                  "number": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "number",
+                  "url",
+                  "repo",
+                  "at"
+                ]
+              },
+              {
+                "description": "The model the session runs from here on, by its marketing name, such as `Haiku 5.5`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "model"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ]
+              }
             ]
           },
           "HubCall": {
@@ -13282,6 +13702,52 @@
                   "kind",
                   "usage"
                 ]
+              },
+              {
+                "description": "Transcript lines read from byte `from`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "thread"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "session": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Item"
+                    }
+                  },
+                  "next": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "reset": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tab",
+                  "from",
+                  "items",
+                  "next"
+                ]
               }
             ]
           },
@@ -13646,6 +14112,376 @@
             "required": [
               "used_percentage",
               "resets_at"
+            ]
+          },
+          "Item": {
+            "oneOf": [
+              {
+                "description": "What the user typed, or a slash command as `/name args`. `pictures` holds the `data:` URLs of\nthe attached images small enough to send; `images` counts them all.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "images": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  },
+                  "pictures": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text",
+                  "images"
+                ]
+              },
+              {
+                "description": "A prompt typed while claude worked, which it took into the turn in progress.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "steer"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "Markdown the assistant wrote.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "text"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "The assistant's reasoning before it answered or used a tool.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "thinking"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "A request to the model that failed, such as `API Error: 529 Overloaded`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "error"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "`args` holds the input of a tool T3 Code shows as a generic call, such as Grep or an MCP tool,\none `[key, value]` per field.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "tool"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "detail": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ],
+                      "minItems": 2,
+                      "maxItems": 2
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "name",
+                  "summary",
+                  "detail"
+                ]
+              },
+              {
+                "description": "The outcome of the `Tool` whose id is `tool`. `links` are a web search's results as `[title, url]`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "result"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "boolean"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "links": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ],
+                      "minItems": 2,
+                      "maxItems": 2
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tool",
+                  "at",
+                  "error",
+                  "text"
+                ]
+              },
+              {
+                "description": "Claude compacted the conversation, from `before` tokens to `after` when it says.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "compaction"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "before": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "after": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at"
+                ]
+              },
+              {
+                "description": "The conversation goes on from a copy of the session `source`, which pinned forked.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "fork"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "source"
+                ]
+              },
+              {
+                "description": "Output of a local command such as `/model`, which claude shows without a turn.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "note"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "A pull request the session opened or worked on, linked at `at`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pr"
+                  },
+                  "number": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "number",
+                  "url",
+                  "repo",
+                  "at"
+                ]
+              },
+              {
+                "description": "The model the session runs from here on, by its marketing name, such as `Haiku 5.5`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "model"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ]
+              }
             ]
           },
           "HubCall": {
@@ -22475,6 +23311,54 @@
                   "usage",
                   "account"
                 ]
+              },
+              {
+                "description": "Transcript lines read from byte `from`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "thread"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "session": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Item"
+                    }
+                  },
+                  "next": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "reset": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tab",
+                  "from",
+                  "session",
+                  "items",
+                  "next",
+                  "reset"
+                ]
               }
             ]
           },
@@ -22614,6 +23498,378 @@
             "required": [
               "used_percentage",
               "resets_at"
+            ]
+          },
+          "Item": {
+            "oneOf": [
+              {
+                "description": "What the user typed, or a slash command as `/name args`. `pictures` holds the `data:` URLs of\nthe attached images small enough to send; `images` counts them all.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "images": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  },
+                  "pictures": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text",
+                  "images"
+                ]
+              },
+              {
+                "description": "A prompt typed while claude worked, which it took into the turn in progress.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "steer"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "Markdown the assistant wrote.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "text"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "The assistant's reasoning before it answered or used a tool.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "thinking"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "A request to the model that failed, such as `API Error: 529 Overloaded`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "error"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "`args` holds the input of a tool T3 Code shows as a generic call, such as Grep or an MCP tool,\none `[key, value]` per field.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "tool"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "detail": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ],
+                      "minItems": 2,
+                      "maxItems": 2
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "name",
+                  "summary",
+                  "detail"
+                ]
+              },
+              {
+                "description": "The outcome of the `Tool` whose id is `tool`. `links` are a web search's results as `[title, url]`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "result"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "boolean"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "links": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ],
+                      "minItems": 2,
+                      "maxItems": 2
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tool",
+                  "at",
+                  "error",
+                  "text"
+                ]
+              },
+              {
+                "description": "Claude compacted the conversation, from `before` tokens to `after` when it says.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "compaction"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "before": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "after": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "before",
+                  "after"
+                ]
+              },
+              {
+                "description": "The conversation goes on from a copy of the session `source`, which pinned forked.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "fork"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "source"
+                ]
+              },
+              {
+                "description": "Output of a local command such as `/model`, which claude shows without a turn.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "note"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "A pull request the session opened or worked on, linked at `at`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pr"
+                  },
+                  "number": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "number",
+                  "url",
+                  "repo",
+                  "at"
+                ]
+              },
+              {
+                "description": "The model the session runs from here on, by its marketing name, such as `Haiku 5.5`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "model"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ]
+              }
             ]
           },
           "Settings": {
@@ -24461,6 +25717,52 @@
                   "kind",
                   "usage"
                 ]
+              },
+              {
+                "description": "Transcript lines read from byte `from`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "thread"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "session": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Item"
+                    }
+                  },
+                  "next": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "reset": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tab",
+                  "from",
+                  "items",
+                  "next"
+                ]
               }
             ]
           },
@@ -24590,6 +25892,376 @@
             "required": [
               "used_percentage",
               "resets_at"
+            ]
+          },
+          "Item": {
+            "oneOf": [
+              {
+                "description": "What the user typed, or a slash command as `/name args`. `pictures` holds the `data:` URLs of\nthe attached images small enough to send; `images` counts them all.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "images": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  },
+                  "pictures": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text",
+                  "images"
+                ]
+              },
+              {
+                "description": "A prompt typed while claude worked, which it took into the turn in progress.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "steer"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "Markdown the assistant wrote.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "text"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "The assistant's reasoning before it answered or used a tool.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "thinking"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "A request to the model that failed, such as `API Error: 529 Overloaded`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "error"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "`args` holds the input of a tool T3 Code shows as a generic call, such as Grep or an MCP tool,\none `[key, value]` per field.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "tool"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "detail": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ],
+                      "minItems": 2,
+                      "maxItems": 2
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "name",
+                  "summary",
+                  "detail"
+                ]
+              },
+              {
+                "description": "The outcome of the `Tool` whose id is `tool`. `links` are a web search's results as `[title, url]`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "result"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "boolean"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "links": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ],
+                      "minItems": 2,
+                      "maxItems": 2
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "tool",
+                  "at",
+                  "error",
+                  "text"
+                ]
+              },
+              {
+                "description": "Claude compacted the conversation, from `before` tokens to `after` when it says.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "compaction"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "before": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "after": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at"
+                ]
+              },
+              {
+                "description": "The conversation goes on from a copy of the session `source`, which pinned forked.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "fork"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "source"
+                ]
+              },
+              {
+                "description": "Output of a local command such as `/model`, which claude shows without a turn.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "note"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "at",
+                  "text"
+                ]
+              },
+              {
+                "description": "A pull request the session opened or worked on, linked at `at`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pr"
+                  },
+                  "number": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "number",
+                  "url",
+                  "repo",
+                  "at"
+                ]
+              },
+              {
+                "description": "The model the session runs from here on, by its marketing name, such as `Haiku 5.5`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "model"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ]
+              }
             ]
           },
           "Settings": {

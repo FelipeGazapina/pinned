@@ -642,6 +642,16 @@ pub enum MachineEvent {
         #[serde(default = "accounts::default_account")]
         account: AccountId,
     },
+    /// Transcript lines read from byte `from`.
+    Thread {
+        tab: TabId,
+        from: u64,
+        session: Option<String>,
+        items: Vec<crate::thread::Item>,
+        next: u64,
+        #[serde(default)]
+        reset: bool,
+    },
 }
 
 /// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
@@ -1068,6 +1078,17 @@ mod tests {
         let old: MachineEvent = serde_json::from_value(json!({ "kind": "usage", "usage": {} })).unwrap();
         assert!(matches!(old, MachineEvent::Usage { account, .. } if account == "claude"), "a machine before accounts reports the default account's usage");
         assert!(serde_json::from_value::<MachineEvent>(json!({ "kind": "output", "tab": "t", "data": "not base64!" })).is_err());
+        round_trip(
+            MachineEvent::Thread {
+                tab: "tab-1".into(),
+                from: 4,
+                session: Some("s1".into()),
+                items: vec![crate::thread::Item::Text { id: "m:0".into(), at: "2020-01-01T00:00:00Z".into(), text: "visible".into() }],
+                next: 20,
+                reset: false,
+            },
+            json!({ "kind": "thread", "tab": "tab-1", "from": 4, "session": "s1", "items": [{ "kind": "text", "id": "m:0", "at": "2020-01-01T00:00:00Z", "text": "visible" }], "next": 20, "reset": false }),
+        );
     }
 
     #[test]

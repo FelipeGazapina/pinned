@@ -124,39 +124,60 @@ function phaseOf(tab) {
 const turnLive = (tab) => ["working", "asking", "input"].includes(phaseOf(tab));
 const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && lastActivity(tab) > (seenAt[threadKey(tab)] ?? 0);
 
+function takeThreadPage(tab, page, from) {
+  const t = threadOf(tab);
+  if (!page || !Array.isArray(page.items) || (!page.session && t.session)) return;
+  if (page.reset) Object.assign(t, { items: [], todos: null, branch: null });
+  if (page.session !== t.session) {
+    const restart = t.next > 0;
+    Object.assign(t, { session: page.session, items: [], next: 0, history: null, todos: null, branch: null });
+    if (restart && from !== 0) return "restart";
+  }
+  if (!page.reset && from !== t.next) {
+    if ((page.next ?? 0) <= t.next) return;
+    return "gap";
+  }
+  t.unsupported = false;
+  const grew = page.items.length > 0 || !t.loaded;
+  if (page.items.some((i) => i.kind === "model")) t.picked = null;
+  if (page.context) t.context = page.context;
+  if (page.todos) t.todos = page.todos;
+  if (page.branch) t.branch = page.branch;
+  t.items.push(...page.items);
+  t.next = page.next;
+  t.loaded = true;
+  const moved = Array.isArray(page.agents) ? takeAgents(t, page.agents) : false;
+  if ((grew || moved) && guiOn()) {
+    if (tab === active) {
+      if (terminalOnly(tab)) renderTerminalOnly();
+      else renderThread();
+      markThreadSeen(tab);
+    }
+    renderSidebar();
+  }
+  if (grew && t.session && !t.history && tab === active) fetchHistory(tab);
+}
+
 async function fetchThread(tab) {
   const t = threadOf(tab);
-  if (t.fetching) return;
+  if (t.fetching) {
+    t.again = true;
+    return;
+  }
   t.fetching = true;
   try {
-    let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: t.next });
-    t.error = null;
-    if (!page.session && t.session) return;
-    if (page.reset) Object.assign(t, { items: [], todos: null, branch: null });
-    if (page.session !== t.session) {
-      const restart = t.next > 0;
-      Object.assign(t, { session: page.session, items: [], next: 0, history: null, todos: null, branch: null });
-      if (restart) page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: 0 });
-    }
-    t.unsupported = false;
-    const grew = page.items.length > 0 || !t.loaded;
-    if (page.items.some((i) => i.kind === "model")) t.picked = null;
-    if (page.context) t.context = page.context;
-    if (page.todos) t.todos = page.todos;
-    if (page.branch) t.branch = page.branch;
-    t.items.push(...page.items);
-    t.next = page.next;
-    t.loaded = true;
-    const moved = takeAgents(t, page.agents);
-    if ((grew || moved) && guiOn()) {
-      if (tab === active) {
-        if (terminalOnly(tab)) renderTerminalOnly();
-        else renderThread();
-        markThreadSeen(tab);
+    do {
+      t.again = false;
+      const from = t.next;
+      let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from });
+      t.error = null;
+      let follow = takeThreadPage(tab, page, from);
+      if (follow === "restart") {
+        page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: 0 });
+        follow = takeThreadPage(tab, page, 0);
       }
-      renderSidebar();
-    }
-    if (grew && t.session && !t.history && tab === active) fetchHistory(tab);
+      if (follow === "gap") t.again = true;
+    } while (t.again);
   } catch (e) {
     t.unsupported = /unknown variant|can't answer/.test(String(e));
     t.loaded = t.unsupported;
@@ -168,7 +189,15 @@ async function fetchThread(tab) {
     }
   } finally {
     t.fetching = false;
+    if (t.again) fetchThread(tab);
   }
+}
+
+function onThreadEvent(machine, event) {
+  const tab = tabByKey(keyOf(machine, event.tab));
+  if (!tab) return;
+  const follow = takeThreadPage(tab, event, event.from ?? 0);
+  if (follow === "gap" || follow === "restart") fetchThread(tab);
 }
 
 async function fetchWorkspace(tab) {
