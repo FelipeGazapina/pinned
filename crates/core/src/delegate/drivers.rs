@@ -774,13 +774,18 @@ pub fn seen_under(pid: u32, before: &[Process]) -> Vec<Process> {
         let mut ask: Vec<i32> = under.iter().copied().chain(before.iter().map(|seen| seen.pid)).collect();
         ask.sort_unstable();
         ask.dedup();
-        running(&ask).into_iter().map(|now| now.process).filter(|now| under.contains(&now.pid) || before.contains(now)).collect()
+        recorded(&under, before, running(&ask))
     }
     #[cfg(not(unix))]
     {
         let _ = pid;
         before.to_vec()
     }
+}
+
+#[cfg(unix)]
+fn recorded(under: &[i32], before: &[Process], now: Vec<Running>) -> Vec<Process> {
+    now.into_iter().map(|now| now.process).filter(|now| under.contains(&now.pid) || before.contains(now)).collect()
 }
 
 pub fn kill_seen(seen: &[Process]) {
@@ -952,6 +957,19 @@ mod tests {
         let _ = agent.wait();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!((reparented, killed), (true, true), "(the shell left the agent's tree, kill_seen stopped it)");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_ps_that_prints_nothing_keeps_what_was_recorded() {
+        let process = |pid, started: &str| super::Process { pid, started: started.into() };
+        let shell = process(4242, "Sat Oct 31 19:52:52 2026");
+        let fresh = super::Running { process: process(4343, "Sat Oct 31 20:00:00 2026"), pgid: 4343 };
+        assert_eq!(
+            [super::recorded(&[], &[shell.clone()], vec![]), super::recorded(&[4343], &[shell], vec![fresh])],
+            [vec![process(4242, "Sat Oct 31 19:52:52 2026")], vec![process(4343, "Sat Oct 31 20:00:00 2026")]],
+            "an empty ps keeps the list, and a ps that answers drops the shell it no longer lists"
+        );
     }
 
     #[test]
