@@ -112,8 +112,6 @@ struct Hashed {
 
 impl State {
     /// A state saved before accounts names no Claude home; its files were in `legacy_claude_home`.
-    /// A missing file is a machine that never synced. A file that does not parse is an error, since
-    /// syncing without the agreed baseline lets an older copy replace a newer edit by mtime.
     pub fn load(file: &Path, legacy_claude_home: &Path) -> Result<State, String> {
         let mut state: State = match std::fs::read(file) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("the sync state {} is corrupt ({e}); restore or remove it to sync again", file.display()))?,
@@ -135,7 +133,6 @@ impl State {
         self.persist()
     }
 
-    /// Renames a complete copy over the file, so a crash leaves the previous state or this one.
     fn persist(&self) -> Result<(), String> {
         let Some(file) = &self.loaded_from else { return Ok(()) };
         let dir = file.parent().unwrap_or(Path::new("."));
