@@ -653,9 +653,19 @@ scripts/release.sh 0.2.0
 ```
 
 The script bumps the version in `Cargo.toml`, tags `v0.2.0` and pushes. The `release`
-workflow builds both Mac architectures and the Windows installer, signs the update bundles, and publishes the release
-with `latest.json`. Running copies then offer the update.
+workflow builds both Mac architectures, the Windows installer, and the Linux musl node
+binaries. Each desktop job uploads its own updater fragment and does not upload
+`latest.json`. One job assembles that file, signs it with the musl binaries, then uploads
+`SHA256SUMS`, `SHA256SUMS.minisig`, both binaries, and `latest.json` in one
+`gh release upload`. `gh` sends those files in parallel, so they land in no fixed order.
+The upload drafts the release first. `publish` downloads the release and clears the draft only when
+`SHA256SUMS.minisig` verifies `SHA256SUMS`, each file in the sums matches, and each desktop
+bundle matches its signature in `latest.json`. A tag with a suffix such as `-rc.1` publishes
+as a prerelease and never takes latest. Any other tag takes latest when it is not older than
+the current latest, and gets `--latest=false` otherwise. A re-run of one
+uploading job drafts the release before it writes a file. Running copies then offer the
+update. A Linux node downloads `pinned-server-<target>` from that release.
 
 Update signing needs the `TAURI_SIGNING_PRIVATE_KEY` repository secret. Its public half is
-`plugins.updater.pubkey` in `tauri.conf.json`. If the private key is lost, installed copies
-can't verify new updates and must be reinstalled by hand.
+`plugins.updater.pubkey` in `tauri.conf.json`. The same secret signs `SHA256SUMS`. If the
+private key is lost, installed copies can't verify new updates and must be reinstalled by hand.

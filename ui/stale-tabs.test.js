@@ -20,6 +20,7 @@ function showMachinesContext() {
   const applied = [];
   const refreshed = [];
   const retried = [];
+  const asked = [];
   const context = runSlice("function showMachines", "function disconnectHub");
   context.account = { machine_id: "this-mac" };
   context.viewListeners = [];
@@ -37,7 +38,8 @@ function showMachinesContext() {
     return Promise.resolve();
   };
   context.retryUploadImages = () => retried.push("retry");
-  return { context, applied, refreshed, retried };
+  context.refreshSyncStopped = (machine) => asked.push(machine);
+  return { context, applied, refreshed, retried, asked };
 }
 
 function whenListedHarness() {
@@ -109,10 +111,11 @@ test("a tab list that never arrives is asked once the fallback fires", async () 
 });
 
 test("an already-online machine keeps its tabs when the update has no snapshot", () => {
-  const { context, applied, refreshed } = showMachinesContext();
+  const { context, applied, refreshed, asked } = showMachinesContext();
   context.showMachines([{ id: "box", name: "railway", online: true }]);
   assert.deepEqual(snapshot(applied), []);
   assert.deepEqual(snapshot(refreshed), []);
+  assert.deepEqual(snapshot(asked), []);
 });
 
 test("an already-online machine applies a tab snapshot without asking again", () => {
@@ -156,12 +159,13 @@ function startClaudeContext() {
 }
 
 test("a machine that just came online uses the snapshot instead of asking", () => {
-  const { context, applied, refreshed, retried } = showMachinesContext();
+  const { context, applied, refreshed, retried, asked } = showMachinesContext();
   context.machines.get("box").view.online = false;
   context.showMachines([{ id: "box", name: "railway", online: true }], { box: [{ id: "tab-new" }] });
   assert.deepEqual(snapshot(applied), [{ machine: "box", ids: ["tab-new"] }]);
   assert.deepEqual(snapshot(refreshed), []);
   assert.deepEqual(snapshot(retried), ["retry"]);
+  assert.deepEqual(snapshot(asked), ["box"], "a machine that comes online is asked whether its sync stopped");
 });
 
 test("Enter starts the restored session when the old tab id is gone", async () => {

@@ -60,6 +60,7 @@ test("the project filter label keeps the full name as its title", () => {
     threadList: { replaceChildren() {}, querySelectorAll: () => [] },
     projectCount: () => 1,
     MOD_LABEL: "⌘",
+    renderSyncAlert() {},
     tickDurations() {},
     scheduleWake() {},
     shelfRows: () => [{}],
