@@ -32,6 +32,7 @@ const delay = rtt / 2;
 
 let transferred = 0;
 let connections = 0;
+const clients = new Set();
 
 function split(addr) {
   const at = addr.lastIndexOf(":");
@@ -81,6 +82,8 @@ function writeStats() {
 
 const server = net.createServer((client) => {
   connections += 1;
+  clients.add(client);
+  client.on("close", () => clients.delete(client));
   client.setNoDelay(true);
   const remote = net.connect({ host: upHost, port: upPort });
   const toRemote = arm(client, remote);
@@ -102,6 +105,10 @@ server.listen(listenPort, listenHost, () => {
   console.error(`proxy ${listen} -> ${upstream} rtt ${rtt}ms`);
 });
 setInterval(writeStats, 500);
+process.on("SIGUSR1", () => {
+  console.error(`closing ${clients.size} client sockets`);
+  for (const sock of clients) sock.destroy();
+});
 process.on("SIGTERM", () => {
   writeStats();
   process.exit(0);
