@@ -479,7 +479,7 @@ impl Machine {
             Call::SyncStopped => json(self.sync_file.as_deref().and_then(sync::unreadable)),
             Call::ResetSync => {
                 if let Some(file) = &self.sync_file {
-                    sync::set_aside(file)?;
+                    sync::set_aside_unreadable(file)?;
                 }
                 Ok(Value::Null)
             }

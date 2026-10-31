@@ -118,14 +118,11 @@ fn read(file: &Path) -> Result<State, String> {
     }
 }
 
-/// Why the sync state in `file` does not load, or None when it does.
 pub fn unreadable(file: &Path) -> Option<String> {
     read(file).err()
 }
 
-/// Moves an unreadable sync state to `<file>.damaged`, so the next load starts with no baseline,
-/// as on a new machine. A readable one stays.
-pub fn set_aside(file: &Path) -> Result<(), String> {
+pub fn set_aside_unreadable(file: &Path) -> Result<(), String> {
     if read(file).is_ok() {
         return Ok(());
     }
@@ -504,7 +501,6 @@ pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now:
     Ok(synced)
 }
 
-/// Puts a pulled file in place, or deletes it for a tombstone. Answers the sha now agreed on.
 fn apply(state: &mut State, key: &str, file: &File, target: &Path) -> Result<Option<String>, String> {
     let Some(data) = &file.data else {
         return match std::fs::remove_file(target) {
@@ -2573,8 +2569,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// `cargo test -p pinned-core --lib first_pull_bench -- --ignored --nocapture`, with
-    /// `PINNED_BENCH_FILES` to change the 1000 files pulled.
     #[test]
     #[ignore]
     fn first_pull_bench() {

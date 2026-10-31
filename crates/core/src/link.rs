@@ -434,12 +434,10 @@ mod tests {
         let (out, _frames) = channel::unbounded_channel();
         *shared.out.lock().unwrap() = Some(out);
         let mut syncer = Syncer::default();
-
         syncer.cycle(&shared, &machine, &file);
         assert_eq!(std::fs::read(&file).unwrap(), b"", "a stopped sync leaves the file as it was");
         let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
-
         assert_eq!(machine.call(Call::ResetSync), Ok(Value::Null));
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
         syncer.cycle(&shared, &machine, &file);
