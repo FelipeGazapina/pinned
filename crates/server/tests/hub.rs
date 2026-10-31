@@ -740,6 +740,136 @@ fn an_executable_hook_stays_executable_through_the_hub() {
     mini.kill();
 }
 
+const HOOK_PATH: &str = "plugins/pstack@local/hooks/session-start.sh";
+
+fn call_machine(hub: &str, token: &str, call: Value) -> Value {
+    let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", hub.replace("http://", "ws://"))).unwrap();
+    if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
+        stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    }
+    ws.send(Message::text(json!({ "type": "auth", "token": token, "name": "raw", "os": "linux", "version": "test" }).to_string())).unwrap();
+    let hello = read_machine(&mut ws, |frame| frame["type"] == "hello");
+    assert!(hello["machine"]["id"].is_string(), "{hello}");
+    ws.send(Message::text(json!({ "type": "call", "id": 1, "call": call }).to_string())).unwrap();
+    let reply = read_machine(&mut ws, |frame| frame["type"] == "reply" && frame["id"] == 1);
+    assert!(reply.get("err").is_none(), "{reply}");
+    reply["ok"].clone()
+}
+
+fn read_machine(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, pred: impl Fn(&Value) -> bool) -> Value {
+    let start = Instant::now();
+    loop {
+        match ws.read() {
+            Ok(Message::Text(text)) => {
+                let frame: Value = serde_json::from_str(&text).unwrap();
+                if pred(&frame) {
+                    return frame;
+                }
+            }
+            Ok(Message::Ping(payload)) => ws.send(Message::Pong(payload)).unwrap(),
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock || error.kind() == std::io::ErrorKind::TimedOut => {
+                assert!(start.elapsed() < WAIT, "timed out waiting for the machine socket");
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
+fn gzip_bytes(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hook_entry(link: &Link) -> Value {
+    let listed = link.call_hub(HubCall::SyncList { project: sync::PLUGINS_KEY.into() }).unwrap();
+    listed.as_array().unwrap().iter().find(|row| row["path"] == HOOK_PATH).unwrap().clone()
+}
+
+#[test]
+fn an_omitted_executable_field_keeps_the_stored_bit_through_the_hub() {
+    let hub = TestHub::start("hookomit");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (_, raw_token) = account::register_machine(&url, &token, "raw", "linux").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("hookomit-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "linux").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let install = mac_home.join("plugins/pstack");
+    let hook = install.join("hooks/session-start.sh");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(install.join(".claude-plugin")).unwrap();
+    std::fs::write(install.join(".claude-plugin/plugin.json"), r#"{"name":"pstack"}"#).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho session-start\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let installed = serde_json::json!({ "plugins": { "pstack@local": [{ "installPath": install, "version": "0.9.82", "gitCommitSha": "abc123" }] } });
+    std::fs::create_dir_all(mac_home.join(".claude/plugins")).unwrap();
+    std::fs::write(mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"pstack@local":true}}"#).unwrap();
+    std::fs::write(mac_home.join(".claude/plugins/installed_plugins.json"), installed.to_string()).unwrap();
+    let share = |home: &Path| sync::PluginShare { claude_home: home.join(".claude"), dir: home.join("synced-plugins") };
+    let now = std::time::SystemTime::now();
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    let mut mac_state = sync::State::default();
+    let mut mini_state = sync::State::default();
+    sync::sync_plugins(&Through(mac_link), &mut mac_state, &share(&mac_home), now).unwrap();
+    sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    let dest = mini_home.join("synced-plugins").join(HOOK_PATH);
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&dest) & 0o100, 0o100, "receiver hook mode is {:o}", mode(&dest));
+
+    let pulled = sync::Hub::pull(&Through(mac_link), sync::PLUGINS_KEY, vec![HOOK_PATH.into()]).unwrap();
+    let mut same = serde_json::to_value(&pulled[0]).unwrap();
+    same.as_object_mut().unwrap().remove("executable");
+    assert!(same.get("executable").is_none());
+    call_machine(&url, &raw_token, json!({ "cmd": "sync_push", "project": sync::PLUGINS_KEY, "files": [same] }));
+    assert_eq!(hook_entry(mac_link)["executable"], json!(true));
+    let quiet = sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    assert_eq!((quiet.pushed.as_slice(), quiet.pulled.as_slice()), (&[][..], &[][..]));
+    assert_eq!(mode(&dest) & 0o100, 0o100, "same bytes without the field left mode {:o}", mode(&dest));
+
+    let body = b"#!/bin/sh\necho session-start\necho again\n";
+    let packed = gzip_bytes(body);
+    let modified = hook_entry(mac_link)["modified"].as_u64().unwrap() + 60_000;
+    call_machine(
+        &url,
+        &raw_token,
+        json!({
+            "cmd": "sync_push",
+            "project": sync::PLUGINS_KEY,
+            "files": [{
+                "path": HOOK_PATH,
+                "sha": sha256_hex(body),
+                "modified": modified,
+                "size": packed.len(),
+                "data": base64::engine::general_purpose::STANDARD.encode(&packed),
+            }],
+        }),
+    );
+    assert_eq!(hook_entry(mac_link)["executable"], json!(true));
+    sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), body);
+    assert_eq!(mode(&dest) & 0o100, 0o100, "new bytes without the field left mode {:o}", mode(&dest));
+    let again = sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    assert_eq!((again.pushed.as_slice(), again.pulled.as_slice()), (&[][..], &[][..]));
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
+}
+
 fn stored_plugin_paths(database: &str) -> Vec<String> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {

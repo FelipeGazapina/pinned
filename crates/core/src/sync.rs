@@ -1430,6 +1430,181 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    fn publish_hook(home: &Path, mode: u32, when: SystemTime) {
+        let install = home.join("plugins/pstack");
+        put(&install.join(".claude-plugin/plugin.json"), r#"{"name":"pstack"}"#);
+        let hook = install.join("hooks/session-start.sh");
+        put(&hook, "#!/bin/sh\necho session-start\n");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(mode)).unwrap();
+        stamp(&hook, when);
+        stamp(&install.join(".claude-plugin/plugin.json"), when);
+        enable(home, "pstack@local", &install, "0.9.82", "abc123");
+    }
+
+    fn omit_executable(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    omit_executable(item);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                map.remove("executable");
+                for item in map.values_mut() {
+                    omit_executable(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn round_trip_without_executable<T: serde::Serialize + serde::de::DeserializeOwned>(value: T) -> T {
+        let mut json = serde_json::to_value(&value).unwrap();
+        omit_executable(&mut json);
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[derive(Default)]
+    struct OmittingHub(RefCell<BTreeMap<String, File>>);
+
+    impl Hub for OmittingHub {
+        fn list(&self, _: &str) -> Result<Vec<Entry>, String> {
+            let entries: Vec<Entry> = self.0.borrow().values().map(|file| file.entry.clone()).collect();
+            Ok(round_trip_without_executable(entries))
+        }
+        fn push(&self, _: &str, files: Vec<File>) -> Result<(), String> {
+            for file in files {
+                self.0.borrow_mut().insert(file.entry.path.clone(), file);
+            }
+            Ok(())
+        }
+        fn pull(&self, _: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
+            let files: Vec<File> = paths.iter().filter_map(|path| self.0.borrow().get(path).cloned()).collect();
+            Ok(round_trip_without_executable(files))
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_newer_plain_copy_with_the_same_bytes_does_not_clear_the_executable_hook() {
+        let root = root("hook-sticky");
+        let hub = MemHub::default();
+        let older = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let newer = older + Duration::from_secs(120);
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        publish_hook(&mac_home, 0o755, older);
+        publish_hook(&mini_home, 0o644, newer);
+        let (mac, mini) = (
+            PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") },
+        );
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let mac_hook = mac.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        let mini_hook = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        assert_eq!(std::fs::read(&mac_hook).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(std::fs::read(&mini_hook).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(mode_bits(&mac_hook) & 0o100, 0o100, "older executable copy is {:o}", mode_bits(&mac_hook));
+        assert_eq!(mode_bits(&mini_hook) & 0o100, 0o100, "newer plain copy is {:o}", mode_bits(&mini_hook));
+        let stored = serde_json::to_value(&hub.0.borrow()["plugins/pstack@local/hooks/session-start.sh"].entry).unwrap();
+        assert_eq!(stored["executable"], serde_json::json!(true));
+        let mac_again = sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        let mini_again = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!((mac_again.pushed.as_slice(), mac_again.pulled.as_slice()), (&[][..], &[][..]));
+        assert_eq!((mini_again.pushed.as_slice(), mini_again.pulled.as_slice()), (&[][..], &[][..]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chmod_on_the_install_reaches_the_receiver_without_a_new_mtime() {
+        let root = root("hook-chmod");
+        let hub = MemHub::default();
+        let (hook, mac, mini) = executable_hook(&root);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let source = mac.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        let dest = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        assert_eq!(mode_bits(&dest) & 0o111, 0, "receiver started at {:o}", mode_bits(&dest));
+        let mtime = std::fs::metadata(&hook).unwrap().modified().unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::File::options().write(true).open(&hook).unwrap().set_modified(mtime).unwrap();
+        assert_eq!(std::fs::metadata(&hook).unwrap().modified().unwrap(), mtime);
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        assert_eq!(mode_bits(&source) & 0o100, 0o100, "mirror after chmod is {:o}", mode_bits(&source));
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(mode_bits(&dest) & 0o100, 0o100, "receiver after chmod is {:o}", mode_bits(&dest));
+        let mac_again = sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        let mini_again = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!((mac_again.pushed.as_slice(), mac_again.pulled.as_slice()), (&[][..], &[][..]));
+        assert_eq!((mini_again.pushed.as_slice(), mini_again.pulled.as_slice()), (&[][..], &[][..]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_old_hub_that_omits_the_executable_field_is_not_pushed_every_sync() {
+        let root = root("old-hub-mode");
+        let hub = OmittingHub::default();
+        let (_, mac, _) = executable_hook(&root);
+        let mut state = State::default();
+        let now = SystemTime::now();
+        let first = sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        assert!(first.pushed.iter().any(|path| path.ends_with("session-start.sh")));
+        let second = sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        assert_eq!((second.pushed.as_slice(), second.pulled.as_slice()), (&[][..], &[][..]));
+        let third = sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        assert_eq!((third.pushed.as_slice(), third.pulled.as_slice()), (&[][..], &[][..]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_receiver_marks_the_hook_owner_executable_only() {
+        let root = root("hook-owner");
+        let hub = MemHub::default();
+        let (_, mac, mini) = executable_hook(&root);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let dest = mini.dir.join("plugins/pstack@local/hooks/session-start.sh");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(mode_bits(&dest) & 0o111, 0o100, "receiver hook mode is {:o}", mode_bits(&dest));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_synced_project_file_does_not_gain_an_executable_bit() {
+        let root = root("project-mode");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        let memory = mac.claude("memory/MEMORY.md");
+        put(&memory, "- notes");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&memory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        mac.sync(&hub);
+        mini.sync(&hub);
+        let dest = mini.claude("memory/MEMORY.md");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "- notes");
+        assert_eq!(mode_bits(&dest) & 0o111, 0, "project file mode is {:o}", mode_bits(&dest));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     struct OldHub;
 
     impl Hub for OldHub {

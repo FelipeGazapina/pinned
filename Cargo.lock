@@ -3338,6 +3338,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chacha20poly1305",
+ "flate2",
  "futures-util",
  "pinned-core",
  "rand_core 0.6.4",
