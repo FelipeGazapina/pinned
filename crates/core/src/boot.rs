@@ -74,6 +74,19 @@ impl Boot {
         true
     }
 
+    fn leave_if_starting(&self) -> bool {
+        self.leave_from(Step::Starting)
+    }
+
+    async fn leave_when_refused(&self) {
+        loop {
+            self.refused.notified().await;
+            if self.leave_from(Step::Running) {
+                return;
+            }
+        }
+    }
+
     async fn commit_when_ready(&self, proof: &Proof) -> AfterHello {
         loop {
             let ready = self.ready.notified();
@@ -130,11 +143,7 @@ pub fn ready() {
 }
 
 pub fn leave_if_starting() -> bool {
-    BOOT.leave_from(Step::Starting)
-}
-
-pub fn leave_if_running() -> bool {
-    BOOT.leave_from(Step::Running)
+    BOOT.leave_if_starting()
 }
 
 pub async fn commit_when_ready() -> AfterHello {
@@ -145,8 +154,9 @@ pub fn refuse() {
     BOOT.refuse(&Proof::of_this_process())
 }
 
-pub async fn refused() {
-    BOOT.refused.notified().await
+/// Returns once the hub refuses a sign in while this boot runs unproven, which leaves it.
+pub async fn leave_when_refused() {
+    BOOT.leave_when_refused().await
 }
 
 fn sibling(path: &Path, suffix: &str) -> Option<PathBuf> {
@@ -202,7 +212,7 @@ mod tests {
         let (boot, staged) = (Boot::new(), staged("hang-after-hello", CHECKSUM));
         let mut hello = pin!(boot.commit_when_ready(&staged.proof));
         assert_eq!(hello.as_mut().now_or_never(), None, "a hello before ready did not wait for ready");
-        assert!(boot.leave_from(Step::Starting), "the deadline kept a boot that never became ready");
+        assert!(boot.leave_if_starting(), "the deadline kept a boot that never became ready");
         assert!(!boot.ready(), "the main thread went on after the deadline chose to leave");
         assert_eq!(hello.as_mut().now_or_never(), None, "the link went on to serve the hub while the boot was leaving");
         assert!(marker_kept(&staged), "the marker went away before the rollback");
@@ -215,22 +225,31 @@ mod tests {
         boot.refuse(&staged.proof);
         assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(AfterHello::Serve), "a hello after ready waited");
         assert!(!marker_kept(&staged), "a hello after ready did not commit");
-        assert_eq!(pin!(boot.refused.notified()).now_or_never(), Some(()), "the refusal was not queued");
-        assert!(!boot.leave_from(Step::Running), "a refusal queued before the hub accepted the boot rolled it back");
+        assert_eq!(pin!(boot.leave_when_refused()).now_or_never(), None, "a refusal queued before the hub accepted the boot rolled it back");
+    }
+
+    #[test]
+    fn a_refusal_while_the_boot_runs_unproven_restores_it() {
+        let (boot, staged) = (Boot::new(), staged("refused-running", CHECKSUM));
+        assert!(boot.ready());
+        boot.refuse(&staged.proof);
+        assert_eq!(pin!(boot.leave_when_refused()).now_or_never(), Some(()), "the hub refused the unproven boot and it stayed");
+        assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(AfterHello::Leaving), "a hello during the rollback went on to serve the hub");
+        assert!(marker_kept(&staged), "the marker went away before the rollback");
     }
 
     #[test]
     fn a_ready_boot_is_past_the_deadline() {
         let (boot, staged) = (Boot::new(), staged("ready-then-deadline", CHECKSUM));
         assert!(boot.ready());
-        assert!(!boot.leave_from(Step::Starting), "the deadline rolled back a boot that was ready");
+        assert!(!boot.leave_if_starting(), "the deadline rolled back a boot that was ready");
         assert!(marker_kept(&staged));
     }
 
     #[test]
     fn a_boot_the_deadline_left_neither_becomes_ready_nor_serves_the_hub() {
         let (boot, staged) = (Boot::new(), staged("deadline-then-ready", CHECKSUM));
-        assert!(boot.leave_from(Step::Starting));
+        assert!(boot.leave_if_starting());
         assert!(!boot.ready(), "the main thread went on to resume sessions during a rollback");
         assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(AfterHello::Leaving), "a hello during the rollback went on to serve the hub");
         assert!(marker_kept(&staged), "a hello during the rollback removed the marker");
@@ -242,7 +261,8 @@ mod tests {
         assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(AfterHello::Serve), "a process with nothing to prove waited for ready");
         assert!(marker_kept(&staged), "a process with nothing to prove removed the marker");
         boot.refuse(&staged.proof);
-        assert_eq!(pin!(boot.refused.notified()).now_or_never(), None, "a process with nothing to prove queued a refusal");
+        assert!(boot.ready());
+        assert_eq!(pin!(boot.leave_when_refused()).now_or_never(), None, "a process with nothing to prove queued a refusal");
     }
 
     #[test]

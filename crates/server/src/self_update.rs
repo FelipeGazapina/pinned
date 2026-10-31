@@ -364,15 +364,10 @@ pub fn prove_or_restore() {
 }
 
 pub async fn roll_back_if_refused(machine: &Machine) {
-    loop {
-        pinned_core::boot::refused().await;
-        if !pinned_core::boot::leave_if_running() {
-            continue;
-        }
-        machine.quit();
-        if let Some(marker) = pinned_core::boot::marker_path() {
-            rollback(&marker);
-        }
+    pinned_core::boot::leave_when_refused().await;
+    machine.quit();
+    if let Some(marker) = pinned_core::boot::marker_path() {
+        rollback(&marker);
     }
 }
 
