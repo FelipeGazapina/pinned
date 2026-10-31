@@ -1466,13 +1466,14 @@ impl Machine {
         for id in self.delegates.running_under(tab) {
             let _ = self.delegates.cancel_tree(&id, "the parent tab closed", path.as_deref());
         }
-        let (made, owned, last) = {
+        let (closed, owned, last) = {
             let mut tabs = self.tabs.lock().unwrap();
-            let made = tabs.get(tab).and_then(|t| t.made.clone());
-            tabs.remove(tab);
+            let closed = tabs.remove(tab);
             let owned: Vec<PathBuf> = tabs.values().filter_map(|t| t.made.clone()).collect();
-            (made, owned, tabs.is_empty())
+            (closed, owned, tabs.is_empty())
         };
+        let made = closed.as_ref().and_then(|t| t.made.clone());
+        drop(closed);
         self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
         if let Some(made) = made {
             if !owned.iter().any(|dir| dir == &made) {
