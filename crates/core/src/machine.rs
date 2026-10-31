@@ -23,6 +23,8 @@ const UNWATCHED: (u16, u16) = (120, 32);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
+/// The page polls a thread this often, so a transcript that is still missing is searched for no more often.
+const MISSED_SEARCH_GAP: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
 
 pub type Event = MachineEvent;
@@ -429,11 +431,28 @@ impl Drop for Busy<'_> {
     }
 }
 
-#[derive(PartialEq)]
+/// What the thread watcher last learned of one tab's transcript.
+#[derive(Default)]
 struct TranscriptLook {
+    found: Option<Transcript>,
+    /// The last search of every project folder, when it found nothing.
+    missed: Option<Missed>,
+}
+
+#[derive(PartialEq)]
+struct Transcript {
     session: String,
     path: PathBuf,
     len: u64,
+}
+
+/// Claude writes a session's transcript with its first message, so the hook names a session the
+/// folders do not hold yet. A turn that starts is when the file appears.
+struct Missed {
+    session: String,
+    status: Option<AgentStatus>,
+    at: Instant,
+    gap: Duration,
 }
 
 impl Machine {
@@ -912,12 +931,24 @@ impl Machine {
         thread::find(&self.accounts.home(account).join("projects"), session)
     }
 
-    fn locate_transcript(&self, account: &Account, session: &str, cached: Option<&Path>) -> Option<PathBuf> {
+    fn locate_transcript(&self, account: &Account, session: &str, status: Option<AgentStatus>, look: &mut TranscriptLook) -> Option<PathBuf> {
         let home = self.accounts.home(account);
-        if let Some(path) = cached.filter(|path| path.starts_with(&home) && path.is_file()) {
-            return Some(path.to_path_buf());
+        if let Some(found) = look.found.as_ref().filter(|found| found.session == session && found.path.starts_with(&home) && found.path.is_file()) {
+            return Some(found.path.clone());
         }
-        self.find_transcript(account, session)
+        let now = Instant::now();
+        let gap = match &look.missed {
+            Some(missed) if missed.session == session && missed.status == status => {
+                if now < missed.at + missed.gap {
+                    return None;
+                }
+                (missed.gap * 2).min(MISSED_SEARCH_GAP)
+            }
+            _ => THREAD_LOOK_EVERY,
+        };
+        let path = self.find_transcript(account, session);
+        look.missed = path.is_none().then(|| Missed { session: session.to_owned(), status, at: now, gap });
+        path
     }
 
     /// Opens a tab beside `tab` whose claude resumes its conversation through the message `through`, as
@@ -965,23 +996,23 @@ impl Machine {
 
     fn nudge_thread_watchers(&self, seen: &mut HashMap<String, TranscriptLook>) {
         let watched: HashSet<String> = self.thread_watchers.lock().unwrap().values().flat_map(|tabs| tabs.iter().cloned()).collect();
-        let open: Vec<(String, String, Account)> = {
+        let open: Vec<(String, String, Option<AgentStatus>, Account)> = {
             let tabs = self.tabs.lock().unwrap();
-            tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.account.clone()))).collect()
+            tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.status, tab.account.clone()))).collect()
         };
-        seen.retain(|id, _| open.iter().any(|(open_id, _, _)| open_id == id));
-        for (id, session, account) in open {
+        seen.retain(|id, _| open.iter().any(|(open_id, ..)| open_id == id));
+        for (id, session, status, account) in open {
             if !watched.contains(&id) {
                 continue;
             }
-            let cached = seen.get(&id).filter(|look| look.session == session).map(|look| look.path.clone());
-            let Some(path) = self.locate_transcript(&account, &session, cached.as_deref()) else { continue };
+            let look = seen.entry(id.clone()).or_default();
+            let Some(path) = self.locate_transcript(&account, &session, status, look) else { continue };
             let Ok(len) = std::fs::metadata(&path).map(|meta| meta.len()) else { continue };
-            let look = TranscriptLook { session, path, len };
-            if seen.get(&id) == Some(&look) {
+            let found = Transcript { session, path, len };
+            if look.found.as_ref() == Some(&found) {
                 continue;
             }
-            seen.insert(id.clone(), look);
+            look.found = Some(found);
             self.emit(Event::Thread { tab: id });
         }
     }
