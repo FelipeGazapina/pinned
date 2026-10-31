@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Instant, SystemTime};
 
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
@@ -341,6 +341,9 @@ pub struct Machine {
     /// The folder threads started without a project run in.
     scratch: PathBuf,
     tabs: Mutex<HashMap<TabId, Tab>>,
+    /// Sessions taken out of `tabs` and killed after the lock opens. `quit` waits for them, or the
+    /// exec after an update would land mid-kill and leave claude stopped or unreaped.
+    kills: Kills,
     /// Chosen when this process starts. Tab ids include it, so the next process cannot hand out an id this one used.
     boot: u64,
     next_tab: AtomicU32,
@@ -408,6 +411,34 @@ thread_local! {
     static ARMED_RESTART: Cell<bool> = const { Cell::new(false) };
 }
 
+#[derive(Default)]
+struct Kills {
+    running: Mutex<usize>,
+    done: Condvar,
+}
+
+impl Kills {
+    /// Taken under the `tabs` lock, so a `quit` that clears the tabs after it waits for this kill.
+    fn begin(&self) -> Kill<'_> {
+        *self.running.lock().unwrap() += 1;
+        Kill(self)
+    }
+
+    fn wait(&self) {
+        let running = self.running.lock().unwrap();
+        drop(self.done.wait_while(running, |running| *running > 0).unwrap());
+    }
+}
+
+struct Kill<'a>(&'a Kills);
+
+impl Drop for Kill<'_> {
+    fn drop(&mut self) {
+        *self.0.running.lock().unwrap() -= 1;
+        self.0.done.notify_all();
+    }
+}
+
 struct Busy<'a> {
     machine: &'a Machine,
     generation: u64,
@@ -459,6 +490,7 @@ impl Machine {
             default_cwd,
             scratch: dir.as_ref().map(|d| d.join("scratch")).unwrap_or_else(|| std::env::temp_dir().join("pinned-scratch")),
             tabs: Mutex::new(HashMap::new()),
+            kills: Kills::default(),
             boot: fresh_boot(),
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
@@ -1344,14 +1376,15 @@ impl Machine {
     }
 
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
-        let (old, screen) = self.tab(tab, |t| {
+        let (old, screen, kill) = self.tab(tab, |t| {
             t.held.clear();
-            (t.session.take(), t.screen.clone())
+            (t.session.take(), t.screen.clone(), self.kills.begin())
         })?;
         let session = screen.lock().unwrap().restart();
         // Only once the screen has moved on: dropping a session echoes the EOF it sends as "^D", which
         // would otherwise reach the viewers. It kills it silently, so its exit can't be mistaken for the new one's.
         drop(old);
+        drop(kill);
         let started = SystemTime::now();
         let (me, exited) = (self.me.clone(), tab.to_owned());
         let pty = pty::Session::spawn(
@@ -1475,14 +1508,15 @@ impl Machine {
         for id in self.delegates.running_under(tab) {
             let _ = self.delegates.cancel_tree(&id, "the parent tab closed", path.as_deref());
         }
-        let (closed, owned, last) = {
+        let (closed, owned, last, kill) = {
             let mut tabs = self.tabs.lock().unwrap();
             let closed = tabs.remove(tab);
             let owned: Vec<PathBuf> = tabs.values().filter_map(|t| t.made.clone()).collect();
-            (closed, owned, tabs.is_empty())
+            (closed, owned, tabs.is_empty(), self.kills.begin())
         };
         let made = closed.as_ref().and_then(|t| t.made.clone());
         drop(closed);
+        drop(kill);
         self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
         if let Some(made) = made {
             if !owned.iter().any(|dir| dir == &made) {
@@ -1971,6 +2005,7 @@ impl Machine {
         // The hub socket is still up. Clients drop these ids before a call can land on a cleared map.
         self.emit(Event::Tabs { tabs: vec![] });
         self.tabs.lock().unwrap().clear();
+        self.kills.wait();
         self.device_hub.stop();
     }
 
@@ -3051,7 +3086,7 @@ pub(crate) mod tests {
         // A quit that waits for the kill cannot return before the reap, so the timeout only ends that wait.
         let early = returned.recv_timeout(Duration::from_secs(1)).ok();
         reap.send(()).unwrap();
-        let state = early.unwrap_or_else(|| returned.recv().unwrap());
+        let state = early.unwrap_or_else(|| returned.recv_timeout(Duration::from_secs(10)).expect("quit never returned after the reap"));
         ender.join().unwrap();
         quitter.join().unwrap();
         state
