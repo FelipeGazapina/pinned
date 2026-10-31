@@ -229,6 +229,33 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_before_ready_does_not_restore_a_boot_the_hub_then_accepted() {
+        let (boot, staged) = (Boot::new(), staged("refused-then-accepted", CHECKSUM));
+        boot.refuse(&staged.proof);
+        let mut hello = pin!(boot.commit_when_ready(&staged.proof));
+        assert_eq!(hello.as_mut().now_or_never(), None, "a hello before ready did not wait for ready");
+        assert!(boot.ready());
+        let left = pin!(boot.leave_when_refused()).now_or_never();
+        let proven = !marker_kept(&staged);
+        let served = hello.as_mut().now_or_never();
+        assert_eq!((left, proven, served), (None, true, Some(AfterHello::Serve)), "(rolled back, proven as it became ready, link serves)");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_hello_the_hub_accepted_clears_its_refusal_even_when_the_marker_stays() {
+        use std::os::unix::fs::PermissionsExt;
+        let (boot, staged) = (Boot::new(), staged("refused-unremovable", CHECKSUM));
+        assert!(boot.ready());
+        boot.refuse(&staged.proof);
+        std::fs::set_permissions(&staged.dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let served = pin!(boot.commit_when_ready(&staged.proof)).now_or_never();
+        std::fs::set_permissions(&staged.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let left = pin!(boot.leave_when_refused()).now_or_never();
+        assert_eq!((served, marker_kept(&staged), left), (Some(AfterHello::Serve), true, None), "(link serves, marker stays, rolled back)");
+    }
+
+    #[test]
     fn a_refusal_while_the_boot_runs_unproven_restores_it() {
         let (boot, staged) = (Boot::new(), staged("refused-running", CHECKSUM));
         assert!(boot.ready());
