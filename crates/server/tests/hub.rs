@@ -7,7 +7,8 @@ use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::sync;
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
-use pinned_core::wire::HubCall;
+use pinned_core::sessions::Saved;
+use pinned_core::wire::{Call, HubCall};
 use pinned_server::boxes::{BoxApi, Policy};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -2116,3 +2117,256 @@ fn a_fresh_permission_stops_at_the_accounts_box_limit() {
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Err("Upstash Box: 1 box is already open, and this account's limit is 1".into()));
     assert_eq!(created(&hub), 1);
 }
+
+struct RawMachine {
+    ws: WebSocket<MaybeTlsStream<TcpStream>>,
+}
+
+impl RawMachine {
+    fn connect(hub: &str, token: &str) -> RawMachine {
+        let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", hub.replace("http://", "ws://"))).unwrap();
+        if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
+            stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        }
+        ws.send(Message::text(
+            json!({ "type": "auth", "token": token, "name": "raw", "os": "linux", "version": "9.9.9" }).to_string(),
+        ))
+        .unwrap();
+        let hello = loop {
+            match ws.read() {
+                Ok(Message::Text(text)) => break text,
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                Err(e) => panic!("machine hello failed: {e}"),
+            }
+        };
+        assert!(serde_json::from_str::<Value>(&hello).unwrap()["type"] == "hello");
+        RawMachine { ws }
+    }
+
+    fn send(&mut self, frame: Value) {
+        self.ws.send(Message::text(frame.to_string())).unwrap();
+    }
+
+    fn wait(&mut self, pred: impl Fn(&Value) -> bool) -> Value {
+        let start = Instant::now();
+        loop {
+            match self.ws.read() {
+                Ok(Message::Text(text)) => {
+                    let value: Value = serde_json::from_str(&text).unwrap();
+                    if pred(&value) {
+                        return value;
+                    }
+                }
+                Ok(Message::Close(close)) => panic!("the machine socket closed: {close:?}"),
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                Err(e) => panic!("the machine socket failed: {e}"),
+            }
+            assert!(start.elapsed() < WAIT, "timed out waiting on the machine socket");
+        }
+    }
+}
+
+#[test]
+fn an_unknown_event_keeps_the_machine_socket_and_a_thread_reaches_only_its_watcher() {
+    let hub = TestHub::start("watch");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut watcher = Client::connect(&url, &token);
+    watcher.wait("hello", |f| f["type"] == "hello");
+    let dir = temp("watch-node");
+    let creds = pair(&url, &mut watcher, "watch-node", &dir);
+    let mut machine = RawMachine::connect(&url, &creds.machine_token);
+    watcher.wait_machines(&[("watch-node", true)]);
+    let mut other = Client::connect(&url, &token);
+    other.wait("hello", |f| f["type"] == "hello" && f["machines"][0]["online"] == true);
+
+    machine.send(json!({ "type": "event", "event": { "kind": "from-the-future", "tab": "tab-9" } }));
+    machine.send(json!({ "type": "event", "event": { "kind": "tabs", "tabs": [] } }));
+    watcher.wait("tabs after an unknown event", |f| f["type"] == "event" && f["event"]["kind"] == "tabs");
+    assert!(other.wait("tabs for the other client", |f| f["type"] == "event" && f["event"]["kind"] == "tabs")["event"]["tabs"].as_array().unwrap().is_empty());
+
+    assert_eq!(watcher.call(&creds.machine_id, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] })), Ok(Value::Null));
+    let told = machine.wait(|frame| frame["type"] == "watch_threads");
+    assert_eq!(told["tabs"], json!(["tab-1"]));
+    assert!(told["viewer"].as_str().unwrap().starts_with("client-"));
+
+    let thread = |tab: &str, text: &str| {
+        json!({
+            "type": "event",
+            "event": {
+                "kind": "thread", "tab": tab, "from": 0, "session": "s", "next": 1,
+                "items": [{ "kind": "text", "id": text, "at": "2020-01-01T00:00:00Z", "text": text }]
+            }
+        })
+    };
+    machine.send(thread("tab-1", "seen"));
+    machine.send(thread("tab-2", "hidden"));
+    let got = watcher.wait("the watched line", |f| f["event"]["items"][0]["text"] == "seen");
+    assert_eq!(got["event"]["tab"], "tab-1");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(watcher.pump());
+    assert!(other.pump());
+    assert!(watcher.frames.iter().all(|frame| frame["event"]["items"][0]["text"] != "hidden"));
+    assert!(other.frames.iter().all(|frame| frame["event"]["kind"] != "thread"));
+}
+
+fn assistant_line(text: &str) -> String {
+    format!(
+        "{{\"type\":\"assistant\",\"uuid\":\"{text}\",\"timestamp\":\"2020-01-01T00:00:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n"
+    )
+}
+
+fn thread_texts(client: &Client) -> Vec<String> {
+    client
+        .frames
+        .iter()
+        .filter(|frame| frame["type"] == "event" && frame["event"]["kind"] == "thread")
+        .map(|frame| frame["event"]["items"][0]["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_watched_line_is_pushed_once_and_again_after_the_machine_reconnects() {
+    let hub = TestHub::start("watch_push");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |frame| frame["type"] == "hello");
+    let dir = temp("watch-push-node");
+    let creds = pair(&url, &mut client, "watch-node", &dir);
+    let machine = creds.machine_id.clone();
+    let mut node = Node::start(&dir, creds);
+    client.wait_machines(&[("watch-node", true)]);
+
+    node.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+    let app = dir.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    let projects = dir.join("accounts/work/projects/demo");
+    std::fs::create_dir_all(&projects).unwrap();
+    let file = projects.join("s1.jsonl");
+    std::fs::write(&file, assistant_line("ready")).unwrap();
+    pinned_core::sessions::save(
+        &dir.join("sessions.json"),
+        &[Saved {
+            cwd: app,
+            session: "s1".into(),
+            env: vec![],
+            bypass: false,
+            interrupted: false,
+            resume_at: None,
+            held: false,
+            account: "work".into(),
+            model: None,
+            permission_mode: None,
+        }],
+    );
+    let tabs = node.machine.restore_tabs();
+    assert_eq!(tabs.len(), 1, "the saved session did not reopen");
+    let tab = tabs[0].clone();
+    assert_eq!(client.call(&machine, json!({ "cmd": "watch_threads", "tabs": [&tab] })), Ok(Value::Null));
+    std::thread::sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
+    client.wait("the pushed line", |frame| frame["event"]["kind"] == "thread" && frame["event"]["items"][0]["text"] == "visible");
+    assert!(started.elapsed() < Duration::from_millis(800), "the line took {:?}, the poll is 1200 ms", started.elapsed());
+    std::thread::sleep(Duration::from_millis(200));
+    client.pump();
+    assert_eq!(thread_texts(&client), vec!["visible".to_string()]);
+
+    let quiet = Arc::new(Mutex::new(0u32));
+    let counted = quiet.clone();
+    node.machine.subscribe(Box::new(move |event| {
+        if serde_json::to_value(event).unwrap()["kind"] == "thread" {
+            *counted.lock().unwrap() += 1;
+        }
+    }));
+    node.link.take().unwrap().stop();
+    std::fs::write(&file, format!("{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("quiet"))).unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(*quiet.lock().unwrap(), 0, "a dropped link forgets remote watches");
+    node.machine.quit();
+    client.wait_machines(&[("watch-node", false)]);
+    let creds = Credentials::load(&dir).unwrap();
+    let mut node = Node::start(&dir, creds);
+    client.wait_machines(&[("watch-node", true)]);
+    let restored = node.machine.restore_tabs();
+    assert_eq!(restored.len(), 1, "the saved session did not reopen");
+    assert_ne!(restored[0], tab, "a new process reused {tab}");
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::write(&file, format!("{}{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("quiet"), assistant_line("stale"))).unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    client.pump();
+    assert!(thread_texts(&client).iter().all(|text| text != "stale"), "the watch from the previous process named the new tab");
+    assert_eq!(client.call(&machine, json!({ "cmd": "watch_threads", "tabs": [&restored[0]] })), Ok(Value::Null));
+    std::thread::sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    std::fs::write(
+        &file,
+        format!("{}{}{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("quiet"), assistant_line("stale"), assistant_line("again")),
+    )
+    .unwrap();
+    client.wait("the line after the machine reconnects", |frame| frame["event"]["items"][0]["text"] == "again");
+    assert!(started.elapsed() < Duration::from_millis(800), "after reconnect the line took {:?}, the poll is 1200 ms", started.elapsed());
+    std::thread::sleep(Duration::from_millis(200));
+    client.pump();
+    assert_eq!(thread_texts(&client).iter().filter(|text| text.as_str() == "again").count(), 1);
+    node.kill();
+}
+
+#[test]
+fn a_dropped_machine_link_replays_the_watch_without_another_client_call() {
+    let hub = TestHub::start("watch_replay");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |frame| frame["type"] == "hello");
+    let dir = temp("watch-replay-node");
+    let creds = pair(&url, &mut client, "watch-node", &dir);
+    let machine = creds.machine_id.clone();
+    let mut node = Node::start(&dir, creds.clone());
+    client.wait_machines(&[("watch-node", true)]);
+
+    node.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+    let app = dir.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    let projects = dir.join("accounts/work/projects/demo");
+    std::fs::create_dir_all(&projects).unwrap();
+    let file = projects.join("s1.jsonl");
+    std::fs::write(&file, assistant_line("ready")).unwrap();
+    pinned_core::sessions::save(
+        &dir.join("sessions.json"),
+        &[Saved {
+            cwd: app,
+            session: "s1".into(),
+            env: vec![],
+            bypass: false,
+            interrupted: false,
+            resume_at: None,
+            held: false,
+            account: "work".into(),
+            model: None,
+            permission_mode: None,
+        }],
+    );
+    let tabs = node.machine.restore_tabs();
+    assert_eq!(tabs.len(), 1, "the saved session did not reopen");
+    let tab = tabs[0].clone();
+    assert_eq!(client.call(&machine, json!({ "cmd": "watch_threads", "tabs": [&tab] })), Ok(Value::Null));
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
+    client.wait("the first pushed line", |frame| frame["event"]["kind"] == "thread" && frame["event"]["items"][0]["text"] == "visible");
+
+    node.link.take().unwrap().stop();
+    client.wait_machines(&[("watch-node", false)]);
+    node.link = Some(link::spawn(Credentials::load(&dir).unwrap(), node.machine.clone(), "0.0.0-test"));
+    client.wait_machines(&[("watch-node", true)]);
+    assert_eq!(node.machine.view(&tab).unwrap().id, tab, "the same process kept {tab}");
+    std::fs::write(&file, format!("{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("replayed"))).unwrap();
+    client.wait("the line after the link returns", |frame| frame["event"]["items"][0]["text"] == "replayed");
+    client.pump();
+    assert_eq!(thread_texts(&client).iter().filter(|text| text.as_str() == "replayed").count(), 1);
+    node.kill();
+}
+

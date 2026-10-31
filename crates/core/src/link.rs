@@ -81,12 +81,14 @@ impl Shared {
         for (tab, viewer) in self.subscribed.lock().unwrap().drain() {
             machine.detach(&tab, &viewer);
         }
+        machine.drop_remote_thread_watchers();
     }
 }
 
 /// Connects `machine` to the hub `creds` names, and keeps it connected until `Link::stop`.
 /// `version` is the binary's, which the hub logs.
 pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
+    machine.watch_threads();
     let shared = Arc::new(Shared::default());
     let (stop, stopped) = watch::channel(false);
     let (syncing, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
@@ -359,6 +361,7 @@ fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSende
             machine.detach(&tab, &viewer);
             shared.subscribed.lock().unwrap().remove(&(tab, viewer));
         }
+        Ok(ToMachine::WatchThreads { viewer, tabs }) => machine.set_watched_threads(&viewer, &tabs),
         Ok(ToMachine::Hello { .. }) => {}
         Err(e) => {
             let value: Value = serde_json::from_str(frame).unwrap_or_default();

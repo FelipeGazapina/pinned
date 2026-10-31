@@ -110,13 +110,59 @@ function setTabs(machine, views, { forget = true } = {}) {
     refreshProjects(machine);
   }
   render();
+  noteTabs(machine);
 }
 
 const refreshTabs = async (machine) => setTabs(machine, await callOn(machine, { cmd: "tabs" }));
 
+// Open and folder changes push the tab list before they answer. Wait for that push.
+// Ask only if it never arrives.
+const tabListed = [];
+function noteTabs(machine) {
+  const pending = tabListed.splice(0);
+  const again = [];
+  for (const waiter of pending) if (!waiter(machine)) again.push(waiter);
+  tabListed.push(...again);
+}
+function whenListed(machine, id) {
+  if (tabByKey(keyOf(machine, id))) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const drop = () => {
+      const at = tabListed.indexOf(waiter);
+      if (at >= 0) tabListed.splice(at, 1);
+    };
+    const timer = setTimeout(() => {
+      drop();
+      refreshTabs(machine).then(() => {
+        if (settled) return;
+        settled = true;
+        if (tabByKey(keyOf(machine, id))) resolve();
+        else reject(new Error("that tab is not on this machine"));
+      }, (err) => {
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+      });
+    }, 2000);
+    function waiter(arrived) {
+      if (arrived !== machine || !tabByKey(keyOf(machine, id))) return false;
+      if (settled) return true;
+      settled = true;
+      clearTimeout(timer);
+      drop();
+      resolve();
+      return true;
+    }
+    tabListed.push(waiter);
+    if (tabByKey(keyOf(machine, id))) waiter(machine);
+  });
+}
+
 /** Shows a tab the machine just opened, once its tab list has it. */
 async function revealTab(machine, id) {
-  await refreshTabs(machine);
+  await whenListed(machine, id);
   const tab = tabByKey(keyOf(machine, id));
   activate(tab);
   return tab;
@@ -464,15 +510,9 @@ async function pickLocalFolder() {
   if (path) pickFolder(path);
 }
 
-// A remote machine opens any path it is given, so the folder is checked by moving a fresh tab there.
+// open_tab rejects a path that is not a folder, so a bad one never becomes a tab.
 async function openRemote(machine, path, bypass) {
-  const id = await callOn(machine, { cmd: "open_tab", path: null, bypass });
-  try {
-    await callOn(machine, { cmd: "set_folder", tab: id, path });
-  } catch (e) {
-    callOn(machine, { cmd: "close_tab", tab: id });
-    throw e;
-  }
+  const id = await callOn(machine, { cmd: "open_tab", path, bypass });
   const tab = await revealTab(machine, id);
   await startTab(tab);
   return tab;
@@ -1025,6 +1065,7 @@ document.addEventListener("paste", (e) => {
 function onMachineEvent(machine, event) {
   if (!machines.has(machine)) return;
   if (event.kind === "tabs") return setTabs(machine, event.tabs);
+  if (event.kind === "thread") return onThreadEvent(machine, event);
   if (event.kind === "usage") {
     machines.get(machine).usage[event.account ?? DEFAULT_ACCOUNT] = event.usage;
     return renderUsage();
@@ -1284,6 +1325,8 @@ function connectHub(signedIn) {
   account = signedIn;
   hub = new Hub(signedIn.hub, signedIn.user_token, {
     hello(frame) {
+      // The hub forgot this socket's watches when the old one dropped, the same way it forgot attach.
+      forgetThreadWatch();
       account.email = frame.account.email;
       showMachines(frame.machines, frame.tabs);
       hub.hub({ cmd: "get_settings" }).then(onHubSettings, console.warn);

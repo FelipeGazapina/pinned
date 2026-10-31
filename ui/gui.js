@@ -124,39 +124,60 @@ function phaseOf(tab) {
 const turnLive = (tab) => ["working", "asking", "input"].includes(phaseOf(tab));
 const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && lastActivity(tab) > (seenAt[threadKey(tab)] ?? 0);
 
+function takeThreadPage(tab, page, from) {
+  const t = threadOf(tab);
+  if (!page || !Array.isArray(page.items) || (!page.session && t.session)) return;
+  if (page.reset) Object.assign(t, { items: [], todos: null, branch: null });
+  if (page.session !== t.session) {
+    const restart = t.next > 0;
+    Object.assign(t, { session: page.session, items: [], next: 0, history: null, todos: null, branch: null });
+    if (restart && from !== 0) return "restart";
+  }
+  if (!page.reset && from !== t.next) {
+    if ((page.next ?? 0) <= t.next) return;
+    return "gap";
+  }
+  t.unsupported = false;
+  const grew = page.items.length > 0 || !t.loaded;
+  if (page.items.some((i) => i.kind === "model")) t.picked = null;
+  if (page.context) t.context = page.context;
+  if (page.todos) t.todos = page.todos;
+  if (page.branch) t.branch = page.branch;
+  t.items.push(...page.items);
+  t.next = page.next;
+  t.loaded = true;
+  const moved = Array.isArray(page.agents) ? takeAgents(t, page.agents) : false;
+  if ((grew || moved) && guiOn()) {
+    if (tab === active) {
+      if (terminalOnly(tab)) renderTerminalOnly();
+      else renderThread();
+      markThreadSeen(tab);
+    }
+    renderSidebar();
+  }
+  if (grew && t.session && !t.history && tab === active) fetchHistory(tab);
+}
+
 async function fetchThread(tab) {
   const t = threadOf(tab);
-  if (t.fetching) return;
+  if (t.fetching) {
+    t.again = true;
+    return;
+  }
   t.fetching = true;
   try {
-    let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: t.next });
-    t.error = null;
-    if (!page.session && t.session) return;
-    if (page.reset) Object.assign(t, { items: [], todos: null, branch: null });
-    if (page.session !== t.session) {
-      const restart = t.next > 0;
-      Object.assign(t, { session: page.session, items: [], next: 0, history: null, todos: null, branch: null });
-      if (restart) page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: 0 });
-    }
-    t.unsupported = false;
-    const grew = page.items.length > 0 || !t.loaded;
-    if (page.items.some((i) => i.kind === "model")) t.picked = null;
-    if (page.context) t.context = page.context;
-    if (page.todos) t.todos = page.todos;
-    if (page.branch) t.branch = page.branch;
-    t.items.push(...page.items);
-    t.next = page.next;
-    t.loaded = true;
-    const moved = takeAgents(t, page.agents);
-    if ((grew || moved) && guiOn()) {
-      if (tab === active) {
-        if (terminalOnly(tab)) renderTerminalOnly();
-        else renderThread();
-        markThreadSeen(tab);
+    do {
+      t.again = false;
+      const from = t.next;
+      let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from });
+      t.error = null;
+      let follow = takeThreadPage(tab, page, from);
+      if (follow === "restart") {
+        page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: 0 });
+        follow = takeThreadPage(tab, page, 0);
       }
-      renderSidebar();
-    }
-    if (grew && t.session && !t.history && tab === active) fetchHistory(tab);
+      if (follow === "gap") t.again = true;
+    } while (t.again);
   } catch (e) {
     t.unsupported = /unknown variant|can't answer/.test(String(e));
     t.loaded = t.unsupported;
@@ -168,7 +189,15 @@ async function fetchThread(tab) {
     }
   } finally {
     t.fetching = false;
+    if (t.again) fetchThread(tab);
   }
+}
+
+function onThreadEvent(machine, event) {
+  const tab = tabByKey(keyOf(machine, event.tab));
+  if (!tab) return;
+  const follow = takeThreadPage(tab, event, event.from ?? 0);
+  if (follow === "gap" || follow === "restart") fetchThread(tab);
 }
 
 async function fetchWorkspace(tab) {
@@ -245,9 +274,53 @@ function renderGui() {
   else if (active && threadOf(active).unsupported) renderUnsupported();
   else renderThread();
   renderPanel();
+  publishThreadWatch();
+}
+
+let watchedSignature = "";
+let watchGeneration = 0;
+const watchedMachines = new Set();
+
+function publishThreadWatch() {
+  const wanted = new Map();
+  if (guiOn() && !document.hidden) {
+    for (const tab of tabs) {
+      if (terminalOnly(tab) && tab.view.program === "sign-in") continue;
+      if (tab !== active && !turnLive(tab) && phaseOf(tab) !== "delegating" && !terminalOnly(tab)) continue;
+      const ids = wanted.get(tab.machine) ?? [];
+      ids.push(tab.view.id);
+      wanted.set(tab.machine, ids);
+    }
+  }
+  const signature = [...wanted.entries()].map(([machine, ids]) => `${machine}=${[...ids].sort().join(",")}`).sort().join("|");
+  if (signature === watchedSignature) return;
+  const previousSignature = watchedSignature;
+  const previousMachines = new Set(watchedMachines);
+  const generation = ++watchGeneration;
+  watchedSignature = signature;
+  const jobs = [];
+  const next = new Set(wanted.keys());
+  for (const machine of watchedMachines) {
+    if (!next.has(machine)) jobs.push(callOn(machine, { cmd: "watch_threads", tabs: [] }));
+  }
+  for (const [machine, ids] of wanted) jobs.push(callOn(machine, { cmd: "watch_threads", tabs: ids }));
+  watchedMachines.clear();
+  for (const machine of next) watchedMachines.add(machine);
+  Promise.all(jobs).catch(() => {
+    if (watchGeneration !== generation) return;
+    watchedSignature = previousSignature;
+    watchedMachines.clear();
+    for (const machine of previousMachines) watchedMachines.add(machine);
+  });
+}
+
+function forgetThreadWatch() {
+  watchedSignature = "";
+  watchGeneration++;
 }
 
 setInterval(() => {
+  publishThreadWatch();
   if (!guiOn() || document.hidden) return;
   for (const tab of tabs) {
     if (terminalOnly(tab) && tab.view.program === "sign-in") continue;
@@ -255,7 +328,10 @@ setInterval(() => {
   }
 }, POLL_MS);
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
-document.addEventListener("visibilitychange", () => markThreadSeen(active));
+document.addEventListener("visibilitychange", () => {
+  markThreadSeen(active);
+  publishThreadWatch();
+});
 
 function stepThread(step) {
   const order = [...threadList.querySelectorAll(".thread-row")].map((r) => tabByKey(r.dataset.tab));

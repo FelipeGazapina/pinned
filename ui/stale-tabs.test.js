@@ -39,6 +39,74 @@ function showMachinesContext() {
   return { context, applied, refreshed, retried };
 }
 
+function whenListedHarness() {
+  const context = runSlice("const tabListed", "async function revealTab");
+  context.tabs = [];
+  context.asked = [];
+  context.applied = [];
+  context.keyOf = (machine, id) => `${machine}:${id}`;
+  context.tabByKey = (key) => context.tabs.find((tab) => tab.key === key) ?? null;
+  context.setTabs = (machine, views) => {
+    context.applied.push(views.map((view) => view.id));
+    context.tabs = views.map((view) => ({ key: context.keyOf(machine, view.id), view }));
+  };
+  context.callOn = async (machine, call) => {
+    context.asked.push(`${machine}:${call.cmd}`);
+    if (call.cmd === "tabs") return [{ id: "tab-1" }];
+    return null;
+  };
+  context.refreshTabs = async (machine) => {
+    context.asked.push(`${machine}:refresh`);
+    context.setTabs(machine, [{ id: "tab-1" }]);
+  };
+  context.setTimeout = setTimeout;
+  context.clearTimeout = clearTimeout;
+  return context;
+}
+
+test("a tab push is shown without waiting out the two second fallback", async () => {
+  const context = whenListedHarness();
+  const waits = [];
+  let pendingTimer = null;
+  context.setTimeout = (fn, ms) => {
+    waits.push(ms);
+    pendingTimer = fn;
+    return 1;
+  };
+  context.clearTimeout = () => {
+    pendingTimer = null;
+  };
+  const started = Date.now();
+  const pending = context.whenListed("box", "tab-new");
+  context.tabs.push({ key: "box:tab-new", view: { id: "tab-new" } });
+  context.noteTabs("box");
+  await pending;
+  assert.ok(Date.now() - started < 500, `the push took ${Date.now() - started} ms`);
+  assert.deepEqual(waits, [2000]);
+  assert.equal(pendingTimer, null);
+  assert.deepEqual(context.asked, []);
+  assert.equal(context.tabByKey("box:tab-new").view.id, "tab-new");
+});
+
+test("a tab list that never arrives is asked once the fallback fires", async () => {
+  const context = whenListedHarness();
+  const waits = [];
+  let fire = null;
+  context.setTimeout = (fn, ms) => {
+    waits.push(ms);
+    fire = fn;
+    return 1;
+  };
+  context.clearTimeout = () => {};
+  const pending = context.whenListed("box", "tab-1");
+  assert.deepEqual(context.asked, []);
+  assert.deepEqual(waits, [2000]);
+  fire();
+  await pending;
+  assert.deepEqual(context.asked, ["box:refresh"]);
+  assert.equal(context.tabByKey("box:tab-1").view.id, "tab-1");
+});
+
 test("an already-online machine keeps its tabs when the update has no snapshot", () => {
   const { context, applied, refreshed } = showMachinesContext();
   context.showMachines([{ id: "box", name: "railway", online: true }]);

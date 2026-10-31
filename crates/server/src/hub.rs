@@ -116,6 +116,8 @@ struct Client {
     out: Outbox,
     login: Vec<u8>,
     attached: HashSet<Target>,
+    /// Tabs on each machine whose transcript growth this client asked to receive.
+    threads: HashMap<MachineId, HashSet<TabId>>,
 }
 
 fn viewer(client: u64) -> String {
@@ -476,9 +478,21 @@ impl Hub {
 
 impl Account {
     /// Registers a machine's connection. An older one must have gone offline first.
+    /// Clients keep their watch sets here, so each set is sent to the new connection.
     pub fn came_online(&self, machine: &str, socket: u64, name: String, dedicated: bool, out: Outbox) {
+        let mut live = self.live.lock().unwrap();
+        let watches: Vec<(String, Vec<TabId>)> = live
+            .clients
+            .iter()
+            .filter_map(|(id, client)| client.threads.get(machine).map(|tabs| (viewer(*id), tabs.iter().cloned().collect())))
+            .collect();
         let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated };
-        self.live.lock().unwrap().machines.insert(machine.to_owned(), online);
+        live.machines.insert(machine.to_owned(), online);
+        if let Some(online) = live.machines.get(machine) {
+            for (viewer, tabs) in watches {
+                let _ = online.out.send(frame(&ToMachine::WatchThreads { viewer, tabs }));
+            }
+        }
     }
 
     /// Forgets the machine's connection, `socket` or whichever it has: its calls fail and its
@@ -614,8 +628,15 @@ impl Account {
             }
             _ => {}
         }
+        let thread_tab = match &event {
+            MachineEvent::Thread { tab, .. } => Some(tab.clone()),
+            _ => None,
+        };
         let text = frame(&ToClient::Event { machine: machine.to_owned(), event });
         for client in live.clients.values() {
+            if thread_tab.as_ref().is_some_and(|tab| !client.threads.get(machine).is_some_and(|tabs| tabs.contains(tab))) {
+                continue;
+            }
             let _ = client.out.send(text.clone());
         }
     }
@@ -653,7 +674,7 @@ impl Account {
                 let _ = out.send(frame(&ToClient::Event { machine: id.clone(), event }));
             }
         }
-        live.clients.insert(id, Client { out, login, attached: HashSet::new() });
+        live.clients.insert(id, Client { out, login, attached: HashSet::new(), threads: HashMap::new() });
     }
 
     pub fn client_gone(&self, id: u64) {
@@ -663,6 +684,27 @@ impl Account {
             if let Some(m) = live.machines.get(&target.machine) {
                 let _ = m.out.send(frame(&ToMachine::Unsubscribe { tab: target.tab, viewer: viewer(id) }));
             }
+        }
+        for machine in client.threads.keys() {
+            if let Some(m) = live.machines.get(machine) {
+                let _ = m.out.send(frame(&ToMachine::WatchThreads { viewer: viewer(id), tabs: vec![] }));
+            }
+        }
+    }
+
+    /// Remembers which tabs this client wants pushed, and tells the machine. The machine never sees the call.
+    pub fn watch_threads(&self, client: u64, machine: &str, tabs: Vec<TabId>) {
+        let mut live = self.live.lock().unwrap();
+        {
+            let Some(c) = live.clients.get_mut(&client) else { return };
+            if tabs.is_empty() {
+                c.threads.remove(machine);
+            } else {
+                c.threads.insert(machine.to_owned(), tabs.iter().cloned().collect());
+            }
+        }
+        if let Some(m) = live.machines.get(machine) {
+            let _ = m.out.send(frame(&ToMachine::WatchThreads { viewer: viewer(client), tabs }));
         }
     }
 

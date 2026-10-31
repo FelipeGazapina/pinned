@@ -251,7 +251,7 @@ fn only_tab(machine: &Machine) -> String {
 }
 
 fn assistant_lines(machine: &Machine, tab: &str) -> Vec<String> {
-    machine.thread(tab, 0).ok().map(|page| page.items.into_iter().filter_map(|item| match item {
+    machine.thread(tab, 0).ok().map(|page| page.state.items.into_iter().filter_map(|item| match item {
         pinned_core::thread::Item::Text { text, .. } => Some(text),
         _ => None,
     }).collect()).unwrap_or_default()

@@ -496,6 +496,8 @@ pub enum Call {
     CancelTask { tab: TabId, task: String },
     /// `null`. Types that finished task's notice into the tab now. The tab must own the task.
     DeliverTask { tab: TabId, task: String },
+    /// `null`. Which tabs' new transcript lines to push to this caller. Empty asks for none.
+    WatchThreads { tabs: Vec<TabId> },
 }
 
 fn pulls_limit() -> usize {
@@ -583,20 +585,41 @@ pub struct ThreadMatch {
     pub found: thread::Found,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct TranscriptState {
+    pub session: Option<String>,
+    pub items: Vec<thread::Item>,
+    pub next: u64,
+    #[serde(default)]
+    pub reset: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<thread::Context>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todos: Option<thread::Todos>,
+}
+
+impl TranscriptState {
+    pub fn from_page(session: Option<String>, page: thread::Page) -> Self {
+        Self { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos }
+    }
+
+    pub fn empty(session: Option<String>) -> Self {
+        Self { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None }
+    }
+
+    pub fn changed(&self) -> bool {
+        !self.items.is_empty() || self.reset || self.context.is_some() || self.branch.is_some() || self.todos.is_some()
+    }
+}
+
 /// A step of a tab's conversation. A client holding items of another `session`, or getting a
 /// `reset` page, starts over.
 #[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct ThreadPage {
-    pub session: Option<String>,
-    pub items: Vec<thread::Item>,
-    pub next: u64,
-    pub reset: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context: Option<thread::Context>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub todos: Option<thread::Todos>,
+    #[serde(flatten)]
+    pub state: TranscriptState,
     /// Every agent the session spawned, whole on each page. A machine on an older pinned leaves it out.
     pub agents: Vec<subagents::Subagent>,
 }
@@ -641,6 +664,13 @@ pub enum MachineEvent {
         usage: Usage,
         #[serde(default = "accounts::default_account")]
         account: AccountId,
+    },
+    /// Transcript lines read from byte `from`.
+    Thread {
+        tab: TabId,
+        from: u64,
+        #[serde(flatten)]
+        state: TranscriptState,
     },
 }
 
@@ -872,6 +902,8 @@ pub enum ToMachine {
     /// seeing it twice.
     Subscribe { tab: TabId, viewer: String },
     Unsubscribe { tab: TabId, viewer: String },
+    /// Replace `viewer`'s set of tabs whose transcript growth is pushed. Empty removes that viewer.
+    WatchThreads { viewer: String, tabs: Vec<TabId> },
 }
 
 #[cfg(test)]
@@ -1075,6 +1107,44 @@ mod tests {
         let old: MachineEvent = serde_json::from_value(json!({ "kind": "usage", "usage": {} })).unwrap();
         assert!(matches!(old, MachineEvent::Usage { account, .. } if account == "claude"), "a machine before accounts reports the default account's usage");
         assert!(serde_json::from_value::<MachineEvent>(json!({ "kind": "output", "tab": "t", "data": "not base64!" })).is_err());
+        round_trip(
+            MachineEvent::Thread {
+                tab: "tab-1".into(),
+                from: 4,
+                state: TranscriptState {
+                    session: Some("s1".into()),
+                    items: vec![crate::thread::Item::Text { id: "m:0".into(), at: "2020-01-01T00:00:00Z".into(), text: "visible".into() }],
+                    next: 20,
+                    reset: false,
+                    context: None,
+                    branch: None,
+                    todos: None,
+                },
+            },
+            json!({ "kind": "thread", "tab": "tab-1", "from": 4, "session": "s1", "items": [{ "kind": "text", "id": "m:0", "at": "2020-01-01T00:00:00Z", "text": "visible" }], "next": 20, "reset": false }),
+        );
+        let old: MachineEvent = serde_json::from_value(json!({ "kind": "thread", "tab": "tab-1", "from": 4, "session": "s1", "items": [], "next": 20 })).unwrap();
+        assert!(matches!(old, MachineEvent::Thread { state, .. } if state.context.is_none() && state.todos.is_none() && state.branch.is_none() && !state.reset));
+        round_trip(
+            MachineEvent::Thread {
+                tab: "tab-1".into(),
+                from: 4,
+                state: TranscriptState {
+                    session: Some("s1".into()),
+                    items: vec![],
+                    next: 30,
+                    reset: false,
+                    context: Some(crate::thread::Context { tokens: 120, at: "t2".into() }),
+                    branch: Some("feature".into()),
+                    todos: Some(crate::thread::Todos { at: "t1".into(), steps: vec![crate::thread::Todo { step: "Ship the fix".into(), status: "in_progress".into() }] }),
+                },
+            },
+            json!({
+                "kind": "thread", "tab": "tab-1", "from": 4, "session": "s1", "items": [], "next": 30, "reset": false,
+                "context": { "tokens": 120, "at": "t2" }, "branch": "feature",
+                "todos": { "at": "t1", "steps": [{ "step": "Ship the fix", "status": "in_progress" }] }
+            }),
+        );
     }
 
     #[test]
@@ -1204,5 +1274,10 @@ mod tests {
             ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None } },
             json!({ "type": "hello", "machine": { "id": "m2", "name": "vps", "os": "linux", "online": true, "last_seen": 0 } }),
         );
+        round_trip(
+            ToMachine::WatchThreads { viewer: "client-4".into(), tabs: vec!["tab-1".into()] },
+            json!({ "type": "watch_threads", "viewer": "client-4", "tabs": ["tab-1"] }),
+        );
+        round_trip(Call::WatchThreads { tabs: vec!["tab-1".into()] }, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] }));
     }
 }
