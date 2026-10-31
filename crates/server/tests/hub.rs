@@ -10,10 +10,12 @@ use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
 use pinned_core::wire::HubCall;
 use pinned_server::boxes::{BoxApi, Policy};
 use serde_json::{json, Value};
-use std::net::TcpStream;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use futures_util::future::BoxFuture;
 use std::time::{Duration, Instant};
@@ -246,25 +248,39 @@ struct Node {
     link: Option<Link>,
 }
 
+fn launched(dir: &Path) -> Arc<Machine> {
+    let claude = dir.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
+    std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let launch = Launch {
+        exe: "/opt/pinned/bin/pinned-server".into(),
+        bins: BTreeMap::from([(Provider::Claude, claude)]),
+        path_env: None,
+        settings: dir.join("settings.json"),
+        mcp_config: None,
+        reminders: true,
+        plugin_dir: dir.join("plugin"),
+        tutorial_helper: dir.join("plugin/tutorial.mjs"),
+        sock: dir.join("sock"),
+        vector_search: false,
+    };
+    Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), |_| {})
+}
+
 impl Node {
     fn start(dir: &Path, creds: Credentials) -> Node {
-        let claude = dir.join("claude");
-        std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
-        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let launch = Launch {
-            exe: "/opt/pinned/bin/pinned-server".into(),
-            bins: BTreeMap::from([(Provider::Claude, claude)]),
-            path_env: None,
-            settings: dir.join("settings.json"),
-            mcp_config: None,
-            reminders: true,
-            plugin_dir: dir.join("plugin"),
-            tutorial_helper: dir.join("plugin/tutorial.mjs"),
-            sock: dir.join("sock"),
-            vector_search: false,
-        };
-        let machine = Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), |_| {});
+        let machine = launched(dir);
         let link = link::spawn(creds, machine.clone(), "0.0.0-test");
+        Node { machine, link: Some(link) }
+    }
+
+    /// The production node: the link is up, then saved sessions are restored and started.
+    fn resume(dir: &Path, creds: Credentials) -> Node {
+        let machine = launched(dir);
+        let link = link::spawn(creds, machine.clone(), "0.0.0-test");
+        for tab in machine.restore_tabs() {
+            machine.start_claude(&tab, 80, 24).unwrap();
+        }
         Node { machine, link: Some(link) }
     }
 
@@ -401,6 +417,203 @@ fn a_restarted_node_does_not_reuse_tab_ids_and_the_client_gets_that_list() {
     assert!(online.get("tabs").is_some_and(|tabs| tabs.is_object()), "the reconnect update carried no tab snapshot");
     let listed = online["tabs"][&id].as_array().unwrap();
     assert!(listed.iter().all(|tab| tab["id"] != first_id), "the snapshot still listed {first_id}");
+}
+
+/// The last tab list a client was given for `machine`: a tabs event, or a machines
+/// snapshot that includes that machine. A snapshot that omits the key leaves the previous list.
+fn ended_tabs(frames: &[Value], machine: &str) -> Vec<Value> {
+    let mut ended = vec![];
+    for frame in frames {
+        if frame["type"] == "event" && frame["machine"] == machine && frame["event"]["kind"] == "tabs" {
+            ended = frame["event"]["tabs"].as_array().cloned().unwrap_or_default();
+        } else if matches!(frame["type"].as_str(), Some("machines" | "hello")) && frame["tabs"][machine].is_array() {
+            ended = frame["tabs"][machine].as_array().cloned().unwrap();
+        }
+    }
+    ended
+}
+
+fn wait_frame(client: &mut Client, from: usize, what: &str, pred: impl Fn(&Value) -> bool) -> usize {
+    let start = Instant::now();
+    loop {
+        if let Some(index) = client.frames.iter().enumerate().skip(from).find(|(_, frame)| pred(frame)).map(|(index, _)| index) {
+            return index;
+        }
+        assert!(client.pump(), "the socket closed while waiting for {what}");
+        assert!(start.elapsed() < WAIT, "timed out waiting for {what}; got {:#?}", &client.frames[from..]);
+    }
+}
+
+/// Drops the bytes between a node and the hub without stopping the node.
+struct SocketCut {
+    addr: std::net::SocketAddr,
+    generation: Arc<AtomicU64>,
+}
+
+impl SocketCut {
+    fn in_front_of(upstream: std::net::SocketAddr) -> SocketCut {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let generation = Arc::new(AtomicU64::new(1));
+        let flag = generation.clone();
+        std::thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(down) = incoming else { continue };
+                let flag = flag.clone();
+                std::thread::spawn(move || {
+                    let Ok(up) = TcpStream::connect(upstream) else { return };
+                    let mine = flag.load(Ordering::SeqCst);
+                    let _ = down.set_nodelay(true);
+                    let _ = up.set_nodelay(true);
+                    let (down_out, up_out) = (down.try_clone().unwrap(), up.try_clone().unwrap());
+                    let flag_back = flag.clone();
+                    std::thread::spawn(move || copy_until(down_out, up_out, &flag_back, mine));
+                    copy_until(up, down, &flag, mine);
+                });
+            }
+        });
+        SocketCut { addr, generation }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    fn cut(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn copy_until(mut from: TcpStream, mut to: TcpStream, generation: &AtomicU64, mine: u64) {
+    let _ = from.set_read_timeout(Some(Duration::from_millis(50)));
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        if generation.load(Ordering::SeqCst) != mine {
+            let _ = to.shutdown(Shutdown::Both);
+            let _ = from.shutdown(Shutdown::Both);
+            return;
+        }
+        match from.read(&mut buf) {
+            Ok(0) => {
+                let _ = to.shutdown(Shutdown::Write);
+                return;
+            }
+            Ok(n) => {
+                if to.write_all(&buf[..n]).is_err() {
+                    return;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => return,
+        }
+    }
+}
+
+fn http_addr(url: &str) -> std::net::SocketAddr {
+    url.trim_start_matches("http://").parse().unwrap()
+}
+
+#[test]
+fn a_reconnected_node_does_not_wipe_the_tabs_the_client_already_has() {
+    let hub = TestHub::start("reconn");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "Ana@Acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    let dir = temp("reconn-node");
+    let mut creds = pair(&url, &mut client, "box", &dir);
+    let id = creds.machine_id.clone();
+    let cut = SocketCut::in_front_of(http_addr(&url));
+    creds.hub = cut.url();
+    client.wait_machines(&[("box", false)]);
+    let node = Node::start(&dir, creds);
+    client.wait_machines(&[("box", true)]);
+    let tab_id = client.call(&id, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    client.wait("the open tab", |frame| {
+        frame["type"] == "event" && frame["machine"] == id && frame["event"]["kind"] == "tabs" && frame["event"]["tabs"].as_array().is_some_and(|tabs| tabs.iter().any(|tab| tab["id"] == tab_id))
+    });
+    let mark = client.frames.len();
+    cut.cut();
+    client.wait_machines(&[("box", false)]);
+    client.wait_machines(&[("box", true)]);
+    let reported = wait_frame(&mut client, mark, "tabs after the socket came back", |frame| {
+        frame["type"] == "event" && frame["machine"] == id && frame["event"]["kind"] == "tabs" && frame["event"]["tabs"].as_array().is_some_and(|tabs| tabs.iter().any(|tab| tab["id"] == tab_id))
+    });
+    let wiped = client.frames[mark..reported].iter().find(|frame| {
+        frame["type"] == "machines" && frame["tabs"][&id].as_array().is_some_and(|tabs| tabs.is_empty())
+    });
+    assert!(wiped.is_none(), "a machines frame listed {id} with no tabs before the node reported them: {wiped:?}");
+    let ended: Vec<String> = ended_tabs(&client.frames, &id).iter().map(|tab| tab["id"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(ended, vec![tab_id]);
+    drop(node);
+}
+
+#[test]
+fn a_restarted_node_reports_the_restored_session() {
+    let hub = TestHub::start("restore");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "Ana@Acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    let dir = temp("restore-node");
+    let creds = pair(&url, &mut client, "box", &dir);
+    let id = creds.machine_id.clone();
+    client.wait_machines(&[("box", false)]);
+    let mut node = Node::start(&dir, creds.clone());
+    client.wait_machines(&[("box", true)]);
+    let first_id = client.call(&id, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    node.kill();
+    client.wait_machines(&[("box", false)]);
+    drop(node);
+    std::fs::write(
+        dir.join("sessions.json"),
+        format!(r#"[{{"cwd": "{}", "session": "conv-1", "env": [], "bypass": false, "interrupted": false}}]"#, dir.display()),
+    )
+    .unwrap();
+    let mark = client.frames.len();
+    let _node = Node::resume(&dir, creds);
+    client.wait_machines(&[("box", true)]);
+    let reported = wait_frame(&mut client, mark, "the restored tab", |frame| {
+        frame["type"] == "event" && frame["machine"] == id && frame["event"]["kind"] == "tabs" && frame["event"]["tabs"].as_array().is_some_and(|tabs| tabs.iter().any(|tab| tab["session"] == "conv-1"))
+    });
+    let wiped = client.frames[mark..reported].iter().find(|frame| {
+        frame["type"] == "machines" && frame["tabs"][&id].as_array().is_some_and(|tabs| tabs.is_empty())
+    });
+    assert!(wiped.is_none(), "a machines frame listed {id} with no tabs before the restored session: {wiped:?}");
+    let ended = ended_tabs(&client.frames, &id);
+    assert_eq!(ended.len(), 1, "the client ended with {ended:?}");
+    assert_eq!(ended[0]["session"], "conv-1");
+    assert_ne!(ended[0]["id"], first_id);
+}
+
+#[test]
+fn quitting_through_the_hub_sends_an_empty_tab_list_before_disconnect() {
+    let hub = TestHub::start("quit");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "Ana@Acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    let dir = temp("quit-node");
+    let creds = pair(&url, &mut client, "box", &dir);
+    let id = creds.machine_id.clone();
+    client.wait_machines(&[("box", false)]);
+    let mut node = Node::start(&dir, creds);
+    client.wait_machines(&[("box", true)]);
+    let tab_id = client.call(&id, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    client.wait("the open tab", |frame| {
+        frame["type"] == "event" && frame["machine"] == id && frame["event"]["kind"] == "tabs" && frame["event"]["tabs"].as_array().is_some_and(|tabs| tabs.iter().any(|tab| tab["id"] == tab_id))
+    });
+    node.machine.quit();
+    let empty_at = wait_frame(&mut client, 0, "the empty tab list", |frame| {
+        frame["type"] == "event" && frame["machine"] == id && frame["event"] == json!({ "kind": "tabs", "tabs": [] })
+    });
+    node.link.take().unwrap().stop();
+    client.wait_machines(&[("box", false)]);
+    let offline_at = client
+        .frames
+        .iter()
+        .rposition(|frame| frame["type"] == "machines" && frame["machines"].as_array().is_some_and(|list| list.iter().any(|machine| machine["name"] == "box" && machine["online"] == false)))
+        .unwrap();
+    assert!(empty_at < offline_at, "empty tabs at {empty_at}, offline at {offline_at}");
+    let ended = ended_tabs(&client.frames[..offline_at], &id);
+    assert_eq!(ended, Vec::<Value>::new());
 }
 
 #[test]

@@ -2816,6 +2816,30 @@ mod tests {
         assert_eq!(seen.lock().unwrap().last().copied(), Some(0));
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn starting_a_restored_tab_twice_keeps_its_claude_session() {
+        let root = temp("restore-twice");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/sessions.json"),
+            format!(r#"[{{"cwd": "{}", "session": "s1", "env": [], "bypass": false, "interrupted": false, "resume_at": null}}]"#, app.display()),
+        )
+        .unwrap();
+        let m = accounts_machine(&root);
+        let tabs = m.restore_tabs();
+        assert_eq!(tabs.len(), 1);
+        let id = tabs[0].clone();
+        m.start_claude(&id, 80, 24).unwrap();
+        m.start_claude(&id, 80, 24).unwrap();
+        let view = m.tabs().into_iter().find(|tab| tab.id == id).unwrap();
+        assert_eq!(view.session.as_deref(), Some("s1"));
+        assert!(view.running);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pinned-machine-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

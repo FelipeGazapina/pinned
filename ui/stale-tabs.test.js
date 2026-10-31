@@ -144,3 +144,73 @@ test("a no-tab error reloads that machine's tabs and is still reported", async (
   assert.deepEqual(context.refreshed, []);
   assert.deepEqual(calls, ["start_claude", "tabs"]);
 });
+
+test("an already-online machine keeps its tabs when the snapshot omits that machine", () => {
+  const { context, applied, refreshed } = showMachinesContext();
+  context.showMachines([{ id: "box", name: "railway", online: true }], {});
+  assert.deepEqual(snapshot(applied), []);
+  assert.deepEqual(snapshot(refreshed), []);
+});
+
+test("Enter on a stale tab activates the restored one and does not start it", async () => {
+  const context = runSlice("const starting", "async function setBypass");
+  context.calls = [];
+  context.notes = [];
+  context.guiOn = () => true;
+  context.refit = () => {};
+  context.render = () => {};
+  context.activate = (tab) => {
+    context.activated = tab.key;
+  };
+  context.showComposerNote = (text, error) => context.notes.push({ text, error });
+  context.callOn = async (_machine, call) => {
+    context.calls.push(call);
+    if (call.tab === "tab-old") throw "no tab tab-old";
+    return "/work";
+  };
+  const old = {
+    key: "box:tab-old",
+    machine: "box",
+    view: { id: "tab-old", session: "conv-1", running: false },
+    attached: Promise.resolve(),
+    term: { cols: 80, rows: 24, write() {} },
+  };
+  const restored = {
+    key: "box:tab-new",
+    machine: "box",
+    view: { id: "tab-new", session: "conv-1", running: false },
+    attached: Promise.resolve(),
+    term: { cols: 80, rows: 24, write() {} },
+  };
+  context.tabs = [restored];
+  await context.startTab(old);
+  assert.equal(context.activated, "box:tab-new");
+  assert.deepEqual(
+    context.calls.map((call) => [call.cmd, call.tab]),
+    [["start_claude", "tab-old"]],
+  );
+});
+
+test("overlapping no-tab errors refresh a machine once", async () => {
+  const context = runSlice("const missingTabId", "const IS_MAC", "globalThis.callOn = callOn;");
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  context.machines = new Map([["box", { transport: { call: async () => { throw "no tab tab-9"; } } }]]);
+  context.refreshed = [];
+  context.refreshTabs = (machine) => {
+    context.refreshed.push(machine);
+    return gate;
+  };
+  const first = context.callOn("box", { cmd: "start_claude", tab: "tab-9" });
+  const second = context.callOn("box", { cmd: "write_input", tab: "tab-9", data: "x" });
+  const third = context.callOn("box", { cmd: "list_accounts" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(context.refreshed, ["box"]);
+  release();
+  await assert.rejects(first, (error) => error === "no tab tab-9");
+  await assert.rejects(second, (error) => error === "no tab tab-9");
+  await assert.rejects(third, (error) => error === "no tab tab-9");
+  assert.deepEqual(context.refreshed, ["box"]);
+});
