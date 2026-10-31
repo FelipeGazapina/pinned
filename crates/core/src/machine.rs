@@ -217,6 +217,7 @@ struct Tab {
     account: Account,
     program: Program,
     session: Option<pty::Session>,
+    starting: bool,
     /// When the running claude started, so a subagent an earlier claude left mid-step reads as stopped.
     started: Option<SystemTime>,
     /// Extra `claude` arguments for the first start only, so a restart doesn't redo the task.
@@ -340,6 +341,8 @@ pub struct Machine {
     /// The folder threads started without a project run in.
     scratch: PathBuf,
     tabs: Mutex<HashMap<TabId, Tab>>,
+    /// Chosen when this process starts. Tab ids include it, so the next process cannot hand out an id this one used.
+    boot: u64,
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
     sync_file: Option<PathBuf>,
@@ -455,6 +458,7 @@ impl Machine {
             default_cwd,
             scratch: dir.as_ref().map(|d| d.join("scratch")).unwrap_or_else(|| std::env::temp_dir().join("pinned-scratch")),
             tabs: Mutex::new(HashMap::new()),
+            boot: fresh_boot(),
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
@@ -842,7 +846,7 @@ impl Machine {
             t.launch = new.iter().flat_map(|id| ["--resume".to_owned(), id.clone()]).collect();
             t.claude_session = new.clone();
         })?;
-        self.start_claude(tab, cols, rows)
+        self.relaunch(tab, cols, rows)
     }
 
     /// The working tree as the prompt `before` began, from the first turn pinned saved from then on;
@@ -1127,10 +1131,23 @@ impl Machine {
         Ok(id)
     }
 
-    /// Starts the tab's program, replacing a session already running there, and returns its
-    /// folder. Viewers stay attached and see the new session from its first byte.
+    /// Starts the tab's program and returns its folder. A second call while that start is in
+    /// flight, or while the session is already running and nothing new was queued, returns the
+    /// folder and leaves the conversation alone. Viewers stay attached.
     pub fn start_claude(&self, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
-        let (cwd, account, program, args, env, bypass) = self.tab(tab, |t| {
+        self.launch_tab(tab, cols, rows, false)
+    }
+
+    fn relaunch(&self, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
+        self.launch_tab(tab, cols, rows, true)
+    }
+
+    fn launch_tab(&self, tab: &str, cols: u16, rows: u16, replace: bool) -> Result<String, String> {
+        let prepared = self.tab(tab, |t| {
+            if !replace && (t.session.is_some() || t.starting) && t.launch.is_empty() {
+                return None;
+            }
+            t.starting = true;
             // Without launch arguments this is a fresh conversation, not the one recorded before.
             if t.launch.is_empty() {
                 t.claude_session = None;
@@ -1140,8 +1157,11 @@ impl Machine {
             if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
                 args.extend(["--model".to_owned(), model]);
             }
-            (t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass)
+            Some((t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass))
         })?;
+        let Some((cwd, account, program, args, env, bypass)) = prepared else {
+            return self.tab(tab, |t| t.cwd.display().to_string());
+        };
         let mut args = args;
         let mut prompt = vec![];
         if self.device_agents.as_ref().is_some_and(|f| f.exists()) {
@@ -1162,7 +1182,10 @@ impl Machine {
         let env = [self.accounts.env(&account), env].concat();
         let plugin_dirs = self.shared_plugin_dirs(&account);
         let cmd = self.launch.command(program, account.provider, tab, &cwd, bypass, args, &env, &plugin_dirs);
-        self.spawn(tab, cmd, pty::size(cols, rows))?;
+        if let Err(error) = self.spawn(tab, cmd, pty::size(cols, rows)) {
+            let _ = self.tab(tab, |t| t.starting = false);
+            return Err(error);
+        }
         self.continue_when_limit_lifts(tab);
         self.emit_tabs();
         Ok(cwd.display().to_string())
@@ -1205,7 +1228,7 @@ impl Machine {
                 (t.launch, t.resume_at) = saved.reopen(unix_now(), t.account.provider);
             }
         })?;
-        self.start_claude(tab, cols, rows)
+        self.relaunch(tab, cols, rows)
     }
 
     /// Turns the tab's permission skipping on or off and returns its folder. Claude reads the flag
@@ -1275,7 +1298,7 @@ impl Machine {
         if let Some(made) = left {
             branches::drop_worktree(&made, path);
         }
-        self.start_claude(tab, cols, rows)
+        self.relaunch(tab, cols, rows)
     }
 
     /// Restarts the tab's claude on its conversation with `model`, for this conversation alone, and
@@ -1290,7 +1313,7 @@ impl Machine {
                 (t.launch, t.resume_at) = saved.reopen(unix_now(), t.account.provider);
             }
         })?;
-        self.start_claude(tab, cols, rows)
+        self.relaunch(tab, cols, rows)
     }
 
     /// Starts claude again on the tab's conversation and returns its folder; a tab with no
@@ -1301,7 +1324,7 @@ impl Machine {
                 (t.launch, t.resume_at) = saved.reopen(unix_now(), t.account.provider);
             }
         })?;
-        self.start_claude(tab, cols, rows)
+        self.relaunch(tab, cols, rows)
     }
 
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
@@ -1327,6 +1350,7 @@ impl Machine {
         )?;
         self.tab(tab, |t| {
             t.session = Some(pty);
+            t.starting = false;
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
             t.turn_pending = None;
@@ -1915,6 +1939,8 @@ impl Machine {
         for tab in &tabs {
             self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
         }
+        // The hub socket is still up. Clients drop these ids before a call can land on a cleared map.
+        self.emit(Event::Tabs { tabs: vec![] });
         self.tabs.lock().unwrap().clear();
         self.device_hub.stop();
     }
@@ -2271,12 +2297,14 @@ impl Machine {
     }
 
     fn add_tab(&self, cwd: PathBuf, account: Account, launch: Vec<String>, env: Vec<(String, String)>, bypass: bool, claude_session: Option<String>) -> TabId {
-        let id = format!("tab-{}", self.next_tab.fetch_add(1, Ordering::Relaxed));
+        let n = self.next_tab.fetch_add(1, Ordering::Relaxed);
+        let id = format!("tab-{:x}-{n}", self.boot);
         let tab = Tab {
             cwd,
             account,
             program: Program::Agent,
             session: None,
+            starting: false,
             started: None,
             launch,
             env,
@@ -2634,8 +2662,19 @@ fn truncate(text: &str, max: usize) -> String {
     }
 }
 
+/// Opening order: the number after the last `-`. `tab-1` and `tab-<boot>-1` both order as 1.
 fn tab_number(id: &str) -> u32 {
-    id.trim_start_matches("tab-").parse().unwrap_or(0)
+    id.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
+}
+
+/// A value chosen when the process starts, different for each `Machine` in the process.
+fn fresh_boot() -> u64 {
+    use sha2::{Digest, Sha256};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let bytes = Sha256::digest(format!("{}:{nanos}:{n}", std::process::id()));
+    u64::from_le_bytes(bytes[..8].try_into().unwrap())
 }
 
 /// The terminal's input line as far as the keys show it.
@@ -2910,6 +2949,57 @@ mod tests {
         Machine::new(launch(), None, Some("/repo".into()), |_| {})
     }
 
+    #[test]
+    fn a_restarted_machine_does_not_reuse_tab_ids() {
+        let first = machine();
+        let old = first.open_tab(None, false).unwrap();
+        let second = machine();
+        let new_id = second.open_tab(None, false).unwrap();
+        let later = second.open_tab(None, false).unwrap();
+        assert_ne!(old, new_id, "the new process reused {old}");
+        assert_eq!(second.view(&old).unwrap_err(), format!("no tab {old}"));
+        assert_eq!((second.view(&new_id).unwrap().opened, second.view(&later).unwrap().opened), (1, 2));
+        assert_eq!((tab_number("tab-1"), tab_number("tab-abcdef-3")), (1, 3));
+    }
+
+    #[test]
+    fn quitting_announces_an_empty_tab_list() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events = seen.clone();
+        let m = Machine::new(launch(), None, Some("/repo".into()), move |event| {
+            if let Event::Tabs { tabs } = event {
+                events.lock().unwrap().push(tabs.len());
+            }
+        });
+        m.open_tab(None, false).unwrap();
+        m.quit();
+        assert_eq!(seen.lock().unwrap().last().copied(), Some(0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn starting_a_restored_tab_twice_keeps_its_claude_session() {
+        let root = temp("restore-twice");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/sessions.json"),
+            format!(r#"[{{"cwd": "{}", "session": "s1", "env": [], "bypass": false, "interrupted": false, "resume_at": null}}]"#, app.display()),
+        )
+        .unwrap();
+        let m = accounts_machine(&root);
+        let tabs = m.restore_tabs();
+        assert_eq!(tabs.len(), 1);
+        let id = tabs[0].clone();
+        m.start_claude(&id, 80, 24).unwrap();
+        m.start_claude(&id, 80, 24).unwrap();
+        let view = m.tabs().into_iter().find(|tab| tab.id == id).unwrap();
+        assert_eq!(view.session.as_deref(), Some("s1"));
+        assert!(view.running);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pinned-machine-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3005,7 +3095,7 @@ mod tests {
         assert_eq!(m.live_tab(&d.env()), None, "the thread's only tab has no running session");
         assert!(!m.deliver(&d.env(), &d.text()));
         let own = running(&m, slack_env("c2", "1792400050.000200"), "sleep 30");
-        assert_eq!(own, "tab-5");
+        assert_eq!(m.view(&own).unwrap().opened, 5);
         assert_eq!(m.live_tab(&d.env()), Some(own));
         let newer = running(&m, slack_env("c2", "1792400050.000200"), "sleep 30");
         assert_eq!(m.live_tab(&d.env()), Some(newer));
@@ -3184,7 +3274,7 @@ mod tests {
         assert_eq!(
             *heard.lock().unwrap(),
             [json!({ "kind": "tabs", "tabs": [{
-                "id": "tab-1", "cwd": "/repo", "account": "claude", "program": "agent", "bypass": false, "running": false, "status": null,
+                "id": tab, "cwd": "/repo", "account": "claude", "program": "agent", "bypass": false, "running": false, "status": null,
                 "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1,
             }] })]
         );
@@ -3253,20 +3343,22 @@ mod tests {
     #[test]
     fn calls_answer_with_the_json_a_client_reads() {
         let m = machine();
-        assert_eq!(m.call(Call::OpenTab { path: None, bypass: true }), Ok(json!("tab-1")));
+        let tab = m.call(Call::OpenTab { path: None, bypass: true }).unwrap();
+        let id = tab.as_str().unwrap().to_owned();
+        assert_eq!(m.view(&id).unwrap().opened, 1);
         assert_eq!(
             m.call(Call::Tabs),
             Ok(json!([{
-                "id": "tab-1", "cwd": "/repo", "account": "claude", "program": "agent", "bypass": true, "running": false, "status": null,
+                "id": id, "cwd": "/repo", "account": "claude", "program": "agent", "bypass": true, "running": false, "status": null,
                 "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1,
             }]))
         );
         assert_eq!(
-            m.call(Call::SetFolder { tab: "tab-1".into(), path: "/nonexistent/acme".into() }),
+            m.call(Call::SetFolder { tab: id.clone(), path: "/nonexistent/acme".into() }),
             Err("/nonexistent/acme is not a folder on this machine".into())
         );
-        assert_eq!(m.call(Call::CloseTab { tab: "tab-1".into() }), Ok(Value::Null));
-        assert_eq!(m.call(Call::StartClaude { tab: "tab-1".into(), cols: 80, rows: 24 }), Err("no tab tab-1".into()));
+        assert_eq!(m.call(Call::CloseTab { tab: id.clone() }), Ok(Value::Null));
+        assert_eq!(m.call(Call::StartClaude { tab: id.clone(), cols: 80, rows: 24 }), Err(format!("no tab {id}")));
         assert_eq!(m.call(Call::Deliver { env: vec![], text: "hi".into() }), Ok(json!(false)));
     }
 
@@ -3974,14 +4066,14 @@ mod tests {
         m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
         let config = root.join("config").display().to_string();
         let tab = m.call(Call::SignIn { account: "work".into() }).unwrap();
-        assert_eq!(tab, json!("tab-1"));
+        let id = tab.as_str().unwrap().to_owned();
         let (seen, sink) = viewer();
-        m.attach("tab-1", "test".into(), sink).unwrap();
+        m.attach(&id, "test".into(), sink).unwrap();
         wait_for("the login", || text(&seen).contains('\n'));
         assert_eq!(text(&seen), format!("claude|auth login|{config}/accounts/work||work\r\n"));
-        let view = m.view("tab-1").unwrap();
+        let view = m.view(&id).unwrap();
         assert_eq!((view.cwd, view.account.as_str(), view.program, view.running), (format!("{config}/accounts/work"), "work", Program::SignIn, true));
-        m.record_session("tab-1", "s1".into(), None);
+        m.record_session(&id, "s1".into(), None);
         assert_eq!(sessions::load(&root.join("config/sessions.json")), vec![], "a login is not a session to resume");
 
         let side = m.sign_in("side").unwrap();
@@ -5092,9 +5184,11 @@ while True:
             std::fs::create_dir_all(p).unwrap();
         }
         let open = |p: &Path| m.call(Call::OpenOrchestrator { path: p.display().to_string() });
-        assert_eq!(open(&app), Ok(json!("tab-1")));
-        assert_eq!(open(&app), Ok(json!("tab-1")), "a second orchestrator opened for the project");
-        assert_eq!(open(&api), Ok(json!("tab-2")));
+        let app_tab = open(&app).unwrap();
+        assert_eq!(open(&app).unwrap(), app_tab, "a second orchestrator opened for the project");
+        let api_tab = open(&api).unwrap();
+        assert_ne!(api_tab, app_tab);
+        assert_eq!(m.view(api_tab.as_str().unwrap()).unwrap().opened, 2);
         m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
         m.open_project(side.clone());
         m.call(Call::SetProjectAccount { path: side.display().to_string(), account: Some("side".into()) }).unwrap();

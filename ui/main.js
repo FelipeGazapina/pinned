@@ -29,11 +29,38 @@ let active = null;
 
 const keyOf = (machine, id) => `${machine}:${id}`;
 const tabByKey = (key) => tabs.find((t) => t.key === key);
-const callOn = (machine, call) => machines.get(machine).transport.call(call);
+const missingTabId = (error) => /^no tab (\S+)/.exec(String(error))?.[1] ?? null;
+const tabRefresh = new Map();
+const callOn = async (machine, call) => {
+  try {
+    return await machines.get(machine).transport.call(call);
+  } catch (error) {
+    if (missingTabId(error) && call.tab != null) {
+      let pending = tabRefresh.get(machine);
+      if (!pending) {
+        pending = refreshTabs(machine).finally(() => {
+          if (tabRefresh.get(machine) === pending) tabRefresh.delete(machine);
+        });
+        tabRefresh.set(machine, pending);
+      }
+      await pending.catch(() => {});
+    }
+    throw error;
+  }
+};
 const IS_MAC = /Mac/.test(navigator.platform);
 const COMPUTER = IS_MAC ? "Mac" : "PC";
 const statusOf = (tab) => tab.view.status ?? "idle";
 const machineName = (id) => (id === LOCAL ? `This ${COMPUTER}` : machines.get(id)?.view.name ?? "machine");
+function machineDirectory() {
+  const names = {};
+  const online = {};
+  for (const [id, machine] of machines) {
+    names[id] = machineName(id);
+    online[id] = machine.view.online === true;
+  }
+  return { localId: LOCAL, localName: machineName(LOCAL), names, online };
+}
 const initials = (name) => name.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
 const tilde = (path) => path.replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)(?=\/|$)/, "~");
 const accountOf = (machine, id) => machines.get(machine)?.accounts?.find((a) => a.id === id);
@@ -229,8 +256,17 @@ async function showProjects({ machine, tab = null } = {}) {
   const here = new Set(projects.map((p) => p.repo).filter(Boolean));
   if (picking.machine !== machine || !pickerOpen()) return;
   const local = machine === LOCAL;
+  const directory = machineDirectory();
   choices = [
-    ...projects.map((p) => ({ name: p.name, path: tilde(p.path), open: () => pickFolder(p.path) })),
+    ...projects.map((p) => {
+      const checkout = [{ machine: picking.machine, path: p.path }];
+      return {
+        name: p.name,
+        path: tilde(p.path),
+        where: PinnedProjects.sessionOn(checkout, directory).label,
+        open: () => pickFolder(PinnedProjects.sessionOn(checkout, directory).path),
+      };
+    }),
     // Projects of the account another machine has, cloned here when chosen.
     ...shared.filter((p) => !here.has(p.key)).map((p) => ({ name: p.name, path: `clone · ${p.key}`, open: () => cloneAndOpen(machine, p.repo), keep: true })),
     { name: "Clone from GitHub…", open: () => cloneFromGithub(), keep: true },
@@ -246,12 +282,31 @@ async function showProjects({ machine, tab = null } = {}) {
 function choiceButtons() {
   return choices.map((choice, i) => {
     const button = document.createElement("button");
-    for (const [cls, text] of [["name", choice.name], ["path", choice.path]]) {
-      if (!text) continue;
-      const span = document.createElement("span");
-      span.className = cls;
-      span.textContent = text;
-      button.append(span);
+    if (choice.where) {
+      const row = document.createElement("span");
+      row.className = "row";
+      if (choice.name) {
+        const name = document.createElement("span");
+        name.className = "name";
+        name.textContent = choice.name;
+        row.append(name);
+      }
+      const where = document.createElement("span");
+      where.className = "where";
+      where.textContent = choice.where;
+      row.append(where);
+      button.append(row);
+    } else if (choice.name) {
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = choice.name;
+      button.append(name);
+    }
+    if (choice.path) {
+      const path = document.createElement("span");
+      path.className = "path";
+      path.textContent = choice.path;
+      button.append(path);
     }
     button.onmousemove = () => chosen !== i && choose(i);
     button.onclick = (e) => openChoice(i, e.shiftKey);
@@ -493,7 +548,15 @@ async function startClaude(tab) {
     tab.view = { ...tab.view, running: true };
     render();
   } catch (e) {
-    tab.term.write(`\r\n\x1b[31m[could not start claude: ${e}]\x1b[0m\r\n`);
+    const kept = tabs.includes(tab);
+    const restored = !kept && tab.view.session ? tabs.find((t) => t.machine === tab.machine && t.view.session === tab.view.session) : null;
+    if (restored) {
+      activate(restored);
+      return;
+    }
+    const text = kept ? `could not start claude: ${e}` : "That session ended when the machine restarted. Open it again to continue.";
+    if (guiOn()) showComposerNote(text, true);
+    if (kept) tab.term.write(`\r\n\x1b[31m[${text}]\x1b[0m\r\n`);
   }
 }
 
@@ -1237,7 +1300,7 @@ function connectHub(signedIn) {
       showMachines(frame.machines, frame.tabs);
       hub.hub({ cmd: "get_settings" }).then(onHubSettings, console.warn);
     },
-    machines: (list) => showMachines(list),
+    machines: (list, tabs) => showMachines(list, tabs),
     // This Mac's own events come over Tauri, not back through the hub.
     event: (machine, event) => machine !== account.machine_id && onMachineEvent(machine, event),
     settings: (latest) => onHubSettings(latest),
@@ -1261,11 +1324,9 @@ function showMachines(list, tabsByMachine) {
     if (known) known.view = view;
     else machines.set(view.id, { view, tabs: [], transport: hub.transport(view.id), usage: {} });
     if (!view.online) setTabs(view.id, [], { forget: false });
-    else if (tabsByMachine) setTabs(view.id, tabsByMachine[view.id] ?? []);
-    else if (!wasOnline) {
-      refreshTabs(view.id).catch(console.warn);
-      retryUploadImages();
-    }
+    else if (tabsByMachine != null && Object.hasOwn(tabsByMachine, view.id)) setTabs(view.id, tabsByMachine[view.id]);
+    else if (!wasOnline) refreshTabs(view.id).catch(console.warn);
+    if (view.online && !wasOnline) retryUploadImages();
   }
   for (const id of [...machines.keys()]) {
     if (id === LOCAL || list.some((v) => v.id === id)) continue;
