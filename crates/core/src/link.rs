@@ -170,6 +170,21 @@ impl sync::Hub for Shared {
     }
 }
 
+impl sync::Hub for Link {
+    fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
+        sync::Hub::list(self.shared.as_ref(), project)
+    }
+    fn push(&self, project: &str, files: Vec<sync::File>) -> Result<(), String> {
+        sync::Hub::push(self.shared.as_ref(), project, files)
+    }
+    fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
+        sync::Hub::pull(self.shared.as_ref(), project, paths)
+    }
+    fn mark_executable(&self, project: &str, repairs: Vec<sync::ModeRepair>) -> Result<(), String> {
+        sync::Hub::mark_executable(self.shared.as_ref(), project, repairs)
+    }
+}
+
 fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
     serde_json::from_value(value).map_err(|e| format!("the hub sent something pinned can't read: {e}"))
 }
