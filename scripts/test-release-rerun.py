@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import fnmatch
 import hashlib
 import json
 import os
@@ -13,16 +14,17 @@ import subprocess
 import sys
 import tempfile
 
+import workflow
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 TAG = "v0.17.0"
+NEXT_TAG = "v0.17.1"
 RC_TAG = "v0.17.0-rc.1"
 REPO = "FelipeGazapina/pinned"
-LEG = "aarch64-apple-darwin"
 ARM_NAME = "pinned-server-aarch64-unknown-linux-musl"
 X86_NAME = "pinned-server-x86_64-unknown-linux-musl"
-BUNDLE = "pinned_aarch64.app.tar.gz"
-EARLIER_ATTEMPT_ARTIFACTS = [f"updater-{LEG}", "linux-node-binaries"]
+ARM_BUNDLE = "pinned_aarch64.app.tar.gz"
 VERSION_ORDER = (
     ("v0.17.0", "v0.17.0-rc.1", True),
     ("v0.17.0-rc.1", "v0.17.0", False),
@@ -38,18 +40,21 @@ VERSION_ORDER = (
     ("v0.17.0", "v0.17.0", False),
     ("v0.17.0", "windows-preview", True),
 )
-PLATFORMS = (
-    "darwin-aarch64",
-    "darwin-aarch64-app",
-    "darwin-x86_64",
-    "darwin-x86_64-app",
-    "windows-x86_64",
-    "windows-x86_64-nsis",
-)
+TAURI_BUNDLES = {
+    "aarch64-apple-darwin": ("macos/pinned.app.tar.gz", ARM_BUNDLE, ("darwin-aarch64", "darwin-aarch64-app")),
+    "x86_64-apple-darwin": ("macos/pinned.app.tar.gz", "pinned_x64.app.tar.gz", ("darwin-x86_64", "darwin-x86_64-app")),
+    "x86_64-pc-windows-msvc": (
+        "nsis/pinned_{version}_x64-setup.exe",
+        "pinned_{version}_x64-setup.exe",
+        ("windows-x86_64", "windows-x86_64-nsis"),
+    ),
+}
 ARM = b"arm-old " * 2048
 X86 = b"x86-old " * 2048
 SUM_NAMES = ("latest.json", ARM_NAME, X86_NAME)
-FULL_RUN = ["draft", "build", "linux-node", "sign-node", "publish"]
+FULL = "*"
+JOB_KEYS = {"needs", "runs-on", "strategy", "defaults", "steps", "env", "concurrency", "permissions"}
+STEP_KEYS = {"name", "id", "uses", "run", "with", "env", "shell"}
 VERIFIER = ROOT / "scripts" / "minisign-verify.mjs"
 CRATE_KEY = "untrusted comment: minisign public key\nRWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3\n"
 CRATE_PREHASHED = (
@@ -250,6 +255,8 @@ def main():
         if prerelease is not None:
             state["prerelease"] = prerelease
         latest = flag_bool(flags, "--latest")
+        if state["prerelease"] and latest is True:
+            record(state, f"asked --latest=true for prerelease {tag}")
         if latest is None and was_draft and not state["draft"]:
             latest = True
         if state["prerelease"]:
@@ -376,6 +383,25 @@ if (command === "generate") {
 '''
 
 
+TOOL_SOURCES = {
+    "npm": '#!/bin/bash\n[[ "$*" == ci ]] || { echo "fake npm: $*" >&2; exit 2; }\n',
+    "sudo": "#!/bin/bash\n",
+    "curl": '#!/bin/bash\necho "the replay has no network: curl $*" >&2\nexit 2\n',
+    "wget": '#!/bin/bash\necho "the replay has no network: wget $*" >&2\nexit 2\n',
+    "docker": r'''#!/bin/bash
+set -euo pipefail
+case "$1" in
+  build | rm) ;;
+  create) echo replay-container ;;
+  cp)
+    [[ "$2" == replay-container:/downloads/. ]] || { echo "fake docker: $*" >&2; exit 2; }
+    cp -R "$REPLAY_BINARIES/." "$3"
+    ;;
+  *) echo "fake docker: $*" >&2; exit 2 ;;
+esac
+''',
+}
+
 PWSH = {"pwsh", "powershell", "pwsh.exe", "powershell.exe"}
 BASH_SYNTAX = re.compile(r"\$\{?[A-Za-z_]|\$(?=\()|\[\[")
 
@@ -383,10 +409,6 @@ BASH_SYNTAX = re.compile(r"\$\{?[A-Za-z_]|\$(?=\()|\[\[")
 def is_bash_syntax(script):
     without_pwsh_env = re.sub(r"\$env:[A-Za-z_][A-Za-z0-9_]*", "", script)
     return BASH_SYNTAX.search(without_pwsh_env) is not None
-
-
-def shell_token(value):
-    return value.strip().split()[0]
 
 
 def runner_shell(label):
@@ -398,227 +420,100 @@ def runner_shell(label):
     return None
 
 
-def effective_shells(workflow_shell, job, step):
-    if step.get("shell"):
-        return [shell_token(step["shell"])]
-    if job.get("shell"):
-        return [shell_token(job["shell"])]
-    if workflow_shell:
-        return [shell_token(workflow_shell)]
-    shells = []
-    for label in job.get("runs_on") or []:
-        if "${{" in label:
-            shells.append(None)
-        else:
-            shells.append(runner_shell(label))
-    return shells or [None]
+def context(tag, matrix=None):
+    return {"tag": tag, "matrix": matrix or {}, "env": {}, "steps": {}}
 
 
-def shell_problems(workflow_shell, jobs):
-    problems = []
-    for name, job in jobs.items():
-        for index, step in enumerate(job["steps"], start=1):
-            script = step.get("run") or ""
-            if not script.strip() or not is_bash_syntax(script):
-                continue
-            bad = []
-            for shell in effective_shells(workflow_shell, job, step):
-                if shell in PWSH or shell is None:
-                    shown = shell or "unresolved"
-                    if shown not in bad:
-                        bad.append(shown)
-            if not bad:
-                continue
-            first = next((item.strip() for item in script.splitlines() if item.strip()), "")
-            problems.append(
-                f"{name} step {index} runs bash syntax under {', '.join(bad)}: {first}"
-            )
-    return problems
-
-
-def indent_of(line):
-    return len(line) - len(line.lstrip(" "))
-
-
-def read_map(lines, i, parent_indent):
-    values = {}
-    key_indent = None
-    while i < len(lines):
-        line = lines[i]
-        if not line.strip() or line.lstrip().startswith("#"):
-            i += 1
-            continue
-        indent = indent_of(line)
-        if indent <= parent_indent:
-            break
-        if key_indent is None:
-            key_indent = indent
-        if indent == key_indent:
-            key, _, value = line.strip().partition(":")
-            values[key.strip()] = value.strip().strip("'\"")
-        i += 1
-    return values, i
-
-
-def parse_workflow(text):
-    lines = text.splitlines()
-    jobs = {}
-    current = None
-    in_jobs = False
-    in_steps = False
-    step = None
-    workflow_shell = None
-    workflow_env = {}
-    seeing_defaults = False
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.startswith("jobs:"):
-            in_jobs = True
-            i += 1
-            continue
-        if not in_jobs:
-            stripped = line.strip()
-            if line.rstrip() == "env:":
-                workflow_env, i = read_map(lines, i + 1, 0)
-                continue
-            if line.startswith("defaults:"):
-                seeing_defaults = True
-            elif seeing_defaults and stripped.startswith("shell:"):
-                workflow_shell = stripped.split(":", 1)[1].strip().strip("'\"")
-            elif line and not line.startswith(" ") and not line.startswith("#"):
-                seeing_defaults = False
-            i += 1
-            continue
-        if line and not line.startswith(" ") and not line.startswith("#"):
-            break
-        if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
-            name = line.strip()[:-1]
-            current = {"steps": [], "runs_on": [], "shell": None, "env": {}}
-            jobs[name] = current
-            in_steps = False
-            step = None
-            i += 1
-            continue
-        if current is not None and line.strip() == "steps:":
-            in_steps = True
-            i += 1
-            continue
-        if current is not None and not in_steps:
-            stripped = line.strip()
-            if stripped == "env:":
-                current["env"], i = read_map(lines, i + 1, indent_of(line))
-                continue
-            if stripped.startswith("runs-on:"):
-                value = stripped.split(":", 1)[1].strip().strip("'\"")
-                if "${{" not in value:
-                    current["runs_on"] = [value]
-                i += 1
-                continue
-            if stripped.startswith("os:") or stripped.startswith("- os:"):
-                current["runs_on"].append(stripped.split(":", 1)[1].strip().strip("'\""))
-                i += 1
-                continue
-            if stripped.startswith("shell:"):
-                current["shell"] = stripped.split(":", 1)[1].strip().strip("'\"")
-                i += 1
-                continue
-        if in_steps and line.startswith("      - "):
-            step = {"uses": None, "run": None, "shell": None, "env": {}, "with": {}}
-            current["steps"].append(step)
-            rest = line.strip()[2:]
-            if rest.startswith("uses:"):
-                step["uses"] = rest.split(":", 1)[1].strip()
-            i += 1
-            continue
-        if step is None:
-            i += 1
-            continue
-        stripped = line.strip()
-        if stripped in ("env:", "with:"):
-            step[stripped[:-1]], i = read_map(lines, i + 1, indent_of(line))
-            continue
-        if stripped.startswith("uses:"):
-            step["uses"] = stripped.split(":", 1)[1].strip()
-            i += 1
-            continue
-        if stripped.startswith("shell:"):
-            step["shell"] = stripped.split(":", 1)[1].strip().strip("'\"")
-            i += 1
-            continue
-        if stripped.startswith("run:"):
-            value = stripped.split(":", 1)[1].strip()
-            if value in {"|", "|-", ">", ">-"}:
-                run_indent = indent_of(line)
-                body = []
-                content_indent = None
-                i += 1
-                while i < len(lines):
-                    nxt = lines[i]
-                    if nxt.strip() == "":
-                        body.append("")
-                        i += 1
-                        continue
-                    indent = indent_of(nxt)
-                    if indent <= run_indent:
-                        break
-                    if content_indent is None:
-                        content_indent = indent
-                    body.append(nxt[content_indent:])
-                    i += 1
-                step["run"] = "\n".join(body) + "\n"
-                continue
-            step["run"] = value + "\n"
-            i += 1
-            continue
-        i += 1
-    return workflow_shell, workflow_env, jobs
-
-
-def release_step(step):
-    uses = step.get("uses") or ""
-    if "tauri-action" in uses:
-        return True
-    run = step.get("run") or ""
-    return any(
-        needle in run
-        for needle in (
-            "gh release",
-            "scripts/assemble-latest-json.sh",
-            "scripts/sign-node-sums.sh",
-            "scripts/release-asset.sh",
-        )
-    )
-
-
-def is_checkout(step):
-    return (step.get("uses") or "").startswith("actions/checkout@")
-
-
-def is_artifact_upload(step):
-    return (step.get("uses") or "").startswith("actions/upload-artifact@")
-
-
-def replayed(step):
-    return is_artifact_upload(step) or release_step(step)
-
-
-def expand(value, tag):
-    known = {"github.repository": REPO, "github.ref_name": tag, "matrix.target": LEG}
-
+def expand(value, ctx):
     def one(match):
         expr = match.group(1)
-        if expr in known:
-            return known[expr]
-        if expr.startswith("secrets."):
+        head, _, rest = expr.partition(".")
+        step_id, _, output = rest.partition(".outputs.")
+        if expr == "github.repository":
+            return REPO
+        if expr == "github.ref_name":
+            return ctx["tag"]
+        if head == "secrets":
             return "replay"
+        if head in ("matrix", "env") and rest in ctx[head]:
+            return ctx[head][rest]
+        if head == "steps" and output in ctx["steps"].get(step_id, {}):
+            return ctx["steps"][step_id][output]
         raise SystemExit(f"the replay cannot expand ${{{{ {expr} }}}}")
 
     return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", one, value)
 
 
-def expanded(values, tag):
-    return {key: expand(value, tag) for key, value in values.items()}
+def expanded(values, ctx):
+    return {key: expand(value, ctx) for key, value in (values or {}).items()}
+
+
+def needs_of(job):
+    needs = job.get("needs") or []
+    return [needs] if isinstance(needs, str) else needs
+
+
+def legs_of(job):
+    matrix = (job.get("strategy") or {}).get("matrix")
+    if matrix is None:
+        return [{}]
+    if set(matrix) != {"include"}:
+        raise SystemExit(f"the replay expands matrix include lists only, not {sorted(matrix)}")
+    return matrix["include"]
+
+
+def run_orders(jobs):
+    for name, job in jobs.items():
+        for need in needs_of(job):
+            if need not in jobs:
+                raise SystemExit(f"{name} needs {need}, which release.yml does not define")
+    orders = []
+
+    def extend(order):
+        if len(order) == len(jobs):
+            orders.append(order)
+            return
+        for name, job in jobs.items():
+            if name not in order and all(need in order for need in needs_of(job)):
+                extend(order + [name])
+
+    extend([])
+    if not orders:
+        raise SystemExit("the needs of release.yml form a cycle")
+    return orders
+
+
+def runs_one_at_a_time(wf, job_name, tags):
+    for level in (wf, wf["jobs"][job_name]):
+        concurrency = level.get("concurrency")
+        if concurrency is None:
+            continue
+        if isinstance(concurrency, str):
+            concurrency = {"group": concurrency}
+        groups = {expand(concurrency["group"], context(tag)) for tag in tags}
+        if len(groups) == 1 and concurrency.get("cancel-in-progress", "false") == "false":
+            return True
+    return False
+
+
+def shell_problems(wf):
+    problems = []
+    for name, job in wf["jobs"].items():
+        runners = [expand(job["runs-on"], context(TAG, matrix)) for matrix in legs_of(job)]
+        for index, step in enumerate(job["steps"], start=1):
+            script = step.get("run") or ""
+            if not script.strip() or not is_bash_syntax(script):
+                continue
+            bad = []
+            for runner in runners:
+                shell = workflow.shell_of(wf, job, step) or runner_shell(runner)
+                shown = shell or "unresolved"
+                if (shell in PWSH or shell is None) and shown not in bad:
+                    bad.append(shown)
+            if bad:
+                first = next((item.strip() for item in script.splitlines() if item.strip()), "")
+                problems.append(f"{name} step {index} runs bash syntax under {', '.join(bad)}: {first}")
+    return problems
 
 
 def runner_env():
@@ -646,24 +541,8 @@ def asset_bytes(state, name):
     return base64.b64decode(raw)
 
 
-def bundle_bytes(build):
-    return f"desktop bundle {build}\n".encode() * 2048
-
-
-def fragment(signature, tag):
-    url = f"https://github.com/{REPO}/releases/download/{tag}/{BUNDLE}"
-    platforms = {key: {"signature": signature, "url": url} for key in PLATFORMS}
-    return {"version": tag[1:], "platforms": platforms}
-
-
-def manifest(signature, notes, tag):
-    body = {
-        "version": tag[1:],
-        "notes": notes,
-        "pub_date": "2026-10-30T00:00:00.000Z",
-        "platforms": fragment(signature, tag)["platforms"],
-    }
-    return json.dumps(body, indent=2).encode()
+def bundle_bytes(target, build):
+    return f"desktop bundle {target} {build}\n".encode() * 256
 
 
 def empty_state():
@@ -678,49 +557,36 @@ def empty_state():
         "calls": [],
         "remote_latest": None,
         "builds": 0,
-        "fragment": None,
-        "artifacts": [],
+        "artifacts": {},
     }
 
 
 def seeded_state(release, draft, replace=None):
-    files, built = release
+    files, artifacts = release
     files = {**files, **(replace or {})}
     state = empty_state()
     state["exists"] = True
     state["draft"] = draft
-    state["fragment"] = built
     state["assets"] = {name: b64(data) for name, data in files.items()}
-    state["artifacts"] = list(EARLIER_ATTEMPT_ARTIFACTS)
+    state["artifacts"] = json.loads(json.dumps(artifacts))
     return state
 
 
-def write_fragment(work, built):
-    path = work / "updater-fragments" / f"updater-{LEG}" / "updater-fragment.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(built))
-
-
-def prepare_work(work, state):
-    node = work / "node-release"
-    node.mkdir(parents=True)
-    (node / ARM_NAME).write_bytes(ARM)
-    (node / X86_NAME).write_bytes(X86)
-    if state["fragment"]:
-        write_fragment(work, state["fragment"])
-
-
 class Replay:
-    def __init__(self, workflow_env, jobs, root):
-        self.workflow_env = workflow_env
-        self.jobs = jobs
+    def __init__(self, wf, root):
+        self.wf = wf
+        self.jobs = wf["jobs"]
         self.root = pathlib.Path(root)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        for name, source in (("gh", GH_SOURCE), ("npx", NPX_SOURCE)):
+        for name, source in (("gh", GH_SOURCE), ("npx", NPX_SOURCE), *TOOL_SOURCES.items()):
             path = self.bin / name
             path.write_text(source)
             path.chmod(0o755)
+        self.binaries = self.root / "docker-downloads"
+        self.binaries.mkdir()
+        (self.binaries / ARM_NAME).write_bytes(ARM)
+        (self.binaries / X86_NAME).write_bytes(X86)
         self.signer = self.root / "signer.mjs"
         self.signer.write_text(SIGNER_SOURCE)
         self.key = self.root / "key.json"
@@ -729,6 +595,16 @@ class Replay:
             subprocess.run(["node", str(self.signer), "generate", str(key)], check=True)
         self.pubkey = json.loads(self.key.read_text())["pubkey"]
         self.forged_pubkey = json.loads(self.forger.read_text())["pubkey"]
+        self.state_path = self.root / "state.json"
+        self.actions = {
+            "actions/checkout": self.checkout,
+            "actions/setup-node": self.nothing,
+            "dtolnay/rust-toolchain": self.nothing,
+            "swatinem/rust-cache": self.nothing,
+            "actions/upload-artifact": self.upload_artifact,
+            "actions/download-artifact": self.download_artifact,
+            "tauri-apps/tauri-action": self.tauri,
+        }
 
     def minisig(self, data, name, key=None):
         scratch = self.root / "to-sign"
@@ -748,163 +624,248 @@ class Replay:
         return b64(self.minisig(data, name, key))
 
     def release(self, build=0, notes="old", tag=TAG, key=None):
-        bundle = bundle_bytes(build)
-        signature = self.tauri_signature(bundle, BUNDLE, key)
-        latest = manifest(signature, notes, tag)
+        version = tag[1:]
+        files = {}
+        platforms = {}
+        artifacts = {}
+        for target, (local, asset, keys) in TAURI_BUNDLES.items():
+            asset = asset.format(version=version)
+            bundle = bundle_bytes(target, build)
+            signature = self.tauri_signature(bundle, pathlib.Path(local).name.format(version=version), key)
+            files[asset] = bundle
+            files[f"{asset}.sig"] = signature.encode()
+            entry = {"signature": signature, "url": f"https://github.com/{REPO}/releases/download/{tag}/{asset}"}
+            leg = {platform: entry for platform in keys}
+            platforms.update(leg)
+            fragment = json.dumps({"version": version, "platforms": leg}).encode()
+            artifacts[f"updater-{target}"] = {"updater-fragment.json": b64(fragment)}
+        latest = json.dumps(
+            {"version": version, "notes": notes, "pub_date": "2026-10-30T00:00:00.000Z", "platforms": platforms},
+            indent=2,
+        ).encode()
         sums = sums_for(latest, ARM, X86)
-        files = {
-            BUNDLE: bundle,
-            f"{BUNDLE}.sig": signature.encode(),
-            "latest.json": latest,
-            ARM_NAME: ARM,
-            X86_NAME: X86,
-            "SHA256SUMS": sums,
-            "SHA256SUMS.minisig": self.minisig(sums, "SHA256SUMS", key),
-        }
-        return files, fragment(signature, tag)
+        files.update(
+            {
+                "latest.json": latest,
+                ARM_NAME: ARM,
+                X86_NAME: X86,
+                "SHA256SUMS": sums,
+                "SHA256SUMS.minisig": self.minisig(sums, "SHA256SUMS", key),
+            }
+        )
+        artifacts["linux-node-binaries"] = {ARM_NAME: b64(ARM), X86_NAME: b64(X86)}
+        return files, artifacts
 
-    def run(self, job_names, state, extra_env, tag):
-        state_path = self.root / "state.json"
-        state_path.write_text(json.dumps(state))
+    def load_state(self):
+        return json.loads(self.state_path.read_text())
+
+    def save_state(self, state):
+        self.state_path.write_text(json.dumps(state))
+
+    def runner(self, tag):
+        env = runner_env()
+        env["PATH"] = str(self.bin) + os.pathsep + env.get("PATH", "")
+        for tool in ("gh", "npx", *TOOL_SOURCES):
+            found = shutil.which(tool, path=env["PATH"])
+            if found is None or pathlib.Path(found).parent != self.bin:
+                raise SystemExit(f"{tool} resolves to {found}, not the replay's fake")
+        env.update(
+            {
+                "GITHUB_REF_NAME": tag,
+                "GITHUB_REPOSITORY": REPO,
+                "REPLAY_ROOT": str(self.root),
+                "REPLAY_REPO": REPO,
+                "REPLAY_STATE": str(self.state_path),
+                "REPLAY_SIGNER": str(self.signer),
+                "REPLAY_KEY": str(self.key),
+                "REPLAY_BINARIES": str(self.binaries),
+            }
+        )
+        return env
+
+    def fresh_work(self):
         work = self.root / "work"
         if work.exists():
             shutil.rmtree(work)
         work.mkdir()
-        prepare_work(work, state)
-        env = runner_env()
-        env["PATH"] = str(self.bin) + os.pathsep + env.get("PATH", "")
-        env["GITHUB_REF_NAME"] = tag
-        env["GITHUB_REPOSITORY"] = REPO
-        env["REPLAY_ROOT"] = str(self.root)
-        env["REPLAY_REPO"] = REPO
-        env["REPLAY_STATE"] = str(state_path)
-        env["REPLAY_SIGNER"] = str(self.signer)
-        env["REPLAY_KEY"] = str(self.key)
-        env.update(expanded(self.workflow_env, tag))
-        stderr = []
+        return work
+
+    def run(self, job_names, state, extra_env, tag):
+        self.save_state(state)
+        work = self.fresh_work()
+        env = self.runner(tag)
+        for index, name in enumerate(job_names):
+            if name not in self.jobs:
+                raise SystemExit(f"release.yml has no {name} job")
+            early = [need for need in needs_of(self.jobs[name]) if need in job_names[index + 1 :]]
+            if early:
+                raise SystemExit(f"a scenario runs {name} before {early[0]}, which it needs")
+        self.assembled = None
+        failed = set()
         code = 0
-        if isinstance(job_names, str):
-            self.checkout(work, True)
-            code, err = self.shell(job_names, {**env, **extra_env}, work)
-            stderr.append(err)
-        else:
-            for name in job_names:
-                code, err = self.job(name, env, extra_env, work, tag)
-                stderr.append(err)
-                if code != 0:
-                    break
-        state = json.loads(state_path.read_text())
-        assembled = work / "node-release" / "latest.json"
-        return code, "".join(stderr), state, assembled.read_bytes() if assembled.exists() else None
-
-    def checkout(self, work, present):
-        for name in (".git", "scripts", "tauri.conf.json"):
-            path = work / name
-            if path.is_dir():
-                shutil.rmtree(path)
-            elif path.exists():
-                path.unlink()
-        if not present:
-            return
-        (work / ".git").mkdir()
-        shutil.copytree(ROOT / "scripts", work / "scripts")
-        conf = {"plugins": {"updater": {"pubkey": self.pubkey}}}
-        (work / "tauri.conf.json").write_text(json.dumps(conf))
-
-    def job(self, name, runner, extra_env, work, tag):
-        job = self.jobs[name]
-        self.checkout(work, any(is_checkout(step) for step in job["steps"]))
-        job_env = {**runner, **expanded(job["env"], tag)}
         stderr = []
-        for step in job["steps"]:
-            if not replayed(step):
+        for name in job_names:
+            if any(need in failed for need in needs_of(self.jobs[name])):
+                failed.add(name)
                 continue
-            env = {**job_env, **expanded(step["env"], tag), **extra_env}
-            if is_artifact_upload(step):
-                code, err = self.upload_artifact(step, env, tag)
-            elif "tauri-action" in (step.get("uses") or ""):
-                code, err = self.tauri(step, env, work, tag)
-            else:
-                code, err = self.shell(step["run"], env, work)
+            job_code, err = self.job(name, env, extra_env, tag, work)
             stderr.append(err)
+            if job_code:
+                failed.add(name)
+                code = code or job_code
+        return code, "".join(stderr), self.load_state(), self.assembled
+
+    def run_script(self, script, state, extra_env, tag):
+        self.save_state(state)
+        work = self.fresh_work()
+        self.checkout({}, context(tag), {}, work)
+        code, err = self.shell(["bash", "-e"], script, {**self.runner(tag), **extra_env}, work)
+        return code, err, self.load_state(), None
+
+    def job(self, name, env, extra_env, tag, work):
+        job = self.jobs[name]
+        unknown = sorted(set(job) - JOB_KEYS)
+        if unknown:
+            return 1, f"the replay does not model {', '.join(unknown)} on {name}\n"
+        fail_fast = (job.get("strategy") or {}).get("fail-fast", "true") != "false"
+        code = 0
+        stderr = []
+        for index, matrix in enumerate(legs_of(job)):
+            leg_work = work / f"{name}-{index}"
+            leg_work.mkdir()
+            leg_code, err = self.leg(name, job, matrix, env, extra_env, tag, leg_work)
+            stderr.append(err)
+            assembled = leg_work / "node-release" / "latest.json"
+            if assembled.exists():
+                self.assembled = assembled.read_bytes()
+            code = code or leg_code
+            if leg_code and fail_fast:
+                break
+        return code, "".join(stderr)
+
+    def leg(self, name, job, matrix, env, extra_env, tag, work):
+        ctx = context(tag, matrix)
+        ctx["env"] = expanded(self.wf.get("env"), ctx)
+        ctx["env"].update(expanded(job.get("env"), ctx))
+        job_env = {**env, **ctx["env"]}
+        stderr = []
+        for index, step in enumerate(job["steps"], start=1):
+            unknown = sorted(set(step) - STEP_KEYS)
+            if unknown:
+                return 1, "".join(stderr) + f"the replay does not model {', '.join(unknown)} on {name} step {index}\n"
+            step_env = {**job_env, **expanded(step.get("env"), ctx), **extra_env}
+            outputs = {}
+            if step.get("uses"):
+                action = self.actions.get(step["uses"].split("@")[0])
+                if action is None:
+                    stderr.append(f"{name} step {index} uses {step['uses']}, which the replay cannot tell from a release write\n")
+                    return 1, "".join(stderr)
+                code, err, outputs = action(step, ctx, step_env, work)
+            else:
+                argv = workflow.bash_argv(workflow.shell_of(self.wf, job, step))
+                code, err = self.shell(argv, expand(step["run"], ctx), step_env, work)
+            stderr.append(err)
+            if step.get("id"):
+                ctx["steps"][step["id"]] = outputs
             if code != 0:
                 return code, "".join(stderr)
         return 0, "".join(stderr)
 
-    def shell(self, script, env, work):
-        path = work / "step.sh"
+    def shell(self, argv, script, env, work):
+        path = self.root / "step.sh"
         path.write_text(script)
-        proc = subprocess.run(
-            ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(path)],
-            cwd=work,
-            env=env,
-            text=True,
-            capture_output=True,
-        )
+        proc = subprocess.run([*argv, str(path)], cwd=work, env=env, text=True, capture_output=True)
         return proc.returncode, proc.stderr
 
-    def upload_artifact(self, step, env, tag):
-        state_path = pathlib.Path(env["REPLAY_STATE"])
-        state = json.loads(state_path.read_text())
-        name = expand(step["with"]["name"], tag)
-        if name in state["artifacts"] and step["with"].get("overwrite") != "true":
+    def nothing(self, step, ctx, env, work):
+        return 0, "", {}
+
+    def checkout(self, step, ctx, env, work):
+        (work / ".git").mkdir()
+        shutil.copytree(ROOT / "scripts", work / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        conf = {"plugins": {"updater": {"pubkey": self.pubkey}}}
+        (work / "tauri.conf.json").write_text(json.dumps(conf))
+        return 0, "", {}
+
+    def upload_artifact(self, step, ctx, env, work):
+        inputs = expanded(step.get("with"), ctx)
+        name = inputs["name"]
+        paths = [line.strip() for line in inputs["path"].splitlines() if line.strip()]
+        files = [work / path for path in paths]
+        missing = [path for path, file in zip(paths, files) if not file.is_file()]
+        if missing:
+            if inputs.get("if-no-files-found", "warn") == "error":
+                return 1, f"No files were found with the provided path: {' '.join(missing)}. No artifacts will be uploaded.\n", {}
+            return 0, "", {}
+        state = self.load_state()
+        if name in state["artifacts"] and inputs.get("overwrite") != "true":
             return 1, (
                 "Failed to CreateArtifact: Received non-retryable error: Failed request: (409) Conflict: "
                 f"an artifact with this name already exists on the workflow run: {name}\n"
-            )
-        if name not in state["artifacts"]:
-            state["artifacts"].append(name)
-        state_path.write_text(json.dumps(state))
-        return 0, ""
+            ), {}
+        base = pathlib.Path(os.path.commonpath([str(file.parent) for file in files]))
+        state["artifacts"][name] = {str(file.relative_to(base)): b64(file.read_bytes()) for file in files}
+        self.save_state(state)
+        return 0, "", {}
 
-    def tauri(self, step, env, work, tag):
-        state_path = pathlib.Path(env["REPLAY_STATE"])
-        build = json.loads(state_path.read_text())["builds"] + 1
-        out = work / "tauri-out"
-        out.mkdir(exist_ok=True)
-        bundle = out / BUNDLE
-        bundle.write_bytes(bundle_bytes(build))
-        signature = self.tauri_signature(bundle.read_bytes(), BUNDLE)
-        (out / f"{BUNDLE}.sig").write_text(signature)
+    def download_artifact(self, step, ctx, env, work):
+        inputs = expanded(step.get("with"), ctx)
+        dest = work / inputs.get("path", ".")
+        artifacts = self.load_state()["artifacts"]
+        if "name" in inputs:
+            if inputs["name"] not in artifacts:
+                return 1, f"Unable to download artifact(s): Artifact not found for name: {inputs['name']}\n", {}
+            chosen = {inputs["name"]: dest}
+        else:
+            pattern = inputs.get("pattern", "*")
+            merge = inputs.get("merge-multiple") == "true"
+            chosen = {name: dest if merge else dest / name for name in sorted(artifacts) if fnmatch.fnmatch(name, pattern)}
+        for name, folder in chosen.items():
+            for relative, data in artifacts[name].items():
+                path = folder / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(base64.b64decode(data))
+        return 0, "", {}
+
+    def tauri(self, step, ctx, env, work):
+        inputs = expanded(step.get("with"), ctx)
+        if inputs.get("tagName") != ctx["tag"]:
+            return 1, f"tauri-action tagName {inputs.get('tagName')} is not {ctx['tag']}\n", {}
+        args = inputs.get("args", "").split()
+        target = args[args.index("--target") + 1] if "--target" in args else None
+        if target not in TAURI_BUNDLES:
+            return 1, f"the replay does not build {target}\n", {}
+        version = ctx["tag"][1:]
+        local, asset, _ = TAURI_BUNDLES[target]
+        local = local.format(version=version)
+        asset = asset.format(version=version)
+        build = self.load_state()["builds"] + 1
+        bundle = work / "target" / target / "release" / "bundle" / local
+        bundle.parent.mkdir(parents=True, exist_ok=True)
+        bundle.write_bytes(bundle_bytes(target, build))
+        signature = bundle.parent / f"{bundle.name}.sig"
+        signature.write_text(self.tauri_signature(bundle.read_bytes(), bundle.name))
+        staged = work / "tauri-upload"
+        staged.mkdir()
+        shutil.copyfile(bundle, staged / asset)
+        shutil.copyfile(signature, staged / f"{asset}.sig")
+        uploads = [staged / asset, staged / f"{asset}.sig"]
+        if (inputs.get("includeUpdaterJson") or "true").lower() != "false":
+            (staged / "latest.json").write_text(json.dumps({"version": version, "pub_date": "tauri"}))
+            uploads.append(staged / "latest.json")
         action_env = {**env, "GH_REPO": REPO}
-        code, err = self.shell(
-            f'gh release upload "$GITHUB_REF_NAME" "{bundle}" "{bundle}.sig" --clobber\n',
-            action_env,
-            work,
-        )
-        if code != 0:
-            return code, err
-        state = json.loads(state_path.read_text())
+        code, err = 0, ""
+        for upload in uploads:
+            step_code, step_err = self.shell(
+                ["bash", "-e"], f'gh release upload "$GITHUB_REF_NAME" "{upload}" --clobber\n', action_env, work
+            )
+            err += step_err
+            if step_code:
+                return step_code, err, {}
+        state = self.load_state()
         state["builds"] = build
-        state["fragment"] = fragment(signature, tag)
-        state_path.write_text(json.dumps(state))
-        write_fragment(work, state["fragment"])
-        flag = (step["with"].get("includeUpdaterJson") or "true").lower()
-        if flag == "false":
-            return code, err
-        latest = out / "latest.json"
-        latest.write_bytes(json.dumps({"version": tag[1:], "pub_date": "tauri"}).encode())
-        code2, err2 = self.shell(
-            f'gh release upload "$GITHUB_REF_NAME" "{latest}" --clobber\n',
-            action_env,
-            work,
-        )
-        return code2, err + err2
-
-
-def step_labels(job):
-    labels = []
-    for step in job["steps"]:
-        if not replayed(step):
-            continue
-        if step.get("uses"):
-            shown = ("includeUpdaterJson", "name", "overwrite")
-            extra = "".join(f" {key}={step['with'][key]}" for key in shown if key in step["with"])
-            labels.append(step["uses"] + extra)
-            continue
-        line = next((item.strip() for item in step["run"].splitlines() if item.strip()), "")
-        labels.append(line)
-    return labels
+        self.save_state(state)
+        return code, err, {"artifactPaths": json.dumps([str(bundle), str(signature)]), "appVersion": version}
 
 
 def unchanged(before, after):
@@ -961,8 +922,6 @@ def scenario_errors(code, stderr, state, assembled, expect):
         else:
             raise AssertionError(key)
     return errors
-
-
 def crate_vector_errors(root):
     pubkey = b64(CRATE_KEY.encode())
     errors = []
@@ -1008,7 +967,7 @@ def version_order_errors():
 def public_clobber_errors(replay):
     old, _ = replay.release()
     newer, _ = replay.release(notes="new")
-    state = seeded_state((old, None), draft=False)
+    state = seeded_state((old, {}), draft=False)
     state_path = replay.root / "clobber-state.json"
     work = replay.root / "clobber-work"
     work.mkdir()
@@ -1065,33 +1024,55 @@ def report(label, errors):
     return 0
 
 
+
+
+def concurrent_publish_errors(replay):
+    tags = (NEXT_TAG, TAG)
+    serial = runs_one_at_a_time(replay.wf, "publish", tags)
+    before = "v0.16.0"
+    latest = before
+    errors = []
+    for tag in tags:
+        state = seeded_state(replay.release(tag=tag), draft=True)
+        state["remote_latest"] = latest if serial else before
+        code, stderr, after, _ = replay.run(["publish"], state, {}, tag)
+        errors += [f"{tag}: {violation}" for violation in after["violations"]]
+        if code != 0:
+            errors.append(f"{tag} publish exit {code}: {stderr.strip()}")
+        if after["latest"]:
+            latest = tag
+    if latest != NEXT_TAG:
+        errors.append(f"latest is {latest} after {NEXT_TAG} and then {TAG} publish, want {NEXT_TAG}")
+    return errors
+
+
+def expand_runs(runs, orders):
+    expansions = [[]]
+    for job_names, extra_env in runs:
+        choices = orders if job_names == FULL else [job_names]
+        expansions = [done + [(choice, extra_env)] for done in expansions for choice in choices]
+    return expansions
+
+
 def main():
-    workflow_shell, workflow_env, jobs = parse_workflow(WORKFLOW.read_text())
-    shell_failed = 0
-    problems = shell_problems(workflow_shell, jobs)
-    if problems:
-        shell_failed = len(problems)
-        for problem in problems:
-            print(f"FAIL shell: {problem}")
-    else:
+    wf = workflow.load(WORKFLOW)
+    problems = shell_problems(wf)
+    for problem in problems:
+        print(f"FAIL shell: {problem}")
+    if not problems:
         print("ok: shells")
-    for name in FULL_RUN:
-        if name not in jobs:
-            sys.exit(f"release.yml has no {name} job")
-        if name != "linux-node" and not any(release_step(step) for step in jobs[name]["steps"]):
-            sys.exit(f"{name} has no release steps")
-    sha = subprocess.check_output(
-        ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True
-    ).strip()
+    orders = run_orders(wf["jobs"])
+    sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True).strip()
     print(f"replay at {sha}")
-    for name in FULL_RUN:
-        print(f"  {name}: {' | '.join(step_labels(jobs[name])) or '(no release write)'}")
+    for order in orders:
+        print(f"  full run: {' > '.join(order)}")
 
     failed = report("version order", version_order_errors())
     with tempfile.TemporaryDirectory(prefix="release-replay-") as tmp:
-        replay = Replay(workflow_env, jobs, tmp)
+        replay = Replay(wf, tmp)
         failed += report("minisign-verify crate vectors", crate_vector_errors(replay.root))
         failed += report("public clobber", public_clobber_errors(replay))
+        failed += report(f"{NEXT_TAG} and {TAG} publish at once", concurrent_publish_errors(replay))
 
         current = replay.release()
         newer = replay.release(notes="new")
@@ -1112,19 +1093,19 @@ def main():
 
         add(
             "full run on a new tag",
-            [(FULL_RUN, {})],
+            [(FULL, {})],
             empty_state(),
             {"code": 0, "draft": False, "prerelease": False, "latest_flag": True, "consistent": True, "latest_assembled": True},
         )
         add(
             "full run, then re-run all jobs",
-            [(FULL_RUN, {}), (FULL_RUN, {})],
+            [(FULL, {}), (FULL, {})],
             empty_state(),
             {"code": 0, "draft": False, "consistent": True, "latest_assembled": True},
         )
         add(
             "full run of a release candidate",
-            [(FULL_RUN, {})],
+            [(FULL, {})],
             empty_state(),
             {"code": 0, "draft": False, "prerelease": True, "latest_flag": False, "consistent": True},
             tag=RC_TAG,
@@ -1175,7 +1156,7 @@ def main():
             {
                 "code": 0,
                 "draft": True,
-                "uploaded": BUNDLE,
+                "uploaded": ARM_BUNDLE,
                 "unchanged_from": public(),
                 "consistent": True,
             },
@@ -1208,7 +1189,7 @@ def main():
             public(),
             {
                 "draft": True,
-                "stderr_has": f"{BUNDLE} does not match its signature in latest.json",
+                "stderr_has": f"pinned_{TAG[1:]}_x64-setup.exe does not match its signature in latest.json",
                 "consistent": True,
                 "unchanged_from": public(),
             },
@@ -1293,9 +1274,9 @@ def main():
             )
         add(
             "build re-run cancelled after the old bundle is deleted, then publish",
-            [(["build"], {"REPLAY_UPLOAD_CANCEL": json.dumps({BUNDLE: missing})}), (["publish"], {})],
+            [(["build"], {"REPLAY_UPLOAD_CANCEL": json.dumps({ARM_BUNDLE: missing})}), (["publish"], {})],
             public(),
-            {"draft": True, "stderr_has": f"{BUNDLE} is missing from the release"},
+            {"draft": True, "stderr_has": f"{ARM_BUNDLE} is missing from the release"},
         )
         add(
             "publish re-run on a draft whose SHA256SUMS.minisig signs older sums",
@@ -1326,7 +1307,10 @@ def main():
         add(
             "upload latest.json without SHA256SUMS",
             [(
-                stray_latest + f'bash scripts/release-asset.sh upload "$GITHUB_REF_NAME" node-release/latest.json node-release/{ARM_NAME}\n',
+                "mkdir -p node-release\n"
+                + stray_latest
+                + f"printf 'arm\\n' > node-release/{ARM_NAME}\n"
+                + f'bash scripts/release-asset.sh upload "$GITHUB_REF_NAME" node-release/latest.json node-release/{ARM_NAME}\n',
                 {"GH_TOKEN": "replay"},
             )],
             public(),
@@ -1335,7 +1319,8 @@ def main():
         add(
             "upload latest.json with SHA256SUMS that does not list it",
             [(
-                stray_latest
+                "mkdir -p node-release\n"
+                + stray_latest
                 + "printf '%064d  latest.json\\n' 0 > node-release/SHA256SUMS\n"
                 + 'bash scripts/release-asset.sh upload "$GITHUB_REF_NAME" node-release/SHA256SUMS node-release/latest.json\n',
                 {"GH_TOKEN": "replay"},
@@ -1344,19 +1329,29 @@ def main():
             {"draft": False, "stderr_has": "SHA256SUMS does not list this latest.json", "unchanged_from": public()},
         )
 
+        ran = 0
         for title, runs, state, expect, tag in cases:
-            code, stderr, after, assembled = 0, "", state, None
-            for job_names, extra_env in runs:
-                carried = {**after, "violations": [], "uploads": [], "calls": []}
-                code, stderr, after, assembled = replay.run(job_names, carried, extra_env, tag)
-                if after["violations"]:
-                    break
-            failed += report(title, scenario_errors(code, stderr, after, assembled, expect))
+            expansions = expand_runs(runs, orders)
+            for expansion in expansions:
+                code, stderr, after, assembled = 0, "", state, None
+                for job_names, extra_env in expansion:
+                    carried = {**after, "violations": [], "uploads": [], "calls": []}
+                    if isinstance(job_names, str):
+                        code, stderr, after, assembled = replay.run_script(job_names, carried, extra_env, tag)
+                    else:
+                        code, stderr, after, assembled = replay.run(job_names, carried, extra_env, tag)
+                    if after["violations"]:
+                        break
+                shown = title
+                if len(expansions) > 1:
+                    shown += " [" + "; ".join(" > ".join(names) for names, _ in expansion) + "]"
+                failed += report(shown, scenario_errors(code, stderr, after, assembled, expect))
+                ran += 1
     if failed:
         print(f"{failed} check(s) failed")
     else:
-        print(f"ok: {len(cases)} scenarios")
-    if failed or shell_failed:
+        print(f"ok: {ran} scenarios")
+    if failed or problems:
         return 1
     return 0
 
