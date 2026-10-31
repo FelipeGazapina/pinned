@@ -480,11 +480,11 @@ impl Delegates {
             let agent = self.agents.lock().unwrap().remove(id);
             (agent, dir)
         };
-        if let Some(dir) = dir {
-            crate::branches::drop_worktree(&dir, path);
-        }
         if let Some(agent) = agent {
             agent.stop();
+        }
+        if let Some(dir) = dir {
+            crate::branches::drop_worktree(&dir, path);
         }
     }
 
