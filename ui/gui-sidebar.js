@@ -1417,8 +1417,8 @@ function projectGroups() {
   return sortedProjects(PinnedProjects.groupProjects({ threads, listed, grouping: !!sideSettings.grouping }), (g) => g.tabs);
 }
 function projectWhere(here) {
-  const title = here.also.length ? ` title="${esc(here.also.join(", "))}"` : "";
-  return `<span class="where"${title}>${esc(here.label)}</span>`;
+  const detail = here.also.length ? `${here.label} (${here.also.join(", ")})` : here.label;
+  return `<span class="where" title="${esc(detail)}">${esc(here.label)}</span>`;
 }
 const projectFilter = document.getElementById("project-filter");
 const projectMenu = document.createElement("div");

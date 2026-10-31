@@ -1,20 +1,36 @@
+function idMark(id, peers) {
+  const compact = (value) => String(value).replace(/-/g, "");
+  const mine = compact(id);
+  let n = Math.min(4, mine.length);
+  while (n < mine.length && peers.filter((other) => compact(other).slice(0, n) === mine.slice(0, n)).length > 1) n += 1;
+  return mine.slice(0, n);
+}
+
 export function sessionOn(checkouts, directory) {
   if (!directory?.localId || !directory?.localName) throw new Error("a directory needs a local id and name");
   if (!checkouts?.length) throw new Error("a session needs a checkout");
   for (const checkout of checkouts) {
     if (!checkout?.machine || !checkout?.path) throw new Error("a checkout needs a machine and a path");
   }
-  const nameOf = (id) => (id === directory.localId ? directory.localName : directory.names[id] ?? "machine");
-  const winner = checkouts.find((checkout) => checkout.thread === true) ?? checkouts[0];
+  const baseName = (id) => (id === directory.localId ? directory.localName : directory.names[id] ?? "machine");
+  const known = new Set([directory.localId, ...Object.keys(directory.names), ...checkouts.map((checkout) => checkout.machine)]);
+  const named = (id) => {
+    const raw = baseName(id);
+    const peers = [...known].filter((other) => baseName(other) === raw);
+    return peers.length > 1 ? `${raw} · ${idMark(id, peers)}` : raw;
+  };
+  const winner = checkouts.find((checkout) => checkout.thread === true)
+    ?? checkouts.find((checkout) => directory.online[checkout.machine] === true)
+    ?? checkouts[0];
   const offline = directory.online[winner.machine] !== true;
   const seen = new Set([winner.machine]);
   const also = [];
   for (const checkout of checkouts) {
     if (seen.has(checkout.machine)) continue;
     seen.add(checkout.machine);
-    also.push(nameOf(checkout.machine));
+    also.push(named(checkout.machine));
   }
-  const label = `${nameOf(winner.machine)}${offline ? " (offline)" : ""}${also.length ? ` +${also.length}` : ""}`;
+  const label = `${named(winner.machine)}${offline ? " (offline)" : ""}${also.length ? ` +${also.length}` : ""}`;
   return { machine: winner.machine, path: winner.path, label, offline, also };
 }
 
