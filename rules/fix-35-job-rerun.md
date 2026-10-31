@@ -20,4 +20,4 @@ Two shapes were weighed. Drafting at the start of `sign-node` would unpublish a 
 
 ## What this does not change
 
-`crates/server/src/self_update.rs` is not edited in this round. Hub deploy still does not wait for `publish`. `tauri-apps/tauri-action` stays on the `v0` tag. No tag was pushed, no GitHub release was created or edited, and the workflow was not run.
+`crates/server/src/self_update.rs` is not edited in this round. The merged lib test writes its own bytes and does not read `target/debug/pinned-server`, so the Linux job does not build the binary before `cargo test --lib`. Hub deploy still does not wait for `publish`. `tauri-apps/tauri-action` stays on the `v0` tag. No tag was pushed, no GitHub release was created or edited, and the workflow was not run.

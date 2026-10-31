@@ -18,5 +18,4 @@ jobs:
       - run: bash scripts/test-assemble-latest-json.sh scripts/fixtures/v0.16.0
       - run: python3 scripts/test-release-rerun.py
       - run: npm ci
-      - run: cargo build -p pinned-server --bin pinned-server
       - run: cargo test -p pinned-server --lib
