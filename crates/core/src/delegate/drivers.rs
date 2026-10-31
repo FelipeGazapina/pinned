@@ -975,6 +975,40 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    const RECORD_PID: &str = "PINNED_TEST_RECORD_PID";
+
+    #[test]
+    #[cfg(unix)]
+    fn a_process_recorded_under_another_timezone_and_locale_is_still_killed() {
+        let mut child = crate::process::command("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        let out = crate::process::command(std::env::current_exe().unwrap())
+            .args(["--exact", "delegate::drivers::tests::record_a_start_time", "--ignored", "--nocapture", "--test-threads=1"])
+            .env(RECORD_PID, pid.to_string())
+            .env("TZ", "JST-9")
+            .env("LC_ALL", "ja_JP.UTF-8")
+            .output()
+            .unwrap();
+        let started = String::from_utf8_lossy(&out.stdout).lines().find_map(|line| line.split_once("started=")).map(|(_, started)| started.to_owned()).unwrap_or_default();
+        let now: Vec<super::Process> = super::running(&[pid]).into_iter().map(|now| now.process).collect();
+        super::kill_seen(&[super::Process { pid, started: started.clone() }]);
+        let killed = within(Duration::from_secs(3), || child.try_wait().unwrap().is_some());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(killed, "recorded {started:?} under TZ=JST-9, and pinned now reads {now:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "a_process_recorded_under_another_timezone_and_locale_is_still_killed runs it in a child process"]
+    fn record_a_start_time() {
+        let Some(pid) = std::env::var(RECORD_PID).ok().and_then(|pid| pid.parse().ok()) else { return };
+        for now in super::running(&[pid]) {
+            println!("started={}", now.process.started);
+        }
+    }
+
     #[test]
     #[cfg(unix)]
     fn the_walk_never_targets_pid_0_or_1() {
