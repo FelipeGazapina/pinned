@@ -262,13 +262,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     };
     sink.send(text(&auth)).await.map_err(|e| e.to_string())?;
     let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| "the hub did not answer the sign in".to_string())?;
-    match hello {
-        Some(Ok(Frame::Text(t))) if matches!(serde_json::from_str(&t), Ok(ToMachine::Hello { .. })) => {}
-        Some(Ok(Frame::Close(Some(close)))) if u16::from(close.code) == UNAUTHORIZED => {
-            return Err("the hub does not know this machine's token: pair it again".into())
-        }
-        other => return Err(format!("the hub answered the sign in with {other:?}")),
-    }
+    accept_hello(hello)?;
 
     let (out, mut incoming) = channel::unbounded_channel();
     *shared.out.lock().unwrap() = Some(out.clone());
@@ -279,7 +273,6 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
         shared.send(&MachineFrame::Event { event: MachineEvent::Usage { usage, account } });
     }
     shared.send(&MachineFrame::Event { event: MachineEvent::Update { status: machine.update_snapshot() } });
-    signal_update_ready();
 
     let mut ping = tokio::time::interval(PING);
     let mut heard = Instant::now();
@@ -332,6 +325,37 @@ fn in_order(shared: Arc<Shared>, machine: Arc<Machine>) -> mpsc::Sender<(u64, Ca
         }
     });
     calls
+}
+
+/// Dials the hub once, and writes the ready file only after the hub accepts this binary.
+/// The caller is a probe: it does not listen, resume sessions, or stay connected.
+pub fn prove_connected(creds: &Credentials, version: &str) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        let url = ws_url(&creds.hub)?;
+        let (mut sink, mut stream) = dial(&url).await?.split();
+        let auth = MachineFrame::Auth {
+            token: creds.machine_token.clone(),
+            name: crate::account::hostname(),
+            os: crate::account::os(),
+            version: version.into(),
+        };
+        sink.send(text(&auth)).await.map_err(|e| e.to_string())?;
+        let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| "the hub did not answer the sign in".to_string())?;
+        accept_hello(hello)?;
+        signal_update_ready();
+        Ok(())
+    })
+}
+
+fn accept_hello(hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Error>>) -> Result<(), String> {
+    match hello {
+        Some(Ok(Frame::Text(t))) if matches!(serde_json::from_str::<ToMachine>(&t), Ok(ToMachine::Hello { .. })) => Ok(()),
+        Some(Ok(Frame::Close(Some(close)))) if u16::from(close.code) == UNAUTHORIZED => {
+            Err("the hub does not know this machine's token: pair it again".into())
+        }
+        other => Err(format!("the hub answered the sign in with {other:?}")),
+    }
 }
 
 fn signal_update_ready() {

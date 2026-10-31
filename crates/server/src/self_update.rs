@@ -4,9 +4,11 @@ use pinned_core::machine::{Machine, SelfUpdate};
 use pinned_core::wire::UpdateStatus;
 use sha2::{Digest, Sha256};
 use std::fs::Permissions;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 pub const RELEASE_BASE: &str = "https://github.com/FelipeGazapina/pinned/releases/latest/download";
@@ -15,6 +17,7 @@ pub const RELEASE_BASE: &str = "https://github.com/FelipeGazapina/pinned/release
 pub const RELEASE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIwQ0ZBQUFCNDgxNzI3NTIKUldSU0p4ZElxNnJQc0hENytBanJ6K25Xd0pOVmdEWlpwZzJRak9VemN3Rk1TcmNFUWdtOWNVOGoK";
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+const DOWNLOAD_CAP: u64 = 128 * 1024 * 1024;
 const CONNECT_WAIT: Duration = Duration::from_secs(60);
 const ALLOW_LEGACY_SIGNATURES: bool = false;
 
@@ -41,41 +44,52 @@ pub(crate) struct Plan {
 
 impl SelfUpdate for NodeUpdate {
     fn install(&self, machine: &Machine) -> UpdateStatus {
+        let status = UpdateStatus::Updating { to: String::new() };
+        machine.report(status.clone());
+        machine.keep_updating();
+        let base = self.base.clone();
+        let machine = machine.arc();
+        std::thread::spawn(move || {
+            let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| NodeUpdate { base }.finish(&machine)));
+            if finished.is_err() {
+                machine.report(UpdateStatus::Failed { to: String::new(), reason: "the update stopped unexpectedly".into() });
+            }
+        });
+        status
+    }
+}
+
+impl NodeUpdate {
+    fn finish(&self, machine: &Machine) {
         let triple = match install_triple() {
             Ok(triple) => triple,
             Err(status) => {
-                machine.report(status.clone());
-                return status;
+                machine.report(status);
+                return;
             }
         };
         let dest = match std::env::current_exe() {
             Ok(dest) => dest,
             Err(error) => {
-                let status = UpdateStatus::Failed { to: String::new(), reason: format!("could not find this binary: {error}") };
-                machine.report(status.clone());
-                return status;
+                machine.report(UpdateStatus::Failed { to: String::new(), reason: format!("could not find this binary: {error}") });
+                return;
             }
         };
         let (status, plan) = self.prepare(&triple, &dest, &release_pubkey(), &|status| {
             machine.report(status);
         });
-        let UpdateStatus::Restarting { ref to } = status else { return status };
-        let Some(plan) = plan else { return status };
-        let to = to.clone();
-        let restarting = machine.arc();
-        let reporting = restarting.clone();
-        let dest = dest.clone();
-        restarting.schedule_restart(Box::new(move || {
-            match watch_new_binary(&plan, &dest, CONNECT_WAIT) {
-                Ok(()) => std::process::exit(0),
-                Err(reason) => {
-                    reporting.report(UpdateStatus::Failed { to, reason });
+        let UpdateStatus::Restarting { to } = status else { return };
+        let Some(plan) = plan else { return };
+        match watch_new_binary(&plan, &dest, CONNECT_WAIT) {
+            Ok(()) => {
+                if let Err(reason) = hand_over(machine, &plan, &dest, &to) {
+                    machine.report(UpdateStatus::Failed { to, reason });
                 }
             }
-        }));
-        let status = status.clone();
-        machine.report(status.clone());
-        status
+            Err(reason) => {
+                machine.report(UpdateStatus::Failed { to, reason });
+            }
+        }
     }
 }
 
@@ -182,16 +196,29 @@ pub(crate) fn stage(dest: &Path, bytes: &[u8]) -> Result<(), String> {
     let name = name.to_string_lossy();
     let bak = dest.with_file_name(format!("{name}.bak"));
     let tmp = dest.with_file_name(format!("{name}.tmp"));
+    let marker = unproven_path(dest);
+    // A crash after the bytes are replaced must not let the next stage copy them over the backup.
+    if marker.is_file() {
+        if !bak.is_file() {
+            return Err(format!("could not back up {}: the previous bytes are missing", dest.display()));
+        }
+        restore(dest)?;
+    }
     std::fs::copy(dest, &bak).map_err(|error| format!("could not back up {}: {error}", dest.display()))?;
     let staged = (|| {
         std::fs::write(&tmp, bytes).map_err(|error| format!("could not write {}: {error}", tmp.display()))?;
         std::fs::set_permissions(&tmp, Permissions::from_mode(0o755)).map_err(|error| format!("could not mark {} executable: {error}", tmp.display()))?;
         std::fs::rename(&tmp, dest).map_err(|error| format!("could not replace {}: {error}", dest.display()))
     })();
-    if staged.is_err() {
+    if let Err(error) = staged {
         let _ = std::fs::remove_file(&tmp);
+        return Err(error);
     }
-    staged
+    if let Err(error) = std::fs::write(&marker, b"") {
+        let _ = restore(dest);
+        return Err(format!("could not mark {} unproven: {error}", dest.display()));
+    }
+    Ok(())
 }
 
 fn failed(report: &dyn Fn(UpdateStatus), to: &str, reason: String) -> (UpdateStatus, Option<Plan>) {
@@ -232,7 +259,22 @@ fn download_within(url: &str, timeout: Duration) -> Result<Vec<u8>, String> {
     if !response.status().is_success() {
         return Err(format!("could not download {url}: {}", response.status()));
     }
-    response.bytes().map(|bytes| bytes.to_vec()).map_err(|error| download_error(url, error))
+    read_capped(response, url, DOWNLOAD_CAP)
+}
+
+fn read_capped(mut reader: impl Read, url: &str, cap: u64) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    let mut buf = [0; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf).map_err(|error| format!("could not download {url}: {error}"))?;
+        if n == 0 {
+            return Ok(body);
+        }
+        if body.len() as u64 + n as u64 > cap {
+            return Err(format!("could not download {url}: larger than {cap} bytes"));
+        }
+        body.extend_from_slice(&buf[..n]);
+    }
 }
 
 fn download_error(url: &str, error: reqwest::Error) -> String {
@@ -277,21 +319,30 @@ fn ready_path(dest: &Path) -> PathBuf {
 pub(crate) fn watch_new_binary(plan: &Plan, dest: &Path, wait: Duration) -> Result<(), String> {
     let ready = ready_path(dest);
     let _ = std::fs::remove_file(&ready);
+    // Own process group, so a failed probe is killed with anything it started.
     let mut child = Command::new(&plan.program)
         .args(&plan.args)
         .current_dir(&plan.cwd)
         .env(pinned_core::link::POST_UPDATE_ENV, "1")
         .env(pinned_core::link::UPDATE_READY_ENV, &ready)
+        .process_group(0)
         .spawn()
-        .map_err(|error| format!("could not start {}: {error}", plan.program.display()))?;
+        .map_err(|error| {
+            let start = format!("could not start {}: {error}", plan.program.display());
+            match restore(dest) {
+                Ok(()) => start,
+                Err(restore_error) => format!("{start}; {restore_error}"),
+            }
+        })?;
     let started = std::time::Instant::now();
     loop {
         if ready.is_file() {
-            let _ = child.try_wait();
+            reap(&mut child);
             return Ok(());
         }
         match child.try_wait() {
             Ok(Some(status)) => {
+                kill_group(child.id());
                 if ready.is_file() {
                     return Ok(());
                 }
@@ -299,21 +350,42 @@ pub(crate) fn watch_new_binary(plan: &Plan, dest: &Path, wait: Duration) -> Resu
                 return Err(format!("the new binary exited before it connected ({status})"));
             }
             Ok(None) if started.elapsed() >= wait => {
-                let _ = child.kill();
-                let _ = child.wait();
+                // A ready file written while the probe is being killed is not acceptance.
                 if ready.is_file() {
+                    reap(&mut child);
                     return Ok(());
                 }
+                kill_group(child.id());
+                let _ = child.wait();
                 restore(dest)?;
                 return Err(format!("the new binary did not connect within {}s", wait.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(error) => {
+                kill_group(child.id());
                 restore(dest)?;
                 return Err(format!("could not watch {}: {error}", plan.program.display()));
             }
         }
     }
+}
+
+fn reap(child: &mut Child) {
+    let pid = child.id();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            kill_group(pid);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    kill_group(pid);
+    let _ = child.wait();
+}
+
+fn kill_group(pid: u32) {
+    let _ = Command::new("kill").args(["-KILL", &format!("-{pid}")]).stderr(Stdio::null()).status();
 }
 
 fn plan_for(dest: &Path) -> Result<Plan, String> {
@@ -324,10 +396,37 @@ fn plan_for(dest: &Path) -> Result<Plan, String> {
     })
 }
 
+fn unproven_path(dest: &Path) -> PathBuf {
+    let name = dest.file_name().unwrap_or_default().to_string_lossy();
+    dest.with_file_name(format!("{name}.unproven"))
+}
+
 fn restore(dest: &Path) -> Result<(), String> {
     let name = dest.file_name().unwrap_or_default().to_string_lossy();
     let bak = dest.with_file_name(format!("{name}.bak"));
-    std::fs::rename(&bak, dest).map_err(|error| format!("could not restore {}: {error}", dest.display()))
+    std::fs::rename(&bak, dest).map_err(|error| format!("could not restore {}: {error}", dest.display()))?;
+    let _ = std::fs::remove_file(unproven_path(dest));
+    Ok(())
+}
+
+fn hand_over(machine: &Machine, plan: &Plan, dest: &Path, to: &str) -> Result<(), String> {
+    let _ = std::fs::remove_file(unproven_path(dest));
+    machine.report(UpdateStatus::Restarting { to: to.to_owned() });
+    machine.quit();
+    let error = Command::new(&plan.program)
+        .args(&plan.args)
+        .current_dir(&plan.cwd)
+        .env_remove(pinned_core::link::POST_UPDATE_ENV)
+        .env_remove(pinned_core::link::UPDATE_READY_ENV)
+        .exec();
+    let restored = restore(dest);
+    for tab in machine.reopen_sessions() {
+        let _ = machine.start_claude(&tab, 120, 32);
+    }
+    match restored {
+        Ok(()) => Err(format!("could not replace this process: {error}")),
+        Err(restore_error) => Err(format!("could not replace this process: {error}; {restore_error}")),
+    }
 }
 
 #[cfg(test)]
@@ -590,6 +689,12 @@ mod tests {
         let err = download_within(&format!("http://{address}/pinned-server"), std::time::Duration::from_millis(200)).unwrap_err();
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "{err} after {:?}", started.elapsed());
         assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[test]
+    fn a_download_stops_when_the_body_passes_the_cap() {
+        let err = read_capped(std::io::Cursor::new(vec![1; 32]), "http://release/binary", 8).unwrap_err();
+        assert!(err.contains("larger than 8 bytes"), "{err}");
     }
 
     fn server_binary() -> PathBuf {

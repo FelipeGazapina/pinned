@@ -140,6 +140,10 @@ fn node(args: &[String]) -> Result<(), String> {
     let args = Args::parse(args, &["config-dir"], 0)?;
     let dir = args.config_dir();
     let creds = Credentials::load(&dir).ok_or_else(|| format!("{} has no account.json: run `pinned-server pair <hub url> <code>` first", dir.display()))?;
+    // The probe only proves the hub accepts this binary. The parent then replaces itself.
+    if std::env::var_os(link::POST_UPDATE_ENV).is_some() {
+        return link::prove_connected(&creds, VERSION);
+    }
     let exe = std::env::current_exe().map_err(|e| format!("could not find pinned-server's own binary: {e}"))?;
     let mut launch = Launch::prepare(&exe).map_err(|e| format!("could not prepare claude's settings: {e}"))?;
     // Reminders notify on a desktop, which a node doesn't have, so its sessions get delegation and the project tools.

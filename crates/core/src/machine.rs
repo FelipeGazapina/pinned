@@ -386,6 +386,8 @@ struct Gate {
     installer: Option<Arc<dyn SelfUpdate>>,
     busy: bool,
     busy_gen: u64,
+    /// Set when `install` returned `Updating` but the install is still running in the background.
+    continuing: bool,
     phase: Option<UpdateStatus>,
     restart: Option<Box<dyn FnOnce() + Send>>,
     restart_gen: u64,
@@ -394,7 +396,7 @@ struct Gate {
 
 impl Default for Gate {
     fn default() -> Self {
-        Self { installer: None, busy: false, busy_gen: 0, phase: None, restart: None, restart_gen: 0, flusher: None }
+        Self { installer: None, busy: false, busy_gen: 0, continuing: false, phase: None, restart: None, restart_gen: 0, flusher: None }
     }
 }
 
@@ -413,9 +415,10 @@ impl Drop for Busy<'_> {
         if gate.busy_gen != self.generation {
             return;
         }
-        if !matches!(gate.phase, Some(UpdateStatus::Restarting { .. })) {
-            gate.busy = false;
+        if gate.continuing || matches!(gate.phase, Some(UpdateStatus::Restarting { .. })) {
+            return;
         }
+        gate.busy = false;
     }
 }
 
@@ -544,6 +547,7 @@ impl Machine {
             let mut gate = self.gate.lock().unwrap();
             gate.phase = Some(status);
             if terminal {
+                gate.continuing = false;
                 gate.busy = false;
                 gate.busy_gen = gate.busy_gen.wrapping_add(1);
             }
@@ -556,6 +560,11 @@ impl Machine {
                 true
             }
         }
+    }
+
+    /// Keeps the update gate busy after `install` returns `Updating`, until a final phase is reported.
+    pub fn keep_updating(&self) {
+        self.gate.lock().unwrap().continuing = true;
     }
 
     pub fn schedule_restart(&self, restart: Box<dyn FnOnce() + Send>) {
@@ -1882,6 +1891,12 @@ impl Machine {
                 message => other(message),
             }
         })
+    }
+
+    /// Clears the shutdown flag and reopens sessions saved by the last `quit`.
+    pub fn reopen_sessions(&self) -> Vec<TabId> {
+        self.quitting.store(false, Ordering::SeqCst);
+        self.restore_tabs()
     }
 
     /// Ends every session as the machine shuts down, keeping them saved for the next launch.
