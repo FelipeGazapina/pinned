@@ -445,8 +445,9 @@ body[data-empty="true"] :is(#actions-edge, #actions), #projects:not([hidden]) ~ 
   border-radius: 8px; background: rgb(var(--s-ink-rgb, 255 255 255) / 0.02); }
 .machine-row .who { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .machine-row .who > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.confirm { padding: 8px 10px; border: 1px solid #e5484d; border-radius: 8px; line-height: 1.45; }
-.confirm .actions { margin-top: 6px; }
+.confirm, .sync-stopped { padding: 8px 10px; border: 1px solid #e5484d; border-radius: 8px; line-height: 1.45; }
+:is(.confirm, .sync-stopped) .actions { margin-top: 6px; }
+.sync-stopped .hint { display: block; margin: 4px 0; overflow-wrap: anywhere; }
 #settings .confirm button.danger { background: #e5484d; border-color: #e5484d; color: #fff; }
 .row.command code { flex: 1; min-width: 0; padding: 6px 8px; border-radius: 6px; background: var(--s-field, #0000004d); user-select: text;
   font: 11px/1.45 ui-monospace, Menlo, monospace; word-break: break-all; }

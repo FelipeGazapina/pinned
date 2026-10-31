@@ -100,6 +100,12 @@ body[data-jump-hints] .thread-row[data-jump]::after { display: block; }
 #side-notice { flex: none; margin: 0 8px 4px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--g-border); background: var(--g-accent);
   font-size: 12px; color: var(--g-side-muted); overflow-wrap: anywhere; }
 #side-notice button { color: var(--g-side-fg); text-decoration: underline; }
+#sync-alert { flex: none; display: flex; align-items: center; gap: 6px; margin: 0 8px 4px; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid rgb(var(--g-error-rgb) / 0.5); background: rgb(var(--g-error-rgb) / 0.06); font-size: 12px; color: var(--g-side-fg); }
+#sync-alert[hidden] { display: none; }
+#sync-alert .i { width: 14px; height: 14px; flex: none; color: var(--g-error); }
+#sync-alert span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#sync-alert button { flex: none; text-decoration: underline; }
 
 #side-menu { position: fixed; z-index: 60; min-width: 220px; max-width: 300px; padding: 4px; border-radius: 12px; border: 1px solid var(--g-border);
   background: rgb(var(--g-raised-rgb) / 0.96); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); box-shadow: 0 12px 28px -12px var(--g-shadow);

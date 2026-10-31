@@ -310,6 +310,7 @@ function renderSidebar() {
   if (!rows.length) threadList.innerHTML = `<p class="empty" role="status">${tabs.length ? "No threads found" : "No threads yet"}</p>`;
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
   document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
+  renderSyncAlert();
   tickDurations();
   scheduleWake();
 }
@@ -752,6 +753,16 @@ function undoLast() {
   return true;
 }
 sideNotice.onclick = (e) => e.target.closest("[data-undo]") && undoLast();
+
+const syncAlert = document.getElementById("sync-alert");
+syncAlert.onclick = (e) => e.target.closest("button") && openSettings("machines");
+
+function renderSyncAlert() {
+  const stopped = account ? [...machines.keys()].filter((id) => machines.get(id).syncStopped) : [];
+  const html = stopped.length ? `${icon("circle-alert")}<span>Sync stopped on ${esc(stopped.map(machineName).join(", "))}</span><button type="button">Review</button>` : "";
+  if (syncAlert.innerHTML !== html) syncAlert.innerHTML = html;
+  syncAlert.hidden = !html;
+}
 
 /** Runs `change` on the marks and returns a function that puts back what it touched. */
 function changeMarks(key, change) {
