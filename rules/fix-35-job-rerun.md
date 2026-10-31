@@ -2,7 +2,7 @@
 
 PR 35. GitHub re-runs one job without the jobs it needs. On `84f8ec6`, `sign-node` uploaded `latest.json` and then signed. Re-running that job on a published tag skipped `draft`. If the signer failed, the public tag had a new manifest and the old `SHA256SUMS`. Linux nodes then fail with `the release checksum does not match`.
 
-`scripts/release-asset.sh` is the only path that writes a release asset or clears the draft flag.
+`scripts/release-asset.sh draft` runs before a desktop upload and before the node upload. `publish` in that script is the only step that clears the draft flag.
 
 - `draft` sets the release to draft and exits unless `isDraft` is true.
 - `upload` checks that `SHA256SUMS` precedes `latest.json` and that the sums list that file, then drafts, then uploads.
