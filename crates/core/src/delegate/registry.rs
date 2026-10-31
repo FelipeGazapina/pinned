@@ -113,6 +113,10 @@ impl Delegates {
         self.persist();
     }
 
+    pub fn set_budget(&self, _id: &str, _ms: u64) {}
+
+    pub fn check_budgets(&self, _now: u64, _path: Option<&str>) {}
+
     pub fn note_parent(&self, id: &str, session: Option<String>) {
         let Some(session) = session.filter(|session| !session.is_empty()) else { return };
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {

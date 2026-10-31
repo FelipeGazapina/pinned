@@ -5379,6 +5379,39 @@ while True:
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn the_notice_loop_stops_a_task_past_its_hard_limit() {
+        use std::os::unix::process::CommandExt;
+        let m = Machine::new(launch(), None, None, |_| {});
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Runaway".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.set_budget(&task.id, 1);
+        let mut sleeper = crate::process::command("sleep");
+        sleeper.arg("20").process_group(0);
+        let child = std::sync::Mutex::new(sleeper.spawn().unwrap());
+        let pid = child.lock().unwrap().id();
+        m.delegates.remember_pid(&task.id, pid);
+        m.arm_notices();
+        wait_for("the hard limit", || m.delegates.is_terminal(&task.id));
+        wait_for("the runaway child to stop", || child.lock().unwrap().try_wait().unwrap().is_some());
+        let status = m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
+        assert_eq!(status["workState"], "cancelled", "{status}");
+    }
+
     /// A worker report must not type over a draft. The orchestrator's Stop hook carries it.
     #[test]
     #[cfg(unix)]

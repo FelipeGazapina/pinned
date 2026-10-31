@@ -668,7 +668,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "clientRequestId".to_owned(),
+                "budgetMs".to_owned(),
+                "clientRequestId".into(),
                 "interactionMode".into(),
                 "isolation".into(),
                 "mode".into(),

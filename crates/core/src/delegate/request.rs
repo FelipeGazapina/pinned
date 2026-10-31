@@ -91,6 +91,7 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         isolation,
         mode,
         timeout_ms,
+        budget_ms: DEFAULT_BUDGET_MS,
         interaction,
         runtime,
         role,

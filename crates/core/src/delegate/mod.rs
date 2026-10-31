@@ -17,6 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 const STEP_KEEP: usize = 8;
 const STEP_CHARS: usize = 400;
 pub const DEFAULT_TIMEOUT_MS: u64 = 10 * 60 * 1000;
+pub const DEFAULT_BUDGET_MS: u64 = 60 * 60 * 1000;
 const MODEL_CACHE: Duration = Duration::from_secs(10 * 60);
 const MODEL_MISS: Duration = Duration::from_secs(15);
 const CATALOG_WAIT: Duration = Duration::from_secs(2);
@@ -174,6 +175,8 @@ pub struct Request {
     pub isolation: Isolation,
     pub mode: Mode,
     pub timeout_ms: u64,
+    #[serde(default = "default_budget")]
+    pub budget_ms: u64,
     #[serde(default)]
     pub interaction: Interaction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,6 +211,10 @@ impl WorkState {
     pub fn terminal(self) -> bool {
         matches!(self, WorkState::ResultAvailable | WorkState::Failed | WorkState::Cancelled)
     }
+}
+
+fn default_budget() -> u64 {
+    DEFAULT_BUDGET_MS
 }
 
 /// Who is calling. A tab session sends `PINNED_TAB`. A child sends `PINNED_TASK`.
@@ -526,6 +533,7 @@ mod tests {
             "isolation": "worktree",
             "mode": "wait",
             "timeoutMs": 5000,
+            "budgetMs": 90000,
             "interactionMode": "plan"
         });
         assert_eq!(
@@ -542,6 +550,7 @@ mod tests {
                 isolation: Isolation::Worktree,
                 mode: Mode::Wait,
                 timeout_ms: 5000,
+                budget_ms: 90_000,
                 interaction: Interaction::Plan,
                 runtime: None,
                 role: None,
@@ -586,11 +595,16 @@ mod tests {
                 isolation: Isolation::Shared,
                 mode: Mode::Async,
                 timeout_ms: DEFAULT_TIMEOUT_MS,
+                budget_ms: DEFAULT_BUDGET_MS,
                 interaction: Interaction::Inherit,
                 runtime: None,
                 role: None,
                 client_request_id: None,
             }
+        );
+        assert_eq!(
+            parse_request(&json!({"task": "x", "budgetMs": 0})).unwrap_err(),
+            "budgetMs must be a number of milliseconds above 0"
         );
         assert_eq!(parse_request(&json!({})).unwrap_err(), "task is required");
         assert_eq!(
@@ -834,6 +848,211 @@ grok-4.7-high - Grok 4.7  High
         path
     }
 
+    fn new_on(delegates: &Delegates, provider: Provider) -> Task {
+        delegates.begin(NewTask {
+            parent: Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Fix".into(),
+            account: provider.spec().builtin.into(),
+            provider,
+            model: None,
+            cwd: PathBuf::from("/tmp"),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        })
+    }
+
+    fn parent() -> Caller {
+        Caller { tab: Some("tab-1".into()), task: None }
+    }
+
+    /// A process a scripted worker left behind, read from the pid file it wrote. Dropping it kills
+    /// the process and its group, so a failing run does not leave it behind.
+    #[cfg(unix)]
+    struct Leftover(PathBuf);
+
+    #[cfg(unix)]
+    impl Leftover {
+        fn pid(&self) -> i32 {
+            let start = Instant::now();
+            loop {
+                if let Some(pid) = std::fs::read_to_string(&self.0).ok().and_then(|text| text.trim().parse().ok()) {
+                    return pid;
+                }
+                assert!(start.elapsed() < Duration::from_secs(5), "{} was never written", self.0.display());
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Leftover {
+        fn drop(&mut self) {
+            if let Some(pid) = std::fs::read_to_string(&self.0).ok().and_then(|text| text.trim().parse::<i32>().ok()) {
+                unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn stopped(pid: i32) -> bool {
+        let start = Instant::now();
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            if start.elapsed() > Duration::from_secs(3) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
+    /// Prints `lines`, then starts a loop that prints a line every second in a session of its own and
+    /// waits on it. Claude Code and the Cursor CLI run a background shell the same way.
+    #[cfg(unix)]
+    fn worker(lines: &[&str], pidfile: &Path) -> String {
+        let replies: Vec<String> = lines.iter().map(|line| format!("echo '{line}'")).collect();
+        format!(
+            "{}\nperl -e 'use POSIX (); POSIX::setsid(); exec @ARGV' sh -c 'echo $$ > \"$0\"; while :; do echo tick; sleep 1; done' '{}' &\nwait",
+            replies.join("\n"),
+            pidfile.display()
+        )
+    }
+
+    #[cfg(unix)]
+    fn run(delegates: &Arc<Delegates>, task: &Task, bin: &Path, dir: &Path) -> (u32, std::sync::mpsc::Receiver<String>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sink = delegates.clone();
+        let id = task.id.clone();
+        let pid = spawn(
+            ChildSpec { bin, argv: &[], cwd: dir, env: &[], path: None, strip: &[] },
+            move |event| {
+                if let Some(tab) = sink.apply(&id, event, None) {
+                    let _ = tx.send(tab);
+                }
+            },
+        )
+        .unwrap();
+        delegates.remember_pid(&task.id, pid);
+        (pid, rx)
+    }
+
+    #[cfg(unix)]
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pinned-delegate-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const INIT: &str = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+    const REPLY: &str = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"PR opened"}]}}"#;
+
+    #[test]
+    #[cfg(unix)]
+    fn a_final_reply_ends_the_task_and_stops_what_the_worker_left_running() {
+        let dir = scratch("leftover");
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"result":"PR opened"}"#;
+        let codex = [
+            r#"{"type":"thread.started","thread_id":"t1"}"#,
+            r#"{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"PR opened"}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ];
+        let mut failures = vec![];
+        for (provider, lines) in [(Provider::Claude, [INIT, REPLY, result]), (Provider::Cursor, [INIT, REPLY, result]), (Provider::Codex, codex)] {
+            let name = provider.spec().name;
+            let leftover = Leftover(dir.join(format!("{name}.pid")));
+            let bin = script(&dir, name, &worker(&lines, &leftover.0));
+            let delegates = Arc::new(Delegates::default());
+            let task = new_on(&delegates, provider);
+            let (agent, told) = run(&delegates, &task, &bin, &dir);
+            let background = leftover.pid();
+            if told.recv_timeout(Duration::from_secs(5)).as_deref() != Ok("tab-1") {
+                failures.push(format!("{name}: the parent was not told, the task is {}", delegates.status(&parent(), &task.id).unwrap()["workState"]));
+                continue;
+            }
+            let status = delegates.status(&parent(), &task.id).unwrap();
+            if (status["workState"].as_str(), status["summary"].as_str()) != (Some("result_available"), Some("PR opened")) {
+                failures.push(format!("{name}: finished as {status}"));
+            }
+            if !stopped(background) {
+                failures.push(format!("{name}: the background loop {background} kept running"));
+            }
+            if !stopped(agent as i32) {
+                failures.push(format!("{name}: the agent {agent} kept running"));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The Cursor CLI holds back its result line while a background shell it started is alive.
+    #[test]
+    #[cfg(unix)]
+    fn a_runaway_worker_is_reported_past_its_budget_then_stopped_at_its_hard_limit() {
+        let dir = scratch("runaway");
+        let leftover = Leftover(dir.join("loop.pid"));
+        let bin = script(&dir, "cursor-agent", &worker(&[INIT, REPLY], &leftover.0));
+        let delegates = Arc::new(Delegates::default());
+        let task = new_on(&delegates, Provider::Cursor);
+        delegates.set_budget(&task.id, 60_000);
+        let (agent, _) = run(&delegates, &task, &bin, &dir);
+        let background = leftover.pid();
+        let start = Instant::now();
+        while !delegates.status(&parent(), &task.id).unwrap()["recentSteps"].to_string().contains("PR opened") {
+            assert!(start.elapsed() < Duration::from_secs(5), "the reply never arrived");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let notice = |delegates: &Delegates| delegates.claim_notice("tab-1").map(|(text, _)| text);
+
+        delegates.check_budgets(now + 30_000, None);
+        assert_eq!(notice(&delegates), None, "a task inside its budget was reported");
+        delegates.check_budgets(now + 60_000, None);
+        let late = notice(&delegates).unwrap_or_default();
+        assert!(late.contains(&task.id) && late.contains("still working after 1 min") && late.contains("PR opened"), "{late}");
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        assert_eq!(status["workState"], "working");
+        assert!(status["next"].as_str().unwrap_or("").contains("past its budget of 1 min"), "{status}");
+        delegates.check_budgets(now + 120_000, None);
+        assert_eq!(notice(&delegates), None, "the budget notice was sent twice");
+
+        delegates.check_budgets(now + 240_000, None);
+        let finished = notice(&delegates).unwrap_or_default();
+        assert!(finished.contains("finished: cancelled"), "{finished}");
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        assert_eq!(status["workState"], "cancelled", "{status}");
+        assert!(status["error"].as_str().unwrap_or("").contains("past its limit of 4 min"), "{status}");
+        assert!(stopped(background), "the background loop {background} kept running");
+        assert!(stopped(agent as i32), "the agent {agent} kept running");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Cursor CLI leaves a worker server in its process group after it exits.
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_that_exits_leaves_nothing_in_its_process_group() {
+        let dir = scratch("exited");
+        let leftover = Leftover(dir.join("server.pid"));
+        let body = format!("echo '{INIT}'\necho '{REPLY}'\nsleep 30 >/dev/null 2>&1 &\necho $! > '{}'\nexit 0", leftover.0.display());
+        let bin = script(&dir, "cursor-agent", &body);
+        let delegates = Arc::new(Delegates::default());
+        let task = new_on(&delegates, Provider::Cursor);
+        let (_, told) = run(&delegates, &task, &bin, &dir);
+        let server = leftover.pid();
+        assert_eq!(told.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("tab-1"));
+        assert_eq!(delegates.status(&parent(), &task.id).unwrap()["summary"], "PR opened");
+        assert!(stopped(server), "the agent exited and left {server} running in its process group");
+        assert_eq!(delegates.remembered(&task.id), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_child_process_returns_the_fixtures_text_and_cancel_kills_it() {
@@ -965,15 +1184,6 @@ grok-4.7-high - Grok 4.7  High
         };
         let delegates = Delegates::default();
 
-        let exited = new_cursor(&delegates, Mode::Async);
-        let (mut child, pid) = spawn_sleeper();
-        delegates.remember_pid(&exited.id, pid);
-        assert_eq!(delegates.remembered(&exited.id), Some(pid));
-        delegates.apply(&exited.id, ChildEvent::Exited { code: Some(1), stderr: "gone".into() }, None);
-        assert_eq!(delegates.remembered(&exited.id), None, "an exited child kept its pid");
-        delegates.kill_remembered();
-        assert!(child.try_wait().unwrap().is_none(), "quit killed pid {pid} after the child had exited");
-
         let failed = new_cursor(&delegates, Mode::Async);
         let (mut failed_child, failed_pid) = spawn_sleeper();
         delegates.remember_pid(&failed.id, failed_pid);
@@ -992,8 +1202,6 @@ grok-4.7-high - Grok 4.7  High
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        let _ = child.kill();
-        let _ = child.wait();
         let _ = failed_child.kill();
         let _ = failed_child.wait();
         let _ = late_child.wait();
