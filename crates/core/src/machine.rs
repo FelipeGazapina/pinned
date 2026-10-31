@@ -3504,6 +3504,46 @@ process.stdout.write(JSON.stringify({
     }
 
     #[test]
+    fn a_push_is_the_poll_page() {
+        let root = temp("thread-same-page");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
+        let dir = root.join("config/accounts/work/projects/demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s1.jsonl");
+        std::fs::write(&file, assistant_line("ready")).unwrap();
+        let mut cursors = HashMap::new();
+        m.push_transcript_lines(&mut cursors);
+        assert!(thread_events(&heard).is_empty(), "the first look must not resend the history");
+        let agents = dir.join("s1/subagents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("agent-a1.meta.json"), r#"{"agentType":"general-purpose","description":"Look around","toolUseId":"toolu_1"}"#).unwrap();
+        std::fs::write(
+            agents.join("agent-a1.jsonl"),
+            "{\"type\":\"assistant\",\"uuid\":\"x\",\"timestamp\":\"t5\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Mapped.\"}]}}\n",
+        )
+        .unwrap();
+        std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        let pushed = thread_events(&heard);
+        assert_eq!(pushed.len(), 1, "one new line, one push");
+        let from = pushed[0]["from"].as_u64().unwrap();
+        let poll = serde_json::to_value(m.thread(&tab, from).unwrap()).unwrap();
+        assert_eq!(poll["items"][0]["text"], "visible");
+        assert_eq!(poll["agents"][0]["name"], "Look around", "the poll lists the agent beside that line");
+        assert_eq!(pushed[0]["agents"], poll["agents"], "the push drops the agents the poll returns");
+        for key in ["session", "items", "next", "reset", "todos", "context", "branch"] {
+            assert_eq!(pushed[0][key], poll[key], "{key}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_transcript_missing_for_one_tick_still_pushes_the_next_line() {
         let root = temp("thread-miss");
         let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
