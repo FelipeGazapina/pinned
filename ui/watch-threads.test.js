@@ -259,6 +259,6 @@ test("signing out leaves the watch of this computer's tabs and stops calling the
     app.state.tick();
   }
   await settle();
-  assert.deepEqual(app.sent, [], "this computer's unchanged watch was sent again");
+  assert.deepEqual(app.sent, [], "this computer's watch is not sent again");
   assert.deepEqual(app.attempts, ["box"], "one unwatch into the closing hub, then none");
 });

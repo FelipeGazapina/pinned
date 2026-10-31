@@ -23,8 +23,7 @@ const UNWATCHED: (u16, u16) = (120, 32);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
-/// The page polls a thread this often, so a transcript that is still missing is searched for no more often.
-const MISSED_SEARCH_GAP: Duration = Duration::from_millis(1200);
+const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
 
 pub type Event = MachineEvent;
@@ -431,11 +430,9 @@ impl Drop for Busy<'_> {
     }
 }
 
-/// What the thread watcher last learned of one tab's transcript.
 #[derive(Default)]
 struct TranscriptLook {
     found: Option<Transcript>,
-    /// The last search of every project folder, when it found nothing.
     missed: Option<Missed>,
 }
 
@@ -942,7 +939,7 @@ impl Machine {
                 if now < missed.at + missed.gap {
                     return None;
                 }
-                (missed.gap * 2).min(MISSED_SEARCH_GAP)
+                (missed.gap * 2).min(PAGE_POLL)
             }
             _ => THREAD_LOOK_EVERY,
         };
@@ -981,8 +978,6 @@ impl Machine {
         self.every(THREAD_LOOK_EVERY, move |machine| machine.nudge_thread_watchers(&mut seen));
     }
 
-    /// Runs `tick` every `period` on a thread of its own until the machine is dropped. A quitting machine
-    /// skips its ticks, and a failed self-update's `reopen_sessions` finds the loop still running.
     fn every(&self, period: Duration, mut tick: impl FnMut(&Machine) + Send + 'static) {
         let me = self.me.clone();
         std::thread::spawn(move || loop {
@@ -3607,14 +3602,14 @@ mod tests {
         for _ in 0..10 {
             m.nudge_thread_watchers(&mut looks);
         }
-        assert_eq!(scans(), before + 1, "ten ticks at the prompt searched every project folder each time");
+        assert_eq!(scans(), before + 1, "ten ticks at the prompt search once");
         m.tab(&tab, |t| t.status = Some(AgentStatus::Working)).unwrap();
         m.nudge_thread_watchers(&mut looks);
         assert_eq!(scans(), before + 2, "a turn that starts searches at once");
         std::fs::write(projects.join("p007/s1.jsonl"), assistant_line("first")).unwrap();
         std::thread::sleep(THREAD_LOOK_EVERY * 2);
         m.nudge_thread_watchers(&mut looks);
-        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })], "the transcript written after the turn started");
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })], "the transcript written after the turn started nudges");
         let _ = std::fs::remove_dir_all(root);
     }
 

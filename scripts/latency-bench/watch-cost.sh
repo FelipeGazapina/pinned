@@ -1,10 +1,4 @@
 #!/bin/bash
-# CPU of one node process with 15 restored sessions and 300 project directories,
-# while a client is watching those tabs. HOME and PATH stay inside the scratch
-# dir, so this never reads the user's Claude home or launches the installed claude.
-#
-#   scripts/latency-bench/watch-cost.sh
-#   WATCH_OUT=.audit/watch-cpu.json scripts/latency-bench/watch-cost.sh
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)

@@ -514,12 +514,11 @@ const releaseNumber = (version) => {
   const [, major, minor, patch] = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version ?? "") ?? [, 0, 0, 0];
   return Number(major) * 1e6 + Number(minor) * 1e3 + Number(patch);
 };
-/** The newest release whose open_tab takes any path. A node that names no version counts as one of these. */
-const OPENS_ANY_PATH_THROUGH = releaseNumber("0.16.0");
+const NEWEST_RELEASE_THAT_OPENS_ANY_PATH = releaseNumber("0.16.0");
 
 async function openRemote(machine, path, bypass) {
   let id;
-  if (releaseNumber(machines.get(machine)?.view.version) > OPENS_ANY_PATH_THROUGH) {
+  if (releaseNumber(machines.get(machine)?.view.version) > NEWEST_RELEASE_THAT_OPENS_ANY_PATH) {
     id = await callOn(machine, { cmd: "open_tab", path, bypass });
   } else {
     id = await callOn(machine, { cmd: "open_tab", path: null, bypass });

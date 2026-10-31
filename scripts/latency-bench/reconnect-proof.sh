@@ -1,9 +1,4 @@
 #!/bin/bash
-# Local hub, node, and the phone client through the bench proxy. Closes the
-# client socket, then restarts the node. Prints how long a transcript line takes
-# to reach a nudged read after each reconnect. HOME stays in the scratch dir.
-#
-#   RTT_MS=150 scripts/latency-bench/reconnect-proof.sh
 set -euo pipefail
 set +m
 

@@ -800,12 +800,12 @@ mod tests {
         assert!(failed.starts_with("could not replace this process"), "{failed}");
 
         let s1 = machine.tabs().into_iter().find(|tab| tab.session.as_deref() == Some("s1")).expect("s1 did not reopen").id;
-        assert!(!before.contains(&s1), "the reopened tab kept the old id {s1}");
+        assert!(!before.contains(&s1), "the reopened tab {s1} has a new id");
         while nudges.try_recv().is_ok() {}
         machine.call(Call::WatchThreads { tabs: vec![s1.clone()] }).unwrap();
-        assert_eq!(nudges.recv_timeout(Duration::from_secs(2)), Ok(s1.clone()), "the first look after the hand-over failed");
+        assert_eq!(nudges.recv_timeout(Duration::from_secs(2)), Ok(s1.clone()), "the reopened tab is looked at once it is watched");
         std::fs::OpenOptions::new().append(true).open(projects.join("s1.jsonl")).unwrap().write_all(b"{\"type\":\"user\"}\n").unwrap();
-        assert_eq!(nudges.recv_timeout(Duration::from_secs(2)), Ok(s1), "the line appended after the hand-over failed");
+        assert_eq!(nudges.recv_timeout(Duration::from_secs(2)), Ok(s1), "a line appended after the failed hand-over nudges");
         machine.quit();
         let _ = std::fs::remove_dir_all(&dir);
     }

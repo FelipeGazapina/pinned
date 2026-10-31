@@ -2325,7 +2325,7 @@ fn a_client_that_disconnects_ends_its_watch_on_the_machine() {
     std::thread::sleep(Duration::from_millis(300));
     append_line(&file, "nobody");
     std::thread::sleep(Duration::from_millis(250));
-    assert_eq!(*nudges.lock().unwrap(), 1, "the machine still looked at the tab for a client that left");
+    assert_eq!(*nudges.lock().unwrap(), 1, "the machine stops looking once the only client watching leaves");
     node.kill();
 }
 

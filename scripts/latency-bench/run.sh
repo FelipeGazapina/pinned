@@ -1,16 +1,4 @@
 #!/bin/bash
-# Phone-to-machine latency bench. Throwaway Postgres, a local hub, and a node
-# whose claude is scripts/latency-bench/fake-claude. A TCP proxy on each side
-# of the hub holds bytes for half of RTT_MS (default 150). Prints p50/p95 and
-# writes the JSON next to the scratch dir.
-#
-#   scripts/latency-bench/run.sh
-#   RTT_MS=0 scripts/latency-bench/run.sh
-#   ITERATIONS=40 RTT_MS=150 scripts/latency-bench/run.sh
-#
-# LATENCY_DIR, LATENCY_PG_PORT (5503), LATENCY_HUB_PORT (8791),
-# LATENCY_CLIENT_PORT (8792) and LATENCY_NODE_PORT (8793) override the scratch
-# location and ports. Nothing here talks to a hub that is not on 127.0.0.1.
 set -euo pipefail
 set +m
 

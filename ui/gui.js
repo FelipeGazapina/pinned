@@ -7,7 +7,6 @@ const panelBody = document.getElementById("panel-body");
 
 const guiOn = () => document.body.dataset.mode === "gui";
 const POLL_MS = 1200;
-/** A streaming tab nudges every 40 ms. Next to the machine a read takes no time, so reads of one tab start this far apart. */
 const THREAD_READ_GAP_MS = 100;
 const narrow = (px) => matchMedia(`(max-width: ${px}px)`).matches;
 
@@ -267,12 +266,10 @@ function renderGui() {
   publishThreadWatch();
 }
 
-/** The tabs the page keeps current: the shown one, terminals, and any whose turn or agents still run. */
 const followed = (tab) =>
   !(terminalOnly(tab) && tab.view.program === "sign-in") && (tab === active || turnLive(tab) || phaseOf(tab) === "delegating" || terminalOnly(tab));
 
-/** The tabs each machine was last asked to watch, sorted and joined. */
-const watching = new Map();
+const sentWatch = new Map();
 let watchGeneration = 0;
 
 function publishThreadWatch() {
@@ -280,25 +277,25 @@ function publishThreadWatch() {
   if (guiOn() && !document.hidden) {
     for (const tab of tabs) if (followed(tab)) wanted.set(tab.machine, [...(wanted.get(tab.machine) ?? []), tab.view.id]);
   }
-  for (const machine of watching.keys()) if (!machines.has(machine)) watching.delete(machine);
+  for (const machine of sentWatch.keys()) if (!machines.has(machine)) sentWatch.delete(machine);
   const generation = watchGeneration;
-  for (const machine of new Set([...watching.keys(), ...wanted.keys()])) {
+  for (const machine of new Set([...sentWatch.keys(), ...wanted.keys()])) {
     const ids = wanted.get(machine) ?? [];
     const key = [...ids].sort().join(",");
-    const before = watching.get(machine);
+    const before = sentWatch.get(machine);
     if ((before ?? "") === key) continue;
-    if (key) watching.set(machine, key);
-    else watching.delete(machine);
+    if (key) sentWatch.set(machine, key);
+    else sentWatch.delete(machine);
     callOn(machine, { cmd: "watch_threads", tabs: ids }).catch(() => {
-      if (watchGeneration !== generation || watching.get(machine) !== (key || undefined)) return;
-      if (before === undefined) watching.delete(machine);
-      else watching.set(machine, before);
+      if (watchGeneration !== generation || sentWatch.get(machine) !== (key || undefined)) return;
+      if (before === undefined) sentWatch.delete(machine);
+      else sentWatch.set(machine, before);
     });
   }
 }
 
 function forgetThreadWatch() {
-  watching.clear();
+  sentWatch.clear();
   watchGeneration++;
 }
 

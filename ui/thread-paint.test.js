@@ -327,14 +327,14 @@ test("a streaming tab reads at most once per gap, and the first nudge after a pa
     s.append({ item: text("a") });
     net.nudge("tab-1");
     await net.drain();
-    assert.deepEqual(painted().items, ["start", "a"], "the first nudge after a pause waited");
+    assert.deepEqual(painted().items, ["start", "a"], "the first nudge after a pause reads at once");
     for (const body of ["b", "c", "d"]) {
       clock.advance(10);
       s.append({ item: text(body) });
       net.nudge("tab-1");
       await net.drain();
     }
-    assert.deepEqual(painted().items, ["start", "a"], "nudges 10 ms apart each read at once");
+    assert.deepEqual(painted().items, ["start", "a"], "nudges 10 ms apart wait for the gap");
     clock.advance(100);
     await settle();
     await net.drain();
