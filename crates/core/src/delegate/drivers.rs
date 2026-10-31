@@ -297,11 +297,24 @@ fn parse_claude(line: &str) -> Vec<StreamEvent> {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return vec![];
     };
-    if let Some(event) = conversation_or_final(&value) {
-        return vec![event];
+    let edges = turn_edges(&value);
+    if !edges.is_empty() {
+        return edges;
     }
     if value["type"] == "system" {
-        return vec![];
+        if value["subtype"] != "background_tasks_changed" {
+            return vec![];
+        }
+        let pending = value["tasks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|task| Background {
+                kind: task["task_type"].as_str().unwrap_or("").to_owned(),
+                description: task["description"].as_str().unwrap_or("").to_owned(),
+            })
+            .collect();
+        return vec![StreamEvent::Background(pending)];
     }
     thread::items_of(&value)
         .into_iter()
@@ -313,8 +326,9 @@ fn parse_cursor(line: &str) -> Vec<StreamEvent> {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return vec![];
     };
-    if let Some(event) = conversation_or_final(&value) {
-        return vec![event];
+    let edges = turn_edges(&value);
+    if !edges.is_empty() {
+        return edges;
     }
     match value["type"].as_str() {
         Some("thinking") if value["subtype"] == "delta" => {
@@ -415,19 +429,23 @@ fn parse_codex(line: &str) -> Vec<StreamEvent> {
             .unwrap_or_default(),
         Some("item.started") => codex_item(&value["item"], false),
         Some("item.completed") => codex_item(&value["item"], true),
+        Some("turn.completed") => vec![StreamEvent::TurnEnd {
+            text: String::new(),
+            error: None,
+        }],
         Some("turn.failed") => {
             let message = value["error"]["message"]
                 .as_str()
                 .or(value["error"].as_str())
                 .unwrap_or("the agent failed");
-            vec![StreamEvent::Final {
+            vec![StreamEvent::TurnEnd {
                 text: String::new(),
                 error: Some(message.to_owned()),
             }]
         }
         Some("error") => {
             let message = value["message"].as_str().unwrap_or("the agent failed");
-            vec![StreamEvent::Final {
+            vec![StreamEvent::TurnEnd {
                 text: String::new(),
                 error: Some(message.to_owned()),
             }]
@@ -506,7 +524,7 @@ fn text_step(id: &str, text: &str, thinking: bool) -> Vec<StreamEvent> {
     vec![StreamEvent::Step(item)]
 }
 
-fn conversation_or_final(value: &Value) -> Option<StreamEvent> {
+fn turn_edges(value: &Value) -> Vec<StreamEvent> {
     if value["type"] == "result" {
         let text = value["result"].as_str().unwrap_or("").to_owned();
         let error = (value["is_error"].as_bool() == Some(true)).then(|| {
@@ -516,14 +534,13 @@ fn conversation_or_final(value: &Value) -> Option<StreamEvent> {
                 text.clone()
             }
         });
-        return Some(StreamEvent::Final { text, error });
+        return vec![StreamEvent::TurnEnd { text, error }];
     }
     if value["type"] == "system" && value["subtype"] == "init" {
-        return value["session_id"]
-            .as_str()
-            .map(|id| StreamEvent::Conversation(id.to_owned()));
+        let conversation = value["session_id"].as_str().map(|id| StreamEvent::Conversation(id.to_owned()));
+        return conversation.into_iter().chain([StreamEvent::TurnStart]).collect();
     }
-    None
+    vec![]
 }
 
 #[cfg(test)]
@@ -556,11 +573,14 @@ pub(crate) fn replay(provider: Provider, lines: &str) -> Outcome {
                     }
                     push_step(&mut outcome.steps, item);
                 }
-                StreamEvent::Final { text, error } => {
-                    outcome.text = Some(text);
+                StreamEvent::TurnEnd { text, error } => {
+                    if !text.is_empty() {
+                        outcome.text = Some(text);
+                    }
                     outcome.error = error;
                     outcome.done = true;
                 }
+                StreamEvent::TurnStart | StreamEvent::Background(_) => {}
             }
         }
     }
@@ -714,9 +734,155 @@ pub fn kill(pid: u32) {
     }
 }
 
+/// Claude Code and the Cursor CLI start a background shell in a session of its own, so the agent's
+/// process group alone does not reach it.
+pub fn kill_tree(pid: u32) {
+    #[cfg(unix)]
+    let targets = signal_targets_under(pid);
+    kill(pid);
+    #[cfg(unix)]
+    signal(&targets);
+}
+
+#[cfg(unix)]
+pub fn kill_descendants(pid: u32) {
+    signal(&signal_targets_under(pid));
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Process {
+    pid: i32,
+    started: String,
+}
+
+/// A shell the agent started in a session of its own is reparented when the agent exits, and only this list still names it.
+pub fn seen_under(pid: u32, before: &[Process]) -> Vec<Process> {
+    #[cfg(unix)]
+    {
+        let under: Vec<i32> = signal_targets_under(pid).into_iter().filter(|target| *target > 0).collect();
+        let mut ask: Vec<i32> = under.iter().copied().chain(before.iter().map(|seen| seen.pid)).collect();
+        ask.sort_unstable();
+        ask.dedup();
+        running(&ask).into_iter().map(|now| now.process).filter(|now| under.contains(&now.pid) || before.contains(now)).collect()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        before.to_vec()
+    }
+}
+
+pub fn kill_seen(seen: &[Process]) {
+    #[cfg(unix)]
+    {
+        let pids: Vec<i32> = seen.iter().map(|seen| seen.pid).collect();
+        for now in running(&pids) {
+            let pid = now.process.pid;
+            if seen.contains(&now.process) {
+                signal(&if now.pgid == pid { vec![-pid, pid] } else { vec![pid] });
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = seen;
+}
+
+#[cfg(unix)]
+fn signal(targets: &[i32]) {
+    for &target in targets {
+        unsafe {
+            libc::kill(target, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn signal_targets_under(root: u32) -> Vec<i32> {
+    targets_under(&process_table(), root)
+}
+
+#[cfg(unix)]
+fn ps(args: &[&str]) -> String {
+    crate::process::command("/bin/ps")
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
+struct Row {
+    pid: u32,
+    ppid: u32,
+    pgid: u32,
+}
+
+#[cfg(unix)]
+fn process_table() -> Vec<Row> {
+    ps(&["-A", "-o", "pid=,ppid=,pgid="])
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace().map(|field| field.parse().ok());
+            Some(Row { pid: fields.next()??, ppid: fields.next()??, pgid: fields.next()?? })
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+struct Running {
+    process: Process,
+    pgid: i32,
+}
+
+#[cfg(unix)]
+fn running(pids: &[i32]) -> Vec<Running> {
+    if pids.is_empty() {
+        return vec![];
+    }
+    let list = pids.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+    ps(&["-o", "pid=,pgid=,lstart=", "-p", &list])
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let pgid = fields.next()?.parse().ok()?;
+            Some(Running { process: Process { pid, started: fields.collect::<Vec<_>>().join(" ") }, pgid })
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn targets_under(rows: &[Row], root: u32) -> Vec<i32> {
+    let mut below = vec![];
+    let mut parents = vec![root];
+    let mut targets = vec![];
+    while let Some(parent) = parents.pop() {
+        for &Row { pid, ppid, pgid } in rows {
+            if pid > 1 && ppid == parent && pid != root && !below.contains(&pid) {
+                below.push(pid);
+                parents.push(pid);
+                if pid == pgid {
+                    targets.push(-(pid as i32));
+                }
+                targets.push(pid as i32);
+            }
+        }
+    }
+    targets
+}
+
 #[cfg(test)]
 mod tests {
     use super::{codex_notify_flag, codex_user_notify};
+
+    #[test]
+    #[cfg(unix)]
+    fn the_walk_never_targets_pid_0_or_1() {
+        let rows = [(0, 500, 0), (1, 500, 1), (501, 500, 501), (502, 501, 501)].map(|(pid, ppid, pgid)| super::Row { pid, ppid, pgid });
+        assert_eq!(super::targets_under(&rows, 500), vec![-501, 501, 502]);
+    }
 
     #[test]
     fn a_top_level_notify_array_is_read_and_a_table_one_is_not() {

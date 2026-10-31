@@ -369,8 +369,7 @@ pub struct Machine {
     pr_watches: crate::prwatch::Watches,
     clones: PathBuf,
     quitting: AtomicBool,
-    /// Wakes parents whose pty has gone quiet, once, for the life of the machine.
-    notice_loop: AtomicBool,
+    delegate_pass_armed: AtomicBool,
     threads_watched: AtomicBool,
     thread_watchers: Mutex<HashMap<ViewerId, HashSet<TabId>>>,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
@@ -505,7 +504,7 @@ impl Machine {
             pr_watches: Default::default(),
             clones: home.join("pinned"),
             quitting: AtomicBool::new(false),
-            notice_loop: AtomicBool::new(false),
+            delegate_pass_armed: AtomicBool::new(false),
             threads_watched: AtomicBool::new(false),
             thread_watchers: Mutex::default(),
             usage: Mutex::default(),
@@ -1511,7 +1510,7 @@ impl Machine {
             });
             let (done, wrote) = done.unwrap_or((true, false));
             if wrote {
-                machine.arm_notices();
+                machine.arm_delegate_pass();
             }
             if done {
                 return;
@@ -1562,7 +1561,7 @@ impl Machine {
             self.save_sessions();
         }
         if submitted {
-            self.arm_notices();
+            self.arm_delegate_pass();
         }
         self.maybe_deliver(tab);
         Ok(())
@@ -1804,7 +1803,7 @@ impl Machine {
         if blocked {
             let session = self.tab(&orchestrator, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.queue_report(&orchestrator, session, line);
-            self.arm_notices();
+            self.arm_delegate_pass();
             return;
         }
         let _ = self.type_prompt(&orchestrator, &line);
@@ -1963,7 +1962,7 @@ impl Machine {
             None => Err(format!("tab {tab} has no running session")),
         })??;
         if wrote {
-            self.arm_notices();
+            self.arm_delegate_pass();
         }
         Ok(())
     }
@@ -1998,7 +1997,7 @@ impl Machine {
             .collect();
         self.delegates.rebind(&sessions);
         if self.delegates.has_pending() {
-            self.arm_notices();
+            self.arm_delegate_pass();
         }
         ids
     }
@@ -2191,6 +2190,7 @@ impl Machine {
             Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
             Claim::Fresh(task) => *task,
         };
+        self.delegates.set_limits(&task.id, request.budget_ms, request.limit_ms);
         if let Some(tab) = caller.tab.as_deref() {
             let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.note_parent(&task.id, session);
@@ -2262,7 +2262,7 @@ impl Machine {
         if self.quitting.load(Ordering::SeqCst) {
             self.delegates.kill_remembered();
         }
-        self.arm_notices();
+        self.arm_delegate_pass();
         self.delegates.started_json(&task.id).map(|value| value.to_string())
     }
 
@@ -2316,16 +2316,24 @@ impl Machine {
         })?
     }
 
-    /// Starts the once-a-second pass that types a waiting notice once its session is idle.
-    fn arm_notices(&self) {
-        if self.notice_loop.swap(true, Ordering::Relaxed) {
+    fn arm_delegate_pass(&self) {
+        if self.delegate_pass_armed.swap(true, Ordering::Relaxed) {
             return;
         }
-        self.every(Duration::from_secs(1), |machine| {
-            let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
-            for tab in tabs {
-                machine.maybe_deliver(&tab);
+        let me = self.me.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let Some(machine) = me.upgrade() else { return };
+            if machine.quitting.load(Ordering::Relaxed) {
+                return;
             }
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
+                let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
+                for tab in tabs {
+                    machine.maybe_deliver(&tab);
+                }
+            }));
         });
     }
 
@@ -4748,6 +4756,24 @@ echo '{"type":"result","result":"ok"}'
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_delegated_task_keeps_the_budget_it_asked_for() {
+        let root = temp("budget");
+        let cursor = root.join("cursor-agent");
+        let body = "#!/bin/sh\nif [ \"$1\" = status ]; then echo 'Logged in as ana@acme.dev'; exit 0; fi\necho '{\"type\":\"result\",\"result\":\"ok\"}'\n";
+        std::fs::write(&cursor, body).unwrap();
+        std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let request = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "budgetMs": 90000, "limitMs": 600000 })).unwrap();
+        let started: Value = serde_json::from_str(&m.start_delegate(Some(tab.clone()), None, None, request).unwrap()).unwrap();
+        let id = started["taskId"].as_str().unwrap().to_owned();
+        let status: Value = serde_json::from_str(&m.task_status(Some(tab), None, &id).unwrap()).unwrap();
+        assert_eq!((status["budgetSecs"].as_u64(), status["limitSecs"].as_u64()), (Some(90), Some(600)), "{status}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_worker_cannot_start_another_pinned_worker() {
         let root = temp("worker-delegate");
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, root.join("missing-claude"))]), ..launch() }, None, None, |_| {});
@@ -5946,6 +5972,96 @@ while True:
         let status: serde_json::Value = serde_json::from_str(&m2.task_status(Some(tabs[0].clone()), None, &finished).unwrap()).unwrap();
         assert_eq!(status["summary"], "DONE");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_delegate_pass_stops_a_task_past_its_hard_limit() {
+        use std::os::unix::process::CommandExt;
+        let m = Machine::new(launch(), None, None, |_| {});
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Runaway".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.set_limits(&task.id, 1, 2);
+        let mut sleeper = crate::process::command("sleep");
+        sleeper.arg("20").process_group(0);
+        let child = std::sync::Mutex::new(sleeper.spawn().unwrap());
+        let pid = child.lock().unwrap().id();
+        m.delegates.remember_pid(&task.id, pid);
+        m.arm_delegate_pass();
+        wait_for("the hard limit", || m.delegates.is_terminal(&task.id));
+        wait_for("the runaway child to stop", || child.lock().unwrap().try_wait().unwrap().is_some());
+        let status = m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
+        assert_eq!(status["workState"], "cancelled", "{status}");
+    }
+
+    #[test]
+    fn the_delegate_pass_keeps_enforcing_limits_after_a_panic() {
+        let m = Machine::new(launch(), None, None, |_| {});
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Runaway".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.set_limits(&task.id, 2_000, 2_500);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _tabs = m.tabs.lock().unwrap();
+            panic!("a thread panics while it holds the tab lock");
+        }));
+        assert!(poisoned.is_err() && m.tabs.is_poisoned());
+        m.arm_delegate_pass();
+        wait_for("the hard limit after a pass panicked", || m.delegates.is_terminal(&task.id));
+        let status = m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
+        let error = status["error"].as_str().unwrap_or("");
+        assert!(status["workState"] == "cancelled" && error.starts_with("pinned stopped it after ") && error.ends_with("s, its limit"), "{status}");
+    }
+
+    #[test]
+    fn a_laptop_sleep_does_not_count_against_a_working_task() {
+        let m = Machine::new(launch(), None, None, |_| {});
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Overnight".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.backdate(&task.id, Duration::from_secs(9 * 60 * 60));
+        m.arm_delegate_pass();
+        std::thread::sleep(Duration::from_millis(1500));
+        let status = m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
+        assert_eq!(status["workState"], "working", "{status}");
+        assert_eq!(m.delegates.claim_notice("tab-1"), None, "the sleep counted toward the budget");
     }
 
     /// A worker report must not type over a draft. The orchestrator's Stop hook carries it.
