@@ -298,7 +298,8 @@ function renderSidebar() {
   noteReturns();
   const scope = projectGroups().find((g) => g.key === ui.project);
   if (!scope && !projectListsPending()) ui.project = "";
-  const trigger = `${scope ? projectIcon(scope.name, scope.tab) : icon("folder")}<span class="label">${esc(scope?.name ?? "All projects")}</span>${icon("chevron-down")}`;
+  const where = scope ? projectWhere(PinnedProjects.sessionOn(scope.checkouts, machineDirectory())) : "";
+  const trigger = `${scope ? projectIcon(scope.name, scope.tab) : icon("folder")}<span class="label">${esc(scope?.name ?? "All projects")}</span>${where}${icon("chevron-down")}`;
   if (projectFilter.innerHTML !== trigger) projectFilter.innerHTML = trigger;
   projectFilter.setAttribute("aria-label", scope ? `Filter threads by project: ${scope.name}` : "Filter threads by project");
   const inScope = tabs.filter((t) => !ui.project || projectKeyOf(t) === ui.project);
@@ -1405,15 +1406,19 @@ function projectListsPending() {
   return onlineMachines().some((id) => machines.get(id).projects === undefined);
 }
 
-/** The sidebar's projects: `{ key, name, tab, machine, path }`. `tab` is the group's first thread, or null when the folder has none. */
+/** The sidebar's projects: `{ key, name, tab, tabs, checkouts }`. `tab` is the group's first thread, or null when the folder has none. */
 function projectGroups() {
   const threads = [];
   for (const tab of tabs) {
     const path = projectPathOf(tab);
     threads.push({ machine: tab.machine, path, name: projectName(tab), repo: projectRepos.get(`${tab.machine}:${path}`) || null, thread: tab });
   }
-  const listed = Object.fromEntries(onlineMachines().map((id) => [id, machines.get(id).projects ?? []]));
+  const listed = Object.fromEntries([...machines].map(([id, machine]) => [id, machine.projects ?? []]));
   return sortedProjects(PinnedProjects.groupProjects({ threads, listed, grouping: !!sideSettings.grouping }), (g) => g.tabs);
+}
+function projectWhere(here) {
+  const title = here.also.length ? ` title="${esc(here.also.join(", "))}"` : "";
+  return `<span class="where"${title}>${esc(here.label)}</span>`;
 }
 const projectFilter = document.getElementById("project-filter");
 const projectMenu = document.createElement("div");
@@ -1429,14 +1434,19 @@ function openProjectMenu() {
   const list = projectMenu.querySelector(".list");
   let hit = 0;
   let shown = [];
+  let directory;
   const draw = () => {
+    directory = machineDirectory();
     const q = input.value.trim().toLowerCase();
     const groups = projectGroups();
-    const machinesShown = !sideSettings.grouping && new Set(groups.map((g) => g.machine)).size > 1;
     shown = [{ key: "", name: "All projects" }, ...groups].filter((g) => !q || g.name.toLowerCase().includes(q));
     hit = Math.min(hit, Math.max(0, shown.length - 1));
     list.innerHTML = shown.length
-      ? shown.map((g, i) => `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(g.key)}" aria-selected="${g.key === ui.project}">${g.key ? projectIcon(g.name, g.tab) : icon("folder")}<span class="label">${esc(g.name)}</span>${machinesShown && g.key ? `<span class="where">${esc(machineName(g.machine))}</span>` : ""}${g.key ? `<button type="button" class="gear" data-orchestrate="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Open the ${esc(g.name)} orchestrator">${icon("bot")}</button><button type="button" class="gear" data-gear="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(g.name)}">${icon("gear")}</button>` : ""}</div>`).join("")
+      ? shown.map((g, i) => {
+          const where = g.key ? projectWhere(PinnedProjects.sessionOn(g.checkouts, directory)) : "";
+          const gears = g.key ? `<button type="button" class="gear" data-orchestrate="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Open the ${esc(g.name)} orchestrator">${icon("bot")}</button><button type="button" class="gear" data-gear="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(g.name)}">${icon("gear")}</button>` : "";
+          return `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(g.key)}" aria-selected="${g.key === ui.project}">${g.key ? projectIcon(g.name, g.tab) : icon("folder")}<span class="label">${esc(g.name)}</span>${where}${gears}</div>`;
+        }).join("")
       : `<p class="empty">No matching projects.</p>`;
   };
   redrawProjectMenu = () => {
@@ -1469,7 +1479,9 @@ function openProjectMenu() {
   const openGroup = (key, run) => {
     const group = shown.find((g) => g.key === key);
     closeProjectMenu();
-    if (group?.machine && group.path) run(group.machine, group.path);
+    if (!group) return;
+    const here = PinnedProjects.sessionOn(group.checkouts, directory);
+    run(here.machine, here.path);
   };
   list.onclick = (e) => {
     const orchestrate = e.target.closest("[data-orchestrate]");

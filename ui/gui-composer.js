@@ -2148,10 +2148,15 @@ async function openHeroProjects(anchor) {
   search.focus();
   const projects = await callOn(tab.machine, { cmd: "list_projects" }).catch(() => []);
   const current = threadOf(tab).workspace?.project ?? tab.view.cwd;
+  let directory;
   const list = () => {
+    directory = machineDirectory();
     const needle = search.value.trim().toLowerCase();
     const shown = projects.filter((p) => p.name.toLowerCase().includes(needle));
-    const rows = shown.map((p) => `<button type="button" data-path="${esc(p.path)}">${projectIcon(p.name)}<span class="label">${esc(p.name)}</span>${p.path === current ? icon("check", "check") : ""}</button>`);
+    const rows = shown.map((p) => {
+      const here = PinnedProjects.sessionOn([{ machine: tab.machine, path: p.path }], directory);
+      return `<button type="button" data-path="${esc(here.path)}">${projectIcon(p.name)}<span class="row"><span class="label">${esc(p.name)}</span><span class="where">${esc(here.label)}</span></span>${here.path === current ? icon("check", "check") : ""}</button>`;
+    });
     if (!needle) rows.push(`<button type="button" data-add>${icon("folder-plus", "lead")}<span class="label">Add project</span></button>`);
     composerMenu.querySelector(".list").innerHTML = rows.join("") || `<p class="none">No matching projects.</p>`;
   };
@@ -2166,11 +2171,12 @@ async function openHeroProjects(anchor) {
     if (!row) return;
     composerMenu.hidden = true;
     if (row.dataset.add !== undefined) return addProject();
-    if (row.dataset.path === current) return;
+    const here = PinnedProjects.sessionOn([{ machine: tab.machine, path: row.dataset.path }], directory);
+    if (here.path === current) return;
     const empty = !threadOf(tab).items.length && !hasDraft(tab);
     try {
-      if (tab.machine === LOCAL) await openTab(LOCAL, row.dataset.path);
-      else await openRemote(tab.machine, row.dataset.path, false);
+      if (here.machine === LOCAL) await openTab(LOCAL, here.path);
+      else await openRemote(here.machine, here.path, false);
       if (empty) closeTab(tab);
     } catch (err) {
       showComposerNote(String(err), true);

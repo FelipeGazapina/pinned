@@ -196,7 +196,8 @@ body[data-jump-hints] .thread-row[data-jump]::after { display: block; }
 #project-menu .item :is(.i, .monogram, .favicon) { width: 16px; height: 16px; flex: none; }
 #project-menu .item > .i { color: var(--g-muted); }
 #project-menu .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#project-menu .where { flex: none; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-muted); }
+#project-filter .where,
+#project-menu .where { flex: none; white-space: nowrap; font-size: 12px; color: var(--g-muted); }
 #project-menu .gear { display: grid; place-items: center; width: 24px; height: 24px; margin-left: auto; border-radius: 6px; color: var(--g-muted); }
 #project-menu .gear:hover { background: var(--g-input); color: var(--g-fg); }
 #project-menu .gear .i { width: 14px; height: 14px; }

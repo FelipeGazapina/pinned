@@ -236,8 +236,10 @@ function paletteProjects() {
 /** A thread without a project runs in the home folder, T3 Code's scratch project. */
 const isScratch = (p) => tilde(p.path) === "~";
 const tabOfProjectAt = (p) => tabs.filter((t) => t.machine === p.machine && projectOfTab(t) === p.path).sort((a, b) => latestUserAt(b) - latestUserAt(a))[0];
-/** ProjectLocationDescription: a remote project's machine icon, where it is, and its folder. */
-const projectSubHtml = (p) => `<span class="part">${p.machine === LOCAL ? "" : icon("monitor")}<span>${esc(machineLabel(p.machine))}</span></span>${metaDot}<span class="cut">${esc(p.path)}</span>`;
+const projectSubHtml = (p, directory) => {
+  const here = PinnedProjects.sessionOn([{ machine: p.machine, path: p.path }], directory);
+  return `<span class="part">${p.machine === LOCAL ? "" : icon("monitor")}<span>${esc(here.label)}</span></span>${metaDot}<span class="cut">${esc(here.path)}</span>`;
+};
 const projectRowIcon = (p) => projectIcon(p.name, tabOfProjectAt(p));
 /** The project ⌘N and "New thread in" mean: the open thread's, else the most recent one. */
 const contextProject = () => (active ? { machine: active.machine, path: projectOfTab(active), name: projectName(active), tab: active } : paletteProjects()[0] ?? null);
@@ -311,12 +313,16 @@ const PALETTE_VIEWS = {
       const byRecent = [...tabs].sort((a, b) => latestUserAt(b) - latestUserAt(a));
       if (!normalize(query)) return [actions, { label: "Recent Threads", items: byRecent.slice(0, RECENT_THREADS).map((t) => threadItem(t)) }].filter((g) => g.items.length);
       searchThreads(query);
+      const directory = machineDirectory();
       const projects = paletteProjects().map((p) => ({
         iconHtml: projectRowIcon(p),
         title: esc(p.name),
-        subHtml: projectSubHtml(p),
-        terms: [p.name, p.path, machineLabel(p.machine)],
-        run: () => (tabOfProjectAt(p) ? activate(tabOfProjectAt(p)) : openProjectIn(p.machine, p.path)),
+        subHtml: projectSubHtml(p, directory),
+        terms: [p.name, p.path, PinnedProjects.sessionOn([{ machine: p.machine, path: p.path }], directory).label],
+        run: () => {
+          const here = PinnedProjects.sessionOn([{ machine: p.machine, path: p.path }], directory);
+          return tabOfProjectAt(p) ? activate(tabOfProjectAt(p)) : openProjectIn(here.machine, here.path);
+        },
       }));
       const linked = palette.linked && palette.linked.query === query;
       const threadsGroup = { label: "Threads", items: linked ? linkedThreadItems() : byRecent.map((t) => threadItem(t, query)) };
@@ -351,9 +357,20 @@ const PALETTE_VIEWS = {
   "new-thread-in": {
     placeholder: "Search...",
     groups(query) {
+      const directory = machineDirectory();
       const all = paletteProjects();
       const at = all[0] && isScratch(all[0]) ? 0 : 1;
-      const projects = all.filter((p) => !isScratch(p)).map((p, i) => ({ iconHtml: projectRowIcon(p), title: esc(p.name), subHtml: projectSubHtml(p), terms: [p.name, p.path, machineLabel(p.machine)], command: i < 9 ? `thread.jump.${i + 1}` : null, run: () => (active && active.machine === p.machine && projectOfTab(active) === p.path ? newThreadIn(active) : openProjectIn(p.machine, p.path)) }));
+      const projects = all.filter((p) => !isScratch(p)).map((p, i) => ({
+        iconHtml: projectRowIcon(p),
+        title: esc(p.name),
+        subHtml: projectSubHtml(p, directory),
+        terms: [p.name, p.path, PinnedProjects.sessionOn([{ machine: p.machine, path: p.path }], directory).label],
+        command: i < 9 ? `thread.jump.${i + 1}` : null,
+        run: () => {
+          const here = PinnedProjects.sessionOn([{ machine: p.machine, path: p.path }], directory);
+          return active && active.machine === p.machine && projectOfTab(active) === p.path ? newThreadIn(active) : openProjectIn(here.machine, here.path);
+        },
+      }));
       const none = onlineMachines().length > 0 && { icon: "message-square-dashed", title: "No project", command: "chat.newWithoutProject", terms: ["no project", "without project", "none"], run: () => newThreadWithoutProject() };
       return filterGroups([{ label: "Projects", items: [...projects.slice(0, at), none, ...projects.slice(at)].filter(Boolean) }], query);
     },
