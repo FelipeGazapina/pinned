@@ -20,7 +20,7 @@ refuse() {
 draft_release() {
   gh release edit "$tag" --draft=true
   is_draft=$(gh release view "$tag" --json isDraft --jq .isDraft)
-  [[ "$is_draft" == "true" ]] || refuse "the release $tag is public, so no asset is uploaded"
+  [[ "$is_draft" == "true" ]] || refuse "gh release edit --draft=true left $tag public, so no asset is uploaded"
 }
 
 hash_of() {
@@ -32,33 +32,50 @@ present() {
 }
 
 version_is_newer() {
-  local left="${1#v}"
-  local right="${2#v}"
-  local IFS=.
+  local LC_ALL=C
+  local left="${1#v}" right="${2#v}"
+  left="${left%%+*}"
+  right="${right%%+*}"
   local -a left_parts right_parts
-  local i left_n right_n
-  read -r -a left_parts <<< "$left"
-  read -r -a right_parts <<< "$right"
+  local i a b
+  IFS=. read -r -a left_parts <<< "${left%%-*}"
+  IFS=. read -r -a right_parts <<< "${right%%-*}"
   for i in 0 1 2; do
-    left_n="${left_parts[$i]:-0}"
-    right_n="${right_parts[$i]:-0}"
-    left_n="${left_n%%[^0-9]*}"
-    right_n="${right_n%%[^0-9]*}"
-    left_n="${left_n:-0}"
-    right_n="${right_n:-0}"
-    if ((10#$left_n > 10#$right_n)); then
-      return 0
-    fi
-    if ((10#$left_n < 10#$right_n)); then
+    a="${left_parts[$i]:-0}"
+    b="${right_parts[$i]:-0}"
+    a="${a%%[^0-9]*}"
+    b="${b%%[^0-9]*}"
+    if ((10#${a:-0} > 10#${b:-0})); then return 0; fi
+    if ((10#${a:-0} < 10#${b:-0})); then return 1; fi
+  done
+  [[ "$right" == *-* ]] || return 1
+  [[ "$left" == *-* ]] || return 0
+  IFS=. read -r -a left_parts <<< "${left#*-}"
+  IFS=. read -r -a right_parts <<< "${right#*-}"
+  for ((i = 0; i < ${#left_parts[@]}; i++)); do
+    ((i < ${#right_parts[@]})) || return 0
+    a="${left_parts[$i]}"
+    b="${right_parts[$i]}"
+    if [[ "$a" == "$b" ]]; then continue; fi
+    if [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]]; then
+      if ((10#$a > 10#$b)); then return 0; fi
       return 1
     fi
+    if [[ "$a" =~ ^[0-9]+$ ]]; then return 1; fi
+    if [[ "$b" =~ ^[0-9]+$ ]]; then return 0; fi
+    if [[ "$a" > "$b" ]]; then return 0; fi
+    return 1
   done
   return 1
 }
 
 tag_is_latest() {
   local current
-  current=$(gh release view --json tagName --jq .tagName 2>/dev/null) || return 0
+  if ! current=$(gh release view --json tagName --jq .tagName 2> "$work/latest-error"); then
+    grep -q -x -F "release not found" "$work/latest-error" ||
+      refuse "could not read the latest release: $(cat "$work/latest-error")"
+    return 0
+  fi
   ! version_is_newer "$current" "$1"
 }
 
@@ -79,7 +96,8 @@ case "$cmd" in
       esac
     done
     if [[ -n "$latest" ]]; then
-      grep -q -x -F "$(hash_of "$latest")  latest.json" "$sums" || refuse "the release checksum does not match"
+      [[ -n "$sums" ]] || refuse "SHA256SUMS is missing from the upload"
+      grep -q -x -F "$(hash_of "$latest")  latest.json" "$sums" || refuse "SHA256SUMS does not list this latest.json"
     fi
     draft_release
     gh release upload "$tag" "$@" --clobber
@@ -90,7 +108,7 @@ case "$cmd" in
     trap 'rm -rf "$work"' EXIT
     assets="$work/assets"
     gh release download "$tag" -D "$assets"
-    pubkey="${PINNED_RELEASE_PUBKEY:-$(jq -r .plugins.updater.pubkey "$repo/tauri.conf.json")}"
+    pubkey=$(jq -r .plugins.updater.pubkey "$repo/tauri.conf.json")
     verifier="$repo/scripts/minisign-verify.mjs"
     present "$assets" SHA256SUMS
     present "$assets" SHA256SUMS.minisig
@@ -113,11 +131,14 @@ case "$cmd" in
       node "$verifier" "$pubkey" "$assets/$name" "$work/signature" ||
         refuse "$name does not match its signature in latest.json"
     done <<< "$bundles"
-    latest=false
-    if tag_is_latest "$tag"; then
-      latest=true
+    if [[ "$tag" == *-* ]]; then
+      flags=(--prerelease --latest=false)
+    elif tag_is_latest "$tag"; then
+      flags=(--latest=true)
+    else
+      flags=(--latest=false)
     fi
-    gh release edit "$tag" --draft=false --latest="$latest"
+    gh release edit "$tag" --draft=false "${flags[@]}"
     ;;
   *)
     usage

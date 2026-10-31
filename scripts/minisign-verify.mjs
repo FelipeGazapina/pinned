@@ -12,13 +12,19 @@ function refuse(reason) {
   process.exit(1);
 }
 
-const keyLine = Buffer.from(pubkey, "base64").toString("utf8").split(/\r?\n/)[1] ?? "";
-const key = Buffer.from(keyLine, "base64");
+function base64(text, what) {
+  const bytes = Buffer.from(text, "base64");
+  if (bytes.toString("base64") !== text) refuse(`${what} is not strict base64`);
+  return bytes;
+}
+
+const keyLine = base64(pubkey, "the public key").toString("utf8").split(/\r?\n/)[1] ?? "";
+const key = base64(keyLine, "the public key line");
 if (key.length !== 42) refuse("the public key is not a minisign key");
 
 const [, signatureLine = "", trusted = "", globalLine = ""] = readFileSync(signatureFile, "utf8").split(/\r?\n/);
-const signature = Buffer.from(signatureLine, "base64");
-const global = Buffer.from(globalLine, "base64");
+const signature = base64(signatureLine, "the signature line");
+const global = base64(globalLine, "the trusted comment signature");
 if (signature.length !== 74 || global.length !== 64 || !trusted.startsWith("trusted comment: ")) {
   refuse("the signature is not minisign text");
 }

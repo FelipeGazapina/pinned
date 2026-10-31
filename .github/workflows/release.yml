@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  GH_REPO: ${{ github.repository }}
   RELEASE_NOTES: On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. Or click the update button in a running pinned.
 
 jobs:
@@ -96,6 +97,7 @@ jobs:
           name: updater-${{ matrix.target }}
           path: updater-fragment.json
           if-no-files-found: error
+          overwrite: true
 
   linux-node:
     needs: draft
@@ -121,6 +123,7 @@ jobs:
             node-release/pinned-server-x86_64-unknown-linux-musl
             node-release/pinned-server-aarch64-unknown-linux-musl
           if-no-files-found: error
+          overwrite: true
 
   sign-node:
     needs: [build, linux-node]
