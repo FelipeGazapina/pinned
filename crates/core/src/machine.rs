@@ -5610,6 +5610,37 @@ while True:
     }
 
     #[test]
+    fn the_delegate_pass_keeps_enforcing_limits_after_a_panic() {
+        let m = Machine::new(launch(), None, None, |_| {});
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Runaway".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.set_limits(&task.id, 2_000, 2_500);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _tabs = m.tabs.lock().unwrap();
+            panic!("a thread panics while it holds the tab lock");
+        }));
+        assert!(poisoned.is_err() && m.tabs.is_poisoned());
+        m.arm_delegate_pass();
+        wait_for("the hard limit after a pass panicked", || m.delegates.is_terminal(&task.id));
+        let status = m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
+        let error = status["error"].as_str().unwrap_or("");
+        assert!(status["workState"] == "cancelled" && error.starts_with("pinned stopped it after ") && error.ends_with("s, its limit"), "{status}");
+    }
+
+    #[test]
     fn a_laptop_sleep_does_not_count_against_a_working_task() {
         let m = Machine::new(launch(), None, None, |_| {});
         let task = m.delegates.begin(crate::delegate::NewTask {

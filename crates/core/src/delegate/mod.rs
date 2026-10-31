@@ -669,6 +669,13 @@ mod tests {
     }
 
     #[test]
+    fn a_limit_alone_puts_the_budget_notice_before_it() {
+        let limits = |args: Value| parse_request(&args).map(|request| (request.budget_ms, request.limit_ms));
+        assert_eq!(limits(json!({"task": "x", "limitMs": 3_600_000})), Ok((1_800_000, 3_600_000)));
+        assert_eq!(limits(json!({"task": "x", "limitMs": 43_200_000})), Ok((7_200_000, 43_200_000)));
+    }
+
+    #[test]
     fn cursor_effort_uses_a_catalog_variant() {
         let ids = [
             "grok-4.7-low",
@@ -991,7 +998,6 @@ grok-4.7-high - Grok 4.7  High
         (pid, rx)
     }
 
-    #[cfg(unix)]
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pinned-delegate-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -999,9 +1005,7 @@ grok-4.7-high - Grok 4.7  High
         dir
     }
 
-    #[cfg(unix)]
     const INIT: &str = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
-    #[cfg(unix)]
     const REPLY: &str = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"PR opened"}]}}"#;
 
     #[test]
@@ -1099,7 +1103,125 @@ grok-4.7-high - Grok 4.7  High
             delegates.apply(&task.id, ChildEvent::Line((*line).to_owned()), None);
         }
         let notice = delegates.claim_notice("tab-1").map(|(text, _)| text).unwrap_or_default();
-        assert_eq!(notice.matches("still runs 1 background task").count(), 1, "{notice}");
+        assert_eq!(notice, pending_line(&task.id));
+    }
+
+    fn pending_line(id: &str) -> String {
+        format!("[pinned] Delegated task {id} \"Fix\" (Claude Code) replied and still runs 1 background task. pinned ends the task when that work finishes and the agent replies again, or, when only shells are left, after 30 min with no activity, and then stops what is still running. Call task_status with taskId \"{id}\" to read the reply and the work, or task_cancel to stop it now.")
+    }
+
+    #[test]
+    fn a_quiet_reply_is_not_taken_while_a_later_turn_runs() {
+        let recording = fixture("claude-background-shell.jsonl");
+        let lines: Vec<&str> = recording.lines().collect();
+        let shell_finished = lines[..13].to_vec();
+        let shell_pending: Vec<&str> = lines[..9].iter().chain(&lines[12..13]).copied().collect();
+        let mut seen = vec![];
+        for feed in [shell_finished, shell_pending] {
+            let delegates = Delegates::default();
+            let task = new_on(&delegates, Provider::Claude);
+            for line in feed {
+                delegates.apply(&task.id, ChildEvent::Line(line.to_owned()), None);
+            }
+            later(&delegates, Duration::from_secs(31 * 60));
+            let status = delegates.status(&parent(), &task.id).unwrap();
+            seen.push(json!([status["workState"], status["summary"], status["background"], status["endedBy"]]));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                json!(["working", INTERIM, [], null]),
+                json!(["working", INTERIM, ["Run sleep 20 then echo bgdone in background"], null]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cancelled_task_keeps_the_reply_so_far() {
+        let file = scratch("cancel-keeps").join("delegates.json");
+        let mut seen = vec![];
+        for how in ["task_cancel", "limit", "quit", "crash"] {
+            let delegates = Delegates::load(Some(file.clone()));
+            let task = new_on(&delegates, Provider::Cursor);
+            for line in [INIT, REPLY] {
+                delegates.apply(&task.id, ChildEvent::Line(line.to_owned()), None);
+            }
+            let delegates = match how {
+                "task_cancel" => {
+                    delegates.cancel(&parent(), &task.id, "the parent asked", None).unwrap();
+                    delegates
+                }
+                "limit" => {
+                    later(&delegates, Duration::from_millis(DEFAULT_LIMIT_MS));
+                    delegates
+                }
+                "quit" => {
+                    delegates.stop_for_restart(None);
+                    delegates
+                }
+                _ => {
+                    drop(delegates);
+                    Delegates::load(Some(file.clone()))
+                }
+            };
+            let status = delegates.status(&parent(), &task.id).unwrap();
+            seen.push(json!([how, status["workState"], status["summary"], status["error"]]));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                json!(["task_cancel", "cancelled", "PR opened", "the parent asked"]),
+                json!(["limit", "cancelled", "PR opened", "pinned stopped it after 8 h, its limit"]),
+                json!(["quit", "cancelled", "PR opened", "stopped by restart"]),
+                json!(["crash", "cancelled", "PR opened", "stopped by restart"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_quiet_task_whose_last_turn_failed_ends_failed() {
+        let delegates = Delegates::default();
+        let task = new_on(&delegates, Provider::Claude);
+        let shell = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_type":"local_bash","description":"npm run dev"}]}"#;
+        let failed = r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: 529 overloaded"}"#;
+        for line in [INIT, shell, failed] {
+            delegates.apply(&task.id, ChildEvent::Line(line.to_owned()), None);
+        }
+        later(&delegates, Duration::from_secs(31 * 60));
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        assert_eq!((status["workState"].as_str(), status["error"].as_str()), (Some("failed"), Some("API Error: 529 overloaded")), "{status}");
+    }
+
+    #[test]
+    fn a_reload_keeps_how_a_task_ended_and_its_limits() {
+        let file = scratch("reload-ended").join("delegates.json");
+        let delegates = Delegates::load(Some(file.clone()));
+        let task = new_on(&delegates, Provider::Claude);
+        delegates.set_limits(&task.id, 3_000_000, 3_600_000);
+        for line in fixture("claude-background-shell.jsonl").lines().take(9) {
+            delegates.apply(&task.id, ChildEvent::Line(line.to_owned()), None);
+        }
+        later(&delegates, Duration::from_secs(31 * 60));
+        drop(delegates);
+        let status = Delegates::load(Some(file)).status(&parent(), &task.id).unwrap();
+        assert_eq!(
+            json!([status["workState"], status["endedBy"], status["budgetSecs"], status["limitSecs"]]),
+            json!(["result_available", "pinned ended it after 30 min with no activity and stopped the 1 shell it left running", 3000, 3600]),
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn a_saved_file_from_before_the_limits_loads_with_the_defaults() {
+        let file = scratch("old-file").join("delegates.json");
+        let old = r#"{"tasks":[{"id":"task-0ld0","parent_kind":"tab","parent_id":"tab-1","title":"Old","account":"claude","provider":"claude","cwd":"/tmp","access":"auto","started":1000,"ended":2000,"state":"result_available","summary":"done","mode":"async","caller_key":"tab:tab-1"}]}"#;
+        std::fs::write(&file, old).unwrap();
+        let status = Delegates::load(Some(file)).status(&parent(), "task-0ld0").unwrap();
+        assert_eq!(
+            json!([status["workState"], status["summary"], status["endedBy"], status["budgetSecs"], status["limitSecs"]]),
+            json!(["result_available", "done", null, 7200, 28800]),
+            "{status}"
+        );
     }
 
     #[cfg(unix)]
@@ -1158,8 +1280,7 @@ grok-4.7-high - Grok 4.7  High
         assert!(status["next"].as_str().unwrap_or("").contains("still runs the work listed in background"), "{status}");
         assert!(alive(shell), "pinned stopped the pending background shell {shell}");
         assert!(alive(agent as i32), "pinned stopped the agent while its shell was pending");
-        let notice = delegates.claim_notice("tab-1").map(|(text, _)| text).unwrap_or_default();
-        assert!(notice.contains("still runs 1 background task: Run sleep 20 then echo bgdone in background") && notice.contains(INTERIM), "{notice}");
+        assert_eq!(delegates.claim_notice("tab-1").map(|(text, _)| text), Some(pending_line(&task.id)));
 
         std::fs::write(dir.join("go"), "").unwrap();
         assert_eq!(told.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("tab-1"));
@@ -1187,17 +1308,17 @@ grok-4.7-high - Grok 4.7  High
         assert!(alive(shell), "pinned stopped the shell before the task was quiet for 30 min");
         later(&delegates, Duration::from_millis(QUIET_AFTER_REPLY_MS));
         assert_eq!(told.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("tab-1"));
-        let notice = delegates.claim_notice("tab-1").map(|(text, _)| text).unwrap_or_default();
-        assert!(
-            notice.contains("finished: result available")
-                && notice.contains("after 30 min with no activity")
-                && notice.contains("Run sleep 20 then echo bgdone in background")
-                && !notice.contains("still runs"),
-            "{notice}"
+        let ended = "pinned ended it after 30 min with no activity and stopped the 1 shell it left running";
+        assert_eq!(
+            delegates.claim_notice("tab-1").map(|(text, _)| text),
+            Some(format!("[pinned] Delegated task {id} \"Fix\" (Claude Code) finished: result available. {ended}. Call task_status with taskId \"{id}\".", id = task.id))
         );
         let status = delegates.status(&parent(), &task.id).unwrap();
-        assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some(INTERIM)), "{status}");
-        assert!(status["endedBy"].as_str().unwrap_or("").contains("after 30 min with no activity"), "{status}");
+        assert_eq!(
+            json!([status["workState"], status["summary"], status["endedBy"], status["background"]]),
+            json!(["result_available", INTERIM, ended, ["Run sleep 20 then echo bgdone in background"]]),
+            "{status}"
+        );
         assert!(stopped(shell), "the shell {shell} outlived the quiet task");
         assert!(stopped(agent as i32), "the agent {agent} outlived the quiet task");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1224,8 +1345,10 @@ grok-4.7-high - Grok 4.7  High
         later(&delegates, Duration::from_secs(30));
         assert_eq!(notice(&delegates), None, "a task inside its budget was reported");
         later(&delegates, Duration::from_secs(60));
-        let late = notice(&delegates).unwrap_or_default();
-        assert!(late.contains(&task.id) && late.contains("still working after 1 min") && late.contains("PR opened") && late.contains("at its limit of 4 min"), "{late}");
+        assert_eq!(
+            notice(&delegates),
+            Some(format!("[pinned] Delegated task {id} \"Fix\" (Cursor) is still working after 1 min, past its budget of 1 min. pinned cancels it at its limit of 4 min. Call task_status with taskId \"{id}\" to read its recent steps, or task_cancel to stop it.", id = task.id))
+        );
         let status = delegates.status(&parent(), &task.id).unwrap();
         assert_eq!(status["workState"], "working");
         assert!(status["next"].as_str().unwrap_or("").contains("past its budget of 1 min"), "{status}");
@@ -1289,6 +1412,66 @@ grok-4.7-high - Grok 4.7  High
         assert_eq!(delegates.status(&parent(), &task.id).unwrap()["summary"], "PR opened");
         assert!(stopped(server), "the agent exited and left {server} running in its process group");
         assert_eq!(delegates.remembered(&task.id), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_that_exits_by_itself_stops_the_shells_it_started() {
+        let dir = scratch("self-exit");
+        let leftover = Leftover(dir.join("server.pid"));
+        let server = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_type":"local_bash","description":"npm run dev"}]}"#;
+        let body = format!(
+            "perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV' sh -c 'echo $$ > \"$0\"; while :; do sleep 1; done' '{pidfile}' >/dev/null 2>&1 &\nwhile [ ! -s '{pidfile}' ]; do sleep 0.05; done\necho '{INIT}'\necho '{server}'\necho '{REPLY}'\nsleep 1\nexit 3",
+            pidfile = leftover.0.display(),
+        );
+        let bin = script(&dir, "claude", &body);
+        let delegates = Arc::new(Delegates::default());
+        let task = new_on(&delegates, Provider::Claude);
+        let (_, told) = run(&delegates, &task, &bin, &dir);
+        let shell = leftover.pid();
+        assert_eq!(told.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("tab-1"));
+        assert!(stopped(shell), "the worker exited and left its shell {shell} running");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    const RESULT: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"PR opened"}"#;
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_that_exits_within_the_grace_finishes_its_own_work() {
+        let dir = scratch("grace-exit");
+        let flushed = dir.join("flushed");
+        let body = format!(
+            "echo '{INIT}'\necho '{REPLY}'\necho '{RESULT}'\ni=0\nwhile [ $i -lt 100000 ]; do i=$((i+1)); done\necho flushed > '{}'",
+            flushed.display()
+        );
+        let bin = script(&dir, "claude", &body);
+        let delegates = Arc::new(Delegates::default());
+        let task = new_on(&delegates, Provider::Claude);
+        let (agent, told) = run(&delegates, &task, &bin, &dir);
+        assert_eq!(told.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("tab-1"));
+        assert!(stopped(agent as i32), "the agent {agent} did not exit by itself");
+        assert_eq!(std::fs::read_to_string(&flushed).ok().as_deref(), Some("flushed\n"), "pinned killed the agent before it finished after its result");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_still_running_after_the_grace_is_killed() {
+        let dir = scratch("grace-kill");
+        let bin = script(&dir, "claude", &format!("echo '{INIT}'\necho '{REPLY}'\necho '{RESULT}'\nexec sleep 30"));
+        let delegates = Arc::new(Delegates::default());
+        let task = new_on(&delegates, Provider::Claude);
+        let (agent, told) = run(&delegates, &task, &bin, &dir);
+        assert_eq!(told.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("tab-1"));
+        assert!(alive(agent as i32), "pinned killed the agent {agent} on its result, with no grace");
+        let start = Instant::now();
+        while alive(agent as i32) {
+            assert!(start.elapsed() < Duration::from_secs(9), "the agent {agent} outlived the grace");
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -798,6 +798,13 @@ mod tests {
     use super::{codex_notify_flag, codex_user_notify};
 
     #[test]
+    #[cfg(unix)]
+    fn the_walk_never_targets_pid_0_or_1() {
+        let rows = [[0, 500, 0], [1, 500, 1], [501, 500, 501], [502, 501, 501]];
+        assert_eq!(super::targets_under(&rows, 500), vec![-501, 501, 502]);
+    }
+
+    #[test]
     fn a_top_level_notify_array_is_read_and_a_table_one_is_not() {
         let text = "notify = [\n  \"/bin/echo\",\n  \"hi\",\n]\n[tui]\nnotify = [\"nope\"]\n";
         assert_eq!(codex_user_notify(text), vec!["/bin/echo".to_owned(), "hi".to_owned()]);
