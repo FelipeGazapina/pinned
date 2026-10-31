@@ -234,7 +234,6 @@ def main():
             return 1
         state["exists"] = True
         state["draft"] = flag_bool(flags, "--draft") is not False
-        state["prerelease"] = flag_bool(flags, "--prerelease") is True
         state["latest"] = False
         save(state)
         return 0
@@ -279,11 +278,6 @@ def main():
                 sys.stderr.write(f"{raw} is empty\n")
                 return 1
             prepared.append((path.name, data))
-        clobber = "--clobber" in flags
-        for name, _data in prepared:
-            if name in state["assets"] and not clobber:
-                sys.stderr.write(f"asset under the same name already exists: [{name}]\n")
-                return 1
         cancel = os.environ.get("REPLAY_UPLOAD_CANCEL")
         fates = json.loads(cancel) if cancel else {}
         for name, data in prepared:
