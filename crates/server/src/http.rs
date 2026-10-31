@@ -442,11 +442,6 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
         Ok(account) => account,
         Err(e) => return eprintln!("pinned-server: machine sign in failed: {e}"),
     };
-    if let Some(wait) = hub.refusal_after(&version) {
-        tokio::time::sleep(wait).await;
-        let _ = socket.send(Message::Text(r#"{"type":"rejected","reason":"version"}"#.into())).await;
-        return;
-    }
     let (machine, socket_id) = (row.id.to_string(), hub.next_socket());
     let (out, mut outbox, overflowed) = Outbox::new();
     let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None, version: version.clone(), update: None };

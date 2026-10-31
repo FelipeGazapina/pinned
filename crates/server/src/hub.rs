@@ -77,8 +77,6 @@ pub struct Hub {
     accounts: Mutex<HashMap<Uuid, Arc<Account>>>,
     /// Numbers every socket, so a machine's old connection can't unregister its new one.
     sockets: AtomicU64,
-    /// A version whose sign-in is answered with a refusal instead of Hello, after this wait.
-    refusal: Mutex<Option<(String, Duration)>>,
 }
 
 pub struct Account {
@@ -147,27 +145,7 @@ impl Hub {
     pub fn new(db: Db, public_url: String, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1), refusal: Mutex::default() })
-    }
-
-    /// Answers a sign-in of `version` with a non-Hello frame after `after`, instead of Hello.
-    pub fn reject_version(&self, version: &str, after: Duration) {
-        *self.refusal.lock().unwrap() = Some((version.to_owned(), after));
-    }
-
-    pub fn refusal_after(&self, version: &str) -> Option<Duration> {
-        self.refusal.lock().unwrap().as_ref().filter(|(name, _)| name == version).map(|(_, after)| *after)
-    }
-
-    /// Closes every machine socket so each one dials again and signs in.
-    pub fn drop_machine_links(&self) {
-        for account in self.accounts.lock().unwrap().values() {
-            let mut live = account.live.lock().unwrap();
-            for machine in live.machines.values_mut() {
-                let (out, _, _) = Outbox::new();
-                machine.out = out;
-            }
-        }
+        Arc::new(Hub { db, public_url, boxes, accounts: Mutex::default(), sockets: AtomicU64::new(1) })
     }
 
     pub fn next_socket(&self) -> u64 {
