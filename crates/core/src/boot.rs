@@ -13,18 +13,21 @@ pub enum AfterHello {
     Leaving,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 enum Step {
-    Starting,
-    Running,
+    /// `refused` once the hub turned down a sign in.
+    Starting { refused: bool },
+    /// The hub accepted a sign in before the boot was ready, and `ready` removes `marker`.
+    Accepted { marker: PathBuf },
+    /// `refused` once the hub turned down a sign in since it last accepted one.
+    Running { refused: bool },
     Proven,
     Leaving,
 }
 
 struct Boot {
     step: Mutex<Step>,
-    ready: Notify,
-    refused: Notify,
+    changed: Notify,
 }
 
 static BOOT: Boot = Boot::new();
@@ -48,7 +51,7 @@ impl Proof {
 
 impl Boot {
     const fn new() -> Boot {
-        Boot { step: Mutex::new(Step::Starting), ready: Notify::const_new(), refused: Notify::const_new() }
+        Boot { step: Mutex::new(Step::Starting { refused: false }), changed: Notify::const_new() }
     }
 
     fn step(&self) -> MutexGuard<'_, Step> {
@@ -57,17 +60,20 @@ impl Boot {
 
     fn ready(&self) -> bool {
         let mut step = self.step();
-        if *step == Step::Leaving {
-            return false;
-        }
-        *step = Step::Running;
-        self.ready.notify_waiters();
+        let next = match &*step {
+            Step::Leaving => return false,
+            Step::Starting { refused } => Step::Running { refused: *refused },
+            Step::Accepted { marker } => commit(marker),
+            Step::Running { .. } | Step::Proven => return true,
+        };
+        *step = next;
+        self.changed.notify_waiters();
         true
     }
 
-    fn leave_from(&self, from: Step) -> bool {
+    fn leave_if(&self, leaves: impl FnOnce(&Step) -> bool) -> bool {
         let mut step = self.step();
-        if *step != from {
+        if !leaves(&step) {
             return false;
         }
         *step = Step::Leaving;
@@ -75,43 +81,65 @@ impl Boot {
     }
 
     fn leave_if_starting(&self) -> bool {
-        self.leave_from(Step::Starting)
+        self.leave_if(|step| matches!(step, Step::Starting { .. } | Step::Accepted { .. }))
     }
 
     async fn leave_when_refused(&self) {
         loop {
-            self.refused.notified().await;
-            if self.leave_from(Step::Running) {
+            let changed = self.changed.notified();
+            if self.leave_if(|step| *step == Step::Running { refused: true }) {
                 return;
+            }
+            changed.await;
+        }
+    }
+
+    /// What the link does once the hub accepted its sign in, or `None` while that waits for `ready`.
+    fn accepted(&self, proof: &Proof) -> Option<AfterHello> {
+        let mut step = self.step();
+        match (&*step, proof.holds()) {
+            (Step::Leaving, _) => Some(AfterHello::Leaving),
+            (Step::Accepted { .. }, _) => None,
+            (Step::Proven, _) | (_, None) => Some(AfterHello::Serve),
+            (Step::Starting { .. }, Some(marker)) => {
+                *step = Step::Accepted { marker: marker.to_owned() };
+                None
+            }
+            (Step::Running { .. }, Some(marker)) => {
+                *step = commit(marker);
+                Some(AfterHello::Serve)
             }
         }
     }
 
     async fn commit_when_ready(&self, proof: &Proof) -> AfterHello {
         loop {
-            let ready = self.ready.notified();
-            {
-                let mut step = self.step();
-                match (*step, proof.holds()) {
-                    (Step::Leaving, _) => return AfterHello::Leaving,
-                    (Step::Proven, _) | (_, None) => return AfterHello::Serve,
-                    (Step::Starting, Some(_)) => {}
-                    (Step::Running, Some(path)) => {
-                        match std::fs::remove_file(path) {
-                            Ok(()) => *step = Step::Proven,
-                            Err(error) => eprintln!("pinned: could not remove {}, the next sign in tries again: {error}", path.display()),
-                        }
-                        return AfterHello::Serve;
-                    }
-                }
+            let changed = self.changed.notified();
+            if let Some(after) = self.accepted(proof) {
+                return after;
             }
-            ready.await;
+            changed.await;
         }
     }
 
     fn refuse(&self, proof: &Proof) {
-        if proof.holds().is_some() {
-            self.refused.notify_one();
+        if proof.holds().is_none() {
+            return;
+        }
+        if let Step::Starting { refused } | Step::Running { refused } = &mut *self.step() {
+            *refused = true;
+            self.changed.notify_waiters();
+        }
+    }
+}
+
+/// Removing the marker keeps this binary on the next start. A boot that can't stays unproven.
+fn commit(marker: &Path) -> Step {
+    match std::fs::remove_file(marker) {
+        Ok(()) => Step::Proven,
+        Err(error) => {
+            eprintln!("pinned: could not remove {}, the next sign in tries again: {error}", marker.display());
+            Step::Running { refused: false }
         }
     }
 }
@@ -263,6 +291,16 @@ mod tests {
         assert_eq!(pin!(boot.leave_when_refused()).now_or_never(), Some(()), "the hub refused the unproven boot and it stayed");
         assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(AfterHello::Leaving), "a hello during the rollback went on to serve the hub");
         assert!(marker_kept(&staged), "the marker went away before the rollback");
+    }
+
+    #[test]
+    fn a_refusal_wakes_the_rollback_already_waiting_on_the_running_boot() {
+        let (boot, staged) = (Boot::new(), staged("refused-later", CHECKSUM));
+        assert!(boot.ready());
+        let mut left = pin!(boot.leave_when_refused());
+        assert_eq!(left.as_mut().now_or_never(), None, "the boot left before the hub refused it");
+        boot.refuse(&staged.proof);
+        assert_eq!(left.as_mut().now_or_never(), Some(()), "the hub refused the unproven boot and the waiting rollback slept on");
     }
 
     #[test]
