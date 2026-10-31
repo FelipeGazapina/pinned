@@ -98,6 +98,9 @@ pub struct State {
     /// moved to another account starts its Claude files over instead of taking them for deleted.
     #[serde(default)]
     claude_homes: BTreeMap<String, PathBuf>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    loaded_from: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
@@ -109,19 +112,38 @@ struct Hashed {
 
 impl State {
     /// A state saved before accounts names no Claude home; its files were in `legacy_claude_home`.
-    pub fn load(file: &Path, legacy_claude_home: &Path) -> State {
-        let mut state: State = std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    pub fn load(file: &Path, legacy_claude_home: &Path) -> Result<State, String> {
+        let mut state: State = match std::fs::read(file) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("the sync state {} is corrupt ({e}); restore or remove it to sync again", file.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
+            Err(e) => return Err(format!("could not read the sync state {}: {e}", file.display())),
+        };
         for key in state.agreed.keys() {
             if key.starts_with(PLUGINS_KEY) {
                 continue;
             }
             state.claude_homes.entry(key.clone()).or_insert_with(|| legacy_claude_home.to_owned());
         }
-        state
+        state.loaded_from = Some(file.to_owned());
+        Ok(state)
     }
 
-    pub fn save(&self, file: &Path) {
-        let _ = std::fs::write(file, serde_json::to_vec(self).unwrap());
+    pub fn save(&mut self, file: &Path) -> Result<(), String> {
+        self.loaded_from = Some(file.to_owned());
+        self.persist()
+    }
+
+    fn persist(&self) -> Result<(), String> {
+        let Some(file) = &self.loaded_from else { return Ok(()) };
+        let dir = file.parent().unwrap_or(Path::new("."));
+        let failed = |e: std::io::Error| format!("could not save {}: {e}", file.display());
+        let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(failed)?;
+        write_state(temp.as_file_mut(), &serde_json::to_vec(self).unwrap()).map_err(failed)?;
+        temp.as_file().sync_all().map_err(failed)?;
+        temp.persist(file).map_err(|e| failed(e.error))?;
+        #[cfg(unix)]
+        std::fs::File::open(dir).and_then(|dir| dir.sync_all()).map_err(failed)?;
+        Ok(())
     }
 
     fn hash(&mut self, file: &Path) -> Option<(String, u64)> {
@@ -134,6 +156,20 @@ impl State {
         self.hashes.insert(file.to_owned(), Hashed { size: meta.len(), modified, sha: sha.clone() });
         Some((sha, modified))
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CRASH_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+fn write_state(out: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(n) = CRASH_AFTER.with(|cut| cut.get()) {
+        out.write_all(&bytes[..n.min(bytes.len())])?;
+        return Err(std::io::Error::other(format!("the disk stopped after {n} bytes")));
+    }
+    out.write_all(bytes)
 }
 
 /// What a sync of one checkout does through the hub.
@@ -168,14 +204,19 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
         }
     }
     let agreed_key = format!("{key} {}", checkout.path.display());
-    let mut agreed = state.agreed.remove(&agreed_key).unwrap_or_default();
+    let mut agreed = state.agreed.get(&agreed_key).cloned().unwrap_or_default();
     if let Some(home) = &checkout.claude_home {
         if state.claude_homes.insert(agreed_key.clone(), home.clone()).is_some_and(|before| &before != home) {
             agreed.retain(|path, _| !path.starts_with("claude/"));
+            if let Some(saved) = state.agreed.get_mut(&agreed_key) {
+                saved.retain(|path, _| !path.starts_with("claude/"));
+            }
+            state.persist()?;
         }
     }
-    let synced = exchange(hub, state, key, &mut agreed, &local, &|path| roots.local(path), now, true)?;
+    let synced = exchange(hub, state, key, &agreed_key, &mut agreed, &local, &|path| roots.local(path), now, true)?;
     state.agreed.insert(agreed_key, agreed);
+    state.persist()?;
     Ok(synced)
 }
 
@@ -183,6 +224,7 @@ fn exchange(
     hub: &impl Hub,
     state: &mut State,
     key: &str,
+    agreed_key: &str,
     mut agreed: &mut BTreeMap<String, String>,
     local: &BTreeMap<String, (String, u64)>,
     resolve: &dyn Fn(&str) -> Option<PathBuf>,
@@ -190,8 +232,6 @@ fn exchange(
     sessions: bool,
 ) -> Result<Synced, String> {
     let remote: BTreeMap<String, Entry> = hub.list(key)?.into_iter().map(|e| (e.path.clone(), e)).collect();
-    // A file of a folder this checkout doesn't share, such as Claude's for a Codex project, is
-    // neither fetched nor taken for deleted.
     let paths: BTreeSet<String> = local.keys().chain(remote.keys()).chain(agreed.keys()).filter(|p| resolve(p).is_some()).cloned().collect();
     let (mut push, mut pull, mut merge) = (vec![], vec![], vec![]);
     #[cfg(unix)]
@@ -241,7 +281,6 @@ fn exchange(
     }
     #[cfg(unix)]
     if !repairs.is_empty() {
-        // A content push would write these bytes and their mtime over whatever landed since list.
         hub.mark_executable(key, repairs)?;
     }
     let mut synced = Synced::default();
@@ -254,6 +293,7 @@ fn exchange(
     }
 
     let mut batch: Vec<File> = vec![];
+    let mut pending: Vec<(String, Option<String>)> = vec![];
     let mut size = 0;
     for path in push {
         let file = match resolve(&path).filter(|f| f.is_file()) {
@@ -264,26 +304,31 @@ fn exchange(
                 if data.len() as u64 > FILE_LIMIT {
                     continue;
                 }
+                let mode = if key == PLUGINS_KEY {
+                    heal_owner_execute(&target)?;
+                    executable(&target)?
+                } else {
+                    None
+                };
                 File {
-                    entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: if key == PLUGINS_KEY { executable(&target)? } else { None } },
+                    entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: mode },
                     data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
                 }
             }
         };
         size += file.entry.size;
-        match &file.data {
-            Some(_) => agreed.insert(path.clone(), file.entry.sha.clone()),
-            None => agreed.remove(&path),
-        };
+        pending.push((file.entry.path.clone(), file.data.as_ref().map(|_| file.entry.sha.clone())));
         batch.push(file);
         synced.pushed.push(path);
         if size >= BATCH {
             hub.push(key, std::mem::take(&mut batch))?;
+            commit_agreed(state, agreed_key, agreed, &std::mem::take(&mut pending))?;
             size = 0;
         }
     }
     if !batch.is_empty() {
-        hub.push(key, batch)?;
+        hub.push(key, std::mem::take(&mut batch))?;
+        commit_agreed(state, agreed_key, agreed, &std::mem::take(&mut pending))?;
     }
 
     let mut wanted: Vec<String> = vec![];
@@ -291,26 +336,29 @@ fn exchange(
     let fetch = |wanted: Vec<String>, agreed: &mut BTreeMap<String, String>, synced: &mut Synced, state: &mut State| -> Result<(), String> {
         for file in hub.pull(key, wanted)? {
             let Some(target) = resolve(&file.entry.path) else { continue };
-            match &file.data {
+            let update = match &file.data {
                 None => {
-                    let _ = std::fs::remove_file(&target);
-                    agreed.remove(&file.entry.path);
+                    match std::fs::remove_file(&target) {
+                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("could not delete {}: {e}", target.display())),
+                        _ => None,
+                    }
                 }
                 Some(data) => {
                     let bytes = unpack(data)?;
                     let mode = if key == PLUGINS_KEY { file.entry.executable } else { None };
                     write(&target, &bytes, Some(file.entry.modified), mode)?;
                     state.hash(&target);
-                    agreed.insert(file.entry.path.clone(), file.entry.sha.clone());
+                    Some(file.entry.sha.clone())
                 }
-            }
-            synced.pulled.push(file.entry.path);
+            };
+            let path = file.entry.path.clone();
+            synced.pulled.push(path.clone());
+            commit_agreed(state, agreed_key, agreed, &[(path, update)])?;
         }
         Ok(())
     };
     for path in pull {
         if !remote.contains_key(&path) {
-            // Deleted here and never on the hub: nothing to fetch, and nothing agreed anymore.
             agreed.remove(&path);
             continue;
         }
@@ -432,9 +480,32 @@ pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now:
     let agreed_key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
     let mut agreed = state.agreed.get(&agreed_key).cloned().unwrap_or_default();
     let keep = conflicting_user_skills(&local, &agreed, &hub.list(PLUGINS_KEY)?);
-    let synced = exchange(hub, state, PLUGINS_KEY, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false)?;
+    let synced = exchange(hub, state, PLUGINS_KEY, &agreed_key, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false)?;
     state.agreed.insert(agreed_key, agreed);
+    state.persist()?;
     Ok(synced)
+}
+
+fn commit_agreed(state: &mut State, agreed_key: &str, agreed: &mut BTreeMap<String, String>, updates: &[(String, Option<String>)]) -> Result<(), String> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    {
+        let saved = state.agreed.entry(agreed_key.to_owned()).or_default();
+        for (path, sha) in updates {
+            match sha {
+                Some(sha) => {
+                    agreed.insert(path.clone(), sha.clone());
+                    saved.insert(path.clone(), sha.clone());
+                }
+                None => {
+                    agreed.remove(path);
+                    saved.remove(path);
+                }
+            }
+        }
+    }
+    state.persist()
 }
 
 fn conflicting_user_skills(local: &BTreeMap<String, (String, u64)>, agreed: &BTreeMap<String, String>, remote: &[Entry]) -> BTreeSet<String> {
@@ -546,6 +617,8 @@ fn copy_tree(src: &Path, dest: &Path, id: &str, rel: &Path) -> Result<(), String
         } else if meta.is_file() {
             let Some(hub_path) = hub_join(&format!("plugins/{id}"), &rel) else { continue };
             if accepts(PLUGINS_KEY, &hub_path) {
+                heal_owner_execute(&src_path)?;
+                let Ok(meta) = std::fs::symlink_metadata(&src_path) else { continue };
                 copy_newer(&src_path, &dest.join(&rel), &meta)?;
             }
         }
@@ -766,6 +839,7 @@ fn unix_mode_fix(path: &str, remote: &BTreeMap<String, Entry>, resolve: &dyn Fn(
     if !file.is_file() {
         return Ok(None);
     }
+    heal_owner_execute(&file)?;
     Ok(mode_fix(executable(&file)?, remote_exec))
 }
 
@@ -774,19 +848,29 @@ fn executable(path: &Path) -> Result<Option<bool>, String> {
     {
         use std::os::unix::fs::PermissionsExt;
         let Some(mode) = std::fs::metadata(path).ok().map(|meta| meta.permissions().mode()) else { return Ok(None) };
-        // The owner runs the hook.
-        let owner = if mode & 0o111 != 0 && mode & 0o100 == 0 {
-            set_owner_execute(path)?;
-            true
-        } else {
-            mode & 0o100 != 0
-        };
-        return Ok(Some(owner));
+        return Ok(Some(mode & 0o111 != 0));
     }
     #[cfg(not(unix))]
     {
         let _ = path;
         Ok(None)
+    }
+}
+
+fn heal_owner_execute(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(mode) = std::fs::metadata(path).ok().map(|meta| meta.permissions().mode()) else { return Ok(()) };
+        if mode & 0o111 != 0 && mode & 0o100 == 0 {
+            set_owner_execute(path)?;
+        }
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
     }
 }
 
@@ -811,7 +895,6 @@ fn write(target: &Path, bytes: &[u8], modified: Option<u64>, executable: Option<
     Ok(())
 }
 
-// A directory this process owns still allows chmod. Tests set this to stand in for EPERM.
 #[cfg(all(unix, test))]
 thread_local! {
     static DENY_OWNER_EXECUTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -835,7 +918,6 @@ fn apply_executable(file: &std::fs::File, executable: bool) -> Result<(), String
         use std::os::unix::fs::PermissionsExt;
         let mut perms = file.metadata().map_err(|e| e.to_string())?.permissions();
         let mode = perms.mode();
-        // The owner runs the hook. 0o111 would turn mode 600 into 711.
         perms.set_mode(if executable { mode | 0o100 } else { mode & !0o111 });
         file.set_permissions(perms).map_err(|e| e.to_string())?;
     }
@@ -870,7 +952,7 @@ fn millis(t: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     #[derive(Default)]
     struct MemHub(RefCell<BTreeMap<String, File>>);
@@ -898,6 +980,33 @@ mod tests {
                 }
             }
             Ok(())
+        }
+    }
+
+    struct FallibleHub {
+        inner: MemHub,
+        fail_list: Cell<bool>,
+        fail_pull: Cell<bool>,
+    }
+
+    impl Hub for FallibleHub {
+        fn list(&self, project: &str) -> Result<Vec<Entry>, String> {
+            if self.fail_list.get() {
+                return Err("the hub did not answer within 60 seconds".into());
+            }
+            self.inner.list(project)
+        }
+        fn push(&self, project: &str, files: Vec<File>) -> Result<(), String> {
+            self.inner.push(project, files)
+        }
+        fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
+            if self.fail_pull.get() {
+                return Err("the hub did not answer within 60 seconds".into());
+            }
+            self.inner.pull(project, paths)
+        }
+        fn mark_executable(&self, project: &str, repairs: Vec<ModeRepair>) -> Result<(), String> {
+            self.inner.mark_executable(project, repairs)
         }
     }
 
@@ -984,7 +1093,7 @@ mod tests {
             let mut saved = serde_json::to_value(&side.state).unwrap();
             saved.as_object_mut().unwrap().remove("claude_homes");
             std::fs::write(&file, saved.to_string()).unwrap();
-            State::load(&file, &side.home.join(".claude"))
+            State::load(&file, &side.home.join(".claude")).unwrap()
         };
         std::fs::remove_file(mac.claude("s1.jsonl")).unwrap();
         mac.state = legacy(&mac);
@@ -1942,9 +2051,9 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn saved_agreed(state: &State, share: &PluginShare, file: &Path) -> BTreeMap<String, String> {
-        state.save(file);
-        let loaded = State::load(file, &file.with_extension("legacy"));
+    fn saved_agreed(state: &mut State, share: &PluginShare, file: &Path) -> BTreeMap<String, String> {
+        state.save(file).unwrap();
+        let loaded = State::load(file, &file.with_extension("legacy")).unwrap();
         let key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
         loaded.agreed.get(&key).cloned().unwrap_or_default()
     }
@@ -2009,7 +2118,7 @@ mod tests {
         hub.fail.set(true);
         let failed = sync_plugins(&hub, &mut state, &mac, now);
         assert_eq!(failed, Err("the hub did not answer within 60 seconds".into()));
-        let agreed = saved_agreed(&state, &mac, &root.join("state.json"));
+        let agreed = saved_agreed(&mut state, &mac, &root.join("state.json"));
         assert_eq!(agreed.get(USER_SKILL).cloned(), Some(sha(b"one\n")));
         assert_eq!(agreed.get(HOOK).cloned(), Some(sha(b"#!/bin/sh\necho session-start\n")));
         assert_eq!(unpack(hub.inner.0.borrow()[USER_SKILL].data.as_deref().unwrap()).unwrap(), b"one\n");
@@ -2049,7 +2158,7 @@ mod tests {
         let deny = DenyOwnerExecute::arm();
         let failed = sync_plugins(&hub, &mut mini_state, &mini, now);
         assert_eq!(failed, Err("Operation not permitted (os error 1)".into()));
-        let agreed = saved_agreed(&mini_state, &mini, &root.join("state.json"));
+        let agreed = saved_agreed(&mut mini_state, &mini, &root.join("state.json"));
         assert_eq!(agreed.get(USER_SKILL).cloned(), Some(sha(b"one\n")));
         assert_eq!(agreed.get(HOOK).cloned(), Some(sha(b"#!/bin/sh\necho session-start\n")));
         drop(deny);
@@ -2060,6 +2169,292 @@ mod tests {
         assert_eq!(unpack(hub.0.borrow()[USER_SKILL].data.as_deref().unwrap()).unwrap(), b"two\n");
         assert_eq!(mode_bits(&dest) & 0o100, 0o100, "healed hook mode is {:o}", mode_bits(&dest));
         assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_654_file_reads_as_executable_and_keeps_its_mode() {
+        let root = root("read-654");
+        let bare = root.join("bare.sh");
+        put(&bare, "#!/bin/sh\necho session-start\n");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bare, std::fs::Permissions::from_mode(0o654)).unwrap();
+        assert_eq!(executable(&bare).unwrap(), Some(true));
+        assert_eq!(mode_bits(&bare), 0o654, "mode is {:o}", mode_bits(&bare));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_654_install_is_owner_executable_after_sync() {
+        let root = root("install-654");
+        let hub = MemHub::default();
+        let (hook, mac, _) = executable_hook(&root);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o654)).unwrap();
+        let skill = mac.claude_home.join("skills/greet/SKILL.md");
+        put(&skill, "hello\n");
+        std::fs::set_permissions(&skill, std::fs::Permissions::from_mode(0o654)).unwrap();
+        let mut state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        let mirror = mac.dir.join(HOOK);
+        assert_eq!(mode_bits(&hook), 0o754, "install mode is {:o}", mode_bits(&hook));
+        assert_eq!(mode_bits(&mirror), 0o754, "mirror mode is {:o}", mode_bits(&mirror));
+        assert_eq!(mode_bits(&skill), 0o754, "skill mode is {:o}", mode_bits(&skill));
+        assert_eq!(hub.0.borrow()[HOOK].entry.executable, Some(true));
+        let mtime = std::fs::metadata(&mirror).unwrap().modified().unwrap();
+        std::fs::set_permissions(&mirror, std::fs::Permissions::from_mode(0o654)).unwrap();
+        std::fs::File::options().write(true).open(&mirror).unwrap().set_modified(mtime).unwrap();
+        sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        assert_eq!(mode_bits(&mirror), 0o754, "healed mirror mode is {:o}", mode_bits(&mirror));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_push_then_a_failed_pull_keeps_the_other_machines_older_edit() {
+        let root = root("plugin-partial");
+        let hub = FallibleHub { inner: MemHub::default(), fail_list: Cell::new(false), fail_pull: Cell::new(false) };
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        let mac = PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") };
+        let mini = PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") };
+        let greet = "user-skills/greet/SKILL.md";
+        let notes = "user-skills/notes/SKILL.md";
+        let mac_greet = mac.claude_home.join("skills/greet/SKILL.md");
+        let mac_notes = mac.claude_home.join("skills/notes/SKILL.md");
+        put(&mac_greet, "one\n");
+        put(&mac_notes, "note\n");
+        let agreed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        stamp(&mac_greet, agreed_at);
+        stamp(&mac_notes, agreed_at);
+        let file = root.join("state.json");
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        mac_state.save(&file).unwrap();
+        put(&mac_greet, "two\n");
+        stamp(&mac_greet, SystemTime::UNIX_EPOCH + Duration::from_millis(5_000));
+        let mini_notes = mini.claude_home.join("skills/notes/SKILL.md");
+        put(&mini_notes, "note-b\n");
+        stamp(&mini_notes, SystemTime::UNIX_EPOCH + Duration::from_millis(6_000));
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        hub.fail_pull.set(true);
+        let failed = sync_plugins(&hub, &mut mac_state, &mac, now);
+        assert_eq!(failed, Err("the hub did not answer within 60 seconds".into()));
+        hub.fail_pull.set(false);
+        let mut mac_state = State::load(&file, &file.with_extension("legacy")).unwrap();
+        let mini_greet = mini.claude_home.join("skills/greet/SKILL.md");
+        let took = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(took.pulled, vec![greet.to_string()]);
+        assert_eq!(std::fs::read(&mini_greet).unwrap(), b"two\n");
+        put(&mini_greet, "three\n");
+        stamp(&mini_greet, SystemTime::UNIX_EPOCH + Duration::from_millis(4_000));
+        let published = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(published.pushed, vec![greet.to_string()]);
+        let next = sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        assert_eq!(texts(&hub.inner).get(greet).map(String::as_str), Some("three\n"));
+        assert_eq!(std::fs::read(&mac_greet).unwrap(), b"three\n");
+        assert_eq!(std::fs::read(&mac_notes).unwrap(), b"note-b\n");
+        assert_eq!(next.pushed, Vec::<String>::new());
+        assert_eq!(next.pulled, vec![greet.to_string(), notes.to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_failed_project_list_keeps_the_baseline_and_the_next_sync_pushes_the_local_edit() {
+        let root = root("project-list-fail");
+        let hub = FallibleHub { inner: MemHub::default(), fail_list: Cell::new(false), fail_pull: Cell::new(false) };
+        let mut mac = Side::new(&root, "mac", "app");
+        let memory = mac.claude("memory/MEMORY.md");
+        put(&memory, "one\n");
+        stamp(&memory, SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+        let file = root.join("state.json");
+        let now = SystemTime::now();
+        sync(&hub, &mut mac.state, &mac.checkout, now).unwrap();
+        mac.state.save(&file).unwrap();
+        put(&memory, "two\n");
+        stamp(&memory, SystemTime::UNIX_EPOCH + Duration::from_secs(50));
+        hub.fail_list.set(true);
+        let failed = sync(&hub, &mut mac.state, &mac.checkout, now);
+        assert_eq!(failed, Err("the hub did not answer within 60 seconds".into()));
+        mac.state.save(&file).unwrap();
+        hub.fail_list.set(false);
+        let mut mac_state = State::load(&file, &file.with_extension("legacy")).unwrap();
+        let key = format!("{} {}", mac.checkout.project.key, mac.checkout.path.display());
+        let kept = mac_state.agreed.get(&key).and_then(|map| map.get("claude/memory/MEMORY.md")).cloned();
+        let next = sync(&hub, &mut mac_state, &mac.checkout, now).unwrap();
+        let original = sha(b"one\n");
+        assert_eq!(std::fs::read(&memory).unwrap(), b"two\n");
+        assert_eq!(texts(&hub.inner).get("claude/memory/MEMORY.md").map(String::as_str), Some("two\n"));
+        assert_eq!(next.pushed, vec!["claude/memory/MEMORY.md".to_string()]);
+        assert_eq!(next.pulled, Vec::<String>::new());
+        assert_eq!(kept.as_deref(), Some(original.as_str()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_project_push_then_a_failed_pull_keeps_the_other_machines_older_edit() {
+        let root = root("project-partial");
+        let hub = FallibleHub { inner: MemHub::default(), fail_list: Cell::new(false), fail_pull: Cell::new(false) };
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        let memory = mac.claude("memory/MEMORY.md");
+        let notes = mac.claude("memory/notes.md");
+        put(&memory, "one\n");
+        put(&notes, "note\n");
+        let agreed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        stamp(&memory, agreed_at);
+        stamp(&notes, agreed_at);
+        let file = root.join("state.json");
+        let now = SystemTime::now();
+        sync(&hub, &mut mac.state, &mac.checkout, now).unwrap();
+        sync(&hub, &mut mini.state, &mini.checkout, now).unwrap();
+        mac.state.save(&file).unwrap();
+        put(&memory, "two\n");
+        stamp(&memory, SystemTime::UNIX_EPOCH + Duration::from_millis(5_000));
+        let mini_notes = mini.claude("memory/notes.md");
+        put(&mini_notes, "note-b\n");
+        stamp(&mini_notes, SystemTime::UNIX_EPOCH + Duration::from_millis(6_000));
+        sync(&hub, &mut mini.state, &mini.checkout, now).unwrap();
+        hub.fail_pull.set(true);
+        let failed = sync(&hub, &mut mac.state, &mac.checkout, now);
+        assert_eq!(failed, Err("the hub did not answer within 60 seconds".into()));
+        hub.fail_pull.set(false);
+        let mut mac_state = State::load(&file, &file.with_extension("legacy")).unwrap();
+        let took = sync(&hub, &mut mini.state, &mini.checkout, now).unwrap();
+        assert_eq!(took.pulled, vec!["claude/memory/MEMORY.md".to_string()]);
+        let mini_memory = mini.claude("memory/MEMORY.md");
+        put(&mini_memory, "three\n");
+        stamp(&mini_memory, SystemTime::UNIX_EPOCH + Duration::from_millis(4_000));
+        let published = sync(&hub, &mut mini.state, &mini.checkout, now).unwrap();
+        assert_eq!(published.pushed, vec!["claude/memory/MEMORY.md".to_string()]);
+        let next = sync(&hub, &mut mac_state, &mac.checkout, now).unwrap();
+        assert_eq!(texts(&hub.inner).get("claude/memory/MEMORY.md").map(String::as_str), Some("three\n"));
+        assert_eq!(std::fs::read(&memory).unwrap(), b"three\n");
+        assert_eq!(std::fs::read(mac.claude("memory/notes.md")).unwrap(), b"note-b\n");
+        assert_eq!(texts(&hub.inner).get("claude/memory/notes.md").map(String::as_str), Some("note-b\n"));
+        assert_eq!(next.pushed, Vec::<String>::new());
+        assert_eq!(next.pulled, vec!["claude/memory/MEMORY.md".to_string(), "claude/memory/notes.md".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_delete_this_machine_cannot_apply_keeps_the_baseline_and_is_not_undone() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = root("unlink-fail");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        let memory = mac.claude("memory/MEMORY.md");
+        put(&memory, "one\n");
+        mac.sync(&hub);
+        mini.sync(&hub);
+        std::fs::remove_file(mini.claude("memory/MEMORY.md")).unwrap();
+        assert_eq!(mini.sync(&hub).pushed, vec!["claude/memory/MEMORY.md"]);
+        let folder = mac.claude("memory");
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let blocked = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now());
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let next = mac.sync(&hub);
+        assert_eq!(hub.0.borrow()["claude/memory/MEMORY.md"].entry.sha, "", "the hub still holds the delete");
+        assert_eq!(next, Synced { pushed: vec![], pulled: vec!["claude/memory/MEMORY.md".into()] });
+        assert_eq!(memory.exists(), false);
+        assert_eq!(blocked, Err(format!("could not delete {}: Permission denied (os error 13)", memory.display())));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_install_heal_touches_only_files_the_sync_copies() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = root("heal-skips");
+        let hub = MemHub::default();
+        let (hook, mac, _) = executable_hook(&root);
+        let install = mac_install(&hook);
+        let outside = root.join("outside/tool.sh");
+        let skipped = [install.join("node_modules/dep/bin/run.sh"), install.join(".env"), install.join("hooks/server.pem"), outside.clone()];
+        for file in skipped.iter().chain([&hook]) {
+            put(file, "#!/bin/sh\n");
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o654)).unwrap();
+        }
+        std::os::unix::fs::symlink(&outside, install.join("hooks/linked.sh")).unwrap();
+        std::os::unix::fs::symlink(outside.parent().unwrap(), install.join("linked")).unwrap();
+        sync_plugins(&hub, &mut State::default(), &mac, SystemTime::now()).unwrap();
+        let modes: Vec<String> = [&hook].into_iter().chain(skipped.iter()).map(|file| format!("{:o}", mode_bits(file))).collect();
+        assert_eq!(modes, ["754", "654", "654", "654", "654"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    fn mac_install(hook: &Path) -> PathBuf {
+        hook.parent().and_then(Path::parent).unwrap().to_path_buf()
+    }
+
+    #[test]
+    fn a_torn_state_file_does_not_let_an_older_copy_replace_a_newer_edit() {
+        let root = root("torn-state");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        let memory = mac.claude("memory/MEMORY.md");
+        put(&memory, "one\n");
+        stamp(&memory, SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+        let file = root.join("sync.json");
+        mac.sync(&hub);
+        mac.state.save(&file).unwrap();
+        mini.sync(&hub);
+        let mini_memory = mini.claude("memory/MEMORY.md");
+        put(&mini_memory, "two two\n");
+        stamp(&mini_memory, SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_100));
+        assert_eq!(mini.sync(&hub).pushed, vec!["claude/memory/MEMORY.md"]);
+        stamp(&memory, SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_200));
+        let saved = std::fs::read(&file).unwrap();
+        std::fs::write(&file, &saved[..12]).unwrap();
+        let synced = State::load(&file, &root.join("legacy")).and_then(|mut state| sync(&hub, &mut state, &mac.checkout, SystemTime::now()));
+        assert_eq!(texts(&hub).get("claude/memory/MEMORY.md").map(String::as_str), Some("two two\n"));
+        assert_eq!(std::fs::read_to_string(&memory).unwrap(), "one\n");
+        assert_eq!(synced, Err(format!("the sync state {} is corrupt (EOF while parsing a string at line 1 column 12); restore or remove it to sync again", file.display())));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    struct CrashAfter;
+
+    impl CrashAfter {
+        fn arm(bytes: usize) -> Self {
+            super::CRASH_AFTER.with(|cut| cut.set(Some(bytes)));
+            Self
+        }
+    }
+
+    impl Drop for CrashAfter {
+        fn drop(&mut self) {
+            super::CRASH_AFTER.with(|cut| cut.set(None));
+        }
+    }
+
+    #[test]
+    fn a_save_cut_short_leaves_the_previous_state_file_whole() {
+        let root = root("cut-save");
+        let hub = MemHub::default();
+        let mut mac = Side::new(&root, "mac", "app");
+        let memory = mac.claude("memory/MEMORY.md");
+        put(&memory, "one\n");
+        let file = root.join("sync.json");
+        mac.state.save(&file).unwrap();
+        mac.sync(&hub);
+        let before = std::fs::read_to_string(&file).unwrap();
+        put(&memory, "two two\n");
+        let now = SystemTime::now();
+        let cut = {
+            let _crash = CrashAfter::arm(12);
+            sync(&hub, &mut mac.state, &mac.checkout, now)
+        };
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        assert_eq!(cut, Err(format!("could not save {}: the disk stopped after 12 bytes", file.display())));
+        let mut loaded = State::load(&file, &root.join("legacy")).unwrap();
+        assert_eq!(sync(&hub, &mut loaded, &mac.checkout, now), Ok(Synced::default()));
+        assert_eq!(texts(&hub).get("claude/memory/MEMORY.md").map(String::as_str), Some("two two\n"));
         let _ = std::fs::remove_dir_all(root);
     }
 

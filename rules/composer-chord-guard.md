@@ -8,7 +8,7 @@ Alt+Cmd+Enter during IME composition called `sendAndNewThread` and left the slas
 
 ## Decision
 
-The prompt keydown listener returns at entry when `isComposing` is set or `keyCode` is 229. That matches the shell, sidebar search, timeline, and theme-import handlers. `triggerKey` leaves the menu only when `composerEnterIntent` returns `new-thread`, or `send` together with `platformEnterMod`. Plain Enter, Option+Enter, and the modifier that is not this platform's send key keep the previous pick. `projectNameMark` puts the escaped full name on the filter and on each menu row. `projectWhere` already titles the machine label, and the composer `.where` spans already title the path or the machine label.
+The prompt keydown listener returns at entry when `isComposing` is set or `keyCode` is 229. That matches the sidebar search, timeline, and theme-import handlers, which skip every composing key. The shell palette skips only a composing Enter, so arrows, Escape, and Backspace still run there. `triggerKey` leaves the menu only when `composerEnterIntent` returns `new-thread`, or `send` together with `platformEnterMod`. Plain Enter, Option+Enter, and the modifier that is not this platform's send key keep the previous pick. `projectNameMark` puts the escaped full name on the filter and on each menu row. `projectWhere` already titles the machine label, and the composer `.where` spans already title the path or the machine label.
 
 ## Fix
 

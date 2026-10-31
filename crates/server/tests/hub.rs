@@ -997,6 +997,7 @@ fn an_executable_hook_stays_executable_through_the_hub() {
 }
 
 const HOOK_PATH: &str = "plugins/pstack@local/hooks/session-start.sh";
+const STOP_PATH: &str = "plugins/pstack@local/hooks/stop.sh";
 
 fn call_machine(hub: &str, token: &str, call: Value) -> Value {
     machine_result(hub, token, call).unwrap_or_else(|err| panic!("{err}"))
@@ -1281,14 +1282,16 @@ fn a_node_marks_the_executable_bit_and_keeps_a_newer_edit() {
     let body = b"#!/bin/sh\necho session-start\n";
     let install = |home: &Path, mode: u32, secs: u64| {
         let plugin = home.join("plugins/pstack");
-        let hook = plugin.join("hooks/session-start.sh");
-        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
         std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
         std::fs::write(plugin.join(".claude-plugin/plugin.json"), r#"{"name":"pstack"}"#).unwrap();
-        std::fs::write(&hook, body).unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(mode)).unwrap();
-        let when = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
-        std::fs::File::options().write(true).open(&hook).unwrap().set_modified(when).unwrap();
+        for rel in ["hooks/session-start.sh", "hooks/stop.sh"] {
+            let hook = plugin.join(rel);
+            std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+            std::fs::write(&hook, body).unwrap();
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(mode)).unwrap();
+            let when = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+            std::fs::File::options().write(true).open(&hook).unwrap().set_modified(when).unwrap();
+        }
         let installed = serde_json::json!({ "plugins": { "pstack@local": [{ "installPath": plugin, "version": "0.9.82", "gitCommitSha": "abc123" }] } });
         std::fs::create_dir_all(home.join(".claude/plugins")).unwrap();
         std::fs::write(home.join(".claude/settings.json"), r#"{"enabledPlugins":{"pstack@local":true}}"#).unwrap();
@@ -1309,7 +1312,10 @@ fn a_node_marks_the_executable_bit_and_keeps_a_newer_edit() {
     assert_eq!(row.modified, 1_700_000_000_000);
     assert_eq!(row.data, gzip_bytes(body));
     assert_eq!(row.executable, true);
-    admin_on(&hub.database, "update project_files set executable = false where project = 'pinned:plugins' and path = 'plugins/pstack@local/hooks/session-start.sh'");
+    admin_on(
+        &hub.database,
+        "update project_files set executable = false where project = 'pinned:plugins' and path in ('plugins/pstack@local/hooks/session-start.sh', 'plugins/pstack@local/hooks/stop.sh')",
+    );
     let newer = b"#!/bin/sh\necho edited\n";
     let racing = RacingLink { link: mini_link, ahead: Mutex::new(Some(plugin_hook(newer, 1_800_000_000_000, false))) };
     sync::sync_plugins(&racing, &mut mini_state, &share(&mini_home), now).unwrap();
@@ -1318,6 +1324,11 @@ fn a_node_marks_the_executable_bit_and_keeps_a_newer_edit() {
     assert_eq!(row.modified, 1_800_000_000_000);
     assert_eq!(row.data, gzip_bytes(newer));
     assert_eq!(row.executable, false);
+    let stop = stored_plugin_row(&hub.database, STOP_PATH);
+    assert_eq!(stop.sha, sha256_hex(body));
+    assert_eq!(stop.modified, 1_700_000_000_000);
+    assert_eq!(stop.data, gzip_bytes(body));
+    assert_eq!(stop.executable, true);
     let (mut mac, mut mini) = (mac, mini);
     mac.kill();
     mini.kill();
@@ -1356,12 +1367,16 @@ struct HookRow {
 }
 
 fn stored_hook_row(database: &str) -> HookRow {
+    stored_plugin_row(database, HOOK_PATH)
+}
+
+fn stored_plugin_row(database: &str, path: &str) -> HookRow {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
         tokio::spawn(connection);
         let row = client
-            .query_one("select sha, modified, executable, data from project_files where project = $1 and path = $2", &[&sync::PLUGINS_KEY, &HOOK_PATH])
+            .query_one("select sha, modified, executable, data from project_files where project = $1 and path = $2", &[&sync::PLUGINS_KEY, &path])
             .await
             .unwrap();
         HookRow { sha: row.get(0), modified: row.get(1), executable: row.get(2), data: row.get(3) }
