@@ -699,20 +699,31 @@ pub fn spawn(
     let mut stderr = child.stderr.take().ok_or("the child has no stderr")?;
     let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let stored = stderr_buf.clone();
-    let stderr_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
-        if buf.len() > 4096 {
-            buf.drain(..buf.len() - 4096);
+    let (closed, stderr_closed) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut chunk = [0; 4096];
+        loop {
+            match stderr.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let mut buf = stored.lock().unwrap();
+                    buf.extend_from_slice(&chunk[..read]);
+                    let extra = buf.len().saturating_sub(4096);
+                    buf.drain(..extra);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
         }
-        *stored.lock().unwrap() = buf;
+        let _ = closed.send(());
     });
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             on_event(ChildEvent::Line(line));
         }
+        // A process that inherited the agent's stderr can hold it open for hours. The wait comes before the reap so the pid stays reserved.
+        let _ = stderr_closed.recv_timeout(STDERR_DRAIN);
         let code = child.wait().ok().and_then(|status| status.code());
-        let _ = stderr_thread.join();
         let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap())
             .trim()
             .to_owned();

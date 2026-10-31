@@ -22,6 +22,7 @@ pub const DEFAULT_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
 const QUIET_AFTER_REPLY_MS: u64 = 30 * 60 * 1000;
 #[cfg(unix)]
 const EXIT_GRACE: Duration = Duration::from_secs(5);
+const STDERR_DRAIN: Duration = Duration::from_secs(1);
 const MODEL_CACHE: Duration = Duration::from_secs(10 * 60);
 const MODEL_MISS: Duration = Duration::from_secs(15);
 const CATALOG_WAIT: Duration = Duration::from_secs(2);
