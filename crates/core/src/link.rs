@@ -342,6 +342,7 @@ fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSende
             machine.detach(&tab, &viewer);
             shared.subscribed.lock().unwrap().remove(&(tab, viewer));
         }
+        Ok(ToMachine::WatchThreads { viewer, tabs }) => machine.set_watched_threads(&viewer, &tabs),
         Ok(ToMachine::Hello { .. }) => {}
         Err(e) => {
             let value: Value = serde_json::from_str(frame).unwrap_or_default();

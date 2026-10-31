@@ -274,9 +274,37 @@ function renderGui() {
   else if (active && threadOf(active).unsupported) renderUnsupported();
   else renderThread();
   renderPanel();
+  publishThreadWatch();
+}
+
+let watchedSignature = "";
+const watchedMachines = new Set();
+
+function publishThreadWatch() {
+  const wanted = new Map();
+  if (guiOn() && !document.hidden) {
+    for (const tab of tabs) {
+      if (terminalOnly(tab) && tab.view.program === "sign-in") continue;
+      if (tab !== active && !turnLive(tab) && phaseOf(tab) !== "delegating" && !terminalOnly(tab)) continue;
+      const ids = wanted.get(tab.machine) ?? [];
+      ids.push(tab.view.id);
+      wanted.set(tab.machine, ids);
+    }
+  }
+  const signature = [...wanted.entries()].map(([machine, ids]) => `${machine}=${[...ids].sort().join(",")}`).sort().join("|");
+  if (signature === watchedSignature) return;
+  watchedSignature = signature;
+  const next = new Set(wanted.keys());
+  for (const machine of watchedMachines) {
+    if (!next.has(machine)) callOn(machine, { cmd: "watch_threads", tabs: [] }).catch(() => {});
+  }
+  for (const [machine, ids] of wanted) callOn(machine, { cmd: "watch_threads", tabs: ids }).catch(() => {});
+  watchedMachines.clear();
+  for (const machine of next) watchedMachines.add(machine);
 }
 
 setInterval(() => {
+  publishThreadWatch();
   if (!guiOn() || document.hidden) return;
   for (const tab of tabs) {
     if (terminalOnly(tab) && tab.view.program === "sign-in") continue;
@@ -284,7 +312,10 @@ setInterval(() => {
   }
 }, POLL_MS);
 setInterval(() => guiOn() && renderSidebar(), 60 * 1000);
-document.addEventListener("visibilitychange", () => markThreadSeen(active));
+document.addEventListener("visibilitychange", () => {
+  markThreadSeen(active);
+  publishThreadWatch();
+});
 
 function stepThread(step) {
   const order = [...threadList.querySelectorAll(".thread-row")].map((r) => tabByKey(r.dataset.tab));

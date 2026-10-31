@@ -11,7 +11,7 @@ use pinned_core::agent::Subject;
 use pinned_core::account::{Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn};
 use pinned_core::link::UNAUTHORIZED;
 use pinned_core::sync;
-use pinned_core::wire::{AccountView, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine};
+use pinned_core::wire::{AccountView, Call, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -380,18 +380,24 @@ async fn serve_client(hub: Arc<Hub>, mut socket: WebSocket) {
 
 fn client_frame(hub: &Arc<Hub>, account: &Arc<Account>, client: u64, text: &str) {
     match serde_json::from_str::<ClientFrame>(text) {
-        Ok(ClientFrame::Call { id, machine, call }) => {
-            // Sent before anything is spawned, so fast typing reaches the machine in order.
-            let sent = account.send_call(&machine, call);
-            let (hub, account) = (hub.clone(), account.clone());
-            tokio::spawn(async move {
-                let result = hub.client_call(&account, &machine, sent).await;
-                if let Err(e) = &result {
-                    eprintln!("pinned-server: client {client}'s call to {machine} failed: {e}");
-                }
-                account.to_client(client, &ToClient::Reply(Reply::new(id, result)));
-            });
-        }
+        Ok(ClientFrame::Call { id, machine, call }) => match call {
+            Call::WatchThreads { tabs } => {
+                account.watch_threads(client, &machine, tabs);
+                account.to_client(client, &ToClient::Reply(Reply::new(id, Ok(Value::Null))));
+            }
+            call => {
+                // Sent before anything is spawned, so fast typing reaches the machine in order.
+                let sent = account.send_call(&machine, call);
+                let (hub, account) = (hub.clone(), account.clone());
+                tokio::spawn(async move {
+                    let result = hub.client_call(&account, &machine, sent).await;
+                    if let Err(e) = &result {
+                        eprintln!("pinned-server: client {client}'s call to {machine} failed: {e}");
+                    }
+                    account.to_client(client, &ToClient::Reply(Reply::new(id, result)));
+                });
+            }
+        },
         Ok(ClientFrame::Hub { id, call }) => {
             let (hub, account) = (hub.clone(), account.clone());
             tokio::spawn(async move {

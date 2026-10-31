@@ -496,6 +496,8 @@ pub enum Call {
     CancelTask { tab: TabId, task: String },
     /// `null`. Types that finished task's notice into the tab now. The tab must own the task.
     DeliverTask { tab: TabId, task: String },
+    /// `null`. Which tabs' new transcript lines to push to this caller. Empty asks for none.
+    WatchThreads { tabs: Vec<TabId> },
 }
 
 fn pulls_limit() -> usize {
@@ -875,6 +877,8 @@ pub enum ToMachine {
     /// seeing it twice.
     Subscribe { tab: TabId, viewer: String },
     Unsubscribe { tab: TabId, viewer: String },
+    /// Replace `viewer`'s set of tabs whose transcript growth is pushed. Empty removes that viewer.
+    WatchThreads { viewer: String, tabs: Vec<TabId> },
 }
 
 #[cfg(test)]
@@ -1206,5 +1210,10 @@ mod tests {
             ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None } },
             json!({ "type": "hello", "machine": { "id": "m2", "name": "vps", "os": "linux", "online": true, "last_seen": 0 } }),
         );
+        round_trip(
+            ToMachine::WatchThreads { viewer: "client-4".into(), tabs: vec!["tab-1".into()] },
+            json!({ "type": "watch_threads", "viewer": "client-4", "tabs": ["tab-1"] }),
+        );
+        round_trip(Call::WatchThreads { tabs: vec!["tab-1".into()] }, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] }));
     }
 }

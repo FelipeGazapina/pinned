@@ -541,6 +541,7 @@ async function main() {
   });
 
   const poll = startThreadPoll(client, session.id, session.next);
+  await client.call({ cmd: "watch_threads", tabs: [session.id] }).promise;
   const anchorDeadline = Date.now() + pollMs + callMs + 5000;
   while (poll.anchor() === 0) {
     if (Date.now() > anchorDeadline) throw new Error("thread poll never started");

@@ -7,7 +7,7 @@ use crate::{branches, commands, favicon, files, github, history, hooks, memory, 
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -22,6 +22,8 @@ const UNWATCHED: (u16, u16) = (120, 32);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
 const THREAD_PUSH_EVERY: Duration = Duration::from_millis(40);
+/// The desktop app, which asks with `Call::WatchThreads` rather than a hub viewer id.
+const LOCAL_VIEWER: &str = "local";
 
 pub type Event = MachineEvent;
 /// Names a viewer of a tab, such as `local` for the app's own webview; attaching again replaces it.
@@ -365,6 +367,8 @@ pub struct Machine {
     /// Wakes parents whose pty has gone quiet, once, for the life of the machine.
     notice_loop: AtomicBool,
     threads_watched: AtomicBool,
+    /// Viewer id to the tabs whose transcript growth that viewer asked to be pushed.
+    thread_watchers: Mutex<HashMap<String, HashSet<String>>>,
     usage: Mutex<BTreeMap<accounts::AccountId, Usage>>,
     agents: Mutex<subagents::Cache>,
     delegates: crate::delegate::Delegates,
@@ -434,6 +438,7 @@ impl Machine {
             quitting: AtomicBool::new(false),
             notice_loop: AtomicBool::new(false),
             threads_watched: AtomicBool::new(false),
+            thread_watchers: Mutex::default(),
             usage: Mutex::default(),
             agents: Mutex::default(),
             delegates,
@@ -668,6 +673,20 @@ impl Machine {
             Call::Rewind { tab, before, files, cols, rows } => json(self.rewind(&tab, &before, files, cols, rows)?),
             Call::Fork { tab, through } => json(self.fork(&tab, &through)?),
             Call::SaveFile { tab, path, text } => json(save_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, &text)?),
+            Call::WatchThreads { tabs } => {
+                self.set_watched_threads(LOCAL_VIEWER, &tabs);
+                Ok(Value::Null)
+            }
+        }
+    }
+
+    /// Replaces one viewer's set of tabs whose new transcript lines are pushed.
+    pub fn set_watched_threads(&self, viewer: &str, tabs: &[String]) {
+        let mut watchers = self.thread_watchers.lock().unwrap();
+        if tabs.is_empty() {
+            watchers.remove(viewer);
+        } else {
+            watchers.insert(viewer.to_owned(), tabs.iter().cloned().collect());
         }
     }
 
@@ -799,12 +818,16 @@ impl Machine {
     }
 
     fn push_transcript_lines(&self, seen: &mut HashMap<String, TranscriptCursor>) {
+        let watched: HashSet<String> = self.thread_watchers.lock().unwrap().values().flat_map(|tabs| tabs.iter().cloned()).collect();
         let open: Vec<(String, String, Account)> = {
             let tabs = self.tabs.lock().unwrap();
             tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.account.clone()))).collect()
         };
         seen.retain(|id, _| open.iter().any(|(open_id, _, _)| open_id == id));
         for (id, session, account) in open {
+            if !watched.contains(&id) {
+                continue;
+            }
             let remembered = seen.get(&id).filter(|cursor| cursor.session == session).map(|cursor| (cursor.byte, cursor.path.clone()));
             let Some(file) = self.locate_transcript(&account, &session, remembered.as_ref().map(|(_, path)| path.as_path())) else {
                 seen.remove(&id);
@@ -3116,6 +3139,7 @@ mod tests {
         let seen = heard.clone();
         m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let dir = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("s1.jsonl");
@@ -3152,6 +3176,7 @@ mod tests {
         let seen = heard.clone();
         m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let projects = root.join("config/accounts/work/projects");
         let (first, second) = (projects.join("demo"), projects.join("other"));
         std::fs::create_dir_all(&first).unwrap();
@@ -3173,6 +3198,43 @@ mod tests {
         assert_eq!(pushed.len(), 1);
         assert_eq!(pushed[0]["tab"], json!(tab));
         assert_eq!(pushed[0]["items"][0]["text"], "moved");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_unwatched_tab_is_not_pushed() {
+        let root = temp("thread-unwatched");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
+        let account = m.accounts.get("work").unwrap();
+        let watched = m.add_tab(root.join("app"), account.clone(), vec![], vec![], false, Some("s1".into()));
+        let background = m.add_tab(root.join("app"), account, vec![], vec![], false, Some("s2".into()));
+        m.call(Call::WatchThreads { tabs: vec![watched.clone()] }).unwrap();
+        let projects = root.join("config/accounts/work/projects");
+        let (one, two) = (projects.join("one"), projects.join("two"));
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        let line = |text: &str| {
+            format!(
+                "{{\"type\":\"assistant\",\"uuid\":\"{text}\",\"timestamp\":\"2020-01-01T00:00:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n"
+            )
+        };
+        std::fs::write(one.join("s1.jsonl"), line("ready")).unwrap();
+        std::fs::write(two.join("s2.jsonl"), line("ready")).unwrap();
+        let mut cursors = HashMap::new();
+        m.push_transcript_lines(&mut cursors);
+        std::fs::write(one.join("s1.jsonl"), format!("{}{}", line("ready"), line("visible"))).unwrap();
+        std::fs::write(two.join("s2.jsonl"), format!("{}{}", line("ready"), line("hidden"))).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        let pushed: Vec<_> = heard.lock().unwrap().iter().filter(|event| event["kind"] == "thread").cloned().collect();
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(pushed[0]["tab"], json!(watched));
+        assert_eq!(pushed[0]["items"][0]["text"], "visible");
+        assert!(pushed.iter().all(|event| event["items"][0]["text"] != "hidden"));
+        assert_ne!(watched, background);
         let _ = std::fs::remove_dir_all(root);
     }
 

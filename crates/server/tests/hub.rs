@@ -1435,3 +1435,98 @@ fn a_fresh_permission_stops_at_the_accounts_box_limit() {
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Err("Upstash Box: 1 box is already open, and this account's limit is 1".into()));
     assert_eq!(created(&hub), 1);
 }
+
+struct RawMachine {
+    ws: WebSocket<MaybeTlsStream<TcpStream>>,
+}
+
+impl RawMachine {
+    fn connect(hub: &str, token: &str) -> RawMachine {
+        let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", hub.replace("http://", "ws://"))).unwrap();
+        if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
+            stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        }
+        ws.send(Message::text(
+            json!({ "type": "auth", "token": token, "name": "raw", "os": "linux", "version": "9.9.9" }).to_string(),
+        ))
+        .unwrap();
+        let hello = loop {
+            match ws.read() {
+                Ok(Message::Text(text)) => break text,
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                Err(e) => panic!("machine hello failed: {e}"),
+            }
+        };
+        assert!(serde_json::from_str::<Value>(&hello).unwrap()["type"] == "hello");
+        RawMachine { ws }
+    }
+
+    fn send(&mut self, frame: Value) {
+        self.ws.send(Message::text(frame.to_string())).unwrap();
+    }
+
+    fn wait(&mut self, pred: impl Fn(&Value) -> bool) -> Value {
+        let start = Instant::now();
+        loop {
+            match self.ws.read() {
+                Ok(Message::Text(text)) => {
+                    let value: Value = serde_json::from_str(&text).unwrap();
+                    if pred(&value) {
+                        return value;
+                    }
+                }
+                Ok(Message::Close(close)) => panic!("the machine socket closed: {close:?}"),
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                Err(e) => panic!("the machine socket failed: {e}"),
+            }
+            assert!(start.elapsed() < WAIT, "timed out waiting on the machine socket");
+        }
+    }
+}
+
+#[test]
+fn an_unknown_event_keeps_the_machine_socket_and_a_thread_reaches_only_its_watcher() {
+    let hub = TestHub::start("watch");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut watcher = Client::connect(&url, &token);
+    watcher.wait("hello", |f| f["type"] == "hello");
+    let dir = temp("watch-node");
+    let creds = pair(&url, &mut watcher, "watch-node", &dir);
+    let mut machine = RawMachine::connect(&url, &creds.machine_token);
+    watcher.wait_machines(&[("watch-node", true)]);
+    let mut other = Client::connect(&url, &token);
+    other.wait("hello", |f| f["type"] == "hello" && f["machines"][0]["online"] == true);
+
+    machine.send(json!({ "type": "event", "event": { "kind": "from-the-future", "tab": "tab-9" } }));
+    machine.send(json!({ "type": "event", "event": { "kind": "tabs", "tabs": [] } }));
+    watcher.wait("tabs after an unknown event", |f| f["type"] == "event" && f["event"]["kind"] == "tabs");
+    assert!(other.wait("tabs for the other client", |f| f["type"] == "event" && f["event"]["kind"] == "tabs")["event"]["tabs"].as_array().unwrap().is_empty());
+
+    assert_eq!(watcher.call(&creds.machine_id, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] })), Ok(Value::Null));
+    let told = machine.wait(|frame| frame["type"] == "watch_threads");
+    assert_eq!(told["tabs"], json!(["tab-1"]));
+    assert!(told["viewer"].as_str().unwrap().starts_with("client-"));
+
+    let thread = |tab: &str, text: &str| {
+        json!({
+            "type": "event",
+            "event": {
+                "kind": "thread", "tab": tab, "from": 0, "session": "s", "next": 1,
+                "items": [{ "kind": "text", "id": text, "at": "2020-01-01T00:00:00Z", "text": text }]
+            }
+        })
+    };
+    machine.send(thread("tab-1", "seen"));
+    machine.send(thread("tab-2", "hidden"));
+    let got = watcher.wait("the watched line", |f| f["event"]["items"][0]["text"] == "seen");
+    assert_eq!(got["event"]["tab"], "tab-1");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(watcher.pump());
+    assert!(other.pump());
+    assert!(watcher.frames.iter().all(|frame| frame["event"]["items"][0]["text"] != "hidden"));
+    assert!(other.frames.iter().all(|frame| frame["event"]["kind"] != "thread"));
+}
+

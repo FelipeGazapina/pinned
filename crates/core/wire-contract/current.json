@@ -2518,6 +2518,26 @@
                   "tab",
                   "task"
                 ]
+              },
+              {
+                "description": "`null`. Which tabs' new transcript lines to push to this caller. Empty asks for none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "watch_threads"
+                  },
+                  "tabs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tabs"
+                ]
               }
             ]
           },
@@ -7807,6 +7827,26 @@
                   "cmd",
                   "tab",
                   "task"
+                ]
+              },
+              {
+                "description": "`null`. Which tabs' new transcript lines to push to this caller. Empty asks for none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "watch_threads"
+                  },
+                  "tabs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tabs"
                 ]
               }
             ]
@@ -27639,6 +27679,30 @@
               "tab",
               "viewer"
             ]
+          },
+          {
+            "description": "Replace `viewer`'s set of tabs whose transcript growth is pushed. Empty removes that viewer.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "watch_threads"
+              },
+              "viewer": {
+                "type": "string"
+              },
+              "tabs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "type",
+              "viewer",
+              "tabs"
+            ]
           }
         ],
         "$defs": {
@@ -30080,6 +30144,26 @@
                   "tab",
                   "task"
                 ]
+              },
+              {
+                "description": "`null`. Which tabs' new transcript lines to push to this caller. Empty asks for none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "watch_threads"
+                  },
+                  "tabs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tabs"
+                ]
               }
             ]
           },
@@ -31160,6 +31244,30 @@
               "type",
               "tab",
               "viewer"
+            ]
+          },
+          {
+            "description": "Replace `viewer`'s set of tabs whose transcript growth is pushed. Empty removes that viewer.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "watch_threads"
+              },
+              "viewer": {
+                "type": "string"
+              },
+              "tabs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "type",
+              "viewer",
+              "tabs"
             ]
           }
         ],
@@ -33581,6 +33689,26 @@
                   "cmd",
                   "tab",
                   "task"
+                ]
+              },
+              {
+                "description": "`null`. Which tabs' new transcript lines to push to this caller. Empty asks for none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "watch_threads"
+                  },
+                  "tabs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tabs"
                 ]
               }
             ]
