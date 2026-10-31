@@ -208,10 +208,12 @@ mod tests {
     }
 
     #[test]
-    fn a_boot_the_deadline_left_never_becomes_ready() {
+    fn a_boot_the_deadline_left_neither_becomes_ready_nor_serves_the_hub() {
         let (boot, staged) = (Boot::new(), staged("deadline-then-ready", CHECKSUM));
         assert!(boot.leave_from(Step::Starting, &staged.proof));
         assert!(!boot.ready(), "the main thread went on to resume sessions during a rollback");
+        assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), None, "a hello during the rollback went on to serve the hub");
+        assert!(marker_kept(&staged), "a hello during the rollback removed the marker");
     }
 
     #[test]
