@@ -2518,6 +2518,19 @@
                   "tab",
                   "task"
                 ]
+              },
+              {
+                "description": "The machine's `UpdateStatus`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "update_self"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -7855,6 +7868,19 @@
                   "tab",
                   "task"
                 ]
+              },
+              {
+                "description": "The machine's `UpdateStatus`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "update_self"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -10900,6 +10926,30 @@
                   "usage",
                   "account"
                 ]
+              },
+              {
+                "description": "Some while this process is installing a release, None when it connects with nothing in progress.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "update"
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/UpdateStatus"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "status"
+                ]
               }
             ]
           },
@@ -11281,6 +11331,97 @@
             "required": [
               "used_percentage",
               "resets_at"
+            ]
+          },
+          "UpdateStatus": {
+            "description": "What a machine reports about replacing itself. `to` is the release it is moving to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "up_to_date"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "version"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "updating"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "restarting"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "cannot"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              }
             ]
           },
           "HubCall": {
@@ -13423,6 +13564,29 @@
                   "kind",
                   "usage"
                 ]
+              },
+              {
+                "description": "Some while this process is installing a release, None when it connects with nothing in progress.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "update"
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/UpdateStatus"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -13787,6 +13951,95 @@
             "required": [
               "used_percentage",
               "resets_at"
+            ]
+          },
+          "UpdateStatus": {
+            "description": "What a machine reports about replacing itself. `to` is the release it is moving to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "up_to_date"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "version"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "updating"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "restarting"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "cannot"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              }
             ]
           },
           "HubCall": {
@@ -18024,6 +18277,21 @@
               "string",
               "null"
             ]
+          },
+          "version": {
+            "description": "The build the machine last signed in with. Empty until it has.",
+            "type": "string"
+          },
+          "update": {
+            "description": "The phase the machine last reported. Absent until it reports one.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/UpdateStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -18032,7 +18300,100 @@
           "os",
           "online",
           "last_seen"
-        ]
+        ],
+        "$defs": {
+          "UpdateStatus": {
+            "description": "What a machine reports about replacing itself. `to` is the release it is moving to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "up_to_date"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "version"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "updating"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "restarting"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "cannot"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              }
+            ]
+          }
+        }
       },
       "accept": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -18062,6 +18423,21 @@
               "string",
               "null"
             ]
+          },
+          "version": {
+            "description": "The build the machine last signed in with. Empty until it has.",
+            "type": "string"
+          },
+          "update": {
+            "description": "The phase the machine last reported. Absent until it reports one.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/UpdateStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -18070,7 +18446,98 @@
           "os",
           "online",
           "last_seen"
-        ]
+        ],
+        "$defs": {
+          "UpdateStatus": {
+            "description": "What a machine reports about replacing itself. `to` is the release it is moving to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "up_to_date"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "version"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "updating"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "restarting"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "cannot"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              }
+            ]
+          }
+        }
       }
     },
     "Memory": {
@@ -18344,6 +18811,21 @@
                   "string",
                   "null"
                 ]
+              },
+              "version": {
+                "description": "The build the machine last signed in with. Empty until it has.",
+                "type": "string"
+              },
+              "update": {
+                "description": "The phase the machine last reported. Absent until it reports one.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UpdateStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -18352,6 +18834,97 @@
               "os",
               "online",
               "last_seen"
+            ]
+          },
+          "UpdateStatus": {
+            "description": "What a machine reports about replacing itself. `to` is the release it is moving to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "up_to_date"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "version"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "updating"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "restarting"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "cannot"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              }
             ]
           }
         }
@@ -18408,6 +18981,21 @@
                   "string",
                   "null"
                 ]
+              },
+              "version": {
+                "description": "The build the machine last signed in with. Empty until it has.",
+                "type": "string"
+              },
+              "update": {
+                "description": "The phase the machine last reported. Absent until it reports one.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UpdateStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -18416,6 +19004,95 @@
               "os",
               "online",
               "last_seen"
+            ]
+          },
+          "UpdateStatus": {
+            "description": "What a machine reports about replacing itself. `to` is the release it is moving to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "up_to_date"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "version"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "updating"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "restarting"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "cannot"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              }
             ]
           }
         }
@@ -18526,6 +19203,21 @@
                   "string",
                   "null"
                 ]
+              },
+              "version": {
+                "description": "The build the machine last signed in with. Empty until it has.",
+                "type": "string"
+              },
+              "update": {
+                "description": "The phase the machine last reported. Absent until it reports one.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UpdateStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -18534,6 +19226,97 @@
               "os",
               "online",
               "last_seen"
+            ]
+          },
+          "UpdateStatus": {
+            "description": "What a machine reports about replacing itself. `to` is the release it is moving to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "up_to_date"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "version"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "updating"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "restarting"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "cannot"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              }
             ]
           }
         }
@@ -18581,6 +19364,21 @@
                   "string",
                   "null"
                 ]
+              },
+              "version": {
+                "description": "The build the machine last signed in with. Empty until it has.",
+                "type": "string"
+              },
+              "update": {
+                "description": "The phase the machine last reported. Absent until it reports one.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UpdateStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -18589,6 +19387,95 @@
               "os",
               "online",
               "last_seen"
+            ]
+          },
+          "UpdateStatus": {
+            "description": "What a machine reports about replacing itself. `to` is the release it is moving to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "up_to_date"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "version"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "updating"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "restarting"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "cannot"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              }
             ]
           }
         }
@@ -22317,6 +23204,21 @@
                   "string",
                   "null"
                 ]
+              },
+              "version": {
+                "description": "The build the machine last signed in with. Empty until it has.",
+                "type": "string"
+              },
+              "update": {
+                "description": "The phase the machine last reported. Absent until it reports one.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UpdateStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -22325,6 +23227,97 @@
               "os",
               "online",
               "last_seen"
+            ]
+          },
+          "UpdateStatus": {
+            "description": "What a machine reports about replacing itself. `to` is the release it is moving to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "up_to_date"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "version"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "updating"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "restarting"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "cannot"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              }
             ]
           },
           "TabView": {
@@ -22702,6 +23695,30 @@
                   "kind",
                   "usage",
                   "account"
+                ]
+              },
+              {
+                "description": "Some while this process is installing a release, None when it connects with nothing in progress.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "update"
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/UpdateStatus"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "status"
                 ]
               }
             ]
@@ -24323,6 +25340,21 @@
                   "string",
                   "null"
                 ]
+              },
+              "version": {
+                "description": "The build the machine last signed in with. Empty until it has.",
+                "type": "string"
+              },
+              "update": {
+                "description": "The phase the machine last reported. Absent until it reports one.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UpdateStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -24331,6 +25363,95 @@
               "os",
               "online",
               "last_seen"
+            ]
+          },
+          "UpdateStatus": {
+            "description": "What a machine reports about replacing itself. `to` is the release it is moving to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "up_to_date"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "version"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "updating"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "restarting"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "cannot"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              }
             ]
           },
           "TabView": {
@@ -24700,6 +25821,29 @@
                 "required": [
                   "kind",
                   "usage"
+                ]
+              },
+              {
+                "description": "Some while this process is installing a release, None when it connects with nothing in progress.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "update"
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/UpdateStatus"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -26236,6 +27380,21 @@
                   "string",
                   "null"
                 ]
+              },
+              "version": {
+                "description": "The build the machine last signed in with. Empty until it has.",
+                "type": "string"
+              },
+              "update": {
+                "description": "The phase the machine last reported. Absent until it reports one.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UpdateStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -26244,6 +27403,97 @@
               "os",
               "online",
               "last_seen"
+            ]
+          },
+          "UpdateStatus": {
+            "description": "What a machine reports about replacing itself. `to` is the release it is moving to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "up_to_date"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "version"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "updating"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "restarting"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "cannot"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              }
             ]
           },
           "Call": {
@@ -28648,6 +29898,19 @@
                   "tab",
                   "task"
                 ]
+              },
+              {
+                "description": "The machine's `UpdateStatus`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "update_self"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -29758,6 +31021,21 @@
                   "string",
                   "null"
                 ]
+              },
+              "version": {
+                "description": "The build the machine last signed in with. Empty until it has.",
+                "type": "string"
+              },
+              "update": {
+                "description": "The phase the machine last reported. Absent until it reports one.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UpdateStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -29766,6 +31044,95 @@
               "os",
               "online",
               "last_seen"
+            ]
+          },
+          "UpdateStatus": {
+            "description": "What a machine reports about replacing itself. `to` is the release it is moving to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "up_to_date"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "version"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "updating"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "restarting"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "to"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "cannot"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ]
+              }
             ]
           },
           "Call": {
@@ -32149,6 +33516,19 @@
                   "cmd",
                   "tab",
                   "task"
+                ]
+              },
+              {
+                "description": "The machine's `UpdateStatus`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "update_self"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               }
             ]
