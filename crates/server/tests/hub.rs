@@ -2337,23 +2337,23 @@ fn a_watched_tab_is_nudged_and_again_after_the_machine_restarts() {
 }
 
 #[test]
-fn a_dropped_machine_link_replays_the_watch_without_another_client_call() {
-    let (_hub, mut client, machine, dir, mut node, tab, file) = node_with_a_transcript("watch_replay");
+fn a_dropped_machine_link_is_nudged_again_once_the_client_names_its_tabs() {
+    let (_hub, mut client, machine, dir, mut node, tab, file) = node_with_a_transcript("watch_rewatch");
     watch(&mut client, &machine, &tab);
     append_line(&file, "visible");
     client.wait("the first nudge", |frame| frame["event"]["kind"] == "thread");
 
     node.link.take().unwrap().stop();
     client.wait_machines(&[("watch-node", false)]);
+    assert_eq!(client.call(&machine, json!({ "cmd": "watch_threads", "tabs": [] })), Ok(Value::Null));
     node.link = Some(link::spawn(Credentials::load(&dir).unwrap(), node.machine.clone(), "0.0.0-test"));
     client.wait_machines(&[("watch-node", true)]);
     assert_eq!(node.machine.view(&tab).unwrap().id, tab, "the same process kept {tab}");
-    client.pump();
-    client.frames.clear();
+    watch(&mut client, &machine, &tab);
     let before = std::fs::metadata(&file).unwrap().len() as usize;
-    append_line(&file, "replayed");
+    append_line(&file, "again");
     client.wait("the nudge after the link returns", |frame| frame["event"]["kind"] == "thread");
-    assert_eq!(read_texts(&mut client, &machine, &tab, before), vec!["replayed"]);
+    assert_eq!(read_texts(&mut client, &machine, &tab, before), vec!["again"]);
     node.kill();
 }
 

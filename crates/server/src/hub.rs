@@ -485,19 +485,8 @@ impl Hub {
 impl Account {
     /// Registers a machine's connection. An older one must have gone offline first.
     pub fn came_online(&self, machine: &str, socket: u64, name: String, dedicated: bool, version: String, out: Outbox) {
-        let mut live = self.live.lock().unwrap();
-        let watches: Vec<(String, Vec<TabId>)> = live
-            .clients
-            .iter()
-            .filter_map(|(id, client)| client.threads.get(machine).map(|tabs| (viewer(*id), tabs.iter().cloned().collect())))
-            .collect();
         let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version };
-        live.machines.insert(machine.to_owned(), online);
-        if let Some(online) = live.machines.get(machine) {
-            for (viewer, tabs) in watches {
-                let _ = online.out.send(frame(&ToMachine::WatchThreads { viewer, tabs }));
-            }
-        }
+        self.live.lock().unwrap().machines.insert(machine.to_owned(), online);
     }
 
     /// Forgets the machine's connection, `socket` or whichever it has: its calls fail and its
