@@ -45,6 +45,9 @@ jobs:
             target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc --bundles nsis
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -57,6 +60,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
       - run: npm ci
       - name: Draft the release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/release-asset.sh draft "$GITHUB_REF_NAME"
