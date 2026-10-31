@@ -146,12 +146,10 @@ impl Drop for Session {
         if let Some(pid) = child.process_id() {
             kill_tree(pid);
         }
-        // portable-pty's kill gives SIGHUP 200ms before SIGKILL and never reaps a process that
-        // outlived the SIGHUP, as claude does: off the caller's thread, and reaped, or a node piles up zombies.
-        std::thread::spawn(move || {
-            let _ = child.kill();
-            let _ = child.wait();
-        });
+        // portable-pty's kill gives SIGHUP 200ms before SIGKILL. Wait here. A thread spawned
+        // for the wait is gone when this process execs, and the child stays a zombie.
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -221,5 +219,20 @@ mod tests {
         let survived = alive(&pid);
         let _ = crate::process::command("kill").args(["-9", &pid]).status();
         assert!(!survived, "the detached child outlived its session");
+    }
+
+    #[test]
+    fn dropping_a_session_reaps_before_drop_returns() {
+        for _ in 0..8 {
+            let mut cmd = CommandBuilder::new("/bin/sleep");
+            cmd.arg("30");
+            let session = Session::spawn(cmd, size(80, 24), |_| {}, || {}).unwrap();
+            let pid = session.pid().unwrap().to_string();
+            drop(session);
+            let stat = crate::process::command("ps").args(["-o", "stat=", "-p", &pid]).output().unwrap();
+            let stat = String::from_utf8_lossy(&stat.stdout);
+            assert!(!stat.contains('Z'), "left a zombie: {stat}");
+            assert!(!alive(&pid), "sleep {pid} is still running");
+        }
     }
 }
