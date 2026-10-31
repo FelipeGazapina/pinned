@@ -41,9 +41,23 @@ The trust root is `tauri.conf.json` and nothing else. No environment variable re
 
 A tag with a suffix, such as `v0.17.0-rc.1`, publishes with `--prerelease --latest=false`. GitHub never marks a prerelease latest, so no desktop and no node installs a release candidate on its own. To try a release candidate, download it from its release page.
 
+Hub deploy skips a suffixed tag too. It deploys the newest tag on `main` of the form `vMAJOR.MINOR.PATCH`. Git's version sort ranks `v0.17.0-rc.1` above `v0.17.0`, so without that filter a release candidate on `main` would go live on the hub, and its final would then read as already live.
+
 A tag without a suffix takes latest when it is not older than the current latest, in semver order. `v0.17.0` is newer than `v0.17.0-rc.2`, and `v0.17.0-rc.10` is newer than `v0.17.0-rc.9`. An older tag gets `--latest=false`, because GitHub marks a newly published release latest when the flag is absent.
 
 `publish` reads the current latest with `gh release view`. It treats only the `release not found` error as "no latest release yet". Any other error, such as an HTTP 503 or a token problem, stops `publish` and leaves the draft.
+
+## Cutting a release
+
+`scripts/release.sh <version>` refuses to start unless all of these hold:
+
+- The version is `MAJOR.MINOR.PATCH`, with an optional `-suffix`.
+- The tree is clean, and the current branch is `main`.
+- `HEAD` equals `origin/main` after a fetch.
+
+It pushes `main` and the tag in one `git push --atomic`, so origin gets both or neither. If another session moves `origin/main` while the release builds, the push is rejected. The script then deletes the local tag and resets `main` to the commit it started from. It first reads origin with `git ls-remote`. If origin already has the tag, the connection dropped after origin took the push, and the script keeps the release commit and the tag. It also keeps them when it cannot read origin.
+
+A version without a suffix writes `crates/core/wire-contract/<version>.json`. A suffixed version writes no snapshot, because `AGENTS.md` makes every later hub honor every snapshot and the hub never runs a release candidate. A release candidate that someone installs by hand gets no compatibility promise from later hubs.
 
 ## Checksums and signature
 
@@ -62,18 +76,28 @@ GitHub re-runs one job without the jobs it needs, so each uploading job drafts t
 - `gh release upload --clobber` deletes each asset right before it uploads that file, in five parallel workers. A cancelled upload can leave any mix of new, old, and missing files. `publish` checks content, not order, so it refuses every such mix.
 - A `build` re-run after `sign-node` replaces a bundle that `latest.json` signed. `publish` refuses until `sign-node` runs again.
 
+`publish` also has the job-level group `release-publish`, so the `publish` jobs of two tags run one at a time. The second reads the latest release after the first sets it, and an older tag cannot end up latest. A group keeps one pending job. If three tags reach `publish` together, GitHub cancels the pending one when the third arrives, and that tag stays a draft until someone re-runs its `publish`. The `queue: max` option keeps every pending job, but actionlint 1.7.12 rejects the key.
+
 ## Replay
 
-`python3 scripts/test-release-rerun.py` runs in the Linux CI job. It replays the release steps of `release.yml` against a fake `gh`, a fake `npx` that signs with a throwaway key, and the real scripts. It models these parts of the runner:
+`python3 scripts/test-release-rerun.py` runs in the Linux CI job. It reads `release.yml` with `scripts/workflow.py`, a YAML reader that fails on syntax it does not know. It runs every `run` step of every job against the real scripts. A job fails at any `uses` step that is not one of `actions/checkout`, `actions/setup-node`, `dtolnay/rust-toolchain`, `swatinem/rust-cache`, `actions/upload-artifact`, `actions/download-artifact`, or `tauri-apps/tauri-action`. A step that writes the release some other way therefore fails the replay. It models these parts of the runner:
 
-- Each step gets the workflow, job, and step `env`. A job without `actions/checkout` has no `.git` and no `scripts/`.
+- A full run tries every job order that `needs` allows. A job whose need failed is skipped, and the others still run. A scenario that names jobs fails if it runs a job before one it needs.
+- `build` runs all three matrix legs. Each job and leg gets its own directory, and files move between jobs only through `upload-artifact` and `download-artifact`.
+- `tauri-action` writes a signed bundle for the `--target` in `args`, uploads it under the name GitHub shows, and sets `artifactPaths` and `appVersion`.
+- Fakes replace `gh`, `npx`, `npm`, `docker`, `sudo`, `curl`, and `wget`. `docker cp` copies two fixed binaries, `sudo` runs nothing, and `curl` and `wget` fail.
+- Each step runs under the shell GitHub picks, `bash -e` by default and `bash -eo pipefail` for `shell: bash`. Each step gets the workflow, job, and step `env`. A job without `actions/checkout` has no `.git` and no `scripts/`.
 - The fake `gh` refuses without `GH_TOKEN` or `GITHUB_TOKEN`, and refuses without `GH_REPO` or a `.git`, the way `gh` 2.102.0 does.
 - `--clobber` deletes and uploads one file at a time. `REPLAY_UPLOAD_CANCEL` maps a file name to `new` or `missing` and cancels the upload. Files it does not name keep their old bytes.
 - `upload-artifact` fails when the artifact exists from an earlier attempt and `overwrite` is not true.
 - `REPLAY_LATEST_ERROR` fails the read of the latest release. `REPLAY_DRAFT_IGNORED` makes `gh release edit --draft=true` leave the release public.
+- The fake `gh` records a violation when an edit asks for `--latest=true` on a prerelease. GitHub ignores that request, so only the fake can see it.
+- Two tags publish at once. The replay reads the `concurrency` groups of the workflow and of `publish`. If the groups let the two runs overlap, both read the latest release before either edits it.
 - A job with a checkout gets a throwaway `tauri.conf.json` that holds the replay key.
 
 It also checks `version_is_newer` against a table of tags, and `scripts/minisign-verify.mjs` against the `minisign-verify` 0.3.0 test vectors.
+
+`python3 scripts/test-release-tags.py` also runs in the Linux CI job. It runs `scripts/release.sh` against a scratch bare remote with a fake `cargo`, and the `pick` step of `hub-deploy.yml` against scratch tags.
 
 ## Build
 
@@ -81,7 +105,7 @@ The Linux job runs `docker build --target build`. That stage is the hub `Dockerf
 
 ## What this does not change
 
-`hub-deploy.yml` and `railway-hub` are unchanged, and hub deploy does not wait for `publish`. The hub image still serves the first install at `GET /download/pinned-server-<target>`. A node that is already installed updates from GitHub, not from that route.
+Hub deploy does not wait for `publish`. The hub image still serves the first install at `GET /download/pinned-server-<target>`. A node that is already installed updates from GitHub, not from that route.
 
 ## Proof limit
 

@@ -172,6 +172,9 @@ jobs:
   publish:
     needs: [build, linux-node, sign-node]
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
