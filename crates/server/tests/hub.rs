@@ -1233,6 +1233,97 @@ fn a_mode_repair_keeps_a_newer_edit_and_marks_only_the_matching_sha() {
     assert_eq!(entry["sha"], json!(sha256_hex(newer)));
 }
 
+struct RacingLink<'a> {
+    link: &'a Link,
+    ahead: Mutex<Option<sync::File>>,
+}
+
+impl sync::Hub for RacingLink<'_> {
+    fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
+        sync::Hub::list(self.link, project)
+    }
+    fn push(&self, project: &str, files: Vec<sync::File>) -> Result<(), String> {
+        sync::Hub::push(self.link, project, files)
+    }
+    fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
+        sync::Hub::pull(self.link, project, paths)
+    }
+    fn mark_executable(&self, project: &str, repairs: Vec<sync::ModeRepair>) -> Result<(), String> {
+        if let Some(newer) = self.ahead.lock().unwrap().take() {
+            sync::Hub::push(self.link, project, vec![newer])?;
+        }
+        sync::Hub::mark_executable(self.link, project, repairs)
+    }
+}
+
+fn plugin_hook(body: &[u8], modified: u64, executable: bool) -> sync::File {
+    let packed = gzip_bytes(body);
+    sync::File {
+        entry: sync::Entry { path: HOOK_PATH.into(), sha: sha256_hex(body), modified, size: packed.len() as u64, executable: Some(executable) },
+        data: Some(base64::engine::general_purpose::STANDARD.encode(packed)),
+    }
+}
+
+#[test]
+fn a_node_marks_the_executable_bit_and_keeps_a_newer_edit() {
+    let hub = TestHub::start("noderepair");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("noderepair-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "linux").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let body = b"#!/bin/sh\necho session-start\n";
+    let install = |home: &Path, mode: u32, secs: u64| {
+        let plugin = home.join("plugins/pstack");
+        let hook = plugin.join("hooks/session-start.sh");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+        std::fs::write(plugin.join(".claude-plugin/plugin.json"), r#"{"name":"pstack"}"#).unwrap();
+        std::fs::write(&hook, body).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(mode)).unwrap();
+        let when = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        std::fs::File::options().write(true).open(&hook).unwrap().set_modified(when).unwrap();
+        let installed = serde_json::json!({ "plugins": { "pstack@local": [{ "installPath": plugin, "version": "0.9.82", "gitCommitSha": "abc123" }] } });
+        std::fs::create_dir_all(home.join(".claude/plugins")).unwrap();
+        std::fs::write(home.join(".claude/settings.json"), r#"{"enabledPlugins":{"pstack@local":true}}"#).unwrap();
+        std::fs::write(home.join(".claude/plugins/installed_plugins.json"), installed.to_string()).unwrap();
+    };
+    install(&mac_home, 0o644, 1_700_000_000);
+    install(&mini_home, 0o755, 1_600_000_000);
+    let share = |home: &Path| sync::PluginShare { claude_home: home.join(".claude"), dir: home.join("synced-plugins") };
+    let now = std::time::SystemTime::now();
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    let mut mac_state = sync::State::default();
+    let mut mini_state = sync::State::default();
+    sync::sync_plugins(mac_link, &mut mac_state, &share(&mac_home), now).unwrap();
+    let repaired = sync::sync_plugins(mini_link, &mut mini_state, &share(&mini_home), now).unwrap();
+    assert!(!repaired.pushed.iter().any(|path| path == HOOK_PATH), "a mode repair sends no file bytes");
+    let row = stored_hook_row(&hub.database);
+    assert_eq!(row.sha, sha256_hex(body));
+    assert_eq!(row.modified, 1_700_000_000_000);
+    assert_eq!(row.data, gzip_bytes(body));
+    assert_eq!(row.executable, true);
+    admin_on(&hub.database, "update project_files set executable = false where project = 'pinned:plugins' and path = 'plugins/pstack@local/hooks/session-start.sh'");
+    let newer = b"#!/bin/sh\necho edited\n";
+    let racing = RacingLink { link: mini_link, ahead: Mutex::new(Some(plugin_hook(newer, 1_800_000_000_000, false))) };
+    sync::sync_plugins(&racing, &mut mini_state, &share(&mini_home), now).unwrap();
+    let row = stored_hook_row(&hub.database);
+    assert_eq!(row.sha, sha256_hex(newer));
+    assert_eq!(row.modified, 1_800_000_000_000);
+    assert_eq!(row.data, gzip_bytes(newer));
+    assert_eq!(row.executable, false);
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
+}
+
 fn push_plugin_file(hub: &str, token: &str, body: &[u8], modified: u64, executable: bool) {
     let packed = gzip_bytes(body);
     call_machine(
