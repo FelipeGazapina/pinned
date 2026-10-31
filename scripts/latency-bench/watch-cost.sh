@@ -142,14 +142,14 @@ WATCH_PID=$!
 for _ in $(seq 1 50); do
   if [ -f "$DIR/watch.json" ]; then break; fi
   if ! kill -0 "$WATCH_PID" 2>/dev/null; then
-    echo "watch client exited before a push" >&2
+    echo "watch client exited before a nudge" >&2
     cat "$DIR/watch.log" >&2
     exit 1
   fi
   sleep 0.2
 done
 if [ ! -f "$DIR/watch.json" ]; then
-  echo "watch client did not push a line" >&2
+  echo "watch client did not read a nudged line" >&2
   cat "$DIR/watch.log" >&2
   exit 1
 fi
@@ -197,7 +197,8 @@ const body = {
   min_pct: sorted[0],
   max_pct: sorted[sorted.length - 1],
   watched_tabs: watch.tabs,
-  push_ms: watch.push_ms,
+  nudge_ms: watch.nudge_ms,
+  read_ms: watch.read_ms,
   samples,
 };
 fs.writeFileSync(out, JSON.stringify(body, null, 2) + "\n");

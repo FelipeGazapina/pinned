@@ -110,8 +110,6 @@ ${between(gui, "let watchedSignature", "setInterval(() => {\n  publishThreadWatc
   sandbox,
 );
 
-/** A session's transcript as `thread` reads it: whole lines from a byte cursor, the last task list,
- * context and branch among them, and every agent. A line with no item still moves the cursor. */
 function transcript(session = "s") {
   let lines = [{ size: 10, item: { kind: "user", at: "t0", text: "start" }, branch: "main" }];
   return {
@@ -156,8 +154,6 @@ function transcript(session = "s") {
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
-/** The hub between the page and machine `box`. A reply carries the page as it was when the call
- * reached the machine. Replies and nudges wait in `queue` until a test delivers them, in any order. */
 function network(transcripts) {
   const queue = [];
   const watches = [];
@@ -256,6 +252,23 @@ test("a branch line with no other item repaints the branch notice", async () => 
   assert.match(painted().branch, /<code[^>]*>feature<\/code>/);
 });
 
+test("an agent that starts with no new line shows its card", async () => {
+  const { tab, s, net } = await opened();
+  s.agents = [runningAgent];
+  await poll(tab, net);
+  assert.match(painted().agents, /Look around/);
+});
+
+test("a rewind that rewrites the last line in place repaints it", async () => {
+  const { tab, s, net } = await opened();
+  s.append({ item: text("before") });
+  await poll(tab, net);
+  s.rewind(1);
+  s.append({ item: text("after"), size: 5 });
+  await poll(tab, net);
+  assert.deepEqual(painted().items, ["start", "after"]);
+});
+
 test("a nudge reads the new line without waiting for the poll", async () => {
   const { s, net } = await opened();
   s.append({ item: text("visible") });
@@ -314,12 +327,12 @@ test("a rewound transcript replaces the lines, the tasks, the branch, and the co
   assert.deepEqual(painted(), { items: ["start"], tasks: "", context: null, branch: "", agents: "" });
 });
 
-test("a new session hides the old session's context ring", async () => {
+test("a new session longer than the old cursor hides the old context ring", async () => {
   const { tab, s, net } = await opened();
   s.append({ item: text("answer"), context: { tokens: 500000, at: "t2" } });
   await poll(tab, net);
   assert.equal(painted().context, "Context window 50% used");
-  s.restart("s2", { item: { kind: "user", at: "t9", text: "fresh" } });
+  s.restart("s2", { item: { kind: "user", at: "t9", text: "fresh" }, size: 50 });
   await poll(tab, net);
   assert.deepEqual(painted().items, ["fresh"]);
   assert.equal(painted().context, null);
@@ -336,7 +349,6 @@ function random(seed) {
   };
 }
 
-/** Appends a run of lines picked by `seed`. Each kind is a field of the thread page alone. */
 function appends(seed) {
   const rand = random(seed);
   const pick = (list) => list[Math.floor(rand() * list.length)];
@@ -354,7 +366,6 @@ function appends(seed) {
   return { steps, rand };
 }
 
-/** What a fresh page shows after reading these lines in one poll. */
 function expected(steps) {
   const last = (key) => steps.findLast((step) => step[key])?.[key];
   const agentsNow = last("agents") ?? [];

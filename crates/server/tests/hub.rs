@@ -2207,24 +2207,15 @@ fn an_unknown_event_keeps_the_machine_socket_and_a_thread_reaches_only_its_watch
     assert_eq!(told["tabs"], json!(["tab-1"]));
     assert!(told["viewer"].as_str().unwrap().starts_with("client-"));
 
-    let thread = |tab: &str, text: &str| {
-        json!({
-            "type": "event",
-            "event": {
-                "kind": "thread", "tab": tab, "from": 0, "session": "s", "next": 1,
-                "items": [{ "kind": "text", "id": text, "at": "2020-01-01T00:00:00Z", "text": text }]
-            }
-        })
-    };
-    machine.send(thread("tab-1", "seen"));
-    machine.send(thread("tab-2", "hidden"));
-    let got = watcher.wait("the watched line", |f| f["event"]["items"][0]["text"] == "seen");
-    assert_eq!(got["event"]["tab"], "tab-1");
+    machine.send(json!({ "type": "event", "event": { "kind": "thread", "tab": "tab-1" } }));
+    machine.send(json!({ "type": "event", "event": { "kind": "thread", "tab": "tab-2" } }));
+    let got = watcher.wait("the watched tab's nudge", |f| f["event"]["kind"] == "thread");
+    assert_eq!(got["event"], json!({ "kind": "thread", "tab": "tab-1" }));
     std::thread::sleep(Duration::from_millis(300));
     assert!(watcher.pump());
     assert!(other.pump());
-    assert!(watcher.frames.iter().all(|frame| frame["event"]["items"][0]["text"] != "hidden"));
-    assert!(other.frames.iter().all(|frame| frame["event"]["kind"] != "thread"));
+    assert_eq!(nudged(&watcher), vec!["tab-1".to_string()]);
+    assert_eq!(nudged(&other), Vec::<String>::new());
 }
 
 fn assistant_line(text: &str) -> String {
@@ -2233,28 +2224,35 @@ fn assistant_line(text: &str) -> String {
     )
 }
 
-fn thread_texts(client: &Client) -> Vec<String> {
+fn nudged(client: &Client) -> Vec<String> {
     client
         .frames
         .iter()
         .filter(|frame| frame["type"] == "event" && frame["event"]["kind"] == "thread")
-        .map(|frame| frame["event"]["items"][0]["text"].as_str().unwrap().to_owned())
+        .map(|frame| frame["event"]["tab"].as_str().unwrap().to_owned())
         .collect()
 }
 
-#[test]
-fn a_watched_line_is_pushed_once_and_again_after_the_machine_reconnects() {
-    let hub = TestHub::start("watch_push");
+fn read_texts(client: &mut Client, machine: &str, tab: &str, from: usize) -> Vec<String> {
+    let page = client.call(machine, json!({ "cmd": "thread", "tab": tab, "from": from })).unwrap();
+    page["items"].as_array().unwrap().iter().map(|item| item["text"].as_str().unwrap_or_default().to_owned()).collect()
+}
+
+fn append_line(file: &Path, text: &str) {
+    std::fs::OpenOptions::new().append(true).open(file).unwrap().write_all(assistant_line(text).as_bytes()).unwrap();
+}
+
+fn node_with_a_transcript(name: &str) -> (TestHub, Client, String, PathBuf, Node, String, PathBuf) {
+    let hub = TestHub::start(name);
     let url = hub.url.clone();
     let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
     let mut client = Client::connect(&url, &token);
     client.wait("hello", |frame| frame["type"] == "hello");
-    let dir = temp("watch-push-node");
+    let dir = temp(&format!("{name}-node"));
     let creds = pair(&url, &mut client, "watch-node", &dir);
     let machine = creds.machine_id.clone();
-    let mut node = Node::start(&dir, creds);
+    let node = Node::start(&dir, creds);
     client.wait_machines(&[("watch-node", true)]);
-
     node.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
     let app = dir.join("app");
     std::fs::create_dir_all(&app).unwrap();
@@ -2280,15 +2278,29 @@ fn a_watched_line_is_pushed_once_and_again_after_the_machine_reconnects() {
     let tabs = node.machine.restore_tabs();
     assert_eq!(tabs.len(), 1, "the saved session did not reopen");
     let tab = tabs[0].clone();
-    assert_eq!(client.call(&machine, json!({ "cmd": "watch_threads", "tabs": [&tab] })), Ok(Value::Null));
-    std::thread::sleep(Duration::from_millis(300));
-    let started = Instant::now();
-    std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
-    client.wait("the pushed line", |frame| frame["event"]["kind"] == "thread" && frame["event"]["items"][0]["text"] == "visible");
-    assert!(started.elapsed() < Duration::from_millis(800), "the line took {:?}, the poll is 1200 ms", started.elapsed());
+    (hub, client, machine, dir, node, tab, file)
+}
+
+fn watch(client: &mut Client, machine: &str, tab: &str) {
+    assert_eq!(client.call(machine, json!({ "cmd": "watch_threads", "tabs": [tab] })), Ok(Value::Null));
+    client.wait("the first look", |frame| frame["event"]["kind"] == "thread" && frame["event"]["tab"] == tab);
     std::thread::sleep(Duration::from_millis(200));
     client.pump();
-    assert_eq!(thread_texts(&client), vec!["visible".to_string()]);
+    client.frames.clear();
+}
+
+#[test]
+fn a_watched_tab_is_nudged_and_again_after_the_machine_restarts() {
+    let (_hub, mut client, machine, dir, node, tab, file) = node_with_a_transcript("watch_push");
+    watch(&mut client, &machine, &tab);
+    let started = Instant::now();
+    append_line(&file, "visible");
+    client.wait("the nudge", |frame| frame["event"]["kind"] == "thread");
+    assert!(started.elapsed() < Duration::from_millis(800), "the nudge took {:?}, the poll is 1200 ms", started.elapsed());
+    assert_eq!(read_texts(&mut client, &machine, &tab, assistant_line("ready").len()), vec!["visible"]);
+    std::thread::sleep(Duration::from_millis(200));
+    client.pump();
+    assert_eq!(nudged(&client), vec![tab.clone()], "one line, one nudge");
 
     let quiet = Arc::new(Mutex::new(0u32));
     let counted = quiet.clone();
@@ -2297,91 +2309,50 @@ fn a_watched_line_is_pushed_once_and_again_after_the_machine_reconnects() {
             *counted.lock().unwrap() += 1;
         }
     }));
+    let mut node = node;
     node.link.take().unwrap().stop();
-    std::fs::write(&file, format!("{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("quiet"))).unwrap();
+    append_line(&file, "quiet");
     std::thread::sleep(Duration::from_millis(250));
     assert_eq!(*quiet.lock().unwrap(), 0, "a dropped link forgets remote watches");
     node.machine.quit();
     client.wait_machines(&[("watch-node", false)]);
-    let creds = Credentials::load(&dir).unwrap();
-    let mut node = Node::start(&dir, creds);
+    let mut node = Node::start(&dir, Credentials::load(&dir).unwrap());
     client.wait_machines(&[("watch-node", true)]);
     let restored = node.machine.restore_tabs();
     assert_eq!(restored.len(), 1, "the saved session did not reopen");
     assert_ne!(restored[0], tab, "a new process reused {tab}");
     std::thread::sleep(Duration::from_millis(300));
-    std::fs::write(&file, format!("{}{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("quiet"), assistant_line("stale"))).unwrap();
+    append_line(&file, "stale");
     std::thread::sleep(Duration::from_millis(250));
     client.pump();
-    assert!(thread_texts(&client).iter().all(|text| text != "stale"), "the watch from the previous process named the new tab");
-    assert_eq!(client.call(&machine, json!({ "cmd": "watch_threads", "tabs": [&restored[0]] })), Ok(Value::Null));
-    std::thread::sleep(Duration::from_millis(300));
+    assert!(!nudged(&client).contains(&restored[0]), "the watch from the previous process named the new tab");
+    watch(&mut client, &machine, &restored[0]);
+    let before = std::fs::metadata(&file).unwrap().len() as usize;
     let started = Instant::now();
-    std::fs::write(
-        &file,
-        format!("{}{}{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("quiet"), assistant_line("stale"), assistant_line("again")),
-    )
-    .unwrap();
-    client.wait("the line after the machine reconnects", |frame| frame["event"]["items"][0]["text"] == "again");
-    assert!(started.elapsed() < Duration::from_millis(800), "after reconnect the line took {:?}, the poll is 1200 ms", started.elapsed());
-    std::thread::sleep(Duration::from_millis(200));
-    client.pump();
-    assert_eq!(thread_texts(&client).iter().filter(|text| text.as_str() == "again").count(), 1);
+    append_line(&file, "again");
+    client.wait("the nudge after the machine restarts", |frame| frame["event"]["kind"] == "thread");
+    assert!(started.elapsed() < Duration::from_millis(800), "after the restart the nudge took {:?}, the poll is 1200 ms", started.elapsed());
+    assert_eq!(read_texts(&mut client, &machine, &restored[0], before), vec!["again"]);
     node.kill();
 }
 
 #[test]
 fn a_dropped_machine_link_replays_the_watch_without_another_client_call() {
-    let hub = TestHub::start("watch_replay");
-    let url = hub.url.clone();
-    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
-    let mut client = Client::connect(&url, &token);
-    client.wait("hello", |frame| frame["type"] == "hello");
-    let dir = temp("watch-replay-node");
-    let creds = pair(&url, &mut client, "watch-node", &dir);
-    let machine = creds.machine_id.clone();
-    let mut node = Node::start(&dir, creds.clone());
-    client.wait_machines(&[("watch-node", true)]);
-
-    node.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
-    let app = dir.join("app");
-    std::fs::create_dir_all(&app).unwrap();
-    let projects = dir.join("accounts/work/projects/demo");
-    std::fs::create_dir_all(&projects).unwrap();
-    let file = projects.join("s1.jsonl");
-    std::fs::write(&file, assistant_line("ready")).unwrap();
-    pinned_core::sessions::save(
-        &dir.join("sessions.json"),
-        &[Saved {
-            cwd: app,
-            session: "s1".into(),
-            env: vec![],
-            bypass: false,
-            interrupted: false,
-            resume_at: None,
-            held: false,
-            account: "work".into(),
-            model: None,
-            permission_mode: None,
-        }],
-    );
-    let tabs = node.machine.restore_tabs();
-    assert_eq!(tabs.len(), 1, "the saved session did not reopen");
-    let tab = tabs[0].clone();
-    assert_eq!(client.call(&machine, json!({ "cmd": "watch_threads", "tabs": [&tab] })), Ok(Value::Null));
-    std::thread::sleep(Duration::from_millis(300));
-    std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
-    client.wait("the first pushed line", |frame| frame["event"]["kind"] == "thread" && frame["event"]["items"][0]["text"] == "visible");
+    let (_hub, mut client, machine, dir, mut node, tab, file) = node_with_a_transcript("watch_replay");
+    watch(&mut client, &machine, &tab);
+    append_line(&file, "visible");
+    client.wait("the first nudge", |frame| frame["event"]["kind"] == "thread");
 
     node.link.take().unwrap().stop();
     client.wait_machines(&[("watch-node", false)]);
     node.link = Some(link::spawn(Credentials::load(&dir).unwrap(), node.machine.clone(), "0.0.0-test"));
     client.wait_machines(&[("watch-node", true)]);
     assert_eq!(node.machine.view(&tab).unwrap().id, tab, "the same process kept {tab}");
-    std::fs::write(&file, format!("{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("replayed"))).unwrap();
-    client.wait("the line after the link returns", |frame| frame["event"]["items"][0]["text"] == "replayed");
     client.pump();
-    assert_eq!(thread_texts(&client).iter().filter(|text| text.as_str() == "replayed").count(), 1);
+    client.frames.clear();
+    let before = std::fs::metadata(&file).unwrap().len() as usize;
+    append_line(&file, "replayed");
+    client.wait("the nudge after the link returns", |frame| frame["event"]["kind"] == "thread");
+    assert_eq!(read_texts(&mut client, &machine, &tab, before), vec!["replayed"]);
     node.kill();
 }
-

@@ -1,8 +1,4 @@
 #!/usr/bin/env node
-// Phone client through the bench proxy. Uses ui/hub.js and the real hello in
-// ui/main.js, which clears the watch signature. Cuts nothing itself: the shell
-// closes the proxy socket, then restarts the node. A line must arrive by push
-// after each of those, with no tab switch.
 
 const fs = require("fs");
 const vm = require("vm");
@@ -135,12 +131,17 @@ sandbox.hub = new sandbox.Hub(hubWs.replace(/^ws/, "http").replace(/\/ws\/client
   },
 });
 
-async function push(marker, file) {
+async function seen(marker, file) {
+  const tab = sandbox.tabs[0].view.id;
+  const from = (await sandbox.hub.call(machine, { cmd: "thread", tab, from: 0 })).next;
+  const nudges = sandbox.threads.length;
   const started = Date.now();
   appendMessage(file, marker);
-  await waitFor(marker, () => sandbox.threads.some((row) => (row.event.items || []).some((item) => item.text === marker)), 800);
-  const hit = sandbox.threads.find((row) => (row.event.items || []).some((item) => item.text === marker));
-  return { marker, push_ms: hit.at - started, tab: hit.event.tab, reset: !!hit.event.reset };
+  await waitFor(`nudge for ${marker}`, () => sandbox.threads.slice(nudges).some((row) => row.event.tab === tab), 800);
+  const nudge = sandbox.threads.slice(nudges).find((row) => row.event.tab === tab);
+  const page = await sandbox.hub.call(machine, { cmd: "thread", tab, from });
+  if (!page.items.some((item) => item.text === marker)) throw new Error(`the nudged read of ${tab} missed ${marker}`);
+  return { marker, tab, nudge_ms: nudge.at - started, read_ms: Date.now() - started };
 }
 
 async function main() {
@@ -153,7 +154,7 @@ async function main() {
   await sandbox.watches.find((row) => row.tabs.includes(opened)).pending;
   await sleep(400);
   const firstFile = transcriptPath();
-  const first = await push(`again-client-${Date.now()}`, firstFile);
+  const first = await seen(`again-client-${Date.now()}`, firstFile);
   const watchesAfterFirst = sandbox.watches.length;
   phase("cut");
 
@@ -162,7 +163,7 @@ async function main() {
   if (!resent.tabs.includes(opened)) throw new Error(`hello resent ${JSON.stringify(resent.tabs)}`);
   await resent.pending;
   await sleep(400);
-  const second = await push(`again-phone-${Date.now()}`, transcriptPath());
+  const second = await seen(`again-phone-${Date.now()}`, transcriptPath());
   phase("restart");
 
   await waitFor("node offline", () => !sandbox.nodeOnline, 20000);
@@ -185,11 +186,11 @@ async function main() {
   await waitFor("watch of the restored tab", () => sandbox.watches.some((row) => row.tabs.includes(restored)), 15000);
   await sandbox.watches.find((row) => row.tabs.includes(restored)).pending;
   await sleep(500);
-  const third = await push(`again-machine-${Date.now()}`, transcriptPath());
+  const third = await seen(`again-machine-${Date.now()}`, transcriptPath());
   const report = {
     rtt_ms: rtt,
     watches: sandbox.watches.map((row) => ({ at: row.at, tabs: row.tabs })),
-    pushes: [first, second, third],
+    lines: [first, second, third],
     poll_ms: 1200,
   };
   fs.writeFileSync(outPath, `${JSON.stringify(report, null, 2)}\n`);

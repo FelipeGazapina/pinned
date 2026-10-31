@@ -1,15 +1,4 @@
 #!/usr/bin/env node
-// Headless phone client for the latency bench.
-//
-// One configured link RTT is split across that link's two directions. The client
-// and the node each sit behind their own link, so a one-way trip costs one full
-// RTT and a call that waits for its reply costs two.
-//
-// (a) is the moment the machine has applied the action, observed on this host:
-// the stand-in claude saw the keystrokes, or the new process wrote its ready
-// line, or the old process was hung up. (b) is the moment this client sees the
-// change: a tabs push, a thread push, or a thread poll on the same interval
-// as ui/gui.js.
 
 const fs = require("fs");
 const net = require("net");
@@ -60,7 +49,7 @@ const result = {
   floor_ms: { one_way: oneWay, call: callMs, open_remote: openFloor },
   errors: 0,
   error_messages: [],
-  thread_pushes: 0,
+  thread_nudged: 0,
   work: {},
   proxy: {},
   metrics: {},
@@ -121,7 +110,7 @@ function connect() {
   const ws = new WebSocket(hubWs);
   const waiters = new Map();
   const tabsWaiters = [];
-  const threadWaiters = [];
+  const threadListeners = new Set();
   const state = { machines: [], tabs: [], hello: null };
   let opened;
   const ready = new Promise((resolve, reject) => {
@@ -153,7 +142,7 @@ function connect() {
       state.tabs = frame.event.tabs || [];
       for (const waiter of tabsWaiters.splice(0)) waiter(state.tabs);
     } else if (frame.type === "event" && frame.event && frame.event.kind === "thread") {
-      for (const waiter of threadWaiters.splice(0)) waiter(frame.event);
+      for (const listen of threadListeners) listen(frame.event);
     } else if (frame.type === "reply") {
       const waiter = waiters.get(frame.id);
       if (!waiter) return;
@@ -205,7 +194,7 @@ function connect() {
     });
   }
 
-  return { ready, state, call, waitTabs, threadWaiters, close: () => ws.close() };
+  return { ready, state, call, waitTabs, threadListeners, close: () => ws.close() };
 }
 
 function waitLine(file, pred, timeoutMs) {
@@ -258,8 +247,6 @@ function latestPid(file) {
   return Number(rows[rows.length - 1].split(" ")[0]);
 }
 
-// The node SIGKILLs the session, so the process cannot write its own exit line.
-// The 2ms poll is the resolution of "the process is gone".
 function waitGone(pid) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
@@ -367,9 +354,9 @@ function tell(sock, message) {
   });
 }
 
-// Offsets walk the poll period in a fixed stride, so a later run waits at the same points.
+const PHASE_STRIDE_MS = 47;
 function phaseOffset(i) {
-  return (i * 47) % pollMs;
+  return (i * PHASE_STRIDE_MS) % pollMs;
 }
 
 async function waitPhase(anchor, offset) {
@@ -381,84 +368,84 @@ async function waitPhase(anchor, offset) {
 function startThreadPoll(client, tab, from) {
   let cursor = from;
   let fetching = false;
+  let again = false;
+  let againByNudge = false;
   let anchor = 0;
-    const pending = [];
-    function deliver(items) {
-      const keep = [];
-      for (const waiter of pending.splice(0)) {
-        if (!waiter(items)) keep.push(waiter);
-      }
-      pending.push(...keep);
+  const pending = [];
+  function deliver(items, byNudge) {
+    const keep = [];
+    for (const waiter of pending.splice(0)) {
+      if (!waiter(items, byNudge)) keep.push(waiter);
     }
-    const timer = setInterval(() => {
-      if (fetching) return;
-      if (anchor === 0) anchor = Date.now();
-      fetching = true;
-      client
-        .call({ cmd: "thread", tab, from: cursor })
-        .promise.then((page) => {
-          if (page && Number.isFinite(page.next)) cursor = page.next;
-          deliver((page && page.items) || []);
-        })
-        .catch((err) => {
-          for (const waiter of pending.splice(0)) waiter.reject(err);
-        })
-        .finally(() => {
-          fetching = false;
-        });
-    }, pollMs);
-    return {
-      anchor: () => anchor,
-      stop: () => clearInterval(timer),
-      seen(text) {
-        return new Promise((resolve, reject) => {
-          let settled = false;
-          const timerId = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            dropPush();
-            reject(new Error(`thread poll missed ${text}`));
-          }, pollMs + callMs + 5000);
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timerId);
-            dropPush();
-            resolve(Date.now());
-          };
-          const waiter = (items) => {
-            if (items.some((item) => item.kind === "text" && item.text === text)) {
-              finish();
-              return true;
-            }
-            return false;
-          };
-          waiter.reject = (err) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timerId);
-            dropPush();
-            reject(err);
-          };
-          pending.push(waiter);
-          const onPush = (event) => {
-            const items = (event && event.items) || [];
-            if (items.some((item) => item.kind === "text" && item.text === text)) {
-              result.thread_pushes += 1;
-              finish();
-              return;
-            }
-            client.threadWaiters.push(onPush);
-          };
-          function dropPush() {
-            const at = client.threadWaiters.indexOf(onPush);
-            if (at >= 0) client.threadWaiters.splice(at, 1);
-          }
-          client.threadWaiters.push(onPush);
-        });
-      },
-    };
+    pending.push(...keep);
   }
+  function read(byNudge) {
+    if (fetching) {
+      again = true;
+      againByNudge = againByNudge || byNudge;
+      return;
+    }
+    fetching = true;
+    client
+      .call({ cmd: "thread", tab, from: cursor })
+      .promise.then((page) => {
+        if (page && Number.isFinite(page.next)) cursor = page.next;
+        deliver((page && page.items) || [], byNudge);
+      })
+      .catch((err) => {
+        for (const waiter of pending.splice(0)) waiter.reject(err);
+      })
+      .finally(() => {
+        fetching = false;
+        if (!again) return;
+        const next = againByNudge;
+        again = againByNudge = false;
+        read(next);
+      });
+  }
+  const onNudge = (event) => {
+    if (event.tab === tab) read(true);
+  };
+  client.threadListeners.add(onNudge);
+  const timer = setInterval(() => {
+    if (anchor === 0) anchor = Date.now();
+    read(false);
+  }, pollMs);
+  return {
+    anchor: () => anchor,
+    stop() {
+      clearInterval(timer);
+      client.threadListeners.delete(onNudge);
+    },
+    seen(text) {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const timerId = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          reject(new Error(`thread poll missed ${text}`));
+        }, pollMs + callMs + 5000);
+        const waiter = (items, byNudge) => {
+          if (!items.some((item) => item.kind === "text" && item.text === text)) return false;
+          if (!settled) {
+            settled = true;
+            clearTimeout(timerId);
+            if (byNudge) result.thread_nudged += 1;
+            resolve(Date.now());
+          }
+          return true;
+        };
+        waiter.reject = (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timerId);
+          reject(err);
+        };
+        pending.push(waiter);
+      });
+    },
+  };
+}
 
 function checkFloors() {
   if (rtt < 50) {
@@ -654,7 +641,7 @@ main()
     fs.writeFileSync(outPath, `${JSON.stringify(result, null, 2)}\n`);
     const names = Object.keys(result.metrics);
     console.error(
-      `rtt_ms ${rtt} iterations ${iterations} errors ${result.errors} work ${Object.values(result.work).reduce((sum, n) => sum + n, 0)} thread_pushes ${result.thread_pushes} load ${result.load.map((n) => n.toFixed(2)).join(" ")}`,
+      `rtt_ms ${rtt} iterations ${iterations} errors ${result.errors} work ${Object.values(result.work).reduce((sum, n) => sum + n, 0)} thread_nudged ${result.thread_nudged} load ${result.load.map((n) => n.toFixed(2)).join(" ")}`,
     );
     console.error("metric            p50     p95     min     max   n  calls");
     for (const name of names) {

@@ -1,7 +1,4 @@
 #!/usr/bin/env node
-// TCP proxy that holds every chunk for half the configured RTT, on each direction.
-// Delay each chunk on its own timer. Sleeping until the next read would stack
-// those delays when the kernel has already buffered several chunks.
 
 const net = require("net");
 const fs = require("fs");

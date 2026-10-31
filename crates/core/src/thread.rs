@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ const READ_LIMIT: u64 = 8 << 20;
 /// The line `fork` adds to a copy, naming the session it was copied from.
 pub const FORK_LINE: &str = "pinned-fork";
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
+#[derive(Serialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Item {
     /// What the user typed, or a slash command as `/name args`. `pictures` holds the `data:` URLs of
@@ -22,7 +22,7 @@ pub enum Item {
         at: String,
         text: String,
         images: u32,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         pictures: Vec<String>,
     },
     /// A prompt typed while claude worked, which it took into the turn in progress.
@@ -41,7 +41,7 @@ pub enum Item {
         name: String,
         summary: String,
         detail: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         args: Vec<(String, String)>,
     },
     /// The outcome of the `Tool` whose id is `tool`. `links` are a web search's results as `[title, url]`.
@@ -50,7 +50,7 @@ pub enum Item {
         at: String,
         error: bool,
         text: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         links: Vec<(String, String)>,
     },
     /// Claude compacted the conversation, from `before` tokens to `after` when it says.
@@ -81,27 +81,25 @@ pub struct Page {
 }
 
 /// A `TodoWrite` call, whose list replaces the one before it.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Todos {
     pub at: String,
     pub steps: Vec<Todo>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Todo {
     pub step: String,
     /// `pending`, `in_progress` or `completed`, as claude writes it.
     pub status: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Context {
     pub tokens: u64,
     pub at: String,
 }
 
-/// Project directories `find` has listed. Tests count scans of one home so a cache hit is visible
-/// while other tests run beside it.
 #[cfg(test)]
 pub static PROJECT_SCANS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 

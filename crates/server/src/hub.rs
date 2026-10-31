@@ -116,7 +116,6 @@ struct Client {
     out: Outbox,
     login: Vec<u8>,
     attached: HashSet<Target>,
-    /// Tabs on each machine whose transcript growth this client asked to receive.
     threads: HashMap<MachineId, HashSet<TabId>>,
 }
 
@@ -478,7 +477,6 @@ impl Hub {
 
 impl Account {
     /// Registers a machine's connection. An older one must have gone offline first.
-    /// Clients keep their watch sets here, so each set is sent to the new connection.
     pub fn came_online(&self, machine: &str, socket: u64, name: String, dedicated: bool, out: Outbox) {
         let mut live = self.live.lock().unwrap();
         let watches: Vec<(String, Vec<TabId>)> = live
@@ -629,7 +627,7 @@ impl Account {
             _ => {}
         }
         let thread_tab = match &event {
-            MachineEvent::Thread { tab, .. } => Some(tab.clone()),
+            MachineEvent::Thread { tab } => Some(tab.clone()),
             _ => None,
         };
         let text = frame(&ToClient::Event { machine: machine.to_owned(), event });
@@ -692,7 +690,6 @@ impl Account {
         }
     }
 
-    /// Remembers which tabs this client wants pushed, and tells the machine. The machine never sees the call.
     pub fn watch_threads(&self, client: u64, machine: &str, tabs: Vec<TabId>) {
         let mut live = self.live.lock().unwrap();
         {

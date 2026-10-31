@@ -1,7 +1,4 @@
 #!/usr/bin/env node
-// Stands in for claude on the latency bench's node. It records when keystrokes
-// arrive and when the process starts or is hung up, which is the machine-local
-// moment a phone action has been applied.
 
 const fs = require("fs");
 const net = require("net");

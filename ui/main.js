@@ -115,9 +115,8 @@ function setTabs(machine, views, { forget = true } = {}) {
 
 const refreshTabs = async (machine) => setTabs(machine, await callOn(machine, { cmd: "tabs" }));
 
-// Open and folder changes push the tab list before they answer. Wait for that push.
-// Ask only if it never arrives.
 const tabListed = [];
+const TAB_LIST_WAIT_MS = 2000;
 function noteTabs(machine) {
   const pending = tabListed.splice(0);
   const again = [];
@@ -145,7 +144,7 @@ function whenListed(machine, id) {
           reject(err);
         }
       });
-    }, 2000);
+    }, TAB_LIST_WAIT_MS);
     function waiter(arrived) {
       if (arrived !== machine || !tabByKey(keyOf(machine, id))) return false;
       if (settled) return true;
@@ -510,7 +509,6 @@ async function pickLocalFolder() {
   if (path) pickFolder(path);
 }
 
-// open_tab rejects a path that is not a folder, so a bad one never becomes a tab.
 async function openRemote(machine, path, bypass) {
   const id = await callOn(machine, { cmd: "open_tab", path, bypass });
   const tab = await revealTab(machine, id);
@@ -1325,7 +1323,6 @@ function connectHub(signedIn) {
   account = signedIn;
   hub = new Hub(signedIn.hub, signedIn.user_token, {
     hello(frame) {
-      // The hub forgot this socket's watches when the old one dropped, the same way it forgot attach.
       forgetThreadWatch();
       account.email = frame.account.email;
       showMachines(frame.machines, frame.tabs);

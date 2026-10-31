@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-// Names every restored tab, then appends one transcript line and waits for the
-// push. With --hold it stays connected so the machine keeps that watch set.
 
 const fs = require("fs");
 
@@ -133,20 +131,24 @@ async function main() {
     }) + "\n",
   );
   const deadline = started + 800;
-  while (Date.now() < deadline) {
-    if (client.threads.slice(before).some((event) => (event.items || []).some((item) => item.text === marker))) break;
-    await sleep(10);
-  }
-  const hit = client.threads.slice(before).find((event) => (event.items || []).some((item) => item.text === marker));
+  while (Date.now() < deadline && client.threads.length === before) await sleep(10);
+  const hit = client.threads[before];
   if (!hit) {
-    console.error(`no push for ${marker} within 800 ms`);
+    console.error(`no nudge for ${marker} within 800 ms`);
+    process.exit(1);
+  }
+  const nudgeMs = Date.now() - started;
+  const page = await client.call({ cmd: "thread", tab: hit.tab, from: 0 });
+  if (!(page.items || []).some((item) => item.text === marker)) {
+    console.error(`the nudged tab ${hit.tab} has no ${marker}`);
     process.exit(1);
   }
   const result = {
-    pushed: true,
+    nudged: true,
     tabs: ids.length,
     tab: hit.tab,
-    push_ms: Date.now() - started,
+    nudge_ms: nudgeMs,
+    read_ms: Date.now() - started,
     marker,
   };
   fs.writeFileSync(outPath, JSON.stringify(result, null, 2) + "\n");
