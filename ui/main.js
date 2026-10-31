@@ -1237,6 +1237,13 @@ function connectHub(signedIn) {
   });
 }
 
+function tabListAction(wasOnline, online, hasSnapshot) {
+  if (!online) return "clear";
+  if (hasSnapshot) return "apply";
+  if (!wasOnline) return "refresh";
+  return "keep";
+}
+
 function showMachines(list, tabsByMachine) {
   for (const view of list) {
     if (view.id === account.machine_id) {
