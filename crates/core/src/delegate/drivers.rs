@@ -824,6 +824,8 @@ fn signal_targets_under(root: u32) -> Vec<i32> {
 fn ps(args: &[&str]) -> String {
     crate::process::command("/bin/ps")
         .args(args)
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
