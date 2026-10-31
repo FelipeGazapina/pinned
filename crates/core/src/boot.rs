@@ -39,10 +39,10 @@ impl Proof {
         Proof { marker: marker_path(), checksum: std::env::var(PROOF_ENV).unwrap_or_default() }
     }
 
-    fn holds(&self) -> bool {
-        let Some(path) = &self.marker else { return false };
-        let Ok(marker) = std::fs::read(path) else { return false };
-        proves(&marker, &self.checksum)
+    /// The marker, while it records this process's checksum.
+    fn holds(&self) -> Option<&Path> {
+        let path = self.marker.as_deref()?;
+        proves(&std::fs::read(path).ok()?, &self.checksum).then_some(path)
     }
 }
 
@@ -79,13 +79,11 @@ impl Boot {
             let ready = self.ready.notified();
             {
                 let mut step = self.step();
-                match *step {
-                    Step::Leaving => return AfterHello::Leaving,
-                    Step::Proven => return AfterHello::Serve,
-                    _ if !proof.holds() => return AfterHello::Serve,
-                    Step::Starting => {}
-                    Step::Running => {
-                        let Some(path) = &proof.marker else { return AfterHello::Serve };
+                match (*step, proof.holds()) {
+                    (Step::Leaving, _) => return AfterHello::Leaving,
+                    (Step::Proven, _) | (_, None) => return AfterHello::Serve,
+                    (Step::Starting, Some(_)) => {}
+                    (Step::Running, Some(path)) => {
                         match std::fs::remove_file(path) {
                             Ok(()) => *step = Step::Proven,
                             Err(error) => eprintln!("pinned: could not remove {}, the next sign in tries again: {error}", path.display()),
@@ -99,7 +97,7 @@ impl Boot {
     }
 
     fn refuse(&self, proof: &Proof) {
-        if proof.holds() {
+        if proof.holds().is_some() {
             self.refused.notify_one();
         }
     }
@@ -116,7 +114,7 @@ pub fn marker_path() -> Option<PathBuf> {
 }
 
 pub fn proving() -> bool {
-    Proof::of_this_process().holds()
+    Proof::of_this_process().holds().is_some()
 }
 
 fn proves(marker: &[u8], proof: &str) -> bool {
