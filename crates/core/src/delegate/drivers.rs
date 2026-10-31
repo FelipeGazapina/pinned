@@ -721,8 +721,7 @@ pub fn spawn(
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             on_event(ChildEvent::Line(line));
         }
-        // A process that inherited the agent's stderr can hold it open for hours. The wait comes before the reap so the pid stays reserved.
-        let _ = stderr_closed.recv_timeout(STDERR_DRAIN);
+        let _ = stderr_closed.recv_timeout(STDERR_CLOSE_WAIT);
         let code = child.wait().ok().and_then(|status| status.code());
         let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap())
             .trim()
