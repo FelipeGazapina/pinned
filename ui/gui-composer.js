@@ -70,7 +70,6 @@ try {
   stash = JSON.parse(load("gui-stash")) ?? [];
 } catch {}
 const STASH_MAX = 20;
-/** T3 Code's send shortcut setting: Enter, ⌘Enter once the prompt has a second line, or ⌘Enter always. */
 let sendShortcut = load("gui-send-shortcut") ?? (load("gui-send-mod") === "true" ? "mod-enter" : "enter");
 function enterNeedsMod(shortcut, text) {
   return shortcut === "mod-enter" || (shortcut === "mod-enter-multiline" && /\n/.test(text));
@@ -79,9 +78,13 @@ const needsMod = (text) => enterNeedsMod(sendShortcut, text);
 function touchComposer(mq = matchMedia) {
   return mq("(pointer: coarse)").matches && !mq("(any-pointer: fine)").matches;
 }
+function platformEnterMod(e, isMac) {
+  return isMac ? e.metaKey : e.ctrlKey;
+}
 function composerEnterIntent(e, { promptText, shortcut, touch, isMac }) {
   if (e.key !== "Enter" || e.shiftKey || e.isComposing || e.keyCode === 229) return "none";
-  const mod = isMac ? e.metaKey : e.ctrlKey;
+  const mod = platformEnterMod(e, isMac);
+  if (e.altKey && mod) return "new-thread";
   if (touch && !mod) return "newline";
   return !enterNeedsMod(shortcut, promptText) || mod ? "send" : "newline";
 }
@@ -793,14 +796,15 @@ prompt.addEventListener("input", () => {
   showTrigger();
 });
 prompt.addEventListener("keydown", (e) => {
+  if (e.isComposing || e.keyCode === 229) return;
   if (isTrigger() && triggerKey(e)) return e.preventDefault();
   if (deleteChip(e)) return e.preventDefault();
   if (promptCodeKey(e)) return e.preventDefault();
-  if (e.key === "Enter" && e.altKey && !e.shiftKey && (IS_MAC ? e.metaKey : e.ctrlKey)) {
+  const enter = composerEnterIntent(e, { promptText: prompt.value, shortcut: sendShortcut, touch: touchComposer(), isMac: IS_MAC });
+  if (enter === "new-thread") {
     e.preventDefault();
     return sendAndNewThread();
   }
-  const enter = composerEnterIntent(e, { promptText: prompt.value, shortcut: sendShortcut, touch: touchComposer(), isMac: IS_MAC });
   if (enter === "send") {
     e.preventDefault();
     send();
@@ -1933,8 +1937,9 @@ function deleteChip(e) {
 }
 
 function triggerKey(e) {
-  if (e.key === "Enter" && !e.shiftKey && (e.metaKey || e.ctrlKey || e.altKey || e.isComposing)) {
-    if (!e.isComposing) composerMenu.hidden = true;
+  const enter = composerEnterIntent(e, { promptText: prompt.value, shortcut: sendShortcut, touch: touchComposer(), isMac: IS_MAC });
+  if (enter === "new-thread" || (enter === "send" && platformEnterMod(e, IS_MAC))) {
+    composerMenu.hidden = true;
     return false;
   }
   const rows = [...composerMenu.querySelectorAll("[data-pick]")];
