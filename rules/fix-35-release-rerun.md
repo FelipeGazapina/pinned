@@ -6,7 +6,7 @@ The `draft` job now runs `gh release edit --draft=true` when the release exists,
 
 `tauri-action@v0` calls the switch `includeUpdaterJson`. It is false on the matrix. Each leg writes `updater-fragment.json` for its own platforms. `scripts/assemble-latest-json.sh` merges those files in one job. It requires `darwin-aarch64`, `darwin-aarch64-app`, `darwin-x86_64`, `darwin-x86_64-app`, `windows-x86_64`, and `windows-x86_64-nsis`. Those are the keys on the v0.16.0 release. Two fragments that set the same key to different bytes fail the job. The script strips one leading `v` from the tag and rejects a `.version` that is not the rest. `sign-node` runs `scripts/sign-node-sums.sh` on that file and the two musl binaries, then uploads `SHA256SUMS` before `latest.json`. `publish` needs `build`, `linux-node`, and `sign-node`, and it is the step that clears the draft flag.
 
-A full run that fails before `publish` leaves the tag a draft. A `sign-node` re-run that fails in the signer uploads nothing, so a public release stays public. `releases/latest` stays on the previous public release until a later run publishes.
+A full run that fails before `publish` leaves the tag a draft. A `sign-node` re-run that fails in the signer uploads nothing, so a public release stays public. If that tag is already the latest, it stays the latest. `publish` is the only step that clears the draft.
 
 ## Proof
 

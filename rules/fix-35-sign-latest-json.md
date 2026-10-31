@@ -35,13 +35,13 @@ valid: Restarting { to: "9.9.9" } bytes=[120, 56, 54, 45, 98, 105, 110, 97, 114,
 tampered latest.json: Failed { to: "", reason: "the release checksum does not match" } bytes=[111, 108, 100, 45, 98, 105, 110, 97, 114, 121]
 tampered binary: Failed { to: "9.9.9", reason: "the release checksum does not match" } bytes=[111, 108, 100, 45, 98, 105, 110, 97, 114, 121]
 legacy: the release signature does not match
-older: Failed { to: "0.0.1", reason: "the published release 0.0.1 is older than 0.16.0" } bytes=[111, 108, 100, 45, 98, 105, 110, 97, 114, 121]
+older: UpToDate { version: "0.16.0" } bytes=[111, 108, 100, 45, 98, 105, 110, 97, 114, 121]
 ```
 
-The valid bytes are `x86-binary`. The other cases left `old-binary`. `cargo test -p pinned-server --lib -- --test-threads=4` passed 36 tests. `actionlint .github/workflows/release.yml` exited 0. `cargo run -p pinned-server --bin wire-contract -- check --base origin/main` exited 0 with no new breaks. The breaks it still lists are the `Connector.machine` change already shipped from 0.8.0 through 0.12.0.
+The valid bytes are `x86-binary`. The other cases left `old-binary`. The older line is the assertion after `prepare` started returning `UpToDate` for a release that is not newer than the running version. `cargo test -p pinned-server --lib -- --test-threads=4` passed 36 tests. `actionlint .github/workflows/release.yml` exited 0. `cargo run -p pinned-server --bin wire-contract -- check --base origin/main` exited 0 with no new breaks. The breaks it still lists are the `Connector.machine` change already shipped from 0.8.0 through 0.12.0.
 
 A throwaway `tauri signer sign` wrote algorithm bytes `ED` (`4544`), which is the prehashed algorithm. The trusted comment was `timestamp:1793454866	file:SHA256SUMS`.
 
 ## Left open
 
-The musl image was not built here. `update_self` was not driven through a live hub. Desktop jobs write updater fragments, not `latest.json`. One job assembles that file. A later round drafts the release inside the job that uploads.
+The musl image was not built here. `update_self` was not driven through a live hub. Desktop jobs write updater fragments, not `latest.json`. One job assembles that file. The upload job drafts the release before it writes.

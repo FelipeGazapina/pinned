@@ -657,7 +657,8 @@ workflow builds both Mac architectures, the Windows installer, and the Linux mus
 binaries. Each desktop job uploads its own updater fragment and does not upload
 `latest.json`. One job assembles that file, signs it with the musl binaries, then uploads
 `SHA256SUMS` before `latest.json`. The upload drafts the release first. `publish` clears
-the draft only when that hash is in the sums, and it marks the tag latest. A re-run of
+the draft only when that hash is in the sums and no asset is newer than `latest.json`.
+It marks the tag latest when the tag is not older than the current latest. A re-run of
 one uploading job drafts the release before it writes a file. Running copies then offer
 the update. A Linux node downloads `pinned-server-<target>` from that release.
 
