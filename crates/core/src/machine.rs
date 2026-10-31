@@ -942,21 +942,23 @@ impl Machine {
         Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
     }
 
-    pub fn watch_threads(self: &Arc<Self>) {
+    pub fn watch_threads(&self) {
         if self.threads_watched.swap(true, Ordering::Relaxed) {
             return;
         }
-        let weak = Arc::downgrade(self);
-        std::thread::spawn(move || {
-            let mut seen = HashMap::new();
-            loop {
-                let Some(machine) = weak.upgrade() else { return };
-                if machine.quitting.load(Ordering::Relaxed) {
-                    return;
-                }
-                machine.nudge_thread_watchers(&mut seen);
-                drop(machine);
-                std::thread::sleep(THREAD_LOOK_EVERY);
+        let mut seen = HashMap::new();
+        self.every(THREAD_LOOK_EVERY, move |machine| machine.nudge_thread_watchers(&mut seen));
+    }
+
+    /// Runs `tick` every `period` on a thread of its own until the machine is dropped. A quitting machine
+    /// skips its ticks, and a failed self-update's `reopen_sessions` finds the loop still running.
+    fn every(&self, period: Duration, mut tick: impl FnMut(&Machine) + Send + 'static) {
+        let me = self.me.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(period);
+            let Some(machine) = me.upgrade() else { return };
+            if !machine.quitting.load(Ordering::Relaxed) {
+                tick(&machine);
             }
         });
     }
@@ -1868,16 +1870,8 @@ impl Machine {
         if self.pr_watches.started.swap(true, Ordering::Relaxed) {
             return;
         }
-        let me = self.me.clone();
         let every = std::env::var("PINNED_PR_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(every));
-            let Some(machine) = me.upgrade() else { return };
-            if machine.quitting.load(Ordering::Relaxed) {
-                return;
-            }
-            machine.read_watches();
-        });
+        self.every(Duration::from_secs(every), Machine::read_watches);
     }
 
     fn read_watches(&self) {
@@ -2280,13 +2274,7 @@ impl Machine {
         if self.notice_loop.swap(true, Ordering::Relaxed) {
             return;
         }
-        let me = self.me.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let Some(machine) = me.upgrade() else { return };
-            if machine.quitting.load(Ordering::Relaxed) {
-                return;
-            }
+        self.every(Duration::from_secs(1), |machine| {
             let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
             for tab in tabs {
                 machine.maybe_deliver(&tab);
