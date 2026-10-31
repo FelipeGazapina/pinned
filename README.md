@@ -652,7 +652,8 @@ Windows before a release.
 scripts/release.sh 0.2.0
 ```
 
-The script bumps the version in `Cargo.toml`, tags `v0.2.0` and pushes. The `release`
+The script runs only from a clean `main` that matches `origin/main`. It bumps the version
+in `Cargo.toml`, tags `v0.2.0`, and pushes `main` and the tag in one atomic push. The `release`
 workflow builds both Mac architectures, the Windows installer, and the Linux musl node
 binaries. Each desktop job uploads its own updater fragment and does not upload
 `latest.json`. One job assembles that file, signs it with the musl binaries, then uploads
@@ -661,7 +662,8 @@ binaries. Each desktop job uploads its own updater fragment and does not upload
 The upload drafts the release first. `publish` downloads the release and clears the draft only when
 `SHA256SUMS.minisig` verifies `SHA256SUMS`, each file in the sums matches, and each desktop
 bundle matches its signature in `latest.json`. A tag with a suffix such as `-rc.1` publishes
-as a prerelease and never takes latest. Any other tag takes latest when it is not older than
+as a prerelease and never takes latest. Hub deploy skips it, and the script writes no wire
+snapshot for it. Any other tag takes latest when it is not older than
 the current latest, and gets `--latest=false` otherwise. A re-run of one
 uploading job drafts the release before it writes a file. Running copies then offer the
 update. A Linux node downloads `pinned-server-<target>` from that release.
