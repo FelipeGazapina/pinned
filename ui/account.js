@@ -185,12 +185,19 @@ function machineEntryHtml(id, view) {
            <span class="actions start"><button class="secondary danger" data-action="confirm-remove">Remove</button>
            <button class="secondary" data-action="cancel-remove">Cancel</button></span></div>`
       : "";
+  const stopped = machines.get(id)?.syncStopped;
+  const sync = stopped
+    ? `<div class="sync-stopped" data-machine="${esc(id)}"><b>Sync stopped.</b> ${esc(view.name)} can't read its record of the last sync, so it no longer syncs projects and plugins.
+         <span class="hint">${esc(stopped)}</span>
+         Start over to sync again, as a new machine does. A file changed on both sides keeps the newer copy, and a file deleted elsewhere since the last sync can come back.
+         <span class="actions start"><button class="secondary" data-action="reset-sync">Start sync over</button></span></div>`
+    : "";
   return `<div class="machine-row" data-machine="${esc(id)}">
       <span class="dot" data-online="${view.online}"></span>
       <div class="who">${name}<span class="hint">${esc(where)}</span></div>
       ${machinesUi.renaming === id ? "" : `<button class="secondary" data-action="rename-machine">Rename</button>`}
       ${local ? "" : `<button class="secondary danger" data-action="remove-machine">Remove</button>`}
-    </div>${confirm}`;
+    </div>${sync}${confirm}`;
 }
 
 const rowMachine = (button) => button.closest("[data-machine]").dataset.machine;
@@ -231,6 +238,12 @@ Object.assign(actions, {
   "cancel-remove"() {
     machinesUi.removing = null;
     showMachinesPage();
+  },
+  async "reset-sync"(button) {
+    const id = rowMachine(button);
+    machinesUi.error = "";
+    await callOn(id, { cmd: "reset_sync" }).catch((e) => (machinesUi.error = String(e)));
+    await refreshSyncStopped(id);
   },
   async "confirm-remove"() {
     const id = machinesUi.removing;

@@ -143,6 +143,17 @@ function setAccounts(machine, list) {
   return list;
 }
 
+/** Asks the machine why its sync stopped. A machine too old to answer counts as syncing. */
+async function refreshSyncStopped(machine) {
+  const m = machines.get(machine);
+  if (!m) return;
+  const why = await callOn(machine, { cmd: "sync_stopped" }).catch(() => null);
+  if (machines.get(machine) !== m) return;
+  m.syncStopped = why;
+  render();
+  if (settingsOpen() && page === "machines" && !machinesUi.renaming) showMachinesPage();
+}
+
 /** Opens a tab running the CLI's login for the account and shows it. */
 async function signIn(machine, account) {
   const id = await callOn(machine, { cmd: "sign_in", account });
@@ -1304,7 +1315,9 @@ function connectHub(signedIn) {
 function showMachines(list, tabsByMachine) {
   for (const view of list) {
     if (view.id === account.machine_id) {
+      const first = !machines.get(LOCAL).hubView;
       machines.get(LOCAL).hubView = view;
+      if (first) refreshSyncStopped(LOCAL);
       continue;
     }
     const known = machines.get(view.id);
@@ -1315,6 +1328,7 @@ function showMachines(list, tabsByMachine) {
     else if (tabsByMachine != null && Object.hasOwn(tabsByMachine, view.id)) setTabs(view.id, tabsByMachine[view.id]);
     else if (!wasOnline) refreshTabs(view.id).catch(console.warn);
     if (view.online && !wasOnline) retryUploadImages();
+    if (view.online && !wasOnline) refreshSyncStopped(view.id);
   }
   for (const id of [...machines.keys()]) {
     if (id === LOCAL || list.some((v) => v.id === id)) continue;
@@ -1338,6 +1352,7 @@ function disconnectHub() {
     machines.delete(id);
   }
   delete machines.get(LOCAL)?.hubView;
+  delete machines.get(LOCAL)?.syncStopped;
   render();
 }
 
