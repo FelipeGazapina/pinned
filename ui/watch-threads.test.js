@@ -180,6 +180,7 @@ function page() {
     placeTabs() {},
     refreshProjects() {},
     retryUploadImages() {},
+    refreshSyncStopped() {},
     settingsOpen: () => false,
     render: () => sandbox.publishThreadWatch(),
     POLL_MS: 1200,
