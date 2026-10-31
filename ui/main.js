@@ -28,7 +28,25 @@ let active = null;
 
 const keyOf = (machine, id) => `${machine}:${id}`;
 const tabByKey = (key) => tabs.find((t) => t.key === key);
-const callOn = (machine, call) => machines.get(machine).transport.call(call);
+const missingTabId = (error) => /^no tab (\S+)/.exec(String(error))?.[1] ?? null;
+const tabRefresh = new Map();
+const callOn = async (machine, call) => {
+  try {
+    return await machines.get(machine).transport.call(call);
+  } catch (error) {
+    if (missingTabId(error) && call.tab != null) {
+      let pending = tabRefresh.get(machine);
+      if (!pending) {
+        pending = refreshTabs(machine).finally(() => {
+          if (tabRefresh.get(machine) === pending) tabRefresh.delete(machine);
+        });
+        tabRefresh.set(machine, pending);
+      }
+      await pending.catch(() => {});
+    }
+    throw error;
+  }
+};
 const IS_MAC = /Mac/.test(navigator.platform);
 const COMPUTER = IS_MAC ? "Mac" : "PC";
 const statusOf = (tab) => tab.view.status ?? "idle";
@@ -492,7 +510,15 @@ async function startClaude(tab) {
     tab.view = { ...tab.view, running: true };
     render();
   } catch (e) {
-    tab.term.write(`\r\n\x1b[31m[could not start claude: ${e}]\x1b[0m\r\n`);
+    const kept = tabs.includes(tab);
+    const restored = !kept && tab.view.session ? tabs.find((t) => t.machine === tab.machine && t.view.session === tab.view.session) : null;
+    if (restored) {
+      activate(restored);
+      return;
+    }
+    const text = kept ? `could not start claude: ${e}` : "That session ended when the machine restarted. Open it again to continue.";
+    if (guiOn()) showComposerNote(text, true);
+    if (kept) tab.term.write(`\r\n\x1b[31m[${text}]\x1b[0m\r\n`);
   }
 }
 
@@ -1224,7 +1250,7 @@ function connectHub(signedIn) {
       showMachines(frame.machines, frame.tabs);
       hub.hub({ cmd: "get_settings" }).then(onHubSettings, console.warn);
     },
-    machines: (list) => showMachines(list),
+    machines: (list, tabs) => showMachines(list, tabs),
     // This Mac's own events come over Tauri, not back through the hub.
     event: (machine, event) => machine !== account.machine_id && onMachineEvent(machine, event),
     settings: (latest) => onHubSettings(latest),
@@ -1248,11 +1274,9 @@ function showMachines(list, tabsByMachine) {
     if (known) known.view = view;
     else machines.set(view.id, { view, tabs: [], transport: hub.transport(view.id), usage: {} });
     if (!view.online) setTabs(view.id, [], { forget: false });
-    else if (tabsByMachine) setTabs(view.id, tabsByMachine[view.id] ?? []);
-    else if (!wasOnline) {
-      refreshTabs(view.id).catch(console.warn);
-      retryUploadImages();
-    }
+    else if (tabsByMachine != null && Object.hasOwn(tabsByMachine, view.id)) setTabs(view.id, tabsByMachine[view.id]);
+    else if (!wasOnline) refreshTabs(view.id).catch(console.warn);
+    if (view.online && !wasOnline) retryUploadImages();
   }
   for (const id of [...machines.keys()]) {
     if (id === LOCAL || list.some((v) => v.id === id)) continue;

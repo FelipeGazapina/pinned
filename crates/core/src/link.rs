@@ -91,10 +91,14 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     let (stop, stopped) = watch::channel(false);
     let (syncing, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
     std::thread::spawn(move || sync_projects(&syncing, &synced_machine, &sync_stopped));
+    let events = shared.clone();
+    let listener = machine.subscribe(Box::new(move |event| {
+        events.send(&MachineFrame::Event { event: event.clone() });
+    }));
     let (link, version) = (shared.clone(), version.to_owned());
     let thread = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("could not start the hub link's runtime");
-        runtime.block_on(run(link, creds, machine, version, stopped));
+        runtime.block_on(run(link, creds, machine, version, stopped, listener));
     });
     Link { shared, stop, thread }
 }
@@ -202,11 +206,7 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
     }
 }
 
-async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, version: String, mut stopped: watch::Receiver<bool>) {
-    let events = shared.clone();
-    let listener = machine.subscribe(Box::new(move |event| {
-        events.send(&MachineFrame::Event { event: event.clone() });
-    }));
+async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, version: String, mut stopped: watch::Receiver<bool>, listener: u64) {
     let mut backoff = BACKOFF_MIN;
     loop {
         let ended = tokio::select! {

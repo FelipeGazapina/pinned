@@ -21990,7 +21990,7 @@
             ]
           },
           {
-            "description": "Every machine of the account, after one came online, went offline or changed.",
+            "description": "Every machine of the account, after one came online, went offline or changed.\n`tabs` lists the online machines' tabs, so a client can drop ids from a process that exited. An older hub leaves it out.",
             "type": "object",
             "properties": {
               "type": {
@@ -22001,6 +22001,18 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/MachineView"
+                }
+              },
+              "tabs": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/TabView"
+                  }
                 }
               }
             },
@@ -23984,7 +23996,7 @@
             ]
           },
           {
-            "description": "Every machine of the account, after one came online, went offline or changed.",
+            "description": "Every machine of the account, after one came online, went offline or changed.\n`tabs` lists the online machines' tabs, so a client can drop ids from a process that exited. An older hub leaves it out.",
             "type": "object",
             "properties": {
               "type": {
@@ -23995,6 +24007,18 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/MachineView"
+                }
+              },
+              "tabs": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/TabView"
+                  }
                 }
               }
             },

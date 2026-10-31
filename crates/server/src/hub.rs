@@ -99,11 +99,17 @@ struct Online {
     out: Outbox,
     pending: HashMap<u64, oneshot::Sender<Result<Value, String>>>,
     next_call: u64,
-    tabs: Vec<TabView>,
+    tabs: Option<Vec<TabView>>,
     /// The last usage the machine reported for each account, for clients that connect after it.
     usage: BTreeMap<AccountId, Usage>,
     /// It runs in one of the account's boxes, so no other run goes to it.
     dedicated: bool,
+}
+
+impl Online {
+    fn tabs(&self) -> &[TabView] {
+        self.tabs.as_deref().unwrap_or(&[])
+    }
 }
 
 struct Client {
@@ -435,7 +441,7 @@ impl Hub {
 
     pub async fn push_machines(&self, account: &Account) {
         match self.machines(account).await {
-            Ok(machines) => account.broadcast(&ToClient::Machines { machines }),
+            Ok(machines) => account.publish_machines(machines),
             Err(e) => eprintln!("pinned-server: could not list account {}'s machines: {e}", account.id),
         }
     }
@@ -460,7 +466,7 @@ impl Hub {
 impl Account {
     /// Registers a machine's connection. An older one must have gone offline first.
     pub fn came_online(&self, machine: &str, socket: u64, name: String, dedicated: bool, out: Outbox) {
-        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: vec![], usage: BTreeMap::new(), dedicated };
+        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated };
         self.live.lock().unwrap().machines.insert(machine.to_owned(), online);
     }
 
@@ -494,12 +500,27 @@ impl Account {
         }
     }
 
+    fn reported_tabs(machines: &HashMap<MachineId, Online>) -> BTreeMap<MachineId, Vec<TabView>> {
+        machines.iter().filter_map(|(id, machine)| machine.tabs.clone().map(|tabs| (id.clone(), tabs))).collect()
+    }
+
+    fn publish_machines(&self, mut machines: Vec<MachineView>) {
+        let live = self.live.lock().unwrap();
+        for machine in &mut machines {
+            machine.online = live.machines.contains_key(&machine.id);
+        }
+        let text = frame(&ToClient::Machines { machines, tabs: Some(Self::reported_tabs(&live.machines)) });
+        for client in live.clients.values() {
+            let _ = client.out.send(text.clone());
+        }
+    }
+
     /// The online machine and tab already working on the connector's `subject`.
     pub fn placed(&self, connector: &str, subject: &Subject) -> Option<(MachineId, TabId)> {
         let live = self.live.lock().unwrap();
         live.machines.iter().find_map(|(id, machine)| {
             machine
-                .tabs
+                .tabs()
                 .iter()
                 .find(|tab| tab.running && tab.connector.as_deref() == Some(connector) && tab.subject.as_ref() == Some(subject))
                 .map(|tab| (id.clone(), tab.id.clone()))
@@ -512,7 +533,7 @@ impl Account {
         live.machines
             .iter()
             .filter(|(id, _)| on(id))
-            .flat_map(|(_, m)| &m.tabs)
+            .flat_map(|(_, m)| m.tabs())
             .any(|t| t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject))
     }
 
@@ -528,7 +549,7 @@ impl Account {
     fn running(&self, connector: &str) -> Vec<MachineId> {
         let live = self.live.lock().unwrap();
         let mut online: Vec<(&MachineId, &Online)> =
-            live.machines.iter().filter(|(_, m)| m.tabs.iter().any(|t| t.running && t.connector.as_deref() == Some(connector))).collect();
+            live.machines.iter().filter(|(_, m)| m.tabs().iter().any(|t| t.running && t.connector.as_deref() == Some(connector))).collect();
         online.sort_by_key(|(_, m)| std::cmp::Reverse(m.socket));
         online.into_iter().map(|(id, _)| id.clone()).collect()
     }
@@ -541,7 +562,7 @@ impl Account {
     pub fn seen(&self, machine: &str, connector: &str, subject: &Subject) -> Seen {
         let live = self.live.lock().unwrap();
         let Some(m) = live.machines.get(machine) else { return Seen::Offline };
-        match m.tabs.iter().find(|t| t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)) {
+        match m.tabs().iter().find(|t| t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)) {
             None => Seen::NoTab,
             // Claude reports a finished turn as waiting for input a minute later, so only Working holds a box.
             Some(t) => Seen::Tab { running: t.running, quiet: t.status != Some(AgentStatus::Working) },
@@ -576,7 +597,7 @@ impl Account {
         let mut live = self.live.lock().unwrap();
         let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return };
         match &event {
-            MachineEvent::Tabs { tabs } => m.tabs = tabs.clone(),
+            MachineEvent::Tabs { tabs } => m.tabs = Some(tabs.clone()),
             MachineEvent::Usage { usage, account } => {
                 m.usage.insert(account.clone(), *usage);
             }
@@ -612,7 +633,7 @@ impl Account {
         for m in &mut machines {
             m.online = live.machines.contains_key(&m.id);
         }
-        let tabs: BTreeMap<MachineId, Vec<TabView>> = live.machines.iter().map(|(id, m)| (id.clone(), m.tabs.clone())).collect();
+        let tabs = Self::reported_tabs(&live.machines);
         let account = pinned_core::wire::AccountView { id: self.id.to_string(), email: self.email.clone() };
         let _ = out.send(frame(&ToClient::Hello { account, machines, tabs }));
         for (id, m) in &live.machines {
