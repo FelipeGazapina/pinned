@@ -3503,9 +3503,9 @@ process.stdout.write(JSON.stringify({
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn a_push_is_the_poll_page() {
-        let root = temp("thread-same-page");
+    /// A machine whose `work` account has tab `s1` watched, its transcript dir, and every event it emits.
+    fn watching(name: &str) -> (PathBuf, Arc<Machine>, Arc<Mutex<Vec<Value>>>, TabId, PathBuf) {
+        let root = temp(name);
         let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
         let heard = Arc::new(Mutex::new(vec![]));
@@ -3515,31 +3515,66 @@ process.stdout.write(JSON.stringify({
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let dir = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&dir).unwrap();
+        (root, m, heard, tab, dir)
+    }
+
+    #[test]
+    fn a_grown_transcript_names_only_its_tab() {
+        let (root, m, heard, tab, dir) = watching("thread-nudge");
         let file = dir.join("s1.jsonl");
         std::fs::write(&file, assistant_line("ready")).unwrap();
         let mut cursors = HashMap::new();
         m.push_transcript_lines(&mut cursors);
-        assert!(thread_events(&heard).is_empty(), "the first look must not resend the history");
-        let agents = dir.join("s1/subagents");
-        std::fs::create_dir_all(&agents).unwrap();
-        std::fs::write(agents.join("agent-a1.meta.json"), r#"{"agentType":"general-purpose","description":"Look around","toolUseId":"toolu_1"}"#).unwrap();
-        std::fs::write(
-            agents.join("agent-a1.jsonl"),
-            "{\"type\":\"assistant\",\"uuid\":\"x\",\"timestamp\":\"t5\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Mapped.\"}]}}\n",
-        )
-        .unwrap();
-        std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
+        heard.lock().unwrap().clear();
+        let todo = r#"{"type":"assistant","uuid":"a1","timestamp":"t1","message":{"content":[{"type":"tool_use","id":"w1","name":"TodoWrite","input":{"todos":[{"content":"Ship the fix","status":"in_progress"}]}}]}}"#;
+        std::fs::write(&file, format!("{}{todo}\n", assistant_line("ready"))).unwrap();
         m.push_transcript_lines(&mut cursors);
-        let pushed = thread_events(&heard);
-        assert_eq!(pushed.len(), 1, "one new line, one push");
-        let from = pushed[0]["from"].as_u64().unwrap();
-        let poll = serde_json::to_value(m.thread(&tab, from).unwrap()).unwrap();
-        assert_eq!(poll["items"][0]["text"], "visible");
-        assert_eq!(poll["agents"][0]["name"], "Look around", "the poll lists the agent beside that line");
-        assert_eq!(pushed[0]["agents"], poll["agents"], "the push drops the agents the poll returns");
-        for key in ["session", "items", "next", "reset", "todos", "context", "branch"] {
-            assert_eq!(pushed[0][key], poll[key], "{key}");
-        }
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
+        m.push_transcript_lines(&mut cursors);
+        assert_eq!(thread_events(&heard).len(), 1, "an unchanged file is quiet");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_newly_watched_tab_is_nudged_once() {
+        let (root, m, heard, tab, dir) = watching("thread-first-look");
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("written before the watch")).unwrap();
+        let mut cursors = HashMap::new();
+        m.push_transcript_lines(&mut cursors);
+        m.push_transcript_lines(&mut cursors);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_new_session_on_a_watched_tab_nudges() {
+        let (root, m, heard, tab, dir) = watching("thread-new-session");
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        let mut cursors = HashMap::new();
+        m.push_transcript_lines(&mut cursors);
+        heard.lock().unwrap().clear();
+        m.tabs.lock().unwrap().get_mut(&tab).unwrap().claude_session = Some("s2".into());
+        std::fs::write(dir.join("s2.jsonl"), assistant_line("fresh")).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_line_finished_after_a_partial_first_look_nudges() {
+        let (root, m, heard, tab, dir) = watching("thread-partial");
+        let file = dir.join("s1.jsonl");
+        let whole = format!("{}{}", assistant_line("ready"), assistant_line("visible"));
+        let cut = assistant_line("ready").len() + 20;
+        std::fs::write(&file, &whole[..cut]).unwrap();
+        let mut cursors = HashMap::new();
+        m.push_transcript_lines(&mut cursors);
+        heard.lock().unwrap().clear();
+        std::fs::write(&file, &whole).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
+        let read = m.thread(&tab, assistant_line("ready").len() as u64).unwrap();
+        assert_eq!(serde_json::to_value(&read).unwrap()["items"][0]["text"], "visible");
         let _ = std::fs::remove_dir_all(root);
     }
 
