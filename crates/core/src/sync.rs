@@ -208,7 +208,7 @@ fn exchange(
                     drop(sha);
                     #[cfg(unix)]
                     if key == PLUGINS_KEY {
-                        if let Some(fix) = unix_mode_fix(path, &remote, resolve) {
+                        if let Some(fix) = unix_mode_fix(path, &remote, resolve)? {
                             match fix {
                                 ModeFix::Mark => repairs.push(ModeRepair { path: path.clone(), sha }),
                                 ModeFix::Chmod => {
@@ -265,7 +265,7 @@ fn exchange(
                     continue;
                 }
                 File {
-                    entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: if key == PLUGINS_KEY { executable(&target) } else { None } },
+                    entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: if key == PLUGINS_KEY { executable(&target)? } else { None } },
                     data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
                 }
             }
@@ -430,7 +430,7 @@ pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now:
         }
     }
     let agreed_key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
-    let mut agreed = state.agreed.remove(&agreed_key).unwrap_or_default();
+    let mut agreed = state.agreed.get(&agreed_key).cloned().unwrap_or_default();
     let keep = conflicting_user_skills(&local, &agreed, &hub.list(PLUGINS_KEY)?);
     let synced = exchange(hub, state, PLUGINS_KEY, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false)?;
     state.agreed.insert(agreed_key, agreed);
@@ -760,25 +760,33 @@ enum ModeFix {
 }
 
 #[cfg(unix)]
-fn unix_mode_fix(path: &str, remote: &BTreeMap<String, Entry>, resolve: &dyn Fn(&str) -> Option<PathBuf>) -> Option<ModeFix> {
-    let remote_exec = remote.get(path)?.executable;
-    let file = resolve(path)?;
+fn unix_mode_fix(path: &str, remote: &BTreeMap<String, Entry>, resolve: &dyn Fn(&str) -> Option<PathBuf>) -> Result<Option<ModeFix>, String> {
+    let Some(remote_exec) = remote.get(path).map(|entry| entry.executable) else { return Ok(None) };
+    let Some(file) = resolve(path) else { return Ok(None) };
     if !file.is_file() {
-        return None;
+        return Ok(None);
     }
-    mode_fix(executable(&file), remote_exec)
+    Ok(mode_fix(executable(&file)?, remote_exec))
 }
 
-fn executable(path: &Path) -> Option<bool> {
+fn executable(path: &Path) -> Result<Option<bool>, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return std::fs::metadata(path).ok().map(|meta| meta.permissions().mode() & 0o111 != 0);
+        let Some(mode) = std::fs::metadata(path).ok().map(|meta| meta.permissions().mode()) else { return Ok(None) };
+        // The owner runs the hook.
+        let owner = if mode & 0o111 != 0 && mode & 0o100 == 0 {
+            set_owner_execute(path)?;
+            true
+        } else {
+            mode & 0o100 != 0
+        };
+        return Ok(Some(owner));
     }
     #[cfg(not(unix))]
     {
         let _ = path;
-        None
+        Ok(None)
     }
 }
 
@@ -2038,13 +2046,13 @@ mod tests {
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
         put(&mini_skill, "two\n");
         stamp(&mini_skill, SystemTime::UNIX_EPOCH + Duration::from_secs(50));
-        let _deny = DenyOwnerExecute::arm();
+        let deny = DenyOwnerExecute::arm();
         let failed = sync_plugins(&hub, &mut mini_state, &mini, now);
         assert_eq!(failed, Err("Operation not permitted (os error 1)".into()));
         let agreed = saved_agreed(&mini_state, &mini, &root.join("state.json"));
         assert_eq!(agreed.get(USER_SKILL).cloned(), Some(sha(b"one\n")));
         assert_eq!(agreed.get(HOOK).cloned(), Some(sha(b"#!/bin/sh\necho session-start\n")));
-        drop(_deny);
+        drop(deny);
         let next = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
         assert_eq!(next.pushed, vec![USER_SKILL.to_string()]);
         assert_eq!(next.pulled, Vec::<String>::new());
