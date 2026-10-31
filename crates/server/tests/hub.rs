@@ -11,10 +11,12 @@ use pinned_core::sessions::Saved;
 use pinned_core::wire::{Call, HubCall};
 use pinned_server::boxes::{BoxApi, Policy};
 use serde_json::{json, Value};
-use std::net::TcpStream;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use futures_util::future::BoxFuture;
 use std::time::{Duration, Instant};
@@ -247,25 +249,39 @@ struct Node {
     link: Option<Link>,
 }
 
+fn launched(dir: &Path) -> Arc<Machine> {
+    let claude = dir.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
+    std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let launch = Launch {
+        exe: "/opt/pinned/bin/pinned-server".into(),
+        bins: BTreeMap::from([(Provider::Claude, claude)]),
+        path_env: None,
+        settings: dir.join("settings.json"),
+        mcp_config: None,
+        reminders: true,
+        plugin_dir: dir.join("plugin"),
+        tutorial_helper: dir.join("plugin/tutorial.mjs"),
+        sock: dir.join("sock"),
+        vector_search: false,
+    };
+    Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), |_| {})
+}
+
 impl Node {
     fn start(dir: &Path, creds: Credentials) -> Node {
-        let claude = dir.join("claude");
-        std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
-        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let launch = Launch {
-            exe: "/opt/pinned/bin/pinned-server".into(),
-            bins: BTreeMap::from([(Provider::Claude, claude)]),
-            path_env: None,
-            settings: dir.join("settings.json"),
-            mcp_config: None,
-            reminders: true,
-            plugin_dir: dir.join("plugin"),
-            tutorial_helper: dir.join("plugin/tutorial.mjs"),
-            sock: dir.join("sock"),
-            vector_search: false,
-        };
-        let machine = Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), |_| {});
+        let machine = launched(dir);
         let link = link::spawn(creds, machine.clone(), "0.0.0-test");
+        Node { machine, link: Some(link) }
+    }
+
+    /// The production node: the link is up, then saved sessions are restored and started.
+    fn resume(dir: &Path, creds: Credentials) -> Node {
+        let machine = launched(dir);
+        let link = link::spawn(creds, machine.clone(), "0.0.0-test");
+        for tab in machine.restore_tabs() {
+            machine.start_claude(&tab, 80, 24).unwrap();
+        }
         Node { machine, link: Some(link) }
     }
 
@@ -322,31 +338,30 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
     assert_eq!(names, [("node-a", true), ("node-b", true)]);
     let b = creds_b.machine_id.as_str();
 
-    let tab = client.call(b, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap();
-    assert_eq!(tab, "tab-1");
-    let cwd = client.call(b, json!({ "cmd": "start_claude", "tab": "tab-1", "cols": 80, "rows": 24 })).unwrap();
+    let tab_id = client.call(b, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    let cwd = client.call(b, json!({ "cmd": "start_claude", "tab": &tab_id, "cols": 80, "rows": 24 })).unwrap();
     assert_eq!(cwd, dir_b.display().to_string());
     client.wait("node-b's running tab", |f| {
         f["type"] == "event" && f["machine"] == b && f["event"]["kind"] == "tabs" && f["event"]["tabs"][0]["running"] == true
     });
-    client.send(json!({ "type": "attach", "machine": b, "tab": "tab-1" }));
+    client.send(json!({ "type": "attach", "machine": b, "tab": &tab_id }));
     let typed: String = (0..300).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
     for key in typed.chars().chain(['\r']) {
-        client.send(json!({ "type": "call", "id": 1000, "machine": b, "call": { "cmd": "write_input", "tab": "tab-1", "data": key.to_string() } }));
+        client.send(json!({ "type": "call", "id": 1000, "machine": b, "call": { "cmd": "write_input", "tab": &tab_id, "data": key.to_string() } }));
     }
     let screen = format!("{typed}\r\n{typed}\r\n");
-    let echoed = client.wait_output(b, "tab-1", "\r\n");
+    let echoed = client.wait_output(b, &tab_id, "\r\n");
     assert_eq!(echoed.get(..typed.len()), Some(typed.as_str()), "keys echo in the order they were typed");
-    assert_eq!(client.wait_output(b, "tab-1", &screen), screen);
+    assert_eq!(client.wait_output(b, &tab_id, &screen), screen);
 
     let mut late = Client::connect(&url, &token);
     let hello = late.wait("hello", |f| f["type"] == "hello");
-    assert_eq!(hello["tabs"][b][0]["id"], "tab-1");
-    late.send(json!({ "type": "attach", "machine": b, "tab": "tab-1" }));
-    assert_eq!(late.wait_output(b, "tab-1", &screen), screen, "a late client gets the screen");
-    client.call(b, json!({ "cmd": "write_input", "tab": "tab-1", "data": "again\r" })).unwrap();
-    late.wait_output(b, "tab-1", "again\r\nagain\r\n");
-    assert_eq!(client.wait_output(b, "tab-1", "again\r\nagain\r\n"), format!("{screen}again\r\nagain\r\n"), "the first client never sees the screen twice");
+    assert_eq!(hello["tabs"][b][0]["id"], tab_id);
+    late.send(json!({ "type": "attach", "machine": b, "tab": &tab_id }));
+    assert_eq!(late.wait_output(b, &tab_id, &screen), screen, "a late client gets the screen");
+    client.call(b, json!({ "cmd": "write_input", "tab": &tab_id, "data": "again\r" })).unwrap();
+    late.wait_output(b, &tab_id, "again\r\nagain\r\n");
+    assert_eq!(client.wait_output(b, &tab_id, "again\r\nagain\r\n"), format!("{screen}again\r\nagain\r\n"), "the first client never sees the screen twice");
 
     let refused = client.call(b, json!({ "cmd": "format_disk" })).unwrap_err();
     let says = format!("this hub runs pinned {}, which can't answer that: unknown variant `format_disk`, expected one of `tabs`, `open_tab`", env!("CARGO_PKG_VERSION"));
@@ -354,7 +369,7 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
     assert!(client.hub(json!({ "cmd": "self_destruct" })).unwrap_err().contains("unknown variant `self_destruct`"));
     assert_eq!(client.call("not-a-machine", json!({ "cmd": "tabs" })), Err("this account has no machine not-a-machine".into()));
 
-    client.call(b, json!({ "cmd": "close_tab", "tab": "tab-1" })).unwrap();
+    client.call(b, json!({ "cmd": "close_tab", "tab": &tab_id })).unwrap();
     client.wait("node-b without tabs", |f| f["type"] == "event" && f["machine"] == b && f["event"] == json!({ "kind": "tabs", "tabs": [] }));
 
     node_b.kill();
@@ -364,6 +379,243 @@ fn a_client_drives_a_tab_on_a_paired_node_through_the_hub() {
     client.wait_machines(&[("node-a", true), ("vps", false)]);
     client.hub(json!({ "cmd": "remove_machine", "id": b })).unwrap();
     client.wait_machines(&[("node-a", true)]);
+}
+
+#[test]
+fn a_restarted_node_does_not_reuse_tab_ids_and_the_client_gets_that_list() {
+    let hub = TestHub::start("retab");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "Ana@Acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    let dir = temp("retab-node");
+    let creds = pair(&url, &mut client, "box", &dir);
+    let id = creds.machine_id.clone();
+    client.wait_machines(&[("box", false)]);
+    let mut node = Node::start(&dir, creds.clone());
+    client.wait_machines(&[("box", true)]);
+    let first = client.call(&id, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap();
+    let first_id = first.as_str().unwrap().to_owned();
+    node.kill();
+    client.wait_machines(&[("box", false)]);
+    drop(node);
+    let _node = Node::start(&dir, creds);
+    client.wait_machines(&[("box", true)]);
+    let second = client.call(&id, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap();
+    let second_id = second.as_str().unwrap().to_owned();
+    assert_ne!(first_id, second_id, "the new process reused {first_id}");
+    assert_eq!(
+        client.call(&id, json!({ "cmd": "start_claude", "tab": first_id, "cols": 80, "rows": 24 })),
+        Err(format!("no tab {first_id}")),
+        "the id from before the restart drove the new tab"
+    );
+    client.pump();
+    for frame in &client.frames {
+        if frame["type"] != "machines" {
+            continue;
+        }
+        let Some(listed) = frame["tabs"][&id].as_array() else { continue };
+        assert!(listed.iter().all(|tab| tab["id"] != first_id), "the snapshot still listed {first_id}: {frame}");
+    }
+    let ended = ended_tabs(&client.frames, &id);
+    assert!(ended.iter().all(|tab| tab["id"] != first_id), "the client still had {first_id}: {ended:?}");
+    assert!(ended.iter().any(|tab| tab["id"] == second_id), "the client never got {second_id}: {ended:?}");
+}
+
+/// The last tab list a client was given for `machine`: a tabs event, or a machines
+/// snapshot that includes that machine. A snapshot that omits the key leaves the previous list.
+fn ended_tabs(frames: &[Value], machine: &str) -> Vec<Value> {
+    let mut ended = vec![];
+    for frame in frames {
+        if frame["type"] == "event" && frame["machine"] == machine && frame["event"]["kind"] == "tabs" {
+            ended = frame["event"]["tabs"].as_array().cloned().unwrap_or_default();
+        } else if matches!(frame["type"].as_str(), Some("machines" | "hello")) && frame["tabs"][machine].is_array() {
+            ended = frame["tabs"][machine].as_array().cloned().unwrap();
+        }
+    }
+    ended
+}
+
+fn wait_frame(client: &mut Client, from: usize, what: &str, pred: impl Fn(&Value) -> bool) -> usize {
+    let start = Instant::now();
+    loop {
+        if let Some(index) = client.frames.iter().enumerate().skip(from).find(|(_, frame)| pred(frame)).map(|(index, _)| index) {
+            return index;
+        }
+        assert!(client.pump(), "the socket closed while waiting for {what}");
+        assert!(start.elapsed() < WAIT, "timed out waiting for {what}; got {:#?}", &client.frames[from..]);
+    }
+}
+
+/// Drops the bytes between a node and the hub without stopping the node.
+struct SocketCut {
+    addr: std::net::SocketAddr,
+    generation: Arc<AtomicU64>,
+}
+
+impl SocketCut {
+    fn in_front_of(upstream: std::net::SocketAddr) -> SocketCut {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let generation = Arc::new(AtomicU64::new(1));
+        let flag = generation.clone();
+        std::thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(down) = incoming else { continue };
+                let flag = flag.clone();
+                std::thread::spawn(move || {
+                    let Ok(up) = TcpStream::connect(upstream) else { return };
+                    let mine = flag.load(Ordering::SeqCst);
+                    let _ = down.set_nodelay(true);
+                    let _ = up.set_nodelay(true);
+                    let (down_out, up_out) = (down.try_clone().unwrap(), up.try_clone().unwrap());
+                    let flag_back = flag.clone();
+                    std::thread::spawn(move || copy_until(down_out, up_out, &flag_back, mine));
+                    copy_until(up, down, &flag, mine);
+                });
+            }
+        });
+        SocketCut { addr, generation }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    fn cut(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn copy_until(mut from: TcpStream, mut to: TcpStream, generation: &AtomicU64, mine: u64) {
+    let _ = from.set_read_timeout(Some(Duration::from_millis(50)));
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        if generation.load(Ordering::SeqCst) != mine {
+            let _ = to.shutdown(Shutdown::Both);
+            let _ = from.shutdown(Shutdown::Both);
+            return;
+        }
+        match from.read(&mut buf) {
+            Ok(0) => {
+                let _ = to.shutdown(Shutdown::Write);
+                return;
+            }
+            Ok(n) => {
+                if to.write_all(&buf[..n]).is_err() {
+                    return;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => return,
+        }
+    }
+}
+
+fn http_addr(url: &str) -> std::net::SocketAddr {
+    url.trim_start_matches("http://").parse().unwrap()
+}
+
+#[test]
+fn a_reconnected_node_does_not_wipe_the_tabs_the_client_already_has() {
+    let hub = TestHub::start("reconn");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "Ana@Acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    let dir = temp("reconn-node");
+    let mut creds = pair(&url, &mut client, "box", &dir);
+    let id = creds.machine_id.clone();
+    let cut = SocketCut::in_front_of(http_addr(&url));
+    creds.hub = cut.url();
+    client.wait_machines(&[("box", false)]);
+    let node = Node::start(&dir, creds);
+    client.wait_machines(&[("box", true)]);
+    let tab_id = client.call(&id, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    client.wait("the open tab", |frame| {
+        frame["type"] == "event" && frame["machine"] == id && frame["event"]["kind"] == "tabs" && frame["event"]["tabs"].as_array().is_some_and(|tabs| tabs.iter().any(|tab| tab["id"] == tab_id))
+    });
+    let mark = client.frames.len();
+    cut.cut();
+    client.wait_machines(&[("box", false)]);
+    client.wait_machines(&[("box", true)]);
+    let reported = wait_frame(&mut client, mark, "tabs after the socket came back", |frame| {
+        frame["type"] == "event" && frame["machine"] == id && frame["event"]["kind"] == "tabs" && frame["event"]["tabs"].as_array().is_some_and(|tabs| tabs.iter().any(|tab| tab["id"] == tab_id))
+    });
+    let wiped = client.frames[mark..reported].iter().find(|frame| {
+        frame["type"] == "machines" && frame["tabs"][&id].as_array().is_some_and(|tabs| tabs.is_empty())
+    });
+    assert!(wiped.is_none(), "a machines frame listed {id} with no tabs before the node reported them: {wiped:?}");
+    let ended: Vec<String> = ended_tabs(&client.frames, &id).iter().map(|tab| tab["id"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(ended, vec![tab_id]);
+    drop(node);
+}
+
+#[test]
+fn a_restarted_node_reports_the_restored_session() {
+    let hub = TestHub::start("restore");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "Ana@Acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    let dir = temp("restore-node");
+    let creds = pair(&url, &mut client, "box", &dir);
+    let id = creds.machine_id.clone();
+    client.wait_machines(&[("box", false)]);
+    let mut node = Node::start(&dir, creds.clone());
+    client.wait_machines(&[("box", true)]);
+    let first_id = client.call(&id, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    node.kill();
+    client.wait_machines(&[("box", false)]);
+    drop(node);
+    std::fs::write(
+        dir.join("sessions.json"),
+        format!(r#"[{{"cwd": "{}", "session": "conv-1", "env": [], "bypass": false, "interrupted": false}}]"#, dir.display()),
+    )
+    .unwrap();
+    let mark = client.frames.len();
+    let _node = Node::resume(&dir, creds);
+    client.wait_machines(&[("box", true)]);
+    let reported = wait_frame(&mut client, mark, "the restored tab", |frame| {
+        frame["type"] == "event" && frame["machine"] == id && frame["event"]["kind"] == "tabs" && frame["event"]["tabs"].as_array().is_some_and(|tabs| tabs.iter().any(|tab| tab["session"] == "conv-1"))
+    });
+    let wiped = client.frames[mark..reported].iter().find(|frame| {
+        frame["type"] == "machines" && frame["tabs"][&id].as_array().is_some_and(|tabs| tabs.is_empty())
+    });
+    assert!(wiped.is_none(), "a machines frame listed {id} with no tabs before the restored session: {wiped:?}");
+    let ended = ended_tabs(&client.frames, &id);
+    assert_eq!(ended.len(), 1, "the client ended with {ended:?}");
+    assert_eq!(ended[0]["session"], "conv-1");
+    assert_ne!(ended[0]["id"], first_id);
+}
+
+#[test]
+fn quitting_through_the_hub_sends_an_empty_tab_list_before_disconnect() {
+    let hub = TestHub::start("quit");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "Ana@Acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    let dir = temp("quit-node");
+    let creds = pair(&url, &mut client, "box", &dir);
+    let id = creds.machine_id.clone();
+    client.wait_machines(&[("box", false)]);
+    let mut node = Node::start(&dir, creds);
+    client.wait_machines(&[("box", true)]);
+    let tab_id = client.call(&id, json!({ "cmd": "open_tab", "path": null, "bypass": false })).unwrap().as_str().unwrap().to_owned();
+    client.wait("the open tab", |frame| {
+        frame["type"] == "event" && frame["machine"] == id && frame["event"]["kind"] == "tabs" && frame["event"]["tabs"].as_array().is_some_and(|tabs| tabs.iter().any(|tab| tab["id"] == tab_id))
+    });
+    node.machine.quit();
+    let empty_at = wait_frame(&mut client, 0, "the empty tab list", |frame| {
+        frame["type"] == "event" && frame["machine"] == id && frame["event"] == json!({ "kind": "tabs", "tabs": [] })
+    });
+    node.link.take().unwrap().stop();
+    client.wait_machines(&[("box", false)]);
+    let offline_at = client
+        .frames
+        .iter()
+        .rposition(|frame| frame["type"] == "machines" && frame["machines"].as_array().is_some_and(|list| list.iter().any(|machine| machine["name"] == "box" && machine["online"] == false)))
+        .unwrap();
+    assert!(empty_at < offline_at, "empty tabs at {empty_at}, offline at {offline_at}");
+    let ended = ended_tabs(&client.frames[..offline_at], &id);
+    assert_eq!(ended, Vec::<Value>::new());
 }
 
 #[test]
@@ -470,7 +722,8 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     let issue = Subject::LinearIssue { issue: "uuid-1".into() };
     assert_eq!(open(run(issue.clone())), Ok(()), "a run a session already works on counts as taken");
     let Work::Run(again) = run(Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() }) else { unreachable!() };
-    assert_eq!(node_a.machine.run(&again.spec()), Ok("tab-1".into()), "a machine answers a run sent again with the session it started");
+    let started = node_a.machine.tabs().into_iter().find(|t| t.connector.as_deref() == Some(id.as_str())).unwrap().id;
+    assert_eq!(node_a.machine.run(&again.spec()), Ok(started.clone()), "a machine answers a run sent again with the session it started");
     assert_eq!((connector_tabs(&node_a), connector_tabs(&node_b)), (1, 1));
 
     let forward = |node: &Node, subject: Subject| node.link.as_ref().unwrap().forward(agent::Message::Stage { connector: id.clone(), subject, stage: Stage::Coding });
@@ -490,7 +743,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     };
     let seen = Arc::new(Mutex::new(vec![]));
     let sink = seen.clone();
-    node_a.machine.attach("tab-1", "test".into(), Box::new(move |b: &[u8]| sink.lock().unwrap().extend_from_slice(b))).unwrap();
+    node_a.machine.attach(&started, "test".into(), Box::new(move |b: &[u8]| sink.lock().unwrap().extend_from_slice(b))).unwrap();
     assert_eq!(open(delivery("1792400050.000200")), Ok(()), "the thread's live session takes its new messages");
     wait_for("the delivered prompt", || String::from_utf8_lossy(&seen.lock().unwrap()).contains("yes, file it"));
     assert_eq!(open(delivery("1792499999.000100")), Err("no session answers that thread".into()));
@@ -560,6 +813,9 @@ impl sync::Hub for Through<'_> {
     fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
         Ok(serde_json::from_value(self.0.call_hub(HubCall::SyncPull { project: project.into(), paths })?).unwrap())
     }
+    fn mark_executable(&self, project: &str, repairs: Vec<sync::ModeRepair>) -> Result<(), String> {
+        self.0.call_hub(HubCall::SyncMarkExecutable { project: project.into(), repairs }).map(drop)
+    }
 }
 
 #[test]
@@ -592,7 +848,7 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
     assert_eq!(pulled, vec!["claude/memory/MEMORY.md"]);
     assert_eq!(std::fs::read_to_string(memory(&on_mini)).unwrap(), "- deploys go through the VPS");
 
-    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1 }, data: Some("eA==".into()) };
+    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()) };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: project.key.clone(), files: vec![outside] }),
         Err("../.ssh/authorized_keys is not a file a project shares".into())
@@ -655,7 +911,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     pulled.sort();
     assert_eq!(pulled, stored);
     assert_eq!(std::fs::read_to_string(mini_home.join("synced-plugins/plugins/toy@demo/skills/greet/SKILL.md")).unwrap(), skill);
-    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1 }, data: Some("eA==".into()) };
+    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()) };
     for path in [
         "plugins/toy@demo/settings.json",
         "plugins/toy@demo/.claude.json",
@@ -676,7 +932,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     }
     let raw = vec![7u8; sync::FILE_LIMIT as usize + 1];
     let oversized = sync::File {
-        entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64 },
+        entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64, executable: None },
         data: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
     };
     assert_eq!(
@@ -687,6 +943,339 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     let (mut mac, mut mini) = (mac, mini);
     mac.kill();
     mini.kill();
+}
+
+#[test]
+fn an_executable_hook_stays_executable_through_the_hub() {
+    let hub = TestHub::start("hookmode");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("hookmode-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "linux").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let install = mac_home.join("plugins/pstack");
+    let hook = install.join("hooks/session-start.sh");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(install.join(".claude-plugin")).unwrap();
+    std::fs::write(install.join(".claude-plugin/plugin.json"), r#"{"name":"pstack"}"#).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho session-start\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let installed = serde_json::json!({ "plugins": { "pstack@local": [{ "installPath": install, "version": "0.9.82", "gitCommitSha": "abc123" }] } });
+    std::fs::create_dir_all(mac_home.join(".claude/plugins")).unwrap();
+    std::fs::write(mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"pstack@local":true}}"#).unwrap();
+    std::fs::write(mac_home.join(".claude/plugins/installed_plugins.json"), installed.to_string()).unwrap();
+    let share = |home: &Path| sync::PluginShare { claude_home: home.join(".claude"), dir: home.join("synced-plugins") };
+    let now = std::time::SystemTime::now();
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    let mut mac_state = sync::State::default();
+    let mut mini_state = sync::State::default();
+    sync::sync_plugins(&Through(mac_link), &mut mac_state, &share(&mac_home), now).unwrap();
+    sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    let dest = mini_home.join("synced-plugins/plugins/pstack@local/hooks/session-start.sh");
+    let plain = mini_home.join("synced-plugins/plugins/pstack@local/.claude-plugin/plugin.json");
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+    assert_eq!(mode(&dest) & 0o111, 0o100, "receiver hook mode is {:o}", mode(&dest));
+    assert_eq!(mode(&plain) & 0o111, 0, "plain file mode is {:o}", mode(&plain));
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(mode(&dest), 0o644);
+    sync::sync_plugins(&Through(mac_link), &mut mac_state, &share(&mac_home), now).unwrap();
+    sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    assert_eq!(mode(&dest) & 0o111, 0o100, "resync left the hook at {:o}", mode(&dest));
+    let again = sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    assert_eq!(again.pushed, Vec::<String>::new());
+    assert_eq!(again.pulled, Vec::<String>::new());
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
+}
+
+const HOOK_PATH: &str = "plugins/pstack@local/hooks/session-start.sh";
+
+fn call_machine(hub: &str, token: &str, call: Value) -> Value {
+    machine_result(hub, token, call).unwrap_or_else(|err| panic!("{err}"))
+}
+
+fn machine_result(hub: &str, token: &str, call: Value) -> Result<Value, String> {
+    let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", hub.replace("http://", "ws://"))).unwrap();
+    if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
+        stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    }
+    ws.send(Message::text(json!({ "type": "auth", "token": token, "name": "raw", "os": "linux", "version": "test" }).to_string())).unwrap();
+    let hello = read_machine(&mut ws, |frame| frame["type"] == "hello");
+    assert!(hello["machine"]["id"].is_string(), "{hello}");
+    ws.send(Message::text(json!({ "type": "call", "id": 1, "call": call }).to_string())).unwrap();
+    let reply = read_machine(&mut ws, |frame| frame["type"] == "reply" && frame["id"] == 1);
+    match reply.get("err") {
+        Some(err) => Err(err.as_str().unwrap_or("hub call failed").to_string()),
+        None => Ok(reply["ok"].clone()),
+    }
+}
+
+fn read_machine(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, pred: impl Fn(&Value) -> bool) -> Value {
+    let start = Instant::now();
+    loop {
+        match ws.read() {
+            Ok(Message::Text(text)) => {
+                let frame: Value = serde_json::from_str(&text).unwrap();
+                if pred(&frame) {
+                    return frame;
+                }
+            }
+            Ok(Message::Ping(payload)) => ws.send(Message::Pong(payload)).unwrap(),
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock || error.kind() == std::io::ErrorKind::TimedOut => {
+                assert!(start.elapsed() < WAIT, "timed out waiting for the machine socket");
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
+fn gzip_bytes(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hook_entry(link: &Link) -> Value {
+    let listed = link.call_hub(HubCall::SyncList { project: sync::PLUGINS_KEY.into() }).unwrap();
+    listed.as_array().unwrap().iter().find(|row| row["path"] == HOOK_PATH).unwrap().clone()
+}
+
+#[test]
+fn an_omitted_executable_field_keeps_the_stored_bit_through_the_hub() {
+    let hub = TestHub::start("hookomit");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (_, raw_token) = account::register_machine(&url, &token, "raw", "linux").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("hookomit-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "linux").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let install = mac_home.join("plugins/pstack");
+    let hook = install.join("hooks/session-start.sh");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(install.join(".claude-plugin")).unwrap();
+    std::fs::write(install.join(".claude-plugin/plugin.json"), r#"{"name":"pstack"}"#).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho session-start\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let installed = serde_json::json!({ "plugins": { "pstack@local": [{ "installPath": install, "version": "0.9.82", "gitCommitSha": "abc123" }] } });
+    std::fs::create_dir_all(mac_home.join(".claude/plugins")).unwrap();
+    std::fs::write(mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"pstack@local":true}}"#).unwrap();
+    std::fs::write(mac_home.join(".claude/plugins/installed_plugins.json"), installed.to_string()).unwrap();
+    let share = |home: &Path| sync::PluginShare { claude_home: home.join(".claude"), dir: home.join("synced-plugins") };
+    let now = std::time::SystemTime::now();
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    let mut mac_state = sync::State::default();
+    let mut mini_state = sync::State::default();
+    sync::sync_plugins(&Through(mac_link), &mut mac_state, &share(&mac_home), now).unwrap();
+    sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    let dest = mini_home.join("synced-plugins").join(HOOK_PATH);
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&dest) & 0o100, 0o100, "receiver hook mode is {:o}", mode(&dest));
+
+    let pulled = sync::Hub::pull(&Through(mac_link), sync::PLUGINS_KEY, vec![HOOK_PATH.into()]).unwrap();
+    let mut same = serde_json::to_value(&pulled[0]).unwrap();
+    same.as_object_mut().unwrap().remove("executable");
+    assert!(same.get("executable").is_none());
+    call_machine(&url, &raw_token, json!({ "cmd": "sync_push", "project": sync::PLUGINS_KEY, "files": [same] }));
+    assert_eq!(hook_entry(mac_link)["executable"], json!(true));
+    let quiet = sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    assert_eq!((quiet.pushed.as_slice(), quiet.pulled.as_slice()), (&[][..], &[][..]));
+    assert_eq!(mode(&dest) & 0o100, 0o100, "same bytes without the field left mode {:o}", mode(&dest));
+
+    let body = b"#!/bin/sh\necho session-start\necho again\n";
+    let packed = gzip_bytes(body);
+    let modified = hook_entry(mac_link)["modified"].as_u64().unwrap() + 60_000;
+    call_machine(
+        &url,
+        &raw_token,
+        json!({
+            "cmd": "sync_push",
+            "project": sync::PLUGINS_KEY,
+            "files": [{
+                "path": HOOK_PATH,
+                "sha": sha256_hex(body),
+                "modified": modified,
+                "size": packed.len(),
+                "data": base64::engine::general_purpose::STANDARD.encode(&packed),
+            }],
+        }),
+    );
+    assert_eq!(hook_entry(mac_link)["executable"], json!(true));
+    sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), body);
+    assert_eq!(mode(&dest) & 0o100, 0o100, "new bytes without the field left mode {:o}", mode(&dest));
+    let again = sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    assert_eq!((again.pushed.as_slice(), again.pulled.as_slice()), (&[][..], &[][..]));
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
+}
+
+#[test]
+fn a_new_sha_with_executable_false_clears_the_bit_on_the_receiver() {
+    let hub = TestHub::start("hookclear");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("hookclear-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "linux").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let install = mac_home.join("plugins/pstack");
+    let hook = install.join("hooks/session-start.sh");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(install.join(".claude-plugin")).unwrap();
+    std::fs::write(install.join(".claude-plugin/plugin.json"), r#"{"name":"pstack"}"#).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho session-start\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let installed = serde_json::json!({ "plugins": { "pstack@local": [{ "installPath": install, "version": "0.9.82", "gitCommitSha": "abc123" }] } });
+    std::fs::create_dir_all(mac_home.join(".claude/plugins")).unwrap();
+    std::fs::write(mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"pstack@local":true}}"#).unwrap();
+    std::fs::write(mac_home.join(".claude/plugins/installed_plugins.json"), installed.to_string()).unwrap();
+    let share = |home: &Path| sync::PluginShare { claude_home: home.join(".claude"), dir: home.join("synced-plugins") };
+    let now = std::time::SystemTime::now();
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    let mut mac_state = sync::State::default();
+    let mut mini_state = sync::State::default();
+    sync::sync_plugins(&Through(mac_link), &mut mac_state, &share(&mac_home), now).unwrap();
+    sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    let dest = mini_home.join("synced-plugins").join(HOOK_PATH);
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(hook_entry(mac_link)["executable"], json!(true));
+    assert_eq!(mode(&dest) & 0o100, 0o100, "receiver hook mode is {:o}", mode(&dest));
+    let changed = "#!/bin/sh\necho changed\n";
+    std::fs::write(&hook, changed).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+    stamp_newer(&hook);
+    sync::sync_plugins(&Through(mac_link), &mut mac_state, &share(&mac_home), now).unwrap();
+    assert_eq!(hook_entry(mac_link)["executable"], json!(false));
+    assert_eq!(hook_entry(mac_link)["sha"], json!(sha256_hex(changed.as_bytes())));
+    sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), changed.as_bytes());
+    assert_eq!(mode(&dest) & 0o111, 0, "cleared hook mode is {:o}", mode(&dest));
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
+}
+
+#[test]
+fn a_mode_repair_keeps_a_newer_edit_and_marks_only_the_matching_sha() {
+    let hub = TestHub::start("moderepair");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (_, raw_token) = account::register_machine(&url, &token, "raw", "linux").unwrap();
+    let older = b"#!/bin/sh\necho session-start\n";
+    let newer = b"#!/bin/sh\necho edited\n";
+    push_plugin_file(&url, &raw_token, older, 100, false);
+    push_plugin_file(&url, &raw_token, newer, 200, false);
+    let stale = machine_result(
+        &url,
+        &raw_token,
+        json!({
+            "cmd": "sync_mark_executable",
+            "project": sync::PLUGINS_KEY,
+            "repairs": [{ "path": HOOK_PATH, "sha": sha256_hex(older) }],
+        }),
+    );
+    assert_eq!(stale, Ok(Value::Null));
+    let newer_gz = gzip_bytes(newer);
+    let row = stored_hook_row(&hub.database);
+    assert_eq!(row.sha, sha256_hex(newer));
+    assert_eq!(row.modified, 200);
+    assert_eq!(row.executable, false);
+    assert_eq!(row.data, newer_gz);
+    let marked = machine_result(
+        &url,
+        &raw_token,
+        json!({
+            "cmd": "sync_mark_executable",
+            "project": sync::PLUGINS_KEY,
+            "repairs": [{ "path": HOOK_PATH, "sha": sha256_hex(newer) }],
+        }),
+    );
+    assert_eq!(marked, Ok(Value::Null));
+    let row = stored_hook_row(&hub.database);
+    assert_eq!(row.sha, sha256_hex(newer));
+    assert_eq!(row.modified, 200);
+    assert_eq!(row.data, newer_gz);
+    assert_eq!(row.executable, true);
+    let listed = machine_result(&url, &raw_token, json!({ "cmd": "sync_list", "project": sync::PLUGINS_KEY })).unwrap();
+    let entry = listed.as_array().unwrap().iter().find(|item| item["path"] == HOOK_PATH).unwrap();
+    assert_eq!(entry["executable"], json!(true));
+    assert_eq!(entry["modified"], json!(200));
+    assert_eq!(entry["sha"], json!(sha256_hex(newer)));
+}
+
+fn push_plugin_file(hub: &str, token: &str, body: &[u8], modified: u64, executable: bool) {
+    let packed = gzip_bytes(body);
+    call_machine(
+        hub,
+        token,
+        json!({
+            "cmd": "sync_push",
+            "project": sync::PLUGINS_KEY,
+            "files": [{
+                "path": HOOK_PATH,
+                "sha": sha256_hex(body),
+                "modified": modified,
+                "size": packed.len(),
+                "executable": executable,
+                "data": base64::engine::general_purpose::STANDARD.encode(&packed),
+            }],
+        }),
+    );
+}
+
+fn stamp_newer(path: &Path) {
+    let later = std::fs::metadata(path).unwrap().modified().unwrap() + Duration::from_secs(120);
+    std::fs::File::options().write(true).open(path).unwrap().set_modified(later).unwrap();
+}
+
+struct HookRow {
+    sha: String,
+    modified: i64,
+    executable: bool,
+    data: Vec<u8>,
+}
+
+fn stored_hook_row(database: &str) -> HookRow {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let row = client
+            .query_one("select sha, modified, executable, data from project_files where project = $1 and path = $2", &[&sync::PLUGINS_KEY, &HOOK_PATH])
+            .await
+            .unwrap();
+        HookRow { sha: row.get(0), modified: row.get(1), executable: row.get(2), data: row.get(3) }
+    })
 }
 
 fn stored_plugin_paths(database: &str) -> Vec<String> {
@@ -1157,7 +1746,7 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
     assert_eq!(open(ana.box_run(issue("uuid-1"))), Ok(()), "a run its box already works on counts as taken");
     assert_eq!(hub.boxes.state.lock().unwrap().created.len(), 1);
 
-    ana.client.call(&machine, json!({ "cmd": "close_tab", "tab": "tab-1" })).unwrap();
+    ana.client.call(&machine, json!({ "cmd": "close_tab", "tab": &tabs[0].id })).unwrap();
     wait_for("the box to be deleted", || hub.boxes.live().is_empty());
     ana.client.wait_machines(&[]);
     wait_for("the row to go", || ana.rows(&hub) == 0);
@@ -1414,7 +2003,8 @@ fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
         })
     };
     stage(Stage::Review).unwrap();
-    ana.client.call(&machine, json!({ "cmd": "close_tab", "tab": "tab-1" })).unwrap();
+    let tab = hub.boxes.with_node(|node| node.machine.tabs().into_iter().next().unwrap().id);
+    ana.client.call(&machine, json!({ "cmd": "close_tab", "tab": tab })).unwrap();
     let start = Instant::now();
     while start.elapsed() < Duration::from_millis(1500) {
         assert_eq!(hub.boxes.live().len(), 1, "fixed box reaped");
@@ -1581,8 +2171,10 @@ fn a_watched_line_is_pushed_once_and_again_after_the_machine_reconnects() {
             permission_mode: None,
         }],
     );
-    assert_eq!(node.machine.restore_tabs(), vec!["tab-1".to_string()]);
-    assert_eq!(client.call(&machine, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] })), Ok(Value::Null));
+    let tabs = node.machine.restore_tabs();
+    assert_eq!(tabs.len(), 1, "the saved session did not reopen");
+    let tab = tabs[0].clone();
+    assert_eq!(client.call(&machine, json!({ "cmd": "watch_threads", "tabs": [&tab] })), Ok(Value::Null));
     std::thread::sleep(Duration::from_millis(300));
     let started = Instant::now();
     std::fs::write(&file, format!("{}{}", assistant_line("ready"), assistant_line("visible"))).unwrap();
@@ -1608,10 +2200,22 @@ fn a_watched_line_is_pushed_once_and_again_after_the_machine_reconnects() {
     let creds = Credentials::load(&dir).unwrap();
     let mut node = Node::start(&dir, creds);
     client.wait_machines(&[("watch-node", true)]);
-    assert_eq!(node.machine.restore_tabs(), vec!["tab-1".to_string()]);
+    let restored = node.machine.restore_tabs();
+    assert_eq!(restored.len(), 1, "the saved session did not reopen");
+    assert_ne!(restored[0], tab, "a new process reused {tab}");
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::write(&file, format!("{}{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("quiet"), assistant_line("stale"))).unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    client.pump();
+    assert!(thread_texts(&client).iter().all(|text| text != "stale"), "the watch from the previous process named the new tab");
+    assert_eq!(client.call(&machine, json!({ "cmd": "watch_threads", "tabs": [&restored[0]] })), Ok(Value::Null));
     std::thread::sleep(Duration::from_millis(300));
     let started = Instant::now();
-    std::fs::write(&file, format!("{}{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("quiet"), assistant_line("again"))).unwrap();
+    std::fs::write(
+        &file,
+        format!("{}{}{}{}{}", assistant_line("ready"), assistant_line("visible"), assistant_line("quiet"), assistant_line("stale"), assistant_line("again")),
+    )
+    .unwrap();
     client.wait("the line after the machine reconnects", |frame| frame["event"]["items"][0]["text"] == "again");
     assert!(started.elapsed() < Duration::from_millis(800), "after reconnect the line took {:?}, the poll is 1200 ms", started.elapsed());
     std::thread::sleep(Duration::from_millis(200));

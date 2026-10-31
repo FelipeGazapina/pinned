@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
-/// A tab's id, unique within its machine, such as `tab-3`.
+/// A tab's id. It names one tab of one process: `tab-<boot>-<n>`, where `boot` changes when the process starts and `n` is the opening order.
 pub type TabId = String;
 /// The id the hub gives a machine, a uuid.
 pub type MachineId = String;
@@ -712,6 +712,8 @@ pub enum HubCall {
     SyncPush { project: String, files: Vec<sync::File> },
     /// From a machine: `Vec<sync::File>`.
     SyncPull { project: String, paths: Vec<String> },
+    /// From a machine: `null`. Sets the executable bit when the hub still stores each sha. Sends no bytes.
+    SyncMarkExecutable { project: String, repairs: Vec<sync::ModeRepair> },
     /// The connector as stored.
     SaveConnector { connector: Connector },
     DeleteConnector { id: String },
@@ -839,7 +841,12 @@ pub enum ToClient {
     Hello { account: AccountView, machines: Vec<MachineView>, tabs: BTreeMap<MachineId, Vec<TabView>> },
     Reply(Reply),
     /// Every machine of the account, after one came online, went offline or changed.
-    Machines { machines: Vec<MachineView> },
+    /// `tabs` lists the online machines' tabs, so a client can drop ids from a process that exited. An older hub leaves it out.
+    Machines {
+        machines: Vec<MachineView>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tabs: Option<BTreeMap<MachineId, Vec<TabView>>>,
+    },
     Event { machine: MachineId, event: MachineEvent },
     /// The account's connectors, after any change or check.
     Settings { settings: Settings },
@@ -1177,6 +1184,18 @@ mod tests {
             ToClient::Settings { settings: Settings { linear: None, slack: None, github: None, vercel: None, upstash: None, connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![] } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
+        let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();
+        assert!(matches!(old, ToClient::Machines { tabs: None, .. }));
+        round_trip(
+            ToClient::Machines { machines: vec![machine.clone()], tabs: Some(BTreeMap::from([("m1".into(), vec![])])) },
+            json!({
+                "type": "machines",
+                "machines": [{ "id": "m1", "name": "mac-mini", "os": "macos", "online": true, "last_seen": 1792400000 }],
+                "tabs": { "m1": [] },
+            }),
+        );
+        let bare = serde_json::to_value(ToClient::Machines { machines: vec![], tabs: None }).unwrap();
+        assert!(bare.get("tabs").is_none());
     }
 
     #[test]

@@ -55,7 +55,7 @@ class Hub {
         break;
       }
       case "machines":
-        this.on.machines?.(frame.machines);
+        this.on.machines?.(frame.machines, frame.tabs);
         break;
       case "event":
         if (frame.event.kind === "output") {

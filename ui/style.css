@@ -99,6 +99,9 @@ body[data-tabs="left"] .tab .resize, body[data-tabs="right"] .tab .resize { disp
 #projects[data-bypass="true"] button.bypass { color: var(--bypass); }
 #projects span { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #projects .path { color: var(--muted); font-size: 11px; }
+#projects button .row { display: flex; align-items: center; gap: 8px; min-width: 0; width: 100%; overflow: visible; }
+#projects button .row .name { flex: 1; min-width: 0; }
+#projects .where { flex: none; max-width: none; overflow: visible; color: var(--muted); }
 
 #workspace[data-drop]::after { content: ""; position: absolute; pointer-events: none;
   background: var(--working); opacity: 0.35; border-radius: 4px; }
