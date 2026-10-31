@@ -573,7 +573,6 @@ fn mirror(plugin: &crate::commands::EnabledPlugin, dest: &Path) -> Result<(), St
     if is_symlink(dest) {
         return Ok(());
     }
-    heal_install(&plugin.path)?;
     copy_tree(&plugin.path, dest, &plugin.id, Path::new(""))?;
     let marker = dest.join(".pinned-plugin.json");
     let body = serde_json::to_vec(&serde_json::json!({ "version": plugin.version, "gitCommitSha": plugin.git_commit_sha })).unwrap();
@@ -607,6 +606,8 @@ fn copy_tree(src: &Path, dest: &Path, id: &str, rel: &Path) -> Result<(), String
         } else if meta.is_file() {
             let Some(hub_path) = hub_join(&format!("plugins/{id}"), &rel) else { continue };
             if accepts(PLUGINS_KEY, &hub_path) {
+                heal_owner_execute(&src_path)?;
+                let Ok(meta) = std::fs::symlink_metadata(&src_path) else { continue };
                 copy_newer(&src_path, &dest.join(&rel), &meta)?;
             }
         }
@@ -849,7 +850,7 @@ fn heal_owner_execute(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let Some(mode) = std::fs::metadata(path).ok().map(|meta| meta.permissions().mode()) else { return Ok(()) };
+        let Some(mode) = std::fs::symlink_metadata(path).ok().filter(|meta| meta.is_file()).map(|meta| meta.permissions().mode()) else { return Ok(()) };
         if mode & 0o111 != 0 && mode & 0o100 == 0 {
             set_owner_execute(path)?;
         }
@@ -858,37 +859,6 @@ fn heal_owner_execute(path: &Path) -> Result<(), String> {
     #[cfg(not(unix))]
     {
         let _ = path;
-        Ok(())
-    }
-}
-
-fn heal_install(dir: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        fn rec(dir: &Path) -> Result<(), String> {
-            if is_symlink(dir) {
-                return Ok(());
-            }
-            let Ok(entries) = std::fs::read_dir(dir) else { return Ok(()) };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if is_symlink(&path) {
-                    continue;
-                }
-                let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
-                if meta.is_dir() {
-                    rec(&path)?;
-                } else if meta.is_file() {
-                    heal_owner_execute(&path)?;
-                }
-            }
-            Ok(())
-        }
-        return rec(dir);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
         Ok(())
     }
 }
