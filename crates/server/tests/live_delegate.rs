@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 #[test]
 #[ignore]
@@ -32,6 +33,68 @@ fn live_cursor_and_claude_through_pinned_mcp() {
             "{account}/{model} returned {status}"
         );
     }
+    machine.quit();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore]
+fn live_claude_task_ends_on_its_reply_and_its_background_shell_stops() {
+    let exe = server_bin();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = std::env::temp_dir().join(format!("pinned-live-background-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let launch = Launch::prepare(&exe).expect("prepare");
+    let machine = Machine::new(launch, Some(dir.clone()), Some(root), |_| {});
+    machine.listen(|_| Err("not a connector callback".into())).unwrap();
+    let sock = machine.launch().sock.clone();
+    let tab = machine.open_tab(Some(dir.display().to_string()), false).unwrap();
+    let marker = format!("pinned_live_tick_{}", std::process::id());
+    let ran = dir.join("shell-ran");
+    let task = format!(
+        "Use the Bash tool with run_in_background set to true to run exactly: sh -c 'touch {}; while true; do echo {marker}; sleep 1; done'. Do not wait for it, do not stop it, and do not read its output. Then reply with exactly the word PINEAPPLE.",
+        ran.display()
+    );
+    let started = mcp(
+        &exe,
+        &sock,
+        &tab,
+        json!({
+            "name": "delegate_task",
+            "arguments": { "task": task, "target": { "providerInstanceId": "claude", "model": "claude-haiku-5-5" }, "mode": "async" }
+        }),
+    );
+    let id = started["taskId"].as_str().unwrap_or("").to_owned();
+    assert!(!id.is_empty(), "delegate_task returned {started}");
+    let begun = Instant::now();
+    let status = loop {
+        let status = mcp(&exe, &sock, &tab, json!({ "name": "task_status", "arguments": { "taskId": id } }));
+        if status["workState"] != "working" {
+            break status;
+        }
+        assert!(begun.elapsed() < Duration::from_secs(180), "the task never finished: {status}");
+        std::thread::sleep(Duration::from_secs(2));
+    };
+    eprintln!("LIVE claude background shell: {status} after {:?}", begun.elapsed());
+    assert_eq!(status["workState"], "result_available", "{status}");
+    assert!(status["summary"].as_str().unwrap_or("").contains("PINEAPPLE"), "{status}");
+    assert!(ran.is_file(), "the child never started its background shell");
+    std::thread::sleep(Duration::from_secs(1));
+    let left = pinned_core::process::command("pgrep").args(["-fl", &marker]).output().unwrap();
+    let left = String::from_utf8_lossy(&left.stdout).into_owned();
+    assert!(left.trim().is_empty(), "the background shell kept running: {left}");
+    let conversation = status["conversationId"].as_str().unwrap_or("");
+    let home = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| Path::new(&std::env::var("HOME").unwrap()).join(".claude"));
+    let transcript = std::fs::read_dir(home.join("projects"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|project| project.path().join(format!("{conversation}.jsonl")))
+        .find(|path| path.is_file())
+        .expect("the stopped child left no transcript");
+    let text = std::fs::read_to_string(&transcript).unwrap();
+    assert!(text.contains("PINEAPPLE"), "the transcript lost the reply: {}", transcript.display());
+    eprintln!("LIVE transcript kept the reply: {}", transcript.display());
     machine.quit();
     let _ = std::fs::remove_dir_all(&dir);
 }

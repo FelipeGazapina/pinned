@@ -113,9 +113,41 @@ impl Delegates {
         self.persist();
     }
 
-    pub fn set_budget(&self, _id: &str, _ms: u64) {}
+    pub fn set_budget(&self, id: &str, ms: u64) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.budget_ms = ms;
+        }
+    }
 
-    pub fn check_budgets(&self, _now: u64, _path: Option<&str>) {}
+    pub fn enforce_budgets(&self, now: u64, path: Option<&str>) {
+        let (late, over) = {
+            let mut tasks = self.tasks.lock().unwrap();
+            let mut late = vec![];
+            let mut over = vec![];
+            for task in tasks.iter_mut().filter(|task| !task.state.terminal()) {
+                let ran = now.saturating_sub(task.started);
+                let limit = task.budget_ms.saturating_mul(HARD_LIMIT_BUDGETS);
+                if ran >= limit {
+                    over.push((task.id.clone(), format!("pinned stopped it after {}, past its limit of {} ({HARD_LIMIT_BUDGETS} times its budget)", span(ran), span(limit))));
+                } else if ran >= task.budget_ms && !task.told_over_budget {
+                    task.told_over_budget = true;
+                    if let Parent::Tab(tab) = &task.parent {
+                        late.push((tab.clone(), task.parent_session.clone(), late_line(task, ran)));
+                    }
+                }
+            }
+            (late, over)
+        };
+        for (tab, session, line) in late {
+            self.queue_report(&tab, session, line);
+        }
+        for (id, reason) in &over {
+            self.stop_tree(id, reason, path);
+        }
+        if !over.is_empty() {
+            self.persist();
+        }
+    }
 
     pub fn note_parent(&self, id: &str, session: Option<String>) {
         let Some(session) = session.filter(|session| !session.is_empty()) else { return };
@@ -139,7 +171,7 @@ impl Delegates {
             }
         };
         if kill_now {
-            kill(pid);
+            kill_tree(pid);
         }
     }
 
@@ -160,7 +192,7 @@ impl Delegates {
     pub fn kill_remembered(&self) {
         let pids: Vec<u32> = self.pids.lock().unwrap().drain().map(|(_, pid)| pid).collect();
         for pid in pids {
-            kill(pid);
+            kill_tree(pid);
         }
     }
 
@@ -185,10 +217,10 @@ impl Delegates {
 
     /// Applies one child event. Returns the parent tab when a task just became deliverable.
     pub fn apply(&self, id: &str, event: ChildEvent, path: Option<&str>) -> Option<String> {
-        let (ready, dirs) = {
+        let (ready, dirs, stop) = {
             let mut tasks = self.tasks.lock().unwrap();
             let index = tasks.iter().position(|task| task.id == id)?;
-            let held = match event {
+            let (held, reaped) = match event {
                 ChildEvent::Line(line) => {
                     let provider = tasks[index].provider;
                     let events = (driver(provider).parse)(&line);
@@ -198,14 +230,11 @@ impl Delegates {
                             held = Some(next);
                         }
                     }
-                    held
+                    (held, false)
                 }
-                ChildEvent::Exited { code, stderr } => {
-                    let id = tasks[index].id.clone();
-                    self.forget_pid(&id);
-                    tasks[index].exited(code, stderr)
-                }
+                ChildEvent::Exited { code, stderr } => (tasks[index].exited(code, stderr), true),
             };
+            let stop = if reaped || held.is_some() { self.pids.lock().unwrap().remove(id) } else { None };
             if let Some(held) = held {
                 settle(&mut tasks, index, held);
             }
@@ -217,8 +246,14 @@ impl Delegates {
             }
             let id = tasks[index].id.clone();
             let ready = chain_ready(&tasks, &id).then(|| root_tab(&tasks, tasks[index].parent.clone())).flatten();
-            (ready, dirs)
+            (ready, dirs, stop.map(|pid| (pid, reaped)))
         };
+        match stop {
+            // A reaped pid can already name another process. Its group cannot, while a member lives.
+            Some((pid, true)) => kill(pid),
+            Some((pid, false)) => kill_tree(pid),
+            None => {}
+        }
         for dir in dirs {
             crate::branches::drop_worktree(&dir, path);
         }
@@ -275,18 +310,10 @@ impl Delegates {
 
     /// Cancels every working descendant, then `id`. Used when the tab closes or pinned quits.
     pub fn cancel_tree(&self, id: &str, reason: &str, path: Option<&str>) -> Result<Value, String> {
-        let order = {
-            let tasks = self.tasks.lock().unwrap();
-            if !tasks.iter().any(|task| task.id == id) {
-                return Err(format!("no task {id}"));
-            }
-            let mut order = vec![];
-            postorder(&tasks, id, &mut order);
-            order
-        };
-        for id in &order {
-            self.stop_one(id, reason, path);
+        if !self.tasks.lock().unwrap().iter().any(|task| task.id == id) {
+            return Err(format!("no task {id}"));
         }
+        self.stop_tree(id, reason, path);
         let body = {
             let mut tasks = self.tasks.lock().unwrap();
             let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| format!("no task {id}"))?;
@@ -305,15 +332,7 @@ impl Delegates {
             tasks.iter().filter(|task| !task.state.terminal() && matches!(task.parent, Parent::Tab(_))).map(|task| task.id.clone()).collect()
         };
         for id in roots {
-            let order = {
-                let tasks = self.tasks.lock().unwrap();
-                let mut order = vec![];
-                postorder(&tasks, &id, &mut order);
-                order
-            };
-            for id in order {
-                self.stop_one(&id, "stopped by restart", path);
-            }
+            self.stop_tree(&id, "stopped by restart", path);
         }
         for id in self.running() {
             self.stop_one(&id, "stopped by restart", path);
@@ -335,6 +354,18 @@ impl Delegates {
         Ok(status_json(task))
     }
 
+    fn stop_tree(&self, id: &str, reason: &str, path: Option<&str>) {
+        let order = {
+            let tasks = self.tasks.lock().unwrap();
+            let mut order = vec![];
+            postorder(&tasks, id, &mut order);
+            order
+        };
+        for id in &order {
+            self.stop_one(id, reason, path);
+        }
+    }
+
     fn stop_one(&self, id: &str, reason: &str, path: Option<&str>) {
         let (pid, dir) = {
             let mut tasks = self.tasks.lock().unwrap();
@@ -353,7 +384,7 @@ impl Delegates {
             crate::branches::drop_worktree(&dir, path);
         }
         if let Some(pid) = pid {
-            kill(pid);
+            kill_tree(pid);
         }
     }
 
@@ -730,7 +761,7 @@ impl Task {
             }
             StreamEvent::Final { text, error } => Some(HeldExit {
                 failed: error.is_some(),
-                summary: Some(text),
+                summary: Some(text).filter(|text| !text.is_empty()).or_else(|| self.assistant.clone()),
                 error,
             }),
         }
@@ -792,18 +823,72 @@ fn status_json(task: &Task) -> Value {
         "error": task.error,
         "recentSteps": task.steps,
         "elapsedSecs": end.saturating_sub(task.started) / 1000,
+        "budgetSecs": task.budget_ms / 1000,
         "conversationId": task.conversation,
         "cwd": task.cwd.display().to_string(),
     });
-    body["next"] = if task.state.terminal() { json!(result_next(task)) } else { json!(working_next(task)) };
+    body["next"] = if task.state.terminal() {
+        json!(result_next(task))
+    } else if task.told_over_budget {
+        json!(format!(
+            "it is past its budget of {}, and pinned cancels it after {}; if recentSteps show it is done or stuck, call task_cancel with taskId \"{}\"; otherwise {}",
+            span(task.budget_ms),
+            span(task.budget_ms.saturating_mul(HARD_LIMIT_BUDGETS)),
+            task.id,
+            working_next(task)
+        ))
+    } else {
+        json!(working_next(task))
+    };
     body
 }
 
-fn notice_line(task: &Task) -> String {
-    let who = match &task.model {
+fn who(task: &Task) -> String {
+    match &task.model {
         Some(model) => format!("{} · {model}", task.provider.spec().name),
         None => task.provider.spec().name.to_owned(),
+    }
+}
+
+fn late_line(task: &Task, ran: u64) -> String {
+    let steps: Vec<String> = task.steps.iter().filter_map(step_line).collect();
+    let recent = steps[steps.len().saturating_sub(3)..].join(" | ");
+    format!(
+        "[pinned] Delegated task {} \"{}\" ({}) is still working after {}, past its budget of {}. Last steps: {}. pinned cancels it after {}. Call task_status with taskId \"{}\" to read it, or task_cancel to stop it.",
+        task.id,
+        task.title,
+        who(task),
+        span(ran),
+        span(task.budget_ms),
+        if recent.is_empty() { "none" } else { &recent },
+        span(task.budget_ms.saturating_mul(HARD_LIMIT_BUDGETS)),
+        task.id
+    )
+}
+
+fn step_line(item: &Item) -> Option<String> {
+    let text = match item {
+        Item::Text { text, .. } | Item::Thinking { text, .. } | Item::Error { text, .. } | Item::Result { text, .. } => text,
+        Item::Tool { name, summary, .. } if summary.is_empty() => name,
+        Item::Tool { summary, .. } => summary,
+        _ => return None,
     };
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!line.is_empty()).then(|| thread::clip(&line, 120))
+}
+
+fn span(ms: u64) -> String {
+    let minutes = ms / 60_000;
+    match (minutes / 60, minutes % 60) {
+        (0, 0) => format!("{}s", ms / 1000),
+        (0, minutes) => format!("{minutes} min"),
+        (hours, 0) => format!("{hours} h"),
+        (hours, minutes) => format!("{hours} h {minutes} min"),
+    }
+}
+
+fn notice_line(task: &Task) -> String {
+    let who = who(task);
     let outcome = match task.state {
         WorkState::Failed => format!("failed: {}", task.error.as_deref().unwrap_or("the agent failed")),
         WorkState::Cancelled => format!("cancelled: {}", task.error.as_deref().unwrap_or("cancelled")),
@@ -915,6 +1000,8 @@ fn fresh(new: NewTask) -> Task {
         role: new.role,
         held: None,
         parent_session: None,
+        budget_ms: DEFAULT_BUDGET_MS,
+        told_over_budget: false,
     }
 }
 
@@ -1027,6 +1114,8 @@ impl SavedTask {
             role: self.role,
             held: None,
             parent_session: self.parent_session,
+            budget_ms: DEFAULT_BUDGET_MS,
+            told_over_budget: false,
         }
     }
 }
@@ -1169,7 +1258,7 @@ fn isolated_cwd(task: &Task) -> Option<PathBuf> {
     (task.isolated && task.conversation.is_none() && task.state.terminal()).then(|| task.cwd.clone())
 }
 
-fn unix_millis() -> u64 {
+pub fn unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))

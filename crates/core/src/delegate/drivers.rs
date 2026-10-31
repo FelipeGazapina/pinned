@@ -415,6 +415,10 @@ fn parse_codex(line: &str) -> Vec<StreamEvent> {
             .unwrap_or_default(),
         Some("item.started") => codex_item(&value["item"], false),
         Some("item.completed") => codex_item(&value["item"], true),
+        Some("turn.completed") => vec![StreamEvent::Final {
+            text: String::new(),
+            error: None,
+        }],
         Some("turn.failed") => {
             let message = value["error"]["message"]
                 .as_str()
@@ -557,7 +561,9 @@ pub(crate) fn replay(provider: Provider, lines: &str) -> Outcome {
                     push_step(&mut outcome.steps, item);
                 }
                 StreamEvent::Final { text, error } => {
-                    outcome.text = Some(text);
+                    if !text.is_empty() {
+                        outcome.text = Some(text);
+                    }
                     outcome.error = error;
                     outcome.done = true;
                 }
@@ -712,6 +718,55 @@ pub fn kill(pid: u32) {
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .status();
     }
+}
+
+/// Claude Code and the Cursor CLI start a background shell in a session of its own, so the agent's
+/// process group alone does not reach it.
+pub fn kill_tree(pid: u32) {
+    #[cfg(unix)]
+    let targets = signal_targets_under(pid);
+    kill(pid);
+    #[cfg(unix)]
+    for target in targets {
+        unsafe {
+            libc::kill(target, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn signal_targets_under(root: u32) -> Vec<i32> {
+    let Ok(output) = crate::process::command("ps")
+        .args(["-A", "-o", "pid=,ppid=,pgid="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return vec![];
+    };
+    let rows: Vec<[u32; 3]> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace().map(|field| field.parse().ok());
+            Some([fields.next()??, fields.next()??, fields.next()??])
+        })
+        .collect();
+    let mut below = vec![];
+    let mut parents = vec![root];
+    let mut targets = vec![];
+    while let Some(parent) = parents.pop() {
+        for &[pid, ppid, pgid] in &rows {
+            if ppid == parent && pid != root && !below.contains(&pid) {
+                below.push(pid);
+                parents.push(pid);
+                if pid == pgid {
+                    targets.push(-(pid as i32));
+                }
+                targets.push(pid as i32);
+            }
+        }
+    }
+    targets
 }
 
 #[cfg(test)]

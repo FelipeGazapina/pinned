@@ -1923,6 +1923,7 @@ impl Machine {
             Claim::Existing(id) => return self.delegates.started_json(&id).map(|value| value.to_string()),
             Claim::Fresh(task) => *task,
         };
+        self.delegates.set_budget(&task.id, request.budget_ms);
         if let Some(tab) = caller.tab.as_deref() {
             let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
             self.delegates.note_parent(&task.id, session);
@@ -2048,7 +2049,6 @@ impl Machine {
         })?
     }
 
-    /// Starts the once-a-second pass that types a waiting notice once its session is idle.
     fn arm_notices(&self) {
         if self.notice_loop.swap(true, Ordering::Relaxed) {
             return;
@@ -2060,6 +2060,7 @@ impl Machine {
             if machine.quitting.load(Ordering::Relaxed) {
                 return;
             }
+            machine.delegates.enforce_budgets(crate::delegate::unix_millis(), machine.launch.path_env.as_deref());
             let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
             for tab in tabs {
                 machine.maybe_deliver(&tab);
@@ -4175,6 +4176,24 @@ echo '{"type":"result","result":"ok"}'
         wait_for("mapped argv", || std::fs::read(&argv).is_ok_and(|b| String::from_utf8_lossy(&b).contains("composer-2.5-high")));
         let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
         assert_eq!(lines, vec!["-p", "--output-format", "stream-json", "--trust", "--model", "composer-2.5-high", "look"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_delegated_task_keeps_the_budget_it_asked_for() {
+        let root = temp("budget");
+        let cursor = root.join("cursor-agent");
+        let body = "#!/bin/sh\nif [ \"$1\" = status ]; then echo 'Logged in as ana@acme.dev'; exit 0; fi\necho '{\"type\":\"result\",\"result\":\"ok\"}'\n";
+        std::fs::write(&cursor, body).unwrap();
+        std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let request = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "budgetMs": 90000 })).unwrap();
+        let started: Value = serde_json::from_str(&m.start_delegate(Some(tab.clone()), None, None, request).unwrap()).unwrap();
+        let id = started["taskId"].as_str().unwrap().to_owned();
+        let status: Value = serde_json::from_str(&m.task_status(Some(tab), None, &id).unwrap()).unwrap();
+        assert_eq!(status["budgetSecs"], 90, "{status}");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -18,6 +18,7 @@ const STEP_KEEP: usize = 8;
 const STEP_CHARS: usize = 400;
 pub const DEFAULT_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 pub const DEFAULT_BUDGET_MS: u64 = 60 * 60 * 1000;
+const HARD_LIMIT_BUDGETS: u64 = 4;
 const MODEL_CACHE: Duration = Duration::from_secs(10 * 60);
 const MODEL_MISS: Duration = Duration::from_secs(15);
 const CATALOG_WAIT: Duration = Duration::from_secs(2);
@@ -281,6 +282,8 @@ pub struct Task {
     pub role: Option<String>,
     pub held: Option<HeldExit>,
     pub parent_session: Option<String>,
+    pub budget_ms: u64,
+    pub told_over_budget: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -793,10 +796,7 @@ grok-4.7-high - Grok 4.7  High
         let codex = replay(Provider::Codex, &fixture("codex.jsonl"));
         assert_eq!(codex.conversation.as_deref(), Some("thread_01"));
         assert_eq!(codex.text.as_deref(), Some("Ship it"));
-        assert!(
-            !codex.done,
-            "codex has no result line; the last agent message is the text"
-        );
+        assert!(codex.done, "turn.completed ends the codex run");
         assert!(codex.steps.contains(&Item::Tool {
             id: "item_2".into(),
             at: String::new(),
@@ -848,6 +848,7 @@ grok-4.7-high - Grok 4.7  High
         path
     }
 
+    #[cfg(unix)]
     fn new_on(delegates: &Delegates, provider: Provider) -> Task {
         delegates.begin(NewTask {
             parent: Parent::Tab("tab-1".into()),
@@ -866,12 +867,11 @@ grok-4.7-high - Grok 4.7  High
         })
     }
 
+    #[cfg(unix)]
     fn parent() -> Caller {
         Caller { tab: Some("tab-1".into()), task: None }
     }
 
-    /// A process a scripted worker left behind, read from the pid file it wrote. Dropping it kills
-    /// the process and its group, so a failing run does not leave it behind.
     #[cfg(unix)]
     struct Leftover(PathBuf);
 
@@ -913,15 +913,13 @@ grok-4.7-high - Grok 4.7  High
         true
     }
 
-    /// Prints `lines`, then starts a loop that prints a line every second in a session of its own and
-    /// waits on it. Claude Code and the Cursor CLI run a background shell the same way.
     #[cfg(unix)]
-    fn worker(lines: &[&str], pidfile: &Path) -> String {
+    fn detached_loop_worker(lines: &[&str], pidfile: &Path) -> String {
         let replies: Vec<String> = lines.iter().map(|line| format!("echo '{line}'")).collect();
+        let pidfile = pidfile.display();
         format!(
-            "{}\nperl -e 'use POSIX (); POSIX::setsid(); exec @ARGV' sh -c 'echo $$ > \"$0\"; while :; do echo tick; sleep 1; done' '{}' &\nwait",
+            "perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV' sh -c 'echo $$ > \"$0\"; while :; do echo tick; sleep 1; done' '{pidfile}' &\nwhile [ ! -s '{pidfile}' ]; do sleep 0.05; done\n{}\nwait",
             replies.join("\n"),
-            pidfile.display()
         )
     }
 
@@ -951,7 +949,9 @@ grok-4.7-high - Grok 4.7  High
         dir
     }
 
+    #[cfg(unix)]
     const INIT: &str = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+    #[cfg(unix)]
     const REPLY: &str = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"PR opened"}]}}"#;
 
     #[test]
@@ -968,7 +968,7 @@ grok-4.7-high - Grok 4.7  High
         for (provider, lines) in [(Provider::Claude, [INIT, REPLY, result]), (Provider::Cursor, [INIT, REPLY, result]), (Provider::Codex, codex)] {
             let name = provider.spec().name;
             let leftover = Leftover(dir.join(format!("{name}.pid")));
-            let bin = script(&dir, name, &worker(&lines, &leftover.0));
+            let bin = script(&dir, name, &detached_loop_worker(&lines, &leftover.0));
             let delegates = Arc::new(Delegates::default());
             let task = new_on(&delegates, provider);
             let (agent, told) = run(&delegates, &task, &bin, &dir);
@@ -992,13 +992,12 @@ grok-4.7-high - Grok 4.7  High
         assert!(failures.is_empty(), "{failures:#?}");
     }
 
-    /// The Cursor CLI holds back its result line while a background shell it started is alive.
     #[test]
     #[cfg(unix)]
     fn a_runaway_worker_is_reported_past_its_budget_then_stopped_at_its_hard_limit() {
         let dir = scratch("runaway");
         let leftover = Leftover(dir.join("loop.pid"));
-        let bin = script(&dir, "cursor-agent", &worker(&[INIT, REPLY], &leftover.0));
+        let bin = script(&dir, "cursor-agent", &detached_loop_worker(&[INIT, REPLY], &leftover.0));
         let delegates = Arc::new(Delegates::default());
         let task = new_on(&delegates, Provider::Cursor);
         delegates.set_budget(&task.id, 60_000);
@@ -1012,18 +1011,18 @@ grok-4.7-high - Grok 4.7  High
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
         let notice = |delegates: &Delegates| delegates.claim_notice("tab-1").map(|(text, _)| text);
 
-        delegates.check_budgets(now + 30_000, None);
+        delegates.enforce_budgets(now + 30_000, None);
         assert_eq!(notice(&delegates), None, "a task inside its budget was reported");
-        delegates.check_budgets(now + 60_000, None);
+        delegates.enforce_budgets(now + 60_000, None);
         let late = notice(&delegates).unwrap_or_default();
         assert!(late.contains(&task.id) && late.contains("still working after 1 min") && late.contains("PR opened"), "{late}");
         let status = delegates.status(&parent(), &task.id).unwrap();
         assert_eq!(status["workState"], "working");
         assert!(status["next"].as_str().unwrap_or("").contains("past its budget of 1 min"), "{status}");
-        delegates.check_budgets(now + 120_000, None);
+        delegates.enforce_budgets(now + 120_000, None);
         assert_eq!(notice(&delegates), None, "the budget notice was sent twice");
 
-        delegates.check_budgets(now + 240_000, None);
+        delegates.enforce_budgets(now + 240_000, None);
         let finished = notice(&delegates).unwrap_or_default();
         assert!(finished.contains("finished: cancelled"), "{finished}");
         let status = delegates.status(&parent(), &task.id).unwrap();
@@ -1034,7 +1033,37 @@ grok-4.7-high - Grok 4.7  High
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The Cursor CLI leaves a worker server in its process group after it exits.
+    #[test]
+    #[cfg(unix)]
+    fn a_late_pid_and_quit_also_stop_background_shells() {
+        use std::os::unix::process::CommandExt;
+        let dir = scratch("late");
+        let delegates = Delegates::default();
+        let mut failures = vec![];
+        for late in [true, false] {
+            let leftover = Leftover(dir.join(format!("{late}.pid")));
+            let bin = script(&dir, &format!("agent-{late}"), &detached_loop_worker(&[INIT], &leftover.0));
+            let task = new_on(&delegates, Provider::Claude);
+            let mut cmd = crate::process::command(&bin);
+            cmd.process_group(0).stdout(Stdio::null());
+            let mut agent = cmd.spawn().unwrap();
+            let background = leftover.pid();
+            if late {
+                delegates.cancel(&parent(), &task.id, "stop", None).unwrap();
+                delegates.remember_pid(&task.id, agent.id());
+            } else {
+                delegates.remember_pid(&task.id, agent.id());
+                delegates.kill_remembered();
+            }
+            if !stopped(background) {
+                failures.push(format!("late {late}: the background loop {background} kept running"));
+            }
+            let _ = agent.wait();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     #[test]
     #[cfg(unix)]
     fn an_agent_that_exits_leaves_nothing_in_its_process_group() {
