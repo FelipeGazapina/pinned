@@ -771,7 +771,7 @@ pub fn reconcile(previous: Option<UpdateStatus>, version: &str, snapshot: Option
         return snapshot;
     }
     match previous {
-        Some(UpdateStatus::Updating { to }) | Some(UpdateStatus::Restarting { to }) if !to.is_empty() => {
+        Some(UpdateStatus::Updating { to }) | Some(UpdateStatus::Restarting { to }) => {
             if crate::self_update::same_release(version, &to) {
                 Some(UpdateStatus::UpToDate { version: version.to_owned() })
             } else {

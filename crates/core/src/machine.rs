@@ -1925,6 +1925,7 @@ impl Machine {
 
     /// Ends every session as the machine shuts down, keeping them saved for the next launch.
     pub fn quit(&self) {
+        self.save_sessions();
         self.quitting.store(true, Ordering::SeqCst);
         self.stamp_parent_sessions();
         self.delegates.stop_for_restart(self.launch.path_env.as_deref());

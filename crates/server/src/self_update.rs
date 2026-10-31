@@ -8,7 +8,8 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::io::Write;
+use std::process::Command;
 use std::time::Duration;
 
 pub const RELEASE_BASE: &str = "https://github.com/FelipeGazapina/pinned/releases/latest/download";
@@ -80,15 +81,8 @@ impl NodeUpdate {
         });
         let UpdateStatus::Restarting { to } = status else { return };
         let Some(plan) = plan else { return };
-        match watch_new_binary(&plan, &dest, CONNECT_WAIT) {
-            Ok(()) => {
-                if let Err(reason) = hand_over(machine, &plan, &dest, &to) {
-                    machine.report(UpdateStatus::Failed { to, reason });
-                }
-            }
-            Err(reason) => {
-                machine.report(UpdateStatus::Failed { to, reason });
-            }
+        if let Err(reason) = hand_over(machine, &plan, &dest, &to) {
+            machine.report(UpdateStatus::Failed { to, reason });
         }
     }
 }
@@ -149,13 +143,10 @@ impl NodeUpdate {
             Ok(running) => running,
             Err(reason) => return failed(report, &version, reason),
         };
-        if published == running {
+        if published <= running {
             let status = UpdateStatus::UpToDate { version: current.to_owned() };
             report(status.clone());
             return (status, None);
-        }
-        if published < running {
-            return failed(report, &version, format!("the published release {version} is older than {current}"));
         }
         report(UpdateStatus::Updating { to: version.clone() });
         let name = format!("pinned-server-{triple}");
@@ -204,7 +195,8 @@ pub(crate) fn stage(dest: &Path, bytes: &[u8]) -> Result<(), String> {
         }
         restore(dest)?;
     }
-    std::fs::copy(dest, &bak).map_err(|error| format!("could not back up {}: {error}", dest.display()))?;
+    copy_durable(dest, &bak)?;
+    write_durable(&marker, b"0").map_err(|error| format!("could not mark {} unproven: {error}", dest.display()))?;
     let staged = (|| {
         std::fs::write(&tmp, bytes).map_err(|error| format!("could not write {}: {error}", tmp.display()))?;
         std::fs::set_permissions(&tmp, Permissions::from_mode(0o755)).map_err(|error| format!("could not mark {} executable: {error}", tmp.display()))?;
@@ -212,11 +204,8 @@ pub(crate) fn stage(dest: &Path, bytes: &[u8]) -> Result<(), String> {
     })();
     if let Err(error) = staged {
         let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&marker);
         return Err(error);
-    }
-    if let Err(error) = std::fs::write(&marker, b"") {
-        let _ = restore(dest);
-        return Err(format!("could not mark {} unproven: {error}", dest.display()));
     }
     Ok(())
 }
@@ -311,83 +300,6 @@ fn stage_planned(dest: &Path, bytes: &[u8], plan: Result<Plan, String>) -> Resul
     Ok(plan)
 }
 
-fn ready_path(dest: &Path) -> PathBuf {
-    let name = dest.file_name().unwrap_or_default().to_string_lossy();
-    dest.with_file_name(format!("{name}.ready"))
-}
-
-pub(crate) fn watch_new_binary(plan: &Plan, dest: &Path, wait: Duration) -> Result<(), String> {
-    let ready = ready_path(dest);
-    let _ = std::fs::remove_file(&ready);
-    // Own process group, so a failed probe is killed with anything it started.
-    let mut child = Command::new(&plan.program)
-        .args(&plan.args)
-        .current_dir(&plan.cwd)
-        .env(pinned_core::link::POST_UPDATE_ENV, "1")
-        .env(pinned_core::link::UPDATE_READY_ENV, &ready)
-        .process_group(0)
-        .spawn()
-        .map_err(|error| {
-            let start = format!("could not start {}: {error}", plan.program.display());
-            match restore(dest) {
-                Ok(()) => start,
-                Err(restore_error) => format!("{start}; {restore_error}"),
-            }
-        })?;
-    let started = std::time::Instant::now();
-    loop {
-        if ready.is_file() {
-            reap(&mut child);
-            return Ok(());
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                kill_group(child.id());
-                if ready.is_file() {
-                    return Ok(());
-                }
-                restore(dest)?;
-                return Err(format!("the new binary exited before it connected ({status})"));
-            }
-            Ok(None) if started.elapsed() >= wait => {
-                // A ready file written while the probe is being killed is not acceptance.
-                if ready.is_file() {
-                    reap(&mut child);
-                    return Ok(());
-                }
-                kill_group(child.id());
-                let _ = child.wait();
-                restore(dest)?;
-                return Err(format!("the new binary did not connect within {}s", wait.as_secs()));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(error) => {
-                kill_group(child.id());
-                restore(dest)?;
-                return Err(format!("could not watch {}: {error}", plan.program.display()));
-            }
-        }
-    }
-}
-
-fn reap(child: &mut Child) {
-    let pid = child.id();
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while std::time::Instant::now() < deadline {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            kill_group(pid);
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    kill_group(pid);
-    let _ = child.wait();
-}
-
-fn kill_group(pid: u32) {
-    let _ = Command::new("kill").args(["-KILL", &format!("-{pid}")]).stderr(Stdio::null()).status();
-}
-
 fn plan_for(dest: &Path) -> Result<Plan, String> {
     Ok(Plan {
         program: dest.to_path_buf(),
@@ -409,16 +321,106 @@ fn restore(dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn copy_durable(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::copy(from, to).map_err(|error| format!("could not back up {}: {error}", from.display()))?;
+    if let Ok(file) = std::fs::File::open(to) {
+        let _ = file.sync_all();
+    }
+    Ok(())
+}
+
+fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!("{name}.writing"));
+    {
+        let mut file = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        if let Ok(parent) = std::fs::File::open(dir) {
+            let _ = parent.sync_all();
+        }
+    }
+    Ok(())
+}
+
+pub fn enter() {
+    let Some(marker) = pinned_core::boot::marker_path() else { return };
+    if !marker.is_file() {
+        return;
+    }
+    let _gate = pinned_core::boot::lock();
+    if !marker.is_file() {
+        return;
+    }
+    if std::env::var_os(pinned_core::boot::PROOF_ENV).is_none() {
+        rollback(&marker);
+    }
+    match record_boot(&marker) {
+        Ok(1) => {
+            drop(_gate);
+            arm_deadline(marker);
+        }
+        Ok(_) => rollback(&marker),
+        Err(error) => {
+            eprintln!("pinned-server: {error}");
+            rollback(&marker);
+        }
+    }
+}
+
+fn record_boot(marker: &Path) -> Result<u32, String> {
+    let body = std::fs::read(marker).map_err(|error| format!("could not read {}: {error}", marker.display()))?;
+    let current: u32 = String::from_utf8_lossy(&body).trim().parse().unwrap_or(0);
+    let next = current.saturating_add(1);
+    write_durable(marker, next.to_string().as_bytes()).map_err(|error| format!("could not record the boot of {}: {error}", marker.display()))?;
+    Ok(next)
+}
+
+fn arm_deadline(marker: PathBuf) {
+    let wait = proof_wait();
+    std::thread::spawn(move || {
+        std::thread::sleep(wait);
+        let _gate = pinned_core::boot::lock();
+        if marker.is_file() {
+            rollback(&marker);
+        }
+    });
+}
+
+fn proof_wait() -> Duration {
+    std::env::var(pinned_core::boot::WAIT_ENV).ok().and_then(|text| text.parse::<u64>().ok()).map(Duration::from_secs).unwrap_or(CONNECT_WAIT)
+}
+
+fn binary_of(marker: &Path) -> PathBuf {
+    let name = marker.file_name().unwrap_or_default().to_string_lossy();
+    let bare = name.strip_suffix(".unproven").unwrap_or(&name);
+    marker.with_file_name(bare)
+}
+
+fn rollback(marker: &Path) -> ! {
+    let dest = binary_of(marker);
+    if let Err(error) = restore(&dest) {
+        eprintln!("pinned-server: {error}");
+        std::process::exit(1);
+    }
+    let error = Command::new(&dest)
+        .args(std::env::args_os().skip(1))
+        .env_remove(pinned_core::boot::PROOF_ENV)
+        .env_remove(pinned_core::boot::MARKER_ENV)
+        .env_remove(pinned_core::boot::VERSION_ENV)
+        .env_remove(pinned_core::boot::WAIT_ENV)
+        .exec();
+    eprintln!("pinned-server: could not start the previous binary: {error}");
+    std::process::exit(1);
+}
+
 fn hand_over(machine: &Machine, plan: &Plan, dest: &Path, to: &str) -> Result<(), String> {
-    let _ = std::fs::remove_file(unproven_path(dest));
     machine.report(UpdateStatus::Restarting { to: to.to_owned() });
     machine.quit();
-    let error = Command::new(&plan.program)
-        .args(&plan.args)
-        .current_dir(&plan.cwd)
-        .env_remove(pinned_core::link::POST_UPDATE_ENV)
-        .env_remove(pinned_core::link::UPDATE_READY_ENV)
-        .exec();
+    let error = exec_planned(plan, dest);
     let restored = restore(dest);
     for tab in machine.reopen_sessions() {
         let _ = machine.start_claude(&tab, 120, 32);
@@ -426,6 +428,26 @@ fn hand_over(machine: &Machine, plan: &Plan, dest: &Path, to: &str) -> Result<()
     match restored {
         Ok(()) => Err(format!("could not replace this process: {error}")),
         Err(restore_error) => Err(format!("could not replace this process: {error}; {restore_error}")),
+    }
+}
+
+fn exec_planned(plan: &Plan, dest: &Path) -> std::io::Error {
+    Command::new(&plan.program)
+        .args(&plan.args)
+        .current_dir(&plan.cwd)
+        .env(pinned_core::boot::PROOF_ENV, "1")
+        .env(pinned_core::boot::MARKER_ENV, unproven_path(dest))
+        .env_remove(pinned_core::boot::VERSION_ENV)
+        .exec()
+}
+
+#[cfg(test)]
+pub(crate) fn start_replacement(plan: &Plan, dest: &Path) -> Result<(), String> {
+    let error = exec_planned(plan, dest);
+    let start = format!("could not start {}: {error}", plan.program.display());
+    match restore(dest) {
+        Ok(()) => Err(start),
+        Err(restore_error) => Err(format!("{start}; {restore_error}")),
     }
 }
 
@@ -636,37 +658,6 @@ mod tests {
     }
 
     #[test]
-    fn a_new_binary_that_exits_immediately_puts_the_old_one_back() {
-        let dir = std::env::temp_dir().join(format!("pinned-watch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dest = dir.join("pinned-server");
-        std::fs::write(&dest, b"new-binary").unwrap();
-        std::fs::write(dir.join("pinned-server.bak"), b"old-binary").unwrap();
-        let plan = Plan { program: "/bin/sh".into(), args: vec!["-c".into(), "exit 7".into()], cwd: dir.clone() };
-        let err = watch_new_binary(&plan, &dest, std::time::Duration::from_secs(2)).unwrap_err();
-        assert!(err.contains("exited"), "{err}");
-        assert_eq!(std::fs::read(&dest).unwrap(), b"old-binary");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_new_binary_that_signals_ready_stays_in_place() {
-        let dir = std::env::temp_dir().join(format!("pinned-ready-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let dest = dir.join("pinned-server");
-        std::fs::write(&dest, b"new-binary").unwrap();
-        std::fs::write(dir.join("pinned-server.bak"), b"old-binary").unwrap();
-        let script = format!("touch \"${}\"", pinned_core::link::UPDATE_READY_ENV);
-        let plan = Plan { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], cwd: dir.clone() };
-        watch_new_binary(&plan, &dest, std::time::Duration::from_secs(2)).unwrap();
-        assert_eq!(std::fs::read(&dest).unwrap(), b"new-binary");
-        assert_eq!(std::fs::read(dir.join("pinned-server.bak")).unwrap(), b"old-binary");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn a_download_that_stalls_ends_before_the_body_arrives() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -689,15 +680,6 @@ mod tests {
     fn a_download_stops_when_the_body_passes_the_cap() {
         let err = read_capped(std::io::Cursor::new(vec![1; 32]), "http://release/binary", 8).unwrap_err();
         assert!(err.contains("larger than 8 bytes"), "{err}");
-    }
-
-    fn server_binary() -> PathBuf {
-        let mut path = std::env::current_exe().unwrap();
-        path.pop();
-        path.pop();
-        path.push("pinned-server");
-        assert!(path.is_file(), "missing {}", path.display());
-        path
     }
 
     #[test]
@@ -735,16 +717,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("pinned-server");
-        std::fs::copy(server_binary(), &dest).unwrap();
+        std::fs::write(&dest, b"not-a-binary").unwrap();
         std::fs::write(dir.join("pinned-server.bak"), b"old-binary").unwrap();
         let mut perms = std::fs::metadata(&dest).unwrap().permissions();
         perms.set_mode(0o644);
         std::fs::set_permissions(&dest, perms).unwrap();
-        let plan = Plan { program: dest.clone(), args: vec!["--version".into()], cwd: dir.clone() };
-        let err = watch_new_binary(&plan, &dest, Duration::from_secs(2)).unwrap_err();
+        // A failed exec has already entered this directory. Keep it on the process's own.
+        let plan = Plan { program: dest.clone(), args: vec!["--version".into()], cwd: std::env::current_dir().unwrap() };
+        let err = start_replacement(&plan, &dest).unwrap_err();
         assert!(err.contains("could not start"), "{err}");
-        let got = std::fs::read(&dest).unwrap();
-        assert!(got == b"old-binary", "dest kept {} bytes starting {:02x?}", got.len(), &got[..got.len().min(8)]);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old-binary");
+        assert!(!dir.join("pinned-server.unproven").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

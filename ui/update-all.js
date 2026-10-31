@@ -7,9 +7,8 @@ function accountMachines() {
   return rows;
 }
 
-const FINAL = new Set(["up_to_date", "failed", "cannot", "restarting"]);
-// Four downloads of five minutes, then a minute for the new binary to be accepted.
-const PHASE_WAIT = 21 * 60 * 1000;
+const FINAL = new Set(["up_to_date", "failed", "cannot"]);
+const PHASE_WAIT = 4 * 5 * 60 * 1000 + 60 * 1000;
 
 function land(id, call) {
   const row = () => accountMachines().find((view) => view.id === id);
@@ -34,7 +33,14 @@ function land(id, call) {
     },
   );
   const timed = new Promise((resolve) => {
-    const timer = setTimeout(resolve, updateEveryMachine.phaseWait ?? PHASE_WAIT);
+    const timer = setTimeout(() => {
+      const view = row();
+      if (view && !FINAL.has(view.update?.state)) {
+        view.update = { state: "failed", to: view.update?.to || "", reason: "the update timed out" };
+        for (const notify of viewListeners.slice()) notify();
+      }
+      resolve();
+    }, updateEveryMachine.phaseWait ?? PHASE_WAIT);
     if (typeof timer.unref === "function") timer.unref();
   });
   return Promise.race([changed, finished, timed]).finally(() => {

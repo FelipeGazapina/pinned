@@ -31,8 +31,6 @@ const SYNC_FIRST: Duration = Duration::from_secs(5);
 const SYNC_EVERY: Duration = Duration::from_secs(20);
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
 pub const UNAUTHORIZED: u16 = 4001;
-pub const POST_UPDATE_ENV: &str = "PINNED_POST_UPDATE";
-pub const UPDATE_READY_ENV: &str = "PINNED_UPDATE_READY";
 
 pub struct Link {
     shared: Arc<Shared>,
@@ -281,6 +279,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     sink.send(text(&auth)).await.map_err(|e| e.to_string())?;
     let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| "the hub did not answer the sign in".to_string())?;
     accept_hello(hello)?;
+    crate::boot::commit();
 
     let (out, mut incoming) = channel::unbounded_channel();
     *shared.out.lock().unwrap() = Some(out.clone());
@@ -345,27 +344,6 @@ fn in_order(shared: Arc<Shared>, machine: Arc<Machine>) -> mpsc::Sender<(u64, Ca
     calls
 }
 
-/// Dials the hub once, and writes the ready file only after the hub accepts this binary.
-/// The caller is a probe: it does not listen, resume sessions, or stay connected.
-pub fn prove_connected(creds: &Credentials, version: &str) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
-    runtime.block_on(async {
-        let url = ws_url(&creds.hub)?;
-        let (mut sink, mut stream) = dial(&url).await?.split();
-        let auth = MachineFrame::Auth {
-            token: creds.machine_token.clone(),
-            name: crate::account::hostname(),
-            os: crate::account::os(),
-            version: version.into(),
-        };
-        sink.send(text(&auth)).await.map_err(|e| e.to_string())?;
-        let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| "the hub did not answer the sign in".to_string())?;
-        accept_hello(hello)?;
-        signal_update_ready();
-        Ok(())
-    })
-}
-
 fn accept_hello(hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Error>>) -> Result<(), String> {
     match hello {
         Some(Ok(Frame::Text(t))) if matches!(serde_json::from_str::<ToMachine>(&t), Ok(ToMachine::Hello { .. })) => Ok(()),
@@ -374,14 +352,6 @@ fn accept_hello(hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Erro
         }
         other => Err(format!("the hub answered the sign in with {other:?}")),
     }
-}
-
-fn signal_update_ready() {
-    let Ok(path) = std::env::var(UPDATE_READY_ENV) else { return };
-    if path.is_empty() {
-        return;
-    }
-    let _ = std::fs::write(path, b"");
 }
 
 fn finish_call(shared: &Shared, machine: &Machine, id: u64, call: Call) {
