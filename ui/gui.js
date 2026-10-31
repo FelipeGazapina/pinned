@@ -278,6 +278,7 @@ function renderGui() {
 }
 
 let watchedSignature = "";
+let watchGeneration = 0;
 const watchedMachines = new Set();
 
 function publishThreadWatch() {
@@ -293,18 +294,29 @@ function publishThreadWatch() {
   }
   const signature = [...wanted.entries()].map(([machine, ids]) => `${machine}=${[...ids].sort().join(",")}`).sort().join("|");
   if (signature === watchedSignature) return;
+  const previousSignature = watchedSignature;
+  const previousMachines = new Set(watchedMachines);
+  const generation = ++watchGeneration;
   watchedSignature = signature;
+  const jobs = [];
   const next = new Set(wanted.keys());
   for (const machine of watchedMachines) {
-    if (!next.has(machine)) callOn(machine, { cmd: "watch_threads", tabs: [] }).catch(() => {});
+    if (!next.has(machine)) jobs.push(callOn(machine, { cmd: "watch_threads", tabs: [] }));
   }
-  for (const [machine, ids] of wanted) callOn(machine, { cmd: "watch_threads", tabs: ids }).catch(() => {});
+  for (const [machine, ids] of wanted) jobs.push(callOn(machine, { cmd: "watch_threads", tabs: ids }));
   watchedMachines.clear();
   for (const machine of next) watchedMachines.add(machine);
+  Promise.all(jobs).catch(() => {
+    if (watchGeneration !== generation) return;
+    watchedSignature = previousSignature;
+    watchedMachines.clear();
+    for (const machine of previousMachines) watchedMachines.add(machine);
+  });
 }
 
 function forgetThreadWatch() {
   watchedSignature = "";
+  watchGeneration++;
 }
 
 setInterval(() => {

@@ -10977,6 +10977,32 @@
                   "reset": {
                     "type": "boolean",
                     "default": false
+                  },
+                  "context": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Context"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "branch": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "todos": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Todos"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -11741,6 +11767,58 @@
                   "name"
                 ]
               }
+            ]
+          },
+          "Context": {
+            "type": "object",
+            "properties": {
+              "tokens": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tokens",
+              "at"
+            ]
+          },
+          "Todos": {
+            "description": "A `TodoWrite` call, whose list replaces the one before it.",
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Todo"
+                }
+              }
+            },
+            "required": [
+              "at",
+              "steps"
+            ]
+          },
+          "Todo": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "string"
+              },
+              "status": {
+                "description": "`pending`, `in_progress` or `completed`, as claude writes it.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "step",
+              "status"
             ]
           },
           "HubCall": {
@@ -13920,6 +13998,32 @@
                   "reset": {
                     "type": "boolean",
                     "default": false
+                  },
+                  "context": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Context"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "branch": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "todos": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Todos"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -14663,6 +14767,58 @@
                   "name"
                 ]
               }
+            ]
+          },
+          "Context": {
+            "type": "object",
+            "properties": {
+              "tokens": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tokens",
+              "at"
+            ]
+          },
+          "Todos": {
+            "description": "A `TodoWrite` call, whose list replaces the one before it.",
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Todo"
+                }
+              }
+            },
+            "required": [
+              "at",
+              "steps"
+            ]
+          },
+          "Todo": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "string"
+              },
+              "status": {
+                "description": "`pending`, `in_progress` or `completed`, as claude writes it.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "step",
+              "status"
             ]
           },
           "HubCall": {
@@ -23616,6 +23772,32 @@
                   "reset": {
                     "type": "boolean",
                     "default": false
+                  },
+                  "context": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Context"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "branch": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "todos": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Todos"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -24138,6 +24320,58 @@
                   "name"
                 ]
               }
+            ]
+          },
+          "Context": {
+            "type": "object",
+            "properties": {
+              "tokens": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tokens",
+              "at"
+            ]
+          },
+          "Todos": {
+            "description": "A `TodoWrite` call, whose list replaces the one before it.",
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Todo"
+                }
+              }
+            },
+            "required": [
+              "at",
+              "steps"
+            ]
+          },
+          "Todo": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "string"
+              },
+              "status": {
+                "description": "`pending`, `in_progress` or `completed`, as claude writes it.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "step",
+              "status"
             ]
           },
           "Settings": {
@@ -26034,6 +26268,32 @@
                   "reset": {
                     "type": "boolean",
                     "default": false
+                  },
+                  "context": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Context"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "branch": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "todos": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Todos"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -26542,6 +26802,58 @@
                   "name"
                 ]
               }
+            ]
+          },
+          "Context": {
+            "type": "object",
+            "properties": {
+              "tokens": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tokens",
+              "at"
+            ]
+          },
+          "Todos": {
+            "description": "A `TodoWrite` call, whose list replaces the one before it.",
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Todo"
+                }
+              }
+            },
+            "required": [
+              "at",
+              "steps"
+            ]
+          },
+          "Todo": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "string"
+              },
+              "status": {
+                "description": "`pending`, `in_progress` or `completed`, as claude writes it.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "step",
+              "status"
             ]
           },
           "Settings": {

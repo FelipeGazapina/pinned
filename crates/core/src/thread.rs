@@ -81,20 +81,20 @@ pub struct Page {
 }
 
 /// A `TodoWrite` call, whose list replaces the one before it.
-#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Todos {
     pub at: String,
     pub steps: Vec<Todo>,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Todo {
     pub step: String,
     /// `pending`, `in_progress` or `completed`, as claude writes it.
     pub status: String,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Context {
     pub tokens: u64,
     pub at: String,

@@ -64,39 +64,47 @@ function whenListedHarness() {
   return context;
 }
 
-test("an older node is asked for its tabs without a two second wait", async () => {
+test("a tab push is shown without waiting out the two second fallback", async () => {
   const context = whenListedHarness();
   const waits = [];
+  let pendingTimer = null;
   context.setTimeout = (fn, ms) => {
     waits.push(ms);
+    pendingTimer = fn;
     return 1;
   };
-  context.clearTimeout = () => {};
-  const pending = context.whenListed("box", "tab-1");
-  assert.deepEqual(waits, []);
-  assert.deepEqual(context.asked, ["box:tabs"]);
-  await pending;
-  assert.equal(context.tabByKey("box:tab-1").view.id, "tab-1");
-});
-
-test("a newer node that pushes the tab does not wait, and a late ask does not replace it", async () => {
-  const context = whenListedHarness();
-  let answer;
-  context.callOn = () => new Promise((resolve) => {
-    answer = resolve;
-  });
+  context.clearTimeout = () => {
+    pendingTimer = null;
+  };
   const started = Date.now();
   const pending = context.whenListed("box", "tab-new");
   context.tabs.push({ key: "box:tab-new", view: { id: "tab-new" } });
   context.noteTabs("box");
   await pending;
   assert.ok(Date.now() - started < 500, `the push took ${Date.now() - started} ms`);
-  if (answer) {
-    answer([{ id: "stale" }]);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-  assert.deepEqual(context.applied, []);
+  assert.deepEqual(waits, [2000]);
+  assert.equal(pendingTimer, null);
+  assert.deepEqual(context.asked, []);
   assert.equal(context.tabByKey("box:tab-new").view.id, "tab-new");
+});
+
+test("a tab list that never arrives is asked once the fallback fires", async () => {
+  const context = whenListedHarness();
+  const waits = [];
+  let fire = null;
+  context.setTimeout = (fn, ms) => {
+    waits.push(ms);
+    fire = fn;
+    return 1;
+  };
+  context.clearTimeout = () => {};
+  const pending = context.whenListed("box", "tab-1");
+  assert.deepEqual(context.asked, []);
+  assert.deepEqual(waits, [2000]);
+  fire();
+  await pending;
+  assert.deepEqual(context.asked, ["box:refresh"]);
+  assert.equal(context.tabByKey("box:tab-1").view.id, "tab-1");
 });
 
 test("an already-online machine keeps its tabs when the update has no snapshot", () => {

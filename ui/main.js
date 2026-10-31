@@ -116,7 +116,7 @@ function setTabs(machine, views, { forget = true } = {}) {
 const refreshTabs = async (machine) => setTabs(machine, await callOn(machine, { cmd: "tabs" }));
 
 // Open and folder changes push the tab list before they answer. Wait for that push.
-// Ask only if it never arrives, which is what an older node that pushed nothing leaves us.
+// Ask only if it never arrives.
 const tabListed = [];
 function noteTabs(machine) {
   const pending = tabListed.splice(0);

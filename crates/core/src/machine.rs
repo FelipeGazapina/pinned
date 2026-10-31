@@ -1,7 +1,7 @@
 use crate::accounts::{self, Account, Accounts, Provider};
 use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::stats::{ThreadStats, Tally};
-use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, EXE_PLACEHOLDER};
+use crate::wire::{Call, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, TranscriptState, EXE_PLACEHOLDER};
 use crate::panel::{DeviceHub, FileServer, Shells};
 use crate::{branches, commands, favicon, files, github, history, hooks, memory, model2vec, panel, plugin, process, projects, pty, pulls, reminders, scaffold, scripts, sessions, subagents, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
@@ -802,12 +802,12 @@ impl Machine {
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
         let (session, account, process) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.session.as_ref().and(t.started)))?;
         let Some(file) = session.as_deref().and_then(|s| self.find_transcript(&account, s)) else {
-            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab) });
+            return Ok(ThreadPage { state: TranscriptState::empty(session), agents: self.delegates.cards(tab) });
         };
         let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
         let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
         agents.extend(self.delegates.cards(tab));
-        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents })
+        Ok(ThreadPage { state: TranscriptState::from_page(session, page), agents })
     }
 
     /// Tells connected clients when a transcript grows.
@@ -843,11 +843,9 @@ impl Machine {
             }
             let remembered = seen.get(&id).filter(|cursor| cursor.session == session).map(|cursor| (cursor.byte, cursor.path.clone()));
             let Some(file) = self.locate_transcript(&account, &session, remembered.as_ref().map(|(_, path)| path.as_path())) else {
-                seen.remove(&id);
                 continue;
             };
             let Ok(len) = std::fs::metadata(&file).map(|meta| meta.len()) else {
-                seen.remove(&id);
                 continue;
             };
             // Same length on the same path has nothing new. A move keeps the old offset. A shorter
@@ -862,11 +860,12 @@ impl Machine {
                 continue;
             };
             let Ok(page) = thread::read(&file, from) else { continue };
-            seen.insert(id.clone(), TranscriptCursor { session: session.clone(), byte: page.next, path: file });
-            if page.items.is_empty() && !page.reset {
+            let state = TranscriptState::from_page(Some(session.clone()), page);
+            seen.insert(id.clone(), TranscriptCursor { session, byte: state.next, path: file });
+            if !state.changed() {
                 continue;
             }
-            self.emit(Event::Thread { tab: id, from, session: Some(session), items: page.items, next: page.next, reset: page.reset });
+            self.emit(Event::Thread { tab: id, from, state });
         }
     }
 
@@ -3261,7 +3260,7 @@ mod tests {
         assert_eq!(pushed[0]["items"][0]["text"], "visible");
         assert!(pushed[0]["from"].as_u64().unwrap() > 0);
         let parsed: MachineEvent = serde_json::from_value(pushed[0].clone()).unwrap();
-        assert!(matches!(parsed, MachineEvent::Thread { next, .. } if next > pushed[0]["from"].as_u64().unwrap()));
+        assert!(matches!(parsed, MachineEvent::Thread { state, .. } if state.next > pushed[0]["from"].as_u64().unwrap()));
         m.push_transcript_lines(&mut cursors);
         assert_eq!(heard.lock().unwrap().iter().filter(|event| event["kind"] == "thread").count(), 1, "an unchanged file is quiet");
         let _ = std::fs::remove_dir_all(root);
@@ -4042,7 +4041,7 @@ process.stdout.write(JSON.stringify({
         let id = m.open_run(&run).unwrap();
         assert_eq!(m.tab(&id, |t| t.launch.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone())).unwrap(), Some("s1".into()));
         assert_eq!(m.tab(&id, |t| t.claude_session.clone()).unwrap().as_deref(), Some("s1"));
-        assert_eq!(m.thread(&id, 0).unwrap().session.as_deref(), Some("s1"));
+        assert_eq!(m.thread(&id, 0).unwrap().state.session.as_deref(), Some("s1"));
         assert_eq!(m.view(&id).unwrap().session.as_deref(), Some("s1"), "the tab's view lacks the session clients key it by");
         let fresh = m.open_run(&RunSpec { args: vec![], ..run }).unwrap();
         assert_eq!(m.tab(&fresh, |t| t.claude_session.clone()).unwrap(), None);
