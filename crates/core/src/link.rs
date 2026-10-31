@@ -38,9 +38,14 @@ pub struct Link {
     thread: std::thread::JoinHandle<()>,
 }
 
+struct Outgoing {
+    text: String,
+    wrote: Option<mpsc::Sender<()>>,
+}
+
 #[derive(Default)]
 struct Shared {
-    out: Mutex<Option<channel::UnboundedSender<String>>>,
+    out: Mutex<Option<channel::UnboundedSender<Outgoing>>>,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>,
     next_call: AtomicU64,
     subscribed: Mutex<HashSet<(TabId, ViewerId)>>,
@@ -49,7 +54,17 @@ struct Shared {
 impl Shared {
     fn send(&self, frame: &MachineFrame) -> bool {
         let out = self.out.lock().unwrap().clone();
-        out.is_some_and(|out| out.send(serde_json::to_string(frame).unwrap()).is_ok())
+        out.is_some_and(|out| out.send(Outgoing { text: serde_json::to_string(frame).unwrap(), wrote: None }).is_ok())
+    }
+
+    /// Blocks until the socket loop has written `frame`, or five seconds. False when offline or on timeout.
+    fn send_flushed(&self, frame: &MachineFrame) -> bool {
+        let Some(out) = self.out.lock().unwrap().clone() else { return false };
+        let (wrote, written) = mpsc::channel();
+        if out.send(Outgoing { text: serde_json::to_string(frame).unwrap(), wrote: Some(wrote) }).is_err() {
+            return false;
+        }
+        written.recv_timeout(Duration::from_secs(5)).is_ok()
     }
 
     /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
@@ -88,6 +103,8 @@ impl Shared {
 /// `version` is the binary's, which the hub logs.
 pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     let shared = Arc::new(Shared::default());
+    let flushing = shared.clone();
+    machine.set_flusher(Arc::new(move |event| flushing.send_flushed(&MachineFrame::Event { event: event.clone() })));
     let (stop, stopped) = watch::channel(false);
     let (syncing, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
     std::thread::spawn(move || sync_projects(&syncing, &synced_machine, &sync_stopped));
@@ -252,20 +269,26 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
         other => return Err(format!("the hub answered the sign in with {other:?}")),
     }
 
-    let (out, mut outgoing) = channel::unbounded_channel();
+    let (out, mut incoming) = channel::unbounded_channel();
     *shared.out.lock().unwrap() = Some(out.clone());
-    let calls = in_order(machine.clone(), out.clone());
+    let calls = in_order(shared.clone(), machine.clone());
     eprintln!("pinned: connected to {}", creds.hub);
     shared.send(&MachineFrame::Event { event: MachineEvent::Tabs { tabs: machine.tabs() } });
     for (account, usage) in machine.usage() {
         shared.send(&MachineFrame::Event { event: MachineEvent::Usage { usage, account } });
     }
+    shared.send(&MachineFrame::Event { event: MachineEvent::Update { status: machine.update_snapshot() } });
 
     let mut ping = tokio::time::interval(PING);
     let mut heard = Instant::now();
     loop {
         tokio::select! {
-            Some(frame) = outgoing.recv() => sink.send(Frame::Text(frame.into())).await.map_err(|e| e.to_string())?,
+            Some(outgoing) = incoming.recv() => {
+                sink.send(Frame::Text(outgoing.text.into())).await.map_err(|e| e.to_string())?;
+                if let Some(wrote) = outgoing.wrote {
+                    let _ = wrote.send(());
+                }
+            }
             frame = stream.next() => {
                 heard = Instant::now();
                 match frame {
@@ -299,15 +322,30 @@ async fn dial(url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, S
 
 /// A thread that answers the connection's calls one after another, so input typed fast reaches
 /// the session in order. It ends with the connection.
-fn in_order(machine: Arc<Machine>, out: channel::UnboundedSender<String>) -> mpsc::Sender<(u64, Call)> {
+fn in_order(shared: Arc<Shared>, machine: Arc<Machine>) -> mpsc::Sender<(u64, Call)> {
     let (calls, queue) = mpsc::channel::<(u64, Call)>();
     std::thread::spawn(move || {
         for (id, call) in queue {
-            let reply = MachineFrame::Reply(Reply::new(id, machine.call(call)));
-            let _ = out.send(serde_json::to_string(&reply).unwrap());
+            finish_call(&shared, &machine, id, call);
         }
     });
     calls
+}
+
+fn finish_call(shared: &Shared, machine: &Machine, id: u64, call: Call) {
+    let result = machine.call(call);
+    let frame = MachineFrame::Reply(Reply::new(id, result));
+    if machine.restart_pending() {
+        // A timeout still restarts: the alternative is a swapped binary that never comes back.
+        let _ = shared.send_flushed(&frame);
+        machine.restart_now();
+    } else {
+        shared.send(&frame);
+    }
+}
+
+fn queue(out: &channel::UnboundedSender<Outgoing>, frame: &MachineFrame) {
+    let _ = out.send(Outgoing { text: serde_json::to_string(frame).unwrap(), wrote: None });
 }
 
 /// The refusal `answer` sends when this binary does not know the command.
@@ -315,14 +353,11 @@ pub fn is_unknown_command(err: &str) -> bool {
     err.contains("can't answer that")
 }
 
-fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSender<String>, calls: &mpsc::Sender<(u64, Call)>, frame: &str, version: &str) {
+fn answer(shared: &Arc<Shared>, machine: &Arc<Machine>, out: &channel::UnboundedSender<Outgoing>, calls: &mpsc::Sender<(u64, Call)>, frame: &str, version: &str) {
     match serde_json::from_str::<ToMachine>(frame) {
         Ok(ToMachine::Call { id, call }) if call.may_wait() => {
-            let (machine, out) = (machine.clone(), out.clone());
-            std::thread::spawn(move || {
-                let reply = MachineFrame::Reply(Reply::new(id, machine.call(call)));
-                let _ = out.send(serde_json::to_string(&reply).unwrap());
-            });
+            let (shared, machine) = (shared.clone(), machine.clone());
+            std::thread::spawn(move || finish_call(&shared, &machine, id, call));
         }
         Ok(ToMachine::Call { id, call }) => {
             let _ = calls.send((id, call));
@@ -336,7 +371,7 @@ fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSende
             let (out, id, to) = (out.clone(), tab.clone(), viewer.clone());
             let sink = move |bytes: &[u8]| {
                 let frame = MachineFrame::Output { viewer: to.clone(), tab: id.clone(), data: Bytes(bytes.to_vec()) };
-                let _ = out.send(serde_json::to_string(&frame).unwrap());
+                queue(&out, &frame);
             };
             if machine.attach(&tab, viewer.clone(), Box::new(sink)).is_ok() {
                 shared.subscribed.lock().unwrap().insert((tab, viewer));
@@ -351,7 +386,7 @@ fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSende
             let value: Value = serde_json::from_str(frame).unwrap_or_default();
             if let (Some("call"), Some(id)) = (value["type"].as_str(), value["id"].as_u64()) {
                 let reply = MachineFrame::Reply(Reply::new(id, Err(format!("this machine runs pinned {version}, which can't answer that: {e}"))));
-                let _ = out.send(serde_json::to_string(&reply).unwrap());
+                queue(out, &reply);
             }
         }
     }
@@ -396,5 +431,68 @@ mod tests {
         let dialed = tokio::time::timeout(Duration::from_secs(60), dial(&url)).await.expect("the dial never ended");
         let err = dialed.expect_err("the dial succeeded although the hub never answered");
         assert!(err.starts_with(&format!("could not connect to {url}: ")), "{err}");
+    }
+
+    struct ArmsRestart {
+        restarted: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl crate::machine::SelfUpdate for ArmsRestart {
+        fn install(&self, machine: &Machine) -> crate::wire::UpdateStatus {
+            let status = crate::wire::UpdateStatus::Restarting { to: "1.2.0".into() };
+            let restarted = self.restarted.clone();
+            machine.schedule_restart(Box::new(move || restarted.store(true, Ordering::SeqCst)));
+            machine.report(status.clone());
+            status
+        }
+    }
+
+    #[test]
+    fn an_offline_flush_returns_without_waiting() {
+        let shared = Shared::default();
+        assert!(!shared.send_flushed(&MachineFrame::Event { event: MachineEvent::Update { status: None } }));
+    }
+
+    #[test]
+    fn a_restart_waits_until_the_reply_is_written() {
+        use crate::machine::Launch;
+        use std::collections::BTreeMap;
+        use std::sync::atomic::AtomicBool;
+
+        let restarted = Arc::new(AtomicBool::new(false));
+        let machine = Machine::new(
+            Launch {
+                exe: "pinned".into(),
+                bins: BTreeMap::new(),
+                path_env: None,
+                settings: "settings".into(),
+                mcp_config: None,
+                reminders: false,
+                plugin_dir: "plugin".into(),
+                tutorial_helper: "tutorial".into(),
+                sock: "sock".into(),
+                vector_search: false,
+            },
+            None,
+            None,
+            |_| {},
+        );
+        machine.set_installer(Arc::new(ArmsRestart { restarted: restarted.clone() }));
+        let shared = Arc::new(Shared::default());
+        let (out, mut incoming) = channel::unbounded_channel();
+        *shared.out.lock().unwrap() = Some(out);
+        let at_write = restarted.clone();
+        let writer = std::thread::spawn(move || {
+            let outgoing = incoming.blocking_recv().unwrap();
+            assert!(!at_write.load(Ordering::SeqCst));
+            outgoing.wrote.unwrap().send(()).unwrap();
+            outgoing.text
+        });
+        finish_call(&shared, &machine, 7, Call::UpdateSelf);
+        let text = writer.join().unwrap();
+        let frame: Value = serde_json::from_str(&text).unwrap();
+        assert!(restarted.load(Ordering::SeqCst));
+        assert_eq!(frame["id"], 7);
+        assert_eq!(frame["ok"], serde_json::json!({ "state": "restarting", "to": "1.2.0" }));
     }
 }
