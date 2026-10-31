@@ -750,6 +750,12 @@ pub fn kill_tree(pid: u32) {
 
 #[cfg(unix)]
 fn signal_targets_under(root: u32) -> Vec<i32> {
+    targets_under(&process_table(), root)
+}
+
+/// `[pid, ppid, pgid]` for every process.
+#[cfg(unix)]
+fn process_table() -> Vec<[u32; 3]> {
     let Ok(output) = crate::process::command("ps")
         .args(["-A", "-o", "pid=,ppid=,pgid="])
         .stdin(Stdio::null())
@@ -758,18 +764,22 @@ fn signal_targets_under(root: u32) -> Vec<i32> {
     else {
         return vec![];
     };
-    let rows: Vec<[u32; 3]> = String::from_utf8_lossy(&output.stdout)
+    String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace().map(|field| field.parse().ok());
             Some([fields.next()??, fields.next()??, fields.next()??])
         })
-        .collect();
+        .collect()
+}
+
+#[cfg(unix)]
+fn targets_under(rows: &[[u32; 3]], root: u32) -> Vec<i32> {
     let mut below = vec![];
     let mut parents = vec![root];
     let mut targets = vec![];
     while let Some(parent) = parents.pop() {
-        for &[pid, ppid, pgid] in &rows {
+        for &[pid, ppid, pgid] in rows {
             if ppid == parent && pid != root && !below.contains(&pid) {
                 below.push(pid);
                 parents.push(pid);
