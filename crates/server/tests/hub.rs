@@ -591,7 +591,7 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
     assert_eq!(pulled, vec!["claude/memory/MEMORY.md"]);
     assert_eq!(std::fs::read_to_string(memory(&on_mini)).unwrap(), "- deploys go through the VPS");
 
-    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1 }, data: Some("eA==".into()) };
+    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: false }, data: Some("eA==".into()) };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: project.key.clone(), files: vec![outside] }),
         Err("../.ssh/authorized_keys is not a file a project shares".into())
@@ -654,7 +654,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     pulled.sort();
     assert_eq!(pulled, stored);
     assert_eq!(std::fs::read_to_string(mini_home.join("synced-plugins/plugins/toy@demo/skills/greet/SKILL.md")).unwrap(), skill);
-    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1 }, data: Some("eA==".into()) };
+    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: false }, data: Some("eA==".into()) };
     for path in [
         "plugins/toy@demo/settings.json",
         "plugins/toy@demo/.claude.json",
@@ -675,7 +675,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     }
     let raw = vec![7u8; sync::FILE_LIMIT as usize + 1];
     let oversized = sync::File {
-        entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64 },
+        entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64, executable: false },
         data: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
     };
     assert_eq!(
@@ -683,6 +683,58 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
         Err("plugins/toy@demo/skills/greet/blob.bin is bigger than a synced file may be".into())
     );
     assert_eq!(stored_plugin_paths(&hub.database), stored);
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
+}
+
+#[test]
+fn an_executable_hook_stays_executable_through_the_hub() {
+    let hub = TestHub::start("hookmode");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("hookmode-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "linux").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let install = mac_home.join("plugins/pstack");
+    let hook = install.join("hooks/session-start.sh");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(install.join(".claude-plugin")).unwrap();
+    std::fs::write(install.join(".claude-plugin/plugin.json"), r#"{"name":"pstack"}"#).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho session-start\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let installed = serde_json::json!({ "plugins": { "pstack@local": [{ "installPath": install, "version": "0.9.82", "gitCommitSha": "abc123" }] } });
+    std::fs::create_dir_all(mac_home.join(".claude/plugins")).unwrap();
+    std::fs::write(mac_home.join(".claude/settings.json"), r#"{"enabledPlugins":{"pstack@local":true}}"#).unwrap();
+    std::fs::write(mac_home.join(".claude/plugins/installed_plugins.json"), installed.to_string()).unwrap();
+    let share = |home: &Path| sync::PluginShare { claude_home: home.join(".claude"), dir: home.join("synced-plugins") };
+    let now = std::time::SystemTime::now();
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    let mut mac_state = sync::State::default();
+    let mut mini_state = sync::State::default();
+    sync::sync_plugins(&Through(mac_link), &mut mac_state, &share(&mac_home), now).unwrap();
+    sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    let dest = mini_home.join("synced-plugins/plugins/pstack@local/hooks/session-start.sh");
+    let plain = mini_home.join("synced-plugins/plugins/pstack@local/.claude-plugin/plugin.json");
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+    assert_eq!(mode(&dest) & 0o111, 0o111, "receiver hook mode is {:o}", mode(&dest));
+    assert_eq!(mode(&plain) & 0o111, 0, "plain file mode is {:o}", mode(&plain));
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(mode(&dest), 0o644);
+    sync::sync_plugins(&Through(mac_link), &mut mac_state, &share(&mac_home), now).unwrap();
+    sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    assert_eq!(mode(&dest) & 0o111, 0o111, "resync left the hook at {:o}", mode(&dest));
+    let again = sync::sync_plugins(&Through(mini_link), &mut mini_state, &share(&mini_home), now).unwrap();
+    assert_eq!(again.pushed, Vec::<String>::new());
+    assert_eq!(again.pulled, Vec::<String>::new());
     let (mut mac, mut mini) = (mac, mini);
     mac.kill();
     mini.kill();

@@ -32,7 +32,9 @@ create table if not exists machines (id uuid primary key, account uuid not null 
 create table if not exists pair_codes (code text primary key, account uuid not null references accounts on delete cascade,
   expires_at timestamptz not null);
 create table if not exists project_files (account uuid not null references accounts on delete cascade, project text not null,
-  path text not null, sha text not null, modified bigint not null, data bytea not null, primary key (account, project, path));
+  path text not null, sha text not null, modified bigint not null, data bytea not null, executable boolean not null default false,
+  primary key (account, project, path));
+alter table project_files add column if not exists executable boolean not null default false;
 create table if not exists shared_projects (account uuid not null references accounts on delete cascade, key text not null,
   name text not null, repo text not null, updated timestamptz not null default now(), primary key (account, key));
 -- Without a cascade: an account whose boxes still run can't be deleted, which would orphan them.
@@ -226,10 +228,13 @@ impl Db {
     pub async fn sync_list(&self, account: Uuid, project: &str) -> Result<Vec<sync::Entry>, String> {
         let rows = self
             .client().await?
-            .query("select path, sha, modified, octet_length(data) from project_files where account = $1 and project = $2", &[&account, &project])
+            .query("select path, sha, modified, octet_length(data), executable from project_files where account = $1 and project = $2", &[&account, &project])
             .await
             .map_err(err)?;
-        Ok(rows.iter().map(|r| sync::Entry { path: r.get(0), sha: r.get(1), modified: r.get::<_, i64>(2) as u64, size: r.get::<_, i32>(3) as u64 }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| sync::Entry { path: r.get(0), sha: r.get(1), modified: r.get::<_, i64>(2) as u64, size: r.get::<_, i32>(3) as u64, executable: r.get(4) })
+            .collect())
     }
 
     /// Keeps the files, unless they would take the account past its quota. Two pushes at once may
@@ -254,9 +259,9 @@ impl Db {
         for (entry, data) in &files {
             client
                 .execute(
-                    "insert into project_files (account, project, path, sha, modified, data) values ($1, $2, $3, $4, $5, $6) \
-                     on conflict (account, project, path) do update set sha = excluded.sha, modified = excluded.modified, data = excluded.data",
-                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data],
+                    "insert into project_files (account, project, path, sha, modified, data, executable) values ($1, $2, $3, $4, $5, $6, $7) \
+                     on conflict (account, project, path) do update set sha = excluded.sha, modified = excluded.modified, data = excluded.data, executable = excluded.executable",
+                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data, &entry.executable],
                 )
                 .await
                 .map_err(err)?;
@@ -267,14 +272,14 @@ impl Db {
     pub async fn sync_pull(&self, account: Uuid, project: &str, paths: &[String]) -> Result<Vec<(sync::Entry, Vec<u8>)>, String> {
         let rows = self
             .client().await?
-            .query("select path, sha, modified, data from project_files where account = $1 and project = $2 and path = any($3)", &[&account, &project, &paths])
+            .query("select path, sha, modified, data, executable from project_files where account = $1 and project = $2 and path = any($3)", &[&account, &project, &paths])
             .await
             .map_err(err)?;
         Ok(rows
             .iter()
             .map(|r| {
                 let data: Vec<u8> = r.get(3);
-                (sync::Entry { path: r.get(0), sha: r.get(1), modified: r.get::<_, i64>(2) as u64, size: data.len() as u64 }, data)
+                (sync::Entry { path: r.get(0), sha: r.get(1), modified: r.get::<_, i64>(2) as u64, size: data.len() as u64, executable: r.get(4) }, data)
             })
             .collect())
     }

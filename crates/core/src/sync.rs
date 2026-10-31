@@ -40,6 +40,9 @@ pub struct Entry {
     /// Compressed bytes.
     #[serde(default)]
     pub size: u64,
+    /// Executable on the machine that sent it.
+    #[serde(default)]
+    pub executable: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -188,8 +191,19 @@ fn exchange(
         let before = agreed.get(path).cloned();
         if mine == theirs {
             match mine {
-                Some(sha) => agreed.insert(path.clone(), sha),
-                None => agreed.remove(path),
+                Some(sha) => {
+                    agreed.insert(path.clone(), sha);
+                    #[cfg(unix)]
+                    if let Some(fix) = unix_mode_fix(path, local, &remote, resolve) {
+                        match fix {
+                            ModeFix::Push => push.push(path.clone()),
+                            ModeFix::Pull => pull.push(path.clone()),
+                        }
+                    }
+                }
+                None => {
+                    agreed.remove(path);
+                }
             };
         } else if mine == before {
             pull.push(path.clone());
@@ -211,7 +225,7 @@ fn exchange(
         let theirs = hub.pull(key, vec![path.clone()])?.into_iter().next().and_then(|f| f.data).map(|d| unpack(&d)).transpose()?.unwrap_or_default();
         let target = resolve(&path).ok_or("no history here")?;
         let mine = std::fs::read(&target).unwrap_or_default();
-        write(&target, &merge_history(&mine, &theirs), None)?;
+        write(&target, &merge_history(&mine, &theirs), None, false)?;
         push.push(path);
     }
 
@@ -219,14 +233,17 @@ fn exchange(
     let mut size = 0;
     for path in push {
         let file = match resolve(&path).filter(|f| f.is_file()) {
-            None => File { entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0 }, data: None },
+            None => File { entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0, executable: false }, data: None },
             Some(target) => {
                 let Some((sha, modified)) = state.hash(&target) else { continue };
                 let data = pack(&std::fs::read(&target).map_err(|e| e.to_string())?);
                 if data.len() as u64 > FILE_LIMIT {
                     continue;
                 }
-                File { entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64 }, data: Some(base64::engine::general_purpose::STANDARD.encode(data)) }
+                File {
+                    entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: executable(&target) },
+                    data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
+                }
             }
         };
         size += file.entry.size;
@@ -257,7 +274,7 @@ fn exchange(
                 }
                 Some(data) => {
                     let bytes = unpack(data)?;
-                    write(&target, &bytes, Some(file.entry.modified))?;
+                    write(&target, &bytes, Some(file.entry.modified), file.entry.executable)?;
                     state.hash(&target);
                     agreed.insert(file.entry.path.clone(), file.entry.sha.clone());
                 }
@@ -656,14 +673,76 @@ fn merge_history(mine: &[u8], theirs: &[u8]) -> Vec<u8> {
     lines.into_iter().flat_map(|(_, l)| [l.as_bytes(), b"\n"]).flatten().copied().collect()
 }
 
-fn write(target: &Path, bytes: &[u8], modified: Option<u64>) -> Result<(), String> {
+#[cfg(unix)]
+fn reconcile_executable_bit(local_exec: bool, remote_exec: bool, local_mtime: u64, remote_mtime: u64) -> Option<ModeFix> {
+    if local_exec == remote_exec {
+        return None;
+    }
+    let local_is_newer = local_mtime > remote_mtime;
+    let same_time_and_local_is_executable = local_mtime == remote_mtime && local_exec;
+    if local_is_newer || same_time_and_local_is_executable {
+        Some(ModeFix::Push)
+    } else {
+        Some(ModeFix::Pull)
+    }
+}
+
+#[cfg(unix)]
+enum ModeFix {
+    Push,
+    Pull,
+}
+
+#[cfg(unix)]
+fn unix_mode_fix(path: &str, local: &BTreeMap<String, (String, u64)>, remote: &BTreeMap<String, Entry>, resolve: &dyn Fn(&str) -> Option<PathBuf>) -> Option<ModeFix> {
+    let remote_exec = remote.get(path)?.executable;
+    let file = resolve(path)?;
+    if !file.is_file() {
+        return None;
+    }
+    let local_mtime = local.get(path).map(|(_, modified)| *modified).unwrap_or(0);
+    let remote_mtime = remote.get(path).map(|entry| entry.modified).unwrap_or(0);
+    reconcile_executable_bit(executable(&file), remote_exec, local_mtime, remote_mtime)
+}
+
+fn executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn write(target: &Path, bytes: &[u8], modified: Option<u64>, executable: bool) -> Result<(), String> {
     if let Some(dir) = target.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let file = std::fs::File::create(target).map_err(|e| format!("could not write {}: {e}", target.display()))?;
     (&file).write_all(bytes).map_err(|e| e.to_string())?;
+    apply_executable(&file, executable)?;
     if let Some(ms) = modified {
         let _ = file.set_modified(UNIX_EPOCH + Duration::from_millis(ms));
+    }
+    Ok(())
+}
+
+fn apply_executable(file: &std::fs::File, executable: bool) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = file.metadata().map_err(|e| e.to_string())?.permissions();
+        let mode = perms.mode();
+        perms.set_mode(if executable { mode | 0o111 } else { mode & !0o111 });
+        file.set_permissions(perms).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, executable);
     }
     Ok(())
 }

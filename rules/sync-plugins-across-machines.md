@@ -16,7 +16,7 @@ These names never go to the hub, including when they sit inside a plugin tree: `
 
 ## How a session loads them
 
-The files live under the reserved project key `pinned:plugins` in `project_files`. The same `SyncList`, `SyncPush`, and `SyncPull` calls are used. No wire type was added.
+The files live under the reserved project key `pinned:plugins` in `project_files`. The same `SyncList`, `SyncPush`, and `SyncPull` calls are used. No wire type was added. Each file entry has an `executable` field, so a hook that is executable on the publishing machine stays executable on the others. See `rules/executable-plugin-hooks.md`.
 
 Each machine keeps one folder per plugin id under its config `synced-plugins` directory. `Launch::command` adds one `--plugin-dir` for each folder whose plugin is not already enabled locally. `commands::list` reads those same folders. A running session picks the change up on restart.
 

@@ -4272,6 +4272,11 @@
                 "minimum": 0,
                 "default": 0
               },
+              "executable": {
+                "description": "Executable on the machine that sent it.",
+                "type": "boolean",
+                "default": false
+              },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
                 "type": [
@@ -4284,7 +4289,8 @@
               "path",
               "sha",
               "modified",
-              "size"
+              "size",
+              "executable"
             ]
           },
           "Connector": {
@@ -9530,6 +9536,11 @@
                 "minimum": 0,
                 "default": 0
               },
+              "executable": {
+                "description": "Executable on the machine that sent it.",
+                "type": "boolean",
+                "default": false
+              },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
                 "type": [
@@ -11997,6 +12008,11 @@
                 "minimum": 0,
                 "default": 0
               },
+              "executable": {
+                "description": "Executable on the machine that sent it.",
+                "type": "boolean",
+                "default": false
+              },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
                 "type": [
@@ -12009,7 +12025,8 @@
               "path",
               "sha",
               "modified",
-              "size"
+              "size",
+              "executable"
             ]
           },
           "Connector": {
@@ -14444,6 +14461,11 @@
                 "format": "uint64",
                 "minimum": 0,
                 "default": 0
+              },
+              "executable": {
+                "description": "Executable on the machine that sent it.",
+                "type": "boolean",
+                "default": false
               },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
@@ -21276,13 +21298,19 @@
             "format": "uint64",
             "minimum": 0,
             "default": 0
+          },
+          "executable": {
+            "description": "Executable on the machine that sent it.",
+            "type": "boolean",
+            "default": false
           }
         },
         "required": [
           "path",
           "sha",
           "modified",
-          "size"
+          "size",
+          "executable"
         ]
       },
       "accept": {
@@ -21309,6 +21337,11 @@
             "format": "uint64",
             "minimum": 0,
             "default": 0
+          },
+          "executable": {
+            "description": "Executable on the machine that sent it.",
+            "type": "boolean",
+            "default": false
           }
         },
         "required": [
@@ -21344,6 +21377,11 @@
             "minimum": 0,
             "default": 0
           },
+          "executable": {
+            "description": "Executable on the machine that sent it.",
+            "type": "boolean",
+            "default": false
+          },
           "data": {
             "description": "The contents gzipped, in base64; none for a deleted file.",
             "type": [
@@ -21356,7 +21394,8 @@
           "path",
           "sha",
           "modified",
-          "size"
+          "size",
+          "executable"
         ]
       },
       "accept": {
@@ -21383,6 +21422,11 @@
             "format": "uint64",
             "minimum": 0,
             "default": 0
+          },
+          "executable": {
+            "description": "Executable on the machine that sent it.",
+            "type": "boolean",
+            "default": false
           },
           "data": {
             "description": "The contents gzipped, in base64; none for a deleted file.",
