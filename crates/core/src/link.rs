@@ -38,9 +38,14 @@ pub struct Link {
     thread: std::thread::JoinHandle<()>,
 }
 
+struct Outgoing {
+    text: String,
+    wrote: Option<mpsc::Sender<()>>,
+}
+
 #[derive(Default)]
 struct Shared {
-    out: Mutex<Option<channel::UnboundedSender<String>>>,
+    out: Mutex<Option<channel::UnboundedSender<Outgoing>>>,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>,
     next_call: AtomicU64,
     subscribed: Mutex<HashSet<(TabId, ViewerId)>>,
@@ -49,7 +54,16 @@ struct Shared {
 impl Shared {
     fn send(&self, frame: &MachineFrame) -> bool {
         let out = self.out.lock().unwrap().clone();
-        out.is_some_and(|out| out.send(serde_json::to_string(frame).unwrap()).is_ok())
+        out.is_some_and(|out| out.send(Outgoing { text: serde_json::to_string(frame).unwrap(), wrote: None }).is_ok())
+    }
+
+    fn send_flushed(&self, frame: &MachineFrame) -> bool {
+        let Some(out) = self.out.lock().unwrap().clone() else { return false };
+        let (wrote, written) = mpsc::channel();
+        if out.send(Outgoing { text: serde_json::to_string(frame).unwrap(), wrote: Some(wrote) }).is_err() {
+            return false;
+        }
+        written.recv_timeout(Duration::from_secs(5)).is_ok()
     }
 
     /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
@@ -88,6 +102,8 @@ impl Shared {
 /// `version` is the binary's, which the hub logs.
 pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     let shared = Arc::new(Shared::default());
+    let flushing = shared.clone();
+    machine.set_flusher(Arc::new(move |event| flushing.send_flushed(&MachineFrame::Event { event: event.clone() })));
     let (stop, stopped) = watch::channel(false);
     let (syncing, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
     std::thread::spawn(move || sync_projects(&syncing, &synced_machine, &sync_stopped));
@@ -262,28 +278,29 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     };
     sink.send(text(&auth)).await.map_err(|e| e.to_string())?;
     let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| "the hub did not answer the sign in".to_string())?;
-    match hello {
-        Some(Ok(Frame::Text(t))) if matches!(serde_json::from_str(&t), Ok(ToMachine::Hello { .. })) => {}
-        Some(Ok(Frame::Close(Some(close)))) if u16::from(close.code) == UNAUTHORIZED => {
-            return Err("the hub does not know this machine's token: pair it again".into())
-        }
-        other => return Err(format!("the hub answered the sign in with {other:?}")),
-    }
+    accept_hello(hello)?;
+    crate::boot::commit();
 
-    let (out, mut outgoing) = channel::unbounded_channel();
+    let (out, mut incoming) = channel::unbounded_channel();
     *shared.out.lock().unwrap() = Some(out.clone());
-    let calls = in_order(machine.clone(), out.clone());
+    let calls = in_order(shared.clone(), machine.clone());
     eprintln!("pinned: connected to {}", creds.hub);
     shared.send(&MachineFrame::Event { event: MachineEvent::Tabs { tabs: machine.tabs() } });
     for (account, usage) in machine.usage() {
         shared.send(&MachineFrame::Event { event: MachineEvent::Usage { usage, account } });
     }
+    shared.send(&MachineFrame::Event { event: MachineEvent::Update { status: machine.update_snapshot() } });
 
     let mut ping = tokio::time::interval(PING);
     let mut heard = Instant::now();
     loop {
         tokio::select! {
-            Some(frame) = outgoing.recv() => sink.send(Frame::Text(frame.into())).await.map_err(|e| e.to_string())?,
+            Some(outgoing) = incoming.recv() => {
+                sink.send(Frame::Text(outgoing.text.into())).await.map_err(|e| e.to_string())?;
+                if let Some(wrote) = outgoing.wrote {
+                    let _ = wrote.send(());
+                }
+            }
             frame = stream.next() => {
                 heard = Instant::now();
                 match frame {
@@ -317,25 +334,51 @@ async fn dial(url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, S
 
 /// A thread that answers the connection's calls one after another, so input typed fast reaches
 /// the session in order. It ends with the connection.
-fn in_order(machine: Arc<Machine>, out: channel::UnboundedSender<String>) -> mpsc::Sender<(u64, Call)> {
+fn in_order(shared: Arc<Shared>, machine: Arc<Machine>) -> mpsc::Sender<(u64, Call)> {
     let (calls, queue) = mpsc::channel::<(u64, Call)>();
     std::thread::spawn(move || {
         for (id, call) in queue {
-            let reply = MachineFrame::Reply(Reply::new(id, machine.call(call)));
-            let _ = out.send(serde_json::to_string(&reply).unwrap());
+            finish_call(&shared, &machine, id, call);
         }
     });
     calls
 }
 
-fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSender<String>, calls: &mpsc::Sender<(u64, Call)>, frame: &str, version: &str) {
+fn accept_hello(hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Error>>) -> Result<(), String> {
+    match hello {
+        Some(Ok(Frame::Text(t))) if matches!(serde_json::from_str::<ToMachine>(&t), Ok(ToMachine::Hello { .. })) => Ok(()),
+        Some(Ok(Frame::Close(Some(close)))) if u16::from(close.code) == UNAUTHORIZED => {
+            Err("the hub does not know this machine's token: pair it again".into())
+        }
+        other => Err(format!("the hub answered the sign in with {other:?}")),
+    }
+}
+
+fn finish_call(shared: &Shared, machine: &Machine, id: u64, call: Call) {
+    let (result, armed) = machine.finish_for_restart(call);
+    let frame = MachineFrame::Reply(Reply::new(id, result));
+    if armed {
+        let _ = shared.send_flushed(&frame);
+        machine.restart_now();
+    } else {
+        shared.send(&frame);
+    }
+}
+
+fn queue(out: &channel::UnboundedSender<Outgoing>, frame: &MachineFrame) {
+    let _ = out.send(Outgoing { text: serde_json::to_string(frame).unwrap(), wrote: None });
+}
+
+/// The refusal `answer` sends when this binary does not know the command.
+pub fn is_unknown_command(err: &str) -> bool {
+    err.contains("can't answer that")
+}
+
+fn answer(shared: &Arc<Shared>, machine: &Arc<Machine>, out: &channel::UnboundedSender<Outgoing>, calls: &mpsc::Sender<(u64, Call)>, frame: &str, version: &str) {
     match serde_json::from_str::<ToMachine>(frame) {
         Ok(ToMachine::Call { id, call }) if call.may_wait() => {
-            let (machine, out) = (machine.clone(), out.clone());
-            std::thread::spawn(move || {
-                let reply = MachineFrame::Reply(Reply::new(id, machine.call(call)));
-                let _ = out.send(serde_json::to_string(&reply).unwrap());
-            });
+            let (shared, machine) = (shared.clone(), machine.clone());
+            std::thread::spawn(move || finish_call(&shared, &machine, id, call));
         }
         Ok(ToMachine::Call { id, call }) => {
             let _ = calls.send((id, call));
@@ -349,7 +392,7 @@ fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSende
             let (out, id, to) = (out.clone(), tab.clone(), viewer.clone());
             let sink = move |bytes: &[u8]| {
                 let frame = MachineFrame::Output { viewer: to.clone(), tab: id.clone(), data: Bytes(bytes.to_vec()) };
-                let _ = out.send(serde_json::to_string(&frame).unwrap());
+                queue(&out, &frame);
             };
             if machine.attach(&tab, viewer.clone(), Box::new(sink)).is_ok() {
                 shared.subscribed.lock().unwrap().insert((tab, viewer));
@@ -364,7 +407,7 @@ fn answer(shared: &Shared, machine: &Arc<Machine>, out: &channel::UnboundedSende
             let value: Value = serde_json::from_str(frame).unwrap_or_default();
             if let (Some("call"), Some(id)) = (value["type"].as_str(), value["id"].as_u64()) {
                 let reply = MachineFrame::Reply(Reply::new(id, Err(format!("this machine runs pinned {version}, which can't answer that: {e}"))));
-                let _ = out.send(serde_json::to_string(&reply).unwrap());
+                queue(out, &reply);
             }
         }
     }
@@ -388,6 +431,7 @@ fn ws_url(hub: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn the_machine_socket_follows_the_hubs_scheme() {
@@ -409,5 +453,154 @@ mod tests {
         let dialed = tokio::time::timeout(Duration::from_secs(60), dial(&url)).await.expect("the dial never ended");
         let err = dialed.expect_err("the dial succeeded although the hub never answered");
         assert!(err.starts_with(&format!("could not connect to {url}: ")), "{err}");
+    }
+
+    struct ArmsRestart {
+        restarted: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl crate::machine::SelfUpdate for ArmsRestart {
+        fn install(&self, machine: &Machine) -> crate::wire::UpdateStatus {
+            let status = crate::wire::UpdateStatus::Restarting { to: "1.2.0".into() };
+            let restarted = self.restarted.clone();
+            machine.schedule_restart(Box::new(move || restarted.store(true, Ordering::SeqCst)));
+            machine.report(status.clone());
+            status
+        }
+    }
+
+    #[test]
+    fn an_offline_flush_returns_without_waiting() {
+        let shared = Shared::default();
+        assert!(!shared.send_flushed(&MachineFrame::Event { event: MachineEvent::Update { status: None } }));
+    }
+
+    #[test]
+    fn a_restart_waits_until_the_reply_is_written() {
+        use crate::machine::Launch;
+        use std::collections::BTreeMap;
+        use std::sync::atomic::AtomicBool;
+
+        let restarted = Arc::new(AtomicBool::new(false));
+        let machine = Machine::new(
+            Launch {
+                exe: "pinned".into(),
+                bins: BTreeMap::new(),
+                path_env: None,
+                settings: "settings".into(),
+                mcp_config: None,
+                reminders: false,
+                plugin_dir: "plugin".into(),
+                tutorial_helper: "tutorial".into(),
+                sock: "sock".into(),
+                vector_search: false,
+            },
+            None,
+            None,
+            |_| {},
+        );
+        machine.set_installer(Arc::new(ArmsRestart { restarted: restarted.clone() }));
+        let shared = Arc::new(Shared::default());
+        let (out, mut incoming) = channel::unbounded_channel();
+        *shared.out.lock().unwrap() = Some(out);
+        let at_write = restarted.clone();
+        let writer = std::thread::spawn(move || {
+            let outgoing = incoming.blocking_recv().unwrap();
+            assert!(!at_write.load(Ordering::SeqCst));
+            outgoing.wrote.unwrap().send(()).unwrap();
+            outgoing.text
+        });
+        finish_call(&shared, &machine, 7, Call::UpdateSelf);
+        let text = writer.join().unwrap();
+        let frame: Value = serde_json::from_str(&text).unwrap();
+        assert!(restarted.load(Ordering::SeqCst));
+        assert_eq!(frame["id"], 7);
+        assert_eq!(frame["ok"], serde_json::json!({ "state": "restarting", "to": "1.2.0" }));
+    }
+
+    struct HoldRestart {
+        started: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        restarted: Arc<AtomicBool>,
+    }
+
+    impl crate::machine::SelfUpdate for HoldRestart {
+        fn install(&self, machine: &Machine) -> crate::wire::UpdateStatus {
+            let restarted = self.restarted.clone();
+            machine.schedule_restart(Box::new(move || restarted.store(true, Ordering::SeqCst)));
+            machine.report(crate::wire::UpdateStatus::Restarting { to: "1.2.0".into() });
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            if let Some(release) = self.release.lock().unwrap().take() {
+                let _ = release.recv();
+            }
+            crate::wire::UpdateStatus::Restarting { to: "1.2.0".into() }
+        }
+    }
+
+    struct LetGo(Option<std::sync::mpsc::Sender<()>>);
+
+    impl Drop for LetGo {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[test]
+    fn a_different_call_does_not_restart_an_update() {
+        use crate::machine::Launch;
+        use std::collections::BTreeMap;
+        use std::sync::atomic::AtomicBool;
+
+        let restarted = Arc::new(AtomicBool::new(false));
+        let machine = Machine::new(
+            Launch {
+                exe: "pinned".into(),
+                bins: BTreeMap::new(),
+                path_env: None,
+                settings: "settings".into(),
+                mcp_config: None,
+                reminders: false,
+                plugin_dir: "plugin".into(),
+                tutorial_helper: "tutorial".into(),
+                sock: "sock".into(),
+                vector_search: false,
+            },
+            None,
+            None,
+            |_| {},
+        );
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let _let_go = LetGo(Some(release_tx));
+        machine.set_installer(Arc::new(HoldRestart {
+            started: Mutex::new(Some(started_tx)),
+            release: Mutex::new(Some(release_rx)),
+            restarted: restarted.clone(),
+        }));
+        let shared = Arc::new(Shared::default());
+        let (out, mut incoming) = channel::unbounded_channel();
+        *shared.out.lock().unwrap() = Some(out);
+        let writer = std::thread::spawn(move || {
+            while let Some(outgoing) = incoming.blocking_recv() {
+                if let Some(wrote) = outgoing.wrote {
+                    let _ = wrote.send(());
+                }
+            }
+        });
+        let updating = machine.clone();
+        let shared_update = shared.clone();
+        let update = std::thread::spawn(move || finish_call(&shared_update, &updating, 7, Call::UpdateSelf));
+        started_rx.recv().unwrap();
+        finish_call(&shared, &machine, 8, Call::Tabs);
+        assert!(!restarted.load(Ordering::SeqCst), "tabs restarted the update");
+        drop(_let_go);
+        update.join().unwrap();
+        assert!(restarted.load(Ordering::SeqCst), "the update call did not restart");
+        drop(shared);
+        writer.join().unwrap();
     }
 }

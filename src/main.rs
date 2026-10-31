@@ -7,8 +7,8 @@ mod commands;
 mod fonts;
 mod navigation;
 
-use pinned_core::machine::{Launch, Machine};
-use pinned_core::wire::{Call, MachineEvent, TabId};
+use pinned_core::machine::{Launch, Machine, SelfUpdate};
+use pinned_core::wire::{Call, MachineEvent, TabId, UpdateStatus};
 use pinned_core::{agent, connectors, reminders, uploads};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -46,13 +46,21 @@ enum View {
 /// Sync commands run one at a time on the main thread, which keeps keystrokes in order.
 #[tauri::command]
 fn machine_call(machine: State<Arc<Machine>>, call: Call) -> Result<serde_json::Value, String> {
-    machine.call(call)
+    finish_local(&machine, call)
 }
 
 #[tauri::command]
 async fn machine_call_slow(machine: State<'_, Arc<Machine>>, call: Call) -> Result<serde_json::Value, String> {
     let machine = machine.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || machine.call(call)).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || finish_local(&machine, call)).await.map_err(|e| e.to_string())?
+}
+
+fn finish_local(machine: &Machine, call: Call) -> Result<serde_json::Value, String> {
+    let (result, armed) = machine.finish_for_restart(call);
+    if armed {
+        machine.restart_now();
+    }
+    result
 }
 
 /// A dropped file's bytes, for a tab on another machine, which can't read this Mac's paths.
@@ -172,23 +180,82 @@ fn saved_opacity(config_dir: Option<PathBuf>) -> u8 {
         .unwrap_or(DEFAULT_OPACITY)
 }
 
-/// Returns the newer version when one is published, keeping it ready for `install_update`.
+async fn find_update(app: &AppHandle) -> Result<Option<Update>, String> {
+    app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())
+}
+
+async fn download_pending(panel: &Panel) -> Result<(), String> {
+    let Some(update) = panel.update.lock().unwrap().take() else {
+        return Err("no update pending".into());
+    };
+    update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn check_update(app: AppHandle, panel: State<'_, Panel>) -> Result<Option<String>, String> {
-    let update = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?;
+    let update = find_update(&app).await?;
     let version = update.as_ref().map(|u| u.version.clone());
     *panel.update.lock().unwrap() = update;
     Ok(version)
 }
 
 #[tauri::command]
-async fn install_update(app: AppHandle, panel: State<'_, Panel>, machine: State<'_, Arc<Machine>>) -> Result<(), String> {
-    let Some(update) = panel.update.lock().unwrap().take() else {
-        return Err("no update pending".into());
+async fn install_update(machine: State<'_, Arc<Machine>>) -> Result<serde_json::Value, String> {
+    let machine = machine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || finish_local(&machine, Call::UpdateSelf)).await.map_err(|e| e.to_string())?
+}
+
+struct DesktopUpdate {
+    app: AppHandle,
+}
+
+impl SelfUpdate for DesktopUpdate {
+    fn install(&self, machine: &Machine) -> UpdateStatus {
+        let status = UpdateStatus::Updating { to: String::new() };
+        machine.report(status.clone());
+        machine.keep_updating();
+        let app = self.app.clone();
+        let machine = machine.arc();
+        tauri::async_runtime::spawn(async move {
+            let status = desktop_install(&app, &machine).await;
+            if matches!(status, UpdateStatus::Restarting { .. }) {
+                machine.restart_now();
+            }
+        });
+        status
+    }
+}
+
+async fn desktop_install(app: &AppHandle, machine: &Machine) -> UpdateStatus {
+    let found = match find_update(app).await {
+        Ok(update) => update,
+        Err(reason) => return failed(machine, "", reason),
     };
-    update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
-    machine.quit();
-    app.restart();
+    let to = found.as_ref().map(|update| update.version.clone());
+    *app.state::<Panel>().update.lock().unwrap() = found;
+    let Some(to) = to else {
+        let status = UpdateStatus::UpToDate { version: env!("CARGO_PKG_VERSION").into() };
+        machine.report(status.clone());
+        return status;
+    };
+    machine.report(UpdateStatus::Updating { to: to.clone() });
+    if let Err(reason) = download_pending(&app.state::<Panel>()).await {
+        return failed(machine, &to, reason);
+    }
+    let (quitting, app) = (machine.arc(), app.clone());
+    machine.schedule_restart(Box::new(move || {
+        quitting.quit();
+        app.restart();
+    }));
+    let status = UpdateStatus::Restarting { to };
+    machine.report(status.clone());
+    status
+}
+
+fn failed(machine: &Machine, to: &str, reason: String) -> UpdateStatus {
+    let status = UpdateStatus::Failed { to: to.into(), reason };
+    machine.report(status.clone());
+    status
 }
 
 fn watch_reminders(app: AppHandle) {
@@ -342,7 +409,9 @@ fn main() {
             let config = app.path().app_config_dir().ok();
             let from_arg = std::env::args().nth(1).and_then(|d| dunce::canonicalize(d).ok()).filter(|p| p.is_dir());
             let handle = app.handle().clone();
+            let updater = handle.clone();
             let machine = Machine::new(launch, config.clone(), from_arg, move |event: MachineEvent| drop(handle.emit("machine", event)));
+            machine.set_installer(Arc::new(DesktopUpdate { app: updater }));
             app.manage(machine.clone());
             app.manage(Panel {
                 expanded: Mutex::new(LogicalSize::new(760.0, 460.0)),

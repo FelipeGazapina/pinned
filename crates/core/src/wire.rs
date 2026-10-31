@@ -496,6 +496,8 @@ pub enum Call {
     CancelTask { tab: TabId, task: String },
     /// `null`. Types that finished task's notice into the tab now. The tab must own the task.
     DeliverTask { tab: TabId, task: String },
+    /// The machine's `UpdateStatus`.
+    UpdateSelf,
 }
 
 fn pulls_limit() -> usize {
@@ -571,8 +573,27 @@ impl Call {
                 | Call::MemorySave { .. }
                 | Call::MemoryForget { .. }
                 | Call::MemoryStatus { .. }
+                | Call::UpdateSelf
         )
     }
+}
+
+/// What a machine reports about replacing itself. `to` is the release it is moving to.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UpdateStatus {
+    UpToDate { version: String },
+    Updating {
+        #[serde(default)]
+        to: String,
+    },
+    Restarting { to: String },
+    Failed {
+        #[serde(default)]
+        to: String,
+        reason: String,
+    },
+    Cannot { reason: String },
 }
 
 /// A tab whose conversation holds what a `SearchThreads` asked for.
@@ -642,6 +663,8 @@ pub enum MachineEvent {
         #[serde(default = "accounts::default_account")]
         account: AccountId,
     },
+    /// Some while this process is installing a release, None when it connects with nothing in progress.
+    Update { status: Option<UpdateStatus> },
 }
 
 /// Account-level calls, answered by the hub. Names and arguments match the app's Tauri
@@ -751,6 +774,12 @@ pub struct MachineView {
     /// The Upstash Box the machine runs in, which pinned deletes with it once its session ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstash_box: Option<String>,
+    /// The build the machine last signed in with. Empty until it has.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
+    /// The phase the machine last reported. Absent until it reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<UpdateStatus>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -1141,7 +1170,7 @@ mod tests {
             ToClient::Event { machine: "m1".into(), event: MachineEvent::Exit { tab: "tab-1".into() } },
             json!({ "type": "event", "machine": "m1", "event": { "kind": "exit", "tab": "tab-1" } }),
         );
-        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000, upstash_box: None };
+        let machine = MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1792400000, upstash_box: None, version: String::new(), update: None };
         round_trip(
             ToClient::Hello {
                 account: AccountView { id: "a1".into(), email: "ana@acme.dev".into() },
@@ -1201,8 +1230,40 @@ mod tests {
             json!({ "type": "call", "id": 3, "call": { "cmd": "resize_pty", "tab": "tab-2", "cols": 80, "rows": 24 } }),
         );
         round_trip(
-            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None } },
+            ToMachine::Hello { machine: MachineView { id: "m2".into(), name: "vps".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None, version: String::new(), update: None } },
             json!({ "type": "hello", "machine": { "id": "m2", "name": "vps", "os": "linux", "online": true, "last_seen": 0 } }),
+        );
+    }
+
+    #[test]
+    fn an_update_status_round_trips_and_an_old_machine_view_still_reads() {
+        round_trip(Call::UpdateSelf, json!({ "cmd": "update_self" }));
+        assert!(Call::UpdateSelf.may_wait());
+        round_trip(UpdateStatus::UpToDate { version: "0.16.0".into() }, json!({ "state": "up_to_date", "version": "0.16.0" }));
+        round_trip(UpdateStatus::Updating { to: String::new() }, json!({ "state": "updating", "to": "" }));
+        round_trip(UpdateStatus::Updating { to: "0.16.0".into() }, json!({ "state": "updating", "to": "0.16.0" }));
+        round_trip(UpdateStatus::Restarting { to: "0.16.0".into() }, json!({ "state": "restarting", "to": "0.16.0" }));
+        round_trip(UpdateStatus::Failed { to: String::new(), reason: "checksum mismatch".into() }, json!({ "state": "failed", "to": "", "reason": "checksum mismatch" }));
+        round_trip(
+            UpdateStatus::Failed { to: "0.16.0".into(), reason: "checksum mismatch".into() },
+            json!({ "state": "failed", "to": "0.16.0", "reason": "checksum mismatch" }),
+        );
+        let omitted: UpdateStatus = serde_json::from_value(json!({ "state": "updating" })).unwrap();
+        assert_eq!(omitted, UpdateStatus::Updating { to: String::new() });
+        let omitted_failure: UpdateStatus = serde_json::from_value(json!({ "state": "failed", "reason": "checksum mismatch" })).unwrap();
+        assert_eq!(omitted_failure, UpdateStatus::Failed { to: String::new(), reason: "checksum mismatch".into() });
+        round_trip(UpdateStatus::Cannot { reason: "this build cannot install a release".into() }, json!({ "state": "cannot", "reason": "this build cannot install a release" }));
+        round_trip(MachineEvent::Update { status: None }, json!({ "kind": "update", "status": null }));
+        round_trip(
+            MachineEvent::Update { status: Some(UpdateStatus::Restarting { to: "0.16.0".into() }) },
+            json!({ "kind": "update", "status": { "state": "restarting", "to": "0.16.0" } }),
+        );
+        let old: MachineView = serde_json::from_value(json!({ "id": "m1", "name": "mac-mini", "os": "macos", "online": true, "last_seen": 1 })).unwrap();
+        assert_eq!(old.version, "");
+        assert_eq!(old.update, None);
+        round_trip(
+            MachineView { id: "m1".into(), name: "mac-mini".into(), os: "macos".into(), online: true, last_seen: 1, upstash_box: None, version: "0.16.0".into(), update: Some(UpdateStatus::UpToDate { version: "0.16.0".into() }) },
+            json!({ "id": "m1", "name": "mac-mini", "os": "macos", "online": true, "last_seen": 1, "version": "0.16.0", "update": { "state": "up_to_date", "version": "0.16.0" } }),
         );
     }
 }

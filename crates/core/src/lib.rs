@@ -1,6 +1,7 @@
 pub mod account;
 pub mod accounts;
 pub mod agent;
+pub mod boot;
 pub mod branches;
 pub mod cli;
 pub mod commands;
