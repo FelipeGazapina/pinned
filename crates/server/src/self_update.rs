@@ -154,6 +154,7 @@ pub(crate) fn verify(pubkey: &str, sums: &str, signature: &str, file_name: &str,
     }
 }
 
+#[cfg(test)]
 pub(crate) fn apply(dest: &Path, file_name: &str, bytes: &[u8], sums: &str, signature: &str, pubkey: &str) -> Result<(), String> {
     verify(pubkey, sums, signature, file_name, bytes)?;
     stage(dest, bytes)
