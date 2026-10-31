@@ -7,6 +7,8 @@ const panelBody = document.getElementById("panel-body");
 
 const guiOn = () => document.body.dataset.mode === "gui";
 const POLL_MS = 1200;
+/** A streaming tab nudges every 40 ms. Next to the machine a read takes no time, so reads of one tab start this far apart. */
+const THREAD_READ_GAP_MS = 100;
 const narrow = (px) => matchMedia(`(max-width: ${px}px)`).matches;
 
 const threads = new Map();
@@ -135,7 +137,10 @@ async function fetchThread(tab) {
   t.fetching = true;
   try {
     do {
+      const wait = (t.readAt ?? -Infinity) + THREAD_READ_GAP_MS - performance.now();
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
       t.again = false;
+      t.readAt = performance.now();
       const before = drawnOf(t);
       let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: t.next });
       t.error = null;
