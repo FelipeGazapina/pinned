@@ -98,6 +98,9 @@ pub struct State {
     /// moved to another account starts its Claude files over instead of taking them for deleted.
     #[serde(default)]
     claude_homes: BTreeMap<String, PathBuf>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    loaded_from: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, schemars::JsonSchema)]
@@ -117,11 +120,19 @@ impl State {
             }
             state.claude_homes.entry(key.clone()).or_insert_with(|| legacy_claude_home.to_owned());
         }
+        state.loaded_from = Some(file.to_owned());
         state
     }
 
-    pub fn save(&self, file: &Path) {
-        let _ = std::fs::write(file, serde_json::to_vec(self).unwrap());
+    pub fn save(&mut self, file: &Path) {
+        self.loaded_from = Some(file.to_owned());
+        self.persist();
+    }
+
+    fn persist(&self) {
+        if let Some(file) = &self.loaded_from {
+            let _ = std::fs::write(file, serde_json::to_vec(self).unwrap());
+        }
     }
 
     fn hash(&mut self, file: &Path) -> Option<(String, u64)> {
@@ -168,14 +179,19 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
         }
     }
     let agreed_key = format!("{key} {}", checkout.path.display());
-    let mut agreed = state.agreed.remove(&agreed_key).unwrap_or_default();
+    let mut agreed = state.agreed.get(&agreed_key).cloned().unwrap_or_default();
     if let Some(home) = &checkout.claude_home {
         if state.claude_homes.insert(agreed_key.clone(), home.clone()).is_some_and(|before| &before != home) {
             agreed.retain(|path, _| !path.starts_with("claude/"));
+            if let Some(saved) = state.agreed.get_mut(&agreed_key) {
+                saved.retain(|path, _| !path.starts_with("claude/"));
+            }
+            state.persist();
         }
     }
-    let synced = exchange(hub, state, key, &mut agreed, &local, &|path| roots.local(path), now, true)?;
+    let synced = exchange(hub, state, key, &agreed_key, &mut agreed, &local, &|path| roots.local(path), now, true)?;
     state.agreed.insert(agreed_key, agreed);
+    state.persist();
     Ok(synced)
 }
 
@@ -183,6 +199,7 @@ fn exchange(
     hub: &impl Hub,
     state: &mut State,
     key: &str,
+    agreed_key: &str,
     mut agreed: &mut BTreeMap<String, String>,
     local: &BTreeMap<String, (String, u64)>,
     resolve: &dyn Fn(&str) -> Option<PathBuf>,
@@ -190,8 +207,6 @@ fn exchange(
     sessions: bool,
 ) -> Result<Synced, String> {
     let remote: BTreeMap<String, Entry> = hub.list(key)?.into_iter().map(|e| (e.path.clone(), e)).collect();
-    // A file of a folder this checkout doesn't share, such as Claude's for a Codex project, is
-    // neither fetched nor taken for deleted.
     let paths: BTreeSet<String> = local.keys().chain(remote.keys()).chain(agreed.keys()).filter(|p| resolve(p).is_some()).cloned().collect();
     let (mut push, mut pull, mut merge) = (vec![], vec![], vec![]);
     #[cfg(unix)]
@@ -241,7 +256,6 @@ fn exchange(
     }
     #[cfg(unix)]
     if !repairs.is_empty() {
-        // A content push would write these bytes and their mtime over whatever landed since list.
         hub.mark_executable(key, repairs)?;
     }
     let mut synced = Synced::default();
@@ -254,6 +268,7 @@ fn exchange(
     }
 
     let mut batch: Vec<File> = vec![];
+    let mut pending: Vec<(String, Option<String>)> = vec![];
     let mut size = 0;
     for path in push {
         let file = match resolve(&path).filter(|f| f.is_file()) {
@@ -264,26 +279,31 @@ fn exchange(
                 if data.len() as u64 > FILE_LIMIT {
                     continue;
                 }
+                let mode = if key == PLUGINS_KEY {
+                    heal_owner_execute(&target)?;
+                    executable(&target)?
+                } else {
+                    None
+                };
                 File {
-                    entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: if key == PLUGINS_KEY { executable(&target)? } else { None } },
+                    entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: mode },
                     data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
                 }
             }
         };
         size += file.entry.size;
-        match &file.data {
-            Some(_) => agreed.insert(path.clone(), file.entry.sha.clone()),
-            None => agreed.remove(&path),
-        };
+        pending.push((file.entry.path.clone(), file.data.as_ref().map(|_| file.entry.sha.clone())));
         batch.push(file);
         synced.pushed.push(path);
         if size >= BATCH {
             hub.push(key, std::mem::take(&mut batch))?;
+            commit_agreed(state, agreed_key, agreed, &std::mem::take(&mut pending));
             size = 0;
         }
     }
     if !batch.is_empty() {
-        hub.push(key, batch)?;
+        hub.push(key, std::mem::take(&mut batch))?;
+        commit_agreed(state, agreed_key, agreed, &std::mem::take(&mut pending));
     }
 
     let mut wanted: Vec<String> = vec![];
@@ -291,26 +311,27 @@ fn exchange(
     let fetch = |wanted: Vec<String>, agreed: &mut BTreeMap<String, String>, synced: &mut Synced, state: &mut State| -> Result<(), String> {
         for file in hub.pull(key, wanted)? {
             let Some(target) = resolve(&file.entry.path) else { continue };
-            match &file.data {
+            let update = match &file.data {
                 None => {
                     let _ = std::fs::remove_file(&target);
-                    agreed.remove(&file.entry.path);
+                    None
                 }
                 Some(data) => {
                     let bytes = unpack(data)?;
                     let mode = if key == PLUGINS_KEY { file.entry.executable } else { None };
                     write(&target, &bytes, Some(file.entry.modified), mode)?;
                     state.hash(&target);
-                    agreed.insert(file.entry.path.clone(), file.entry.sha.clone());
+                    Some(file.entry.sha.clone())
                 }
-            }
-            synced.pulled.push(file.entry.path);
+            };
+            let path = file.entry.path.clone();
+            synced.pulled.push(path.clone());
+            commit_agreed(state, agreed_key, agreed, &[(path, update)]);
         }
         Ok(())
     };
     for path in pull {
         if !remote.contains_key(&path) {
-            // Deleted here and never on the hub: nothing to fetch, and nothing agreed anymore.
             agreed.remove(&path);
             continue;
         }
@@ -432,9 +453,32 @@ pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now:
     let agreed_key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
     let mut agreed = state.agreed.get(&agreed_key).cloned().unwrap_or_default();
     let keep = conflicting_user_skills(&local, &agreed, &hub.list(PLUGINS_KEY)?);
-    let synced = exchange(hub, state, PLUGINS_KEY, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false)?;
+    let synced = exchange(hub, state, PLUGINS_KEY, &agreed_key, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false)?;
     state.agreed.insert(agreed_key, agreed);
+    state.persist();
     Ok(synced)
+}
+
+fn commit_agreed(state: &mut State, agreed_key: &str, agreed: &mut BTreeMap<String, String>, updates: &[(String, Option<String>)]) {
+    if updates.is_empty() {
+        return;
+    }
+    {
+        let saved = state.agreed.entry(agreed_key.to_owned()).or_default();
+        for (path, sha) in updates {
+            match sha {
+                Some(sha) => {
+                    agreed.insert(path.clone(), sha.clone());
+                    saved.insert(path.clone(), sha.clone());
+                }
+                None => {
+                    agreed.remove(path);
+                    saved.remove(path);
+                }
+            }
+        }
+    }
+    state.persist();
 }
 
 fn conflicting_user_skills(local: &BTreeMap<String, (String, u64)>, agreed: &BTreeMap<String, String>, remote: &[Entry]) -> BTreeSet<String> {
@@ -513,6 +557,7 @@ fn mirror(plugin: &crate::commands::EnabledPlugin, dest: &Path) -> Result<(), St
     if is_symlink(dest) {
         return Ok(());
     }
+    heal_install(&plugin.path)?;
     copy_tree(&plugin.path, dest, &plugin.id, Path::new(""))?;
     let marker = dest.join(".pinned-plugin.json");
     let body = serde_json::to_vec(&serde_json::json!({ "version": plugin.version, "gitCommitSha": plugin.git_commit_sha })).unwrap();
@@ -766,6 +811,7 @@ fn unix_mode_fix(path: &str, remote: &BTreeMap<String, Entry>, resolve: &dyn Fn(
     if !file.is_file() {
         return Ok(None);
     }
+    heal_owner_execute(&file)?;
     Ok(mode_fix(executable(&file)?, remote_exec))
 }
 
@@ -774,19 +820,60 @@ fn executable(path: &Path) -> Result<Option<bool>, String> {
     {
         use std::os::unix::fs::PermissionsExt;
         let Some(mode) = std::fs::metadata(path).ok().map(|meta| meta.permissions().mode()) else { return Ok(None) };
-        // The owner runs the hook.
-        let owner = if mode & 0o111 != 0 && mode & 0o100 == 0 {
-            set_owner_execute(path)?;
-            true
-        } else {
-            mode & 0o100 != 0
-        };
-        return Ok(Some(owner));
+        return Ok(Some(mode & 0o111 != 0));
     }
     #[cfg(not(unix))]
     {
         let _ = path;
         Ok(None)
+    }
+}
+
+fn heal_owner_execute(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(mode) = std::fs::metadata(path).ok().map(|meta| meta.permissions().mode()) else { return Ok(()) };
+        if mode & 0o111 != 0 && mode & 0o100 == 0 {
+            set_owner_execute(path)?;
+        }
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+fn heal_install(dir: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        fn rec(dir: &Path) -> Result<(), String> {
+            if is_symlink(dir) {
+                return Ok(());
+            }
+            let Ok(entries) = std::fs::read_dir(dir) else { return Ok(()) };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if is_symlink(&path) {
+                    continue;
+                }
+                let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+                if meta.is_dir() {
+                    rec(&path)?;
+                } else if meta.is_file() {
+                    heal_owner_execute(&path)?;
+                }
+            }
+            Ok(())
+        }
+        return rec(dir);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
     }
 }
 
@@ -811,7 +898,6 @@ fn write(target: &Path, bytes: &[u8], modified: Option<u64>, executable: Option<
     Ok(())
 }
 
-// A directory this process owns still allows chmod. Tests set this to stand in for EPERM.
 #[cfg(all(unix, test))]
 thread_local! {
     static DENY_OWNER_EXECUTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -835,7 +921,6 @@ fn apply_executable(file: &std::fs::File, executable: bool) -> Result<(), String
         use std::os::unix::fs::PermissionsExt;
         let mut perms = file.metadata().map_err(|e| e.to_string())?.permissions();
         let mode = perms.mode();
-        // The owner runs the hook. 0o111 would turn mode 600 into 711.
         perms.set_mode(if executable { mode | 0o100 } else { mode & !0o111 });
         file.set_permissions(perms).map_err(|e| e.to_string())?;
     }
@@ -1969,7 +2054,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn saved_agreed(state: &State, share: &PluginShare, file: &Path) -> BTreeMap<String, String> {
+    fn saved_agreed(state: &mut State, share: &PluginShare, file: &Path) -> BTreeMap<String, String> {
         state.save(file);
         let loaded = State::load(file, &file.with_extension("legacy"));
         let key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
@@ -2036,7 +2121,7 @@ mod tests {
         hub.fail.set(true);
         let failed = sync_plugins(&hub, &mut state, &mac, now);
         assert_eq!(failed, Err("the hub did not answer within 60 seconds".into()));
-        let agreed = saved_agreed(&state, &mac, &root.join("state.json"));
+        let agreed = saved_agreed(&mut state, &mac, &root.join("state.json"));
         assert_eq!(agreed.get(USER_SKILL).cloned(), Some(sha(b"one\n")));
         assert_eq!(agreed.get(HOOK).cloned(), Some(sha(b"#!/bin/sh\necho session-start\n")));
         assert_eq!(unpack(hub.inner.0.borrow()[USER_SKILL].data.as_deref().unwrap()).unwrap(), b"one\n");
@@ -2076,7 +2161,7 @@ mod tests {
         let deny = DenyOwnerExecute::arm();
         let failed = sync_plugins(&hub, &mut mini_state, &mini, now);
         assert_eq!(failed, Err("Operation not permitted (os error 1)".into()));
-        let agreed = saved_agreed(&mini_state, &mini, &root.join("state.json"));
+        let agreed = saved_agreed(&mut mini_state, &mini, &root.join("state.json"));
         assert_eq!(agreed.get(USER_SKILL).cloned(), Some(sha(b"one\n")));
         assert_eq!(agreed.get(HOOK).cloned(), Some(sha(b"#!/bin/sh\necho session-start\n")));
         drop(deny);
@@ -2111,11 +2196,22 @@ mod tests {
         let (hook, mac, _) = executable_hook(&root);
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o654)).unwrap();
-        sync_plugins(&hub, &mut State::default(), &mac, SystemTime::now()).unwrap();
+        let skill = mac.claude_home.join("skills/greet/SKILL.md");
+        put(&skill, "hello\n");
+        std::fs::set_permissions(&skill, std::fs::Permissions::from_mode(0o654)).unwrap();
+        let mut state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut state, &mac, now).unwrap();
         let mirror = mac.dir.join(HOOK);
         assert_eq!(mode_bits(&hook), 0o754, "install mode is {:o}", mode_bits(&hook));
         assert_eq!(mode_bits(&mirror), 0o754, "mirror mode is {:o}", mode_bits(&mirror));
+        assert_eq!(mode_bits(&skill), 0o754, "skill mode is {:o}", mode_bits(&skill));
         assert_eq!(hub.0.borrow()[HOOK].entry.executable, Some(true));
+        let mtime = std::fs::metadata(&mirror).unwrap().modified().unwrap();
+        std::fs::set_permissions(&mirror, std::fs::Permissions::from_mode(0o654)).unwrap();
+        std::fs::File::options().write(true).open(&mirror).unwrap().set_modified(mtime).unwrap();
+        sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        assert_eq!(mode_bits(&mirror), 0o754, "healed mirror mode is {:o}", mode_bits(&mirror));
         let _ = std::fs::remove_dir_all(root);
     }
 
