@@ -110,14 +110,34 @@ struct Hashed {
     sha: String,
 }
 
+fn read(file: &Path) -> Result<State, String> {
+    match std::fs::read(file) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("the sync state {} is corrupt ({e}); restore or remove it to sync again", file.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
+        Err(e) => Err(format!("could not read the sync state {}: {e}", file.display())),
+    }
+}
+
+/// Why the sync state in `file` does not load, or None when it does.
+pub fn unreadable(file: &Path) -> Option<String> {
+    read(file).err()
+}
+
+/// Moves an unreadable sync state to `<file>.damaged`, so the next load starts with no baseline,
+/// as on a new machine. A readable one stays.
+pub fn set_aside(file: &Path) -> Result<(), String> {
+    if read(file).is_ok() {
+        return Ok(());
+    }
+    let mut damaged = file.as_os_str().to_owned();
+    damaged.push(".damaged");
+    std::fs::rename(file, &damaged).map_err(|e| format!("could not move {} aside: {e}", file.display()))
+}
+
 impl State {
     /// A state saved before accounts names no Claude home; its files were in `legacy_claude_home`.
     pub fn load(file: &Path, legacy_claude_home: &Path) -> Result<State, String> {
-        let mut state: State = match std::fs::read(file) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("the sync state {} is corrupt ({e}); restore or remove it to sync again", file.display()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
-            Err(e) => return Err(format!("could not read the sync state {}: {e}", file.display())),
-        };
+        let mut state = read(file)?;
         for key in state.agreed.keys() {
             if key.starts_with(PLUGINS_KEY) {
                 continue;

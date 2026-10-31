@@ -476,8 +476,13 @@ impl Machine {
             }
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
-            Call::SyncStopped => Ok(Value::Null),
-            Call::ResetSync => Ok(Value::Null),
+            Call::SyncStopped => json(self.sync_file.as_deref().and_then(sync::unreadable)),
+            Call::ResetSync => {
+                if let Some(file) = &self.sync_file {
+                    sync::set_aside(file)?;
+                }
+                Ok(Value::Null)
+            }
             Call::ProjectHistory { path, session } => {
                 let mut turns = self.project_history(&path);
                 if let Some(session) = session {
