@@ -7,6 +7,13 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_NOTES: On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. Or click the update button in a running pinned.
+
 jobs:
   draft:
     runs-on: ubuntu-latest
@@ -16,11 +23,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          notes="On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. Or click the update button in a running pinned."
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag already exists"
+            gh release edit "$tag" --draft=true --title "pinned $tag" --notes "$RELEASE_NOTES"
           else
-            gh release create "$tag" --draft --title "pinned $tag" --notes "$notes"
+            gh release create "$tag" --draft --title "pinned $tag" --notes "$RELEASE_NOTES"
           fi
 
   build:
@@ -50,7 +56,8 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: swatinem/rust-cache@v2
       - run: npm ci
-      - uses: tauri-apps/tauri-action@v0
+      - id: tauri
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -58,9 +65,29 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: pinned ${{ github.ref_name }}
-          releaseBody: On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. Or click the update button in a running pinned.
+          releaseBody: ${{ env.RELEASE_NOTES }}
           releaseDraft: true
+          includeUpdaterJson: false
           args: ${{ matrix.args }}
+      - name: Write this leg's updater fragment
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+          TARGET: ${{ matrix.target }}
+          APP_VERSION: ${{ steps.tauri.outputs.appVersion }}
+        run: |
+          bash scripts/updater-fragment.sh \
+            --target "$TARGET" \
+            --tag "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --version "$APP_VERSION" \
+            --paths "$ARTIFACT_PATHS" \
+            --out updater-fragment.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: updater-${{ matrix.target }}
+          path: updater-fragment.json
+          if-no-files-found: error
 
   linux-node:
     needs: draft
@@ -101,12 +128,24 @@ jobs:
         with:
           name: linux-node-binaries
           path: node-release
-      - name: Download the latest.json the desktop jobs uploaded
+      - run: ls -la node-release
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: updater-*
+          path: updater-fragments
+      - name: Assemble latest.json
+        run: |
+          pub_date=$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z")')
+          bash scripts/assemble-latest-json.sh \
+            --notes "$RELEASE_NOTES" \
+            --pub-date "$pub_date" \
+            --tag "$GITHUB_REF_NAME" \
+            --out node-release/latest.json \
+            updater-fragments
+      - name: Upload latest.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release download "$GITHUB_REF_NAME" --pattern latest.json --dir node-release --clobber
-          test -s node-release/latest.json
+        run: gh release upload "$GITHUB_REF_NAME" node-release/latest.json --clobber
       - name: Sign checksums of those exact bytes
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -124,7 +163,7 @@ jobs:
             --clobber
 
   publish:
-    needs: [build, sign-node]
+    needs: [build, linux-node, sign-node]
     runs-on: ubuntu-latest
     steps:
       - name: Publish the release
