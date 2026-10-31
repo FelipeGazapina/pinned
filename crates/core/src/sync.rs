@@ -327,8 +327,10 @@ fn exchange(
             let Some(target) = resolve(&file.entry.path) else { continue };
             let update = match &file.data {
                 None => {
-                    let _ = std::fs::remove_file(&target);
-                    None
+                    match std::fs::remove_file(&target) {
+                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("could not delete {}: {e}", target.display())),
+                        _ => None,
+                    }
                 }
                 Some(data) => {
                     let bytes = unpack(data)?;
