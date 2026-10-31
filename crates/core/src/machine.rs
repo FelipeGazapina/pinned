@@ -2224,7 +2224,7 @@ impl Machine {
             std::thread::sleep(std::time::Duration::from_secs(1));
             let Some(machine) = me.upgrade() else { return };
             if machine.quitting.load(Ordering::Relaxed) {
-                return;
+                continue;
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
