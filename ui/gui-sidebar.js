@@ -299,7 +299,7 @@ function renderSidebar() {
   const scope = projectGroups().find((g) => g.key === ui.project);
   if (!scope && !projectListsPending()) ui.project = "";
   const where = scope ? projectWhere(PinnedProjects.sessionOn(scope.checkouts, machineDirectory())) : "";
-  const trigger = `${scope ? projectIcon(scope.name, scope.tab) : icon("folder")}<span class="label">${esc(scope?.name ?? "All projects")}</span>${where}${icon("chevron-down")}`;
+  const trigger = `${scope ? projectIcon(scope.name, scope.tab) : icon("folder")}${projectNameMark(scope?.name ?? "All projects")}${where}${icon("chevron-down")}`;
   if (projectFilter.innerHTML !== trigger) projectFilter.innerHTML = trigger;
   projectFilter.setAttribute("aria-label", scope ? `Filter threads by project: ${scope.name}` : "Filter threads by project");
   const inScope = tabs.filter((t) => !ui.project || projectKeyOf(t) === ui.project);
@@ -1416,6 +1416,10 @@ function projectGroups() {
   const listed = Object.fromEntries([...machines].map(([id, machine]) => [id, machine.projects ?? []]));
   return sortedProjects(PinnedProjects.groupProjects({ threads, listed, grouping: !!sideSettings.grouping }), (g) => g.tabs);
 }
+function projectNameMark(name) {
+  const text = esc(name);
+  return `<span class="label" title="${text}">${text}</span>`;
+}
 function projectWhere(here) {
   const detail = here.also.length ? `${here.label} (${here.also.join(", ")})` : here.label;
   return `<span class="where" title="${esc(detail)}">${esc(here.label)}</span>`;
@@ -1445,7 +1449,7 @@ function openProjectMenu() {
       ? shown.map((g, i) => {
           const where = g.key ? projectWhere(PinnedProjects.sessionOn(g.checkouts, directory)) : "";
           const gears = g.key ? `<button type="button" class="gear" data-orchestrate="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Open the ${esc(g.name)} orchestrator">${icon("bot")}</button><button type="button" class="gear" data-gear="${esc(g.key)}" tabindex="-1" aria-hidden="true" title="Project settings for ${esc(g.name)}">${icon("gear")}</button>` : "";
-          return `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(g.key)}" aria-selected="${g.key === ui.project}">${g.key ? projectIcon(g.name, g.tab) : icon("folder")}<span class="label">${esc(g.name)}</span>${where}${gears}</div>`;
+          return `<div role="option" class="item${i === hit ? " hit" : ""}" data-project="${esc(g.key)}" aria-selected="${g.key === ui.project}">${g.key ? projectIcon(g.name, g.tab) : icon("folder")}${projectNameMark(g.name)}${where}${gears}</div>`;
         }).join("")
       : `<p class="empty">No matching projects.</p>`;
   };
