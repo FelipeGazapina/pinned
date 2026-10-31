@@ -236,7 +236,6 @@ function paletteProjects() {
 /** A thread without a project runs in the home folder, T3 Code's scratch project. */
 const isScratch = (p) => tilde(p.path) === "~";
 const tabOfProjectAt = (p) => tabs.filter((t) => t.machine === p.machine && projectOfTab(t) === p.path).sort((a, b) => latestUserAt(b) - latestUserAt(a))[0];
-/** ProjectLocationDescription: a remote project's machine icon, where it is, and its folder. */
 const projectSubHtml = (p, directory) => {
   const here = PinnedProjects.sessionOn([{ machine: p.machine, path: p.path }], directory);
   return `<span class="part">${p.machine === LOCAL ? "" : icon("monitor")}<span>${esc(here.label)}</span></span>${metaDot}<span class="cut">${esc(here.path)}</span>`;
