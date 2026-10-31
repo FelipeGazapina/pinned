@@ -294,6 +294,7 @@ function choiceButtons() {
       const where = document.createElement("span");
       where.className = "where";
       where.textContent = choice.where;
+      where.title = choice.where;
       row.append(where);
       button.append(row);
     } else if (choice.name) {

@@ -7,8 +7,8 @@ Mobile web UI sent the prompt on Enter because desktop uses Enter-to-send when t
 
 ## Solution
 - `touchComposer()` detects coarse pointer without a fine pointer (`matchMedia`).
-- `composerEnterIntent()` returns `send` vs `newline` vs `none`; touch always newlines on Enter.
-- `prompt.enterKeyHint = "enter"` on touch; send button title omits Enter shortcut text.
+- `composerEnterIntent()` returns `send` vs `newline` vs `none`. Plain Enter newlines on touch. Cmd or Ctrl+Enter still sends.
+- `prompt.enterKeyHint = "enter"` on touch. The send button title names ⌘Enter or CtrlEnter. The settings sentence names that chord on a hardware keyboard.
 - Settings General page shows static copy instead of the send-shortcut `<select>` on touch.
 - `ui/gui-composer.css`: 40px send button on `(pointer: coarse)`.
 
@@ -16,4 +16,4 @@ Mobile web UI sent the prompt on Enter because desktop uses Enter-to-send when t
 `ui/composer-enter.test.js` exercises `composerEnterIntent`, `touchComposer`, and `triggerKey` Enter picking via vm slices of `gui-composer.js`.
 
 ## Verification
-`node --test ui/*.test.js` — 36 tests pass. No browser screenshot (GUI boot too heavy for this run).
+`node --test ui/*.test.js`. No browser screenshot (GUI boot too heavy for this run).
