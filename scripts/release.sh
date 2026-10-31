@@ -31,6 +31,9 @@ fi
 git commit -am "Release v$version"
 git tag "v$version"
 if ! git push --atomic origin HEAD:refs/heads/main "refs/tags/v$version"; then
+  pushed=$(git ls-remote origin "refs/tags/v$version") ||
+    refuse "git push failed and origin cannot be read, so main keeps the release commit and v$version. Check origin before you run the release again."
+  [[ -z "$pushed" ]] || refuse "git push failed, but origin has v$version, so the release went out. Fetch origin before you change anything."
   git tag -d "v$version" > /dev/null
   git reset -q --hard "$start"
   refuse "the push was rejected, so origin has no new main and no v$version. Pull main, then run the release again."

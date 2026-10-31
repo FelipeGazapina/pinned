@@ -55,7 +55,7 @@ A tag without a suffix takes latest when it is not older than the current latest
 - The tree is clean, and the current branch is `main`.
 - `HEAD` equals `origin/main` after a fetch.
 
-It pushes `main` and the tag in one `git push --atomic`, so origin gets both or neither. If another session moves `origin/main` while the release builds, the push is rejected. The script then deletes the local tag and resets `main` to the commit it started from.
+It pushes `main` and the tag in one `git push --atomic`, so origin gets both or neither. If another session moves `origin/main` while the release builds, the push is rejected. The script then deletes the local tag and resets `main` to the commit it started from. It first reads origin with `git ls-remote`. If origin already has the tag, the connection dropped after origin took the push, and the script keeps the release commit and the tag. It also keeps them when it cannot read origin.
 
 A version without a suffix writes `crates/core/wire-contract/<version>.json`. A suffixed version writes no snapshot, because `AGENTS.md` makes every later hub honor every snapshot and the hub never runs a release candidate. A release candidate that someone installs by hand gets no compatibility promise from later hubs.
 
