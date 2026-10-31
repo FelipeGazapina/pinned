@@ -218,9 +218,7 @@ impl SelfUpdate for DesktopUpdate {
         let machine = machine.arc();
         tauri::async_runtime::spawn(async move {
             let status = desktop_install(&app, &machine).await;
-            if matches!(status, UpdateStatus::Restarting { .. }) {
-                machine.restart_now();
-            }
+            machine.restart_if_replacing(&status);
         });
         status
     }

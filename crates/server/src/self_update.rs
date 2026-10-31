@@ -19,7 +19,7 @@ pub const RELEASE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYy
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const DOWNLOAD_CAP: u64 = 128 * 1024 * 1024;
-const CONNECT_WAIT: Duration = Duration::from_secs(60);
+const READY_WAIT: Duration = Duration::from_secs(60);
 const ALLOW_LEGACY_SIGNATURES: bool = false;
 
 pub struct NodeUpdate {
@@ -41,6 +41,7 @@ pub(crate) struct Plan {
     pub program: PathBuf,
     pub args: Vec<std::ffi::OsString>,
     pub cwd: PathBuf,
+    pub proof: String,
 }
 
 impl SelfUpdate for NodeUpdate {
@@ -157,7 +158,7 @@ impl NodeUpdate {
         if let Err(reason) = verify(pubkey, &sums, &signature, &name, &bytes) {
             return failed(report, &version, reason);
         }
-        match stage_planned(dest, &bytes, plan_for(dest)) {
+        match stage_planned(dest, &bytes, working_dir()) {
             Ok(plan) => (UpdateStatus::Restarting { to: version }, Some(plan)),
             Err(reason) => failed(report, &version, reason),
         }
@@ -177,12 +178,12 @@ pub(crate) fn verify(pubkey: &str, sums: &str, signature: &str, file_name: &str,
 }
 
 #[cfg(test)]
-pub(crate) fn apply(dest: &Path, file_name: &str, bytes: &[u8], sums: &str, signature: &str, pubkey: &str) -> Result<(), String> {
+pub(crate) fn apply(dest: &Path, file_name: &str, bytes: &[u8], sums: &str, signature: &str, pubkey: &str) -> Result<String, String> {
     verify(pubkey, sums, signature, file_name, bytes)?;
     stage(dest, bytes)
 }
 
-pub(crate) fn stage(dest: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn stage(dest: &Path, bytes: &[u8]) -> Result<String, String> {
     let name = dest.file_name().ok_or_else(|| format!("{} has no name", dest.display()))?;
     let name = name.to_string_lossy();
     let bak = dest.with_file_name(format!("{name}.bak"));
@@ -196,7 +197,8 @@ pub(crate) fn stage(dest: &Path, bytes: &[u8]) -> Result<(), String> {
         restore(dest)?;
     }
     copy_durable(dest, &bak)?;
-    write_durable(&marker, b"0").map_err(|error| format!("could not mark {} unproven: {error}", dest.display()))?;
+    let proof = sha256(bytes);
+    write_durable(&marker, format!("{proof}\n").as_bytes()).map_err(|error| format!("could not mark {} unproven: {error}", dest.display()))?;
     let staged = (|| {
         std::fs::write(&tmp, bytes).map_err(|error| format!("could not write {}: {error}", tmp.display()))?;
         std::fs::set_permissions(&tmp, Permissions::from_mode(0o755)).map_err(|error| format!("could not mark {} executable: {error}", tmp.display()))?;
@@ -207,7 +209,7 @@ pub(crate) fn stage(dest: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&marker);
         return Err(error);
     }
-    Ok(())
+    Ok(proof)
 }
 
 fn failed(report: &dyn Fn(UpdateStatus), to: &str, reason: String) -> (UpdateStatus, Option<Plan>) {
@@ -294,18 +296,14 @@ fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn stage_planned(dest: &Path, bytes: &[u8], plan: Result<Plan, String>) -> Result<Plan, String> {
-    let plan = plan?;
-    stage(dest, bytes)?;
-    Ok(plan)
+fn stage_planned(dest: &Path, bytes: &[u8], cwd: Result<PathBuf, String>) -> Result<Plan, String> {
+    let cwd = cwd?;
+    let proof = stage(dest, bytes)?;
+    Ok(Plan { program: dest.to_path_buf(), args: std::env::args_os().skip(1).collect(), cwd, proof })
 }
 
-fn plan_for(dest: &Path) -> Result<Plan, String> {
-    Ok(Plan {
-        program: dest.to_path_buf(),
-        args: std::env::args_os().skip(1).collect(),
-        cwd: std::env::current_dir().map_err(|error| format!("could not read the working directory: {error}"))?,
-    })
+fn working_dir() -> Result<PathBuf, String> {
+    std::env::current_dir().map_err(|error| format!("could not read the working directory: {error}"))
 }
 
 fn unproven_path(dest: &Path) -> PathBuf {
@@ -316,7 +314,9 @@ fn unproven_path(dest: &Path) -> PathBuf {
 fn restore(dest: &Path) -> Result<(), String> {
     let name = dest.file_name().unwrap_or_default().to_string_lossy();
     let bak = dest.with_file_name(format!("{name}.bak"));
-    std::fs::rename(&bak, dest).map_err(|error| format!("could not restore {}: {error}", dest.display()))?;
+    if bak.is_file() {
+        std::fs::rename(&bak, dest).map_err(|error| format!("could not restore {}: {error}", dest.display()))?;
+    }
     let _ = std::fs::remove_file(unproven_path(dest));
     Ok(())
 }
@@ -346,52 +346,38 @@ fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn enter() {
+pub fn prove_or_restore() {
     let Some(marker) = pinned_core::boot::marker_path() else { return };
-    if !marker.is_file() {
+    if !marker.exists() {
         return;
     }
-    let _gate = pinned_core::boot::lock();
-    if !marker.is_file() {
-        return;
-    }
-    if std::env::var_os(pinned_core::boot::PROOF_ENV).is_none() {
+    if !pinned_core::boot::proving() {
         rollback(&marker);
     }
-    match record_boot(&marker) {
-        Ok(1) => {
-            drop(_gate);
-            arm_deadline(marker);
-        }
-        Ok(_) => rollback(&marker),
-        Err(error) => {
-            eprintln!("pinned-server: {error}");
-            rollback(&marker);
-        }
-    }
-}
-
-fn record_boot(marker: &Path) -> Result<u32, String> {
-    let body = std::fs::read(marker).map_err(|error| format!("could not read {}: {error}", marker.display()))?;
-    let current: u32 = String::from_utf8_lossy(&body).trim().parse().unwrap_or(0);
-    let next = current.saturating_add(1);
-    write_durable(marker, next.to_string().as_bytes()).map_err(|error| format!("could not record the boot of {}: {error}", marker.display()))?;
-    Ok(next)
-}
-
-fn arm_deadline(marker: PathBuf) {
     let wait = proof_wait();
     std::thread::spawn(move || {
         std::thread::sleep(wait);
-        let _gate = pinned_core::boot::lock();
-        if marker.is_file() {
+        if pinned_core::boot::leave_if_starting() {
             rollback(&marker);
         }
     });
 }
 
+pub async fn roll_back_if_refused(machine: &Machine) {
+    loop {
+        pinned_core::boot::refused().await;
+        if !pinned_core::boot::leave_if_running() {
+            continue;
+        }
+        machine.quit();
+        if let Some(marker) = pinned_core::boot::marker_path() {
+            rollback(&marker);
+        }
+    }
+}
+
 fn proof_wait() -> Duration {
-    std::env::var(pinned_core::boot::WAIT_ENV).ok().and_then(|text| text.parse::<u64>().ok()).map(Duration::from_secs).unwrap_or(CONNECT_WAIT)
+    std::env::var(pinned_core::boot::WAIT_ENV).ok().and_then(|text| text.parse::<u64>().ok()).map(Duration::from_secs).unwrap_or(READY_WAIT)
 }
 
 fn binary_of(marker: &Path) -> PathBuf {
@@ -435,7 +421,7 @@ fn exec_planned(plan: &Plan, dest: &Path) -> std::io::Error {
     Command::new(&plan.program)
         .args(&plan.args)
         .current_dir(&plan.cwd)
-        .env(pinned_core::boot::PROOF_ENV, "1")
+        .env(pinned_core::boot::PROOF_ENV, &plan.proof)
         .env(pinned_core::boot::MARKER_ENV, unproven_path(dest))
         .env_remove(pinned_core::boot::VERSION_ENV)
         .exec()
@@ -593,6 +579,7 @@ mod tests {
         assert_eq!(plan.program, dest);
         assert_eq!(plan.args, std::env::args_os().skip(1).collect::<Vec<_>>());
         assert_eq!(plan.cwd, std::env::current_dir().unwrap());
+        assert_eq!(plan.proof, "3e2b640c4a45777e3e885018961a7f04d722259075f43de7d0b0511d1547b2d8");
         let _ = std::fs::remove_dir_all(dest.parent().unwrap());
     }
 
@@ -697,14 +684,14 @@ mod tests {
     }
 
     #[test]
-    fn a_staged_binary_records_zero_boots() {
+    fn a_staged_binary_is_marked_with_its_checksum() {
         let dir = std::env::temp_dir().join(format!("pinned-marker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("pinned-server");
         std::fs::write(&dest, b"old-binary").unwrap();
-        stage(&dest, b"new-binary").unwrap();
-        assert_eq!(std::fs::read(dir.join("pinned-server.unproven")).unwrap(), b"0");
+        assert_eq!(stage(&dest, b"new-binary").unwrap(), "3e2b640c4a45777e3e885018961a7f04d722259075f43de7d0b0511d1547b2d8");
+        assert_eq!(std::fs::read_to_string(dir.join("pinned-server.unproven")).unwrap(), "3e2b640c4a45777e3e885018961a7f04d722259075f43de7d0b0511d1547b2d8\n");
         assert_eq!(std::fs::read(dir.join("pinned-server.bak")).unwrap(), b"old-binary");
         assert_eq!(std::fs::read(&dest).unwrap(), b"new-binary");
         let _ = std::fs::remove_dir_all(&dir);
@@ -737,7 +724,7 @@ mod tests {
         perms.set_mode(0o644);
         std::fs::set_permissions(&dest, perms).unwrap();
         // A failed exec has already entered this directory. Keep it on the process's own.
-        let plan = Plan { program: dest.clone(), args: vec!["--version".into()], cwd: std::env::current_dir().unwrap() };
+        let plan = Plan { program: dest.clone(), args: vec!["--version".into()], cwd: std::env::current_dir().unwrap(), proof: String::new() };
         let err = start_replacement(&plan, &dest).unwrap_err();
         assert!(err.contains("could not start"), "{err}");
         assert_eq!(std::fs::read(&dest).unwrap(), b"old-binary");

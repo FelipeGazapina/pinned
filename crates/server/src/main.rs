@@ -144,7 +144,7 @@ fn running_version() -> String {
 }
 
 fn node(args: &[String]) -> Result<(), String> {
-    pinned_server::self_update::enter();
+    pinned_server::self_update::prove_or_restore();
     let args = Args::parse(args, &["config-dir"], 0)?;
     let dir = args.config_dir();
     let creds = Credentials::load(&dir).ok_or_else(|| format!("{} has no account.json: run `pinned-server pair <hub url> <code>` first", dir.display()))?;
@@ -161,6 +161,7 @@ fn node(args: &[String]) -> Result<(), String> {
     let link = Arc::new(link::spawn(creds, machine.clone(), &version));
     let forward = link.clone();
     machine.listen(move |message| forward.forward(message)).map_err(|e| format!("could not listen for claude's hooks: {e}"))?;
+    pinned_core::boot::ready();
     for tab in machine.restore_tabs() {
         if let Err(e) = machine.start_claude(&tab, UNWATCHED.0, UNWATCHED.1) {
             eprintln!("pinned-server: could not resume {tab}: {e}");
@@ -173,6 +174,7 @@ fn node(args: &[String]) -> Result<(), String> {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = terminate.recv() => {}
+            _ = pinned_server::self_update::roll_back_if_refused(&machine) => {}
         }
         Ok::<_, String>(())
     })?;

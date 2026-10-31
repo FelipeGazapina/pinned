@@ -585,7 +585,9 @@ impl Machine {
 
     /// Runs the restart `install` scheduled once the release is in place.
     pub fn restart_if_replacing(&self, status: &UpdateStatus) {
-        let _ = status;
+        if matches!(status, UpdateStatus::Restarting { .. }) {
+            self.restart_now();
+        }
     }
 
     pub fn update_snapshot(&self) -> Option<UpdateStatus> {

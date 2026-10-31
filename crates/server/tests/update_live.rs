@@ -1,7 +1,3 @@
-//! A node update against the real hub, which allows one socket per machine. Each node reaches
-//! the hub through a `Gate`, so a test can take the hub away from the node while the web client
-//! stays connected and records what the page would show.
-
 use base64::Engine;
 use pinned_core::account::{self, Credentials};
 use pinned_server::boxes::{Policy, Upstash};
@@ -80,8 +76,6 @@ impl Drop for Hub {
     }
 }
 
-/// A TCP relay between a node and the hub. Closed, it drops every connection it is offered,
-/// which the node sees as a hub that is down.
 struct Gate {
     url: String,
     open: Arc<AtomicBool>,
@@ -225,7 +219,6 @@ fn offline_transitions(frames: &[Value], id: &str) -> usize {
     transitions
 }
 
-/// Each distinct `update` phase the machine's row showed, in order.
 fn phases(frames: &[Value], id: &str) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for row in frames.iter().filter_map(|frame| row_of(frame, id)) {
@@ -297,8 +290,6 @@ impl Drop for Node {
     }
 }
 
-/// A hub, a node's way to it, the client watching the machines page, and a paired config dir
-/// with its own copy of `pinned-server`.
 struct Live {
     hub: Hub,
     gate: Gate,
@@ -351,7 +342,6 @@ impl Live {
         }
     }
 
-    /// Waits until the machine is online on `version` and its row shows `phase`.
     fn wait_settled(&mut self, version: &str, phase: &Value, node: &Node, limit: Duration) {
         let started = Instant::now();
         loop {
@@ -370,22 +360,25 @@ impl Live {
         }
     }
 
-    /// The hub refuses this machine's token while `refused`, the way it refuses an unknown one.
-    fn refuse_sign_in(&self, refused: bool) {
-        let token_hash = if refused { "token_hash || '\\x00'::bytea" } else { "substring(token_hash from 1 for length(token_hash) - 1)" };
-        admin(&self.hub.database, &format!("update machines set token_hash = {token_hash} where id = '{}'", self.id));
+    fn refuse_sign_in(&self) {
+        admin(&self.hub.database, &format!("update machines set token_hash = token_hash || '\\x00'::bytea where id = '{}'", self.id));
     }
 
-    /// A saved session and a `claude` that records its pid and ignores hangups, so a session the
-    /// node never ended stays alive.
-    fn saved_session(&self) -> String {
+    fn allow_sign_in(&self) {
+        admin(&self.hub.database, &format!("update machines set token_hash = substring(token_hash from 1 for length(token_hash) - 1) where id = '{}'", self.id));
+    }
+
+    fn save_session(&self) {
+        let saved = json!([{ "cwd": self.dir, "session": "s1", "env": [], "bypass": false, "interrupted": false, "account": "claude" }]);
+        std::fs::write(self.dir.join("sessions.json"), serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
+    }
+
+    fn claude_that_ignores_hangups(&self) -> String {
         let bin = self.dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let claude = bin.join("claude");
         std::fs::write(&claude, "#!/bin/sh\necho $$ >> \"$HOME/claude.pids\"\ntrap '' HUP\nexec sleep 300\n").unwrap();
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let saved = json!([{ "cwd": self.dir, "session": "s1", "env": [], "bypass": false, "interrupted": false, "account": "claude" }]);
-        std::fs::write(self.dir.join("sessions.json"), serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
         bin.display().to_string()
     }
 
@@ -418,7 +411,6 @@ impl Live {
     }
 }
 
-/// Pairs a machine whose link goes through `gate`, since the hub answers with its own address.
 fn pair(gate: &str, client: &mut Client, dir: &Path) -> Credentials {
     let code = client.hub(json!({ "cmd": "pair_code" })).unwrap();
     let text = code["code"].as_str().unwrap().to_lowercase();
@@ -427,7 +419,6 @@ fn pair(gate: &str, client: &mut Client, dir: &Path) -> Credentials {
     creds
 }
 
-/// Serves a release of 9.9.9 whose binary is `script`, signed with a key made for this test.
 fn release(script: &str) -> (String, String) {
     let asset = script.as_bytes().to_vec();
     let latest = json!({ "version": "9.9.9" }).to_string().into_bytes();
@@ -462,8 +453,6 @@ fn release(script: &str) -> (String, String) {
     (format!("http://{address}"), pubkey)
 }
 
-/// A release binary that reports 9.9.9. It runs `before` first, and keeps the marker beside the
-/// installed name, since the real binary it runs lives elsewhere.
 fn script(before: &str) -> String {
     let real = Path::new(BIN);
     assert!(!real.display().to_string().contains([' ', '\'']), "{}", real.display());
@@ -545,7 +534,8 @@ fn a_hub_that_is_down_past_the_deadline_keeps_the_new_version() {
 #[test]
 fn a_binary_the_hub_refuses_rolls_back_and_keeps_one_session() {
     let mut live = Live::start("refused");
-    let fake = live.saved_session();
+    live.save_session();
+    let fake = live.claude_that_ignores_hangups();
     let old = std::fs::read(&live.dest).unwrap();
     let mut node = updating(&live, &script("sleep 2"), &[("FAKE_BIN", fake.as_str())]);
     live.wait_online(Duration::from_secs(20));
@@ -556,11 +546,11 @@ fn a_binary_the_hub_refuses_rolls_back_and_keeps_one_session() {
     live.gate.close();
     live.wait_claudes(2, &mut node, Duration::from_secs(20));
     assert!(live.marker().exists(), "the new process was proven before the hub saw it\n{}", node.output());
-    live.refuse_sign_in(true);
+    live.refuse_sign_in();
     live.gate.reopen();
     live.wait_restored(&old, &mut node, Duration::from_secs(30));
     live.wait_claudes(3, &mut node, Duration::from_secs(20));
-    live.refuse_sign_in(false);
+    live.allow_sign_in();
     live.wait_settled(VERSION, &came_back_on_the_old_version(), &node, Duration::from_secs(60));
     let (recorded, alive) = live.claudes();
     assert_eq!(alive.len(), 1, "the rollback left claude running twice: alive {alive:?}, recorded {recorded:?}\n{}", node.output());
@@ -591,7 +581,8 @@ fn a_binary_that_exits_before_it_is_ready_is_replaced_by_the_old_one() {
 #[test]
 fn a_binary_that_hangs_before_it_is_ready_is_replaced_by_the_old_one() {
     let mut live = Live::start("hang");
-    let fake = live.saved_session();
+    live.save_session();
+    let fake = live.claude_that_ignores_hangups();
     let old = std::fs::read(&live.dest).unwrap();
     let mut node = updating(&live, &script(""), &[("PINNED_PROOF_WAIT", "2"), ("FAKE_BIN", fake.as_str())]);
     live.wait_online(Duration::from_secs(20));

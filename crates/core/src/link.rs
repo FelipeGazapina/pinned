@@ -254,7 +254,11 @@ async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, ver
                 eprintln!("pinned: disconnected from {}", creds.hub);
                 backoff = BACKOFF_MIN;
             }
-            Some(Err(e)) => eprintln!("pinned: hub link: {e}; retrying in {}s", backoff.as_secs()),
+            Some(Err(Fault::Refused(e))) => {
+                eprintln!("pinned: hub link: {e}; retrying in {}s", backoff.as_secs());
+                crate::boot::refuse();
+            }
+            Some(Err(Fault::Transport(e))) => eprintln!("pinned: hub link: {e}; retrying in {}s", backoff.as_secs()),
         }
         tokio::select! {
             _ = tokio::time::sleep(backoff) => {}
@@ -267,19 +271,19 @@ async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, ver
 
 /// One connection, from dialing to its end. Ok means the hub accepted the machine before the
 /// connection ended, so the next attempt waits the least.
-async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Machine>, version: &str) -> Result<(), String> {
-    let url = ws_url(&creds.hub)?;
-    let (mut sink, mut stream) = dial(&url).await?.split();
+async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Machine>, version: &str) -> Result<(), Fault> {
+    let url = ws_url(&creds.hub).map_err(Fault::Transport)?;
+    let (mut sink, mut stream) = dial(&url).await.map_err(Fault::Transport)?.split();
     let auth = MachineFrame::Auth {
         token: creds.machine_token.clone(),
         name: crate::account::hostname(),
         os: crate::account::os(),
         version: version.into(),
     };
-    sink.send(text(&auth)).await.map_err(|e| e.to_string())?;
-    let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| "the hub did not answer the sign in".to_string())?;
+    sink.send(text(&auth)).await.map_err(transport)?;
+    let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| Fault::Transport("the hub did not answer the sign in".into()))?;
     accept_hello(hello)?;
-    crate::boot::commit();
+    crate::boot::commit_if_proving();
 
     let (out, mut incoming) = channel::unbounded_channel();
     *shared.out.lock().unwrap() = Some(out.clone());
@@ -296,7 +300,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     loop {
         tokio::select! {
             Some(outgoing) = incoming.recv() => {
-                sink.send(Frame::Text(outgoing.text.into())).await.map_err(|e| e.to_string())?;
+                sink.send(Frame::Text(outgoing.text.into())).await.map_err(transport)?;
                 if let Some(wrote) = outgoing.wrote {
                     let _ = wrote.send(());
                 }
@@ -307,14 +311,14 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
                     Some(Ok(Frame::Text(t))) => answer(shared, machine, &out, &calls, &t, version),
                     Some(Ok(Frame::Close(_))) | None => return Ok(()),
                     Some(Ok(_)) => {}
-                    Some(Err(e)) => return Err(e.to_string()),
+                    Some(Err(e)) => return Err(transport(e)),
                 }
             }
             _ = ping.tick() => {
                 if heard.elapsed() > SILENT {
-                    return Err("the hub stopped answering".into());
+                    return Err(Fault::Transport("the hub stopped answering".into()));
                 }
-                sink.send(Frame::Ping(Default::default())).await.map_err(|e| e.to_string())?;
+                sink.send(Frame::Ping(Default::default())).await.map_err(transport)?;
             }
         }
     }
@@ -344,13 +348,23 @@ fn in_order(shared: Arc<Shared>, machine: Arc<Machine>) -> mpsc::Sender<(u64, Ca
     calls
 }
 
-fn accept_hello(hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Error>>) -> Result<(), String> {
+enum Fault {
+    Transport(String),
+    Refused(String),
+}
+
+fn transport(error: tokio_tungstenite::tungstenite::Error) -> Fault {
+    Fault::Transport(error.to_string())
+}
+
+fn accept_hello(hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Error>>) -> Result<(), Fault> {
     match hello {
         Some(Ok(Frame::Text(t))) if matches!(serde_json::from_str::<ToMachine>(&t), Ok(ToMachine::Hello { .. })) => Ok(()),
         Some(Ok(Frame::Close(Some(close)))) if u16::from(close.code) == UNAUTHORIZED => {
-            Err("the hub does not know this machine's token: pair it again".into())
+            Err(Fault::Refused("the hub does not know this machine's token: pair it again".into()))
         }
-        other => Err(format!("the hub answered the sign in with {other:?}")),
+        Some(Ok(frame @ (Frame::Text(_) | Frame::Binary(_)))) => Err(Fault::Refused(format!("the hub answered the sign in with {frame:?}"))),
+        other => Err(Fault::Transport(format!("the hub answered the sign in with {other:?}"))),
     }
 }
 
@@ -453,6 +467,15 @@ mod tests {
         let dialed = tokio::time::timeout(Duration::from_secs(60), dial(&url)).await.expect("the dial never ended");
         let err = dialed.expect_err("the dial succeeded although the hub never answered");
         assert!(err.starts_with(&format!("could not connect to {url}: ")), "{err}");
+    }
+
+    #[test]
+    fn a_hub_that_reads_the_sign_in_and_says_no_is_a_refusal() {
+        let close = |code: u16| Some(Ok(Frame::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame { code: code.into(), reason: "".into() }))));
+        assert!(matches!(accept_hello(close(UNAUTHORIZED)), Err(Fault::Refused(_))));
+        assert!(matches!(accept_hello(Some(Ok(Frame::Text(r#"{"type":"nope"}"#.into())))), Err(Fault::Refused(_))));
+        assert!(matches!(accept_hello(close(1001)), Err(Fault::Transport(_))));
+        assert!(matches!(accept_hello(None), Err(Fault::Transport(_))));
     }
 
     struct ArmsRestart {
