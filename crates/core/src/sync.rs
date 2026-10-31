@@ -803,8 +803,18 @@ fn write(target: &Path, bytes: &[u8], modified: Option<u64>, executable: Option<
     Ok(())
 }
 
+// A directory this process owns still allows chmod. Tests set this to stand in for EPERM.
+#[cfg(all(unix, test))]
+thread_local! {
+    static DENY_OWNER_EXECUTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[cfg(unix)]
 fn set_owner_execute(path: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if DENY_OWNER_EXECUTE.with(|deny| deny.get()) {
+        return Err("Operation not permitted (os error 1)".into());
+    }
     use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(path).map_err(|e| e.to_string())?.permissions();
     perms.set_mode(perms.mode() | 0o100);
@@ -1874,6 +1884,174 @@ mod tests {
         mini.sync(&hub);
         assert_eq!(std::fs::read(&dest).unwrap(), next);
         assert_eq!(mode_bits(&dest) & 0o111, 0, "a project pull ignores a stored executable bit, mode is {:o}", mode_bits(&dest));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    const USER_SKILL: &str = "user-skills/greet/SKILL.md";
+
+    #[cfg(unix)]
+    struct MarkHub {
+        inner: MemHub,
+        fail: std::cell::Cell<bool>,
+    }
+
+    #[cfg(unix)]
+    impl Hub for MarkHub {
+        fn list(&self, project: &str) -> Result<Vec<Entry>, String> {
+            self.inner.list(project)
+        }
+        fn push(&self, project: &str, files: Vec<File>) -> Result<(), String> {
+            self.inner.push(project, files)
+        }
+        fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
+            self.inner.pull(project, paths)
+        }
+        fn mark_executable(&self, project: &str, repairs: Vec<ModeRepair>) -> Result<(), String> {
+            if self.fail.get() {
+                return Err("the hub did not answer within 60 seconds".into());
+            }
+            self.inner.mark_executable(project, repairs)
+        }
+    }
+
+    #[cfg(unix)]
+    struct DenyOwnerExecute;
+
+    #[cfg(unix)]
+    impl DenyOwnerExecute {
+        fn arm() -> Self {
+            super::DENY_OWNER_EXECUTE.with(|deny| deny.set(true));
+            Self
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for DenyOwnerExecute {
+        fn drop(&mut self) {
+            super::DENY_OWNER_EXECUTE.with(|deny| deny.set(false));
+        }
+    }
+
+    #[cfg(unix)]
+    fn saved_agreed(state: &State, share: &PluginShare, file: &Path) -> BTreeMap<String, String> {
+        state.save(file);
+        let loaded = State::load(file, &file.with_extension("legacy"));
+        let key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
+        loaded.agreed.get(&key).cloned().unwrap_or_default()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_group_executable_hook_becomes_owner_executable_locally_and_on_the_receiver() {
+        let root = root("hook-654");
+        let hub = MemHub::default();
+        let (hook, mac, mini) = executable_hook(&root);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let source = mac.dir.join(HOOK);
+        let dest = mini.dir.join(HOOK);
+        assert_eq!(mode_bits(&dest) & 0o100, 0, "receiver started at {:o}", mode_bits(&dest));
+        let mtime = std::fs::metadata(&hook).unwrap().modified().unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o654)).unwrap();
+        std::fs::File::options().write(true).open(&hook).unwrap().set_modified(mtime).unwrap();
+        let before = hub.0.borrow()[HOOK].clone();
+        let repaired = sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        assert!(!repaired.pushed.iter().any(|path| path == HOOK), "a mode repair sends no file bytes");
+        assert!(!repaired.pulled.iter().any(|path| path == HOOK), "a mode repair fetches no file bytes");
+        assert_eq!(mode_bits(&source) & 0o100, 0o100, "local hook mode is {:o}", mode_bits(&source));
+        let stored = hub.0.borrow()[HOOK].clone();
+        assert_eq!(stored.entry.executable, Some(true));
+        assert_eq!(stored.entry.sha, before.entry.sha);
+        assert_eq!(stored.data, before.data);
+        assert_eq!(stored.entry.modified, before.entry.modified);
+        assert_eq!(unpack(stored.data.as_deref().unwrap()).unwrap(), b"#!/bin/sh\necho session-start\n");
+        let healed = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert!(!healed.pulled.iter().any(|path| path == HOOK), "the receiver chmods the hook it has");
+        assert_eq!(mode_bits(&dest) & 0o100, 0o100, "receiver hook mode is {:o}", mode_bits(&dest));
+        assert_eq!(std::fs::read(&source).unwrap(), b"#!/bin/sh\necho session-start\n");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_mark_keeps_the_agreed_baseline_and_the_next_sync_pushes_the_local_edit() {
+        let root = root("mark-fail");
+        let hub = MarkHub { inner: MemHub::default(), fail: std::cell::Cell::new(false) };
+        let (hook, mac, _) = executable_hook(&root);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let skill = mac.claude_home.join("skills/greet/SKILL.md");
+        put(&skill, "one\n");
+        let published = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        stamp(&skill, published);
+        stamp(&hook, published);
+        let mut state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        put(&skill, "two\n");
+        stamp(&skill, SystemTime::UNIX_EPOCH + Duration::from_secs(50));
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        hub.fail.set(true);
+        let failed = sync_plugins(&hub, &mut state, &mac, now);
+        assert_eq!(failed, Err("the hub did not answer within 60 seconds".into()));
+        let agreed = saved_agreed(&state, &mac, &root.join("state.json"));
+        assert_eq!(agreed.get(USER_SKILL).cloned(), Some(sha(b"one\n")));
+        assert_eq!(agreed.get(HOOK).cloned(), Some(sha(b"#!/bin/sh\necho session-start\n")));
+        assert_eq!(unpack(hub.inner.0.borrow()[USER_SKILL].data.as_deref().unwrap()).unwrap(), b"one\n");
+        hub.fail.set(false);
+        let next = sync_plugins(&hub, &mut state, &mac, now).unwrap();
+        assert_eq!(next.pushed, vec![USER_SKILL.to_string()]);
+        assert_eq!(next.pulled, Vec::<String>::new());
+        assert_eq!(std::fs::read(&skill).unwrap(), b"two\n");
+        assert_eq!(unpack(hub.inner.0.borrow()[USER_SKILL].data.as_deref().unwrap()).unwrap(), b"two\n");
+        assert_eq!(hub.inner.0.borrow()[HOOK].entry.executable, Some(true));
+        assert_eq!(unpack(hub.inner.0.borrow()[HOOK].data.as_deref().unwrap()).unwrap(), b"#!/bin/sh\necho session-start\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_chmod_keeps_the_agreed_baseline_and_the_next_sync_pushes_the_local_edit() {
+        let root = root("chmod-fail");
+        let hub = MemHub::default();
+        let (hook, mac, mini) = executable_hook(&root);
+        let skill = mac.claude_home.join("skills/greet/SKILL.md");
+        put(&skill, "one\n");
+        let published = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        stamp(&skill, published);
+        stamp(&hook, published);
+        let mut mac_state = State::default();
+        let mut mini_state = State::default();
+        let now = SystemTime::now();
+        sync_plugins(&hub, &mut mac_state, &mac, now).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        let dest = mini.dir.join(HOOK);
+        let mini_skill = mini.claude_home.join("skills/greet/SKILL.md");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+        put(&mini_skill, "two\n");
+        stamp(&mini_skill, SystemTime::UNIX_EPOCH + Duration::from_secs(50));
+        let _deny = DenyOwnerExecute::arm();
+        let failed = sync_plugins(&hub, &mut mini_state, &mini, now);
+        assert_eq!(failed, Err("Operation not permitted (os error 1)".into()));
+        let agreed = saved_agreed(&mini_state, &mini, &root.join("state.json"));
+        assert_eq!(agreed.get(USER_SKILL).cloned(), Some(sha(b"one\n")));
+        assert_eq!(agreed.get(HOOK).cloned(), Some(sha(b"#!/bin/sh\necho session-start\n")));
+        drop(_deny);
+        let next = sync_plugins(&hub, &mut mini_state, &mini, now).unwrap();
+        assert_eq!(next.pushed, vec![USER_SKILL.to_string()]);
+        assert_eq!(next.pulled, Vec::<String>::new());
+        assert_eq!(std::fs::read(&mini_skill).unwrap(), b"two\n");
+        assert_eq!(unpack(hub.0.borrow()[USER_SKILL].data.as_deref().unwrap()).unwrap(), b"two\n");
+        assert_eq!(mode_bits(&dest) & 0o100, 0o100, "healed hook mode is {:o}", mode_bits(&dest));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho session-start\n");
         let _ = std::fs::remove_dir_all(root);
     }
 
