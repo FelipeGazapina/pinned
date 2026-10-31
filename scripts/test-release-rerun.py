@@ -39,6 +39,20 @@ X86 = b"x86-old " * 2048
 SUM_NAMES = ("latest.json", ARM_NAME, X86_NAME)
 STAMP_EPOCH = 1700000000
 FULL_RUN = ["draft", "build", "linux-node", "sign-node", "publish"]
+VERIFIER = ROOT / "scripts" / "minisign-verify.mjs"
+CRATE_KEY = "untrusted comment: minisign public key\nRWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3\n"
+CRATE_PREHASHED = (
+    "untrusted comment: signature from minisign secret key\n"
+    "RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=\n"
+    "trusted comment: timestamp:1556193335\tfile:test\n"
+    "y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+bHwhEBg==\n"
+)
+CRATE_LEGACY = (
+    "untrusted comment: signature from minisign secret key\n"
+    "RWQf6LRCGA9i59SLOFxz6NxvASXDJeRtuZykwQepbDEGt87ig1BNpWaVWuNrm73YiIiJbq71Wi+dP9eKL8OC351vwIasSSbXxwA=\n"
+    "trusted comment: timestamp:1555779966\tfile:test\n"
+    "QtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfNQUaOAA==\n"
+)
 
 GH_SOURCE = r'''#!/usr/bin/env python3
 import base64, hashlib, json, os, pathlib, sys
@@ -616,7 +630,7 @@ def prepare_work(work, state):
     node.mkdir(parents=True)
     (node / ARM_NAME).write_bytes(ARM)
     (node / X86_NAME).write_bytes(X86)
-    if state.get("fragment"):
+    if state["fragment"]:
         write_fragment(work, state["fragment"])
 
 
@@ -730,7 +744,7 @@ class Replay:
 
     def tauri(self, step, env, work):
         state_path = pathlib.Path(env["REPLAY_STATE"])
-        build = int(json.loads(state_path.read_text()).get("builds") or 0) + 1
+        build = json.loads(state_path.read_text())["builds"] + 1
         out = work / "tauri-out"
         out.mkdir(exist_ok=True)
         bundle = out / BUNDLE
@@ -830,6 +844,28 @@ def scenario_errors(code, stderr, state, assembled, expect):
     return errors
 
 
+def crate_vector_errors(root):
+    pubkey = b64(CRATE_KEY.encode())
+    errors = []
+    for label, message, signature, want in (
+        ("prehashed", b"test", CRATE_PREHASHED, 0),
+        ("tampered", b"tesT", CRATE_PREHASHED, 1),
+        ("legacy", b"test", CRATE_LEGACY, 1),
+    ):
+        message_path = root / f"vector-{label}"
+        signature_path = root / f"vector-{label}.minisig"
+        message_path.write_bytes(message)
+        signature_path.write_text(signature)
+        proc = subprocess.run(
+            ["node", str(VERIFIER), pubkey, str(message_path), str(signature_path)],
+            text=True,
+            capture_output=True,
+        )
+        if proc.returncode != want:
+            errors.append(f"{label} vector exit {proc.returncode}, want {want}: {proc.stderr.strip()}")
+    return errors
+
+
 def public_clobber_errors(replay):
     state = seeded_state(replay.release(), draft=False)
     state_path = replay.root / "clobber-state.json"
@@ -894,6 +930,14 @@ def main():
     failed = 0
     with tempfile.TemporaryDirectory(prefix="release-replay-") as tmp:
         replay = Replay(jobs, tmp)
+        vector_errors = crate_vector_errors(replay.root)
+        if vector_errors:
+            failed += 1
+            print("FAIL minisign-verify crate vectors")
+            for error in vector_errors:
+                print(f"  {error}")
+        else:
+            print("ok: minisign-verify crate vectors")
         clobber_errors = public_clobber_errors(replay)
         if clobber_errors:
             failed += 1
@@ -983,7 +1027,7 @@ def main():
             drafted(replace={"latest.json": newer[0]["latest.json"]}),
             {
                 "draft": True,
-                "stderr_has": "the release checksum does not match",
+                "stderr_has": "latest.json does not match SHA256SUMS",
                 "consistent": False,
             },
         )
@@ -993,7 +1037,7 @@ def main():
             public(),
             {
                 "draft": True,
-                "stderr_has": "sign-node did not run after the last build",
+                "stderr_has": f"{BUNDLE} does not match its signature in latest.json",
                 "consistent": True,
                 "unchanged_from": public(),
             },
@@ -1039,14 +1083,24 @@ def main():
             drafted(remote_latest="v0.17.0-rc.1"),
             {"code": 0, "draft": False, "latest_flag": True, "consistent": True},
         )
+        for landed, missing in (
+            ([], "SHA256SUMS"),
+            (["SHA256SUMS"], "SHA256SUMS.minisig"),
+            (["SHA256SUMS", "SHA256SUMS.minisig"], "latest.json"),
+            (["SHA256SUMS", "SHA256SUMS.minisig", "latest.json"], ARM_NAME),
+            (["SHA256SUMS", "SHA256SUMS.minisig", "latest.json", X86_NAME], ARM_NAME),
+        ):
+            add(
+                f"sign-node cancelled after {len(landed)} of 5 files land, then publish",
+                [(["sign-node"], {"REPLAY_UPLOAD_LANDS": ",".join(landed)}), (["publish"], {})],
+                public(),
+                {"draft": True, "stderr_has": f"{missing} is missing from the release"},
+            )
         add(
-            "sign-node cancelled after the small files land, then publish",
-            [
-                (["sign-node"], {"REPLAY_UPLOAD_LANDS": "SHA256SUMS,SHA256SUMS.minisig,latest.json"}),
-                (["publish"], {}),
-            ],
+            "build re-run cancelled before the bundle lands, then publish",
+            [(["build"], {"REPLAY_UPLOAD_LANDS": ""}), (["publish"], {})],
             public(),
-            {"draft": True, "stderr_has": f"{ARM_NAME} is missing from the release"},
+            {"draft": True, "stderr_has": f"{BUNDLE} is missing from the release"},
         )
         add(
             "publish re-run on a draft whose SHA256SUMS.minisig signs older sums",

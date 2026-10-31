@@ -10,21 +10,25 @@ cmd="${1:-}"
 tag="${2:-}"
 [[ -n "$cmd" && -n "$tag" ]] || usage
 shift 2
+repo=$(cd "$(dirname "$0")/.." && pwd)
+
+refuse() {
+  echo "$1" >&2
+  exit 1
+}
 
 draft_release() {
   gh release edit "$tag" --draft=true
   is_draft=$(gh release view "$tag" --json isDraft --jq .isDraft)
-  [[ "$is_draft" == "true" ]] || {
-    echo "the release $tag is public, so no asset is uploaded" >&2
-    exit 1
-  }
+  [[ "$is_draft" == "true" ]] || refuse "the release $tag is public, so no asset is uploaded"
 }
 
-hash_line() {
-  local file="$1"
-  local digest
-  digest=$(sha256sum "$file" | awk '{print $1}')
-  printf '%s  %s\n' "$digest" "$(basename "$file")"
+hash_of() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+present() {
+  [[ -f "$1/$2" ]] || refuse "$2 is missing from the release"
 }
 
 version_is_newer() {
@@ -53,15 +57,9 @@ version_is_newer() {
 }
 
 tag_is_latest() {
-  local tag="$1"
   local current
-  if ! current=$(gh release view --json tagName --jq .tagName 2>/dev/null); then
-    return 0
-  fi
-  if [[ -z "$current" || "$current" == "$tag" ]]; then
-    return 0
-  fi
-  version_is_newer "$tag" "$current"
+  current=$(gh release view --json tagName --jq .tagName 2>/dev/null) || return 0
+  ! version_is_newer "$current" "$1"
 }
 
 case "$cmd" in
@@ -71,73 +69,55 @@ case "$cmd" in
     ;;
   upload)
     [[ "$#" -ge 1 ]] || usage
-    seen_sums=0
     latest=""
     sums=""
     for file in "$@"; do
-      [[ -s "$file" ]] || {
-        echo "$file is missing" >&2
-        exit 1
-      }
-      name=$(basename "$file")
-      if [[ "$name" == "SHA256SUMS" ]]; then
-        seen_sums=1
-        sums=$file
-      fi
-      if [[ "$name" == "latest.json" ]]; then
-        [[ "$seen_sums" -eq 1 ]] || {
-          echo "latest.json is ahead of SHA256SUMS" >&2
-          exit 1
-        }
-        latest=$file
-      fi
+      [[ -s "$file" ]] || refuse "$file is missing"
+      case "$(basename "$file")" in
+        SHA256SUMS) sums=$file ;;
+        latest.json) latest=$file ;;
+      esac
     done
     if [[ -n "$latest" ]]; then
-      line=$(hash_line "$latest")
-      grep -q -x -F "$line" "$sums" || {
-        echo "the release checksum does not match" >&2
-        exit 1
-      }
+      grep -q -x -F "$(hash_of "$latest")  latest.json" "$sums" || refuse "the release checksum does not match"
     fi
     draft_release
     gh release upload "$tag" "$@" --clobber
     ;;
   publish)
     [[ "$#" -eq 0 ]] || usage
-    dir=$(mktemp -d)
-    trap 'rm -rf "$dir"' EXIT
-    gh release download "$tag" -D "$dir" \
-      -p latest.json \
-      -p SHA256SUMS \
-      -p SHA256SUMS.minisig
-    [[ -s "$dir/SHA256SUMS.minisig" ]] || {
-      echo "SHA256SUMS.minisig is missing" >&2
-      exit 1
-    }
-    line=$(hash_line "$dir/latest.json")
-    grep -q -x -F "$line" "$dir/SHA256SUMS" || {
-      echo "the release checksum does not match" >&2
-      exit 1
-    }
-    assets=$(gh release view "$tag" --json assets)
-    RELEASE_ASSETS="$assets" python3 - <<'PY'
-import json, os, sys
-payload = json.loads(os.environ["RELEASE_ASSETS"])
-rows = {item["name"]: item.get("updatedAt") or "" for item in payload["assets"]}
-latest = rows.get("latest.json")
-if not latest:
-    sys.stderr.write("latest.json is missing\n")
-    sys.exit(1)
-newer = sorted(name for name, stamp in rows.items() if name != "latest.json" and stamp > latest)
-if newer:
-    sys.stderr.write("sign-node did not run after the last build: " + ", ".join(newer) + "\n")
-    sys.exit(1)
-PY
-    edit_args=(--draft=false)
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    assets="$work/assets"
+    gh release download "$tag" -D "$assets"
+    pubkey="${PINNED_RELEASE_PUBKEY:-$(jq -r .plugins.updater.pubkey "$repo/tauri.conf.json")}"
+    verifier="$repo/scripts/minisign-verify.mjs"
+    present "$assets" SHA256SUMS
+    present "$assets" SHA256SUMS.minisig
+    node "$verifier" "$pubkey" "$assets/SHA256SUMS" "$assets/SHA256SUMS.minisig" ||
+      refuse "SHA256SUMS.minisig does not verify SHA256SUMS"
+    listed=" "
+    while read -r digest name _; do
+      name="${name#\*}"
+      present "$assets" "$name"
+      [[ "$(hash_of "$assets/$name")" == "$digest" ]] || refuse "$name does not match SHA256SUMS"
+      listed+="$name "
+    done < "$assets/SHA256SUMS"
+    for name in latest.json pinned-server-aarch64-unknown-linux-musl pinned-server-x86_64-unknown-linux-musl; do
+      [[ "$listed" == *" $name "* ]] || refuse "SHA256SUMS does not list $name"
+    done
+    bundles=$(jq -r '[.platforms[] | [(.url | split("/") | last), .signature]] | unique[] | @tsv' "$assets/latest.json")
+    while IFS=$'\t' read -r name signature; do
+      present "$assets" "$name"
+      printf '%s' "$signature" | openssl base64 -d -A > "$work/signature"
+      node "$verifier" "$pubkey" "$assets/$name" "$work/signature" ||
+        refuse "$name does not match its signature in latest.json"
+    done <<< "$bundles"
+    latest=false
     if tag_is_latest "$tag"; then
-      edit_args+=(--latest)
+      latest=true
     fi
-    gh release edit "$tag" "${edit_args[@]}"
+    gh release edit "$tag" --draft=false --latest="$latest"
     ;;
   *)
     usage
