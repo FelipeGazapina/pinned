@@ -625,6 +625,7 @@ fn walked(connectors: &[Connector], fixture: Fixture, scripted: ScriptedModel) -
                     }
                     Effect::Resume { .. } => Supplied::Opened { machine: "mac".into(), tab: "tab-1".into() },
                     Effect::Type { .. } => Supplied::Done,
+                    Effect::File { .. } => Supplied::Ticket { id: "uuid".into(), identifier: "ENG-12".into(), url: "https://linear.app/acme/issue/ENG-12".into() },
                 };
                 supply(&mut run, supplied, GRAPH_AT);
             }

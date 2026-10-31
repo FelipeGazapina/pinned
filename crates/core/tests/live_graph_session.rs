@@ -141,14 +141,14 @@ fn run_case(name: &str, proof: Proof) {
 }
 
 fn drive(connectors: &Connectors, open: &impl Fn(Work) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Placement>, String>> + Send>>, why: &str) {
-    let error = block_on(connectors.drive(open));
+    let error = block_on(connectors.drive(open, &no_thread));
     if let Err(error) = error {
         panic!("{why}: {error}");
     }
 }
 
 fn feed(connectors: &Connectors, machine: &Machine, open: &impl Fn(Work) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Placement>, String>> + Send>>, after: &[TabView]) {
-    let error = block_on(connectors.on_tabs(MACHINE, pinned_core::connectors::unix_millis(), after, open));
+    let error = block_on(connectors.on_tabs(MACHINE, pinned_core::connectors::unix_millis(), after, open, &no_thread));
     if let Err(error) = &error {
         eprintln!("LIVE tabs now: {}", serde_json::to_string(&machine.tabs()).unwrap_or_default());
         panic!("on_tabs: {error}");
@@ -276,6 +276,10 @@ fn word(page: &str, word: &str) -> bool {
     page.split(|c: char| !c.is_ascii_alphanumeric()).any(|part| part == word)
 }
 
+fn no_thread(_machine: &str, _tab: &str) -> std::future::Ready<Result<Vec<pinned_core::thread::Item>, String>> {
+    std::future::ready(Ok(Vec::new()))
+}
+
 fn format_work(work: &Work) -> String {
     match work {
         Work::Run(run) => format!("run\n{}", run.args.join("\n")),
@@ -311,6 +315,7 @@ fn talks_connector(folder: &Path) -> Connector {
         repo: String::new(),
         account: String::new(),
         graph: Some(two_talks()),
+        receipts: Default::default(),
     }
 }
 

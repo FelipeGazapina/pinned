@@ -275,6 +275,7 @@ mod tests {
             repo: String::new(),
             account: String::new(),
             graph: None,
+            receipts: BTreeMap::new(),
         }
     }
 

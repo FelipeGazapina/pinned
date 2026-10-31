@@ -491,11 +491,12 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 tokio::spawn(async move {
                     let Ok(connectors) = hub.connectors(&account).await else { return };
                     let id = account.id;
+                    let thread = crate::hub::Hub::draft_thread(hub.clone(), id);
                     let open = move |work| {
                         let hub = hub.clone();
                         async move { hub.open_placed(id, work).await }
                     };
-                    if let Err(e) = connectors.on_tabs(&machine, observed, &after, open).await {
+                    if let Err(e) = connectors.on_tabs(&machine, observed, &after, open, thread).await {
                         eprintln!("pinned-server: could not wake a workflow run: {e}");
                     }
                 });

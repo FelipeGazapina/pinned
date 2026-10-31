@@ -6,6 +6,7 @@
 //! is gone the run resumes the same Claude conversation, and when that conversation is gone too it
 //! opens a new one seeded with the run's history, so the new session knows everything so far.
 
+use super::draft::Draft;
 use super::{Answers, Classify, Fallback, Gate, Graph, NodeId, NodeKind, PortId, Switch};
 use crate::agent::Subject;
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,12 @@ pub struct Run {
     /// Cleared when the effect is supplied, so a later talk with the same text still types.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     sent: Vec<String>,
+    /// Title and description a create-ticket node already got from the session, by node id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    drafts: BTreeMap<NodeId, Draft>,
+    /// Set only while a create-ticket session effect is in flight. `supply` has no library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    awaiting: Option<Awaiting>,
 }
 
 /// One graph the walk is inside. `queue` is the nodes still to run at this depth, front first.
@@ -68,10 +75,18 @@ enum Phase {
     Enter,
     /// The front node is a talk whose text was sent. `status` is `Waiting`.
     WaitTurn,
+    /// Front node is a create-ticket whose ask was sent. The reply is the draft.
+    WaitDraft,
     /// The front node finished. Splice this port's targets in front of its siblings.
     Follow(PortId),
     /// The frame above is the called graph. When it pops, follow this node's `out`.
     InCall,
+}
+
+/// Set while a create-ticket ask is in flight, so the reply parks on `WaitDraft` instead of `WaitTurn`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+enum Awaiting {
+    Draft { node: NodeId },
 }
 
 /// Captured when a classify effect is issued. Port choice reads it on `supply`.
@@ -169,6 +184,12 @@ pub enum Effect {
     Type {
         text: String,
     },
+    /// File the draft already stored on the run for `node`. Safe to perform twice.
+    /// The receipt on the connector is the issue. This effect does not carry the title.
+    File {
+        connector: String,
+        node: NodeId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -184,6 +205,11 @@ pub enum Supplied {
     /// Another connector already holds the subject. The run ends without a session.
     Held { why: String },
     Failed(String),
+    Ticket {
+        id: String,
+        identifier: String,
+        url: String,
+    },
 }
 
 /// News from outside the run that it may be waiting for.
@@ -192,6 +218,11 @@ pub enum Wake {
     /// The tab's status went done or failed. `claude` is the id a hook reported, if any.
     TurnEnded {
         claude: Option<String>,
+    },
+    /// A create-ticket wait ended. `draft` is the text after the ask.
+    Drafted {
+        claude: Option<String>,
+        draft: Draft,
     },
     TabGone,
 }
@@ -209,6 +240,28 @@ impl Run {
     /// What the classify node `node` answered in this run, with the decision model's pick.
     pub fn answers(&self, node: &NodeId) -> Option<&Answers> {
         self.classified.get(node)
+    }
+
+    pub(crate) fn draft(&self, node: &NodeId) -> Option<&Draft> {
+        self.drafts.get(node)
+    }
+
+    pub(crate) fn waiting_draft(&self) -> bool {
+        self.status == Status::Waiting && self.stack.last().is_some_and(|frame| frame.phase == Phase::WaitDraft)
+    }
+
+    pub(crate) fn open_draft(&self) -> Option<(String, String)> {
+        if self.pending.is_some() || !self.waiting_draft() {
+            return None;
+        }
+        let node = self.stack.last()?.queue.first()?;
+        if self.drafts.contains_key(node) {
+            return None;
+        }
+        match &self.session {
+            Session::Live { machine, tab, .. } => Some((machine.clone(), tab.clone())),
+            _ => None,
+        }
     }
 }
 
@@ -230,6 +283,8 @@ pub fn start(library: &Library, connector: &str, subject: Subject, input: Value,
         ready: None,
         claimed: false,
         sent: Vec::new(),
+        drafts: BTreeMap::new(),
+        awaiting: None,
     };
     let Some(graph) = library.get(connector) else {
         return failed(run, format!("workflow {connector:?} has no graph"));
@@ -273,7 +328,7 @@ pub fn drive(run: &mut Run, library: &Library) -> Drive {
         }
         let phase = run.stack.last().expect("frame").phase.clone();
         match phase {
-            Phase::WaitTurn => {
+            Phase::WaitTurn | Phase::WaitDraft => {
                 run.status = Status::Waiting;
                 return Drive::Park;
             }
@@ -318,6 +373,7 @@ pub fn push(run: &mut Run, wake: Wake, at: &str) {
     match wake {
         Wake::TabGone => detach(run, at),
         Wake::TurnEnded { claude } => turn_ended(run, claude),
+        Wake::Drafted { claude, draft } => turn_drafted(run, claude, draft),
     }
 }
 
@@ -387,6 +443,22 @@ fn step(run: &mut Run, library: &Library) -> Next {
             Ok(effect) => Next::Act(effect),
             Err(why) => Next::Fail(why),
         },
+        NodeKind::CreateTicket { instructions, .. } => {
+            if run.drafts.contains_key(&node_id) {
+                return Next::Act(Effect::File { connector, node: node_id });
+            }
+            let prompt = super::draft::draft_prompt(&instructions, &run.context);
+            match talk_effect(run, &connector, &prompt) {
+                Ok(effect) => {
+                    run.awaiting = match &effect {
+                        Effect::Open { .. } | Effect::Type { .. } | Effect::Resume { .. } => Some(Awaiting::Draft { node: node_id }),
+                        _ => None,
+                    };
+                    Next::Act(effect)
+                }
+                Err(why) => Next::Fail(why),
+            }
+        }
         NodeKind::Call { workflow } => enter_call(run, library, &connector, &node_id, &workflow),
         NodeKind::Switch(switch) => {
             let (port, why) = switch_port(run, &switch);
@@ -538,6 +610,13 @@ fn apply(
             effect @ (Effect::Open { .. } | Effect::Type { .. } | Effect::Resume { .. }),
             supplied,
         ) => talk_supplied(run, effect, supplied, at),
+        (Effect::File { connector, node }, Supplied::Ticket { id, identifier, url }) => {
+            let front = front_node(run)?;
+            record(run, &connector, &front, json!({ "ticket": &identifier, "url": &url }), at);
+            write_ticket(run, &node, &Supplied::Ticket { id, identifier, url });
+            follow_out(run);
+            Ok(())
+        }
         (effect, _) => Err(format!(
             "the result does not answer the outstanding {} effect",
             effect_name(&effect)
@@ -619,7 +698,7 @@ fn talk_supplied(
                 saw_working: false,
                 await_working: false,
             };
-            wait_turn(run, false);
+            park_ask(run, false);
             Ok(())
         }
         (Effect::Resume { claude, .. }, Supplied::Opened { machine, tab }) => {
@@ -632,12 +711,12 @@ fn talk_supplied(
                 saw_working: false,
                 await_working: false,
             };
-            wait_turn(run, true);
+            park_ask(run, true);
             Ok(())
         }
         (Effect::Type { .. }, Supplied::Done) => {
             log_talk(run, &prompt, at)?;
-            wait_turn(run, true);
+            park_ask(run, true);
             Ok(())
         }
         (effect, _) => Err(format!(
@@ -652,6 +731,16 @@ fn log_talk(run: &mut Run, prompt: &str, at: &str) -> Result<(), String> {
     let connector = run.stack.last().expect("frame").connector.clone();
     record(run, &connector, &node, json!({ "talk": prompt }), at);
     Ok(())
+}
+
+fn park_ask(run: &mut Run, await_working: bool) {
+    let draft = matches!(run.awaiting.take(), Some(Awaiting::Draft { node }) if front_node(run).ok().as_ref() == Some(&node));
+    wait_turn(run, await_working);
+    if draft {
+        if let Some(frame) = run.stack.last_mut() {
+            frame.phase = Phase::WaitDraft;
+        }
+    }
 }
 
 fn wait_turn(run: &mut Run, await_working: bool) {
@@ -883,7 +972,7 @@ fn path_pages(
         };
         match &node.kind {
             NodeKind::Page { .. } => return true,
-            NodeKind::Talk { .. } | NodeKind::Call { .. } | NodeKind::Stop => return false,
+            NodeKind::Talk { .. } | NodeKind::Call { .. } | NodeKind::Stop | NodeKind::CreateTicket { .. } => return false,
             NodeKind::Trigger { .. } | NodeKind::StagePicked | NodeKind::Classify(_) | NodeKind::Switch(_) => node
                 .kind
                 .ports()
@@ -972,7 +1061,7 @@ fn detach(run: &mut Run, at: &str) {
     if run.status == Status::Waiting {
         run.status = Status::Running;
         if let Some(frame) = run.stack.last_mut() {
-            if frame.phase == Phase::WaitTurn {
+            if frame.phase == Phase::WaitTurn || frame.phase == Phase::WaitDraft {
                 frame.phase = Phase::Enter;
             }
         }
@@ -980,10 +1069,10 @@ fn detach(run: &mut Run, at: &str) {
 }
 
 fn turn_ended(run: &mut Run, claude: Option<String>) {
-    if let Session::Live { claude: slot, .. } = &mut run.session {
-        if claude.is_some() {
-            *slot = claude;
-        }
+    note_claude(run, claude);
+    if run.waiting_draft() {
+        fail_run(run, "the draft was not read".into());
+        return;
     }
     if run.status != Status::Waiting {
         return;
@@ -994,6 +1083,35 @@ fn turn_ended(run: &mut Run, claude: Option<String>) {
             frame.phase = Phase::Follow(out_port());
         }
     }
+}
+
+fn turn_drafted(run: &mut Run, claude: Option<String>, draft: Draft) {
+    note_claude(run, claude);
+    if run.pending.is_some() || !run.waiting_draft() {
+        return;
+    }
+    let Ok(node) = front_node(run) else { return };
+    run.drafts.insert(node, draft);
+    run.status = Status::Running;
+    if let Some(frame) = run.stack.last_mut() {
+        frame.phase = Phase::Enter;
+    }
+}
+
+fn note_claude(run: &mut Run, claude: Option<String>) {
+    if claude.is_none() {
+        return;
+    }
+    if let Session::Live { claude: slot, .. } = &mut run.session {
+        *slot = claude;
+    }
+}
+
+pub(crate) fn fail_run(run: &mut Run, why: String) {
+    if run.pending.is_some() || !run.waiting_draft() {
+        return;
+    }
+    fail_status(run, why);
 }
 
 fn front(run: &Run) -> Result<(String, NodeId), String> {
@@ -1011,13 +1129,19 @@ fn front_node(run: &Run) -> Result<NodeId, String> {
 }
 
 fn write_answers(run: &mut Run, name: &str, answers: &Answers) {
+    insert_context(run, name, answers_value(answers));
+}
+
+fn write_ticket(run: &mut Run, node: &NodeId, ticket: &Supplied) {
+    let Supplied::Ticket { id, identifier, url } = ticket else { return };
+    insert_context(run, &node.0, json!({ "id": id, "identifier": identifier, "url": url }));
+}
+
+fn insert_context(run: &mut Run, key: &str, value: Value) {
     if !run.context.is_object() {
         run.context = json!({});
     }
-    run.context
-        .as_object_mut()
-        .expect("context object")
-        .insert(name.to_owned(), answers_value(answers));
+    run.context.as_object_mut().expect("context object").insert(key.to_owned(), value);
 }
 
 fn answers_value(answers: &Answers) -> Value {
@@ -1067,7 +1191,8 @@ fn own_prompt(run: &Run, effect: &Effect) -> String {
         Effect::Claim { .. }
         | Effect::Classify { .. }
         | Effect::Page { .. }
-        | Effect::StagePicked { .. } => String::new(),
+        | Effect::StagePicked { .. }
+        | Effect::File { .. } => String::new(),
     }
 }
 
@@ -1080,6 +1205,7 @@ fn effect_name(effect: &Effect) -> &'static str {
         Effect::Open { .. } => "open",
         Effect::Resume { .. } => "resume",
         Effect::Type { .. } => "type",
+        Effect::File { .. } => "file",
     }
 }
 
@@ -1249,6 +1375,11 @@ mod tests {
                         | Effect::Page { .. }
                         | Effect::StagePicked { .. }
                         | Effect::Type { .. } => Supplied::Done,
+                        Effect::File { .. } => Supplied::Ticket {
+                            id: "uuid".into(),
+                            identifier: "ENG-12".into(),
+                            url: "https://linear.app/acme/issue/ENG-12".into(),
+                        },
                     };
                     seen.push(effect);
                     supply(run, supplied, AT);
@@ -2425,6 +2556,89 @@ mod tests {
             )
             .0,
             "nowhere"
+        );
+    }
+
+    #[test]
+    fn a_create_ticket_claims_then_opens_on_the_draft_prompt_and_files_under_the_node_id() {
+        let instructions = "Title it as the user would.";
+        let lib = library(vec![(
+            "bugs",
+            chain(vec![
+                ("t", "Trigger", trigger()),
+                ("file-1", "File the bug", NodeKind::CreateTicket {
+                    team: "Engineering".into(),
+                    label: "Bug".into(),
+                    column: String::new(),
+                    instructions: instructions.into(),
+                }),
+            ]),
+        )]);
+        let mut run = start(&lib, "bugs", linear(), json!("ENG-7: Broken button"), AT);
+        assert_eq!(
+            act(&mut run, &lib),
+            Effect::Claim { connector: "bugs".into(), key: "uuid".into() }
+        );
+        supply(&mut run, Supplied::Done, AT);
+        assert_eq!(
+            act(&mut run, &lib),
+            Effect::Open {
+                owner: "bugs".into(),
+                prompt: "\
+{\"trigger\":\"ENG-7: Broken button\"}\n\n\
+Title it as the user would.\n\n\
+Reply with one ticket fence and nothing else. Do not call `pinned linear create` on this turn.\n\n\
+```ticket\nTitle: Export 500s\n\nThe worker returns 500 when the cursor is past the end.\n```"
+                    .into(),
+                seeded: false,
+            }
+        );
+        supply(&mut run, opened(), AT);
+        assert_eq!(drive(&mut run, &lib), Drive::Park);
+        push(
+            &mut run,
+            Wake::Drafted {
+                claude: Some(CLAUDE.into()),
+                draft: super::super::draft::Draft {
+                    title: "Export 500s".into(),
+                    description: "The worker returns 500 when the cursor is past the end.".into(),
+                },
+            },
+            AT,
+        );
+        assert_eq!(
+            act(&mut run, &lib),
+            Effect::File { connector: "bugs".into(), node: nid("file-1") }
+        );
+        supply(
+            &mut run,
+            Supplied::Ticket {
+                id: "uuid".into(),
+                identifier: "ENG-12".into(),
+                url: "https://linear.app/acme/issue/ENG-12".into(),
+            },
+            AT,
+        );
+        assert_eq!(
+            run.context["file-1"],
+            json!({ "id": "uuid", "identifier": "ENG-12", "url": "https://linear.app/acme/issue/ENG-12" })
+        );
+        let draft = run.drafts.get(&nid("file-1")).expect("stored draft");
+        let NodeKind::CreateTicket { team, label, column, .. } = &lib["bugs"].node(&nid("file-1")).expect("node").kind else {
+            panic!("file-1 is a create-ticket");
+        };
+        let team_states = json!({ "name": team, "states": { "nodes": [] } });
+        let state = crate::linear::column_state(&team_states, column).expect("column");
+        let label_id = (!label.is_empty()).then_some(label.as_str());
+        assert_eq!(
+            crate::linear::create_input(team, "", &draft.title, &draft.description, label_id, state),
+            json!({
+                "teamId": "Engineering",
+                "assigneeId": "",
+                "title": "Export 500s",
+                "description": "The worker returns 500 when the cursor is past the end.",
+                "labelIds": ["Bug"],
+            })
         );
     }
 

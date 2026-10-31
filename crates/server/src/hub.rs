@@ -174,6 +174,22 @@ impl Hub {
         Ok(connectors.clone())
     }
 
+    pub(crate) fn draft_thread(
+        hub: Arc<Hub>,
+        account: Uuid,
+    ) -> impl Fn(&str, &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<pinned_core::thread::Item>, String>> + Send>> + Send + Sync {
+        move |machine: &str, tab: &str| {
+            let hub = hub.clone();
+            let machine = machine.to_owned();
+            let tab = tab.to_owned();
+            Box::pin(async move {
+                let account = hub.account(account).await?;
+                let value = hub.call_machine(&account, &machine, Call::Thread { tab, from: 0 }, MACHINE_CALL_WAIT).await.map_err(String::from)?;
+                pinned_core::thread::draft_items(&value)
+            })
+        }
+    }
+
     async fn watch(self: &Arc<Self>, account: &Arc<Account>) -> Result<(), String> {
         let connectors = self.connectors(account).await?;
         if account.watching.swap(true, Ordering::SeqCst) {
@@ -190,7 +206,8 @@ impl Hub {
                 let (hub, account) = checked.clone();
                 tokio::spawn(async move { hub.push_settings(&account).await });
             };
-            connectors.watch(open, on_check).await
+            let thread = Self::draft_thread(hub.clone(), id);
+            connectors.watch(open, thread, on_check).await
         });
         let (hub, account) = (self.clone(), account.clone());
         tokio::spawn(async move {

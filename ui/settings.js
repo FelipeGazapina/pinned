@@ -1029,6 +1029,7 @@ function graphNodeUi(node) {
   if (type === "page") return { tone: "slack", icon: "@", app: "Slack", title: "Page a group" };
   if (type === "stage-picked") return { ...STEPS.picked, title: "Stage picked" };
   if (type === "call") return { tone: "called", icon: "↳", app: "Workflow", title: "Call workflow" };
+  if (type === "create-ticket") return { tone: "linear", icon: "⚑", app: "Linear", title: "Create ticket" };
   if (type === "stop") return { tone: "", icon: "■", app: "", title: "Stop" };
   return { tone: "", icon: "?", app: "", title: node.name ?? "Node" };
 }
@@ -1053,6 +1054,7 @@ function graphNodeSummary(node, c) {
     const target = settings.connectors.find((k) => k.id === node.workflow);
     return target?.name ?? (node.workflow ? "Missing workflow" : "Pick a workflow");
   }
+  if (type === "create-ticket") return node.team?.trim() || "Name a team";
   if (type === "stop") return "Ends this branch";
   return node.name ?? "";
 }
@@ -1151,9 +1153,11 @@ function graphPickerHtml(c, anchor) {
   const api = graphApi();
   const types = api?.PICKER_TYPES ?? ["talk", "stop"];
   const items = types
-    .map((type) => {
+    .flatMap((type) => {
       const ui = graphNodeUi({ type, watch: { kind: "called" } });
-      return `<button data-action="graph-pick-type" data-type="${type}">${iconHtml(ui)}<span>${esc(type)}</span></button>`;
+      const button = (label, backlog) => `<button data-action="graph-pick-type" data-type="${type}"${backlog ? ' data-backlog="true"' : ""}>${iconHtml(ui)}<span>${esc(label)}</span></button>`;
+      if (type !== "create-ticket") return [button(type, false)];
+      return [button("Create ticket", false), button("Create ticket on backlog", true)];
     })
     .join("");
   return `<div class="add-menu graph-picker" style="width:${MENU_W}px;left:${anchor.x}px;top:${anchor.y}px">${items}</div>`;
@@ -1375,6 +1379,15 @@ function graphNodePanel(c) {
     const targets = settings.connectors.filter((k) => k.id !== c.id);
     body = `<label>Workflow ${select(`graph.nodes.${i}.workflow`, ["", ...targets.map((k) => k.id)], (id) => targets.find((k) => k.id === id)?.name ?? id, node.workflow ?? "")}</label>`;
   } else if (type === "stage-picked") body = `<p class="hint">Moves the Linear issue to the connector's picked column when the session opens.</p>`;
+  else if (type === "create-ticket") {
+    const i = graphNodeIndex(node.id);
+    body = `<label>Team ${input(`graph.nodes.${i}.team`, node.team ?? "", 'spellcheck="false"')}</label>
+      <label>Label ${input(`graph.nodes.${i}.label`, node.label ?? "", 'spellcheck="false"')}</label>
+      <p class="hint">An empty label adds no label.</p>
+      <label>Column ${input(`graph.nodes.${i}.column`, node.column ?? "", 'spellcheck="false"')}</label>
+      <p class="hint">An empty column uses the team's default.</p>
+      <label>Instructions<textarea data-bind="graph.nodes.${i}.instructions" rows="4">${esc(node.instructions ?? "")}</textarea></label>`;
+  }
   const removable = type !== "trigger";
   return `<aside class="node-panel" aria-label="${esc(ui.title)}">
     <div class="node-panel-head">${iconHtml(ui)}<span class="text"><span class="app">${ui.app}</span><b>${esc(node.name || ui.title)}</b></span>
@@ -1388,16 +1401,25 @@ function panelHtml(c) {
   return graphNodePanel(c);
 }
 
-function applyGraphPick(type) {
+function applyGraphPick(type, backlog) {
   const api = graphApi();
   if (!api || !view.graphPick) return;
-  const upstreamId = view.graphPick.mode === "splice" ? view.draft.graph.edges[view.graphPick.edgeIndex]?.from : view.graphPick.from;
-  const fresh = api.newNode(type, view.draft.graph, upstreamId);
+  const edge = view.graphPick.mode === "splice" ? view.draft.graph.edges[view.graphPick.edgeIndex] : null;
+  const from = edge?.from ?? view.graphPick.from;
+  const port = edge?.port ?? view.graphPick.port;
+  if (type === "create-ticket") {
+    const before = view.draft.graph.nodes.map((node) => node.id);
+    view.draft.graph = api.insertCreateTicket(view.draft.graph, from, port, { backlog });
+    view.open = view.draft.graph.nodes.find((node) => node.type === "create-ticket" && !before.includes(node.id))?.id ?? null;
+    view.graphPick = null;
+    redraw();
+    return;
+  }
+  const fresh = api.newNode(type, view.draft.graph, from);
   if (view.graphPick.mode === "splice") {
-    const edge = view.draft.graph.edges[view.graphPick.edgeIndex];
     view.draft.graph = api.splice(view.draft.graph, edge, fresh);
   } else {
-    view.draft.graph = api.append(view.draft.graph, view.graphPick.from, view.graphPick.port, fresh);
+    view.draft.graph = api.append(view.draft.graph, from, port, fresh);
   }
   view.graphPick = null;
   view.open = fresh.id;
@@ -1797,7 +1819,7 @@ const actions = {
     refresh();
   },
   "graph-pick-type"(button) {
-    applyGraphPick(button.dataset.type);
+    applyGraphPick(button.dataset.type, button.dataset.backlog === "true");
   },
   "graph-select-edge"(button) {
     view.selectedEdge = Number(button.dataset.edge);
