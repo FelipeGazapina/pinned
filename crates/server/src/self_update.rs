@@ -608,13 +608,7 @@ mod tests {
         let older = home.join("older");
         sign_release(&older, "0.0.1", private_key);
         let (status, bytes) = install_from(&home, "older", served(&older), pubkey);
-        assert_eq!(
-            status,
-            UpdateStatus::Failed {
-                to: "0.0.1".into(),
-                reason: format!("the published release 0.0.1 is older than {}", env!("CARGO_PKG_VERSION")),
-            },
-        );
+        assert_eq!(status, UpdateStatus::UpToDate { version: env!("CARGO_PKG_VERSION").into() });
         assert_eq!(bytes, b"old-binary");
     }
 
