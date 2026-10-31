@@ -7,18 +7,80 @@ pub const MARKER_ENV: &str = "PINNED_UNPROVEN";
 pub const VERSION_ENV: &str = "PINNED_VERSION";
 pub const WAIT_ENV: &str = "PINNED_PROOF_WAIT";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Step {
     Starting,
     Running,
     Leaving,
 }
 
-static STEP: Mutex<Step> = Mutex::new(Step::Starting);
-static REFUSED: Notify = Notify::const_new();
+struct Boot {
+    step: Mutex<Step>,
+    refused: Notify,
+}
 
-fn step() -> MutexGuard<'static, Step> {
-    STEP.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+static BOOT: Boot = Boot::new();
+
+struct Proof {
+    marker: Option<PathBuf>,
+    checksum: String,
+}
+
+impl Proof {
+    fn of_this_process() -> Proof {
+        Proof { marker: marker_path(), checksum: std::env::var(PROOF_ENV).unwrap_or_default() }
+    }
+
+    fn holds(&self) -> bool {
+        let Some(path) = &self.marker else { return false };
+        let Ok(marker) = std::fs::read(path) else { return false };
+        proves(&marker, &self.checksum)
+    }
+}
+
+impl Boot {
+    const fn new() -> Boot {
+        Boot { step: Mutex::new(Step::Starting), refused: Notify::const_new() }
+    }
+
+    fn step(&self) -> MutexGuard<'_, Step> {
+        self.step.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn ready(&self) -> bool {
+        let mut step = self.step();
+        if *step == Step::Leaving {
+            return false;
+        }
+        *step = Step::Running;
+        true
+    }
+
+    fn leave_from(&self, from: Step, proof: &Proof) -> bool {
+        let mut step = self.step();
+        if *step != from || !proof.holds() {
+            return false;
+        }
+        *step = Step::Leaving;
+        true
+    }
+
+    async fn commit_when_ready(&self, proof: &Proof) {
+        let step = self.step();
+        if *step == Step::Leaving || !proof.holds() {
+            return;
+        }
+        let Some(path) = &proof.marker else { return };
+        if let Err(error) = std::fs::remove_file(path) {
+            eprintln!("pinned: could not remove {}, the next sign in tries again: {error}", path.display());
+        }
+    }
+
+    fn refuse(&self, proof: &Proof) {
+        if proof.holds() {
+            self.refused.notify_one();
+        }
+    }
 }
 
 pub fn marker_path() -> Option<PathBuf> {
@@ -32,9 +94,7 @@ pub fn marker_path() -> Option<PathBuf> {
 }
 
 pub fn proving() -> bool {
-    let Some(path) = marker_path() else { return false };
-    let Ok(marker) = std::fs::read(path) else { return false };
-    proves(&marker, &std::env::var(PROOF_ENV).unwrap_or_default())
+    Proof::of_this_process().holds()
 }
 
 fn proves(marker: &[u8], proof: &str) -> bool {
@@ -42,52 +102,31 @@ fn proves(marker: &[u8], proof: &str) -> bool {
 }
 
 pub fn ready() {
-    let mut step = step();
-    if *step == Step::Leaving {
-        drop(step);
+    if !BOOT.ready() {
         loop {
             std::thread::park();
         }
     }
-    *step = Step::Running;
 }
 
 pub fn leave_if_starting() -> bool {
-    leave_from(Step::Starting)
+    BOOT.leave_from(Step::Starting, &Proof::of_this_process())
 }
 
 pub fn leave_if_running() -> bool {
-    leave_from(Step::Running)
+    BOOT.leave_from(Step::Running, &Proof::of_this_process())
 }
 
-fn leave_from(from: Step) -> bool {
-    let mut step = step();
-    if *step != from || !proving() {
-        return false;
-    }
-    *step = Step::Leaving;
-    true
-}
-
-pub fn commit_if_proving() {
-    let step = step();
-    if *step == Step::Leaving || !proving() {
-        return;
-    }
-    let Some(path) = marker_path() else { return };
-    if let Err(error) = std::fs::remove_file(&path) {
-        eprintln!("pinned: could not remove {}, the next sign in tries again: {error}", path.display());
-    }
+pub async fn commit_when_ready() {
+    BOOT.commit_when_ready(&Proof::of_this_process()).await
 }
 
 pub fn refuse() {
-    if proving() {
-        REFUSED.notify_one();
-    }
+    BOOT.refuse(&Proof::of_this_process())
 }
 
 pub async fn refused() {
-    REFUSED.notified().await
+    BOOT.refused.notified().await
 }
 
 fn sibling(path: &Path, suffix: &str) -> Option<PathBuf> {

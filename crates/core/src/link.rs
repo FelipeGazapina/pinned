@@ -299,7 +299,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     sink.send(text(&auth)).await.map_err(transport)?;
     let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| Fault::Transport("the hub did not answer the sign in".into()))?;
     accept_hello(hello)?;
-    crate::boot::commit_if_proving();
+    crate::boot::commit_when_ready().await;
 
     let (out, mut incoming) = channel::unbounded_channel();
     *shared.out.lock().unwrap() = Some(out.clone());
