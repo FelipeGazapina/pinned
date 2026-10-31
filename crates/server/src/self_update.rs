@@ -895,14 +895,14 @@ mod tests {
                 permission_mode: None,
             }
         };
-        pinned_core::sessions::save(&dir.join("sessions.json"), &[saved("s1"), saved("s2")]);
+        pinned_core::sessions::save(&dir.join("sessions.json"), &(1..=8).map(|n| saved(&format!("s{n}"))).collect::<Vec<_>>());
         let before = machine.restore_tabs();
         for tab in &before {
             machine.start_claude(tab, 80, 24).unwrap();
         }
         machine.watch_threads();
         machine.call(Call::WatchThreads { tabs: before.clone() }).unwrap();
-        let mut first: Vec<String> = (0..2).map(|_| nudges.recv_timeout(Duration::from_secs(2)).unwrap()).collect();
+        let mut first: Vec<String> = (0..before.len()).map(|_| nudges.recv_timeout(Duration::from_secs(2)).unwrap()).collect();
         first.sort();
         assert_eq!(first, before, "the first look");
 
