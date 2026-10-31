@@ -1140,16 +1140,15 @@ grok-4.7-high - Grok 4.7  High
         );
     }
 
-    #[test]
-    fn a_cancelled_task_keeps_the_reply_so_far() {
-        let dir = scratch("cancel-keeps");
+    fn after_each_stop(name: &str, provider: Provider, lines: &[&str]) -> Vec<Value> {
+        let dir = scratch(name);
         let file = dir.join("delegates.json");
         let mut seen = vec![];
         for how in ["task_cancel", "limit", "quit", "crash"] {
             let delegates = Delegates::load(Some(file.clone()));
-            let task = new_on(&delegates, Provider::Cursor);
-            for line in [INIT, REPLY] {
-                delegates.apply(&task.id, ChildEvent::Line(line.to_owned()), None);
+            let task = new_on(&delegates, provider);
+            for line in lines {
+                delegates.apply(&task.id, ChildEvent::Line((*line).to_owned()), None);
             }
             let delegates = match how {
                 "task_cancel" => {
@@ -1172,8 +1171,14 @@ grok-4.7-high - Grok 4.7  High
             let status = delegates.status(&parent(), &task.id).unwrap();
             seen.push(json!([how, status["workState"], status["summary"], status["error"]]));
         }
+        let _ = std::fs::remove_dir_all(&dir);
+        seen
+    }
+
+    #[test]
+    fn a_cancelled_task_keeps_the_reply_so_far() {
         assert_eq!(
-            seen,
+            after_each_stop("cancel-keeps", Provider::Cursor, &[INIT, REPLY]),
             vec![
                 json!(["task_cancel", "cancelled", "PR opened", "the parent asked"]),
                 json!(["limit", "cancelled", "PR opened", "pinned stopped it after 8 h, its limit"]),
@@ -1181,7 +1186,20 @@ grok-4.7-high - Grok 4.7  High
                 json!(["crash", "cancelled", "PR opened", "stopped by restart"]),
             ]
         );
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cancelled_task_keeps_its_newest_reply() {
+        let recording = fixture("claude-background-shell.jsonl");
+        let before_the_final_result: Vec<&str> = recording.lines().take(17).collect();
+        let shell = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_type":"local_bash","description":"npm run dev"}]}"#;
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"result":"PR opened and CI is green"}"#;
+        let summaries = |name: &str, lines: &[&str]| after_each_stop(name, Provider::Claude, lines).into_iter().map(|row| row[2].clone()).collect::<Vec<_>>();
+        assert_eq!(
+            [summaries("newest-text", &before_the_final_result), summaries("newest-result", &[INIT, shell, REPLY, result])],
+            [vec![json!("FINAL-REPORT\nbgdone\n\n[exited with code 0]"); 4], vec![json!("PR opened and CI is green"); 4]],
+            "a text written after the last turn end is newer than the summary that turn left, and a later result is newer than both"
+        );
     }
 
     #[test]
