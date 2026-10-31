@@ -379,6 +379,7 @@ pub struct Machine {
 struct TranscriptCursor {
     session: String,
     byte: u64,
+    path: PathBuf,
 }
 
 impl Machine {
@@ -747,6 +748,14 @@ impl Machine {
         thread::find(&self.accounts.home(account).join("projects"), session)
     }
 
+    /// The transcript at `cached` when that file is still there. A deleted or moved one is searched for again.
+    fn locate_transcript(&self, account: &Account, session: &str, cached: Option<&Path>) -> Option<PathBuf> {
+        if let Some(path) = cached.filter(|path| path.is_file()) {
+            return Some(path.to_path_buf());
+        }
+        self.find_transcript(account, session)
+    }
+
     /// Opens a tab beside `tab` whose claude resumes its conversation through the message `through`, as
     /// T3 Code's "Fork from this response" does, and returns the new tab's id.
     pub fn fork(&self, tab: &str, through: &str) -> Result<TabId, String> {
@@ -796,14 +805,27 @@ impl Machine {
         };
         seen.retain(|id, _| open.iter().any(|(open_id, _, _)| open_id == id));
         for (id, session, account) in open {
-            let Some(file) = self.find_transcript(&account, &session) else { continue };
-            let Ok(len) = std::fs::metadata(&file).map(|meta| meta.len()) else { continue };
-            let Some(from) = seen.get(&id).and_then(|cursor| (cursor.session == session && len > cursor.byte).then_some(cursor.byte)) else {
-                seen.insert(id, TranscriptCursor { session, byte: len });
+            let remembered = seen.get(&id).filter(|cursor| cursor.session == session).map(|cursor| (cursor.byte, cursor.path.clone()));
+            let Some(file) = self.locate_transcript(&account, &session, remembered.as_ref().map(|(_, path)| path.as_path())) else {
+                seen.remove(&id);
+                continue;
+            };
+            let Ok(len) = std::fs::metadata(&file).map(|meta| meta.len()) else {
+                seen.remove(&id);
+                continue;
+            };
+            // A new path keeps the old offset, so a line written as the file moves is still delivered.
+            let from = match &remembered {
+                Some((byte, path)) if path == &file && len > *byte => Some(*byte),
+                Some((byte, path)) if path != &file => Some(*byte),
+                _ => None,
+            };
+            let Some(from) = from else {
+                seen.insert(id, TranscriptCursor { session, byte: len, path: file });
                 continue;
             };
             let Ok(page) = thread::read(&file, from) else { continue };
-            seen.insert(id.clone(), TranscriptCursor { session: session.clone(), byte: page.next });
+            seen.insert(id.clone(), TranscriptCursor { session: session.clone(), byte: page.next, path: file });
             if page.items.is_empty() && !page.reset {
                 continue;
             }
@@ -3118,6 +3140,39 @@ mod tests {
         assert!(matches!(parsed, MachineEvent::Thread { next, .. } if next > pushed[0]["from"].as_u64().unwrap()));
         m.push_transcript_lines(&mut cursors);
         assert_eq!(heard.lock().unwrap().iter().filter(|event| event["kind"] == "thread").count(), 1, "an unchanged file is quiet");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_moved_transcript_is_found_again() {
+        let root = temp("thread-move");
+        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
+        let heard = Arc::new(Mutex::new(vec![]));
+        let seen = heard.clone();
+        m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        let projects = root.join("config/accounts/work/projects");
+        let (first, second) = (projects.join("demo"), projects.join("other"));
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let line = |text: &str| {
+            format!(
+                "{{\"type\":\"assistant\",\"uuid\":\"{text}\",\"timestamp\":\"2020-01-01T00:00:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n"
+            )
+        };
+        let original = first.join("s1.jsonl");
+        std::fs::write(&original, line("ready")).unwrap();
+        let mut cursors = HashMap::new();
+        m.push_transcript_lines(&mut cursors);
+        assert!(heard.lock().unwrap().iter().all(|event| event["kind"] != "thread"));
+        std::fs::remove_file(&original).unwrap();
+        std::fs::write(second.join("s1.jsonl"), format!("{}{}", line("ready"), line("moved"))).unwrap();
+        m.push_transcript_lines(&mut cursors);
+        let pushed: Vec<_> = heard.lock().unwrap().iter().filter(|event| event["kind"] == "thread").cloned().collect();
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(pushed[0]["tab"], json!(tab));
+        assert_eq!(pushed[0]["items"][0]["text"], "moved");
         let _ = std::fs::remove_dir_all(root);
     }
 
