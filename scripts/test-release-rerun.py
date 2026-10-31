@@ -20,6 +20,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 TAG = "v0.17.0"
 NEXT_TAG = "v0.17.1"
+LAST_TAG = "v0.17.2"
 RC_TAG = "v0.17.0-rc.1"
 REPO = "FelipeGazapina/pinned"
 ARM_NAME = "pinned-server-aarch64-unknown-linux-musl"
@@ -483,7 +484,7 @@ def run_orders(jobs):
     return orders
 
 
-def runs_one_at_a_time(wf, job_name, tags):
+def queued_runs(wf, job_name, tags):
     for level in (wf, wf["jobs"][job_name]):
         concurrency = level.get("concurrency")
         if concurrency is None:
@@ -492,8 +493,10 @@ def runs_one_at_a_time(wf, job_name, tags):
             concurrency = {"group": concurrency}
         groups = {expand(concurrency["group"], context(tag)) for tag in tags}
         if len(groups) == 1 and concurrency.get("cancel-in-progress", "false") == "false":
-            return True
-    return False
+            if concurrency.get("queue", "single") == "max":
+                return list(tags)
+            return [tags[0], tags[-1]]
+    return None
 
 
 def shell_problems(wf):
@@ -1023,23 +1026,22 @@ def report(label, errors):
 
 
 
-def concurrent_publish_errors(replay):
-    tags = (NEXT_TAG, TAG)
-    serial = runs_one_at_a_time(replay.wf, "publish", tags)
+def concurrent_publish_errors(replay, tags, want_latest):
+    queued = queued_runs(replay.wf, "publish", tags)
     before = "v0.16.0"
     latest = before
-    errors = []
-    for tag in tags:
+    errors = [f"{tag} stays a draft, because GitHub cancels its pending publish" for tag in tags if queued and tag not in queued]
+    for tag in queued or tags:
         state = seeded_state(replay.release(tag=tag), draft=True)
-        state["remote_latest"] = latest if serial else before
+        state["remote_latest"] = latest if queued else before
         code, stderr, after, _ = replay.run(["publish"], state, {}, tag)
         errors += [f"{tag}: {violation}" for violation in after["violations"]]
         if code != 0:
             errors.append(f"{tag} publish exit {code}: {stderr.strip()}")
         if after["latest"]:
             latest = tag
-    if latest != NEXT_TAG:
-        errors.append(f"latest is {latest} after {NEXT_TAG} and then {TAG} publish, want {NEXT_TAG}")
+    if latest != want_latest:
+        errors.append(f"latest is {latest} after {' then '.join(tags)} publish, want {want_latest}")
     return errors
 
 
@@ -1069,7 +1071,11 @@ def main():
         replay = Replay(wf, tmp)
         failed += report("minisign-verify crate vectors", crate_vector_errors(replay.root))
         failed += report("public clobber", public_clobber_errors(replay))
-        failed += report(f"{NEXT_TAG} and {TAG} publish at once", concurrent_publish_errors(replay))
+        failed += report(f"{NEXT_TAG} and {TAG} publish at once", concurrent_publish_errors(replay, (NEXT_TAG, TAG), NEXT_TAG))
+        failed += report(
+            f"{NEXT_TAG}, {TAG} and {LAST_TAG} publish at once",
+            concurrent_publish_errors(replay, (NEXT_TAG, TAG, LAST_TAG), LAST_TAG),
+        )
 
         current = replay.release()
         newer = replay.release(notes="new")
