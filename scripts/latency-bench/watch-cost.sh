@@ -1,8 +1,7 @@
 #!/bin/bash
-# CPU of one node process with 15 restored sessions and 300 project directories.
-# The watcher starts inside `pinned-server node` whether or not a hub accepts
-# the dial. HOME and PATH stay inside the scratch dir, so this never reads the
-# user's Claude home or launches the installed claude.
+# CPU of one node process with 15 restored sessions and 300 project directories,
+# while a client is watching those tabs. HOME and PATH stay inside the scratch
+# dir, so this never reads the user's Claude home or launches the installed claude.
 #
 #   scripts/latency-bench/watch-cost.sh
 #   WATCH_OUT=.audit/watch-cpu.json scripts/latency-bench/watch-cost.sh
@@ -15,6 +14,10 @@ WINDOWS=${WATCH_WINDOWS:-5}
 WINDOW_S=${WATCH_WINDOW_S:-8}
 TABS=${WATCH_TABS:-15}
 PROJECTS=${WATCH_PROJECTS:-300}
+PG_PORT=${WATCH_PG_PORT:-55123}
+HUB_PORT=${WATCH_HUB_PORT:-8794}
+EMAIL=watch@example.test
+PASSWORD="watch password 1"
 SERVER=${CARGO_TARGET_DIR:-$REPO/target}/release/pinned-server
 
 case "$DIR" in
@@ -30,14 +33,18 @@ fi
 cleanup() {
   local status=$?
   set +e
+  if [ -n "${WATCH_PID:-}" ]; then kill "$WATCH_PID" 2>/dev/null; wait "$WATCH_PID" 2>/dev/null; fi
   if [ -n "${NODE_PID:-}" ]; then kill "$NODE_PID" 2>/dev/null; wait "$NODE_PID" 2>/dev/null; fi
+  if [ -n "${HUB_PID:-}" ]; then kill "$HUB_PID" 2>/dev/null; wait "$HUB_PID" 2>/dev/null; fi
+  if [ -d "$DIR/pg" ]; then pg_ctl -D "$DIR/pg" -m fast stop >/dev/null 2>&1; fi
   set -e
   return "$status"
 }
 trap cleanup EXIT
 
+if [ -d "$DIR/pg" ]; then pg_ctl -D "$DIR/pg" -m fast stop >/dev/null 2>&1 || true; fi
 rm -rf "$DIR"
-mkdir -p "$DIR/bin" "$DIR/home/.claude/projects" "$DIR/config" "$DIR/work" "$(dirname "$OUT")"
+mkdir -p "$DIR/bin" "$DIR/home/.claude/projects" "$DIR/config" "$DIR/work" "$DIR/downloads" "$(dirname "$OUT")"
 
 cat >"$DIR/bin/claude" <<'EOF'
 #!/bin/sh
@@ -68,14 +75,29 @@ for (let i = 1; i <= tabs; i += 1) {
   saved.push({ cwd: work, session, env: [], account: "claude", bypass: false, interrupted: false });
 }
 fs.writeFileSync(dir + "/config/sessions.json", JSON.stringify(saved));
-fs.writeFileSync(dir + "/config/account.json", JSON.stringify({
-  hub: "http://127.0.0.1:9",
-  email: "watch@example.test",
-  user_token: "watch-token",
-  machine_id: "m-watch",
-  machine_token: "watch-machine",
-}));
 ' "$DIR" "$DIR/work" "$TABS" "$PROJECTS"
+
+export LC_ALL=C
+initdb -U pinned --auth=trust -D "$DIR/pg" >/dev/null
+pg_ctl -D "$DIR/pg" -l "$DIR/pg.log" -o "-p $PG_PORT -c listen_addresses=127.0.0.1 -c unix_socket_directories=" start >/dev/null
+for _ in $(seq 1 50); do
+  psql -h 127.0.0.1 -p "$PG_PORT" -U pinned -d postgres -c 'select 1' >/dev/null 2>&1 && break
+  sleep 0.2
+done
+psql -h 127.0.0.1 -p "$PG_PORT" -U pinned -d postgres -qc "create database pinned"
+"$SERVER" hub --db "postgres://pinned@127.0.0.1:$PG_PORT/pinned" --listen "127.0.0.1:$HUB_PORT" \
+  --ui "$REPO/ui" --downloads "$DIR/downloads" --key-file "$DIR/hub.key" \
+  --public-url "http://127.0.0.1:$HUB_PORT" --signup open >"$DIR/hub.log" 2>&1 &
+HUB_PID=$!
+for _ in $(seq 1 50); do
+  curl -fsS "http://127.0.0.1:$HUB_PORT/" >/dev/null 2>&1 && break
+  sleep 0.2
+done
+curl -fsS "http://127.0.0.1:$HUB_PORT/" >/dev/null
+curl -fsS "http://127.0.0.1:$HUB_PORT/api/signup" -H 'content-type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" >/dev/null
+env HOME="$DIR/home" PINNED_PASSWORD="$PASSWORD" "$SERVER" login "http://127.0.0.1:$HUB_PORT" "$EMAIL" \
+  --name watch-node --config-dir "$DIR/config" >"$DIR/login.log" 2>&1
 
 env HOME="$DIR/home" SHELL="$DIR/bin/shell" PATH="$DIR/bin:/usr/bin:/bin" \
   "$SERVER" node --config-dir "$DIR/config" >"$DIR/node.log" 2>&1 &
@@ -107,6 +129,31 @@ if [ "$kids" -lt "$TABS" ] || [ "$open" -lt "$TABS" ]; then
   exit 1
 fi
 
+read -r TOKEN MACHINE < <(node -e 'const a=require(process.argv[1]); process.stdout.write(a.user_token+" "+a.machine_id+"\n")' "$DIR/config/account.json")
+node "$REPO/scripts/latency-bench/watch-tabs.js" \
+  --hub-ws "ws://127.0.0.1:$HUB_PORT/ws/client" \
+  --token "$TOKEN" \
+  --machine "$MACHINE" \
+  --transcript "$DIR/home/.claude/projects/p001/s001.jsonl" \
+  --tabs "$TABS" \
+  --out "$DIR/watch.json" \
+  --hold >"$DIR/watch.log" 2>&1 &
+WATCH_PID=$!
+for _ in $(seq 1 50); do
+  if [ -f "$DIR/watch.json" ]; then break; fi
+  if ! kill -0 "$WATCH_PID" 2>/dev/null; then
+    echo "watch client exited before a push" >&2
+    cat "$DIR/watch.log" >&2
+    exit 1
+  fi
+  sleep 0.2
+done
+if [ ! -f "$DIR/watch.json" ]; then
+  echo "watch client did not push a line" >&2
+  cat "$DIR/watch.log" >&2
+  exit 1
+fi
+
 node -e '
 const { spawnSync } = require("child_process");
 const fs = require("fs");
@@ -116,6 +163,7 @@ const seconds = Number(process.argv[3]);
 const out = process.argv[4];
 const tabs = Number(process.argv[5]);
 const projects = Number(process.argv[6]);
+const watch = JSON.parse(fs.readFileSync(process.argv[7], "utf8"));
 function cpuSeconds() {
   const text = spawnSync("ps", ["-p", String(pid), "-o", "time="], { encoding: "utf8" }).stdout.trim();
   const parts = text.split(":").map(Number);
@@ -148,11 +196,17 @@ const body = {
   median_pct: mid,
   min_pct: sorted[0],
   max_pct: sorted[sorted.length - 1],
+  watched_tabs: watch.tabs,
+  push_ms: watch.push_ms,
   samples,
 };
 fs.writeFileSync(out, JSON.stringify(body, null, 2) + "\n");
 console.log(JSON.stringify(body));
-' "$NODE_PID" "$WINDOWS" "$WINDOW_S" "$OUT" "$TABS" "$PROJECTS"
+' "$NODE_PID" "$WINDOWS" "$WINDOW_S" "$OUT" "$TABS" "$PROJECTS" "$DIR/watch.json"
+if ! kill -0 "$WATCH_PID" 2>/dev/null; then
+  echo "watch client exited during the sample" >&2
+  exit 1
+fi
 
 echo "result $OUT"
 if [ -n "${NODE_PID:-}" ] && kill -0 "$NODE_PID" 2>/dev/null; then
