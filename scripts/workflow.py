@@ -95,7 +95,7 @@ class Parser:
             return None
         if raw in ("|", "|-"):
             return self.block(indent, raw == "|")
-        if raw[0] in "&*!{>%@`?":
+        if raw[0] in "#&*!{>%@`?":
             self.fail(f"does not read [{raw}]")
         if raw[0] == "[":
             if not raw.endswith("]"):
