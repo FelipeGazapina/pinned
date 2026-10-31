@@ -498,6 +498,11 @@ pub enum Call {
     DeliverTask { tab: TabId, task: String },
     /// The machine's `UpdateStatus`.
     UpdateSelf,
+    /// Why the machine stopped syncing projects and plugins, or `null` while it syncs.
+    SyncStopped,
+    /// `null`. Sets an unreadable sync state aside, so the next sync starts over as on a new
+    /// machine. A readable one is left alone.
+    ResetSync,
 }
 
 fn pulls_limit() -> usize {

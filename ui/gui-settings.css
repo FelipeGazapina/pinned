@@ -51,7 +51,7 @@ body[data-mode="gui"] #settings button.primary:disabled { background: var(--g-in
 body[data-mode="gui"] #settings button.secondary { border: 1px solid var(--g-input); background: rgb(var(--g-ink-rgb) / 0.03); color: var(--g-fg); }
 body[data-mode="gui"] #settings button.secondary:hover { background: var(--g-input); }
 body[data-mode="gui"] #settings button.danger:hover { background: var(--g-error); border-color: var(--g-error); color: var(--g-on-primary); }
-body[data-mode="gui"] #settings .confirm { border-color: rgb(var(--g-error-rgb) / 0.5); border-radius: 12px; background: rgb(var(--g-error-rgb) / 0.06); }
+body[data-mode="gui"] #settings :is(.confirm, .sync-stopped) { border-color: rgb(var(--g-error-rgb) / 0.5); border-radius: 12px; background: rgb(var(--g-error-rgb) / 0.06); }
 body[data-mode="gui"] #settings .confirm button.danger { background: var(--g-error); border-color: var(--g-error); }
 
 /* Cards, list rows and the workflow canvas share one surface. */

@@ -346,6 +346,7 @@ pub struct Machine {
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
     sync_file: Option<PathBuf>,
+    sync_loop_holds_state: AtomicBool,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
@@ -462,6 +463,7 @@ impl Machine {
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
+            sync_loop_holds_state: AtomicBool::new(false),
             projects: Mutex::new(projects),
             projects_file,
             accounts: Accounts::load(dir.as_deref(), home.clone()),
@@ -614,6 +616,13 @@ impl Machine {
             }
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
+            Call::SyncStopped => json(self.sync_stopped()),
+            Call::ResetSync => {
+                if let Some(file) = &self.sync_file {
+                    sync::set_aside_unreadable(file)?;
+                }
+                Ok(Value::Null)
+            }
             Call::ProjectHistory { path, session } => {
                 let mut turns = self.project_history(&path);
                 if let Some(session) = session {
@@ -1717,6 +1726,17 @@ impl Machine {
     /// Where this machine remembers what it synced, or None when it keeps nothing.
     pub fn sync_file(&self) -> Option<&Path> {
         self.sync_file.as_deref()
+    }
+
+    pub(crate) fn hold_sync_state(&self, held: bool) {
+        self.sync_loop_holds_state.store(held, Ordering::SeqCst);
+    }
+
+    fn sync_stopped(&self) -> Option<String> {
+        if self.sync_loop_holds_state.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.sync_file.as_deref().and_then(sync::unreadable)
     }
 
     /// One share per Claude home. A test binary under `deps` shares only homes inside its config dir.
@@ -2929,7 +2949,7 @@ fn save_file(cwd: &Path, path: &str, text: &str) -> Result<String, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::agent::{session_env, Subject};
@@ -2938,7 +2958,7 @@ mod tests {
     use serde_json::json;
     use std::time::{Duration, Instant};
 
-    fn launch() -> Launch {
+    pub(crate) fn launch() -> Launch {
         Launch {
             exe: "/opt/pinned/bin/pinned".into(),
             bins: BTreeMap::new(),
