@@ -11,7 +11,7 @@ use pinned_core::agent::Subject;
 use pinned_core::account::{Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn};
 use pinned_core::link::UNAUTHORIZED;
 use pinned_core::sync;
-use pinned_core::wire::{AccountView, Call, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine};
+use pinned_core::wire::{AccountView, Call, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine, UpdateStatus};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -385,6 +385,13 @@ fn client_frame(hub: &Arc<Hub>, account: &Arc<Account>, client: u64, text: &str)
                 account.watch_threads(client, &machine, tabs);
                 account.to_client(client, &ToClient::Reply(Reply::new(id, Ok(Value::Null))));
             }
+            Call::UpdateSelf if account.dedicated(&machine) => {
+                let status = UpdateStatus::Cannot { reason: "an Upstash box is replaced by the hub".into() };
+                account.note_update(&machine, Some(status.clone()));
+                account.to_client(client, &ToClient::Reply(Reply::new(id, Ok(serde_json::to_value(&status).unwrap()))));
+                let (hub, account) = (hub.clone(), account.clone());
+                tokio::spawn(async move { hub.push_machines(&account).await });
+            }
             call => {
                 // Sent before anything is spawned, so fast typing reaches the machine in order.
                 let sent = account.send_call(&machine, call);
@@ -431,7 +438,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
         Some(Ok(MachineFrame::Auth { token, os, version, .. })) => (token, os, version),
         _ => return drop(socket.send(close_unauthorized()).await),
     };
-    let row = match hub.db.machine_connected(&token, &os).await {
+    let row = match hub.db.machine_connected(&token, &os, &version).await {
         Ok(Some(row)) => row,
         Ok(None) => return drop(socket.send(close_unauthorized()).await),
         Err(e) => return eprintln!("pinned-server: machine sign in failed: {e}"),
@@ -442,13 +449,13 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     };
     let (machine, socket_id) = (row.id.to_string(), hub.next_socket());
     let (out, mut outbox, overflowed) = Outbox::new();
-    let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None };
+    let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None, version: version.clone(), update: None };
     let _ = out.send(serde_json::to_string(&ToMachine::Hello { machine: view }).unwrap());
     // A machine that reconnects before its old socket timed out goes offline and back, so clients attach again.
     if account.went_offline(&machine, None) {
         hub.push_machines(&account).await;
     }
-    account.came_online(&machine, socket_id, row.name, row.dedicated, out);
+    account.came_online(&machine, socket_id, row.name, row.dedicated, version.clone(), out);
     hub.push_machines(&account).await;
     eprintln!("pinned-server: machine {machine} of account {} connected (pinned {version})", account.id);
 
@@ -484,13 +491,28 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
 
 fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: u64, text: &str) {
     match serde_json::from_str::<MachineFrame>(text) {
-        Ok(MachineFrame::Reply(reply)) => account.answered(machine, socket, reply),
+        Ok(MachineFrame::Reply(reply)) => {
+            if account.answered(machine, socket, reply) {
+                let (hub, account) = (hub.clone(), account.clone());
+                tokio::spawn(async move { hub.push_machines(&account).await });
+            }
+        }
         Ok(MachineFrame::Event { event }) => {
+            let push = if let MachineEvent::Update { status } = &event {
+                account.note_update(machine, status.clone());
+                true
+            } else {
+                false
+            };
             let after = match &event {
                 MachineEvent::Tabs { tabs } => Some(tabs.clone()),
                 _ => None,
             };
             account.machine_event(machine, socket, event);
+            if push {
+                let (hub, account) = (hub.clone(), account.clone());
+                tokio::spawn(async move { hub.push_machines(&account).await });
+            }
             if let Some(after) = after {
                 let observed = pinned_core::connectors::unix_millis();
                 let (hub, account, machine) = (hub.clone(), account.clone(), machine.to_owned());

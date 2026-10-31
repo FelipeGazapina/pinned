@@ -20,6 +20,7 @@ const terms = document.getElementById("terms");
 const picker = document.getElementById("projects");
 
 const machines = new Map();
+const viewListeners = [];
 let account = null;
 let hub = null;
 
@@ -1276,13 +1277,25 @@ async function checkUpdate() {
     console.warn("update check failed", e);
   }
 }
+function headerUpdateResult(status) {
+  if (status?.state === "restarting" || status?.state === "updating") return "wait";
+  if (status?.state === "failed" || status?.state === "cannot") return "error";
+  return "refresh";
+}
 async function installUpdate() {
   for (const b of document.querySelectorAll(".update")) {
     b.disabled = true;
     b.textContent = "updating…";
   }
   try {
-    await invoke("install_update");
+    const status = await invoke("install_update");
+    const outcome = headerUpdateResult(status);
+    if (outcome === "error") {
+      active?.term.write(`\r\n\x1b[31m[update failed: ${status.reason}]\x1b[0m\r\n`);
+      checkUpdate();
+    } else if (outcome === "refresh") {
+      checkUpdate();
+    }
   } catch (e) {
     active?.term.write(`\r\n\x1b[31m[update failed: ${e}]\x1b[0m\r\n`);
     checkUpdate();
@@ -1361,6 +1374,7 @@ function showMachines(list, tabsByMachine) {
     setTabs(id, [], { forget: false });
     machines.delete(id);
   }
+  for (const listen of [...viewListeners]) listen();
   render();
   if (settingsOpen() && page === "account") showAccount();
   // Redrawing would take the name being typed away.

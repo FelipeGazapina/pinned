@@ -1925,7 +1925,7 @@ fn a_hub_restarted_mid_boot_finishes_the_run_with_one_box() {
     let second = hub.boxes.state.lock().unwrap().accounts.last().unwrap().clone();
     assert_eq!(second.machine_id, first.machine_id, "the same machine, booted again");
     assert_ne!(second.machine_token, first.machine_token);
-    assert_eq!(hub.runtime.block_on(hub.hub().db.machine_connected(&first.machine_token, "linux")).unwrap().map(|m| m.id), None, "the old token no longer signs in");
+    assert_eq!(hub.runtime.block_on(hub.hub().db.machine_connected(&first.machine_token, "linux", "0.0.0")).unwrap().map(|m| m.id), None, "the old token no longer signs in");
     let phases = || hub.runtime.block_on(hub.hub().db.boxes(ana.id)).unwrap().into_iter().map(|r| r.unwrap().phase).collect::<Vec<_>>();
     wait_for("the row to run", || phases() == [pinned_server::boxes::Phase::Running]);
 }
@@ -2355,4 +2355,165 @@ fn a_dropped_machine_link_replays_the_watch_without_another_client_call() {
     client.wait("the nudge after the link returns", |frame| frame["event"]["kind"] == "thread");
     assert_eq!(read_texts(&mut client, &machine, &tab, before), vec!["replayed"]);
     node.kill();
+}
+
+struct MachineSock {
+    ws: WebSocket<MaybeTlsStream<TcpStream>>,
+}
+
+impl MachineSock {
+    fn connect(hub: &str, token: &str, version: &str) -> MachineSock {
+        let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", hub.replace("http://", "ws://"))).unwrap();
+        if let MaybeTlsStream::Plain(s) = ws.get_mut() {
+            s.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        }
+        ws.send(Message::text(json!({ "type": "auth", "token": token, "name": "vps", "os": "linux", "version": version }).to_string())).unwrap();
+        let mut sock = MachineSock { ws };
+        let hello = sock.read_json();
+        assert_eq!(hello["type"], "hello");
+        sock
+    }
+
+    fn try_text(&mut self) -> Option<Value> {
+        match self.ws.read() {
+            Ok(Message::Text(text)) => Some(serde_json::from_str(&text).unwrap()),
+            Ok(_) => self.try_text(),
+            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => None,
+            Err(e) => panic!("machine socket: {e}"),
+        }
+    }
+
+    fn read_json(&mut self) -> Value {
+        let start = Instant::now();
+        loop {
+            if let Some(value) = self.try_text() {
+                return value;
+            }
+            assert!(start.elapsed() < WAIT, "timed out waiting for a machine frame");
+        }
+    }
+
+    fn send(&mut self, frame: Value) {
+        self.ws.send(Message::text(frame.to_string())).unwrap();
+    }
+}
+
+fn listed(frame: &Value, id: &str) -> Value {
+    frame["machines"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap().clone()
+}
+
+fn latest_row(client: &Client, id: &str) -> Value {
+    let latest = client.frames.iter().rev().find(|f| f["type"] == "machines" || f["type"] == "hello").unwrap();
+    listed(latest, id)
+}
+
+fn wait_row(client: &mut Client, id: &str, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
+    let frame = client.wait(what, |f| {
+        (f["type"] == "machines" || f["type"] == "hello") && f["machines"].as_array().is_some_and(|rows| rows.iter().any(|m| m["id"] == id && pred(m)))
+    });
+    listed(&frame, id)
+}
+
+fn settle(client: &mut Client) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(300) {
+        client.pump();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn an_update_self_is_delivered_and_the_list_shows_the_phase() {
+    let hub = TestHub::start("upd_relay");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let (machine, machine_token) = account::register_machine(&url, &token, "vps", "linux").unwrap();
+    let id = machine.id.clone();
+    let mut node = MachineSock::connect(&url, &machine_token, "0.15.0");
+    client.wait_machines(&[("vps", true)]);
+    assert_eq!(latest_row(&client, &id)["version"], "0.15.0");
+
+    node.send(json!({ "type": "event", "event": { "kind": "update", "status": { "state": "updating", "to": "0.15.0" } } }));
+    assert_eq!(wait_row(&mut client, &id, "updating to the running version", |m| m["update"]["state"] == "updating")["update"], json!({ "state": "updating", "to": "0.15.0" }));
+    node.send(json!({ "type": "event", "event": { "kind": "update", "status": null } }));
+    assert_eq!(wait_row(&mut client, &id, "up to date", |m| m["update"]["state"] == "up_to_date")["update"], json!({ "state": "up_to_date", "version": "0.15.0" }));
+
+    node.send(json!({ "type": "event", "event": { "kind": "update", "status": { "state": "restarting", "to": "0.16.0" } } }));
+    assert_eq!(wait_row(&mut client, &id, "restarting", |m| m["update"]["state"] == "restarting")["update"], json!({ "state": "restarting", "to": "0.16.0" }));
+    node.send(json!({ "type": "event", "event": { "kind": "update", "status": null } }));
+    let failed = json!({ "state": "failed", "to": "0.16.0", "reason": "came back on 0.15.0" });
+    assert_eq!(wait_row(&mut client, &id, "came back", |m| m["update"]["state"] == "failed")["update"], failed);
+
+    client.send(json!({ "type": "call", "id": 4, "machine": id, "call": { "cmd": "tabs" } }));
+    let frame = node.read_json();
+    assert_eq!(frame["call"], json!({ "cmd": "tabs" }));
+    let call_id = frame["id"].as_u64().unwrap();
+    node.send(json!({ "type": "reply", "id": call_id, "err": "this machine runs pinned 0.15.0, which can't answer that: tabs" }));
+    let reply = client.wait("tabs reply", |f| f["type"] == "reply" && f["id"] == 4);
+    assert_eq!(reply["err"], "this machine runs pinned 0.15.0, which can't answer that: tabs");
+    settle(&mut client);
+    assert_eq!(latest_row(&client, &id)["update"], failed);
+
+    client.send(json!({ "type": "call", "id": 5, "machine": id, "call": { "cmd": "update_self" } }));
+    let frame = node.read_json();
+    assert_eq!(frame["call"], json!({ "cmd": "update_self" }));
+    let call_id = frame["id"].as_u64().unwrap();
+    node.send(json!({ "type": "reply", "id": call_id, "ok": { "state": "updating", "to": "0.16.0" } }));
+    let reply = client.wait("update reply", |f| f["type"] == "reply" && f["id"] == 5);
+    assert_eq!(reply["ok"], json!({ "state": "updating", "to": "0.16.0" }));
+    assert_eq!(wait_row(&mut client, &id, "reply on the list", |m| m["update"]["to"] == "0.16.0" && m["update"]["state"] == "updating")["update"], json!({ "state": "updating", "to": "0.16.0" }));
+
+    let sentence = "this machine runs pinned 0.15.0, which can't answer that: unknown variant `update_self`";
+    client.send(json!({ "type": "call", "id": 6, "machine": id, "call": { "cmd": "update_self" } }));
+    let frame = node.read_json();
+    assert_eq!(frame["call"], json!({ "cmd": "update_self" }));
+    let call_id = frame["id"].as_u64().unwrap();
+    node.send(json!({ "type": "reply", "id": call_id, "err": sentence }));
+    let reply = client.wait("hand reply", |f| f["type"] == "reply" && f["id"] == 6);
+    assert_eq!(reply["err"], sentence);
+    assert_eq!(wait_row(&mut client, &id, "update by hand", |m| m["update"]["reason"] == "update by hand")["update"], json!({ "state": "cannot", "reason": "update by hand" }));
+}
+
+#[test]
+fn an_update_for_another_account_is_refused() {
+    let hub = TestHub::start("upd_other");
+    let url = hub.url.clone();
+    let (token_a, _) = account::signup(&url, "a@acme.dev", "correct horse").unwrap();
+    let (token_b, _) = account::signup(&url, "b@acme.dev", "correct horse").unwrap();
+    let mut b = Client::connect(&url, &token_b);
+    b.wait("hello", |f| f["type"] == "hello");
+    let code = b.hub(json!({ "cmd": "pair_code" })).unwrap();
+    let creds = account::pair(&url, code["code"].as_str().unwrap(), "node-b", "linux").unwrap();
+    let mut a = Client::connect(&url, &token_a);
+    a.wait("hello", |f| f["type"] == "hello");
+    assert_eq!(a.call(&creds.machine_id, json!({ "cmd": "update_self" })), Err(format!("this account has no machine {}", creds.machine_id)));
+}
+
+#[test]
+fn an_online_upstash_box_is_not_asked_to_update() {
+    let hub = TestHub::start("upd_box");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (machine, machine_token) = account::register_machine(&url, &token, "vps", "linux").unwrap();
+    admin_on(&hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase) values ('box-1', '{}', '{}', 'box_123', 'c1', '{{\"issue\":\"i1\"}}', '{{}}', 'small', 'running')",
+        account.id, machine.id,
+    ));
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    assert_eq!(client.call(&machine.id, json!({ "cmd": "update_self" })), Err("vps is offline".into()));
+
+    let mut node = MachineSock::connect(&url, &machine_token, "0.15.0");
+    client.wait_machines(&[("vps", true)]);
+    assert_eq!(
+        client.call(&machine.id, json!({ "cmd": "update_self" })),
+        Ok(json!({ "state": "cannot", "reason": "an Upstash box is replaced by the hub" })),
+    );
+    assert!(node.try_text().is_none());
+    assert_eq!(
+        wait_row(&mut client, &machine.id, "box refusal", |m| m["update"]["reason"] == "an Upstash box is replaced by the hub")["update"],
+        json!({ "state": "cannot", "reason": "an Upstash box is replaced by the hub" }),
+    );
 }
