@@ -5589,6 +5589,32 @@ while True:
         assert_eq!(status["workState"], "cancelled", "{status}");
     }
 
+    #[test]
+    fn a_laptop_sleep_does_not_count_against_a_working_task() {
+        let m = Machine::new(launch(), None, None, |_| {});
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab("tab-1".into()),
+            tool: None,
+            title: "Overnight".into(),
+            account: "cursor".into(),
+            provider: Provider::Cursor,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: "tab:tab-1".into(),
+            client_request_id: None,
+            role: None,
+        });
+        m.delegates.backdate(&task.id, Duration::from_secs(9 * 60 * 60));
+        m.arm_notices();
+        std::thread::sleep(Duration::from_millis(1500));
+        let status = m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
+        assert_eq!(status["workState"], "working", "{status}");
+        assert_eq!(m.delegates.claim_notice("tab-1"), None, "the sleep counted toward the budget");
+    }
+
     /// A worker report must not type over a draft. The orchestrator's Stop hook carries it.
     #[test]
     #[cfg(unix)]

@@ -149,6 +149,14 @@ impl Delegates {
         }
     }
 
+    /// Moves the wall-clock start back by `by`, as a laptop sleep of that length does.
+    #[cfg(test)]
+    pub(crate) fn backdate(&self, id: &str, by: Duration) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.started -= by.as_millis() as u64;
+        }
+    }
+
     pub fn note_parent(&self, id: &str, session: Option<String>) {
         let Some(session) = session.filter(|session| !session.is_empty()) else { return };
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {

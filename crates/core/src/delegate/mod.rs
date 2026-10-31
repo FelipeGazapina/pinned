@@ -848,7 +848,6 @@ grok-4.7-high - Grok 4.7  High
         path
     }
 
-    #[cfg(unix)]
     fn new_on(delegates: &Delegates, provider: Provider) -> Task {
         delegates.begin(NewTask {
             parent: Parent::Tab("tab-1".into()),
@@ -867,7 +866,6 @@ grok-4.7-high - Grok 4.7  High
         })
     }
 
-    #[cfg(unix)]
     fn parent() -> Caller {
         Caller { tab: Some("tab-1".into()), task: None }
     }
@@ -990,6 +988,134 @@ grok-4.7-high - Grok 4.7  High
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    fn state_at_each_result(recording: &str) -> Vec<(String, String)> {
+        let delegates = Delegates::default();
+        let task = new_on(&delegates, Provider::Claude);
+        let mut seen = vec![];
+        for line in recording.lines() {
+            delegates.apply(&task.id, ChildEvent::Line(line.to_owned()), None);
+            if line.contains(r#""type":"result""#) {
+                let status = delegates.status(&parent(), &task.id).unwrap();
+                seen.push((status["workState"].as_str().unwrap_or("").to_owned(), status["summary"].as_str().unwrap_or("").to_owned()));
+            }
+        }
+        seen
+    }
+
+    const INTERIM: &str = "Background command is still running; I'll report once the completion notification arrives.";
+
+    #[test]
+    fn a_claude_result_is_the_answer_only_when_no_turn_or_background_task_is_open() {
+        let pair = |state: &str, summary: &str| (state.to_owned(), summary.to_owned());
+        assert_eq!(state_at_each_result(&fixture("claude-reply.jsonl")), vec![pair("result_available", "PINEAPPLE")]);
+        assert_eq!(
+            state_at_each_result(&fixture("claude-background-shell.jsonl")),
+            vec![pair("working", INTERIM), pair("result_available", "FINAL-REPORT\nbgdone\n\n[exited with code 0]")],
+            "the first result came while the background shell was pending"
+        );
+        assert_eq!(
+            state_at_each_result(&fixture("claude-background-agent.jsonl")),
+            vec![pair("working", "WAITING"), pair("result_available", "FINAL-REPORT\nDONE-SUB")],
+            "Claude held the first turn's result until the subagent finished and the next turn began"
+        );
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: i32) -> bool {
+        let out = crate::process::command("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        !stat.is_empty() && !stat.starts_with('Z')
+    }
+
+    /// Plays the recorded shell run up to its first result, then holds there with a live background shell.
+    #[cfg(unix)]
+    fn pending_shell_worker(dir: &Path, leftover: &Leftover) -> PathBuf {
+        let recording = fixture("claude-background-shell.jsonl");
+        let split = recording.find(r#"{"type":"system","subtype":"task_updated""#).unwrap();
+        std::fs::write(dir.join("first.jsonl"), &recording[..split]).unwrap();
+        std::fs::write(dir.join("rest.jsonl"), &recording[split..]).unwrap();
+        let body = format!(
+            "perl -e 'use POSIX (); POSIX::setsid(); exec @ARGV' sh -c 'echo $$ > \"$0\"; while :; do sleep 1; done' '{}' &\nwhile [ ! -s '{}' ]; do sleep 0.05; done\ncat first.jsonl\nwhile [ ! -e go ]; do sleep 0.05; done\ncat rest.jsonl\nsleep 30",
+            leftover.0.display(),
+            leftover.0.display(),
+        );
+        script(dir, "claude", &body)
+    }
+
+    #[cfg(unix)]
+    fn wait_for_summary(delegates: &Delegates, id: &str, summary: &str) {
+        let start = Instant::now();
+        while delegates.status(&parent(), id).unwrap()["summary"] != summary {
+            assert!(start.elapsed() < Duration::from_secs(5), "{}", delegates.status(&parent(), id).unwrap());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn later(delegates: &Delegates, by: Duration) {
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
+        delegates.enforce_budgets(now + by.as_millis() as u64, None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_reply_with_a_background_shell_pending_keeps_the_shell_and_tells_the_parent() {
+        let dir = scratch("pending-shell");
+        let leftover = Leftover(dir.join("shell.pid"));
+        let bin = pending_shell_worker(&dir, &leftover);
+        let delegates = Arc::new(Delegates::default());
+        let task = new_on(&delegates, Provider::Claude);
+        let (agent, told) = run(&delegates, &task, &bin, &dir);
+        let shell = leftover.pid();
+        wait_for_summary(&delegates, &task.id, INTERIM);
+        std::thread::sleep(Duration::from_millis(300));
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        assert_eq!(status["workState"], "working", "{status}");
+        assert!(alive(shell), "pinned stopped the pending background shell {shell}");
+        assert!(alive(agent as i32), "pinned stopped the agent while its shell was pending");
+        let notice = delegates.claim_notice("tab-1").map(|(text, _)| text).unwrap_or_default();
+        assert!(notice.contains("still runs 1 background task: Run sleep 20 then echo bgdone in background") && notice.contains(INTERIM), "{notice}");
+
+        std::fs::write(dir.join("go"), "").unwrap();
+        assert_eq!(told.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("tab-1"));
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some("FINAL-REPORT\nbgdone\n\n[exited with code 0]")), "{status}");
+        assert!(stopped(shell), "the shell {shell} outlived the final answer");
+        assert!(stopped(agent as i32), "the agent {agent} outlived the final answer");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_reply_quiet_for_30_min_with_background_work_ends_with_that_reply() {
+        let dir = scratch("quiet");
+        let leftover = Leftover(dir.join("shell.pid"));
+        let bin = pending_shell_worker(&dir, &leftover);
+        let delegates = Arc::new(Delegates::default());
+        let task = new_on(&delegates, Provider::Claude);
+        let (agent, told) = run(&delegates, &task, &bin, &dir);
+        let shell = leftover.pid();
+        wait_for_summary(&delegates, &task.id, INTERIM);
+
+        later(&delegates, Duration::from_secs(29 * 60));
+        assert_eq!(delegates.status(&parent(), &task.id).unwrap()["workState"], "working");
+        assert!(alive(shell), "pinned stopped the shell before the task was quiet for 30 min");
+        later(&delegates, Duration::from_secs(30 * 60));
+        assert_eq!(told.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("tab-1"));
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some(INTERIM)), "{status}");
+        let notice = delegates.claim_notice("tab-1").map(|(text, _)| text).unwrap_or_default();
+        assert!(
+            notice.contains("finished: result available")
+                && notice.contains("after 30 min with no activity")
+                && notice.contains("Run sleep 20 then echo bgdone in background")
+                && !notice.contains("still runs"),
+            "{notice}"
+        );
+        assert!(stopped(shell), "the shell {shell} outlived the quiet task");
+        assert!(stopped(agent as i32), "the agent {agent} outlived the quiet task");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
