@@ -243,12 +243,13 @@ test("needsMod and Enter share enterNeedsMod", () => {
   );
 });
 
-function openSlash(promptValue, { coarse, fine, isMac = true } = {}) {
+function openSlash(promptValue, { coarse, fine, isMac = true, shortcut = "enter" } = {}) {
   return loadPromptKey({
     promptValue,
     coarse,
     fine,
     isMac,
+    shortcut,
     rows: [highlighted("/help")],
     menuHidden: false,
   });
@@ -343,6 +344,110 @@ test("Cmd+Enter with a shorter highlight sends the typed text", () => {
   assert.deepEqual(desk.sent, ["/he"]);
   assert.deepEqual(desk.picks, []);
   assert.equal(desk.prompt.value, "/he");
+});
+
+test("a composing Alt+Cmd+Enter with a menu open does not send", () => {
+  for (const surface of [
+    { coarse: false, fine: true },
+    { coarse: true, fine: false },
+  ]) {
+    const menu = openSlash("/he", { ...surface, isMac: true });
+    const chord = keydown({ altKey: true, metaKey: true, isComposing: true });
+    menu.element.dispatch(chord);
+    assert.deepEqual(menu.sent, []);
+    assert.deepEqual(menu.picks, []);
+    assert.equal(menu.prompt.value, "/he");
+    assert.equal(menu.composerMenu.hidden, false);
+    assert.equal(chord.defaultPrevented, false);
+  }
+});
+
+test("keyCode 229 does not send or pick", () => {
+  const chords = [{}, { metaKey: true }, { altKey: true, metaKey: true }, { key: "Tab" }];
+  for (const extra of chords) {
+    const menu = openSlash("/he", { coarse: false, fine: true, isMac: true });
+    const event = keydown({ ...extra, keyCode: 229, isComposing: false });
+    menu.element.dispatch(event);
+    assert.deepEqual(menu.sent, []);
+    assert.deepEqual(menu.picks, []);
+    assert.equal(menu.prompt.value, "/he");
+    assert.equal(menu.composerMenu.hidden, false);
+    assert.equal(event.defaultPrevented, false);
+  }
+});
+
+test("Option+Enter with a menu open picks and does not send", () => {
+  const desk = openSlash("/he", { coarse: false, fine: true, isMac: true });
+  const option = keydown({ altKey: true });
+  desk.element.dispatch(option);
+  assert.deepEqual(desk.picks, ["/help"]);
+  assert.deepEqual(desk.sent, []);
+  assert.equal(desk.prompt.value, "/help ");
+  assert.equal(option.defaultPrevented, true);
+
+  const phone = openSlash("/he", { coarse: true, fine: false, isMac: true });
+  const phoneOption = keydown({ altKey: true });
+  phone.element.dispatch(phoneOption);
+  assert.deepEqual(phone.picks, ["/help"]);
+  assert.deepEqual(phone.sent, []);
+  assert.equal(phone.prompt.value, "/help ");
+  assert.equal(phoneOption.defaultPrevented, true);
+
+  const macCtrl = openSlash("/he", { coarse: false, fine: true, isMac: true });
+  const ctrl = keydown({ ctrlKey: true });
+  macCtrl.element.dispatch(ctrl);
+  assert.deepEqual(macCtrl.picks, ["/help"]);
+  assert.deepEqual(macCtrl.sent, []);
+
+  const winMeta = openSlash("/he", { coarse: false, fine: true, isMac: false });
+  const meta = keydown({ metaKey: true });
+  winMeta.element.dispatch(meta);
+  assert.deepEqual(winMeta.picks, ["/help"]);
+  assert.deepEqual(winMeta.sent, []);
+});
+
+test("Cmd+Enter and Alt+Cmd+Enter with a menu open still send", () => {
+  const desk = openSlash("/he", { coarse: false, fine: true, isMac: true });
+  const cmd = keydown({ metaKey: true });
+  desk.element.dispatch(cmd);
+  assert.deepEqual(desk.sent, ["/he"]);
+  assert.deepEqual(desk.picks, []);
+  assert.equal(desk.prompt.value, "/he");
+  assert.equal(desk.composerMenu.hidden, true);
+
+  const deskNew = openSlash("/he", { coarse: false, fine: true, isMac: true });
+  const alt = keydown({ altKey: true, metaKey: true });
+  deskNew.element.dispatch(alt);
+  assert.deepEqual(deskNew.sent, ["new-thread /he"]);
+  assert.deepEqual(deskNew.picks, []);
+  assert.equal(deskNew.prompt.value, "/he");
+  assert.equal(alt.defaultPrevented, true);
+
+  const phone = openSlash("/he", { coarse: true, fine: false, isMac: true });
+  const phoneAlt = keydown({ altKey: true, metaKey: true });
+  phone.element.dispatch(phoneAlt);
+  assert.deepEqual(phone.sent, ["new-thread /he"]);
+  assert.deepEqual(phone.picks, []);
+  assert.equal(phone.prompt.value, "/he");
+
+  const win = openSlash("/he", { coarse: false, fine: true, isMac: false });
+  const ctrl = keydown({ ctrlKey: true });
+  win.element.dispatch(ctrl);
+  assert.deepEqual(win.sent, ["/he"]);
+  assert.deepEqual(win.picks, []);
+  assert.equal(win.composerMenu.hidden, true);
+
+  const configured = openSlash("/he", { coarse: false, fine: true, isMac: true, shortcut: "mod-enter" });
+  const configuredCmd = keydown({ metaKey: true });
+  configured.element.dispatch(configuredCmd);
+  assert.deepEqual(configured.sent, ["/he"]);
+  assert.deepEqual(configured.picks, []);
+
+  const configuredPlain = openSlash("/he", { coarse: false, fine: true, isMac: true, shortcut: "mod-enter" });
+  const plain = keydown();
+  configuredPlain.element.dispatch(plain);
+  assert.deepEqual(configuredPlain.picks, ["/help"]);
+  assert.deepEqual(configuredPlain.sent, []);
 });
 
 test("keyCode 229 does not send", () => {
