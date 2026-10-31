@@ -137,6 +137,12 @@ impl Session {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Runs once, on this thread, between the kill and the reap of the next session dropped here.
+    pub(crate) static BEFORE_REAP: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         self.killed.store(true, Ordering::SeqCst);
@@ -151,6 +157,10 @@ impl Drop for Session {
         }
         #[cfg(not(unix))]
         let _ = child.kill();
+        #[cfg(test)]
+        if let Some(pause) = BEFORE_REAP.take() {
+            pause();
+        }
         // Reaped on this thread: a thread spawned for the wait is gone when this process execs,
         // and the child stays a zombie.
         let _ = child.wait();

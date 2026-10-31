@@ -3017,6 +3017,72 @@ pub(crate) mod tests {
         assert_eq!(seen.lock().unwrap().last().copied(), Some(0));
     }
 
+    #[cfg(unix)]
+    fn ps_state(pid: u32) -> String {
+        let ps = crate::process::command("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+        String::from_utf8_lossy(&ps.stdout).trim().to_owned()
+    }
+
+    /// Runs `end` on its own thread and holds the session it drops between the kill and the reap,
+    /// quits meanwhile, and returns the `ps` state `pid` had as `quit` returned.
+    #[cfg(unix)]
+    fn state_as_quit_returns_during_a_kill(m: &Arc<Machine>, pid: u32, end: impl FnOnce(&Machine) + Send + 'static) -> String {
+        let (killed, held) = std::sync::mpsc::channel();
+        let (reap, reaping) = std::sync::mpsc::channel::<()>();
+        let ender = {
+            let m = m.clone();
+            std::thread::spawn(move || {
+                pty::BEFORE_REAP.set(Some(Box::new(move || {
+                    killed.send(()).unwrap();
+                    let _ = reaping.recv();
+                })));
+                end(&m);
+            })
+        };
+        held.recv_timeout(Duration::from_secs(10)).expect("the session was never killed");
+        let (quit, returned) = std::sync::mpsc::channel();
+        let quitter = {
+            let m = m.clone();
+            std::thread::spawn(move || {
+                m.quit();
+                quit.send(ps_state(pid)).unwrap();
+            })
+        };
+        // A quit that waits for the kill cannot return before the reap, so the timeout only ends that wait.
+        let early = returned.recv_timeout(Duration::from_secs(1)).ok();
+        reap.send(()).unwrap();
+        let state = early.unwrap_or_else(|| returned.recv().unwrap());
+        ender.join().unwrap();
+        quitter.join().unwrap();
+        state
+    }
+
+    #[cfg(unix)]
+    fn running_tab(m: &Machine) -> (TabId, u32) {
+        let tab = m.add_tab(std::env::temp_dir(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        m.spawn(&tab, sh("exec sleep 30"), pty::size(80, 24)).unwrap();
+        let pid = m.tab(&tab, |t| t.session.as_ref().and_then(pty::Session::pid)).unwrap().unwrap();
+        (tab, pid)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn quit_returns_only_once_the_session_of_a_tab_closing_meanwhile_is_reaped() {
+        let m = machine();
+        let (tab, pid) = running_tab(&m);
+        let state = state_as_quit_returns_during_a_kill(&m, pid, move |m| _ = m.close_tab(&tab));
+        assert_eq!(state, "", "quit returned while the closed tab's claude was killed and not reaped");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn quit_returns_only_once_the_old_session_of_a_tab_restarting_meanwhile_is_reaped() {
+        let m = machine();
+        let (tab, pid) = running_tab(&m);
+        let state = state_as_quit_returns_during_a_kill(&m, pid, move |m| _ = m.spawn(&tab, sh("exec sleep 30"), pty::size(80, 24)));
+        assert_eq!(state, "", "quit returned while the restarted tab's old claude was killed and not reaped");
+    }
+
     #[test]
     #[cfg(unix)]
     fn starting_a_restored_tab_twice_keeps_its_claude_session() {
