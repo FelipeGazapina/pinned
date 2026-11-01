@@ -350,8 +350,7 @@ pub struct Machine {
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
     sync_file: Option<PathBuf>,
-    sync_state_holder: AtomicU64,
-    next_sync_hold: AtomicU64,
+    sync_loop_holds_state: AtomicBool,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
@@ -432,19 +431,6 @@ impl Drop for Busy<'_> {
     }
 }
 
-const NO_SYNC_HOLD: u64 = 0;
-
-pub(crate) struct SyncHold<'a> {
-    machine: &'a Machine,
-    id: u64,
-}
-
-impl Drop for SyncHold<'_> {
-    fn drop(&mut self) {
-        let _ = self.machine.sync_state_holder.compare_exchange(self.id, NO_SYNC_HOLD, Ordering::SeqCst, Ordering::SeqCst);
-    }
-}
-
 #[derive(Default)]
 struct TranscriptLook {
     nudged: Option<(PathBuf, u64)>,
@@ -497,8 +483,7 @@ impl Machine {
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
-            sync_state_holder: AtomicU64::new(NO_SYNC_HOLD),
-            next_sync_hold: AtomicU64::new(NO_SYNC_HOLD + 1),
+            sync_loop_holds_state: AtomicBool::new(false),
             projects: Mutex::new(projects),
             projects_file,
             accounts: Accounts::load(dir.as_deref(), home.clone()),
@@ -1857,14 +1842,12 @@ impl Machine {
         self.sync_file.as_deref()
     }
 
-    pub(crate) fn hold_sync_state(&self) -> SyncHold<'_> {
-        let id = self.next_sync_hold.fetch_add(1, Ordering::SeqCst);
-        self.sync_state_holder.store(id, Ordering::SeqCst);
-        SyncHold { machine: self, id }
+    pub(crate) fn hold_sync_state(&self, held: bool) {
+        self.sync_loop_holds_state.store(held, Ordering::SeqCst);
     }
 
     fn sync_stopped(&self) -> Option<String> {
-        if self.sync_state_holder.load(Ordering::SeqCst) != NO_SYNC_HOLD {
+        if self.sync_loop_holds_state.load(Ordering::SeqCst) {
             return None;
         }
         self.sync_file.as_deref().and_then(sync::unreadable)
@@ -2347,7 +2330,7 @@ impl Machine {
             std::thread::sleep(std::time::Duration::from_secs(1));
             let Some(machine) = me.upgrade() else { return };
             if machine.quitting.load(Ordering::Relaxed) {
-                return;
+                continue;
             }
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
@@ -6146,12 +6129,8 @@ while True:
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    #[cfg(unix)]
-    fn the_delegate_pass_stops_a_task_past_its_hard_limit() {
-        use std::os::unix::process::CommandExt;
-        let m = Machine::new(launch(), None, None, |_| {});
-        let task = m.delegates.begin(crate::delegate::NewTask {
+    fn runaway(m: &Machine) -> crate::delegate::Task {
+        m.delegates.begin(crate::delegate::NewTask {
             parent: crate::delegate::Parent::Tab("tab-1".into()),
             tool: None,
             title: "Runaway".into(),
@@ -6165,7 +6144,15 @@ while True:
             caller_key: "tab:tab-1".into(),
             client_request_id: None,
             role: None,
-        });
+        })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_delegate_pass_stops_a_task_past_its_hard_limit() {
+        use std::os::unix::process::CommandExt;
+        let m = Machine::new(launch(), None, None, |_| {});
+        let task = runaway(&m);
         m.delegates.set_limits(&task.id, 1, 2);
         let mut sleeper = crate::process::command("sleep");
         sleeper.arg("20").process_group(0);
@@ -6180,23 +6167,31 @@ while True:
     }
 
     #[test]
+    #[cfg(unix)]
+    fn the_delegate_pass_still_stops_a_task_after_a_quit_that_reopens() {
+        use std::os::unix::process::CommandExt;
+        let m = Machine::new(launch(), None, None, |_| {});
+        m.arm_delegate_pass();
+        m.quit();
+        std::thread::sleep(Duration::from_millis(2500));
+        m.reopen_sessions();
+        let task = runaway(&m);
+        m.delegates.set_limits(&task.id, 1, 2);
+        let mut sleeper = crate::process::command("sleep");
+        sleeper.arg("20").process_group(0);
+        let child = std::sync::Mutex::new(sleeper.spawn().unwrap());
+        m.delegates.remember_pid(&task.id, child.lock().unwrap().id());
+        m.arm_delegate_pass();
+        wait_for("the hard limit after a quit that reopened", || m.delegates.is_terminal(&task.id));
+        wait_for("the runaway child to stop", || child.lock().unwrap().try_wait().unwrap().is_some());
+        let status = m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, &task.id).unwrap();
+        assert_eq!(status["workState"], "cancelled", "{status}");
+    }
+
+    #[test]
     fn the_delegate_pass_keeps_enforcing_limits_after_a_panic() {
         let m = Machine::new(launch(), None, None, |_| {});
-        let task = m.delegates.begin(crate::delegate::NewTask {
-            parent: crate::delegate::Parent::Tab("tab-1".into()),
-            tool: None,
-            title: "Runaway".into(),
-            account: "cursor".into(),
-            provider: Provider::Cursor,
-            model: None,
-            cwd: std::env::temp_dir(),
-            mode: crate::delegate::Mode::Async,
-            access: crate::delegate::Access::Auto,
-            isolated: false,
-            caller_key: "tab:tab-1".into(),
-            client_request_id: None,
-            role: None,
-        });
+        let task = runaway(&m);
         m.delegates.set_limits(&task.id, 2_000, 2_500);
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _tabs = m.tabs.lock().unwrap();
