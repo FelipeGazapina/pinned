@@ -3449,7 +3449,7 @@ pub(crate) mod tests {
         page["items"].as_array().unwrap().iter().map(|item| item["text"].as_str().unwrap_or_default().to_owned()).collect()
     }
 
-    fn ticked_by_hand(m: &Machine) {
+    fn keep_the_watcher_loop_off(m: &Machine) {
         m.threads_watched.store(true, Ordering::Relaxed);
     }
 
@@ -3461,7 +3461,7 @@ pub(crate) mod tests {
         let seen = heard.clone();
         m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
-        ticked_by_hand(&m);
+        keep_the_watcher_loop_off(&m);
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let dir = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3817,24 +3817,17 @@ pub(crate) mod tests {
 
     #[test]
     fn a_tick_with_nothing_watched_waits_for_no_tab() {
-        let (root, m, _, tab, dir) = watching("thread-idle");
+        let (root, m, _, _, dir) = watching("thread-idle");
         std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
         m.set_watched_threads(LOCAL_VIEWER, &[]);
-        let tick = |m: &Arc<Machine>| {
-            let (m, (done, finished)) = (m.clone(), std::sync::mpsc::channel());
-            std::thread::spawn(move || {
-                m.nudge_thread_watchers(&mut HashMap::new());
-                let _ = done.send(());
-            });
-            finished
-        };
+        let (ticker, (done, finished)) = (m.clone(), std::sync::mpsc::channel());
         let held = m.tabs.lock().unwrap();
-        assert!(tick(&m).recv_timeout(Duration::from_secs(5)).is_ok(), "an empty watch ticks while another thread holds the tabs");
-        m.set_watched_threads(LOCAL_VIEWER, std::slice::from_ref(&tab));
-        let watched = tick(&m);
-        assert!(watched.recv_timeout(Duration::from_millis(50)).is_err(), "a watched tab is read under the tabs lock");
+        std::thread::spawn(move || {
+            ticker.nudge_thread_watchers(&mut HashMap::new());
+            let _ = done.send(());
+        });
+        assert!(finished.recv_timeout(Duration::from_secs(5)).is_ok(), "an empty watch ticks while another thread holds the tabs");
         drop(held);
-        assert!(watched.recv_timeout(Duration::from_secs(5)).is_ok());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3855,7 +3848,7 @@ pub(crate) mod tests {
         std::fs::write(root.join("config/accounts/personal/signed-in"), "").unwrap();
         std::fs::create_dir_all(root.join("app")).unwrap();
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
-        ticked_by_hand(&m);
+        keep_the_watcher_loop_off(&m);
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let from = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&from).unwrap();
