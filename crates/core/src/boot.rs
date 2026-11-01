@@ -126,8 +126,17 @@ impl Boot {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static REMOVAL_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn commit(marker: &Path) -> Step {
-    match std::fs::remove_file(marker) {
+    #[cfg(test)]
+    let removed = if REMOVAL_FAILS.get() { Err(std::io::ErrorKind::PermissionDenied.into()) } else { std::fs::remove_file(marker) };
+    #[cfg(not(test))]
+    let removed = std::fs::remove_file(marker);
+    match removed {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
             eprintln!("pinned: could not remove {}, the next sign in tries again: {error}", marker.display());
             Step::Running(Hub::Accepted)
@@ -261,16 +270,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    #[cfg_attr(root, ignore = "root removes the marker from a read-only directory, so its removal cannot fail")]
     fn a_hello_the_hub_accepted_clears_its_refusal_even_when_the_marker_stays() {
-        use std::os::unix::fs::PermissionsExt;
         let (boot, staged) = (Boot::new(), staged("refused-unremovable", CHECKSUM));
         assert!(boot.ready(&staged.proof));
         boot.refuse(&staged.proof);
-        std::fs::set_permissions(&staged.dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        REMOVAL_FAILS.set(true);
         let served = pin!(boot.commit_when_ready(&staged.proof)).now_or_never();
-        std::fs::set_permissions(&staged.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        REMOVAL_FAILS.set(false);
         let left = pin!(boot.leave_when_refused()).now_or_never();
         assert_eq!((served, marker_kept(&staged), left), (Some(AfterHello::Serve), true, None), "(link serves, marker stays, rolled back)");
     }
