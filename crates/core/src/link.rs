@@ -593,7 +593,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Says hello, then answers nothing and reports each call the machine makes.
     fn a_hub_that_answers_no_call(calls: mpsc::Sender<String>) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
