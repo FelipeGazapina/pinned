@@ -77,10 +77,15 @@ if ! git push --atomic origin HEAD:refs/heads/main "refs/tags/v$version"; then
     refuse "git push failed and origin cannot be read, so main keeps the release commit and v$version. Check origin before you run the release again."
   [[ "$remote_tag" != "$(git rev-parse "v$version")" ]] ||
     refuse "git push failed, but origin has v$version, so the release went out. The tag on origin is at the release commit. Fetch origin before you change anything."
-  git reset -q --keep "$start" ||
-    refuse "the push was rejected, so the release did not go out. Local main keeps the release commit and v$version, because these files changed while the push ran:
-$(git status --porcelain)
+  if ! reset_error=$(git reset -q --keep "$start" 2>&1); then
+    changed=$(git status --porcelain)
+    [[ -z "$changed" ]] || refuse "the push was rejected, so the release did not go out. Local main keeps the release commit and v$version, because these files changed while the push ran:
+$changed
 Stash them, then run: git tag -d v$version && git reset --keep $start && git stash pop"
+    refuse "the push was rejected, so the release did not go out. Local main keeps the release commit and v$version, because git reset --keep failed:
+$reset_error
+Fix that, then run: git tag -d v$version && git reset --keep $start"
+  fi
   git tag -d "v$version" > /dev/null
   [[ -z "$remote_tag" ]] ||
     refuse "the push was rejected, and origin has v$version at another commit. The release did not go out, and main is back where it started. Check that tag on origin before you pick a version."
