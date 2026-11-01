@@ -3535,12 +3535,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_watcher_nudges_a_grown_transcript_within_a_tick() {
+    fn the_first_watch_starts_the_watcher_which_nudges_within_a_tick() {
         let root = temp("thread-loop");
         let heard = Arc::new(Mutex::new(vec![]));
         let seen = heard.clone();
         let m = Machine::new(launch(), Some(root.join("config")), None, move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap()));
-        m.watch_threads();
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
         let dir = root.join("config/accounts/work/projects/demo");
