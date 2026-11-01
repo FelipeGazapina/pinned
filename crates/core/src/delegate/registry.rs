@@ -33,6 +33,11 @@ struct Agent {
     seen: Vec<Process>,
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_STOP: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
+}
+
 impl Agent {
     fn stop(self) {
         kill_tree(self.pid);
@@ -480,6 +485,10 @@ impl Delegates {
             let agent = self.agents.lock().unwrap().remove(id);
             (agent, dir)
         };
+        #[cfg(test)]
+        if let Some(pause) = BEFORE_STOP.take() {
+            pause();
+        }
         if let Some(agent) = agent {
             agent.stop();
         }

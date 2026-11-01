@@ -14,17 +14,23 @@ pub enum AfterHello {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum Hub {
+    Silent,
+    Refused,
+    Accepted,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
-    Starting,
-    Running,
+    Starting(Hub),
+    Running(Hub),
     Proven,
     Leaving,
 }
 
 struct Boot {
     step: Mutex<Step>,
-    ready: Notify,
-    refused: Notify,
+    changed: Notify,
 }
 
 static BOOT: Boot = Boot::new();
@@ -39,69 +45,103 @@ impl Proof {
         Proof { marker: marker_path(), checksum: std::env::var(PROOF_ENV).unwrap_or_default() }
     }
 
-    fn holds(&self) -> bool {
-        let Some(path) = &self.marker else { return false };
-        let Ok(marker) = std::fs::read(path) else { return false };
-        proves(&marker, &self.checksum)
+    fn holds(&self) -> Option<&Path> {
+        let path = self.marker.as_deref()?;
+        proves(&std::fs::read(path).ok()?, &self.checksum).then_some(path)
     }
 }
 
 impl Boot {
     const fn new() -> Boot {
-        Boot { step: Mutex::new(Step::Starting), ready: Notify::const_new(), refused: Notify::const_new() }
+        Boot { step: Mutex::new(Step::Starting(Hub::Silent)), changed: Notify::const_new() }
     }
 
     fn step(&self) -> MutexGuard<'_, Step> {
         self.step.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn ready(&self) -> bool {
+    fn ready(&self, proof: &Proof) -> bool {
         let mut step = self.step();
-        if *step == Step::Leaving {
-            return false;
-        }
-        *step = Step::Running;
-        self.ready.notify_waiters();
+        let next = match *step {
+            Step::Leaving => return false,
+            Step::Starting(Hub::Accepted) => proof.marker.as_deref().map_or(Step::Proven, commit),
+            Step::Starting(hub) => Step::Running(hub),
+            Step::Running(_) | Step::Proven => return true,
+        };
+        *step = next;
+        self.changed.notify_waiters();
         true
     }
 
-    fn leave_from(&self, from: Step) -> bool {
+    fn leave_if(&self, leaves: impl FnOnce(&Step) -> bool) -> bool {
         let mut step = self.step();
-        if *step != from {
+        if !leaves(&step) {
             return false;
         }
         *step = Step::Leaving;
         true
     }
 
+    fn leave_if_starting(&self) -> bool {
+        self.leave_if(|step| matches!(step, Step::Starting(_)))
+    }
+
+    async fn leave_when_refused(&self) {
+        loop {
+            let changed = self.changed.notified();
+            if self.leave_if(|step| *step == Step::Running(Hub::Refused)) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
     async fn commit_when_ready(&self, proof: &Proof) -> AfterHello {
         loop {
-            let ready = self.ready.notified();
+            let changed = self.changed.notified();
             {
                 let mut step = self.step();
-                match *step {
-                    Step::Leaving => return AfterHello::Leaving,
-                    Step::Proven => return AfterHello::Serve,
-                    _ if !proof.holds() => return AfterHello::Serve,
-                    Step::Starting => {}
-                    Step::Running => {
-                        let Some(path) = &proof.marker else { return AfterHello::Serve };
-                        match std::fs::remove_file(path) {
-                            Ok(()) => *step = Step::Proven,
-                            Err(error) => eprintln!("pinned: could not remove {}, the next sign in tries again: {error}", path.display()),
-                        }
+                match (&*step, proof.holds()) {
+                    (Step::Leaving, _) => return AfterHello::Leaving,
+                    (Step::Proven, _) | (_, None) => return AfterHello::Serve,
+                    (Step::Starting(_), Some(_)) => *step = Step::Starting(Hub::Accepted),
+                    (Step::Running(_), Some(marker)) => {
+                        *step = commit(marker);
                         return AfterHello::Serve;
                     }
                 }
             }
-            ready.await;
+            changed.await;
         }
     }
 
     fn refuse(&self, proof: &Proof) {
-        if proof.holds() {
-            self.refused.notify_one();
+        if proof.holds().is_none() {
+            return;
         }
+        if let Step::Starting(hub) | Step::Running(hub) = &mut *self.step() {
+            *hub = Hub::Refused;
+            self.changed.notify_waiters();
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static REMOVAL_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn commit(marker: &Path) -> Step {
+    #[cfg(test)]
+    let removed = if REMOVAL_FAILS.get() { Err(std::io::ErrorKind::PermissionDenied.into()) } else { std::fs::remove_file(marker) };
+    #[cfg(not(test))]
+    let removed = std::fs::remove_file(marker);
+    match removed {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            eprintln!("pinned: could not remove {}, the next sign in tries again: {error}", marker.display());
+            Step::Running(Hub::Accepted)
+        }
+        _ => Step::Proven,
     }
 }
 
@@ -116,7 +156,7 @@ pub fn marker_path() -> Option<PathBuf> {
 }
 
 pub fn proving() -> bool {
-    Proof::of_this_process().holds()
+    Proof::of_this_process().holds().is_some()
 }
 
 fn proves(marker: &[u8], proof: &str) -> bool {
@@ -124,7 +164,7 @@ fn proves(marker: &[u8], proof: &str) -> bool {
 }
 
 pub fn ready() {
-    if !BOOT.ready() {
+    if !BOOT.ready(&Proof::of_this_process()) {
         loop {
             std::thread::park();
         }
@@ -132,11 +172,7 @@ pub fn ready() {
 }
 
 pub fn leave_if_starting() -> bool {
-    BOOT.leave_from(Step::Starting)
-}
-
-pub fn leave_if_running() -> bool {
-    BOOT.leave_from(Step::Running)
+    BOOT.leave_if_starting()
 }
 
 pub async fn commit_when_ready() -> AfterHello {
@@ -147,8 +183,8 @@ pub fn refuse() {
     BOOT.refuse(&Proof::of_this_process())
 }
 
-pub async fn refused() {
-    BOOT.refused.notified().await
+pub async fn leave_when_refused() {
+    BOOT.leave_when_refused().await
 }
 
 fn sibling(path: &Path, suffix: &str) -> Option<PathBuf> {
@@ -194,7 +230,7 @@ mod tests {
         let mut hello = pin!(boot.commit_when_ready(&staged.proof));
         assert_eq!(hello.as_mut().now_or_never(), None, "a hello before ready did not wait for ready");
         assert!(marker_kept(&staged), "a hello before ready committed");
-        assert!(boot.ready());
+        assert!(boot.ready(&staged.proof));
         assert_eq!(hello.as_mut().now_or_never(), Some(AfterHello::Serve), "the hello was still waiting once the boot was ready");
         assert!(!marker_kept(&staged), "the hello did not commit once the boot was ready");
     }
@@ -204,8 +240,8 @@ mod tests {
         let (boot, staged) = (Boot::new(), staged("hang-after-hello", CHECKSUM));
         let mut hello = pin!(boot.commit_when_ready(&staged.proof));
         assert_eq!(hello.as_mut().now_or_never(), None, "a hello before ready did not wait for ready");
-        assert!(boot.leave_from(Step::Starting), "the deadline kept a boot that never became ready");
-        assert!(!boot.ready(), "the main thread went on after the deadline chose to leave");
+        assert!(boot.leave_if_starting(), "the deadline kept a boot that never became ready");
+        assert!(!boot.ready(&staged.proof), "the main thread went on after the deadline chose to leave");
         assert_eq!(hello.as_mut().now_or_never(), None, "the link went on to serve the hub while the boot was leaving");
         assert!(marker_kept(&staged), "the marker went away before the rollback");
     }
@@ -213,27 +249,84 @@ mod tests {
     #[test]
     fn a_refusal_queued_before_a_hello_does_not_restore_the_proven_boot() {
         let (boot, staged) = (Boot::new(), staged("late-refusal", CHECKSUM));
-        assert!(boot.ready());
+        assert!(boot.ready(&staged.proof));
         boot.refuse(&staged.proof);
         assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(AfterHello::Serve), "a hello after ready waited");
         assert!(!marker_kept(&staged), "a hello after ready did not commit");
-        assert_eq!(pin!(boot.refused.notified()).now_or_never(), Some(()), "the refusal was not queued");
-        assert!(!boot.leave_from(Step::Running), "a refusal queued before the hub accepted the boot rolled it back");
+        assert_eq!(pin!(boot.leave_when_refused()).now_or_never(), None, "a refusal queued before the hub accepted the boot rolled it back");
+    }
+
+    #[test]
+    fn a_refusal_before_ready_does_not_restore_a_boot_the_hub_then_accepted() {
+        let (boot, staged) = (Boot::new(), staged("refused-then-accepted", CHECKSUM));
+        boot.refuse(&staged.proof);
+        let mut hello = pin!(boot.commit_when_ready(&staged.proof));
+        assert_eq!(hello.as_mut().now_or_never(), None, "a hello before ready did not wait for ready");
+        assert!(boot.ready(&staged.proof));
+        let left = pin!(boot.leave_when_refused()).now_or_never();
+        let proven = !marker_kept(&staged);
+        let served = hello.as_mut().now_or_never();
+        assert_eq!((left, proven, served), (None, true, Some(AfterHello::Serve)), "(rolled back, proven as it became ready, link serves)");
+    }
+
+    #[test]
+    fn a_hello_the_hub_accepted_clears_its_refusal_even_when_the_marker_stays() {
+        let (boot, staged) = (Boot::new(), staged("refused-unremovable", CHECKSUM));
+        assert!(boot.ready(&staged.proof));
+        boot.refuse(&staged.proof);
+        REMOVAL_FAILS.set(true);
+        let served = pin!(boot.commit_when_ready(&staged.proof)).now_or_never();
+        REMOVAL_FAILS.set(false);
+        let left = pin!(boot.leave_when_refused()).now_or_never();
+        assert_eq!((served, marker_kept(&staged), left), (Some(AfterHello::Serve), true, None), "(link serves, marker stays, rolled back)");
+    }
+
+    #[test]
+    fn a_boot_the_hub_accepted_stays_proven_when_its_marker_was_already_gone() {
+        let (boot, staged) = (Boot::new(), staged("accepted-marker-gone", CHECKSUM));
+        let marker = staged.proof.marker.clone().unwrap();
+        let mut hello = pin!(boot.commit_when_ready(&staged.proof));
+        assert_eq!(hello.as_mut().now_or_never(), None, "a hello before ready did not wait for ready");
+        std::fs::remove_file(&marker).unwrap();
+        assert!(boot.ready(&staged.proof));
+        std::fs::write(&marker, format!("{CHECKSUM}\n")).unwrap();
+        boot.refuse(&staged.proof);
+        assert_eq!(pin!(boot.leave_when_refused()).now_or_never(), None, "a refusal rolled back a boot the hub accepted whose marker was already gone at ready");
+    }
+
+    #[test]
+    fn a_refusal_while_the_boot_runs_unproven_restores_it() {
+        let (boot, staged) = (Boot::new(), staged("refused-running", CHECKSUM));
+        assert!(boot.ready(&staged.proof));
+        boot.refuse(&staged.proof);
+        assert_eq!(pin!(boot.leave_when_refused()).now_or_never(), Some(()), "the hub refused the unproven boot and it stayed");
+        assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(AfterHello::Leaving), "a hello during the rollback went on to serve the hub");
+        assert!(marker_kept(&staged), "the marker went away before the rollback");
+    }
+
+    #[test]
+    fn a_refusal_wakes_the_rollback_already_waiting_on_the_running_boot() {
+        let (boot, staged) = (Boot::new(), staged("refused-later", CHECKSUM));
+        assert!(boot.ready(&staged.proof));
+        let mut left = pin!(boot.leave_when_refused());
+        assert_eq!(left.as_mut().now_or_never(), None, "the boot left before the hub refused it");
+        boot.refuse(&staged.proof);
+        assert_eq!(left.as_mut().now_or_never(), Some(()), "the hub refused the unproven boot and the waiting rollback slept on");
     }
 
     #[test]
     fn a_ready_boot_is_past_the_deadline() {
         let (boot, staged) = (Boot::new(), staged("ready-then-deadline", CHECKSUM));
-        assert!(boot.ready());
-        assert!(!boot.leave_from(Step::Starting), "the deadline rolled back a boot that was ready");
+        assert!(boot.ready(&staged.proof));
+        assert!(!boot.leave_if_starting(), "the deadline rolled back a boot that was ready");
         assert!(marker_kept(&staged));
     }
 
     #[test]
     fn a_boot_the_deadline_left_neither_becomes_ready_nor_serves_the_hub() {
         let (boot, staged) = (Boot::new(), staged("deadline-then-ready", CHECKSUM));
-        assert!(boot.leave_from(Step::Starting));
-        assert!(!boot.ready(), "the main thread went on to resume sessions during a rollback");
+        assert!(boot.leave_if_starting());
+        assert!(!boot.ready(&staged.proof), "the main thread went on to resume sessions during a rollback");
         assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(AfterHello::Leaving), "a hello during the rollback went on to serve the hub");
         assert!(marker_kept(&staged), "a hello during the rollback removed the marker");
     }
@@ -244,7 +337,8 @@ mod tests {
         assert_eq!(pin!(boot.commit_when_ready(&staged.proof)).now_or_never(), Some(AfterHello::Serve), "a process with nothing to prove waited for ready");
         assert!(marker_kept(&staged), "a process with nothing to prove removed the marker");
         boot.refuse(&staged.proof);
-        assert_eq!(pin!(boot.refused.notified()).now_or_never(), None, "a process with nothing to prove queued a refusal");
+        assert!(boot.ready(&staged.proof));
+        assert_eq!(pin!(boot.leave_when_refused()).now_or_never(), None, "a process with nothing to prove queued a refusal");
     }
 
     #[test]
