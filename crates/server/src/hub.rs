@@ -483,10 +483,17 @@ impl Hub {
 }
 
 impl Account {
-    /// Registers a machine's connection. An older one must have gone offline first.
+    /// Registers a machine's connection and sends it every client's watch of it. An older one must
+    /// have gone offline first. A client that never saw it leave does not send its watch again.
     pub fn came_online(&self, machine: &str, socket: u64, name: String, dedicated: bool, version: String, out: Outbox) {
+        let mut live = self.live.lock().unwrap();
+        for (id, client) in &live.clients {
+            if let Some(tabs) = client.threads.get(machine) {
+                let _ = out.send(frame(&ToMachine::WatchThreads { viewer: viewer(*id), tabs: tabs.iter().cloned().collect() }));
+            }
+        }
         let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version };
-        self.live.lock().unwrap().machines.insert(machine.to_owned(), online);
+        live.machines.insert(machine.to_owned(), online);
     }
 
     /// Forgets the machine's connection, `socket` or whichever it has: its calls fail and its

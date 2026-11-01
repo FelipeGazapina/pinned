@@ -14,7 +14,7 @@ A read repaints when `drawnOf` changes. It holds every thread field the screen d
 
 `followed()` in `ui/gui.js` names the tabs the page watches and the tabs the 1200 ms poll reads, so the two sets cannot differ. `sentWatch` keeps the watch each machine was last sent. The page sends only to machines whose tabs changed, and it forgets a machine that left the page, as on sign-out. A failed send restores that one machine's entry, so the next render sends it again.
 
-The hub forwards a client's watch to the machine and keeps it only to filter events and to unwatch on `client_gone`. It does not replay a watch when a machine reconnects. The hub pushes the machine offline first, the page drops that machine's tabs and sends an empty watch, and it watches again once the tabs return.
+The hub forwards a client's watch to the machine and keeps it to filter events, to unwatch on `client_gone`, and to replay in `came_online`. Usually the page sees the machine go offline, drops its tabs, sends an empty watch, and watches again once the tabs return. The replay covers the other order. The old socket's close handler removes the machine and then awaits the database while the new socket registers it, so the page sees the machine online throughout and never sends its watch again.
 
 Reads of one tab start at least `THREAD_READ_GAP_MS` (100 ms) apart. Over the internet a read takes longer than that, so only a nearby page waits. A nudge after a quiet spell reads at once.
 
