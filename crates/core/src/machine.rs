@@ -3308,11 +3308,14 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
-    fn wake_quit(m: &Machine, quit: &std::sync::mpsc::Receiver<Quit>) -> Quit {
-        if quit.try_iter().any(|said| said == Quit::Returned) {
+    fn wake_quit(m: &Machine, quit: &std::sync::mpsc::Receiver<Quit>, before: &Quit) -> Quit {
+        if *before == Quit::Returned || quit.try_iter().any(|said| said == Quit::Returned) {
             return Quit::Returned;
         }
-        m.kills.done.notify_all();
+        {
+            let _parked = m.kills.running.lock().unwrap();
+            m.kills.done.notify_all();
+        }
         quit.recv_timeout(SOON).expect("quit neither parked nor returned")
     }
 
@@ -3338,7 +3341,7 @@ pub(crate) mod tests {
         let during_old = quit.recv_timeout(SOON).expect("quit neither parked nor returned");
         at_old.open.send(()).unwrap();
         at_new.reached.recv_timeout(SOON).expect("the new claude outlived the tab quit cleared");
-        let during_new = wake_quit(&m, &quit);
+        let during_new = wake_quit(&m, &quit, &during_old);
         at_new.open.send(()).unwrap();
         restarter.join().unwrap();
         quitter.join().unwrap();
