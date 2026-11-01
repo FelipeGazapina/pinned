@@ -70,7 +70,7 @@ const sandbox = {
   setTimeout: (run, ms) => clock.timers.push({ at: clock.now + ms, run }),
   document: {
     hidden: false,
-    body: { dataset: {} },
+    body: { dataset: { mode: "gui" } },
     getElementById(id) {
       if (id === "context-meter") return contextMeter;
       return element();
@@ -88,7 +88,7 @@ vm.runInContext(
   `
 function threadOf(tab) { return tab.thread; }
 function statusOf(tab) { return tab.view.status ?? "idle"; }
-function guiOn() { return true; }
+function guiOn() { return document.body.dataset.mode === "gui"; }
 function keyOf(machine, id) { return machine + ":" + id; }
 function tabByKey(key) { return tabs.find((tab) => tab.key === key) ?? null; }
 function modelOf() { return null; }
@@ -320,6 +320,14 @@ test("a nudge reads only a tab the page follows, and nothing while the page is h
     assert.equal(net.reads, 0, "the shown tab of a hidden page");
   } finally {
     sandbox.document.hidden = false;
+  }
+  sandbox.document.body.dataset.mode = "terminal";
+  try {
+    net.nudge("tab-1");
+    await net.drain();
+    assert.equal(net.reads, 0, "the shown tab of a page in terminal mode");
+  } finally {
+    sandbox.document.body.dataset.mode = "gui";
   }
   net.nudge("tab-1");
   await net.drain();

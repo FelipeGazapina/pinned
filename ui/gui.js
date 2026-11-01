@@ -186,7 +186,7 @@ async function fetchThread(tab) {
 
 function onThreadEvent(machine, event) {
   const tab = tabByKey(keyOf(machine, event.tab));
-  if (tab) fetchThread(tab);
+  if (tab && followed(tab) && guiOn() && !document.hidden) fetchThread(tab);
 }
 
 async function fetchWorkspace(tab) {
