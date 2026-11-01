@@ -10,7 +10,7 @@ The machine sends `{"kind": "thread", "tab": ...}` to each client that watches a
 
 `fetchThread` in `ui/gui.js` is the only writer of a thread's cursor. A nudge or a poll tick during a read sets `again`, and the read runs once more. The earlier push moved the cursor from a second path. A poll in flight then came back stale and was dropped, with the `agents` list that only the poll carried.
 
-A read repaints when `drawnOf` changes. It holds every thread field the screen draws: the session, loaded, unsupported, error, the item count, the tasks, the context, the branch, and the agents key. A reset always repaints. A reset or a new session clears the context ring along with the lines, the tasks, and the branch.
+A read repaints when `drawnOf` changes. It holds every thread field the screen draws: the session, loaded, unsupported, error, the item count, the tasks, the context, the branch, and the agents key. A reset always repaints, and it counts in `renderThread`'s content key, so a rewind that leaves as many lines as before still draws the new last line. A reset or a new session clears the context ring along with the lines, the tasks, and the branch.
 
 ## What the page watches
 

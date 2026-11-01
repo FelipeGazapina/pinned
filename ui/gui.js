@@ -144,7 +144,7 @@ async function fetchThread(tab) {
       let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: t.next });
       t.error = null;
       if (!page.session && t.session) return;
-      if (page.reset) Object.assign(t, { items: [], todos: null, branch: null, context: null });
+      if (page.reset) Object.assign(t, { items: [], todos: null, branch: null, context: null, resets: (t.resets ?? 0) + 1 });
       if (page.session !== t.session) {
         const restart = t.next > 0;
         Object.assign(t, { session: page.session, items: [], next: 0, history: null, todos: null, branch: null, context: null });
