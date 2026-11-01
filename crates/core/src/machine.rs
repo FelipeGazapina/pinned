@@ -448,6 +448,8 @@ impl Drop for Kill<'_> {
 #[cfg(test)]
 thread_local! {
     static BEFORE_PARK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_SESSIONS_WRITE: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
+    static BEFORE_WORKTREE_OWNED: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
 }
 
 struct Busy<'a> {
@@ -1810,6 +1812,10 @@ impl Machine {
         let prompt = if prompt.starts_with('-') { format!("\n{prompt}") } else { prompt };
         let launch = title.iter().flat_map(|t| ["--name".to_owned(), t.clone()]).chain([prompt]).collect();
         let id = self.add_tab(cwd.clone(), account, launch, role_env(Role::Worker, project), bypass, None).inspect_err(|_| if let Some(made) = &made { branches::drop_worktree(made, self.launch.path_env.as_deref()) })?;
+        #[cfg(test)]
+        if let Some(pause) = BEFORE_WORKTREE_OWNED.take() {
+            pause();
+        }
         self.tab(&id, |t| t.made = made.clone())?;
         if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
             self.close_tab(&id);
@@ -2568,6 +2574,10 @@ impl Machine {
             open.sort_by_key(|(n, _)| *n);
             open.into_iter().map(|(_, s)| s).collect()
         };
+        #[cfg(test)]
+        if let Some(pause) = BEFORE_SESSIONS_WRITE.take() {
+            pause();
+        }
         sessions::save(file, &saved);
     }
 
@@ -3300,6 +3310,10 @@ pub(crate) mod tests {
         assert_eq!(during_new, Quit::Parked, "quit returned while the new claude of a tab it cleared was still being killed");
     }
 
+    fn saved_sessions(dir: &Path) -> Vec<String> {
+        sessions::load(&dir.join("sessions.json")).into_iter().map(|s| s.session).collect()
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_tab_closing_as_the_machine_quits_leaves_the_saved_sessions_to_the_next_process() {
@@ -3311,8 +3325,44 @@ pub(crate) mod tests {
             pty::BEFORE_REAP.set(Some(pause));
             m.close_tab(&tab);
         });
-        let saved: Vec<String> = sessions::load(&dir.join("sessions.json")).into_iter().map(|s| s.session).collect();
-        assert_eq!(saved, ["sess-y"], "the closing tab wrote the tabs quit cleared over the ones quit saved");
+        assert_eq!(saved_sessions(&dir), ["sess-y"], "the closing tab wrote the tabs quit cleared over the ones quit saved");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn session_event(tab: &str, session: &str) -> AgentEvent {
+        AgentEvent { status: AgentStatus::Working, session: Some(session.into()), ..done_event(tab) }
+    }
+
+    #[test]
+    fn a_save_that_read_the_tabs_before_quit_leaves_the_sessions_quit_saved() {
+        let dir = temp("save-before-quit");
+        let m = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
+        let (pause, gate) = gate();
+        let saver = {
+            let (m, tab) = (m.clone(), tab.clone());
+            std::thread::spawn(move || {
+                BEFORE_SESSIONS_WRITE.set(Some(pause));
+                m.record_event(session_event(&tab, "sess-old"));
+            })
+        };
+        gate.reached.recv_timeout(SOON).expect("the first save never read the tabs");
+        m.record_event(session_event(&tab, "sess-new"));
+        m.quit();
+        gate.open.send(()).unwrap();
+        saver.join().unwrap();
+        assert_eq!(saved_sessions(&dir), ["sess-new"], "a save that read the tabs before quit wrote over the sessions quit saved");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_second_quit_keeps_the_sessions_the_first_saved() {
+        let dir = temp("quit-twice");
+        let m = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("sess-q".into())).unwrap();
+        m.quit();
+        m.quit();
+        assert_eq!(saved_sessions(&dir), ["sess-q"], "the second quit wrote over the sessions the first saved");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -3320,8 +3370,8 @@ pub(crate) mod tests {
         static AT_TABS: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
     }
 
-    fn pausing_machine(launch: Launch) -> Arc<Machine> {
-        Machine::new(launch, None, Some("/repo".into()), |event| {
+    fn pausing_machine(launch: Launch, dir: Option<PathBuf>) -> Arc<Machine> {
+        Machine::new(launch, dir, Some("/repo".into()), |event| {
             if let Event::Tabs { .. } = event {
                 if let Some(pause) = AT_TABS.take() {
                     pause();
@@ -3330,9 +3380,64 @@ pub(crate) mod tests {
         })
     }
 
+    fn quit_held_at_the_empty_tabs(m: &Arc<Machine>) -> (Gate, std::thread::JoinHandle<()>) {
+        let (pause, gate) = gate();
+        let quitter = {
+            let m = m.clone();
+            std::thread::spawn(move || {
+                AT_TABS.set(Some(pause));
+                m.quit();
+            })
+        };
+        gate.reached.recv_timeout(SOON).expect("quit never sent the empty tab list");
+        (gate, quitter)
+    }
+
+    #[test]
+    fn quit_saves_the_sessions_open_as_it_clears_the_tabs() {
+        let dir = temp("quit-saves-at-clear");
+        let m = pausing_machine(launch(), Some(dir.clone()));
+        let early = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("sess-early".into())).unwrap();
+        let late = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
+        m.save_sessions();
+        let (gate, quitter) = quit_held_at_the_empty_tabs(&m);
+        m.record_event(session_event(&late, "sess-late"));
+        m.close_tab(&early);
+        gate.open.send(()).unwrap();
+        quitter.join().unwrap();
+        assert_eq!(saved_sessions(&dir), ["sess-late"], "quit saved the sessions open before it began, not the ones open as it cleared the tabs");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn quit_returns_only_once_a_tab_closing_meanwhile_has_stopped_its_delegates() {
+        let m = machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
+        m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(tab.clone()),
+            tool: None,
+            title: "Look".into(),
+            account: accounts::default_account(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: "/repo".into(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{tab}"),
+            client_request_id: None,
+            role: None,
+        });
+        let quit = quit_while_paused(&m, move |m, pause| {
+            crate::delegate::BEFORE_STOP.set(Some(pause));
+            m.close_tab(&tab);
+        });
+        assert_eq!(quit, Quit::Parked, "quit returned while a closing tab's delegate was cancelled and not yet stopped");
+    }
+
     #[test]
     fn quit_returns_only_once_a_tab_closing_meanwhile_has_finished_closing() {
-        let m = pausing_machine(launch());
+        let m = pausing_machine(launch(), None);
         let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         let quit = quit_while_paused(&m, move |m, pause| {
             AT_TABS.set(Some(pause));
@@ -3355,47 +3460,62 @@ pub(crate) mod tests {
     #[test]
     #[cfg(unix)]
     fn a_tab_starts_no_claude_once_quit_has_begun() {
-        let m = pausing_machine(launch());
+        let m = pausing_machine(launch(), None);
         let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
-        let (pause, gate) = gate();
-        let quitter = {
-            let m = m.clone();
-            std::thread::spawn(move || {
-                AT_TABS.set(Some(pause));
-                m.quit();
-            })
-        };
-        gate.reached.recv_timeout(SOON).expect("quit never sent the empty tab list");
+        let (gate, quitter) = quit_held_at_the_empty_tabs(&m);
         let started = m.spawn(&tab, sh("exec sleep 30"), pty::size(80, 24));
         gate.open.send(()).unwrap();
         quitter.join().unwrap();
         assert_eq!(started, Err("pinned is shutting down".to_owned()), "a tab started a claude after quit sent the empty tab list");
     }
 
-    #[test]
     #[cfg(unix)]
-    fn a_worker_refused_once_quit_has_begun_leaves_no_worktree() {
-        let dir = temp("refused-worker");
+    fn repo_for_workers(dir: &Path) -> (PathBuf, Arc<Machine>, TabId) {
         let repo = dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q", "-b", "main"]);
         git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
-        let m = pausing_machine(Launch { bins: BTreeMap::from([(Provider::Claude, PathBuf::from("/usr/bin/false"))]), ..launch() });
+        let m = pausing_machine(Launch { bins: BTreeMap::from([(Provider::Claude, PathBuf::from("/usr/bin/false"))]), ..launch() }, None);
         let from = m.add_tab(repo.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
-        let (pause, gate) = gate();
-        let quitter = {
-            let m = m.clone();
-            std::thread::spawn(move || {
-                AT_TABS.set(Some(pause));
-                m.quit();
-            })
-        };
-        gate.reached.recv_timeout(SOON).expect("quit never sent the empty tab list");
+        (repo, m, from)
+    }
+
+    #[cfg(unix)]
+    fn worktrees(repo: &Path) -> usize {
+        std::fs::read_dir(repo.join(".claude/worktrees")).unwrap().count()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_refused_once_quit_has_begun_leaves_no_worktree() {
+        let dir = temp("refused-worker");
+        let (repo, m, from) = repo_for_workers(&dir);
+        let (gate, quitter) = quit_held_at_the_empty_tabs(&m);
         let refused = m.delegate(&from, &repo, "work".into(), None);
         gate.open.send(()).unwrap();
         quitter.join().unwrap();
-        let worktrees = std::fs::read_dir(repo.join(".claude/worktrees")).unwrap().count();
-        assert_eq!((refused, worktrees), (Err("pinned is shutting down".to_owned()), 0), "(worker, worktrees left)");
+        assert_eq!((refused, worktrees(&repo)), (Err("pinned is shutting down".to_owned()), 0), "(worker, worktrees left)");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_whose_tab_quit_cleared_leaves_no_worktree() {
+        let dir = temp("cleared-worker");
+        let (repo, m, from) = repo_for_workers(&dir);
+        let (pause, gate) = gate();
+        let worker = {
+            let (m, repo) = (m.clone(), repo.clone());
+            std::thread::spawn(move || {
+                BEFORE_WORKTREE_OWNED.set(Some(pause));
+                m.delegate(&from, &repo, "work".into(), None)
+            })
+        };
+        gate.reached.recv_timeout(SOON).expect("the worker never got its tab");
+        m.quit();
+        gate.open.send(()).unwrap();
+        let started = worker.join().unwrap();
+        assert_eq!((started.is_ok(), worktrees(&repo)), (false, 0), "(worker started, worktrees left)");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -4333,6 +4453,8 @@ pub(crate) mod tests {
         m.quit();
         assert!(!loose.exists(), "quit left a worktree no tab owns");
         assert!(owned.is_dir(), "quit removed a worktree an opened tab owns");
+        m.close_tab(&parent);
+        assert!(owned.is_dir(), "a close of the parent after quit removed the worktree quit kept for an opened tab");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -5534,7 +5656,6 @@ exec sleep 30
         let _ = std::fs::remove_file(file);
     }
 
-    #[cfg(unix)]
     fn done_event(tab: &str) -> AgentEvent {
         AgentEvent {
             status: AgentStatus::Done,
