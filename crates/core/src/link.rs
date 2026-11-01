@@ -577,12 +577,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    fn creds(hub: String) -> Credentials {
+        Credentials { hub, email: "ana@acme.dev".into(), user_token: String::new(), machine_id: "m-1".into(), machine_token: "t".into() }
+    }
+
     #[test]
     fn a_link_stopped_between_cycles_does_not_wait_for_the_next() {
         let (dir, _file, machine, _shared, _frames) = stopped_sync_fixture("link-idle");
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-        let creds = Credentials { hub: format!("http://{closed}"), email: "ana@acme.dev".into(), user_token: String::new(), machine_id: "m-1".into(), machine_token: "t".into() };
-        let link = spawn(creds, machine.clone(), "0.0.0-test");
+        let link = spawn(creds(format!("http://{closed}")), machine.clone(), "0.0.0-test");
         std::thread::sleep(Duration::from_millis(200));
         let stopping = Instant::now();
         link.stop();
@@ -605,9 +608,9 @@ mod tests {
                 socket.send(Frame::Text(hello.into())).await.unwrap();
                 while let Some(Ok(frame)) = socket.next().await {
                     if let Frame::Text(text) = frame {
-                        let frame: Value = serde_json::from_str(&text).unwrap();
-                        if frame["type"] == "call" {
-                            let _ = calls.send(frame["call"]["cmd"].as_str().unwrap().to_owned());
+                        let sent: Value = serde_json::from_str(&text).unwrap();
+                        if sent["type"] == "call" {
+                            let _ = calls.send(sent["call"]["cmd"].as_str().unwrap().to_owned());
                         }
                     }
                 }
@@ -629,8 +632,7 @@ mod tests {
             machine.open_project(app);
         }
         let (calls, called) = mpsc::channel();
-        let creds = Credentials { hub: a_hub_that_answers_no_call(calls), email: "ana@acme.dev".into(), user_token: String::new(), machine_id: "m-1".into(), machine_token: "t".into() };
-        let link = spawn(creds, machine.clone(), "0.0.0-test");
+        let link = spawn(creds(a_hub_that_answers_no_call(calls)), machine.clone(), "0.0.0-test");
         assert_eq!(called.recv_timeout(Duration::from_secs(30)).as_deref(), Ok("share_project"));
         link.stop();
         let saved: Value = serde_json::from_slice(&std::fs::read(&file).expect("the stopped loop saved its state")).unwrap();
