@@ -570,6 +570,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    fn a_hub_that_only_says_hello() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async move {
+                let (socket, _) = tokio::net::TcpListener::from_std(listener).unwrap().accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                socket.next().await;
+                let hello = r#"{"type":"hello","machine":{"id":"m-1","name":"mac","os":"macos","online":true,"last_seen":0}}"#;
+                socket.send(Frame::Text(hello.into())).await.unwrap();
+                while let Some(Ok(_)) = socket.next().await {}
+            });
+        });
+        url
+    }
+
+    #[test]
+    fn once_a_link_stops_the_state_file_decides_again() {
+        let (dir, file, machine, _shared, _frames) = stopped_sync_fixture("link-stop");
+        let creds = Credentials { hub: a_hub_that_only_says_hello(), email: "ana@acme.dev".into(), user_token: String::new(), machine_id: "m-1".into(), machine_token: "t".into() };
+        let link = spawn(creds, machine.clone(), "0.0.0-test");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !file.exists() {
+            assert!(Instant::now() < deadline, "the sync loop never saved its state");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
+        link.stop();
+        let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_state_file_restored_by_hand_reads_as_syncing_before_the_next_cycle() {
         let (dir, file, machine, shared, _frames) = stopped_sync_fixture("restored");
