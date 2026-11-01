@@ -17,11 +17,18 @@ SNAPSHOTS = "crates/core/wire-contract"
 
 FAKE_CARGO = r'''#!/bin/bash
 set -euo pipefail
-if [[ "$1" == update && -n "${RACE:-}" ]]; then
-  bash -c "$RACE"
+if [[ "$1" == "${FAIL:-}" ]]; then
+  echo "error: fake cargo $1 failed" >&2
+  exit 101
+fi
+if [[ "$1" == update ]]; then
+  echo "# updated" >> Cargo.lock
 fi
 if [[ "$1" == run && "$*" == *" snapshot "* ]]; then
   cp crates/core/wire-contract/current.json "crates/core/wire-contract/${!#}.json"
+fi
+if [[ "$1" == "${RACE_ON:-update}" && -n "${RACE:-}" ]]; then
+  bash -c "$RACE"
 fi
 '''
 
@@ -55,7 +62,7 @@ class Remote:
         proc = subprocess.run(["git", *args], cwd=cwd, env=self.env, text=True, capture_output=True)
         if proc.returncode != 0:
             raise SystemExit(f"git {' '.join(args)} in {cwd}: {proc.stderr.strip()}")
-        return proc.stdout.strip()
+        return proc.stdout.rstrip()
 
     def clone(self, name):
         path = self.root / name
@@ -83,6 +90,8 @@ class ReleaseSandbox(Remote):
         (seed / "scripts").mkdir()
         shutil.copy2(ROOT / "scripts" / "release.sh", seed / "scripts" / "release.sh")
         shutil.copy2(ROOT / "Cargo.toml", seed / "Cargo.toml")
+        shutil.copy2(ROOT / "Cargo.lock", seed / "Cargo.lock")
+        (seed / "README.md").write_text("pinned\n")
         (seed / SNAPSHOTS).mkdir(parents=True)
         shutil.copy2(ROOT / SNAPSHOTS / "current.json", seed / SNAPSHOTS / "current.json")
         self.git(seed, "add", ".")
@@ -100,6 +109,22 @@ class ReleaseSandbox(Remote):
     def parallel_push(self):
         return f'cd "{self.other}" && git pull -q --ff-only && echo parallel >> log.txt && git add log.txt && git commit -qm parallel && git push -q origin main'
 
+    def foreign_tag(self, version):
+        return f'cd "{self.other}" && git switch -q -c side && echo side >> log.txt && git add log.txt && git commit -qm side && git tag v{version} && git push -q origin v{version}'
+
+    def during_build(self, during, version):
+        return {
+            None: {},
+            "parallel": {"RACE": self.parallel_push()},
+            "foreign tag": {"RACE": self.foreign_tag(version)},
+            "stray edit": {"RACE": "echo stray >> README.md"},
+            "cargo fails": {"FAIL": "update"},
+            "Cargo.toml edit": {"RACE": "echo edit >> Cargo.toml"},
+            "Cargo.lock edit": {"RACE": "echo edit >> Cargo.lock", "RACE_ON": "run"},
+            "Cargo.toml edit, cargo fails": {"RACE": "echo edit >> Cargo.toml", "FAIL": "run"},
+            "index held": {"RACE": "touch .git/index.lock", "RACE_ON": "run"},
+        }[during]
+
     def label(self, sha):
         if sha == self.start:
             return "start"
@@ -112,10 +137,8 @@ class ReleaseSandbox(Remote):
                 return f"{subject} on {self.label(parent)}"
         raise SystemExit(f"no clone has {sha}")
 
-    def release(self, version, race=None):
-        env = {**self.env, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
-        if race:
-            env["RACE"] = race
+    def release(self, version, during=None):
+        env = {**self.env, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", **self.during_build(during, version)}
         return subprocess.run(
             ["bash", "scripts/release.sh", version], cwd=self.work, env=env, text=True, capture_output=True
         )
@@ -140,7 +163,8 @@ class ReleaseSandbox(Remote):
             if line.startswith("version = ")
         ]
         snapshots = self.git(self.root, f"--git-dir={self.bare}", "ls-tree", "--name-only", f"{tag}:{SNAPSHOTS}").split()
-        return {"versions": versions, "snapshots": snapshots}
+        changed = self.git(self.root, f"--git-dir={self.bare}", "diff-tree", "--no-commit-id", "--name-only", "-r", tag).split()
+        return {"versions": versions, "snapshots": snapshots, "changed": changed}
 
 
 def released(version):
@@ -152,7 +176,7 @@ RELEASE_CASES = (
         "release from a current main",
         "0.16.1",
         None,
-        False,
+        None,
         {
             "code": 0,
             "remote": {"refs/heads/main": released("0.16.1"), "refs/tags/v0.16.1": released("0.16.1")},
@@ -160,6 +184,7 @@ RELEASE_CASES = (
             "files": {
                 "versions": ['version = "0.16.1"', 'version = "0.16.1"'],
                 "snapshots": ["0.16.1.json", "current.json"],
+                "changed": ["Cargo.lock", "Cargo.toml", "crates/core/wire-contract/0.16.1.json"],
             },
         },
     ),
@@ -167,7 +192,7 @@ RELEASE_CASES = (
         "main moves while the release builds",
         "0.16.1",
         None,
-        True,
+        "parallel",
         {
             "refused": "the push was rejected, so origin has no new main and no v0.16.1",
             "remote": {"refs/heads/main": "parallel on start"},
@@ -178,7 +203,7 @@ RELEASE_CASES = (
         "main moved before the release",
         "0.16.1",
         "parallel",
-        False,
+        None,
         {
             "refused": "HEAD is not origin/main",
             "remote": {"refs/heads/main": "parallel on start"},
@@ -189,7 +214,7 @@ RELEASE_CASES = (
         "release from a main with an unpushed commit",
         "0.16.1",
         "unpushed",
-        False,
+        None,
         {
             "refused": "HEAD is not origin/main",
             "remote": {"refs/heads/main": "start"},
@@ -200,7 +225,7 @@ RELEASE_CASES = (
         "release from a branch other than main",
         "0.16.1",
         "topic",
-        False,
+        None,
         {
             "refused": "run a release from main, not topic",
             "remote": {"refs/heads/main": "start"},
@@ -211,7 +236,7 @@ RELEASE_CASES = (
         "release with an uncommitted file",
         "0.16.1",
         "dirty",
-        False,
+        None,
         {
             "refused": "commit or stash your changes first",
             "remote": {"refs/heads/main": "start"},
@@ -222,7 +247,7 @@ RELEASE_CASES = (
         "release candidate writes no wire snapshot",
         "0.17.0-rc.1",
         None,
-        False,
+        None,
         {
             "code": 0,
             "remote": {"refs/heads/main": released("0.17.0-rc.1"), "refs/tags/v0.17.0-rc.1": released("0.17.0-rc.1")},
@@ -230,6 +255,7 @@ RELEASE_CASES = (
             "files": {
                 "versions": ['version = "0.17.0-rc.1"', 'version = "0.17.0-rc.1"'],
                 "snapshots": ["current.json"],
+                "changed": ["Cargo.lock", "Cargo.toml"],
             },
         },
     ),
@@ -237,7 +263,7 @@ RELEASE_CASES = (
         "version with a leading v",
         "v0.16.1",
         None,
-        False,
+        None,
         {
             "refused": "the version is MAJOR.MINOR.PATCH with an optional -suffix, not v0.16.1",
             "remote": {"refs/heads/main": "start"},
@@ -245,10 +271,168 @@ RELEASE_CASES = (
         },
     ),
     (
+        "a tracked file changes while the release builds",
+        "0.16.1",
+        None,
+        "stray edit",
+        {
+            "refused": "changed while the release built",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M README.md"]},
+        },
+    ),
+    (
+        "Cargo.toml changes while the release builds",
+        "0.16.1",
+        None,
+        "Cargo.toml edit",
+        {
+            "refused": "changed while the release built:\n M Cargo.toml",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.toml"]},
+            "kept": {"Cargo.toml": "edit"},
+        },
+    ),
+    (
+        "Cargo.lock changes while the snapshot builds",
+        "0.16.1",
+        None,
+        "Cargo.lock edit",
+        {
+            "refused": "changed while the release built:\n M Cargo.lock",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.lock"]},
+            "kept": {"Cargo.lock": "edit"},
+        },
+    ),
+    (
+        "Cargo.toml changes and the snapshot build fails",
+        "0.16.1",
+        None,
+        "Cargo.toml edit, cargo fails",
+        {
+            "code": 101,
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.toml"]},
+            "kept": {"Cargo.toml": "edit"},
+        },
+    ),
+    (
+        "another git holds the index while the release rolls back",
+        "0.16.1",
+        None,
+        "index held",
+        {
+            "code": 128,
+            "refused": "Run git checkout HEAD -- Cargo.toml",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.lock", " M Cargo.toml"]},
+        },
+    ),
+    (
+        "the release is killed right after its commit",
+        "0.16.1",
+        "killed after commit",
+        None,
+        {
+            "refused": "Undo it with git reset --keep",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": released("0.16.1"), "tags": [], "status": []},
+        },
+    ),
+    (
+        "the release is killed right after it bumps Cargo.toml",
+        "0.16.1",
+        "killed after sed",
+        None,
+        {
+            "code": -15,
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": []},
+        },
+    ),
+    (
+        "a tracked file changes while the push runs",
+        "0.16.1",
+        "edit during push",
+        None,
+        {
+            "refused": "the push was rejected, so origin has no new main and no v0.16.1",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M README.md"]},
+        },
+    ),
+    (
+        "Cargo.toml changes while a rejected push runs",
+        "0.16.1",
+        "edit Cargo.toml during push",
+        None,
+        {
+            "refused": "Stash them, then run: git tag -d v0.16.1 && git reset --keep",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": released("0.16.1"), "tags": ["v0.16.1"], "status": [" M Cargo.toml"]},
+        },
+    ),
+    (
+        "cargo update fails",
+        "0.16.1",
+        None,
+        "cargo fails",
+        {
+            "code": 101,
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": []},
+        },
+    ),
+    (
+        "origin already has the tag at another commit",
+        "0.16.1",
+        "foreign tag",
+        None,
+        {
+            "refused": "origin already has v0.16.1",
+            "remote": {"refs/heads/main": "start", "refs/tags/v0.16.1": "side on start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": []},
+        },
+    ),
+    (
+        "origin takes the tag at another commit while the release builds",
+        "0.16.1",
+        None,
+        "foreign tag",
+        {
+            "refused": "the push was rejected, and origin has v0.16.1 at another commit",
+            "remote": {"refs/heads/main": "start", "refs/tags/v0.16.1": "side on start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": []},
+        },
+    ),
+    (
+        "a stale local tag",
+        "0.16.1",
+        "stale tag",
+        None,
+        {
+            "refused": "a local tag v0.16.1 exists",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": ["v0.16.1"], "status": []},
+        },
+    ),
+    (
+        "the version already has a wire snapshot",
+        "0.16.1",
+        "shipped snapshot",
+        None,
+        {
+            "refused": "crates/core/wire-contract/0.16.1.json exists",
+            "remote": {"refs/heads/main": "shipped snapshot on start"},
+            "local": {"branch": "main", "HEAD": "shipped snapshot on start", "tags": [], "status": []},
+        },
+    ),
+    (
         "connection drops after origin takes the release",
         "0.16.1",
         "dropped",
-        False,
+        None,
         {
             "refused": "git push failed, but origin has v0.16.1, so the release went out",
             "remote": {"refs/heads/main": released("0.16.1"), "refs/tags/v0.16.1": released("0.16.1")},
@@ -259,7 +443,7 @@ RELEASE_CASES = (
         "connection drops and origin cannot be read",
         "0.16.1",
         "unreadable",
-        False,
+        None,
         {
             "refused": "git push failed and origin cannot be read",
             "remote": {"refs/heads/main": released("0.16.1"), "refs/tags/v0.16.1": released("0.16.1")},
@@ -275,10 +459,51 @@ if [[ "$1" == committed ]]; then
 fi
 """
 
+EDIT_AND_REJECT_HOOK = """#!/bin/bash
+echo stray >> "{path}"
+exit 1
+"""
+HOOKS = ("reference-transaction", "pre-receive")
+KILL_AFTER_SED = """#!/bin/bash
+"{sed}" "$@"
+status=$?
+kill -TERM $PPID
+exit $status
+"""
+KILL_RELEASE_HOOK = """#!/bin/bash
+kill -TERM $(ps -o ppid= -p $PPID)
+sleep 1
+"""
 
-def prepare(sandbox, setup):
+
+def install_hook(repo, name, source):
+    hook = repo / "hooks" / name
+    hook.write_text(source)
+    hook.chmod(0o755)
+
+
+def prepare(sandbox, setup, version):
     if setup == "parallel":
         subprocess.run(["bash", "-c", sandbox.parallel_push()], env=sandbox.env, check=True)
+    elif setup == "foreign tag":
+        subprocess.run(["bash", "-c", sandbox.foreign_tag(version)], env=sandbox.env, check=True)
+    elif setup == "stale tag":
+        sandbox.git(sandbox.work, "tag", f"v{version}")
+    elif setup == "shipped snapshot":
+        (sandbox.work / SNAPSHOTS / f"{version}.json").write_text('{"shipped": true}\n')
+        sandbox.git(sandbox.work, "add", SNAPSHOTS)
+        sandbox.git(sandbox.work, "commit", "-q", "-m", "shipped snapshot")
+        sandbox.git(sandbox.work, "push", "-q", "origin", "main")
+    elif setup == "edit during push":
+        install_hook(sandbox.bare, "pre-receive", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "README.md"))
+    elif setup == "edit Cargo.toml during push":
+        install_hook(sandbox.work / ".git", "pre-push", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "Cargo.toml"))
+    elif setup == "killed after commit":
+        install_hook(sandbox.work / ".git", "post-commit", KILL_RELEASE_HOOK)
+    elif setup == "killed after sed":
+        shim = sandbox.bin / "sed"
+        shim.write_text(KILL_AFTER_SED.format(sed=shutil.which("sed")))
+        shim.chmod(0o755)
     elif setup == "unpushed":
         sandbox.commit(sandbox.work, "unpushed")
     elif setup == "topic":
@@ -287,18 +512,18 @@ def prepare(sandbox, setup):
         (sandbox.work / "notes.txt").write_text("draft\n")
     elif setup in ("dropped", "unreadable"):
         hide = f'mv "{sandbox.bare}" "{sandbox.hidden}"' if setup == "unreadable" else ":"
-        hook = sandbox.bare / "hooks" / "reference-transaction"
-        hook.write_text(DROP_HOOK.format(hide=hide))
-        hook.chmod(0o755)
+        install_hook(sandbox.bare, "reference-transaction", DROP_HOOK.format(hide=hide))
 
 
-def release_errors(root, version, setup, race, expect):
+def release_errors(root, version, setup, during, expect):
     sandbox = ReleaseSandbox(root)
-    prepare(sandbox, setup)
-    proc = sandbox.release(version, sandbox.parallel_push() if race else None)
+    prepare(sandbox, setup, version)
+    proc = sandbox.release(version, during)
+    (sandbox.work / ".git" / "index.lock").unlink(missing_ok=True)
     if sandbox.hidden.exists():
         sandbox.hidden.rename(sandbox.bare)
-    (sandbox.bare / "hooks" / "reference-transaction").unlink(missing_ok=True)
+    for hook in HOOKS:
+        (sandbox.bare / "hooks" / hook).unlink(missing_ok=True)
     seen = sandbox.observed()
     errors = []
     if "code" in expect and proc.returncode != expect["code"]:
@@ -311,6 +536,10 @@ def release_errors(root, version, setup, race, expect):
     for key in ("remote", "local"):
         if seen[key] != expect[key]:
             errors.append(f"{key} is {seen[key]}, want {expect[key]}")
+    for path, line in expect.get("kept", {}).items():
+        last = (sandbox.work / path).read_text().splitlines()[-1]
+        if last != line:
+            errors.append(f"{path} ends with [{last}], want the edit [{line}]")
     if "files" in expect:
         files = sandbox.released_files(f"v{version}")
         if files != expect["files"]:
@@ -394,10 +623,10 @@ def report(label, errors):
 def main():
     failed = 0
     with tempfile.TemporaryDirectory(prefix="release-tags-") as tmp:
-        for index, (title, version, setup, race, expect) in enumerate(RELEASE_CASES):
+        for index, (title, version, setup, during, expect) in enumerate(RELEASE_CASES):
             root = pathlib.Path(tmp) / f"release-{index}"
             root.mkdir()
-            failed += report(title, release_errors(root, version, setup, race, expect))
+            failed += report(title, release_errors(root, version, setup, during, expect))
         for index, (title, tags, live, want) in enumerate(HUB_CASES):
             root = pathlib.Path(tmp) / f"hub-{index}"
             root.mkdir()

@@ -2,7 +2,7 @@
 
 use crate::account::Credentials;
 use crate::agent::Message;
-use crate::machine::{Machine, ViewerId};
+use crate::machine::{Machine, SyncHold, ViewerId};
 use crate::sync;
 use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
 use futures_util::{SinkExt, StreamExt};
@@ -192,40 +192,39 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
 /// Keeps the machine's projects in step with the account's while the link runs.
 fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<bool>) {
     let Some(file) = machine.sync_file().map(Path::to_path_buf) else { return };
-    let mut syncer = Syncer::default();
-    let mut wait = SYNC_FIRST;
-    'run: loop {
-        let until = Instant::now() + wait;
-        while Instant::now() < until {
-            if *stopped.borrow() {
-                break 'run;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        wait = SYNC_EVERY;
-        if shared.online() {
-            syncer.cycle(shared, machine, &file);
-        }
-    }
-    machine.hold_sync_state(false);
+    Syncer::default().run(shared, machine, &file, stopped);
 }
 
 #[derive(Default)]
-struct Syncer {
-    state: Option<sync::State>,
+struct Syncer<'a> {
+    state: Option<(sync::State, SyncHold<'a>)>,
     reported_unreadable: bool,
     shared_projects: HashSet<String>,
     reported_old_hub: bool,
 }
 
-impl Syncer {
-    fn cycle(&mut self, shared: &Shared, machine: &Machine, file: &Path) {
+impl<'a> Syncer<'a> {
+    fn run(mut self, shared: &Shared, machine: &'a Machine, file: &Path, stopped: &watch::Receiver<bool>) {
+        let mut wait = SYNC_FIRST;
+        'run: loop {
+            let until = Instant::now() + wait;
+            while Instant::now() < until {
+                if *stopped.borrow() {
+                    break 'run;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            wait = SYNC_EVERY;
+            if shared.online() {
+                self.cycle(shared, machine, file);
+            }
+        }
+    }
+
+    fn cycle(&mut self, shared: &Shared, machine: &'a Machine, file: &Path) {
         if self.state.is_none() {
             match sync::State::load(file, &crate::machine::home().join(".claude")) {
-                Ok(loaded) => {
-                    self.state = Some(loaded);
-                    machine.hold_sync_state(true);
-                }
+                Ok(loaded) => self.state = Some((loaded, machine.hold_sync_state())),
                 Err(e) => {
                     if !self.reported_unreadable {
                         eprintln!("pinned: could not sync: {e}. Start sync over from Settings, Machines in the app.");
@@ -235,7 +234,7 @@ impl Syncer {
                 }
             }
         }
-        let Some(state) = self.state.as_mut() else { return };
+        let Some((state, _)) = self.state.as_mut() else { return };
         for checkout in machine.checkouts() {
             let key = checkout.project.key.clone();
             if !self.shared_projects.contains(&key) && shared.call(HubCall::ShareProject { project: checkout.project.clone() }).is_ok() {
@@ -544,10 +543,28 @@ mod tests {
     #[test]
     fn once_the_sync_loop_ends_the_state_file_decides_again() {
         let (dir, file, machine, shared, _frames) = stopped_sync_fixture("ended");
-        Syncer::default().cycle(&shared, &machine, &file);
+        let mut syncer = Syncer::default();
+        syncer.cycle(&shared, &machine, &file);
         std::fs::write(&file, b"").unwrap();
         let (_stop, stopped) = watch::channel(true);
-        sync_projects(&shared, &machine, &stopped);
+        syncer.run(&shared, &machine, &file, &stopped);
+        let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_old_sync_loop_that_ends_late_leaves_the_new_loops_state_held() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("overlap");
+        let mut old = Syncer::default();
+        old.cycle(&shared, &machine, &file);
+        let mut new = Syncer::default();
+        new.cycle(&shared, &machine, &file);
+        std::fs::write(&file, b"").unwrap();
+        let (_stop, stopped) = watch::channel(true);
+        old.run(&shared, &machine, &file, &stopped);
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
+        new.run(&shared, &machine, &file, &stopped);
         let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
         let _ = std::fs::remove_dir_all(dir);
