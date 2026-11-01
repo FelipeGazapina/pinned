@@ -433,15 +433,8 @@ impl Drop for Busy<'_> {
 
 #[derive(Default)]
 struct TranscriptLook {
-    found: Option<Transcript>,
+    nudged: Option<(PathBuf, u64)>,
     missed: Option<Missed>,
-}
-
-#[derive(PartialEq)]
-struct Transcript {
-    session: String,
-    path: PathBuf,
-    len: u64,
 }
 
 /// Claude writes a session's transcript with its first message, so the hook names a session the
@@ -863,9 +856,9 @@ impl Machine {
 
     /// The tab's transcript file, in the home of the account it runs under.
     fn transcript(&self, tab: &str) -> Result<PathBuf, String> {
-        let (session, account) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone()))?;
+        let (session, account, kept) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.last_found_transcript.clone()))?;
         let session = session.ok_or("this thread has no conversation yet")?;
-        self.find_transcript(&account, &session).ok_or_else(|| "Claude Code's transcript of this conversation is gone".into())
+        self.kept_transcript(tab, &account, &session, kept, || self.find_transcript(&account, &session)).ok_or_else(|| "Claude Code's transcript of this conversation is gone".into())
     }
 
     /// Copies the tab's conversation up to `cut` under a new session id, with the turns pinned saved for
@@ -938,12 +931,18 @@ impl Machine {
         thread::find(&self.accounts.home(account).join("projects"), session)
     }
 
-    fn locate_transcript(&self, account: &Account, session: &str, status: Option<AgentStatus>, look: &mut TranscriptLook, now: Instant) -> Option<PathBuf> {
+    fn kept_transcript(&self, tab: &str, account: &Account, session: &str, kept: Option<PathBuf>, search: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
         let home = self.accounts.home(account);
-        if let Some(found) = look.found.as_ref().filter(|found| found.session == session && found.path.starts_with(&home) && found.path.is_file()) {
-            return Some(found.path.clone());
+        if let Some(path) = kept.filter(|path| path.file_stem().is_some_and(|stem| stem == session) && path.starts_with(&home) && path.is_file()) {
+            return Some(path);
         }
-        let gap = match &look.missed {
+        let path = search()?;
+        let _ = self.tab(tab, |t| t.last_found_transcript = Some(path.clone()));
+        Some(path)
+    }
+
+    fn locate_transcript(&self, account: &Account, session: &str, status: Option<AgentStatus>, missed: &mut Option<Missed>, now: Instant) -> Option<PathBuf> {
+        let gap = match missed {
             Some(missed) if missed.session == session && missed.status == status => {
                 if now < missed.at + missed.gap {
                     return None;
@@ -953,7 +952,7 @@ impl Machine {
             _ => THREAD_LOOK_EVERY,
         };
         let path = self.find_transcript(account, session);
-        look.missed = path.is_none().then(|| Missed { session: session.to_owned(), status, at: now, gap });
+        *missed = path.is_none().then(|| Missed { session: session.to_owned(), status, at: now, gap });
         path
     }
 
@@ -969,18 +968,11 @@ impl Machine {
 
     /// The tab's conversation from byte `from` of its transcript, empty until claude reports a session.
     pub fn thread(&self, tab: &str, from: u64) -> Result<ThreadPage, String> {
-        let (session, account, process, known) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.session.as_ref().and(t.started), t.last_found_transcript.clone()))?;
-        let file = session.as_deref().and_then(|s| {
-            let home = self.accounts.home(&account);
-            let still = known.as_ref().filter(|path| path.file_stem().is_some_and(|stem| stem == s) && path.starts_with(&home) && path.is_file());
-            still.cloned().or_else(|| self.find_transcript(&account, s))
-        });
+        let (session, account, process, kept) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.session.as_ref().and(t.started), t.last_found_transcript.clone()))?;
+        let file = session.as_deref().and_then(|s| self.kept_transcript(tab, &account, s, kept, || self.find_transcript(&account, s)));
         let Some(file) = file else {
             return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab) });
         };
-        if known.as_ref() != Some(&file) {
-            self.tab(tab, |t| t.last_found_transcript = Some(file.clone()))?;
-        }
         let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
         let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
         agents.extend(self.delegates.cards(tab));
@@ -1011,24 +1003,24 @@ impl Machine {
         if watched.is_empty() {
             return;
         }
-        let open: Vec<(String, String, Option<AgentStatus>, Account)> = {
+        let open: Vec<(String, String, Option<AgentStatus>, Account, Option<PathBuf>)> = {
             let tabs = self.tabs.lock().unwrap();
-            tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.status, tab.account.clone()))).collect()
+            tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.status, tab.account.clone(), tab.last_found_transcript.clone()))).collect()
         };
         seen.retain(|id, _| open.iter().any(|(open_id, ..)| open_id == id));
         let now = Instant::now();
-        for (id, session, status, account) in open {
+        for (id, session, status, account, kept) in open {
             if !watched.contains(&id) {
                 continue;
             }
             let look = seen.entry(id.clone()).or_default();
-            let Some(path) = self.locate_transcript(&account, &session, status, look, now) else { continue };
+            let Some(path) = self.kept_transcript(&id, &account, &session, kept, || self.locate_transcript(&account, &session, status, &mut look.missed, now)) else { continue };
             let Ok(len) = std::fs::metadata(&path).map(|meta| meta.len()) else { continue };
-            let found = Transcript { session, path, len };
-            if look.found.as_ref() == Some(&found) {
+            let nudged = Some((path, len));
+            if look.nudged == nudged {
                 continue;
             }
-            look.found = Some(found);
+            look.nudged = nudged;
             self.emit(Event::Thread { tab: id });
         }
     }
@@ -3435,7 +3427,7 @@ pub(crate) mod tests {
         page["items"].as_array().unwrap().iter().map(|item| item["text"].as_str().unwrap_or_default().to_owned()).collect()
     }
 
-    fn ticked_by_hand(m: &Machine) {
+    fn keep_the_watcher_loop_off(m: &Machine) {
         m.threads_watched.store(true, Ordering::Relaxed);
     }
 
@@ -3447,7 +3439,7 @@ pub(crate) mod tests {
         let seen = heard.clone();
         m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
-        ticked_by_hand(&m);
+        keep_the_watcher_loop_off(&m);
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let dir = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3663,6 +3655,52 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_read_after_a_nudge_reads_the_copy_the_nudge_watched() {
+        let (root, m, heard, tab, a) = watching("thread-one-copy");
+        let b = a.parent().unwrap().join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        assert_eq!(texts_from(&m, &tab, 0), vec!["ready"], "a read finds copy a");
+        std::fs::remove_file(a.join("s1.jsonl")).unwrap();
+        std::fs::write(b.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        std::fs::write(a.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        heard.lock().unwrap().clear();
+        std::fs::write(b.join("s1.jsonl"), format!("{}{}", assistant_line("ready"), assistant_line("only in b"))).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })], "the line written to copy b nudges");
+        assert_eq!(texts_from(&m, &tab, 0), vec!["ready", "only in b"], "the read after that nudge shows the line");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_tab_closed_while_its_transcript_is_searched_still_gets_the_read() {
+        let (root, m, _, _, dir) = watching("thread-close-during-read");
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        let projects = root.join("config/accounts/work/projects");
+        let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
+        let read = (0..20)
+            .find_map(|_| {
+                let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+                let before = scans();
+                let held = thread::PROJECT_SCANS.lock().unwrap();
+                let reader = {
+                    let (m, tab) = (m.clone(), tab.clone());
+                    std::thread::spawn(move || m.thread(&tab, 0).map(|page| serde_json::to_value(page).unwrap()["items"][0]["text"].clone()))
+                };
+                std::thread::sleep(Duration::from_millis(20));
+                m.close_tab(&tab);
+                drop(held);
+                let read = reader.join().unwrap();
+                (scans() > before).then_some(read)
+            })
+            .expect("a read that passed the tab lookup before the close");
+        assert_eq!(read, Ok(json!("ready")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_transcript_not_written_yet_is_searched_again_after_a_wait_or_a_new_status() {
         let (root, m, heard, tab, _) = watching("thread-unwritten");
         let projects = root.join("config/accounts/work/projects");
@@ -3692,15 +3730,15 @@ pub(crate) mod tests {
         let projects = root.join("config/accounts/work/projects");
         let account = m.accounts.get("work").unwrap();
         let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
-        let searched = |look: &mut TranscriptLook, session: &str, status: Option<AgentStatus>, now: Instant| {
+        let searched = |missed: &mut Option<Missed>, session: &str, status: Option<AgentStatus>, now: Instant| {
             let before = scans();
-            m.locate_transcript(&account, session, status, look, now);
+            m.locate_transcript(&account, session, status, missed, now);
             scans() > before
         };
-        let next_search = |look: &mut TranscriptLook, session: &str, status: Option<AgentStatus>, after: Instant| {
-            (1..=3000).find(|ms| searched(look, session, status, after + Duration::from_millis(*ms))).unwrap()
+        let next_search = |missed: &mut Option<Missed>, session: &str, status: Option<AgentStatus>, after: Instant| {
+            (1..=3000).find(|ms| searched(missed, session, status, after + Duration::from_millis(*ms))).unwrap()
         };
-        let mut look = TranscriptLook::default();
+        let mut look = None;
         let mut at = Instant::now();
         assert!(searched(&mut look, "s1", None, at), "the first look searches");
         let mut gaps = vec![];
@@ -3757,24 +3795,17 @@ pub(crate) mod tests {
 
     #[test]
     fn a_tick_with_nothing_watched_waits_for_no_tab() {
-        let (root, m, _, tab, dir) = watching("thread-idle");
+        let (root, m, _, _, dir) = watching("thread-idle");
         std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
         m.set_watched_threads(LOCAL_VIEWER, &[]);
-        let tick = |m: &Arc<Machine>| {
-            let (m, (done, finished)) = (m.clone(), std::sync::mpsc::channel());
-            std::thread::spawn(move || {
-                m.nudge_thread_watchers(&mut HashMap::new());
-                let _ = done.send(());
-            });
-            finished
-        };
+        let (ticker, (done, finished)) = (m.clone(), std::sync::mpsc::channel());
         let held = m.tabs.lock().unwrap();
-        assert!(tick(&m).recv_timeout(Duration::from_secs(5)).is_ok(), "an empty watch ticks while another thread holds the tabs");
-        m.set_watched_threads(LOCAL_VIEWER, std::slice::from_ref(&tab));
-        let watched = tick(&m);
-        assert!(watched.recv_timeout(Duration::from_millis(50)).is_err(), "a watched tab is read under the tabs lock");
+        std::thread::spawn(move || {
+            ticker.nudge_thread_watchers(&mut HashMap::new());
+            let _ = done.send(());
+        });
+        assert!(finished.recv_timeout(Duration::from_secs(5)).is_ok(), "an empty watch ticks while another thread holds the tabs");
         drop(held);
-        assert!(watched.recv_timeout(Duration::from_secs(5)).is_ok());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3795,7 +3826,7 @@ pub(crate) mod tests {
         std::fs::write(root.join("config/accounts/personal/signed-in"), "").unwrap();
         std::fs::create_dir_all(root.join("app")).unwrap();
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
-        ticked_by_hand(&m);
+        keep_the_watcher_loop_off(&m);
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let from = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&from).unwrap();

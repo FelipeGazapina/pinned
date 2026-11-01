@@ -944,8 +944,10 @@ mod tests {
         }
         let (old, _, _) = Outbox::new();
         account.came_online("m", 1, "box".into(), false, "0.16.1".into(), old);
+        account.came_online("other", 3, "laptop".into(), false, "0.16.1".into(), Outbox::new().0);
         account.watch_threads(1, "m", vec!["tab-1".into()]);
         account.watch_threads(2, "m", vec!["tab-2".into()]);
+        account.watch_threads(1, "other", vec!["tab-9".into()]);
         assert!(account.went_offline("m", Some(1)), "the old socket's close");
         account.watch_threads(2, "m", vec![]);
         let (new, mut sent, _) = Outbox::new();
@@ -954,7 +956,7 @@ mod tests {
         while let Ok(text) = sent.try_recv() {
             frames.push(serde_json::from_str::<Value>(&text).unwrap());
         }
-        assert_eq!(frames, vec![serde_json::json!({ "type": "watch_threads", "viewer": "client-1", "tabs": ["tab-1"] })], "the watch of client 1, which never saw the machine leave, and none for client 2, which unwatched it");
+        assert_eq!(frames, vec![serde_json::json!({ "type": "watch_threads", "viewer": "client-1", "tabs": ["tab-1"] })], "client 1's watch of this machine, not of the other one it watches, and none for client 2, which unwatched it");
     }
 
     #[test]

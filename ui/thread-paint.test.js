@@ -48,13 +48,17 @@ const threadView = element();
 const crumb = element();
 
 const clock = { now: 0, timers: [] };
+const listeners = {};
 clock.advance = (ms) => {
   clock.now += ms;
   const due = clock.timers.filter((timer) => timer.at <= clock.now).sort((a, b) => a.at - b.at);
   clock.timers = clock.timers.filter((timer) => timer.at > clock.now);
   for (const timer of due) timer.run();
 };
-clock.next = () => clock.advance(Math.min(...clock.timers.map((timer) => timer.at)) - clock.now);
+clock.next = () => {
+  if (!clock.timers.length) throw new Error("clock.next() with no timer set");
+  clock.advance(Math.min(...clock.timers.map((timer) => timer.at)) - clock.now);
+};
 
 const sandbox = {
   tasksTab,
@@ -70,11 +74,14 @@ const sandbox = {
   ui: { sidebarOpen: true },
   performance: { now: () => clock.now },
   setTimeout: (run, ms) => clock.timers.push({ at: clock.now + ms, run }),
+  setInterval: () => 0,
   document: {
     hidden: false,
     activeElement: null,
     body: { dataset: { mode: "gui" }, toggleAttribute() {} },
-    addEventListener() {},
+    addEventListener(type, listener) {
+      (listeners[type] ??= []).push(listener);
+    },
     getElementById(id) {
       if (id === "context-meter") return contextMeter;
       return element();
@@ -97,7 +104,6 @@ vm.runInContext(
   `
 function threadOf(tab) { return tab.thread; }
 function statusOf(tab) { return tab.view.status ?? "idle"; }
-function guiOn() { return document.body.dataset.mode === "gui"; }
 function keyOf(machine, id) { return machine + ":" + id; }
 function tabByKey(key) { return tabs.find((tab) => tab.key === key) ?? null; }
 function modelOf() { return null; }
@@ -125,6 +131,10 @@ function markClippedTables() {}
 function renderDialog() {}
 function showScrollEnd() {}
 function renderMinimap() {}
+function save() {}
+function refit() {}
+function focusInput() {}
+const TAURI = null;
 function renderComposer(tab) {
   renderBanners(tab);
   renderTasks(tab);
@@ -138,7 +148,10 @@ const bannerDismissed = new Set();
 let restoringBranch = null;
 let bannersOpen = false;
 
+${between(gui, "const guiOn", "\n")}
+${between(gui, "const POLL_MS", "\n")}
 ${between(gui, "const THREAD_READ_GAP_MS", "\n")}
+${between(gui, "function setMode", "async function fitWindowTo")}
 ${between(main, "const tilde =", "\n")}
 ${between(timeline, "const PLAN_TOOL", "let uploadImages = null;")}
 ${between(timeline, "function userHtml", "const DIALOG_KEYS")}
@@ -149,7 +162,7 @@ ${between(composer, "let tasksOpen = false;", "tasksTab.addEventListener")}
 ${between(composer, "function branchBanner", "composerBanners.addEventListener")}
 ${between(composer, "const formatTokens", "const contextCard")}
 ${between(gui, "const statusBeforeRender", "const followed =")}
-${between(gui, "const followed =", "setInterval(() => {\n  publishThreadWatch")}
+${between(gui, "const followed =", "function stepThread")}
 ${between(main, "function onMachineEvent", 'listen("machine"')}
 `,
   sandbox,
@@ -401,6 +414,30 @@ test("a nudge reads only a tab the page follows, and nothing while the page is h
   net.nudge("tab-1");
   await net.drain();
   assert.equal(net.reads, 1, "the shown tab of a visible page");
+});
+
+test("a nudge dropped while the page was hidden or in terminal mode is read once the page shows the thread", async () => {
+  const { s, net } = await opened();
+  try {
+    sandbox.document.hidden = true;
+    s.append({ item: text("while hidden") });
+    net.nudge("tab-1");
+    await net.drain();
+    sandbox.document.hidden = false;
+    for (const listener of listeners.visibilitychange) listener();
+    await net.drain();
+    assert.deepEqual(painted().items, ["start", "while hidden"], "the page shown again");
+    sandbox.document.body.dataset.mode = "terminal";
+    s.append({ item: text("in the terminal") });
+    net.nudge("tab-1");
+    await net.drain();
+    sandbox.setMode("gui");
+    await net.drain();
+    assert.deepEqual(painted().items, ["start", "while hidden", "in the terminal"], "the app view opened again");
+  } finally {
+    sandbox.document.hidden = false;
+    sandbox.document.body.dataset.mode = "gui";
+  }
 });
 
 test("a thread event from the hub reads the tab and paints the new line", async () => {
