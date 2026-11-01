@@ -1205,6 +1205,18 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[test]
+    fn a_cancelled_task_keeps_its_reply_over_a_later_sub_agent_line() {
+        let recording = fixture("claude-background-agent.jsonl");
+        let lines: Vec<&str> = recording.lines().collect();
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"result":"PR opened"}"#;
+        let summaries = after_each_stop("sub-agent-last", Provider::Claude, &[lines[0], lines[2], lines[3], lines[6], result, lines[13]])
+            .into_iter()
+            .map(|row| row[2].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(summaries, vec![json!("PR opened"); 4], "the sub-agent's DONE-SUB came after the worker's reply");
+    }
+
+    #[test]
     fn a_quiet_task_whose_last_turn_failed_ends_failed() {
         let delegates = Delegates::default();
         let task = new_on(&delegates, Provider::Claude);
@@ -1216,6 +1228,28 @@ grok-4.7-high - Grok 4.7  High
         later(&delegates, Duration::from_secs(31 * 60));
         let status = delegates.status(&parent(), &task.id).unwrap();
         assert_eq!((status["workState"].as_str(), status["error"].as_str()), (Some("failed"), Some("API Error: 529 overloaded")), "{status}");
+    }
+
+    #[test]
+    fn a_quiet_task_ends_with_the_reply_a_cancel_would_keep() {
+        let shell = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_type":"local_bash","description":"npm run dev"}]}"#;
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"result":"PR opened"}"#;
+        let more = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Bumped the version too"}]}}"#;
+        let mut summaries = vec![];
+        for quiet in [true, false] {
+            let delegates = Delegates::default();
+            let task = new_on(&delegates, Provider::Claude);
+            for line in [INIT, shell, result, more] {
+                delegates.apply(&task.id, ChildEvent::Line(line.to_owned()), None);
+            }
+            if quiet {
+                later(&delegates, Duration::from_secs(31 * 60));
+            } else {
+                delegates.cancel(&parent(), &task.id, "the parent asked", None).unwrap();
+            }
+            summaries.push(delegates.status(&parent(), &task.id).unwrap()["summary"].clone());
+        }
+        assert_eq!(summaries, [json!("Bumped the version too"), json!("Bumped the version too")], "[ended quiet, cancelled]");
     }
 
     #[test]
@@ -1498,8 +1532,21 @@ grok-4.7-high - Grok 4.7  High
 
     #[test]
     #[cfg(unix)]
-    fn a_cancel_stops_the_agent_before_it_removes_the_worktree() {
-        let dir = scratch("kill-then-drop");
+    fn an_agent_that_closes_stdout_long_before_it_fails_keeps_its_stderr() {
+        let dir = scratch("stdout-early");
+        let bin = script(&dir, "agent", &format!("echo '{INIT}'\nexec >&-\nsleep 1.5\necho 'Error: auth expired' | {{ sleep 0.3; cat >&2; }} &\nexit 1"));
+        let delegates = Arc::new(Delegates::default());
+        let task = new_on(&delegates, Provider::Cursor);
+        let (_, told) = run(&delegates, &task, &bin, &dir);
+        let finished = told.recv_timeout(Duration::from_secs(5)).is_ok();
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(json!([finished, status["workState"], status["error"]]), json!([true, "failed", "Error: auth expired"]));
+    }
+
+    /// A fake `git` that appends, for each call, its first argument and whether the agent whose pid is in `agent.pid` still runs.
+    #[cfg(unix)]
+    fn witness_git(dir: &Path) -> (PathBuf, PathBuf, String) {
         let (tree, tools) = (dir.join("tree"), dir.join("tools"));
         std::fs::create_dir_all(&tree).unwrap();
         std::fs::create_dir_all(&tools).unwrap();
@@ -1508,21 +1555,58 @@ grok-4.7-high - Grok 4.7  High
             &tools,
             "git",
             &format!(
-                "case \"$(ps -o stat= -p \"$(cat '{}')\")\" in ''|Z*) agent=stopped ;; *) agent=running ;; esac\necho \"$1 $agent\" >> '{}'",
-                pidfile.display(),
-                witness.display()
+                "command -v ps >/dev/null || {{ echo \"$1 unknown, no ps\" >> '{witness}'; exit 1; }}\ncase \"$(ps -o stat= -p \"$(cat '{pidfile}')\")\" in ''|Z*) agent=stopped ;; *) agent=running ;; esac\necho \"$1 $agent\" >> '{witness}'",
+                pidfile = pidfile.display(),
+                witness = witness.display()
             ),
         );
+        (tree, witness, format!("{}:/bin:/usr/bin", tools.display()))
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_cancel_stops_the_agent_before_it_removes_the_worktree() {
+        let dir = scratch("kill-then-drop");
+        let (tree, witness, path) = witness_git(&dir);
         let bin = script(&dir, "claude", "exec sleep 30");
         let delegates = Arc::new(Delegates::default());
         let task = new_on(&delegates, Provider::Claude);
         delegates.place(&task.id, tree.clone(), true);
         let (agent, _) = run(&delegates, &task, &bin, &dir);
-        std::fs::write(&pidfile, agent.to_string()).unwrap();
-        let path = format!("{}:/bin:/usr/bin", tools.display());
+        std::fs::write(dir.join("agent.pid"), agent.to_string()).unwrap();
         delegates.cancel(&parent(), &task.id, "the parent asked", Some(&path)).unwrap();
         let seen = std::fs::read_to_string(&witness).unwrap_or_default();
         assert!(stopped(agent as i32), "the agent {agent} outlived the cancel");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(seen, "symbolic-ref stopped\nworktree stopped\n", "the state of the agent at each git call that removes its worktree");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_answered_agent_stops_before_its_worktree_is_removed() {
+        let dir = scratch("answer-then-drop");
+        let (tree, witness, path) = witness_git(&dir);
+        let pidfile = dir.join("agent.pid");
+        let bin = script(&dir, "claude", &format!("while [ ! -s '{}' ]; do sleep 0.05; done\necho '{REPLY}'\necho '{RESULT}'\nexec sleep 30", pidfile.display()));
+        let delegates = Arc::new(Delegates::default());
+        let task = new_on(&delegates, Provider::Claude);
+        delegates.place(&task.id, tree.clone(), true);
+        let sink = delegates.clone();
+        let id = task.id.clone();
+        let agent = spawn(ChildSpec { bin: &bin, argv: &[], cwd: &dir, env: &[], path: None, strip: &[] }, move |event| {
+            sink.apply(&id, event, Some(&path));
+        })
+        .unwrap();
+        delegates.remember_pid(&task.id, agent);
+        std::fs::write(&pidfile, agent.to_string()).unwrap();
+        let start = Instant::now();
+        let seen = loop {
+            let seen = std::fs::read_to_string(&witness).unwrap_or_default();
+            if seen.lines().count() >= 2 || start.elapsed() > Duration::from_secs(9) {
+                break seen;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(seen, "symbolic-ref stopped\nworktree stopped\n", "the state of the agent at each git call that removes its worktree");
     }
