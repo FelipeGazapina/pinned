@@ -303,6 +303,29 @@ test("a nudge reads the new line without waiting for the poll", async () => {
   assert.deepEqual(painted().items, ["start", "visible"]);
 });
 
+test("a nudge reads only a tab the page follows, and nothing while the page is hidden", async () => {
+  clearScreen();
+  const shown = tabFor("tab-1", "idle");
+  const background = tabFor("tab-2", "idle");
+  const net = network({ "tab-1": transcript(), "tab-2": transcript() });
+  sandbox.tabs = [shown, background];
+  sandbox.active = shown;
+  net.nudge("tab-2");
+  await net.drain();
+  assert.equal(net.reads, 0, "a background tab that only the phone follows");
+  sandbox.document.hidden = true;
+  try {
+    net.nudge("tab-1");
+    await net.drain();
+    assert.equal(net.reads, 0, "the shown tab of a hidden page");
+  } finally {
+    sandbox.document.hidden = false;
+  }
+  net.nudge("tab-1");
+  await net.drain();
+  assert.equal(net.reads, 1, "the shown tab of a visible page");
+});
+
 test("a thread event from the hub reads the tab and paints the new line", async () => {
   const { s, net } = await opened();
   s.append({ item: text("pushed") });
