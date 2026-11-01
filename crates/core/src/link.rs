@@ -34,9 +34,22 @@ pub const UNAUTHORIZED: u16 = 4001;
 
 pub struct Link {
     shared: Arc<Shared>,
-    stop: watch::Sender<bool>,
+    stop: Stop,
     thread: std::thread::JoinHandle<()>,
     syncing: std::thread::JoinHandle<()>,
+}
+
+/// Dropped by `Link::stop` or with the link, and either way both of the link's threads end.
+struct Stop {
+    sender: watch::Sender<bool>,
+    syncing: std::thread::Thread,
+}
+
+impl Drop for Stop {
+    fn drop(&mut self) {
+        let _ = self.sender.send(true);
+        self.syncing.unpark();
+    }
 }
 
 struct Outgoing {
@@ -118,7 +131,7 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("could not start the hub link's runtime");
         runtime.block_on(run(link, creds, machine, version, stopped, listener));
     });
-    Link { shared, stop, thread, syncing }
+    Link { shared, stop: Stop { sender: stop, syncing: syncing.thread().clone() }, thread, syncing }
 }
 
 impl Link {
@@ -150,10 +163,10 @@ impl Link {
     }
 
     pub fn stop(self) {
-        let _ = self.stop.send(true);
-        self.syncing.thread().unpark();
-        let _ = self.thread.join();
-        let _ = self.syncing.join();
+        let Link { stop, thread, syncing, .. } = self;
+        drop(stop);
+        let _ = thread.join();
+        let _ = syncing.join();
     }
 }
 
