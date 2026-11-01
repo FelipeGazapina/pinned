@@ -1818,12 +1818,16 @@ impl Machine {
         // A prompt starting with a dash would read as an option.
         let prompt = if prompt.starts_with('-') { format!("\n{prompt}") } else { prompt };
         let launch = title.iter().flat_map(|t| ["--name".to_owned(), t.clone()]).chain([prompt]).collect();
-        let id = self.add_tab(cwd.clone(), account, launch, role_env(Role::Worker, project), bypass, None).inspect_err(|_| if let Some(made) = &made { branches::drop_worktree(made, self.launch.path_env.as_deref()) })?;
-        #[cfg(test)]
-        if let Some(pause) = BEFORE_WORKTREE_OWNED.take() {
-            pause();
-        }
-        self.tab(&id, |t| t.made = made.clone())?;
+        let id = self
+            .add_tab(cwd.clone(), account, launch, role_env(Role::Worker, project), bypass, None)
+            .and_then(|id| {
+                #[cfg(test)]
+                if let Some(pause) = BEFORE_WORKTREE_OWNED.take() {
+                    pause();
+                }
+                self.tab(&id, |t| t.made = made.clone()).map(|()| id)
+            })
+            .inspect_err(|_| if let Some(made) = &made { branches::drop_worktree(made, self.launch.path_env.as_deref()) })?;
         if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
             self.close_tab(&id);
             if let Some(made) = made {
