@@ -12,7 +12,6 @@ refuse() {
 
 semver='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
 [[ "$version" =~ $semver ]] || refuse "the version is MAJOR.MINOR.PATCH with an optional -suffix, not $version"
-[[ -z "$(git status --porcelain)" ]] || refuse "commit or stash your changes first"
 branch=$(git symbolic-ref --short -q HEAD || true)
 [[ "$branch" == main ]] || refuse "run a release from main, not ${branch:-a detached HEAD}"
 snapshot="crates/core/wire-contract/$version.json"
@@ -23,6 +22,7 @@ start=$(git rev-parse HEAD)
 [[ "$start" == "$(git rev-parse origin/main)" ]] || refuse "HEAD is not origin/main. Pull or push main, then run the release again."
 remote_tag=$(git ls-remote origin "refs/tags/v$version")
 [[ -z "$remote_tag" ]] || refuse "origin already has v$version. Pick another version."
+[[ -z "$(git status --porcelain)" ]] || refuse "commit or stash your changes first"
 
 wrote_toml=
 wrote_lock=
