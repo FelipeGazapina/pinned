@@ -258,6 +258,9 @@ impl Syncer {
             }
         }
         for share in machine.plugin_shares() {
+            if !shared.online() {
+                break;
+            }
             match sync::sync_plugins(shared, state, &share, SystemTime::now()) {
                 Ok(done) if !done.pushed.is_empty() || !done.pulled.is_empty() => {
                     self.reported_old_hub = false;
