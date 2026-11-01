@@ -330,6 +330,17 @@ RELEASE_CASES = (
         },
     ),
     (
+        "the release is killed right after its commit",
+        "0.16.1",
+        "killed after commit",
+        None,
+        {
+            "refused": "Undo it with git reset --keep",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": released("0.16.1"), "tags": [], "status": []},
+        },
+    ),
+    (
         "a tracked file changes while the push runs",
         "0.16.1",
         "edit during push",
@@ -442,10 +453,14 @@ echo stray >> "{path}"
 exit 1
 """
 HOOKS = ("reference-transaction", "pre-receive")
+KILL_RELEASE_HOOK = """#!/bin/bash
+kill -TERM $(ps -o ppid= -p $PPID)
+sleep 1
+"""
 
 
-def install_hook(sandbox, name, source):
-    hook = sandbox.bare / "hooks" / name
+def install_hook(repo, name, source):
+    hook = repo / "hooks" / name
     hook.write_text(source)
     hook.chmod(0o755)
 
@@ -463,11 +478,11 @@ def prepare(sandbox, setup, version):
         sandbox.git(sandbox.work, "commit", "-q", "-m", "shipped snapshot")
         sandbox.git(sandbox.work, "push", "-q", "origin", "main")
     elif setup == "edit during push":
-        install_hook(sandbox, "pre-receive", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "README.md"))
+        install_hook(sandbox.bare, "pre-receive", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "README.md"))
     elif setup == "edit Cargo.toml during push":
-        hook = sandbox.work / ".git" / "hooks" / "pre-push"
-        hook.write_text(EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "Cargo.toml"))
-        hook.chmod(0o755)
+        install_hook(sandbox.work / ".git", "pre-push", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "Cargo.toml"))
+    elif setup == "killed after commit":
+        install_hook(sandbox.work / ".git", "post-commit", KILL_RELEASE_HOOK)
     elif setup == "unpushed":
         sandbox.commit(sandbox.work, "unpushed")
     elif setup == "topic":
@@ -476,7 +491,7 @@ def prepare(sandbox, setup, version):
         (sandbox.work / "notes.txt").write_text("draft\n")
     elif setup in ("dropped", "unreadable"):
         hide = f'mv "{sandbox.bare}" "{sandbox.hidden}"' if setup == "unreadable" else ":"
-        install_hook(sandbox, "reference-transaction", DROP_HOOK.format(hide=hide))
+        install_hook(sandbox.bare, "reference-transaction", DROP_HOOK.format(hide=hide))
 
 
 def release_errors(root, version, setup, during, expect):
