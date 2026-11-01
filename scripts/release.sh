@@ -33,13 +33,13 @@ put_back() {
   if edited "$1" "$2"; then
     echo "$1 changed while the release ran, so it keeps your edit and the v$version bump." >&2
   else
-    git checkout -q HEAD -- "$1"
+    git checkout -q HEAD -- "$1" || echo "the release could not restore $1. Run git checkout HEAD -- $1" >&2
   fi
 }
 restore() {
   put_back Cargo.toml "$wrote_toml"
   put_back Cargo.lock "$wrote_lock"
-  git rm -q --cached --ignore-unmatch -- "$snapshot"
+  git rm -q --cached --ignore-unmatch -- "$snapshot" || true
   rm -f "$snapshot"
 }
 trap restore EXIT
