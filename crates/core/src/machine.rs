@@ -3239,16 +3239,85 @@ pub(crate) mod tests {
         assert_eq!(quit, Quit::Parked, "quit returned while the closed tab's claude was killed and not reaped");
     }
 
+    /// Wakes a parked `quit` to count the calls in flight again, and answers whether it parked again or returned.
+    fn look_again(m: &Machine, quit: &std::sync::mpsc::Receiver<Quit>) -> Quit {
+        if quit.try_iter().any(|said| said == Quit::Returned) {
+            return Quit::Returned;
+        }
+        m.kills.done.notify_all();
+        quit.recv_timeout(SOON).expect("quit neither parked nor returned")
+    }
+
     #[test]
     #[cfg(unix)]
-    fn quit_returns_only_once_the_old_session_of_a_tab_restarting_meanwhile_is_reaped() {
+    fn quit_returns_only_once_a_tab_restarting_meanwhile_has_ended_its_old_and_its_new_claude() {
         let m = machine();
         let tab = running_tab(&m);
-        let quit = quit_while_paused(&m, move |m, pause| {
+        let (old, at_old) = gate();
+        let (new, at_new) = gate();
+        let restarter = {
+            let m = m.clone();
+            std::thread::spawn(move || {
+                pty::BEFORE_REAP.set(Some(Box::new(move || {
+                    pty::BEFORE_REAP.set(Some(new));
+                    old();
+                })));
+                _ = m.spawn(&tab, sh("exec sleep 30"), pty::size(80, 24));
+            })
+        };
+        at_old.reached.recv_timeout(SOON).expect("the old claude was never killed");
+        let (quit, quitter) = quitter(&m);
+        let during_old = quit.recv_timeout(SOON).expect("quit neither parked nor returned");
+        at_old.open.send(()).unwrap();
+        at_new.reached.recv_timeout(SOON).expect("the new claude outlived the tab quit cleared");
+        let during_new = look_again(&m, &quit);
+        at_new.open.send(()).unwrap();
+        restarter.join().unwrap();
+        quitter.join().unwrap();
+        assert_eq!(during_old, Quit::Parked, "quit returned while the restarted tab's old claude was killed and not reaped");
+        assert_eq!(during_new, Quit::Parked, "quit returned while the new claude of a tab it cleared was still being killed");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_tab_closing_as_the_machine_quits_leaves_the_saved_sessions_to_the_next_process() {
+        let dir = temp("quit-during-close");
+        let m = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("sess-y".into()));
+        let tab = running_tab(&m);
+        quit_while_paused(&m, move |m, pause| {
             pty::BEFORE_REAP.set(Some(pause));
-            _ = m.spawn(&tab, sh("exec sleep 30"), pty::size(80, 24));
+            m.close_tab(&tab);
         });
-        assert_eq!(quit, Quit::Parked, "quit returned while the restarted tab's old claude was killed and not reaped");
+        let saved: Vec<String> = sessions::load(&dir.join("sessions.json")).into_iter().map(|s| s.session).collect();
+        assert_eq!(saved, ["sess-y"], "the closing tab wrote the tabs quit cleared over the ones quit saved");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    thread_local! {
+        static AT_TABS: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
+    }
+
+    /// A machine that stops the thread which armed `AT_TABS` when that thread next sends the tab list.
+    fn pausing_machine() -> Arc<Machine> {
+        Machine::new(launch(), None, Some("/repo".into()), |event| {
+            if let Event::Tabs { .. } = event {
+                if let Some(pause) = AT_TABS.take() {
+                    pause();
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn quit_returns_only_once_a_tab_closing_meanwhile_has_finished_closing() {
+        let m = pausing_machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let quit = quit_while_paused(&m, move |m, pause| {
+            AT_TABS.set(Some(pause));
+            m.close_tab(&tab);
+        });
+        assert_eq!(quit, Quit::Parked, "quit returned while a closing tab still dropped its worktrees, saved, and sent the tabs");
     }
 
     #[test]
