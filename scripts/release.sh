@@ -47,8 +47,7 @@ restore() {
   rm -f "$snapshot"
 }
 trap restore EXIT
-sed -i.bak "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
-rm Cargo.toml.bak
+git show HEAD:Cargo.toml | sed "s/^version = \".*\"/version = \"$version\"/" > Cargo.toml
 wrote_toml=$(git hash-object Cargo.toml)
 cargo update -p pinned --quiet
 wrote_lock=$(git hash-object Cargo.lock)
