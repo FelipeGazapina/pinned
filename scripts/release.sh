@@ -24,22 +24,41 @@ start=$(git rev-parse HEAD)
 remote_tag=$(git ls-remote origin "refs/tags/v$version")
 [[ -z "$remote_tag" ]] || refuse "origin already has v$version. Pick another version."
 
+wrote_toml=
+wrote_lock=
+edited() {
+  [[ -n "$2" && "$(git hash-object -- "$1")" != "$2" ]]
+}
+put_back() {
+  if edited "$1" "$2"; then
+    echo "$1 changed while the release ran, so it keeps your edit and the v$version bump." >&2
+  else
+    git checkout -q HEAD -- "$1"
+  fi
+}
 restore() {
-  git checkout -q HEAD -- Cargo.toml Cargo.lock
+  put_back Cargo.toml "$wrote_toml"
+  put_back Cargo.lock "$wrote_lock"
   git rm -q --cached --ignore-unmatch -- "$snapshot"
   rm -f "$snapshot"
 }
 trap restore EXIT
 sed -i.bak "s/^version = \".*\"/version = \"$version\"/" Cargo.toml
 rm Cargo.toml.bak
+wrote_toml=$(git hash-object Cargo.toml)
 cargo update -p pinned --quiet
+wrote_lock=$(git hash-object Cargo.lock)
 if [[ "$version" == *-* ]]; then
   echo "v$version is a release candidate. Hub deploy skips it, so it gets no wire snapshot."
 else
   cargo run -q -p pinned-server --bin wire-contract -- snapshot "$version"
   git add "$snapshot"
 fi
-stray=$(git status --porcelain -- ':!Cargo.toml' ':!Cargo.lock' ":!$snapshot")
+stray=$(
+  git status --porcelain -- ':!Cargo.toml' ':!Cargo.lock' ":!$snapshot"
+  if edited Cargo.toml "$wrote_toml"; then echo " M Cargo.toml"; fi
+  if edited Cargo.lock "$wrote_lock"; then echo " M Cargo.lock"; fi
+)
 [[ -z "$stray" ]] || refuse "the release stopped before the commit, because these files changed while the release built:
 $stray"
 git add Cargo.toml Cargo.lock
