@@ -3680,6 +3680,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_tab_closed_while_its_transcript_is_searched_still_gets_the_read() {
+        let (root, m, _, _, dir) = watching("thread-close-during-read");
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        let projects = root.join("config/accounts/work/projects");
+        let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
+        let read = (0..20)
+            .find_map(|_| {
+                let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+                let before = scans();
+                let held = thread::PROJECT_SCANS.lock().unwrap();
+                let reader = {
+                    let (m, tab) = (m.clone(), tab.clone());
+                    std::thread::spawn(move || m.thread(&tab, 0).map(|page| serde_json::to_value(page).unwrap()["items"][0]["text"].clone()))
+                };
+                std::thread::sleep(Duration::from_millis(20));
+                m.close_tab(&tab);
+                drop(held);
+                let read = reader.join().unwrap();
+                (scans() > before).then_some(read)
+            })
+            .expect("a read that passed the tab lookup before the close");
+        assert_eq!(read, Ok(json!("ready")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_transcript_not_written_yet_is_searched_again_after_a_wait_or_a_new_status() {
         let (root, m, heard, tab, _) = watching("thread-unwritten");
         let projects = root.join("config/accounts/work/projects");
