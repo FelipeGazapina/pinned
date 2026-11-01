@@ -873,8 +873,7 @@ impl Machine {
     fn transcript(&self, tab: &str) -> Result<PathBuf, String> {
         let (session, account, kept) = self.tab(tab, |t| (t.claude_session.clone(), t.account.clone(), t.last_found_transcript.clone()))?;
         let session = session.ok_or("this thread has no conversation yet")?;
-        self.kept_transcript(tab, &account, &session, kept, || self.find_transcript(&account, &session))
-            .ok_or_else(|| "Claude Code's transcript of this conversation is gone".into())
+        self.kept_transcript(tab, &account, &session, kept, || self.find_transcript(&account, &session)).ok_or_else(|| "Claude Code's transcript of this conversation is gone".into())
     }
 
     /// Copies the tab's conversation up to `cut` under a new session id, with the turns pinned saved for
@@ -947,8 +946,6 @@ impl Machine {
         thread::find(&self.accounts.home(account).join("projects"), session)
     }
 
-    /// The path the tab keeps while that file holds `session` in `account`'s home, else what `search`
-    /// finds, which the tab then keeps. Reads, nudges and forks all use this one copy.
     fn kept_transcript(&self, tab: &str, account: &Account, session: &str, kept: Option<PathBuf>, search: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
         let home = self.accounts.home(account);
         if let Some(path) = kept.filter(|path| path.file_stem().is_some_and(|stem| stem == session) && path.starts_with(&home) && path.is_file()) {
@@ -1023,9 +1020,7 @@ impl Machine {
         }
         let open: Vec<(String, String, Option<AgentStatus>, Account, Option<PathBuf>)> = {
             let tabs = self.tabs.lock().unwrap();
-            tabs.iter()
-                .filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.status, tab.account.clone(), tab.last_found_transcript.clone())))
-                .collect()
+            tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.status, tab.account.clone(), tab.last_found_transcript.clone()))).collect()
         };
         seen.retain(|id, _| open.iter().any(|(open_id, ..)| open_id == id));
         let now = Instant::now();

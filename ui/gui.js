@@ -302,8 +302,6 @@ function forgetThreadWatch() {
   watchGeneration++;
 }
 
-/** The node sends a nudge once per change, so one dropped while the page was hidden or in
- * terminal mode is read here once the thread shows again. */
 function readFollowedThreads() {
   if (!guiOn() || document.hidden) return;
   for (const tab of tabs) if (followed(tab)) fetchThread(tab);
