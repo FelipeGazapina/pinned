@@ -3624,6 +3624,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn reads_of_a_tab_search_the_projects_once_until_its_transcript_moves() {
+        let (root, m, _, tab, dir) = watching("thread-read-cache");
+        let projects = root.join("config/accounts/work/projects");
+        let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        let before = scans();
+        for _ in 0..5 {
+            assert_eq!(texts_from(&m, &tab, 0), vec!["ready"]);
+        }
+        assert_eq!(scans(), before + 1, "five reads search once");
+        let other = projects.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::rename(dir.join("s1.jsonl"), other.join("s1.jsonl")).unwrap();
+        assert_eq!(texts_from(&m, &tab, 0), vec!["ready"], "a moved transcript is found again");
+        assert_eq!(scans(), before + 2);
+        std::fs::remove_file(other.join("s1.jsonl")).unwrap();
+        assert_eq!(texts_from(&m, &tab, 0), Vec::<String>::new(), "a deleted transcript reads as none");
+        std::fs::write(dir.join("s1.jsonl"), format!("{}{}", assistant_line("ready"), assistant_line("back"))).unwrap();
+        assert_eq!(texts_from(&m, &tab, 0), vec!["ready", "back"], "a transcript written again is found again");
+        std::fs::write(dir.join("s2.jsonl"), assistant_line("fresh")).unwrap();
+        m.tab(&tab, |t| t.claude_session = Some("s2".into())).unwrap();
+        assert_eq!(texts_from(&m, &tab, 0), vec!["fresh"], "a new session reads its own transcript");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_transcript_not_written_yet_is_searched_again_after_a_wait_or_a_new_status() {
         let (root, m, heard, tab, _) = watching("thread-unwritten");
         let projects = root.join("config/accounts/work/projects");
@@ -3764,6 +3790,7 @@ pub(crate) mod tests {
         std::fs::write(&original, assistant_line("ready")).unwrap();
         let mut looks = HashMap::new();
         m.nudge_thread_watchers(&mut looks);
+        assert_eq!(texts_from(&m, &tab, 0), vec!["ready"]);
         m.switch_account(&tab, "personal", 80, 24).unwrap();
         let copied = root.join("config/accounts/personal/projects/demo/s1.jsonl");
         assert!(original.is_file(), "the switch leaves the old transcript");
