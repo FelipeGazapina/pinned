@@ -93,12 +93,14 @@ function openRemoteOn(version, answer) {
   return sandbox;
 }
 
-test("a node newer than 0.16.0 opens the folder in the call that makes the tab", async () => {
-  const app = openRemoteOn("0.17.0", () => "tab-3");
-  const tab = await app.openRemote("remote", "/work", true);
-  assert.equal(tab.view.id, "tab-3");
-  assert.deepEqual(JSON.parse(JSON.stringify(app.calls)), [{ cmd: "open_tab", path: "/work", bypass: true }, { reveal: "tab-3" }, { start: "tab-3" }]);
-});
+for (const version of ["0.17.0", "0.16.1", "0.16.1-rc.1"]) {
+  test(`a node at ${version} opens the folder in the call that makes the tab`, async () => {
+    const app = openRemoteOn(version, () => "tab-3");
+    const tab = await app.openRemote("remote", "/work", true);
+    assert.equal(tab.view.id, "tab-3");
+    assert.deepEqual(JSON.parse(JSON.stringify(app.calls)), [{ cmd: "open_tab", path: "/work", bypass: true }, { reveal: "tab-3" }, { start: "tab-3" }]);
+  });
+}
 
 for (const version of ["0.16.0", "0.9.1", ""]) {
   test(`a node at ${version || "an unknown version"} has the folder checked on a fresh tab, which closes when it is not one`, async () => {
