@@ -112,6 +112,9 @@ class ReleaseSandbox(Remote):
     def foreign_tag(self, version):
         return f'cd "{self.other}" && git switch -q -c side && echo side >> log.txt && git add log.txt && git commit -qm side && git tag v{version} && git push -q origin v{version}'
 
+    def wip_commit(self):
+        return "echo wip >> README.md && git add README.md && git commit -qm 'my wip'"
+
     def during_build(self, during, version):
         return {
             None: {},
@@ -123,6 +126,8 @@ class ReleaseSandbox(Remote):
             "Cargo.lock edit": {"RACE": "echo edit >> Cargo.lock", "RACE_ON": "run"},
             "Cargo.toml edit, cargo fails": {"RACE": "echo edit >> Cargo.toml", "FAIL": "run"},
             "index held": {"RACE": "touch .git/index.lock", "RACE_ON": "run"},
+            "commit lands": {"RACE": self.wip_commit()},
+            "commit lands, cargo fails": {"RACE": self.wip_commit(), "FAIL": "run"},
         }[during]
 
     def label(self, sha):
@@ -330,6 +335,30 @@ RELEASE_CASES = (
         },
     ),
     (
+        "a commit lands on main while the release builds",
+        "0.16.1",
+        None,
+        "commit lands",
+        {
+            "refused": "a commit landed on main while the release built",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "my wip on start", "tags": [], "status": []},
+        },
+    ),
+    (
+        "a commit lands on main and the snapshot build fails",
+        "0.16.1",
+        None,
+        "commit lands, cargo fails",
+        {
+            "code": 101,
+            "refused": "HEAD moved while the release ran",
+            "unsaid": "reset --keep",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "my wip on start", "tags": [], "status": []},
+        },
+    ),
+    (
         "the release is killed right after its commit",
         "0.16.1",
         "killed after commit",
@@ -533,6 +562,8 @@ def release_errors(root, version, setup, during, expect):
             errors.append("exit 0, want a refusal")
         if expect["refused"] not in proc.stderr:
             errors.append(f"stderr missing [{expect['refused']}]: {proc.stderr.strip()}")
+    if "unsaid" in expect and expect["unsaid"] in proc.stderr:
+        errors.append(f"stderr says [{expect['unsaid']}]: {proc.stderr.strip()}")
     for key in ("remote", "local"):
         if seen[key] != expect[key]:
             errors.append(f"{key} is {seen[key]}, want {expect[key]}")
