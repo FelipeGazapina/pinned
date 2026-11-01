@@ -421,7 +421,7 @@ struct Kills {
 }
 
 impl Kills {
-    fn start(&self, _locked: &HashMap<TabId, Tab>) -> Kill<'_> {
+    fn start(&self) -> Kill<'_> {
         *self.running.lock().unwrap() += 1;
         Kill(self)
     }
@@ -1512,7 +1512,7 @@ impl Machine {
             if self.quitting.load(Ordering::SeqCst) {
                 return Err("pinned is shutting down".into());
             }
-            let kill = self.kills.start(&tabs);
+            let kill = self.kills.start();
             let t = tabs.get_mut(tab).ok_or_else(|| format!("no tab {tab}"))?;
             t.held.clear();
             (t.session.take(), t.screen.clone(), kill)
@@ -1641,18 +1641,19 @@ impl Machine {
 
     /// Ends the tab's session and forgets it. Answers whether no tab is left.
     pub fn close_tab(&self, tab: &str) -> bool {
+        let _closing = self.kills.start();
         let path = self.launch.path_env.clone();
         for id in self.delegates.running_under(tab) {
             let _ = self.delegates.cancel_tree(&id, "the parent tab closed", path.as_deref());
         }
-        let (closed, owned, last, kill) = {
+        let (closed, owned, last) = {
             let mut tabs = self.tabs.lock().unwrap();
-            let kill = self.kills.start(&tabs);
             let closed = tabs.remove(tab);
             let owned: Vec<PathBuf> = tabs.values().filter_map(|t| t.made.clone()).collect();
-            (closed, owned, tabs.is_empty(), kill)
+            (closed, owned, tabs.is_empty())
         };
-        let made = closed.as_ref().and_then(|t| t.made.clone());
+        let Some(closed) = closed else { return last };
+        let made = closed.made.clone();
         drop(closed);
         self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
         if let Some(made) = made {
@@ -1662,7 +1663,6 @@ impl Machine {
         }
         self.save_sessions();
         self.emit_tabs();
-        drop(kill);
         last
     }
 
