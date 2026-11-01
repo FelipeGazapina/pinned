@@ -999,7 +999,7 @@ impl Machine {
     pub fn fork(&self, tab: &str, through: &str) -> Result<TabId, String> {
         let (cwd, account, env, bypass) = self.tab(tab, |t| (t.cwd.clone(), t.account.clone(), t.env.clone(), t.bypass))?;
         let new = self.fork_session(tab, thread::Cut::Through(through), true)?.ok_or("there is nothing to fork before this message")?;
-        let id = self.add_tab(cwd, account, vec!["--resume".into(), new.clone()], env, bypass, Some(new));
+        let id = self.add_tab(cwd, account, vec!["--resume".into(), new.clone()], env, bypass, Some(new))?;
         self.emit_tabs();
         Ok(id)
     }
@@ -1079,7 +1079,7 @@ impl Machine {
             None => self.default_cwd.clone(),
         };
         let account = self.account_for(None, &cwd)?;
-        let id = self.add_tab(cwd, account, vec![], vec![], bypass, None);
+        let id = self.add_tab(cwd, account, vec![], vec![], bypass, None)?;
         self.emit_tabs();
         Ok(id)
     }
@@ -1124,7 +1124,7 @@ impl Machine {
     pub fn open_scratch(&self, bypass: bool) -> Result<TabId, String> {
         std::fs::create_dir_all(&self.scratch).map_err(|e| format!("could not make {}: {e}", self.scratch.display()))?;
         let account = self.account_for(None, &self.scratch)?;
-        let id = self.add_tab(self.scratch.clone(), account, vec![], vec![], bypass, None);
+        let id = self.add_tab(self.scratch.clone(), account, vec![], vec![], bypass, None)?;
         self.emit_tabs();
         Ok(id)
     }
@@ -1157,7 +1157,7 @@ impl Machine {
         let args = run.args.iter().map(|a| a.replace(EXE_PLACEHOLDER, &exe)).collect();
         // A run resuming a conversation shows its transcript before claude's first hook names it.
         let resumed = run.args.windows(2).find(|w| w[0] == "--resume").map(|w| w[1].clone());
-        let id = self.add_tab(cwd, account, args, run.env.clone(), false, resumed);
+        let id = self.add_tab(cwd, account, args, run.env.clone(), false, resumed)?;
         self.emit_tabs();
         Ok(id)
     }
@@ -1284,7 +1284,7 @@ impl Machine {
         let account = self.accounts.get(account).ok_or_else(|| format!("no account {account} on this machine"))?;
         let home = self.accounts.home(&account);
         std::fs::create_dir_all(&home).map_err(|e| format!("could not make {}: {e}", home.display()))?;
-        let id = self.add_tab(home, account, vec![], vec![], false, None);
+        let id = self.add_tab(home, account, vec![], vec![], false, None)?;
         self.tab(&id, |t| t.program = Program::SignIn)?;
         if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
             self.close_tab(&id);
@@ -1492,6 +1492,9 @@ impl Machine {
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
         let (old, screen, kill) = {
             let mut tabs = self.tabs.lock().unwrap();
+            if self.quitting.load(Ordering::SeqCst) {
+                return Err("pinned is shutting down".into());
+            }
             let kill = self.kills.start(&tabs);
             let t = tabs.get_mut(tab).ok_or_else(|| format!("no tab {tab}"))?;
             t.held.clear();
@@ -1716,7 +1719,7 @@ impl Machine {
         if !account.provider.spec().harness {
             return Err(format!("account {} runs {}, which can't be a project's orchestrator", account.id, account.provider.spec().name));
         }
-        let id = self.add_tab(project.clone(), account, vec![], role_env(Role::Orchestrator, &project), false, None);
+        let id = self.add_tab(project.clone(), account, vec![], role_env(Role::Orchestrator, &project), false, None)?;
         self.emit_tabs();
         Ok(id)
     }
@@ -1791,7 +1794,7 @@ impl Machine {
         // A prompt starting with a dash would read as an option.
         let prompt = if prompt.starts_with('-') { format!("\n{prompt}") } else { prompt };
         let launch = title.iter().flat_map(|t| ["--name".to_owned(), t.clone()]).chain([prompt]).collect();
-        let id = self.add_tab(cwd.clone(), account, launch, role_env(Role::Worker, project), bypass, None);
+        let id = self.add_tab(cwd.clone(), account, launch, role_env(Role::Worker, project), bypass, None).inspect_err(|_| if let Some(made) = &made { branches::drop_worktree(made, self.launch.path_env.as_deref()) })?;
         self.tab(&id, |t| t.made = made.clone())?;
         if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
             self.close_tab(&id);
@@ -2025,7 +2028,7 @@ impl Machine {
                 // The transcript is in its account's home: with that account gone, nothing can resume it.
                 let account = self.account_for(Some(&s.account), &s.cwd).ok()?;
                 let (launch, resume_at) = s.reopen(now, account.provider);
-                let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session));
+                let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session)).ok()?;
                 let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode) = (s.interrupted, resume_at, s.held, s.model, s.permission_mode));
                 Some(id)
             })
@@ -2437,7 +2440,7 @@ impl Machine {
             launch.extend(["--permission-mode".to_owned(), "plan".to_owned()]);
         }
         let session = (info.provider == Provider::Claude).then(|| info.conversation.clone());
-        let id = self.add_tab(info.cwd.clone(), account, launch, vec![], bypass, session);
+        let id = self.add_tab(info.cwd.clone(), account, launch, vec![], bypass, session)?;
         if plan {
             let _ = self.tab(&id, |t| t.permission_mode = Some("plan".into()));
         }
@@ -2473,7 +2476,7 @@ impl Machine {
         self.tabs.lock().unwrap().get_mut(id).map(f).ok_or_else(|| format!("no tab {id}"))
     }
 
-    fn add_tab(&self, cwd: PathBuf, account: Account, launch: Vec<String>, env: Vec<(String, String)>, bypass: bool, claude_session: Option<String>) -> TabId {
+    fn add_tab(&self, cwd: PathBuf, account: Account, launch: Vec<String>, env: Vec<(String, String)>, bypass: bool, claude_session: Option<String>) -> Result<TabId, String> {
         let n = self.next_tab.fetch_add(1, Ordering::Relaxed);
         let id = format!("tab-{:x}-{n}", self.boot);
         let tab = Tab {
@@ -2505,8 +2508,12 @@ impl Machine {
             permission_unknown: false,
             screen: Arc::default(),
         };
-        self.tabs.lock().unwrap().insert(id.clone(), tab);
-        id
+        let mut tabs = self.tabs.lock().unwrap();
+        if self.quitting.load(Ordering::SeqCst) {
+            return Err("pinned is shutting down".into());
+        }
+        tabs.insert(id.clone(), tab);
+        Ok(id)
     }
 
     fn emit(&self, event: Event) {
@@ -3224,7 +3231,7 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     fn running_tab(m: &Machine) -> TabId {
-        let tab = m.add_tab(std::env::temp_dir(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let tab = m.add_tab(std::env::temp_dir(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         m.spawn(&tab, sh("exec sleep 30"), pty::size(80, 24)).unwrap();
         tab
     }
@@ -3285,7 +3292,7 @@ pub(crate) mod tests {
     fn a_tab_closing_as_the_machine_quits_leaves_the_saved_sessions_to_the_next_process() {
         let dir = temp("quit-during-close");
         let m = Machine::new(launch(), Some(dir.clone()), None, |_| {});
-        m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("sess-y".into()));
+        m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("sess-y".into())).unwrap();
         let tab = running_tab(&m);
         quit_while_paused(&m, move |m, pause| {
             pty::BEFORE_REAP.set(Some(pause));
@@ -3301,8 +3308,8 @@ pub(crate) mod tests {
     }
 
     /// A machine that stops the thread which armed `AT_TABS` when that thread next sends the tab list.
-    fn pausing_machine() -> Arc<Machine> {
-        Machine::new(launch(), None, Some("/repo".into()), |event| {
+    fn pausing_machine(launch: Launch) -> Arc<Machine> {
+        Machine::new(launch, None, Some("/repo".into()), |event| {
             if let Event::Tabs { .. } = event {
                 if let Some(pause) = AT_TABS.take() {
                     pause();
@@ -3313,8 +3320,8 @@ pub(crate) mod tests {
 
     #[test]
     fn quit_returns_only_once_a_tab_closing_meanwhile_has_finished_closing() {
-        let m = pausing_machine();
-        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let m = pausing_machine(launch());
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         let quit = quit_while_paused(&m, move |m, pause| {
             AT_TABS.set(Some(pause));
             m.close_tab(&tab);
@@ -3336,8 +3343,8 @@ pub(crate) mod tests {
     #[test]
     #[cfg(unix)]
     fn a_tab_starts_no_claude_once_quit_has_begun() {
-        let m = pausing_machine();
-        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let m = pausing_machine(launch());
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         let (pause, gate) = gate();
         let quitter = {
             let m = m.clone();
@@ -3351,6 +3358,33 @@ pub(crate) mod tests {
         gate.open.send(()).unwrap();
         quitter.join().unwrap();
         assert_eq!(started, Err("pinned is shutting down".to_owned()), "a tab started a claude after quit sent the empty tab list");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_refused_once_quit_has_begun_leaves_no_worktree() {
+        let dir = temp("refused-worker");
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let m = pausing_machine(Launch { bins: BTreeMap::from([(Provider::Claude, PathBuf::from("/usr/bin/false"))]), ..launch() });
+        let from = m.add_tab(repo.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
+        let (pause, gate) = gate();
+        let quitter = {
+            let m = m.clone();
+            std::thread::spawn(move || {
+                AT_TABS.set(Some(pause));
+                m.quit();
+            })
+        };
+        gate.reached.recv_timeout(SOON).expect("quit never sent the empty tab list");
+        let refused = m.delegate(&from, &repo, "work".into(), None);
+        gate.open.send(()).unwrap();
+        quitter.join().unwrap();
+        let worktrees = std::fs::read_dir(repo.join(".claude/worktrees")).unwrap().count();
+        assert_eq!((refused, worktrees), (Err("pinned is shutting down".to_owned()), 0), "(worker, worktrees left)");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -3393,7 +3427,7 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     fn running(m: &Machine, env: Vec<(String, String)>, script: &str) -> TabId {
-        let id = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env, false, None);
+        let id = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env, false, None).unwrap();
         m.spawn(&id, sh(script), pty::size(80, 24)).unwrap();
         id
     }
@@ -3467,7 +3501,7 @@ pub(crate) mod tests {
         running(&m, session_env("c2", &Subject::LinearIssue { issue: "uuid".into() }), "sleep 30");
         running(&m, slack_env("c9", "1792400050.000200"), "sleep 30");
         running(&m, slack_env("c2", "1792499999.000100"), "sleep 30");
-        m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], slack_env("c2", "1792400050.000200"), false, None);
+        m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], slack_env("c2", "1792400050.000200"), false, None).unwrap();
         let d = delivery("c2", "1792400050.000200", &["hi"]);
         assert_eq!(m.live_tab(&d.env()), None, "the thread's only tab has no running session");
         assert!(!m.deliver(&d.env(), &d.text()));
@@ -3588,7 +3622,7 @@ pub(crate) mod tests {
         let events = Arc::new(Mutex::new(vec![]));
         let seen_events = events.clone();
         let m = Machine::new(launch(), None, Some("/repo".into()), move |e| seen_events.lock().unwrap().push(serde_json::to_value(e).unwrap()));
-        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         let mut cmd = CommandBuilder::new("cmd.exe");
         cmd.args(["/c", "echo pinned on windows"]);
         m.spawn(&tab, cmd, pty::size(80, 24)).unwrap();
@@ -3661,7 +3695,7 @@ pub(crate) mod tests {
         let heard = Arc::new(Mutex::new(vec![]));
         let seen = heard.clone();
         m.subscribe(Box::new(move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap())));
-        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into())).unwrap();
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let dir = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3751,7 +3785,7 @@ pub(crate) mod tests {
     #[test]
     fn an_unwatched_tab_is_not_nudged() {
         let (root, m, heard, watched, dir) = watching("thread-unwatched");
-        let background = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s2".into()));
+        let background = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s2".into())).unwrap();
         std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
         std::fs::write(dir.join("s2.jsonl"), assistant_line("ready")).unwrap();
         let mut looks = HashMap::new();
@@ -3772,7 +3806,7 @@ pub(crate) mod tests {
         let m = Machine::new(launch(), Some(root.join("config")), None, move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap()));
         m.watch_threads();
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
-        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into())).unwrap();
         let dir = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("s1.jsonl");
@@ -3878,7 +3912,7 @@ pub(crate) mod tests {
     #[test]
     fn a_dropped_hub_link_keeps_this_machines_own_watch() {
         let (root, m, heard, local, dir) = watching("thread-local-viewer");
-        let remote = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s2".into()));
+        let remote = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s2".into())).unwrap();
         m.set_watched_threads("client-7", std::slice::from_ref(&remote));
         std::fs::write(dir.join("s1.jsonl"), assistant_line("local")).unwrap();
         std::fs::write(dir.join("s2.jsonl"), assistant_line("remote")).unwrap();
@@ -3905,7 +3939,7 @@ pub(crate) mod tests {
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Personal".into() }).unwrap();
         std::fs::write(root.join("config/accounts/personal/signed-in"), "").unwrap();
         std::fs::create_dir_all(root.join("app")).unwrap();
-        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
+        let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into())).unwrap();
         m.call(Call::WatchThreads { tabs: vec![tab.clone()] }).unwrap();
         let from = root.join("config/accounts/work/projects/demo");
         std::fs::create_dir_all(&from).unwrap();
@@ -3987,7 +4021,7 @@ pub(crate) mod tests {
         git(&dir, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
         git(&dir, &["branch", "other"]);
         let m = machine();
-        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         let working = AgentEvent { status: AgentStatus::Working, cwd: None, message: None, tab: Some(tab.clone()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false };
         m.record_event(working.clone());
         let checkout = Call::Checkout { tab: tab.clone(), branch: "other".into(), create: false, from: None };
@@ -4042,7 +4076,7 @@ pub(crate) mod tests {
         std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
-        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into()));
+        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into())).unwrap();
         m.spawn(&tab, sh("sleep 30"), pty::size(80, 24)).unwrap();
         m.tab(&tab, |t| t.interrupted = true).unwrap();
         let (seen, sink) = viewer();
@@ -4069,7 +4103,7 @@ pub(crate) mod tests {
         std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
-        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into()));
+        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into())).unwrap();
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
 
@@ -4091,7 +4125,7 @@ pub(crate) mod tests {
         let m = Machine::new(Launch { bins: [(Provider::Claude, claude)].into_iter().collect(), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
         assert_eq!(m.call(Call::DeviceAgents { allow: None }), Ok(json!(false)));
         assert_eq!(m.call(Call::DeviceAgents { allow: Some(true) }), Ok(json!(true)));
-        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
         m.start_claude(&tab, 80, 24).unwrap();
@@ -4141,8 +4175,8 @@ pub(crate) mod tests {
     fn cancel_task_from_the_owning_tab_cancels_and_another_tab_is_refused() {
         let m = machine();
         let account = Account::builtin(Provider::Claude);
-        let tab = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
-        let other = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
+        let tab = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None).unwrap();
+        let other = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None).unwrap();
         let task = m.delegates.begin(crate::delegate::NewTask {
             parent: crate::delegate::Parent::Tab(tab.clone()),
             tool: None,
@@ -4177,7 +4211,7 @@ pub(crate) mod tests {
         let owned = branches::new_worktree(&repo, None).unwrap();
         let m = machine();
         let account = Account::builtin(Provider::Claude);
-        let parent = m.add_tab(std::fs::canonicalize(&repo).unwrap(), account.clone(), vec![], vec![], false, None);
+        let parent = m.add_tab(std::fs::canonicalize(&repo).unwrap(), account.clone(), vec![], vec![], false, None).unwrap();
         let spec = |title: &str, cwd: PathBuf| crate::delegate::NewTask {
             parent: crate::delegate::Parent::Tab(parent.clone()),
             tool: None,
@@ -4222,7 +4256,7 @@ pub(crate) mod tests {
         let kept = branches::new_worktree(&repo, None).unwrap();
         let m = machine();
         let account = Account::builtin(Provider::Claude);
-        let parent = m.add_tab(std::fs::canonicalize(&repo).unwrap(), account.clone(), vec![], vec![], false, None);
+        let parent = m.add_tab(std::fs::canonicalize(&repo).unwrap(), account.clone(), vec![], vec![], false, None).unwrap();
         let task = m.delegates.begin(crate::delegate::NewTask {
             parent: crate::delegate::Parent::Tab(parent.clone()),
             tool: None,
@@ -4258,7 +4292,7 @@ pub(crate) mod tests {
         let owned = branches::new_worktree(&repo, None).unwrap();
         let m = machine();
         let account = Account::builtin(Provider::Claude);
-        let parent = m.add_tab(std::fs::canonicalize(&repo).unwrap(), account.clone(), vec![], vec![], false, None);
+        let parent = m.add_tab(std::fs::canonicalize(&repo).unwrap(), account.clone(), vec![], vec![], false, None).unwrap();
         let spec = |title: &str, cwd: PathBuf| crate::delegate::NewTask {
             parent: crate::delegate::Parent::Tab(parent.clone()),
             tool: None,
@@ -4302,7 +4336,7 @@ pub(crate) mod tests {
         std::fs::write(&claude, "#!/bin/sh\npwd; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, None, |_| {});
-        let tab = m.add_tab(std::fs::canonicalize(&repo).unwrap(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let tab = m.add_tab(std::fs::canonicalize(&repo).unwrap(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
 
@@ -4325,7 +4359,7 @@ pub(crate) mod tests {
         std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
-        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into()));
+        let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into())).unwrap();
         m.spawn(&tab, sh("sleep 30"), pty::size(80, 24)).unwrap();
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
@@ -4447,7 +4481,7 @@ pub(crate) mod tests {
                 seen.lock().unwrap().extend(tabs);
             }
         });
-        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env, false, None);
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env, false, None).unwrap();
         let working = AgentEvent {
             status: AgentStatus::Working,
             cwd: Some("/repo".into()),
@@ -4587,7 +4621,7 @@ pub(crate) mod tests {
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into() }).unwrap();
         m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into() }).unwrap();
         let title = |account: &str| {
-            let tab = m.add_tab(root.clone(), m.accounts.get(account).unwrap(), vec![], vec![], false, None);
+            let tab = m.add_tab(root.clone(), m.accounts.get(account).unwrap(), vec![], vec![], false, None).unwrap();
             m.call(Call::RegenerateTitle { tab, previous: String::new(), thread: "USER: hi".into() })
         };
         assert_eq!(title("work"), Ok(json!("as work")));
@@ -4967,7 +5001,7 @@ echo '{"type":"result","result":"ok"}'
         std::fs::write(&cursor, body).unwrap();
         std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
-        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         m.tab(&tab, |t| t.model = Some("claude-opus-5-5".into())).unwrap();
         let plain = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "mode": "async" })).unwrap();
         m.start_delegate(Some(tab.clone()), None, None, plain).unwrap();
@@ -4997,7 +5031,7 @@ echo '{"type":"result","result":"ok"}'
         std::fs::write(&cursor, body).unwrap();
         std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
-        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         let request = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "budgetMs": 90000, "limitMs": 600000 })).unwrap();
         let started: Value = serde_json::from_str(&m.start_delegate(Some(tab.clone()), None, None, request).unwrap()).unwrap();
         let id = started["taskId"].as_str().unwrap().to_owned();
@@ -5010,7 +5044,7 @@ echo '{"type":"result","result":"ok"}'
     fn a_worker_cannot_start_another_pinned_worker() {
         let root = temp("worker-delegate");
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, root.join("missing-claude"))]), ..launch() }, None, None, |_| {});
-        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, Path::new("/repo")), false, None);
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, Path::new("/repo")), false, None).unwrap();
         let request = crate::delegate::parse_request(&json!({ "task": "look" })).unwrap();
         assert_eq!(m.start_delegate(Some(tab), None, None, request).unwrap_err(), "a worker cannot start another pinned worker");
         assert!(m.delegates.running().is_empty());
@@ -5051,13 +5085,13 @@ echo '{"type":"result","result":"ok"}'
         std::fs::write(&cursor, body).unwrap();
         std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
-        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         m.close_tab(&tab);
         let gone = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "mode": "async" })).unwrap();
         let err = m.start_delegate(Some(tab), None, None, gone).unwrap_err();
         assert!(err.contains("no tab"), "{err}");
 
-        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         let mapped = crate::delegate::parse_request(&json!({
             "task": "look",
             "target": { "providerInstanceId": "cursor", "model": "composer-2.5" },
@@ -5121,7 +5155,7 @@ echo '{"type":"result","result":"ok"}'
             Some(repo.clone()),
             |_| {},
         );
-        let tab = m.add_tab(repo.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let tab = m.add_tab(repo.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         let request = crate::delegate::parse_request(&json!({ "task": "look", "isolation": "worktree", "mode": "async" })).unwrap();
         let worker = m.clone();
         let parent = tab.clone();
@@ -5180,7 +5214,7 @@ echo '{"type":"result","result":"ok"}'
         std::fs::write(&claude, body).unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
-        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None).unwrap();
         m.record_event(AgentEvent { permission_mode: Some("plan".into()), ..done_event(&tab) });
         let request = crate::delegate::parse_request(&json!({ "task": "look", "mode": "async" })).unwrap();
         m.start_delegate(Some(tab), None, None, request).unwrap();
@@ -5221,7 +5255,7 @@ echo '{"type":"result","result":"ok"}'
         let claude = claude_recording_argv(&root);
         let argv = root.join("argv");
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
-        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None).unwrap();
         let full = ["-p", "look", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"].map(str::to_owned).to_vec();
         let plan = ["-p", "look", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"].map(str::to_owned).to_vec();
         m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
@@ -5287,7 +5321,7 @@ exec sleep 30
         );
         let open = |provider: Provider, parent_bypass: bool, access: crate::delegate::Access, session: &str| {
             let account = Account::builtin(provider);
-            let parent = m.add_tab(root.clone(), account.clone(), vec![], vec![], parent_bypass, None);
+            let parent = m.add_tab(root.clone(), account.clone(), vec![], vec![], parent_bypass, None).unwrap();
             let task = m.delegates.begin(crate::delegate::NewTask {
                 parent: crate::delegate::Parent::Tab(parent.clone()),
                 tool: None,
@@ -5574,7 +5608,7 @@ exec sleep 30
         let file = std::env::temp_dir().join(format!("pinned-notice-deliver-{}.bin", std::process::id()));
         let _ = std::fs::remove_file(&file);
         let m = machine();
-        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env.clone(), false, None);
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env.clone(), false, None).unwrap();
         m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display())), pty::size(80, 24)).unwrap();
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
@@ -5592,7 +5626,7 @@ exec sleep 30
 
         let file_b = std::env::temp_dir().join(format!("pinned-notice-deliver-b-{}.bin", std::process::id()));
         let _ = std::fs::remove_file(&file_b);
-        let tab_b = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env.clone(), false, None);
+        let tab_b = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env.clone(), false, None).unwrap();
         m.spawn(&tab_b, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file_b.display())), pty::size(80, 24)).unwrap();
         let (seen_b, sink_b) = viewer();
         m.attach(&tab_b, "test-b".into(), sink_b).unwrap();
@@ -5670,7 +5704,7 @@ exec sleep 30
         m.maybe_deliver(&tab);
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(!read_pty(&file).contains("[pinned]"), "the notice was typed over a draft: {}", read_pty(&file));
-        let other = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let other = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         let refused = m.call(Call::DeliverTask { tab: other, task: id.clone() });
         assert_eq!(refused, Err(format!("task {id} belongs to another session")));
         assert!(!read_pty(&file).contains("[pinned]"), "another tab typed the notice: {}", read_pty(&file));
@@ -5728,7 +5762,7 @@ exec sleep 30
         let file = std::env::temp_dir().join(format!("pinned-notice-cursor-{}.bin", std::process::id()));
         let _ = std::fs::remove_file(&file);
         let m = machine();
-        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Cursor), vec![], vec![], false, None);
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Cursor), vec![], vec![], false, None).unwrap();
         m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display())), pty::size(80, 24)).unwrap();
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
@@ -5796,7 +5830,7 @@ while True:
             vec![("NOTICE_FILE".into(), file.display().to_string()), ("CODEX_HOME".into(), root.display().to_string())],
             false,
             None,
-        );
+        ).unwrap();
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
         m.start_claude(&tab, 80, 24).unwrap();
@@ -5964,7 +5998,7 @@ while True:
         m.listen(|_| Err("not the machine's".into())).unwrap();
         let path = m.open_project(project.clone()).display().to_string();
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
-        let worktree = m.add_tab(PathBuf::from(&path).join(".claude/worktrees/pinned-1"), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let worktree = m.add_tab(PathBuf::from(&path).join(".claude/worktrees/pinned-1"), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         let scratch = m.open_tab(Some(m.scratch.display().to_string()), false).unwrap();
         let tool = |tab: &str, tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":{{{tool}}}}}"#));
 
@@ -6142,8 +6176,8 @@ while True:
         let project = root.join("app");
         std::fs::create_dir_all(&project).unwrap();
         let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
-        let _first = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
-        let parent = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let _first = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
+        let parent = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None).unwrap();
         m.record_event(AgentEvent {
             status: AgentStatus::Done,
             cwd: None,
@@ -6314,7 +6348,7 @@ while True:
         wait_for("stty", || text(&seen).contains("ready"));
         m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&orchestrator) });
         m.write_input(&orchestrator, b"xyz").unwrap();
-        let worker = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &project), false, None);
+        let worker = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &project), false, None).unwrap();
         m.tab(&worker, |t| t.title = Some("JSON output".into())).unwrap();
         m.record_event(AgentEvent { status: AgentStatus::Done, ..done_event(&worker) });
         std::thread::sleep(Duration::from_millis(200));
@@ -6349,8 +6383,8 @@ while True:
         m.attach(&orchestrator, "test".into(), sink).unwrap();
         wait_for("stty", || text(&seen).contains("ready"));
         let work = m.accounts.get("work").unwrap();
-        let worker = m.add_tab("/work/app/.claude/worktrees/pinned-1".into(), work.clone(), vec![], role_env(Role::Worker, app), false, Some("s1".into()));
-        let elsewhere = m.add_tab("/work/api".into(), work, vec![], role_env(Role::Worker, Path::new("/work/api")), false, Some("s1".into()));
+        let worker = m.add_tab("/work/app/.claude/worktrees/pinned-1".into(), work.clone(), vec![], role_env(Role::Worker, app), false, Some("s1".into())).unwrap();
+        let elsewhere = m.add_tab("/work/api".into(), work, vec![], role_env(Role::Worker, Path::new("/work/api")), false, Some("s1".into())).unwrap();
         m.tab(&worker, |t| t.title = Some("JSON output".into())).unwrap();
         let event = |tab: &str, status, message: Option<&str>| AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(tab.into()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false };
 
