@@ -3183,7 +3183,6 @@ pub(crate) mod tests {
         Returned,
     }
 
-    /// Runs `quit` on its own thread, which says when `quit` parks to wait for a close or a restart in flight, and when it returns.
     fn quitter(m: &Arc<Machine>) -> (std::sync::mpsc::Receiver<Quit>, std::thread::JoinHandle<()>) {
         let (says, heard) = std::sync::mpsc::channel();
         let m = m.clone();
@@ -3201,7 +3200,6 @@ pub(crate) mod tests {
         open: std::sync::mpsc::Sender<()>,
     }
 
-    /// A pause for another thread to run, which says it was reached and blocks until the gate opens.
     fn gate() -> (Box<dyn FnOnce() + Send>, Gate) {
         let (reach, reached) = std::sync::mpsc::channel();
         let (open, opened) = std::sync::mpsc::channel::<()>();
@@ -3212,8 +3210,6 @@ pub(crate) mod tests {
         (Box::new(pause), Gate { reached, open })
     }
 
-    /// Runs `end` on its own thread until it stops at the pause it was handed, quits meanwhile, and
-    /// answers whether `quit` parked on that call or returned first.
     fn quit_while_paused(m: &Arc<Machine>, end: impl FnOnce(&Machine, Box<dyn FnOnce() + Send>) + Send + 'static) -> Quit {
         let (pause, gate) = gate();
         let ender = {
@@ -3248,9 +3244,8 @@ pub(crate) mod tests {
         assert_eq!(quit, Quit::Parked, "quit returned while the closed tab's claude was killed and not reaped");
     }
 
-    /// Wakes a parked `quit` to count the calls in flight again, and answers whether it parked again or returned.
     #[cfg(unix)]
-    fn look_again(m: &Machine, quit: &std::sync::mpsc::Receiver<Quit>) -> Quit {
+    fn wake_quit(m: &Machine, quit: &std::sync::mpsc::Receiver<Quit>) -> Quit {
         if quit.try_iter().any(|said| said == Quit::Returned) {
             return Quit::Returned;
         }
@@ -3280,7 +3275,7 @@ pub(crate) mod tests {
         let during_old = quit.recv_timeout(SOON).expect("quit neither parked nor returned");
         at_old.open.send(()).unwrap();
         at_new.reached.recv_timeout(SOON).expect("the new claude outlived the tab quit cleared");
-        let during_new = look_again(&m, &quit);
+        let during_new = wake_quit(&m, &quit);
         at_new.open.send(()).unwrap();
         restarter.join().unwrap();
         quitter.join().unwrap();
@@ -3308,7 +3303,6 @@ pub(crate) mod tests {
         static AT_TABS: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
     }
 
-    /// A machine that stops the thread which armed `AT_TABS` when that thread next sends the tab list.
     fn pausing_machine(launch: Launch) -> Arc<Machine> {
         Machine::new(launch, None, Some("/repo".into()), |event| {
             if let Event::Tabs { .. } = event {
@@ -3327,7 +3321,7 @@ pub(crate) mod tests {
             AT_TABS.set(Some(pause));
             m.close_tab(&tab);
         });
-        assert_eq!(quit, Quit::Parked, "quit returned while a closing tab still dropped its worktrees, saved, and sent the tabs");
+        assert_eq!(quit, Quit::Parked, "quit returned while a closing tab was still sending the tabs");
     }
 
     #[test]

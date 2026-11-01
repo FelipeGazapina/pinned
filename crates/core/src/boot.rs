@@ -285,7 +285,7 @@ mod tests {
         assert!(boot.ready(&staged.proof));
         std::fs::write(&marker, format!("{CHECKSUM}\n")).unwrap();
         boot.refuse(&staged.proof);
-        assert_eq!(pin!(boot.leave_when_refused()).now_or_never(), None, "a refusal rolled back a boot the hub accepted after its marker was gone");
+        assert_eq!(pin!(boot.leave_when_refused()).now_or_never(), None, "a refusal rolled back a boot the hub accepted whose marker was already gone at ready");
     }
 
     #[test]
