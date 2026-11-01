@@ -55,7 +55,10 @@ clock.advance = (ms) => {
   clock.timers = clock.timers.filter((timer) => timer.at > clock.now);
   for (const timer of due) timer.run();
 };
-clock.next = () => clock.advance(Math.min(...clock.timers.map((timer) => timer.at)) - clock.now);
+clock.next = () => {
+  if (!clock.timers.length) throw new Error("clock.next() with no timer set");
+  clock.advance(Math.min(...clock.timers.map((timer) => timer.at)) - clock.now);
+};
 
 const sandbox = {
   tasksTab,
@@ -101,7 +104,6 @@ vm.runInContext(
   `
 function threadOf(tab) { return tab.thread; }
 function statusOf(tab) { return tab.view.status ?? "idle"; }
-function guiOn() { return document.body.dataset.mode === "gui"; }
 function keyOf(machine, id) { return machine + ":" + id; }
 function tabByKey(key) { return tabs.find((tab) => tab.key === key) ?? null; }
 function modelOf() { return null; }
@@ -146,6 +148,7 @@ const bannerDismissed = new Set();
 let restoringBranch = null;
 let bannersOpen = false;
 
+${between(gui, "const guiOn", "\n")}
 ${between(gui, "const POLL_MS", "\n")}
 ${between(gui, "const THREAD_READ_GAP_MS", "\n")}
 ${between(gui, "function setMode", "async function fitWindowTo")}
