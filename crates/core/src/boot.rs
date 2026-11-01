@@ -262,11 +262,9 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(root, ignore = "root removes the marker from a read-only directory, so its removal cannot fail")]
     fn a_hello_the_hub_accepted_clears_its_refusal_even_when_the_marker_stays() {
         use std::os::unix::fs::PermissionsExt;
-        if unsafe { libc::geteuid() } == 0 {
-            return eprintln!("skipped: root removes the marker from a read-only directory, so its removal cannot fail");
-        }
         let (boot, staged) = (Boot::new(), staged("refused-unremovable", CHECKSUM));
         assert!(boot.ready());
         boot.refuse(&staged.proof);

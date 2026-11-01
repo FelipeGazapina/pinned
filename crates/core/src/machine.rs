@@ -426,9 +426,18 @@ impl Kills {
     }
 
     fn wait(&self) {
-        let running = self.running.lock().unwrap();
-        drop(self.done.wait_while(running, |running| *running > 0).unwrap());
+        let mut running = self.running.lock().unwrap();
+        while *running > 0 {
+            #[cfg(test)]
+            BEFORE_PARK.with_borrow(|park| if let Some(park) = park { park() });
+            running = self.done.wait(running).unwrap();
+        }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_PARK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
 struct Kill<'a> {
@@ -3157,67 +3166,89 @@ pub(crate) mod tests {
         assert_eq!(seen.lock().unwrap().last().copied(), Some(0));
     }
 
-    #[cfg(unix)]
-    fn ps_state(pid: u32) -> String {
-        let ps = crate::process::command("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
-        String::from_utf8_lossy(&ps.stdout).trim().to_owned()
+    const SOON: Duration = Duration::from_secs(10);
+
+    #[derive(Debug, PartialEq)]
+    enum Quit {
+        Parked,
+        Returned,
     }
 
-    #[cfg(unix)]
-    fn state_as_quit_returns_during_a_kill(m: &Arc<Machine>, pid: u32, end: impl FnOnce(&Machine) + Send + 'static) -> String {
-        let (killed, held) = std::sync::mpsc::channel();
-        let (reap, reaping) = std::sync::mpsc::channel::<()>();
+    /// Runs `quit` on its own thread, which says when `quit` parks on a call still ending a session and when it returns.
+    fn quitter(m: &Arc<Machine>) -> (std::sync::mpsc::Receiver<Quit>, std::thread::JoinHandle<()>) {
+        let (says, heard) = std::sync::mpsc::channel();
+        let m = m.clone();
+        let quitter = std::thread::spawn(move || {
+            let parked = says.clone();
+            BEFORE_PARK.set(Some(Box::new(move || _ = parked.send(Quit::Parked))));
+            m.quit();
+            says.send(Quit::Returned).unwrap();
+        });
+        (heard, quitter)
+    }
+
+    struct Gate {
+        reached: std::sync::mpsc::Receiver<()>,
+        open: std::sync::mpsc::Sender<()>,
+    }
+
+    /// A pause for another thread to run, which says it was reached and blocks until the gate opens.
+    fn gate() -> (Box<dyn FnOnce() + Send>, Gate) {
+        let (reach, reached) = std::sync::mpsc::channel();
+        let (open, opened) = std::sync::mpsc::channel::<()>();
+        let pause = move || {
+            reach.send(()).unwrap();
+            let _ = opened.recv();
+        };
+        (Box::new(pause), Gate { reached, open })
+    }
+
+    /// Runs `end` on its own thread until it stops at the pause it was handed, quits meanwhile, and
+    /// answers whether `quit` parked on that call or returned first.
+    fn quit_while_paused(m: &Arc<Machine>, end: impl FnOnce(&Machine, Box<dyn FnOnce() + Send>) + Send + 'static) -> Quit {
+        let (pause, gate) = gate();
         let ender = {
             let m = m.clone();
-            std::thread::spawn(move || {
-                pty::BEFORE_REAP.set(Some(Box::new(move || {
-                    killed.send(()).unwrap();
-                    let _ = reaping.recv();
-                })));
-                end(&m);
-            })
+            std::thread::spawn(move || end(&m, pause))
         };
-        held.recv_timeout(Duration::from_secs(10)).expect("the session was never killed");
-        let (quit, returned) = std::sync::mpsc::channel();
-        let quitter = {
-            let m = m.clone();
-            std::thread::spawn(move || {
-                m.quit();
-                quit.send(ps_state(pid)).unwrap();
-            })
-        };
-        let early = returned.recv_timeout(Duration::from_secs(1)).ok();
-        reap.send(()).unwrap();
-        let state = early.unwrap_or_else(|| returned.recv_timeout(Duration::from_secs(10)).expect("quit never returned after the reap"));
+        gate.reached.recv_timeout(SOON).expect("the call never reached its pause");
+        let (quit, quitter) = quitter(m);
+        let first = quit.recv_timeout(SOON).expect("quit neither parked nor returned");
+        gate.open.send(()).unwrap();
         ender.join().unwrap();
         quitter.join().unwrap();
-        state
+        first
     }
 
     #[cfg(unix)]
-    fn running_tab(m: &Machine) -> (TabId, u32) {
+    fn running_tab(m: &Machine) -> TabId {
         let tab = m.add_tab(std::env::temp_dir(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         m.spawn(&tab, sh("exec sleep 30"), pty::size(80, 24)).unwrap();
-        let pid = m.tab(&tab, |t| t.session.as_ref().and_then(pty::Session::pid)).unwrap().unwrap();
-        (tab, pid)
+        tab
     }
 
     #[test]
     #[cfg(unix)]
     fn quit_returns_only_once_the_session_of_a_tab_closing_meanwhile_is_reaped() {
         let m = machine();
-        let (tab, pid) = running_tab(&m);
-        let state = state_as_quit_returns_during_a_kill(&m, pid, move |m| _ = m.close_tab(&tab));
-        assert_eq!(state, "", "quit returned while the closed tab's claude was killed and not reaped");
+        let tab = running_tab(&m);
+        let quit = quit_while_paused(&m, move |m, pause| {
+            pty::BEFORE_REAP.set(Some(pause));
+            m.close_tab(&tab);
+        });
+        assert_eq!(quit, Quit::Parked, "quit returned while the closed tab's claude was killed and not reaped");
     }
 
     #[test]
     #[cfg(unix)]
     fn quit_returns_only_once_the_old_session_of_a_tab_restarting_meanwhile_is_reaped() {
         let m = machine();
-        let (tab, pid) = running_tab(&m);
-        let state = state_as_quit_returns_during_a_kill(&m, pid, move |m| _ = m.spawn(&tab, sh("exec sleep 30"), pty::size(80, 24)));
-        assert_eq!(state, "", "quit returned while the restarted tab's old claude was killed and not reaped");
+        let tab = running_tab(&m);
+        let quit = quit_while_paused(&m, move |m, pause| {
+            pty::BEFORE_REAP.set(Some(pause));
+            _ = m.spawn(&tab, sh("exec sleep 30"), pty::size(80, 24));
+        });
+        assert_eq!(quit, Quit::Parked, "quit returned while the restarted tab's old claude was killed and not reaped");
     }
 
     #[test]
