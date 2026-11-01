@@ -289,6 +289,17 @@ RELEASE_CASES = (
         },
     ),
     (
+        "Cargo.toml changes while a rejected push runs",
+        "0.16.1",
+        "edit Cargo.toml during push",
+        None,
+        {
+            "refused": "Stash them, then run: git tag -d v0.16.1 && git reset --keep",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": released("0.16.1"), "tags": ["v0.16.1"], "status": [" M Cargo.toml"]},
+        },
+    ),
+    (
         "cargo update fails",
         "0.16.1",
         None,
@@ -375,7 +386,7 @@ fi
 """
 
 EDIT_AND_REJECT_HOOK = """#!/bin/bash
-echo stray >> "{readme}"
+echo stray >> "{path}"
 exit 1
 """
 HOOKS = ("reference-transaction", "pre-receive")
@@ -400,7 +411,11 @@ def prepare(sandbox, setup, version):
         sandbox.git(sandbox.work, "commit", "-q", "-m", "shipped snapshot")
         sandbox.git(sandbox.work, "push", "-q", "origin", "main")
     elif setup == "edit during push":
-        install_hook(sandbox, "pre-receive", EDIT_AND_REJECT_HOOK.format(readme=sandbox.work / "README.md"))
+        install_hook(sandbox, "pre-receive", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "README.md"))
+    elif setup == "edit Cargo.toml during push":
+        hook = sandbox.work / ".git" / "hooks" / "pre-push"
+        hook.write_text(EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "Cargo.toml"))
+        hook.chmod(0o755)
     elif setup == "unpushed":
         sandbox.commit(sandbox.work, "unpushed")
     elif setup == "topic":
