@@ -212,7 +212,7 @@ impl Syncer {
         'run: loop {
             let until = Instant::now() + wait;
             while let Some(left) = until.checked_duration_since(Instant::now()) {
-                if *stopped.borrow() {
+                if *stopped.borrow() || stopped.has_changed().is_err() {
                     break 'run;
                 }
                 std::thread::park_timeout(left);
