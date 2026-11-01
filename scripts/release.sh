@@ -37,6 +37,10 @@ put_back() {
   fi
 }
 restore() {
+  if [[ "$(git rev-parse HEAD)" != "$start" ]]; then
+    echo "the release stopped after its commit and before the push, so local main has the release commit and no v$version. Undo it with git reset --keep $start" >&2
+    return
+  fi
   put_back Cargo.toml "$wrote_toml"
   put_back Cargo.lock "$wrote_lock"
   git rm -q --cached --ignore-unmatch -- "$snapshot" || true
