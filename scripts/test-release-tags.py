@@ -122,6 +122,7 @@ class ReleaseSandbox(Remote):
             "Cargo.toml edit": {"RACE": "echo edit >> Cargo.toml"},
             "Cargo.lock edit": {"RACE": "echo edit >> Cargo.lock", "RACE_ON": "run"},
             "Cargo.toml edit, cargo fails": {"RACE": "echo edit >> Cargo.toml", "FAIL": "run"},
+            "index held": {"RACE": "touch .git/index.lock", "RACE_ON": "run"},
         }[during]
 
     def label(self, sha):
@@ -317,6 +318,18 @@ RELEASE_CASES = (
         },
     ),
     (
+        "another git holds the index while the release rolls back",
+        "0.16.1",
+        None,
+        "index held",
+        {
+            "code": 128,
+            "refused": "Run git checkout HEAD -- Cargo.toml",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.lock", " M Cargo.toml"]},
+        },
+    ),
+    (
         "a tracked file changes while the push runs",
         "0.16.1",
         "edit during push",
@@ -470,6 +483,7 @@ def release_errors(root, version, setup, during, expect):
     sandbox = ReleaseSandbox(root)
     prepare(sandbox, setup, version)
     proc = sandbox.release(version, during)
+    (sandbox.work / ".git" / "index.lock").unlink(missing_ok=True)
     if sandbox.hidden.exists():
         sandbox.hidden.rename(sandbox.bare)
     for hook in HOOKS:
