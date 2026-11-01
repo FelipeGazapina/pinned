@@ -3680,6 +3680,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_read_after_a_nudge_reads_the_copy_the_nudge_watched() {
+        let (root, m, heard, tab, a) = watching("thread-one-copy");
+        let b = a.parent().unwrap().join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        assert_eq!(texts_from(&m, &tab, 0), vec!["ready"], "a read finds copy a");
+        std::fs::remove_file(a.join("s1.jsonl")).unwrap();
+        std::fs::write(b.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        let mut looks = HashMap::new();
+        m.nudge_thread_watchers(&mut looks);
+        std::fs::write(a.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        heard.lock().unwrap().clear();
+        std::fs::write(b.join("s1.jsonl"), format!("{}{}", assistant_line("ready"), assistant_line("only in b"))).unwrap();
+        m.nudge_thread_watchers(&mut looks);
+        assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })], "the line written to copy b nudges");
+        assert_eq!(texts_from(&m, &tab, 0), vec!["ready", "only in b"], "the read after that nudge shows the line");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_tab_closed_while_its_transcript_is_searched_still_gets_the_read() {
         let (root, m, _, _, dir) = watching("thread-close-during-read");
         std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
