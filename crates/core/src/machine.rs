@@ -994,7 +994,7 @@ impl Machine {
             return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab) });
         };
         if known.as_ref() != Some(&file) {
-            self.tab(tab, |t| t.last_found_transcript = Some(file.clone()))?;
+            let _ = self.tab(tab, |t| t.last_found_transcript = Some(file.clone()));
         }
         let page = thread::read(&file, from).map_err(|e| format!("could not read the transcript: {e}"))?;
         let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
