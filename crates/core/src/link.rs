@@ -577,6 +577,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn a_link_stopped_between_cycles_does_not_wait_for_the_next() {
+        let (dir, _file, machine, _shared, _frames) = stopped_sync_fixture("link-idle");
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let creds = Credentials { hub: format!("http://{closed}"), email: "ana@acme.dev".into(), user_token: String::new(), machine_id: "m-1".into(), machine_token: "t".into() };
+        let link = spawn(creds, machine.clone(), "0.0.0-test");
+        std::thread::sleep(Duration::from_millis(200));
+        let stopping = Instant::now();
+        link.stop();
+        assert!(stopping.elapsed() < Duration::from_secs(2), "stop waited {:?} for the sync loop's next cycle", stopping.elapsed());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Says hello, then answers nothing and reports each call the machine makes.
     fn a_hub_that_answers_no_call(calls: mpsc::Sender<String>) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
