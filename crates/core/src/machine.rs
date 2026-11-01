@@ -350,8 +350,7 @@ pub struct Machine {
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
     sync_file: Option<PathBuf>,
-    sync_state_holder: AtomicU64,
-    next_sync_hold: AtomicU64,
+    sync_loop_holds_state: AtomicBool,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
@@ -432,19 +431,6 @@ impl Drop for Busy<'_> {
     }
 }
 
-const NO_SYNC_HOLD: u64 = 0;
-
-pub(crate) struct SyncHold<'a> {
-    machine: &'a Machine,
-    id: u64,
-}
-
-impl Drop for SyncHold<'_> {
-    fn drop(&mut self) {
-        let _ = self.machine.sync_state_holder.compare_exchange(self.id, NO_SYNC_HOLD, Ordering::SeqCst, Ordering::SeqCst);
-    }
-}
-
 #[derive(Default)]
 struct TranscriptLook {
     found: Option<Transcript>,
@@ -504,8 +490,7 @@ impl Machine {
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
-            sync_state_holder: AtomicU64::new(NO_SYNC_HOLD),
-            next_sync_hold: AtomicU64::new(NO_SYNC_HOLD + 1),
+            sync_loop_holds_state: AtomicBool::new(false),
             projects: Mutex::new(projects),
             projects_file,
             accounts: Accounts::load(dir.as_deref(), home.clone()),
@@ -1865,14 +1850,12 @@ impl Machine {
         self.sync_file.as_deref()
     }
 
-    pub(crate) fn hold_sync_state(&self) -> SyncHold<'_> {
-        let id = self.next_sync_hold.fetch_add(1, Ordering::SeqCst);
-        self.sync_state_holder.store(id, Ordering::SeqCst);
-        SyncHold { machine: self, id }
+    pub(crate) fn hold_sync_state(&self, held: bool) {
+        self.sync_loop_holds_state.store(held, Ordering::SeqCst);
     }
 
     fn sync_stopped(&self) -> Option<String> {
-        if self.sync_state_holder.load(Ordering::SeqCst) != NO_SYNC_HOLD {
+        if self.sync_loop_holds_state.load(Ordering::SeqCst) {
             return None;
         }
         self.sync_file.as_deref().and_then(sync::unreadable)
