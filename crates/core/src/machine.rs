@@ -999,6 +999,9 @@ impl Machine {
 
     fn nudge_thread_watchers(&self, seen: &mut HashMap<String, TranscriptLook>) {
         let watched: HashSet<String> = self.thread_watchers.lock().unwrap().values().flat_map(|tabs| tabs.iter().cloned()).collect();
+        if watched.is_empty() {
+            return;
+        }
         let open: Vec<(String, String, Option<AgentStatus>, Account)> = {
             let tabs = self.tabs.lock().unwrap();
             tabs.iter().filter_map(|(id, tab)| tab.claude_session.clone().map(|session| (id.clone(), session, tab.status, tab.account.clone()))).collect()
