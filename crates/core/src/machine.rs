@@ -3657,6 +3657,29 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_tick_with_nothing_watched_waits_for_no_tab() {
+        let (root, m, _, tab, dir) = watching("thread-idle");
+        std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
+        m.set_watched_threads(LOCAL_VIEWER, &[]);
+        let tick = |m: &Arc<Machine>| {
+            let (m, (done, finished)) = (m.clone(), std::sync::mpsc::channel());
+            std::thread::spawn(move || {
+                m.nudge_thread_watchers(&mut HashMap::new());
+                let _ = done.send(());
+            });
+            finished
+        };
+        let held = m.tabs.lock().unwrap();
+        assert!(tick(&m).recv_timeout(Duration::from_secs(5)).is_ok(), "an empty watch ticks while another thread holds the tabs");
+        m.set_watched_threads(LOCAL_VIEWER, std::slice::from_ref(&tab));
+        let watched = tick(&m);
+        assert!(watched.recv_timeout(Duration::from_millis(50)).is_err(), "a watched tab is read under the tabs lock");
+        drop(held);
+        assert!(watched.recv_timeout(Duration::from_secs(5)).is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_switched_account_is_read_from_its_new_home() {
         let root = temp("thread-switch");
