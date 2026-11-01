@@ -2,7 +2,7 @@
 
 use crate::account::Credentials;
 use crate::agent::Message;
-use crate::machine::{Machine, ViewerId};
+use crate::machine::{Machine, SyncHold, ViewerId};
 use crate::sync;
 use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
 use futures_util::{SinkExt, StreamExt};
@@ -34,9 +34,21 @@ pub const UNAUTHORIZED: u16 = 4001;
 
 pub struct Link {
     shared: Arc<Shared>,
-    stop: watch::Sender<bool>,
+    stop: StopOnDrop,
     thread: std::thread::JoinHandle<()>,
     syncing: std::thread::JoinHandle<()>,
+}
+
+struct StopOnDrop {
+    sender: watch::Sender<bool>,
+    syncing: std::thread::Thread,
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        let _ = self.sender.send(true);
+        self.syncing.unpark();
+    }
 }
 
 struct Outgoing {
@@ -118,7 +130,7 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("could not start the hub link's runtime");
         runtime.block_on(run(link, creds, machine, version, stopped, listener));
     });
-    Link { shared, stop, thread, syncing }
+    Link { shared, stop: StopOnDrop { sender: stop, syncing: syncing.thread().clone() }, thread, syncing }
 }
 
 impl Link {
@@ -150,10 +162,10 @@ impl Link {
     }
 
     pub fn stop(self) {
-        let _ = self.stop.send(true);
-        self.syncing.thread().unpark();
-        let _ = self.thread.join();
-        let _ = self.syncing.join();
+        let Link { stop, thread, syncing, .. } = self;
+        drop(stop);
+        let _ = thread.join();
+        let _ = syncing.join();
     }
 }
 
@@ -199,7 +211,7 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
 
 #[derive(Default)]
 struct Syncer {
-    state: Option<sync::State>,
+    state: Option<(sync::State, SyncHold)>,
     reported_unreadable: bool,
     shared_projects: HashSet<String>,
     reported_old_hub: bool,
@@ -221,16 +233,12 @@ impl Syncer {
                 self.cycle(shared, machine, file);
             }
         }
-        machine.hold_sync_state(false);
     }
 
     fn cycle(&mut self, shared: &Shared, machine: &Machine, file: &Path) {
         if self.state.is_none() {
             match sync::State::load(file, &crate::machine::home().join(".claude")) {
-                Ok(loaded) => {
-                    self.state = Some(loaded);
-                    machine.hold_sync_state(true);
-                }
+                Ok(loaded) => self.state = Some((loaded, machine.hold_sync_state())),
                 Err(e) => {
                     if !self.reported_unreadable {
                         eprintln!("pinned: could not sync: {e}. Start sync over from Settings, Machines in the app.");
@@ -240,7 +248,7 @@ impl Syncer {
                 }
             }
         }
-        let Some(state) = self.state.as_mut() else { return };
+        let Some((state, _)) = self.state.as_mut() else { return };
         for checkout in machine.checkouts() {
             if !shared.online() {
                 break;
@@ -258,6 +266,9 @@ impl Syncer {
             }
         }
         for share in machine.plugin_shares() {
+            if !shared.online() {
+                break;
+            }
             match sync::sync_plugins(shared, state, &share, SystemTime::now()) {
                 Ok(done) if !done.pushed.is_empty() || !done.pulled.is_empty() => {
                     self.reported_old_hub = false;
@@ -576,6 +587,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn a_sync_loop_that_panics_lets_the_state_file_decide_again() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("panicked");
+        let mut syncer = Syncer::default();
+        syncer.cycle(&shared, &machine, &file);
+        std::fs::write(&file, b"").unwrap();
+        let (_stop, stopped) = watch::channel(false);
+        std::thread::scope(|scope| {
+            let _ = scope.spawn(|| {
+                let _out = shared.out.lock().unwrap();
+                panic!("a thread died holding the link's socket");
+            })
+            .join();
+            let ended = scope.spawn(|| syncer.run(&shared, &machine, &file, &stopped)).join();
+            assert!(ended.is_err(), "the loop panicked on the poisoned socket");
+        });
+        let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_sync_loop_that_never_loaded_the_state_leaves_another_loops_hold_alone() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("other-hold");
+        let mut holding = Syncer::default();
+        holding.cycle(&shared, &machine, &file);
+        std::fs::write(&file, b"").unwrap();
+        let (_stop, stopped) = watch::channel(true);
+        Syncer::default().run(&shared, &machine, &file, &stopped);
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
+        drop(holding);
+        let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn creds(hub: String) -> Credentials {
         Credentials { hub, email: "ana@acme.dev".into(), user_token: String::new(), machine_id: "m-1".into(), machine_token: "t".into() }
     }
@@ -626,19 +673,50 @@ mod tests {
             for args in [&["init", "-q"][..], &["remote", "add", "origin", &format!("git@github.com:acme/{name}.git")]] {
                 assert!(std::process::Command::new("git").arg("-C").arg(&app).args(args).status().unwrap().success());
             }
-            std::fs::write(app.join(".claude/skills/skill.md"), vec![0u8; 16 << 20]).unwrap();
+            std::fs::write(app.join(".claude/skills/skill.md"), vec![0u8; 1 << 10]).unwrap();
             machine.open_project(app);
         }
+        machine.call(Call::AddAccount { provider: crate::accounts::Provider::Claude, name: "Work".into() }).unwrap();
+        std::fs::create_dir_all(dir.join("accounts/work/skills")).unwrap();
+        std::fs::write(dir.join("accounts/work/skills/own.md"), vec![0u8; 1 << 10]).unwrap();
         let (calls, called) = mpsc::channel();
         let link = spawn(creds(a_hub_that_answers_no_call(calls)), machine.clone(), "0.0.0-test");
         assert_eq!(called.recv_timeout(Duration::from_secs(30)).as_deref(), Ok("share_project"));
-        link.stop();
+        let (stopped, done) = mpsc::channel();
+        std::thread::spawn(move || {
+            link.stop();
+            let _ = stopped.send(());
+        });
+        assert_eq!(done.recv_timeout(Duration::from_secs(10)), Ok(()), "stop did not return");
         let saved: Value = serde_json::from_slice(&std::fs::read(&file).expect("the stopped loop saved its state")).unwrap();
         let hashed: Vec<String> = saved["hashes"].as_object().unwrap().keys().map(|path| Path::new(path).file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(hashed, ["skill.md"]);
+        assert_eq!(dir.join("synced-plugins").exists(), false);
         std::fs::write(&file, b"").unwrap();
         let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_parked_sync_loop_lets_go_once_its_link_is_dropped() {
+        let (dir, file, machine, _shared, _frames) = stopped_sync_fixture("link-dropped");
+        let (calls, _called) = mpsc::channel();
+        let link = spawn(creds(a_hub_that_answers_no_call(calls)), machine.clone(), "0.0.0-test");
+        let first_cycle = Instant::now() + Duration::from_secs(30);
+        while !file.exists() {
+            assert!(Instant::now() < first_cycle, "the loop never saved its state");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
+        drop(link);
+        let why = Value::String(format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display()));
+        let let_go = Instant::now() + Duration::from_secs(2);
+        while machine.call(Call::SyncStopped).as_ref() != Ok(&why) && Instant::now() < let_go {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(machine.call(Call::SyncStopped), Ok(why));
         let _ = std::fs::remove_dir_all(dir);
     }
 

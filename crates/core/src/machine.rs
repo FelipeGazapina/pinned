@@ -350,7 +350,7 @@ pub struct Machine {
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
     sync_file: Option<PathBuf>,
-    sync_loop_holds_state: AtomicBool,
+    sync_loop_holds_state: Arc<AtomicBool>,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
@@ -490,7 +490,7 @@ impl Machine {
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
-            sync_loop_holds_state: AtomicBool::new(false),
+            sync_loop_holds_state: Arc::new(AtomicBool::new(false)),
             projects: Mutex::new(projects),
             projects_file,
             accounts: Accounts::load(dir.as_deref(), home.clone()),
@@ -1850,8 +1850,10 @@ impl Machine {
         self.sync_file.as_deref()
     }
 
-    pub(crate) fn hold_sync_state(&self, held: bool) {
-        self.sync_loop_holds_state.store(held, Ordering::SeqCst);
+    #[must_use]
+    pub(crate) fn hold_sync_state(&self) -> SyncHold {
+        self.sync_loop_holds_state.store(true, Ordering::SeqCst);
+        SyncHold(self.sync_loop_holds_state.clone())
     }
 
     fn sync_stopped(&self) -> Option<String> {
@@ -2775,6 +2777,14 @@ const HOME_ENV: &str = "HOME";
 // Where Claude Code looks for ~/.claude on Windows; HOME there is Git Bash's, when set at all.
 #[cfg(windows)]
 const HOME_ENV: &str = "USERPROFILE";
+
+pub(crate) struct SyncHold(Arc<AtomicBool>);
+
+impl Drop for SyncHold {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 
 pub(crate) fn home() -> PathBuf {
     PathBuf::from(std::env::var_os(HOME_ENV).unwrap_or_default())
