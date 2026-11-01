@@ -626,16 +626,25 @@ mod tests {
             for args in [&["init", "-q"][..], &["remote", "add", "origin", &format!("git@github.com:acme/{name}.git")]] {
                 assert!(std::process::Command::new("git").arg("-C").arg(&app).args(args).status().unwrap().success());
             }
-            std::fs::write(app.join(".claude/skills/skill.md"), vec![0u8; 16 << 20]).unwrap();
+            std::fs::write(app.join(".claude/skills/skill.md"), vec![0u8; 1 << 10]).unwrap();
             machine.open_project(app);
         }
+        machine.call(Call::AddAccount { provider: crate::accounts::Provider::Claude, name: "Work".into() }).unwrap();
+        std::fs::create_dir_all(dir.join("accounts/work/skills")).unwrap();
+        std::fs::write(dir.join("accounts/work/skills/own.md"), vec![0u8; 1 << 10]).unwrap();
         let (calls, called) = mpsc::channel();
         let link = spawn(creds(a_hub_that_answers_no_call(calls)), machine.clone(), "0.0.0-test");
         assert_eq!(called.recv_timeout(Duration::from_secs(30)).as_deref(), Ok("share_project"));
-        link.stop();
+        let (stopped, done) = mpsc::channel();
+        std::thread::spawn(move || {
+            link.stop();
+            let _ = stopped.send(());
+        });
+        assert_eq!(done.recv_timeout(Duration::from_secs(10)), Ok(()), "stop did not return");
         let saved: Value = serde_json::from_slice(&std::fs::read(&file).expect("the stopped loop saved its state")).unwrap();
         let hashed: Vec<String> = saved["hashes"].as_object().unwrap().keys().map(|path| Path::new(path).file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(hashed, ["skill.md"]);
+        assert_eq!(dir.join("synced-plugins").exists(), false);
         std::fs::write(&file, b"").unwrap();
         let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
