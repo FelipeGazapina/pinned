@@ -2,7 +2,7 @@
 
 use crate::account::Credentials;
 use crate::agent::Message;
-use crate::machine::{Machine, ViewerId};
+use crate::machine::{Machine, SyncHold, ViewerId};
 use crate::sync;
 use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, Reply, TabId, ToMachine};
 use futures_util::{SinkExt, StreamExt};
@@ -199,7 +199,7 @@ fn sync_projects(shared: &Shared, machine: &Machine, stopped: &watch::Receiver<b
 
 #[derive(Default)]
 struct Syncer {
-    state: Option<sync::State>,
+    state: Option<(sync::State, SyncHold)>,
     reported_unreadable: bool,
     shared_projects: HashSet<String>,
     reported_old_hub: bool,
@@ -221,16 +221,12 @@ impl Syncer {
                 self.cycle(shared, machine, file);
             }
         }
-        machine.hold_sync_state(false);
     }
 
     fn cycle(&mut self, shared: &Shared, machine: &Machine, file: &Path) {
         if self.state.is_none() {
             match sync::State::load(file, &crate::machine::home().join(".claude")) {
-                Ok(loaded) => {
-                    self.state = Some(loaded);
-                    machine.hold_sync_state(true);
-                }
+                Ok(loaded) => self.state = Some((loaded, machine.hold_sync_state())),
                 Err(e) => {
                     if !self.reported_unreadable {
                         eprintln!("pinned: could not sync: {e}. Start sync over from Settings, Machines in the app.");
@@ -240,7 +236,7 @@ impl Syncer {
                 }
             }
         }
-        let Some(state) = self.state.as_mut() else { return };
+        let Some((state, _)) = self.state.as_mut() else { return };
         for checkout in machine.checkouts() {
             if !shared.online() {
                 break;
