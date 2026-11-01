@@ -58,7 +58,11 @@ pub fn save(file: &Path, saved: &[Saved]) {
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(file, serde_json::to_vec_pretty(saved).unwrap());
+    // `load` reads a torn file as no sessions, so an exec in the middle of a write must find the old file whole.
+    let tmp = file.with_extension("json.tmp");
+    if std::fs::write(&tmp, serde_json::to_vec_pretty(saved).unwrap()).is_ok() {
+        let _ = std::fs::rename(&tmp, file);
+    }
 }
 
 /// The worktree a `claude --worktree` session in `folder` works in, given a cwd its hooks

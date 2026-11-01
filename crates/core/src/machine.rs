@@ -349,6 +349,11 @@ pub struct Machine {
     boot: u64,
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
+    /// Numbers each snapshot of the open sessions, taken under the tabs lock.
+    snapshots: AtomicU64,
+    /// The number of the snapshot in the sessions file. A save writes only a newer one, so a save
+    /// that took its snapshot before `quit()` cleared the tabs cannot write over quit's.
+    saved_snapshot: Mutex<u64>,
     sync_file: Option<PathBuf>,
     sync_state_holder: AtomicU64,
     next_sync_hold: AtomicU64,
@@ -542,6 +547,8 @@ impl Machine {
             boot: fresh_boot(),
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
+            snapshots: AtomicU64::new(0),
+            saved_snapshot: Mutex::new(0),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
             sync_state_holder: AtomicU64::new(NO_SYNC_HOLD),
             next_sync_hold: AtomicU64::new(NO_SYNC_HOLD + 1),
@@ -2123,8 +2130,7 @@ impl Machine {
 
     /// Ends every session as the machine shuts down, keeping them saved for the next launch.
     pub fn quit(&self) {
-        self.save_sessions();
-        self.quitting.store(true, Ordering::SeqCst);
+        let first = !self.quitting.swap(true, Ordering::SeqCst);
         self.stamp_parent_sessions();
         self.delegates.stop_for_restart(self.launch.path_env.as_deref());
         self.delegates.kill_remembered();
@@ -2140,7 +2146,15 @@ impl Machine {
         }
         // The hub socket is still up. Clients drop these ids before a call can land on a cleared map.
         self.emit(Event::Tabs { tabs: vec![] });
-        self.tabs.lock().unwrap().clear();
+        let (open, closed) = {
+            let mut tabs = self.tabs.lock().unwrap();
+            (self.open_sessions(&tabs), std::mem::take(&mut *tabs))
+        };
+        // A second quit finds no tabs, and must not save that over the sessions the first one saved.
+        if let Some(file) = self.sessions_file.as_ref().filter(|_| first) {
+            self.write_sessions(file, open);
+        }
+        drop(closed);
         self.kills.wait();
         self.device_hub.stop();
     }
@@ -2565,20 +2579,32 @@ impl Machine {
     /// Writes the tabs whose claude session is still going, in the order they were opened.
     fn save_sessions(&self) {
         let Some(file) = &self.sessions_file else { return };
-        let saved: Vec<sessions::Saved> = {
+        let open = {
             let tabs = self.tabs.lock().unwrap();
             if self.quitting.load(Ordering::SeqCst) {
                 return;
             }
-            let mut open: Vec<(u32, sessions::Saved)> = tabs.iter().filter_map(|(id, t)| Some((tab_number(id), t.saved()?))).collect();
-            open.sort_by_key(|(n, _)| *n);
-            open.into_iter().map(|(_, s)| s).collect()
+            self.open_sessions(&tabs)
         };
         #[cfg(test)]
         if let Some(pause) = BEFORE_SESSIONS_WRITE.take() {
             pause();
         }
-        sessions::save(file, &saved);
+        self.write_sessions(file, open);
+    }
+
+    fn open_sessions(&self, tabs: &HashMap<TabId, Tab>) -> (u64, Vec<sessions::Saved>) {
+        let mut open: Vec<(u32, sessions::Saved)> = tabs.iter().filter_map(|(id, t)| Some((tab_number(id), t.saved()?))).collect();
+        open.sort_by_key(|(n, _)| *n);
+        (self.snapshots.fetch_add(1, Ordering::SeqCst) + 1, open.into_iter().map(|(_, s)| s).collect())
+    }
+
+    fn write_sessions(&self, file: &Path, (snapshot, open): (u64, Vec<sessions::Saved>)) {
+        let mut saved = self.saved_snapshot.lock().unwrap();
+        if snapshot > *saved {
+            sessions::save(file, &open);
+            *saved = snapshot;
+        }
     }
 
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
