@@ -12,7 +12,6 @@ refuse() {
 
 semver='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
 [[ "$version" =~ $semver ]] || refuse "the version is MAJOR.MINOR.PATCH with an optional -suffix, not $version"
-[[ -z "$(git status --porcelain)" ]] || refuse "commit or stash your changes first"
 branch=$(git symbolic-ref --short -q HEAD || true)
 [[ "$branch" == main ]] || refuse "run a release from main, not ${branch:-a detached HEAD}"
 snapshot="crates/core/wire-contract/$version.json"
@@ -23,6 +22,7 @@ start=$(git rev-parse HEAD)
 [[ "$start" == "$(git rev-parse origin/main)" ]] || refuse "HEAD is not origin/main. Pull or push main, then run the release again."
 remote_tag=$(git ls-remote origin "refs/tags/v$version")
 [[ -z "$remote_tag" ]] || refuse "origin already has v$version. Pick another version."
+[[ -z "$(git status --porcelain)" ]] || refuse "commit or stash your changes first"
 
 wrote_toml=
 wrote_lock=
@@ -38,8 +38,11 @@ put_back() {
 }
 restore() {
   if [[ "$(git rev-parse HEAD)" != "$start" ]]; then
-    echo "the release stopped after its commit and before the push, so local main has the release commit and no v$version. Undo it with git reset --keep $start" >&2
-    return
+    if [[ "$(git rev-parse -q --verify HEAD^)" == "$start" && "$(git log -1 --format=%s)" == "Release v$version" ]]; then
+      echo "the release stopped after its commit and before the push, so local main has the release commit and no v$version. Undo it with git reset --keep $start" >&2
+      return
+    fi
+    echo "HEAD moved while the release ran, so the release keeps the new commits and puts back only its own files." >&2
   fi
   put_back Cargo.toml "$wrote_toml"
   put_back Cargo.lock "$wrote_lock"
@@ -64,6 +67,7 @@ stray=$(
 )
 [[ -z "$stray" ]] || refuse "the release stopped before the commit, because these files changed while the release built:
 $stray"
+[[ "$(git rev-parse HEAD)" == "$start" ]] || refuse "the release stopped before the commit, because a commit landed on main while the release built. Push or drop that commit, then run the release again."
 git add Cargo.toml Cargo.lock
 git commit -m "Release v$version"
 trap - EXIT
@@ -73,10 +77,15 @@ if ! git push --atomic origin HEAD:refs/heads/main "refs/tags/v$version"; then
     refuse "git push failed and origin cannot be read, so main keeps the release commit and v$version. Check origin before you run the release again."
   [[ "$remote_tag" != "$(git rev-parse "v$version")" ]] ||
     refuse "git push failed, but origin has v$version, so the release went out. The tag on origin is at the release commit. Fetch origin before you change anything."
-  git reset -q --keep "$start" ||
-    refuse "the push was rejected, so the release did not go out. Local main keeps the release commit and v$version, because these files changed while the push ran:
-$(git status --porcelain)
+  if ! reset_error=$(git reset -q --keep "$start" 2>&1); then
+    changed=$(git status --porcelain)
+    [[ -z "$changed" ]] || refuse "the push was rejected, so the release did not go out. Local main keeps the release commit and v$version, because these files changed while the push ran:
+$changed
 Stash them, then run: git tag -d v$version && git reset --keep $start && git stash pop"
+    refuse "the push was rejected, so the release did not go out. Local main keeps the release commit and v$version, because git reset --keep failed:
+$reset_error
+Fix that, then run: git tag -d v$version && git reset --keep $start"
+  fi
   git tag -d "v$version" > /dev/null
   [[ -z "$remote_tag" ]] ||
     refuse "the push was rejected, and origin has v$version at another commit. The release did not go out, and main is back where it started. Check that tag on origin before you pick a version."
