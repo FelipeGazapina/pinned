@@ -3323,6 +3323,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_hub_open_tab_after_quit_adds_no_tab_until_the_sessions_reopen() {
+        let m = machine();
+        m.quit();
+        let refused = m.call(Call::OpenTab { path: None, bypass: false });
+        assert_eq!((refused, m.tabs().len()), (Err("pinned is shutting down".to_owned()), 0), "(open_tab, tabs) after quit");
+        m.reopen_sessions();
+        m.call(Call::OpenTab { path: None, bypass: false }).unwrap();
+        assert_eq!(m.tabs().len(), 1, "a reopened machine opened no tab");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_tab_starts_no_claude_once_quit_has_begun() {
+        let m = pausing_machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let (pause, gate) = gate();
+        let quitter = {
+            let m = m.clone();
+            std::thread::spawn(move || {
+                AT_TABS.set(Some(pause));
+                m.quit();
+            })
+        };
+        gate.reached.recv_timeout(SOON).expect("quit never sent the empty tab list");
+        let started = m.spawn(&tab, sh("exec sleep 30"), pty::size(80, 24));
+        gate.open.send(()).unwrap();
+        quitter.join().unwrap();
+        assert_eq!(started, Err("pinned is shutting down".to_owned()), "a tab started a claude after quit sent the empty tab list");
+    }
+
+    #[test]
     #[cfg(unix)]
     fn starting_a_restored_tab_twice_keeps_its_claude_session() {
         let root = temp("restore-twice");
