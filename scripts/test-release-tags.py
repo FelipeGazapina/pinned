@@ -415,6 +415,18 @@ RELEASE_CASES = (
         },
     ),
     (
+        "another git holds the index while a rejected push rolls back",
+        "0.16.1",
+        "index held during push",
+        None,
+        {
+            "refused": "because git reset --keep failed:\nfatal: Unable to create",
+            "unsaid": "Stash them",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": released("0.16.1"), "tags": ["v0.16.1"], "status": []},
+        },
+    ),
+    (
         "cargo update fails",
         "0.16.1",
         None,
@@ -545,6 +557,8 @@ def prepare(sandbox, setup, version):
         install_hook(sandbox.bare, "pre-receive", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "README.md"))
     elif setup == "edit Cargo.toml during push":
         install_hook(sandbox.work / ".git", "pre-push", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "Cargo.toml"))
+    elif setup == "index held during push":
+        install_hook(sandbox.work / ".git", "pre-push", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / ".git" / "index.lock"))
     elif setup == "edit Cargo.toml during fetch":
         shim = sandbox.bin / "git"
         shim.write_text(EDIT_ON_FETCH.format(git=shutil.which("git")))
