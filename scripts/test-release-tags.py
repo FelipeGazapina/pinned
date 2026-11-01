@@ -359,6 +359,18 @@ RELEASE_CASES = (
         },
     ),
     (
+        "Cargo.toml changes while the release fetches origin",
+        "0.16.1",
+        "edit Cargo.toml during fetch",
+        None,
+        {
+            "refused": "commit or stash your changes first",
+            "remote": {"refs/heads/main": "start"},
+            "local": {"branch": "main", "HEAD": "start", "tags": [], "status": [" M Cargo.toml"]},
+            "kept": {"Cargo.toml": "edit"},
+        },
+    ),
+    (
         "the release is killed right after its commit",
         "0.16.1",
         "killed after commit",
@@ -499,6 +511,12 @@ status=$?
 kill -TERM $PPID
 exit $status
 """
+EDIT_ON_FETCH = """#!/bin/bash
+if [[ "$1" == fetch ]]; then
+  echo edit >> Cargo.toml
+fi
+exec "{git}" "$@"
+"""
 KILL_RELEASE_HOOK = """#!/bin/bash
 kill -TERM $(ps -o ppid= -p $PPID)
 sleep 1
@@ -527,6 +545,10 @@ def prepare(sandbox, setup, version):
         install_hook(sandbox.bare, "pre-receive", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "README.md"))
     elif setup == "edit Cargo.toml during push":
         install_hook(sandbox.work / ".git", "pre-push", EDIT_AND_REJECT_HOOK.format(path=sandbox.work / "Cargo.toml"))
+    elif setup == "edit Cargo.toml during fetch":
+        shim = sandbox.bin / "git"
+        shim.write_text(EDIT_ON_FETCH.format(git=shutil.which("git")))
+        shim.chmod(0o755)
     elif setup == "killed after commit":
         install_hook(sandbox.work / ".git", "post-commit", KILL_RELEASE_HOOK)
     elif setup == "killed after sed":
