@@ -3662,6 +3662,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_loop_skips_its_ticks_while_the_machine_quits_and_ticks_again_after_a_reopen() {
+        let m = machine();
+        let ticks = Arc::new(AtomicU32::new(0));
+        let counted = ticks.clone();
+        m.every(Duration::from_millis(1), move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        wait_for("a tick", || ticks.load(Ordering::SeqCst) > 0);
+        m.quit();
+        wait_for("the ticks to stop", || {
+            let before = ticks.load(Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(10));
+            ticks.load(Ordering::SeqCst) == before
+        });
+        let stopped = ticks.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(ticks.load(Ordering::SeqCst), stopped, "no tick while the machine quits");
+        m.reopen_sessions();
+        wait_for("a tick after the reopen", || ticks.load(Ordering::SeqCst) > stopped);
+    }
+
+    #[test]
     fn a_tick_with_nothing_watched_waits_for_no_tab() {
         let (root, m, _, tab, dir) = watching("thread-idle");
         std::fs::write(dir.join("s1.jsonl"), assistant_line("ready")).unwrap();
