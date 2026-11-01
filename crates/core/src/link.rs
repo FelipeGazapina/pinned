@@ -566,7 +566,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    fn a_hub_that_only_says_hello() -> String {
+    /// Says hello, then answers nothing and reports each call the machine makes.
+    fn a_hub_that_answers_no_call(calls: mpsc::Sender<String>) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -578,25 +579,40 @@ mod tests {
                 socket.next().await;
                 let hello = r#"{"type":"hello","machine":{"id":"m-1","name":"mac","os":"macos","online":true,"last_seen":0}}"#;
                 socket.send(Frame::Text(hello.into())).await.unwrap();
-                while let Some(Ok(_)) = socket.next().await {}
+                while let Some(Ok(frame)) = socket.next().await {
+                    if let Frame::Text(text) = frame {
+                        let frame: Value = serde_json::from_str(&text).unwrap();
+                        if frame["type"] == "call" {
+                            let _ = calls.send(frame["call"]["cmd"].as_str().unwrap().to_owned());
+                        }
+                    }
+                }
             });
         });
         url
     }
 
     #[test]
-    fn once_a_link_stops_the_state_file_decides_again() {
+    fn a_link_stopped_inside_a_cycle_saves_the_checkout_in_hand_and_lets_go() {
         let (dir, file, machine, _shared, _frames) = stopped_sync_fixture("link-stop");
-        let creds = Credentials { hub: a_hub_that_only_says_hello(), email: "ana@acme.dev".into(), user_token: String::new(), machine_id: "m-1".into(), machine_token: "t".into() };
-        let link = spawn(creds, machine.clone(), "0.0.0-test");
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !file.exists() {
-            assert!(Instant::now() < deadline, "the sync loop never saved its state");
-            std::thread::sleep(Duration::from_millis(10));
+        for name in ["one", "two"] {
+            let app = dir.join(name);
+            std::fs::create_dir_all(app.join(".claude/skills")).unwrap();
+            for args in [&["init", "-q"][..], &["remote", "add", "origin", &format!("git@github.com:acme/{name}.git")]] {
+                assert!(std::process::Command::new("git").arg("-C").arg(&app).args(args).status().unwrap().success());
+            }
+            std::fs::write(app.join(".claude/skills/skill.md"), vec![0u8; 16 << 20]).unwrap();
+            machine.open_project(app);
         }
-        std::fs::write(&file, b"").unwrap();
-        assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
+        let (calls, called) = mpsc::channel();
+        let creds = Credentials { hub: a_hub_that_answers_no_call(calls), email: "ana@acme.dev".into(), user_token: String::new(), machine_id: "m-1".into(), machine_token: "t".into() };
+        let link = spawn(creds, machine.clone(), "0.0.0-test");
+        assert_eq!(called.recv_timeout(Duration::from_secs(30)).as_deref(), Ok("share_project"));
         link.stop();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&file).expect("the stopped loop saved its state")).unwrap();
+        let hashed: Vec<String> = saved["hashes"].as_object().unwrap().keys().map(|path| Path::new(path).file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(hashed, ["skill.md"]);
+        std::fs::write(&file, b"").unwrap();
         let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
         let _ = std::fs::remove_dir_all(dir);
